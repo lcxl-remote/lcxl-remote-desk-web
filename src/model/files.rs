@@ -1,4 +1,4 @@
-use std::{fs::Metadata, os::windows::fs::MetadataExt};
+use std::fs::Metadata;
 
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -24,11 +24,23 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
+    #[cfg(target_os = "linux")]
+    pub fn get_permissions(metadata: &Metadata) -> u32 {
+        use std::os::linux::fs::MetadataExt;
+        metadata.st_mode()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn get_permissions(metadata: &Metadata) -> u32 {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes()
+    }
+
     pub fn new(metadata: &Metadata) -> Result<Self, DeskError> {
         Ok(Self {
             name: String::new(),
             size: metadata.len(),
-            permissions: metadata.file_attributes(),
+            permissions: FileInfo::get_permissions(metadata),
             accessed: DateTime::<Local>::from(metadata.accessed()?),
             created: DateTime::<Local>::from(metadata.created()?),
             modified: DateTime::<Local>::from(metadata.modified()?),
