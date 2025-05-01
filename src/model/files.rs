@@ -18,11 +18,15 @@ pub struct FileInfo {
     pub name: String,
     pub path: String,
     pub size: u64,
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub is_symlink: bool,
     pub permissions: u32,
     pub accessed: DateTime<Local>,
     pub created: DateTime<Local>,
     pub modified: DateTime<Local>,
     pub err_msg: Option<String>,
+    
 }
 
 impl FileInfo {
@@ -55,12 +59,15 @@ impl FileInfo {
         } else {
             "".to_string()
         };
-        
+
         let metadata = path.metadata();
         let mut file_info = Self {
             name: file_name,
             path: path.to_string_lossy().to_string(),
             size: 0,
+            is_dir: false,
+            is_file: false,
+            is_symlink: false,
             permissions: 0,
             accessed: Local.timestamp_opt(0, 0).unwrap(),
             created: Local.timestamp_opt(0, 0).unwrap(),
@@ -70,6 +77,9 @@ impl FileInfo {
         match metadata {
             Ok(metadata) => {
                 file_info.size = metadata.len();
+                file_info.is_dir = metadata.is_dir();
+                file_info.is_file = metadata.is_file();
+                file_info.is_symlink = metadata.is_symlink();
                 match metadata.accessed() {
                     Ok(accessed) => file_info.accessed = DateTime::<Local>::from(accessed),
                     Err(err) => file_info.append_error(format!("{:?}", err)),

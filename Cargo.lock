@@ -1446,7 +1446,9 @@ name = "lcxl-web-remote-desk"
 version = "0.1.0"
 dependencies = [
  "actix-files",
+ "actix-http",
  "actix-server",
+ "actix-service",
  "actix-session",
  "actix-web",
  "actix-ws",
