@@ -48,12 +48,17 @@ impl FileInfo {
     }
 
     pub fn new(
-        name: &str,
-        path: PathBuf,
-        metadata: io::Result<Metadata>,
+        path: PathBuf
     ) -> Result<Self, DeskError> {
+        let file_name = if let Some(file_name) = path.file_name() {
+            file_name.to_string_lossy().to_string()
+        } else {
+            "".to_string()
+        };
+        
+        let metadata = path.metadata();
         let mut file_info = Self {
-            name: String::from(name),
+            name: file_name,
             path: path.to_string_lossy().to_string(),
             size: 0,
             permissions: 0,

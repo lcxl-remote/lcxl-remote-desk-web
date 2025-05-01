@@ -14,6 +14,40 @@ use crate::{
 #[cfg(target_os = "windows")]
 pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError> {
     let mut file_info_list = vec![];
+
+    use log::info;
+    use windows::Win32::{Foundation::{GetLastError, ERROR_INVALID_INDEX, STATUS_RTPM_INVALID_CONTEXT}, Storage::FileSystem::GetLogicalDriveStringsW};
+
+    let lp_buffer: Vec<u16> = unsafe {
+        let str_len = GetLogicalDriveStringsW(None);
+        if str_len == 0 {
+            // something wrong, get last error
+            return DeskError::windows_error();
+        }
+
+        let mut lp_buffer  = vec![0u16; str_len as usize];
+        let str_len = GetLogicalDriveStringsW(Some(&mut lp_buffer));
+        // double check
+        if str_len == 0 {
+            // something wrong, get last error
+            return DeskError::windows_error();
+        }
+        lp_buffer.into_iter().take(str_len as usize).collect()
+    };
+    let mut start_index = 0;
+    let mut end_index = 0;
+    for item in  lp_buffer.iter() {
+        if *item == 0 {
+            if end_index > start_index {
+                let driver = String::from_utf16_lossy(&lp_buffer[start_index..end_index]);
+                info!("driver: {}", driver);
+                let driver_path_buf = PathBuf::from(driver.as_str());
+                file_info_list.push(FileInfo::new(driver_path_buf)?);
+                start_index = end_index;
+            }
+        }
+        end_index+=1;
+    }
     Ok(file_info_list)
 }
 
@@ -50,9 +84,7 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
             break;
         }
 
-        let metadata = entry.metadata().await;
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        let file_info = FileInfo::new(file_name.as_str(), entry.path(), metadata)?;
+        let file_info = FileInfo::new(entry.path())?;
         debug!("file_info={:?}", file_info);
         file_info_list.push(file_info);
     }
@@ -75,7 +107,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         let uri_path = "/file/list?path=/sys&page_no=1&page_count=200";
         #[cfg(target_os = "windows")]
-        let uri_path = "C:\\";
+        let uri_path = "/file/list?path=&page_no=1&page_count=200";
 
         let req = test::TestRequest::get().uri(uri_path).to_request();
         error!("req={:?}", req);

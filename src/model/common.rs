@@ -19,6 +19,7 @@ impl ErrorCode {
     pub const FILE_PATH_NOT_FOUND: ErrorCode = ErrorCode(11);
     pub const NOT_ALLOW_DELETE_FILE: ErrorCode = ErrorCode(21);
     pub const FILE_CHANGED: ErrorCode = ErrorCode(22);
+    pub const WINDOWS_ERROR: ErrorCode = ErrorCode(1000);
 }
 
 impl Display for ErrorCode {

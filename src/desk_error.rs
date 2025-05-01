@@ -56,6 +56,17 @@ impl DeskError {
             error_code, message,
         )))
     }
+
+    #[cfg(target_os="windows")]
+    pub fn windows_error<T>() -> Result<T, DeskError> {
+        use windows::Win32::{Foundation::GetLastError, System::Diagnostics::Debug::{FormatMessageW, FORMAT_MESSAGE_FROM_SYSTEM}};
+        unsafe {
+            let last_error = GetLastError();
+            //TODO use FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM)
+            return DeskError::custom_error(ErrorCode::WINDOWS_ERROR, format!("windows error code: {:?}", last_error));
+        }
+        
+    }
 }
 
 impl Display for DeskError {
