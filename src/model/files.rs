@@ -13,7 +13,7 @@ pub struct FileListParams {
     pub page_count: i64,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, ToSchema, Debug)]
 pub struct FileInfo {
     pub name: String,
     pub path: String,
@@ -38,30 +38,49 @@ impl FileInfo {
         metadata.file_attributes()
     }
 
-    pub fn new(name: &str, path: PathBuf, metadata: io::Result<Metadata>) -> Result<Self, DeskError> {
-        let file_info = match metadata {
-            Ok(metadata) => Self {
-                name: String::from(name),
-                path: path.to_string_lossy().to_string(),
-                size: metadata.len(),
-                permissions: FileInfo::get_permissions(&metadata),
-                accessed: DateTime::<Local>::from(metadata.accessed()?),
-                created: DateTime::<Local>::from(metadata.created()?),
-                modified: DateTime::<Local>::from(metadata.modified()?),
-                err_msg: None,
-            },    
-            Err(err) => {
-                Self {
-                    name: String::from(name),
-                    path: path.to_string_lossy().to_string(),
-                    size: 0,
-                    permissions:0,
-                    accessed:Local.timestamp_opt(0, 0).unwrap(),
-                    created: Local.timestamp_opt(0, 0).unwrap(),
-                    modified: Local.timestamp_opt(0, 0).unwrap(),
-                    err_msg: Some(format!("{:?}", err)),
+    pub fn append_error(&mut self, err_msg: String) {
+        if self.err_msg == None {
+            self.err_msg = Some(err_msg)
+        } else {
+            let origin_err_msg = self.err_msg.clone().unwrap();
+            self.err_msg = Some(origin_err_msg +"\n"+ &err_msg);
+        }
+    }
+
+    pub fn new(
+        name: &str,
+        path: PathBuf,
+        metadata: io::Result<Metadata>,
+    ) -> Result<Self, DeskError> {
+        let mut file_info = Self {
+            name: String::from(name),
+            path: path.to_string_lossy().to_string(),
+            size: 0,
+            permissions: 0,
+            accessed: Local.timestamp_opt(0, 0).unwrap(),
+            created: Local.timestamp_opt(0, 0).unwrap(),
+            modified: Local.timestamp_opt(0, 0).unwrap(),
+            err_msg: None,
+        };
+        match metadata {
+            Ok(metadata) => {
+                file_info.size = metadata.len();
+                match metadata.accessed() {
+                    Ok(accessed) => file_info.accessed = DateTime::<Local>::from(accessed),
+                    Err(err) => file_info.append_error(format!("{:?}", err)),
                 }
-            },
+                match metadata.created() {
+                    Ok(created) => file_info.created = DateTime::<Local>::from(created),
+                    Err(err) => file_info.append_error(format!("{:?}", err)),
+                }
+                match metadata.modified() {
+                    Ok(modified) => file_info.modified = DateTime::<Local>::from(modified),
+                    Err(err) => file_info.append_error(format!("{:?}", err)),
+                }
+            }
+            Err(err) => {
+                file_info.err_msg = Some(format!("{:?}", err));
+            }
         };
         Ok(file_info)
     }
