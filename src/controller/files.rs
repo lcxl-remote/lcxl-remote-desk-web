@@ -10,6 +10,12 @@ use crate::{
     },
 };
 
+#[cfg(target_os="windows")]
+pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError>{
+    let mut file_info_list = vec![];
+    Ok(file_info_list)
+}
+
 #[utoipa::path(
     summary = "List files",
     params(FileListParams),
@@ -24,6 +30,15 @@ pub async fn list_files(
 ) -> Result<HttpResponse, DeskError> {
     let path = PathBuf::from(query_list.path.as_str());
 
+    #[cfg(target_os="windows")]
+    if query_list.path.is_empty() {
+        let file_info_list = get_logical_driver_list()?;
+        let total_count = file_info_list.len() as i64;
+        return Ok(HttpResponse::Ok().json(FileListResponse {
+            file_info_list,
+            total_count,
+        }));
+    }
     let mut file_info_list = vec![];
     let mut entries = tokio::fs::read_dir(path.as_path()).await?;
     let start_index = (query_list.page_no - 1) * query_list.page_count;
@@ -37,8 +52,9 @@ pub async fn list_files(
             break;
         }
 
-        let metadata = entry.metadata().await?;
-        let file_info = FileInfo::new(&metadata)?;
+        let metadata = entry.metadata().await;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let file_info = FileInfo::new(file_name.as_str(), entry.path(), metadata)?;
         file_info_list.push(file_info);
     }
     Ok(HttpResponse::Ok().json(FileListResponse {
