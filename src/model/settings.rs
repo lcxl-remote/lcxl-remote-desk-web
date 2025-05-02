@@ -280,7 +280,6 @@ impl Settings {
     }
 }
 
-
 pub struct SharedSettings(pub Mutex<Settings>);
 
 impl SharedSettings {

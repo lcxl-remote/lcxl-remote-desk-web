@@ -1,10 +1,13 @@
 use actix_session::Session;
-use actix_web::{post, web, Error as AWError, HttpResponse};
+use actix_web::{Error as AWError, HttpResponse, post, web};
 use log::{error, info};
 
 use crate::{
     controller::user::SESSION_KEY_USERNAME,
-    model::{login::{FakeCaptcha, FakeCaptchaParams, LoginParams, LoginResult, PasswordParams}, settings::SharedSettings},
+    model::{
+        login::{FakeCaptcha, FakeCaptchaParams, LoginParams, LoginResult, PasswordParams},
+        settings::SharedSettings,
+    },
 };
 
 #[utoipa::path(

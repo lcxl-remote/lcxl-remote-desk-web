@@ -1,5 +1,11 @@
 use actix_session::{Session, SessionGetError};
-use actix_web::{body::MessageBody, dev::{ServiceRequest, ServiceResponse}, get, middleware::Next, Error as AWError, FromRequest, HttpResponse};
+use actix_web::{
+    Error as AWError, FromRequest, HttpResponse,
+    body::MessageBody,
+    dev::{ServiceRequest, ServiceResponse},
+    get,
+    middleware::Next,
+};
 use log::{info, warn};
 
 use crate::model::user::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone};
@@ -105,7 +111,9 @@ pub async fn reject_anonymous_users(
         Some(_) => next.call(req).await,
         None => {
             warn!("Anonymous user tried to access protected resource.");
-            Err( actix_web::error::ErrorUnauthorized("User is not logged in."))
+            Err(actix_web::error::ErrorUnauthorized(
+                "User is not logged in.",
+            ))
         }
     }
 }

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use actix_web::{HttpResponse, get, web};
-use log::debug;
+use log::{debug, info};
 
 use crate::{
     desk_error::DeskError,
@@ -90,6 +90,7 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
         debug!("file_info={:?}", file_info);
         file_info_list.push(file_info);
     }
+    info!("List path: {}, total count: {}", path_str, total_count);
     Ok(HttpResponse::Ok().json(FileListResponse {
         file_info_list,
         total_count,
@@ -99,10 +100,7 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_http::Request;
-    use actix_service::{IntoServiceFactory, Service, ServiceFactory};
-    use actix_web::{App, http::header::ContentType, test};
-    use log::{error, info};
+    use actix_web::{App, test};
 
     #[actix_web::test]
     async fn it_works() {
