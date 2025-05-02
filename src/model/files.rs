@@ -1,4 +1,4 @@
-use std::{fs::Metadata, io, path::PathBuf};
+use std::{fs::Metadata, path::PathBuf};
 
 use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,6 @@ pub struct FileInfo {
     pub created: DateTime<Local>,
     pub modified: DateTime<Local>,
     pub err_msg: Option<String>,
-    
 }
 
 impl FileInfo {
@@ -42,18 +41,16 @@ impl FileInfo {
         metadata.file_attributes()
     }
 
-    pub fn append_error(&mut self, err_msg: String) {
+    pub fn add_err_msg(&mut self, err_msg: String) {
         if self.err_msg == None {
             self.err_msg = Some(err_msg)
         } else {
             let origin_err_msg = self.err_msg.clone().unwrap();
-            self.err_msg = Some(origin_err_msg +"\n"+ &err_msg);
+            self.err_msg = Some(origin_err_msg + "\n" + &err_msg);
         }
     }
 
-    pub fn new(
-        path: PathBuf
-    ) -> Result<Self, DeskError> {
+    pub fn new(path: PathBuf) -> Result<Self, DeskError> {
         let file_name = if let Some(file_name) = path.file_name() {
             file_name.to_string_lossy().to_string()
         } else {
@@ -82,15 +79,19 @@ impl FileInfo {
                 file_info.is_symlink = metadata.is_symlink();
                 match metadata.accessed() {
                     Ok(accessed) => file_info.accessed = DateTime::<Local>::from(accessed),
-                    Err(err) => file_info.append_error(format!("Failed to get file accessed time: {:?}", err)),
+                    Err(err) => file_info
+                        .add_err_msg(format!("Failed to get file accessed time: {:?}", err)),
                 }
                 match metadata.created() {
                     Ok(created) => file_info.created = DateTime::<Local>::from(created),
-                    Err(err) => file_info.append_error(format!("Failed to get file created time: {:?}", err)),
+                    Err(err) => {
+                        file_info.add_err_msg(format!("Failed to get file created time: {:?}", err))
+                    }
                 }
                 match metadata.modified() {
                     Ok(modified) => file_info.modified = DateTime::<Local>::from(modified),
-                    Err(err) => file_info.append_error(format!("Failed to get file modified time: {:?}", err)),
+                    Err(err) => file_info
+                        .add_err_msg(format!("Failed to get file modified time: {:?}", err)),
                 }
             }
             Err(err) => {
