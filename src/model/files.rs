@@ -82,19 +82,19 @@ impl FileInfo {
                 file_info.is_symlink = metadata.is_symlink();
                 match metadata.accessed() {
                     Ok(accessed) => file_info.accessed = DateTime::<Local>::from(accessed),
-                    Err(err) => file_info.append_error(format!("{:?}", err)),
+                    Err(err) => file_info.append_error(format!("Failed to get file accessed time: {:?}", err)),
                 }
                 match metadata.created() {
                     Ok(created) => file_info.created = DateTime::<Local>::from(created),
-                    Err(err) => file_info.append_error(format!("{:?}", err)),
+                    Err(err) => file_info.append_error(format!("Failed to get file created time: {:?}", err)),
                 }
                 match metadata.modified() {
                     Ok(modified) => file_info.modified = DateTime::<Local>::from(modified),
-                    Err(err) => file_info.append_error(format!("{:?}", err)),
+                    Err(err) => file_info.append_error(format!("Failed to get file modified time: {:?}", err)),
                 }
             }
             Err(err) => {
-                file_info.err_msg = Some(format!("{:?}", err));
+                file_info.err_msg = Some(format!("Failed to get file metadata: {:?}", err));
             }
         };
         Ok(file_info)
