@@ -106,7 +106,7 @@ mod tests {
     async fn it_works() {
         env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
         let app = test::init_service(App::new().service(list_files)).await;
-        #[cfg(target_os = "linux")]
+        #[cfg(not(target_os = "windows"))]
         let uri_path = "/file/list?path=/sys&page_no=1&page_count=200";
         #[cfg(target_os = "windows")]
         let uri_path = "/file/list?path=C:\\&page_no=1&page_count=200";
@@ -118,7 +118,7 @@ mod tests {
 
         // blank path
 
-        #[cfg(target_os = "linux")]
+        #[cfg(not(target_os = "windows"))]
         let uri_path = "/file/list?path=&page_no=1&page_count=200";
         #[cfg(target_os = "windows")]
         let uri_path = "/file/list?path=&page_no=1&page_count=200";

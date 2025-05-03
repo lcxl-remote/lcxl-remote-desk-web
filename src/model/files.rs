@@ -1,6 +1,7 @@
 use std::{fs::Metadata, path::PathBuf};
 
 use chrono::{DateTime, Local, TimeZone};
+use config::File;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
@@ -32,6 +33,12 @@ impl FileInfo {
     #[cfg(target_os = "linux")]
     pub fn get_permissions(metadata: &Metadata) -> u32 {
         use std::os::linux::fs::MetadataExt;
+        metadata.st_mode()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn get_permissions(metadata: &Metadata) -> u32 {
+        use std::os::macos::fs::MetadataExt;
         metadata.st_mode()
     }
 
@@ -77,6 +84,8 @@ impl FileInfo {
                 file_info.is_dir = metadata.is_dir();
                 file_info.is_file = metadata.is_file();
                 file_info.is_symlink = metadata.is_symlink();
+                file_info.permissions = FileInfo::get_permissions(&metadata);
+                use chrono::{DateTime, Local};
                 match metadata.accessed() {
                     Ok(accessed) => file_info.accessed = DateTime::<Local>::from(accessed),
                     Err(err) => file_info
