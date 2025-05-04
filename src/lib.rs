@@ -3,7 +3,7 @@ pub mod desk_error;
 pub mod model;
 pub mod utils;
 
-use std::env;
+use std::{env, sync::Arc};
 
 use actix_server::Server;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
@@ -70,6 +70,11 @@ pub async fn run() -> Result<Server, DeskError> {
         info!("New random password: {}", new_password);
         settings.save()?;
     }
+
+    //start turn server
+    let turn_config = Arc::new(settings.to_turn_server_config()?);
+    turn_server::startup(turn_config).await?;
+    info!("Turn server started");
 
     // Start the Actix web server here
     let mut http_server = HttpServer::new(move || {

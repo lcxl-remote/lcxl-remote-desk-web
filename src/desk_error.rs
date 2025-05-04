@@ -46,6 +46,8 @@ pub enum DeskError {
     TomlError(toml::ser::Error),
     /// A connection pool error occurred.
     R2d2Error(r2d2::Error),
+    // Anyhow error occurred.
+    AnyhowError(anyhow::Error), 
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -59,7 +61,7 @@ impl DeskError {
 
     #[cfg(target_os="windows")]
     pub fn windows_error<T>() -> Result<T, DeskError> {
-        use windows::Win32::{Foundation::GetLastError, System::Diagnostics::Debug::{FormatMessageW, FORMAT_MESSAGE_FROM_SYSTEM}};
+        use windows::Win32::Foundation::GetLastError;
         unsafe {
             let last_error = GetLastError();
             //TODO use FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM)
@@ -80,6 +82,7 @@ impl Display for DeskError {
             DeskError::TomlError(error) => error.fmt(f),
             DeskError::R2d2Error(error) => error.fmt(f),
             DeskError::CustomError(error) => error.fmt(f),
+            DeskError::AnyhowError(error) => error.fmt(f),
         }
     }
 }
@@ -126,6 +129,12 @@ impl From<r2d2::Error> for DeskError {
     }
 }
 
+impl From<anyhow::Error> for DeskError {
+    fn from(err: anyhow::Error) -> Self {
+        DeskError::AnyhowError(err)
+    }
+
+}
 impl ResponseError for DeskError {
     fn status_code(&self) -> actix_web::http::StatusCode {
         actix_web::http::StatusCode::OK

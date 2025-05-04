@@ -66,6 +66,9 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
             total_count,
         }));
     }
+
+    // path_str need to be mut in linux/macos platform
+    #[allow(unused_mut)]
     let mut path_str = query_list.path.as_str();
     #[cfg(not(target_os = "windows"))]
     if query_list.path.is_empty() {

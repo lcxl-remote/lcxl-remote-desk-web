@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs, ops::Deref, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, fs, net::SocketAddr, ops::Deref, path::PathBuf};
 
 use ::serde::{Deserialize, Serialize};
 use chrono::{DateTime, Local};
@@ -6,6 +6,7 @@ use clap::Parser;
 use config::{Config, Environment, File};
 use log::{debug, info};
 use tokio::sync::Mutex;
+use turn_server::config::Interface;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::desk_error::DeskError;
@@ -108,45 +109,52 @@ pub struct ListSettings {
     pub filter_dup_file_by_dir_path: Option<bool>,
 }
 
-/// Query parameters for listing files.
-#[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
-pub struct TrashListSettings {
-    /// Page number, start from 1
-    pub page_no: i64,
-    /// Page count, must be greater than 0
-    pub page_count: i64,
-    /// Minimum file size
-    pub min_file_size: Option<i64>,
-    /// Max file size
-    pub max_file_size: Option<i64>,
-    /// Dir path of the directory containing the file
-    pub dir_path: Option<String>,
-    /// File name filtering
-    pub file_name: Option<String>,
-    /// New field for file extension filtering
-    pub file_extension: Option<String>,
-    /// Optional file extension list filtering, comma(,) separated values.
-    pub file_extension_list: Option<String>,
-    /// MD5 hash of the file content, used for filtering files by their content.
-    pub md5: Option<String>,
-    /// Optional time range filter for file creation.
-    pub start_created_time: Option<DateTime<Local>>,
-    pub end_created_time: Option<DateTime<Local>>,
-    /// Optional time range filter for file modification.
-    pub start_modified_time: Option<DateTime<Local>>,
-    pub end_modified_time: Option<DateTime<Local>>,
+/// Turn Server Settings
+/// See also `turn_server::config::Config`
 
-    /// Optional time range filter for file remove.
-    pub start_removed_time: Option<DateTime<Local>>,
-    pub end_removed_time: Option<DateTime<Local>>,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TurnSettings {
+    /// turn server realm
+    pub realm: String,
+    
+    /// turn server listen interfaces
+    pub interfaces: Vec<Interface>,
+    /// api bind
+    ///
+    /// This option specifies the http server binding address used to control
+    /// the turn server.
+    pub bind: SocketAddr,
 
-    /// Optional order by field.
-    pub order_by: Option<String>,
-    /// Optional order direction, true for ascending, false for descending. Default is descending.
-    pub order_asc: Option<bool>,
+    /// static user password
+    ///
+    /// This option can be used to specify the
+    /// static identity authentication information used by the turn server for
+    /// verification. Note: this is a high-priority authentication method, turn
+    /// The server will try to use static authentication first, and then use
+    /// external control service authentication.
+    pub static_credentials: HashMap<String, String>,
+    /// Static authentication key value (string) that applies only to the TURN
+    /// REST API.
+    ///
+    /// If set, the turn server will not request external services via the HTTP
+    /// Hooks API to obtain the key.
+    pub static_auth_secret: Option<String>,
 }
 
-/// Dfr Settings
+impl Default for TurnSettings {
+    fn default() -> Self {
+        Self {
+            realm: "localhost".to_string(),
+            interfaces: vec![],
+            bind: "127.0.0.1:3478".parse().unwrap(),
+            static_credentials: HashMap::new(),
+            static_auth_secret: None,
+        }
+    }
+}
+
+/// Desk Settings
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct Settings {
@@ -158,8 +166,8 @@ pub struct Settings {
     pub scan: ScanSettings,
     /// List settings
     pub list: ListSettings,
-    /// Trash list settings
-    pub trash_list: TrashListSettings,
+    /// Turn settings
+    pub turn: TurnSettings,
 }
 
 impl Default for SystemSettings {
@@ -175,6 +183,29 @@ impl Default for SystemSettings {
             clear_trash_interval_s: 2592000, // 30 days in seconds
             trash_path: "data/.dfr_trash".to_string(),
         }
+    }
+}
+
+impl Settings {
+    pub fn to_turn_server_config(&self) -> Result<turn_server::config::Config, DeskError> {
+        let turn_config = turn_server::config::Config{
+            turn: turn_server::config::Turn {
+                realm: self.turn.realm.clone(),
+                interfaces:  self.turn.interfaces.clone(),
+            },
+            api: turn_server::config::Api {
+                bind: self.turn.bind.clone(),
+            },
+            log: turn_server::config::Log {
+                level: self.system.log_level.as_str().parse().unwrap_or(turn_server::config::LogLevel::Info),
+
+            },
+            auth: turn_server::config::Auth {
+                static_credentials: self.turn.static_credentials.clone(),
+                static_auth_secret: self.turn.static_auth_secret.clone(),
+            },
+        };
+        Ok(turn_config)
     }
 }
 
@@ -220,30 +251,6 @@ impl Default for ListSettings {
             order_by: None,
             order_asc: None,
             filter_dup_file_by_dir_path: None,
-        }
-    }
-}
-
-impl Default for TrashListSettings {
-    fn default() -> Self {
-        Self {
-            page_no: 1,
-            page_count: 20,
-            min_file_size: None,
-            max_file_size: None,
-            dir_path: None,
-            file_name: None,
-            file_extension: None,
-            file_extension_list: None,
-            md5: None,
-            start_created_time: None,
-            end_created_time: None,
-            start_modified_time: None,
-            end_modified_time: None,
-            start_removed_time: None,
-            end_removed_time: None,
-            order_by: None,
-            order_asc: None,
         }
     }
 }
