@@ -12,7 +12,7 @@ use crate::{
     desk_error::DeskError,
     model::{
         settings::Settings,
-        turn::{ApiState, TurnInfo, TurnQueryParams, TurnSession, TurnSessionStatistics},
+        turn::{ApiState, TurnInfo, TurnInterface, TurnQueryParams, TurnSession, TurnSessionStatistics},
     },
 };
 
@@ -48,13 +48,32 @@ pub async fn startup_turn_server(settings: &Settings) -> Result<ApiState, DeskEr
     Ok(api_state)
 }
 
+#[utoipa::path(
+    summary = "Get turn server info",
+    responses(
+        (status = 200, description = "Turn server info", body = TurnInfo),
+    ),
+)]
 #[get("/turn/info")]
 pub async fn get_turn_info(api_state: web::Data<ApiState>) -> Result<HttpResponse, DeskError> {
     let sessions = api_state.service.get_sessions();
+    let mut interfaces = Vec::new();
+    for interface in api_state.config.turn.interfaces.iter() {
+        let bind = interface.bind.clone();
+        let external = interface.external.clone();
+        let transport = interface.transport.clone();
+        let turn_interface = TurnInterface {
+            transport: transport.into(),
+            bind: bind.to_string(),
+            external: external.to_string(),
+        };
+
+        interfaces.push(turn_interface);
+    }
     let turn_info = TurnInfo {
         software: SOFTWARE.to_string(),
         uptime: api_state.uptime.elapsed().as_secs(),
-        interfaces: api_state.config.turn.interfaces.clone(),
+        interfaces,
         port_capacity: PortAllocatePools::capacity(),
         port_allocated: sessions.allocated(),
     };
@@ -62,6 +81,13 @@ pub async fn get_turn_info(api_state: web::Data<ApiState>) -> Result<HttpRespons
     return Ok(HttpResponse::Ok().json(turn_info));
 }
 
+#[utoipa::path(
+    summary = "Get turn server session",
+    params(TurnQueryParams),
+    responses(
+        (status = 200, description = "Turn server session", body = TurnSession),
+    ),
+)]
 #[get("/turn/session")]
 pub async fn get_turn_session(
     api_state: web::Data<ApiState>,
@@ -86,6 +112,14 @@ pub async fn get_turn_session(
     }
 }
 
+#[utoipa::path(
+    summary = "Get turn server session statistics",
+    params(TurnQueryParams),
+    responses(
+        (status = 200, description = "Turn server session statistics", body = TurnSessionStatistics),
+        (status = 404, description = "Turn server session not found"),
+    ),
+)]
 #[get("/turn/session/statistics")]
 pub async fn get_turn_session_statistics(
     api_state: web::Data<ApiState>,
@@ -106,6 +140,14 @@ pub async fn get_turn_session_statistics(
     }
 }
 
+#[utoipa::path(
+    summary = "Delete turn server session",
+    params(TurnQueryParams),
+    responses(
+        (status = 200, description = "Deleted turn server session"),
+        (status = 417, description = "Expectation failed"),
+    ),
+)]
 #[delete("/turn/session")]
 pub async fn delete_turn_session(
     api_state: web::Data<ApiState>,
@@ -122,6 +164,13 @@ pub async fn delete_turn_session(
     }
 }
 
+#[utoipa::path(
+    summary = "Turn server metrics",
+    responses(
+        (status = 200, description = "turn server metrics", body = String),
+        (status = 417, description = "Expectation failed"),
+    ),
+)]
 #[get("/turn/metrics")]
 pub async fn get_turn_metrics() -> Result<HttpResponse, DeskError> {
     let mut metrics_bytes = Vec::with_capacity(4096);

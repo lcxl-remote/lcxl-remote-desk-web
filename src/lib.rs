@@ -106,6 +106,12 @@ pub async fn run() -> Result<Server, DeskError> {
             .service(get_current_user)
             .service(get_notices)
             .service(get_captcha)
+            // TODO need to login for these routes
+            .service(get_turn_info)
+            .service(get_turn_session)
+            .service(get_turn_session_statistics)
+            .service(delete_turn_session)
+            .service(get_turn_metrics)
             .service(
                 // need to login for these routes
                 utoipa_actix_web::scope("/api/desk")
@@ -125,11 +131,7 @@ pub async fn run() -> Result<Server, DeskError> {
                     .cookie_secure(false)
                     .build(),
             )
-            .service(get_turn_info)
-            .service(get_turn_session)
-            .service(get_turn_session_statistics)
-            .service(delete_turn_session)
-            .service(get_turn_metrics)
+            
             .service(
                 actix_files::Files::new("/", static_file_path.clone()).index_file("index.html"),
             )
