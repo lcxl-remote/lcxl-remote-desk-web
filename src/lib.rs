@@ -3,14 +3,14 @@ pub mod desk_error;
 pub mod model;
 pub mod utils;
 
-use std::{env, sync::Arc};
+use std::env;
 
 use actix_server::Server;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
 use actix_web::{
     App, HttpResponse, HttpServer,
     cookie::Key,
-    error,
+    error::InternalError,
     middleware::{Logger, from_fn},
     web::{self},
 };
@@ -18,6 +18,10 @@ use clap::Parser as _;
 use controller::{
     login::{change_password, get_captcha, login_account, logout_account},
     settings::query_settings,
+    turn::{
+        delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
+        get_turn_session_statistics, startup_turn_server,
+    },
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
 use desk_error::DeskError;
@@ -72,15 +76,15 @@ pub async fn run() -> Result<Server, DeskError> {
     }
 
     //start turn server
-    let turn_config = Arc::new(settings.to_turn_server_config()?);
-    turn_server::startup(turn_config).await?;
-    info!("Turn server started");
+    let turn_api_server = web::Data::new(startup_turn_server(&settings).await?);
 
-    // Start the Actix web server here
+    // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
+            .app_data(shared_settings.clone())
+            .app_data(turn_api_server.clone())
             .app_data(
                 web::JsonConfig::default()
                     .limit(4096 * 1024 << 2)
@@ -88,7 +92,7 @@ pub async fn run() -> Result<Server, DeskError> {
                         // <- create custom error response
                         warn!("progress request {} err: {}", req.path(), err);
                         let err_message = err.to_string();
-                        return error::InternalError::from_response(
+                        return InternalError::from_response(
                             err,
                             HttpResponse::BadRequest()
                                 .json(RestResponse::failed(ErrorCode::SYSTEM_ERROR, err_message)),
@@ -121,9 +125,15 @@ pub async fn run() -> Result<Server, DeskError> {
                     .cookie_secure(false)
                     .build(),
             )
+            .service(get_turn_info)
+            .service(get_turn_session)
+            .service(get_turn_session_statistics)
+            .service(delete_turn_session)
+            .service(get_turn_metrics)
             .service(
                 actix_files::Files::new("/", static_file_path.clone()).index_file("index.html"),
             )
+            
     });
     if settings.system.enable_ipv6 && check_ipv6_available() {
         let addr = format!(

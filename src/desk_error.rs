@@ -47,7 +47,9 @@ pub enum DeskError {
     /// A connection pool error occurred.
     R2d2Error(r2d2::Error),
     // Anyhow error occurred.
-    AnyhowError(anyhow::Error), 
+    AnyhowError(anyhow::Error),
+    /// A join error occurred.
+    TokioTaskJoinError(tokio::task::JoinError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -59,15 +61,17 @@ impl DeskError {
         )))
     }
 
-    #[cfg(target_os="windows")]
+    #[cfg(target_os = "windows")]
     pub fn windows_error<T>() -> Result<T, DeskError> {
         use windows::Win32::Foundation::GetLastError;
         unsafe {
             let last_error = GetLastError();
             //TODO use FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM)
-            return DeskError::custom_error(ErrorCode::WINDOWS_ERROR, format!("windows error code: {:?}", last_error));
+            return DeskError::custom_error(
+                ErrorCode::WINDOWS_ERROR,
+                format!("windows error code: {:?}", last_error),
+            );
         }
-        
     }
 }
 
@@ -83,6 +87,7 @@ impl Display for DeskError {
             DeskError::R2d2Error(error) => error.fmt(f),
             DeskError::CustomError(error) => error.fmt(f),
             DeskError::AnyhowError(error) => error.fmt(f),
+            DeskError::TokioTaskJoinError(error) => error.fmt(f),
         }
     }
 }
@@ -133,8 +138,14 @@ impl From<anyhow::Error> for DeskError {
     fn from(err: anyhow::Error) -> Self {
         DeskError::AnyhowError(err)
     }
-
 }
+
+impl From<tokio::task::JoinError> for DeskError {
+    fn from(err: tokio::task::JoinError) -> Self {
+        DeskError::TokioTaskJoinError(err)
+    }
+}
+
 impl ResponseError for DeskError {
     fn status_code(&self) -> actix_web::http::StatusCode {
         actix_web::http::StatusCode::OK

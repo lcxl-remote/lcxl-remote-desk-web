@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, fs, net::SocketAddr, ops::Deref, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, fs, ops::Deref, path::PathBuf};
 
 use ::serde::{Deserialize, Serialize};
 use chrono::{DateTime, Local};
@@ -120,11 +120,6 @@ pub struct TurnSettings {
     
     /// turn server listen interfaces
     pub interfaces: Vec<Interface>,
-    /// api bind
-    ///
-    /// This option specifies the http server binding address used to control
-    /// the turn server.
-    pub bind: SocketAddr,
 
     /// static user password
     ///
@@ -147,7 +142,6 @@ impl Default for TurnSettings {
         Self {
             realm: "localhost".to_string(),
             interfaces: vec![],
-            bind: "127.0.0.1:3478".parse().unwrap(),
             static_credentials: HashMap::new(),
             static_auth_secret: None,
         }
@@ -194,7 +188,7 @@ impl Settings {
                 interfaces:  self.turn.interfaces.clone(),
             },
             api: turn_server::config::Api {
-                bind: self.turn.bind.clone(),
+                bind: "127.0.0.1:3000".parse().unwrap(),
             },
             log: turn_server::config::Log {
                 level: self.system.log_level.as_str().parse().unwrap_or(turn_server::config::LogLevel::Info),
@@ -264,7 +258,7 @@ impl Settings {
         // Load settings from config file
         let config = Config::builder()
             .add_source(File::with_name(args.config_file_path.as_str()).required(false))
-            .add_source(Environment::with_prefix("DFR"))
+            .add_source(Environment::with_prefix("DESK"))
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.system.config_file_path = args.config_file_path.clone();
@@ -276,6 +270,10 @@ impl Settings {
         config_file_path.set_extension("toml");
         // Save settings to config file
         let toml_str = toml::to_string(self)?;
+        if !config_file_path.parent().unwrap().exists() {
+            info!("Creating config directory: {}", config_file_path.parent().unwrap().display());
+            fs::create_dir_all(config_file_path.parent().unwrap())?;
+        }
 
         debug!(
             "Saving config to: {}, content: {}",
