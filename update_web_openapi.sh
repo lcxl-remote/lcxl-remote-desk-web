@@ -5,5 +5,5 @@ set -e
 echo "Generating OpenAPI JSON file..."
 cd "$(dirname "$0")/web"
 
-curl http://localhost:8081/api/openapi.json -o config/openapi.json 
+curl http://localhost:8081/openapi.json -o config/openapi.json 
 npm run openapi

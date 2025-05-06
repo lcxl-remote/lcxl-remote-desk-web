@@ -54,7 +54,7 @@ pub async fn startup_turn_server(settings: &Settings) -> Result<ApiState, DeskEr
         (status = 200, description = "Turn server info", body = TurnInfo),
     ),
 )]
-#[get("/turn/info")]
+#[get("/info")]
 pub async fn get_turn_info(api_state: web::Data<ApiState>) -> Result<HttpResponse, DeskError> {
     let sessions = api_state.service.get_sessions();
     let mut interfaces = Vec::new();
@@ -88,7 +88,7 @@ pub async fn get_turn_info(api_state: web::Data<ApiState>) -> Result<HttpRespons
         (status = 200, description = "Turn server session", body = TurnSession),
     ),
 )]
-#[get("/turn/session")]
+#[get("/session")]
 pub async fn get_turn_session(
     api_state: web::Data<ApiState>,
     query: web::Query<TurnQueryParams>,
@@ -120,7 +120,7 @@ pub async fn get_turn_session(
         (status = 404, description = "Turn server session not found"),
     ),
 )]
-#[get("/turn/session/statistics")]
+#[get("/session/statistics")]
 pub async fn get_turn_session_statistics(
     api_state: web::Data<ApiState>,
     query: web::Query<TurnQueryParams>,
@@ -148,7 +148,7 @@ pub async fn get_turn_session_statistics(
         (status = 417, description = "Expectation failed"),
     ),
 )]
-#[delete("/turn/session")]
+#[delete("/session")]
 pub async fn delete_turn_session(
     api_state: web::Data<ApiState>,
     query: web::Query<TurnQueryParams>,
@@ -171,7 +171,7 @@ pub async fn delete_turn_session(
         (status = 417, description = "Expectation failed"),
     ),
 )]
-#[get("/turn/metrics")]
+#[get("/metrics")]
 pub async fn get_turn_metrics() -> Result<HttpResponse, DeskError> {
     let mut metrics_bytes = Vec::with_capacity(4096);
     if generate_metrics(&mut metrics_bytes).is_err() {

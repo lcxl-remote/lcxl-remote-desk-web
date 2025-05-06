@@ -107,23 +107,29 @@ pub async fn run() -> Result<Server, DeskError> {
             .service(get_notices)
             .service(get_captcha)
             // TODO need to login for these routes
-            .service(get_turn_info)
-            .service(get_turn_session)
-            .service(get_turn_session_statistics)
-            .service(delete_turn_session)
-            .service(get_turn_metrics)
             .service(
                 // need to login for these routes
-                utoipa_actix_web::scope("/api/desk")
+                utoipa_actix_web::scope("/api")
                     .wrap(from_fn(reject_anonymous_users))
-                    .service(change_password)
-                    .service(query_settings),
+                    .service(
+                        utoipa_actix_web::scope("/desk")
+                            .service(change_password)
+                            .service(query_settings),
+                    )
+                    .service(
+                        utoipa_actix_web::scope("/turn")
+                            .service(get_turn_info)
+                            .service(get_turn_session)
+                            .service(get_turn_session_statistics)
+                            .service(delete_turn_session)
+                            .service(get_turn_metrics),
+                    ),
             )
             .openapi_service(|api| {
-                SwaggerUi::new("/swagger-ui/{_:.*}").url("/api/openapi.json", api)
+                SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api)
             })
             .openapi_service(|api| Redoc::with_url("/redoc", api))
-            .openapi_service(|api| RapiDoc::with_url("/rapidoc", "/api/openapi.json", api))
+            .openapi_service(|api| RapiDoc::with_url("/rapidoc", "/openapi.json", api))
             .openapi_service(|api| Scalar::with_url("/scalar", api))
             .into_app()
             .wrap(
@@ -131,11 +137,9 @@ pub async fn run() -> Result<Server, DeskError> {
                     .cookie_secure(false)
                     .build(),
             )
-            
             .service(
                 actix_files::Files::new("/", static_file_path.clone()).index_file("index.html"),
             )
-            
     });
     if settings.system.enable_ipv6 && check_ipv6_available() {
         let addr = format!(
