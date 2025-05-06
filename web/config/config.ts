@@ -142,7 +142,7 @@ export default defineConfig({
     {
       requestLibPath: "import { request } from '@umijs/max'",
       schemaPath: join(__dirname, 'openapi.json'),
-      projectName: 'dfr',
+      projectName: 'desk',
     },
   ],
   //mfsu: false,

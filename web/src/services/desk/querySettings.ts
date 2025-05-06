@@ -2,9 +2,9 @@
 /* eslint-disable */
 import { request } from '@umijs/max';
 
-/** Query settings GET /api/dfr/settings */
+/** Query settings GET /api/desk/settings */
 export async function querySettings(options?: { [key: string]: any }) {
-  return request<API.RestResponseSystemSettings>('/api/dfr/settings', {
+  return request<API.RestResponseSystemSettings>('/api/desk/settings', {
     method: 'GET',
     ...(options || {}),
   });

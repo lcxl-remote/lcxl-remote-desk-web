@@ -2,9 +2,9 @@
 /* eslint-disable */
 import { request } from '@umijs/max';
 
-/** Change password of user account POST /api/dfr/api/login/password */
+/** Change password of user account POST /api/desk/api/login/password */
 export async function changePassword(body: API.PasswordParams, options?: { [key: string]: any }) {
-  return request<any>('/api/dfr/api/login/password', {
+  return request<any>('/api/desk/api/login/password', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
