@@ -22,48 +22,6 @@ export default [
       },
     ],
   },
-   /*
-  {
-    path: '/welcome',
-    name: 'welcome',
-    icon: 'smile',
-    component: './Welcome',
-  },
- 
-  {
-    name: 'list.table-list',
-    icon: 'table',
-    path: '/list',
-    component: './TableList',
-  },
-  */
-  {
-    path: '/scan',
-    name: 'scan',
-    icon: 'search',
-    routes: [
-      {
-        path: '/scan',
-        redirect: '/scan/list',
-      },
-      {
-        name: 'file-list',
-        path: '/scan/list',
-        component: './FileList',
-      },
-      {
-        name: 'trash-list',
-        path: '/scan/trash',
-        component: './TrashList',
-      },
-      {
-        path: '/scan/file',
-        name: 'scan-file',
-        component: './Scan',
-      },
-
-    ],
-  },
   {
     path: '/settings',
     name: 'settings',
@@ -88,7 +46,7 @@ export default [
   },
   {
     path: '/',
-    redirect: '/scan',
+    redirect: '/settings',
   },
   {
     path: '*',

@@ -1,7 +1,7 @@
-import { queryScanSettings } from '@/services/dfr/queryScanSettings';
-import { queryScanStatus } from '@/services/dfr/queryScanStatus';
-import { startScan } from '@/services/dfr/startScan';
-import { stopScan } from '@/services/dfr/stopScan';
+import { queryScanSettings } from '@/services/desk/queryScanSettings';
+import { queryScanStatus } from '@/services/desk/queryScanStatus';
+import { startScan } from '@/services/desk/startScan';
+import { stopScan } from '@/services/desk/stopScan';
 import { formatSize } from '@/utils/format_utils';
 import { PageContainer, ProForm, ProFormDigit, ProFormInstance, ProFormSelect, ProFormText, ProFormTextArea } from '@ant-design/pro-components';
 import { useIntl } from '@umijs/max';

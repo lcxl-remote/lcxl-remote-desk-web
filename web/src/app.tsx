@@ -6,7 +6,7 @@ import type { RunTimeLayoutConfig } from '@umijs/max';
 import { history, Link } from '@umijs/max';
 import defaultSettings from '../config/defaultSettings';
 import { errorConfig } from './requestErrorConfig';
-import { getCurrentUser } from '@/services/dfr/getCurrentUser';
+import { getCurrentUser } from '@/services/desk/getCurrentUser';
 import React from 'react';
 const isDev = process.env.NODE_ENV === 'development';
 const loginPath = '/user/login';

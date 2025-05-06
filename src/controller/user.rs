@@ -42,6 +42,7 @@ pub async fn get_current_user(
     settings: web::Data<SharedSettings>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
+    info!("Connection Info: {:?}",  req.connection_info());
     if let Some(client_ip_str) = req.connection_info().realip_remote_addr() {
         info!("Client IP: {}", client_ip_str);
         if let Ok(client_ip) = client_ip_str.parse::<IpAddr>() {

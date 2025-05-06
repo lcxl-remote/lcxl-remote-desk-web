@@ -14,10 +14,12 @@ import * as getTurnSessionStatistics from './getTurnSessionStatistics';
 import * as loginAccount from './loginAccount';
 import * as logoutAccount from './logoutAccount';
 import * as querySettings from './querySettings';
+import * as updateSettings from './updateSettings';
 export default {
   getCurrentUser,
   changePassword,
   querySettings,
+  updateSettings,
   loginAccount,
   getCaptcha,
   logoutAccount,

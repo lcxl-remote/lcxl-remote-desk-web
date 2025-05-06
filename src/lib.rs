@@ -17,7 +17,7 @@ use actix_web::{
 use clap::Parser as _;
 use controller::{
     login::{change_password, get_captcha, login_account, logout_account},
-    settings::query_settings,
+    settings::{query_settings, update_settings},
     turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
         get_turn_session_statistics, startup_turn_server,
@@ -114,7 +114,8 @@ pub async fn run() -> Result<Server, DeskError> {
                     .service(
                         utoipa_actix_web::scope("/desk")
                             .service(change_password)
-                            .service(query_settings),
+                            .service(query_settings)
+                            .service(update_settings),
                     )
                     .service(
                         utoipa_actix_web::scope("/turn")

@@ -1,4 +1,4 @@
-import { changePassword } from "@/services/dfr/changePassword";
+import { changePassword } from "@/services/desk/changePassword";
 import { PageContainer, ProForm, ProFormText } from "@ant-design/pro-components";
 import { history, useIntl, useModel } from "@umijs/max";
 import { message } from "antd";

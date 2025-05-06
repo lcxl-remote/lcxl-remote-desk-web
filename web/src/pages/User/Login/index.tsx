@@ -1,6 +1,6 @@
 import { Footer } from '@/components';
-import { loginAccount } from '@/services/dfr/loginAccount';
-import { getCaptcha } from '@/services/dfr/getCaptcha';
+import { loginAccount } from '@/services/desk/loginAccount';
+import { getCaptcha } from '@/services/desk/getCaptcha';
 import {
   AlipayCircleOutlined,
   LockOutlined,

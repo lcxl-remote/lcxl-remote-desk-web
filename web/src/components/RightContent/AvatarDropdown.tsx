@@ -1,4 +1,4 @@
-import { logoutAccount } from '@/services/dfr/logoutAccount';
+import { logoutAccount } from '@/services/desk/logoutAccount';
 import { LogoutOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons';
 import { history, useIntl, useModel } from '@umijs/max';
 import { Spin } from 'antd';

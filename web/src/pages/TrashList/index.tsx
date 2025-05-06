@@ -10,11 +10,11 @@ import {
 import { FormattedMessage, useIntl, history } from '@umijs/max';
 import { Button, Drawer, message, Popconfirm, Select, SelectProps } from 'antd';
 import React, { useRef, useState } from 'react';
-import { deleteTrashFiles } from '@/services/dfr/deleteTrashFiles';
-import { deleteTrashFile } from '@/services/dfr/deleteTrashFile';
-import { restoreTrashFile } from '@/services/dfr/restoreTrashFile';
-import { queryTrashListSettings } from '@/services/dfr/queryTrashListSettings';
-import { listTrashFiles } from '@/services/dfr/listTrashFiles';
+import { deleteTrashFiles } from '@/services/desk/deleteTrashFiles';
+import { deleteTrashFile } from '@/services/desk/deleteTrashFile';
+import { restoreTrashFile } from '@/services/desk/restoreTrashFile';
+import { queryTrashListSettings } from '@/services/desk/queryTrashListSettings';
+import { listTrashFiles } from '@/services/desk/listTrashFiles';
 
 
 /**

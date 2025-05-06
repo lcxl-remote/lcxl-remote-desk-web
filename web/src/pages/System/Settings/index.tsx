@@ -1,5 +1,5 @@
-import { querySettings } from "@/services/dfr/querySettings";
-import { updateSettings } from "@/services/dfr/updateSettings";
+import { querySettings } from "@/services/desk/querySettings";
+import { updateSettings } from "@/services/desk/updateSettings";
 import { PageContainer, ProForm, ProFormDigit, ProFormSelect, ProFormSwitch, ProFormText } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
 import { Alert, Divider, message } from "antd";

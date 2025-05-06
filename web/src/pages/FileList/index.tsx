@@ -1,5 +1,5 @@
-import { listFiles } from '@/services/dfr/listFiles';
-import { deleteFile } from '@/services/dfr/deleteFile';
+import { listFiles } from '@/services/desk/listFiles';
+import { deleteFile } from '@/services/desk/deleteFile';
 import { formatSize } from '@/utils/format_utils';
 import { SearchOutlined } from '@ant-design/icons';
 import type { ActionType, ColumnsState, ProColumns, ProDescriptionsItemProps, ProFormInstance } from '@ant-design/pro-components';
@@ -12,8 +12,8 @@ import {
 import { FormattedMessage, useIntl, history } from '@umijs/max';
 import { Button, Drawer, Input, message, Popconfirm, Select, SelectProps } from 'antd';
 import React, { useRef, useState } from 'react';
-import { queryListSettings } from '@/services/dfr/queryListSettings';
-import { deleteFiles } from '@/services/dfr/deleteFiles';
+import { queryListSettings } from '@/services/desk/queryListSettings';
+import { deleteFiles } from '@/services/desk/deleteFiles';
 
 
 /**
