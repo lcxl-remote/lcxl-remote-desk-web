@@ -1,4 +1,9 @@
-use std::{collections::{HashMap, HashSet}, fs, ops::Deref, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    ops::Deref,
+    path::PathBuf,
+};
 
 use ::serde::{Deserialize, Serialize};
 use chrono::{DateTime, Local};
@@ -36,10 +41,6 @@ pub struct SystemSettings {
     pub listen_addr_ipv6: String,
     /// access logs are printed with the INFO level so ensure it is enabled by default
     pub log_level: String,
-    /// interval in seconds to clear trash
-    pub clear_trash_interval_s: u32,
-    /// trash path for deleted files
-    pub trash_path: String,
 }
 
 /// User settings
@@ -117,7 +118,7 @@ pub struct ListSettings {
 pub struct TurnSettings {
     /// turn server realm
     pub realm: String,
-    
+
     /// turn server listen interfaces
     pub interfaces: Vec<Interface>,
 
@@ -174,25 +175,27 @@ impl Default for SystemSettings {
             listen_addr_ipv4: "0.0.0.0".to_string(),
             listen_addr_ipv6: "::".to_string(),
             log_level: "info".to_string(),
-            clear_trash_interval_s: 2592000, // 30 days in seconds
-            trash_path: "data/.dfr_trash".to_string(),
         }
     }
 }
 
 impl Settings {
     pub fn to_turn_server_config(&self) -> Result<turn_server::config::Config, DeskError> {
-        let turn_config = turn_server::config::Config{
+        let turn_config = turn_server::config::Config {
             turn: turn_server::config::Turn {
                 realm: self.turn.realm.clone(),
-                interfaces:  self.turn.interfaces.clone(),
+                interfaces: self.turn.interfaces.clone(),
             },
             api: turn_server::config::Api {
                 bind: "127.0.0.1:3000".parse().unwrap(),
             },
             log: turn_server::config::Log {
-                level: self.system.log_level.as_str().parse().unwrap_or(turn_server::config::LogLevel::Info),
-
+                level: self
+                    .system
+                    .log_level
+                    .as_str()
+                    .parse()
+                    .unwrap_or(turn_server::config::LogLevel::Info),
             },
             auth: turn_server::config::Auth {
                 static_credentials: self.turn.static_credentials.clone(),
@@ -271,7 +274,10 @@ impl Settings {
         // Save settings to config file
         let toml_str = toml::to_string(self)?;
         if !config_file_path.parent().unwrap().exists() {
-            info!("Creating config directory: {}", config_file_path.parent().unwrap().display());
+            info!(
+                "Creating config directory: {}",
+                config_file_path.parent().unwrap().display()
+            );
             fs::create_dir_all(config_file_path.parent().unwrap())?;
         }
 

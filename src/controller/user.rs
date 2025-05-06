@@ -1,14 +1,20 @@
+use std::net::IpAddr;
+
 use actix_session::{Session, SessionGetError};
 use actix_web::{
-    Error as AWError, FromRequest, HttpResponse,
+    Error as AWError, FromRequest, HttpRequest, HttpResponse,
     body::MessageBody,
     dev::{ServiceRequest, ServiceResponse},
     get,
     middleware::Next,
+    web,
 };
 use log::{info, warn};
 
-use crate::model::user::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone};
+use crate::model::{
+    settings::SharedSettings,
+    user::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone},
+};
 
 pub const SESSION_KEY_USERNAME: &str = "username";
 pub const USER_ADMIN: &str = "admin";
@@ -31,7 +37,32 @@ impl SessionExt for Session {
     ),
 )]
 #[get("/api/currentUser")]
-pub async fn get_current_user(session: Session) -> Result<HttpResponse, AWError> {
+pub async fn get_current_user(
+    req: HttpRequest,
+    settings: web::Data<SharedSettings>,
+    session: Session,
+) -> Result<HttpResponse, AWError> {
+    if let Some(client_ip_str) = req.connection_info().realip_remote_addr() {
+        info!("Client IP: {}", client_ip_str);
+        if let Ok(client_ip) = client_ip_str.parse::<IpAddr>() {
+            info!("Parsed client IP: {:?}", client_ip);
+            if client_ip.is_loopback() {
+                info!("Client IP is loopback, auto login as admin");
+                // Allow access for loopback IPs
+                let login_user_name = {
+                    let settings = settings.lock().await;
+                    settings.user.login_user_name.clone()
+                };
+                session
+                    .insert(SESSION_KEY_USERNAME, &login_user_name)
+                    .unwrap(); // Store user information in session
+            }
+        } else {
+            warn!("Failed to parse client IP: {}", client_ip_str);
+        }
+    } else {
+        warn!("No client IP found in request");
+    }
     if let Some(username) = session.get_current_user()? {
         let current_user = CurrentUser {
             name: Some(username),
