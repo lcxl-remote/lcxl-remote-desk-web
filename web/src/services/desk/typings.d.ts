@@ -17,6 +17,13 @@ declare namespace API {
     userid?: any;
   };
 
+  type DeleteFileRequest = {
+    /** Whether to delete permanently or move to trash */
+    delete_permanently?: any;
+    /** The path of file to be deleted */
+    file_path: string;
+  };
+
   type deleteTurnSessionParams = {
     address: string;
     interface: string;
@@ -29,6 +36,25 @@ declare namespace API {
 
   type FakeCaptchaParams = {
     phone?: any;
+  };
+
+  type FileInfo = {
+    accessed: string;
+    created: string;
+    err_msg?: any;
+    is_dir: boolean;
+    is_file: boolean;
+    is_symlink: boolean;
+    modified: string;
+    name: string;
+    path: string;
+    permissions: number;
+    size: number;
+  };
+
+  type FileListResponse = {
+    file_info_list: FileInfo[];
+    total_count: number;
   };
 
   type Geographic = {
@@ -49,6 +75,28 @@ declare namespace API {
   type LabelKey = {
     key?: any;
     label?: any;
+  };
+
+  type listFilesParams = {
+    path: string;
+    page_no: number;
+    page_count: number;
+    /** Minimum file size */
+    min_file_size?: number;
+    /** Max file size */
+    max_file_size?: number;
+    /** File name filtering */
+    file_name?: any;
+    /** New field for file extension filtering */
+    file_extension?: any;
+    /** Optional file extension list filtering, comma(,) separated values. */
+    file_extension_list?: any;
+    /** Optional time range filter for file creation. */
+    start_created_time?: any;
+    end_created_time?: any;
+    /** Optional time range filter for file modification. */
+    start_modified_time?: any;
+    end_modified_time?: any;
   };
 
   type LoginParams = {

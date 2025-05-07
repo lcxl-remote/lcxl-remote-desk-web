@@ -3,6 +3,7 @@
 // API 更新时间：
 // API 唯一标识：
 import * as changePassword from './changePassword';
+import * as deleteFile from './deleteFile';
 import * as deleteTurnSession from './deleteTurnSession';
 import * as getCaptcha from './getCaptcha';
 import * as getCurrentUser from './getCurrentUser';
@@ -11,6 +12,7 @@ import * as getTurnInfo from './getTurnInfo';
 import * as getTurnMetrics from './getTurnMetrics';
 import * as getTurnSession from './getTurnSession';
 import * as getTurnSessionStatistics from './getTurnSessionStatistics';
+import * as listFiles from './listFiles';
 import * as loginAccount from './loginAccount';
 import * as logoutAccount from './logoutAccount';
 import * as querySettings from './querySettings';
@@ -18,6 +20,8 @@ import * as updateSettings from './updateSettings';
 export default {
   getCurrentUser,
   changePassword,
+  deleteFile,
+  listFiles,
   querySettings,
   updateSettings,
   loginAccount,

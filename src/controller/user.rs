@@ -42,12 +42,19 @@ pub async fn get_current_user(
     settings: web::Data<SharedSettings>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
-    info!("Connection Info: {:?}",  req.connection_info());
+    info!("Connection Info: {:?}", req.connection_info());
     if let Some(client_ip_str) = req.connection_info().realip_remote_addr() {
         info!("Client IP: {}", client_ip_str);
         if let Ok(client_ip) = client_ip_str.parse::<IpAddr>() {
             info!("Parsed client IP: {:?}", client_ip);
-            if client_ip.is_loopback() {
+            let mut loopback = client_ip.is_loopback();
+            if let IpAddr::V6(ipv6) = client_ip {
+                if let Some(ipv4) = ipv6.to_ipv4_mapped() {
+                    info!("Parsed IPv4 from IPv6-mapped address: {:?}", ipv4);
+                    loopback = ipv4.is_loopback();
+                }
+            }
+            if loopback {
                 info!("Client IP is loopback, auto login as admin");
                 // Allow access for loopback IPs
                 let login_user_name = {

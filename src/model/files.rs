@@ -11,6 +11,23 @@ pub struct FileListParams {
     pub path: String,
     pub page_no: i64,
     pub page_count: i64,
+
+    /// Minimum file size
+    pub min_file_size: Option<i64>,
+    /// Max file size
+    pub max_file_size: Option<i64>,
+    /// File name filtering
+    pub file_name: Option<String>,
+    /// New field for file extension filtering
+    pub file_extension: Option<String>,
+    /// Optional file extension list filtering, comma(,) separated values.
+    pub file_extension_list: Option<String>,
+    /// Optional time range filter for file creation.
+    pub start_created_time: Option<DateTime<Local>>,
+    pub end_created_time: Option<DateTime<Local>>,
+    /// Optional time range filter for file modification.
+    pub start_modified_time: Option<DateTime<Local>>,
+    pub end_modified_time: Option<DateTime<Local>>,
 }
 
 #[derive(Serialize, ToSchema, Debug)]
@@ -114,4 +131,13 @@ impl FileInfo {
 pub struct FileListResponse {
     pub file_info_list: Vec<FileInfo>,
     pub total_count: i64,
+}
+
+/// Request body for deleting a file.
+#[derive(Deserialize, Serialize, ToSchema, Clone, Debug)]
+pub struct DeleteFileRequest {
+    /// The path of file to be deleted
+    pub file_path: String,
+    /// Whether to delete permanently or move to trash
+    pub delete_permanently: Option<bool>,
 }

@@ -1,11 +1,15 @@
 use std::path::PathBuf;
 
-use actix_web::{HttpResponse, get, web};
-use log::{debug, info};
+use actix_web::{HttpResponse, delete, get, web};
+use log::{debug, error, info, warn};
+use tokio::fs;
 
 use crate::{
     desk_error::DeskError,
-    model::files::{FileInfo, FileListParams, FileListResponse},
+    model::{
+        common::{ErrorCode, RestResponse},
+        files::{DeleteFileRequest, FileInfo, FileListParams, FileListResponse},
+    },
 };
 
 #[cfg(target_os = "windows")]
@@ -98,6 +102,108 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
         file_info_list,
         total_count,
     }))
+}
+
+#[utoipa::path(
+    summary = "Delete a file",
+    request_body(content = DeleteFileRequest),
+    responses(
+        (status = 200, description = "Delete file successfully"),
+        (status = 400, description = "Bad request"),
+        (status = 501, description = "Not implemented"),
+    ),
+)]
+#[delete("/file")]
+pub async fn delete_file(
+    requst_json: web::Json<DeleteFileRequest>,
+) -> Result<HttpResponse, DeskError> {
+    let delete_file_request = requst_json.into_inner();
+
+    let file = PathBuf::from(delete_file_request.file_path.as_str());
+    if !file.exists() {
+        // remove file from db
+
+        return Ok(
+            HttpResponse::Ok().json(RestResponse::succeed_with_message(format!(
+                "File {} is not exist",
+                file.display()
+            ))),
+        );
+    }
+
+    // remove file
+    let delete_permanently = delete_file_request.delete_permanently.unwrap_or(false);
+    if delete_permanently {
+        warn!("Delete file {} permanently", delete_file_request.file_path);
+        fs::remove_file(delete_file_request.file_path.as_str()).await?;
+    } else {
+        // move to trash dir
+        info!("Move file {} to trash dir", delete_file_request.file_path);
+        #[cfg(target_os = "windows")]
+        {
+            use std::ffi::c_void;
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::Shell::{
+                FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+                SHFILEOPSTRUCTW, SHFileOperationW,
+            };
+
+            use windows::core::{BOOL, HSTRING, PCWSTR};
+
+            let mut fileop = SHFILEOPSTRUCTW {
+                hwnd: HWND::default(),
+                wFunc: FO_DELETE,
+                pFrom: PCWSTR(HSTRING::from(delete_file_request.file_path.as_str()).as_ptr()),
+                pTo: PCWSTR::null(),
+                fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
+                fAnyOperationsAborted: BOOL::from(false),
+                hNameMappings: 0 as *mut c_void,
+                lpszProgressTitle: PCWSTR::null(),
+            };
+
+            // invoke SHFileOperationW to move file to trash
+            let opr_code = unsafe { SHFileOperationW(&mut fileop) };
+            if opr_code != 0 {
+                error!(
+                    "Failed to delete file: {}, code: {}",
+                    delete_file_request.file_path, opr_code
+                );
+                return Ok(HttpResponse::Ok().json(RestResponse::failed(
+                    ErrorCode::WINDOWS_ERROR,
+                    format!(
+                        "Failed to delete file: {}, code: {}",
+                        delete_file_request.file_path, opr_code
+                    ),
+                )));
+            }
+
+            info!(
+                "Moved file {} to trash successfully",
+                delete_file_request.file_path
+            )
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux specific code to move file to trash
+            return Ok(HttpResponse::Ok().json(RestResponse::failed(
+                ErrorCode::SYSTEM_ERROR,
+                "Need implementation",
+            )));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // Linux specific code to move file to trash
+            return Ok(HttpResponse::Ok().json(RestResponse::failed(
+                ErrorCode::SYSTEM_ERROR,
+                "Need implementation",
+            )));
+        }
+    }
+
+    info!("Delete file {} successfully", delete_file_request.file_path);
+    Ok(HttpResponse::Ok().finish())
 }
 
 #[cfg(test)]
