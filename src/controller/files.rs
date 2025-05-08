@@ -217,7 +217,7 @@ pub async fn delete_file(
             // Linux specific code to move file to trash
             return Ok(HttpResponse::Ok().json(RestResponse::failed(
                 ErrorCode::SYSTEM_ERROR,
-                "Need implementation",
+                "Need implementation".to_string(),
             )));
         }
 
@@ -226,7 +226,7 @@ pub async fn delete_file(
             // Linux specific code to move file to trash
             return Ok(HttpResponse::Ok().json(RestResponse::failed(
                 ErrorCode::SYSTEM_ERROR,
-                "Need implementation",
+                "Need implementation".to_string(),
             )));
         }
     }
