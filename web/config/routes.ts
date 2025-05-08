@@ -23,6 +23,22 @@ export default [
     ],
   },
   {
+    path: '/desk',
+    name: 'desk',
+    icon: 'message',
+    routes: [
+      {
+        path: '/desk',
+        redirect: '/desk/filelist',
+      },
+      {
+        name: 'file-list',
+        path: '/desk/filelist',
+        component: './FileList',
+      },
+    ],
+  },
+  {
     path: '/settings',
     name: 'settings',
     icon: 'setting',

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use actix_web::{HttpResponse, delete, get, web};
+use chrono::{Local, TimeZone};
 use log::{debug, error, info, warn};
 use tokio::fs;
 
@@ -44,7 +45,7 @@ pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError> {
                 info!("driver: {}", driver);
                 let driver_path_buf = PathBuf::from(driver.as_str());
                 file_info_list.push(FileInfo::new(driver_path_buf)?);
-                start_index = end_index;
+                start_index = end_index + 1;
             }
         }
         end_index += 1;
@@ -81,21 +82,49 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
     let path = PathBuf::from(path_str);
 
     let mut file_info_list = vec![];
+    if query_list.page_no == 1 {
+        //get parent dir
+        match path.parent() {
+            Some(parent_dir) => {
+                let mut parent_file_info = FileInfo::new(parent_dir.to_path_buf())?;
+                parent_file_info.name = "..".to_string();
+                // add parent dir to list
+                file_info_list.push(parent_file_info);
+            }
+            None => {
+                #[cfg(target_os = "windows")]
+                {
+                    let fake_root_dir = FileInfo {
+                        name: "..".to_string(),
+                        path: "".to_string(),
+                        size: 0,
+                        is_dir: true,
+                        is_file: false,
+                        is_symlink: false,
+                        permissions: 0,
+                        accessed: Local.timestamp_opt(0, 0).unwrap(),
+                        created: Local.timestamp_opt(0, 0).unwrap(),
+                        modified: Local.timestamp_opt(0, 0).unwrap(),
+                        err_msg: None,
+                    };
+                    file_info_list.push(fake_root_dir);
+                }
+            }
+        }
+    }
+
     let mut entries = tokio::fs::read_dir(path.as_path()).await?;
     let start_index = (query_list.page_no - 1) * query_list.page_count;
-    let end_index = query_list.page_no * query_list.page_count;
-    let mut total_count: i64 = 0;
+    let mut total_count = 1i64;
     while let Some(entry) = entries.next_entry().await? {
         total_count += 1;
         if total_count <= start_index {
             continue;
-        } else if total_count > end_index {
-            break;
+        } else if (file_info_list.len() as i64) < query_list.page_count {
+            let file_info = FileInfo::new(entry.path())?;
+            debug!("file_info={:?}", file_info);
+            file_info_list.push(file_info);
         }
-
-        let file_info = FileInfo::new(entry.path())?;
-        debug!("file_info={:?}", file_info);
-        file_info_list.push(file_info);
     }
     info!("List path: {}, total count: {}", path_str, total_count);
     Ok(HttpResponse::Ok().json(FileListResponse {

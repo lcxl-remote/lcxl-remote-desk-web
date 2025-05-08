@@ -82,79 +82,46 @@ const TableList: React.FC = () => {
     {
       title: (
         <FormattedMessage
+          id="pages.searchTable.filePath"
+        />
+      ),
+      hideInTable: true,
+      dataIndex: ["path"],
+      valueType: 'text',
+    },
+    {
+      title: (
+        <FormattedMessage
           id="pages.searchTable.updateForm.ruleName.nameLabel"
         />
       ),
       dataIndex: ["name"],
-      tooltip: '文件名称',
+      hideInSearch: true,
+      hideInDescriptions: true,
       render: (dom, entity) => {
+        let content = entity.name;
+        if (!content) {
+          content = entity.path;
+        }
+        if (!entity.is_dir) {
+          return content;
+        }
         return (
           <a
             onClick={() => {
-              setCurrentRow(entity);
-              setShowDetail(true);
+              if (!formRef.current) {
+                return;
+              }
+              formRef.current.setFieldsValue({
+                path: entity.path,
+              });
+              formRef.current.submit();
             }}
           >
-            {dom}
+            {content}
           </a>
         );
       },
-    },
-    {
-      key: 'file_extention_list',
-      title: <FormattedMessage id="pages.searchTable.fileExtentionList" />,
-      dataIndex: ["file_info", "file_extension"],
-      hideInForm: true,
-      hideInDescriptions: true,
-      hideInTable: true,
-      renderFormItem: (item, { type, defaultRender, ...rest }, form) => {
-        const options: SelectProps['options'] = [];
-        options.push({
-          value: "jpg",
-          label: "jpg",
-        });
-        options.push({
-          value: "jpeg",
-          label: "jpeg",
-        });
-        options.push({
-          value: "bmp",
-          label: "bmp",
-        });
-        options.push({
-          value: "png",
-          label: "png",
-        });
-        options.push({
-          value: "heic",
-          label: "heic",
-        });
-        options.push({
-          value: "gif",
-          label: "gif",
-        });
-        options.push({
-          value: "avi",
-          label: "avi",
-        });
-        options.push({
-          value: "mp4",
-          label: "mp4",
-        });
-        options.push({
-          value: "mkv",
-          label: "mkv",
-        });
-        return (
-          <Select
-            {...rest}
-            mode="tags"
-            //placeholder="Tags Mode"
-            options={options}
-          />
-        );
-      },
-      //initialValue: ["jpg", "mp4"],
     },
     {
       title: <FormattedMessage id="pages.searchTable.fileSize" />,
@@ -181,18 +148,6 @@ const TableList: React.FC = () => {
       },
     },
     {
-      key: 'search_file_created_time',
-      title: (
-        <FormattedMessage
-          id="pages.searchTable.fileCreatedTime"
-        />
-      ),
-      hideInTable: true,
-      hideInDescriptions: true,
-      dataIndex: ["created"],
-      valueType: 'dateTimeRange',
-    },
-    {
       title: (
         <FormattedMessage
           id="pages.searchTable.fileModifiedTime"
@@ -207,48 +162,34 @@ const TableList: React.FC = () => {
       },
     },
     {
-      key: 'search_file_modified_time',
       title: (
         <FormattedMessage
-          id="pages.searchTable.fileModifiedTime"
+          id="pages.searchTable.fileAccessedTime"
         />
       ),
-      hideInTable: true,
-      hideInDescriptions: true,
-      dataIndex: ["modified"],
-      valueType: 'dateTimeRange',
-    },
-    {
-      key: 'search_file_size',
-      title: (
-        <FormattedMessage
-          id="pages.searchTable.searchFileSize"
-        />
-      ),
-      hideInTable: true,
-      hideInDescriptions: true,
-      dataIndex: ['file_info', "inode_info", "size"],
-      valueType: 'digitRange',
-      //initialValue: [2, null],
-    },
-    {
-      key: 'search_md5_count',
-      title: (
-        <FormattedMessage
-          id="pages.searchTable.searchMd5Count"
-        />
-      ),
-      hideInTable: true,
-      hideInDescriptions: true,
-      dataIndex: ["md5_count"],
-      valueType: 'digitRange',
-      //initialValue: [2, null],
+      //sorter: true,
+      hideInSearch: true,
+      dataIndex: ["accessed"],
+      valueType: 'dateTime',
+      renderFormItem: (item, { defaultRender, ...rest }, form) => {
+        return defaultRender(item);
+      },
     },
     {
       title: <FormattedMessage id="pages.searchTable.titleOption" />,
       dataIndex: 'option',
       valueType: 'option',
       render: (_, record) => [
+        <a
+            onClick={() => {
+              setCurrentRow(record);
+              setShowDetail(true);
+            }}
+          >
+           <FormattedMessage
+            id="pages.searchTable.detail"
+          />
+          </a>,
         <Popconfirm
           title={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmTitle" })}
           description={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmDescription" })}
@@ -273,13 +214,6 @@ const TableList: React.FC = () => {
             <FormattedMessage id="pages.searchTable.deletion" />
           </a>
         </Popconfirm>,
-        /*
-        <a key="subscribeAlert" href="https://procomponents.ant.design/">
-          <FormattedMessage
-            id="pages.searchTable.subscribeAlert"
-          />
-        </a>,
-        */
       ],
     },
   ];
@@ -295,12 +229,13 @@ const TableList: React.FC = () => {
         headerTitle={intl.formatMessage({
           id: 'pages.searchTable.title',
         })}
+        formRef={formRef}
         actionRef={actionRef}
         rowKey={(record: API.FileInfo) => {
           return record.path;
         }}
         search={{
-          labelWidth: 120,
+          labelWidth: "auto",
         }}
         columnsState={{
           value: columnsStateMap,
@@ -318,56 +253,9 @@ const TableList: React.FC = () => {
             <SearchOutlined /> <FormattedMessage id="pages.searchTable.startSearch" />
           </Button>,
         ]}
-        /*
-        form={{
-          request: async () => {
-            const response = await queryListSettings();
-            const form_params = response.data!;
-
-            let search_file_modified_time: string[] | undefined = undefined;
-            if (form_params.start_modified_time != null || form_params.end_modified_time != null) {
-              search_file_modified_time = [];
-              search_file_modified_time.push(form_params.start_modified_time);
-              search_file_modified_time.push(form_params.end_modified_time);
-            }
-
-            let search_file_created_time: string[] | undefined = undefined;
-            if (form_params.start_created_time != null || form_params.end_created_time != null) {
-              search_file_created_time = [];
-              search_file_created_time.push(form_params.start_created_time);
-              search_file_created_time.push(form_params.end_created_time);
-            }
-
-
-            let search_md5_count: (number | undefined)[] = [];
-            search_md5_count.push(form_params.min_md5_count);
-            search_md5_count.push(form_params.max_md5_count);
-
-            let file_extention_list: string[] | undefined = undefined;
-            if (form_params.file_extension_list != null) {
-              file_extention_list = form_params.file_extension_list.split(',');
-            }
-
-            let search_file_size: (number | undefined)[] = [];
-            search_file_size.push(form_params.min_file_size);
-            search_file_size.push(form_params.max_file_size);
-
-            let file_info: API.FileInfo | undefined = undefined;
-            file_info = {
-              file_name: form_params.file_name,
-              dir_path: form_params.dir_path
-            };
-            return {
-              file_info,
-              search_file_modified_time,
-              search_file_created_time,
-              search_md5_count,
-              file_extention_list,
-              search_file_size,
-            };
-          },
+        pagination={{
+          pageSize: 200,
         }}
-          */
         request={async (
           // 第一个参数 params 查询表单和 params 参数的结合
           // 第一个参数中一定会有 pageSize 和  current ，这两个参数是 antd 的规范
@@ -375,10 +263,6 @@ const TableList: React.FC = () => {
             pageSize?: number;
             current?: number;
             keywords?: string;
-            search_file_modified_time?: string[];
-            search_file_created_time?: string[];
-            file_extention_list?: string[];
-            search_file_size?: number[];
           },
           sort,
           filter,
@@ -386,29 +270,12 @@ const TableList: React.FC = () => {
           // 这里需要返回一个 Promise,在返回之前你可以进行数据转化
           // 如果需要转化参数可以在这里进行修改
           var list_param: API.listFilesParams = {
+            path: params.path?params.path:"",
             page_no: params.current!,
             page_count: params.pageSize!,
           };
           console.info("sort", sort);
           console.info("filter", filter);
-          
-        
-          if (params.search_file_modified_time) {
-            list_param.start_modified_time = new Date(params.search_file_modified_time[0]).toISOString();
-            list_param.end_modified_time = new Date(params.search_file_modified_time[1]).toISOString();
-          }
-          if (params.search_file_created_time) {
-            list_param.start_created_time = new Date(params.search_file_created_time[0]).toISOString();
-            list_param.end_created_time = new Date(params.search_file_created_time[1]).toISOString();
-          }
-          
-          if (params.file_extention_list && params.file_extention_list.length > 0) {
-            list_param.file_extension_list = params.file_extention_list.join(',').toLowerCase();
-          }
-          if (params.search_file_size) {
-            list_param.min_file_size = params.search_file_size[0];
-            list_param.max_file_size = params.search_file_size[1];
-          }
 
           const msg = await listFiles(list_param);
           return {
@@ -475,7 +342,7 @@ const TableList: React.FC = () => {
         {currentRow?.path && (
           <ProDescriptions<API.FileInfo>
             column={2}
-            title={currentRow?.path}
+            title={currentRow?.name}
             request={async () => ({
               data: currentRow || {},
             })}
