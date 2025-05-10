@@ -16,6 +16,7 @@ import * as listFiles from './listFiles';
 import * as loginAccount from './loginAccount';
 import * as logoutAccount from './logoutAccount';
 import * as querySettings from './querySettings';
+import * as signalingHandler from './signalingHandler';
 import * as updateSettings from './updateSettings';
 export default {
   getCurrentUser,
@@ -24,6 +25,7 @@ export default {
   listFiles,
   querySettings,
   updateSettings,
+  signalingHandler,
   loginAccount,
   getCaptcha,
   logoutAccount,

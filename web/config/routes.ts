@@ -36,6 +36,11 @@ export default [
         path: '/desk/filelist',
         component: './FileList',
       },
+      {
+        name: 'desk',
+        path: '/desk/desk',
+        component: './Desk',
+      },
     ],
   },
   {
@@ -62,7 +67,7 @@ export default [
   },
   {
     path: '/',
-    redirect: '/settings',
+    redirect: '/desk',
   },
   {
     path: '*',

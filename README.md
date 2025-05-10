@@ -57,6 +57,14 @@ LCXL Web Remote Desk 提供了以下功能：
     * `rustup toolchain install stable-x86_64-pc-windows-gnu`
     * `rustup default stable-x86_64-pc-windows-gnu`
 
+### MacOS 调试环境配置
+
+当使用VS Code远程调试Mac OS上的Rust程序时，会报如下错误：`process exited with status -1 (this is a non-interactive debug session, cannot get permission to debug proesses.)`，参考此issue： https://github.com/vadimcn/codelldb/issues/1079 , 需要在MacOS上进行以下配置：
+```bash
+sudo security authorizationdb write system.privilege.taskport.debug allow
+```
+
+
 
 
 

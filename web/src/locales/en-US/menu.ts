@@ -53,4 +53,5 @@ export default {
   'menu.settings.system': 'System Settings',
   'menu.desk': 'Desk',
   'menu.desk.file-list': 'File List',
+  'menu.desk.desk': "Desktop",
 };

@@ -51,6 +51,7 @@ export default {
   'menu.settings': '设置',
   'menu.settings.account': '个人设置',
   'menu.settings.system': '系统设置',
- 'menu.desk': '桌面',
+  'menu.desk': '桌面',
   'menu.desk.file-list': '文件列表',
+  'menu.desk.desk': "桌面",
 };

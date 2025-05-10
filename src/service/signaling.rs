@@ -1,8 +1,11 @@
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use futures_util::StreamExt;
+use log::{error, info, warn};
 
 pub async fn handle_signaling(mut stream: AggregatedMessageStream, mut session: Session) {
+    info!("Handling signaling");
     // Handle signaling logic here
+    session.text("hello websocket client!").await.unwrap();
     while let Some(msg) = stream.next().await {
         match msg {
             Ok(AggregatedMessage::Text(text)) => {
@@ -23,14 +26,15 @@ pub async fn handle_signaling(mut stream: AggregatedMessageStream, mut session: 
                 // ignore PONG frames
             }
             Ok(AggregatedMessage::Close(close_reason)) => {
-                log::warn!("WS close frame received: {:?}", close_reason);
+                warn!("WS close frame received: {:?}", close_reason);
                 break;
             }
             Err(e) => {
-                log::error!("WS error: {}", e);
+                error!("WS error: {}", e);
                 break;
             }
             _ => {}
         }
     }
+    info!("Signaling session ended");
 }

@@ -7,7 +7,7 @@ declare namespace API {
     email?: any;
     geographic?: null | Geographic;
     group?: any;
-    name?: any;
+    name: string;
     notifyCount?: number;
     phone?: any;
     signature?: any;
@@ -229,7 +229,7 @@ address and service listening port. */
       email?: any;
       geographic?: null | Geographic;
       group?: any;
-      name?: any;
+      name: string;
       notifyCount?: number;
       phone?: any;
       signature?: any;

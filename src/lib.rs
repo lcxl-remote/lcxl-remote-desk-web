@@ -17,14 +17,10 @@ use actix_web::{
 };
 use clap::Parser as _;
 use controller::{
-    files::{delete_file, list_files},
-    login::{change_password, get_captcha, login_account, logout_account},
-    settings::{query_settings, update_settings},
-    turn::{
+    files::{delete_file, list_files}, login::{change_password, get_captcha, login_account, logout_account}, settings::{query_settings, update_settings}, signaling::signaling_handler, turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
         get_turn_session_statistics, startup_turn_server,
-    },
-    user::{get_current_user, get_notices, reject_anonymous_users},
+    }, user::{get_current_user, get_notices, reject_anonymous_users}
 };
 use desk_error::DeskError;
 use log::{info, warn};
@@ -119,7 +115,8 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(query_settings)
                             .service(update_settings)
                             .service(delete_file)
-                            .service(list_files),
+                            .service(list_files)
+                            .service(signaling_handler),
                     )
                     .service(
                         utoipa_actix_web::scope("/turn")
