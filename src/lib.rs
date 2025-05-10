@@ -1,6 +1,7 @@
 pub mod controller;
 pub mod desk_error;
 pub mod model;
+pub mod service;
 pub mod utils;
 
 use std::env;
@@ -16,10 +17,14 @@ use actix_web::{
 };
 use clap::Parser as _;
 use controller::{
-    files::{delete_file, list_files}, login::{change_password, get_captcha, login_account, logout_account}, settings::{query_settings, update_settings}, turn::{
+    files::{delete_file, list_files},
+    login::{change_password, get_captcha, login_account, logout_account},
+    settings::{query_settings, update_settings},
+    turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
         get_turn_session_statistics, startup_turn_server,
-    }, user::{get_current_user, get_notices, reject_anonymous_users}
+    },
+    user::{get_current_user, get_notices, reject_anonymous_users},
 };
 use desk_error::DeskError;
 use log::{info, warn};
@@ -125,9 +130,7 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(get_turn_metrics),
                     ),
             )
-            .openapi_service(|api| {
-                SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api)
-            })
+            .openapi_service(|api| SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api))
             .openapi_service(|api| Redoc::with_url("/redoc", api))
             .openapi_service(|api| RapiDoc::with_url("/rapidoc", "/openapi.json", api))
             .openapi_service(|api| Scalar::with_url("/scalar", api))

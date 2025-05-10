@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use actix_session::{Session, SessionGetError};
+use actix_session::Session;
 use actix_web::{
     Error as AWError, FromRequest, HttpRequest, HttpResponse,
     body::MessageBody,
@@ -11,23 +11,13 @@ use actix_web::{
 };
 use log::{info, warn};
 
-use crate::model::{
-    settings::SharedSettings,
-    user::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone},
+use crate::{
+    model::{
+        settings::SharedSettings,
+        user::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone},
+    },
+    service::user::SessionExt,
 };
-
-pub const SESSION_KEY_USERNAME: &str = "username";
-pub const USER_ADMIN: &str = "admin";
-
-pub trait SessionExt {
-    fn get_current_user(&self) -> Result<Option<String>, SessionGetError>;
-}
-
-impl SessionExt for Session {
-    fn get_current_user(&self) -> Result<Option<String>, SessionGetError> {
-        self.get::<String>(SESSION_KEY_USERNAME)
-    }
-}
 
 #[utoipa::path(
     summary = "Get current user",
@@ -61,9 +51,9 @@ pub async fn get_current_user(
                     let settings = settings.lock().await;
                     settings.user.login_user_name.clone()
                 };
-                session
-                    .insert(SESSION_KEY_USERNAME, &login_user_name)
-                    .unwrap(); // Store user information in session
+                let user_info = CurrentUser::new_admin(&login_user_name);
+
+                session.set_current_user(&user_info).unwrap(); // Store user information in session
             }
         } else {
             warn!("Failed to parse client IP: {}", client_ip_str);
@@ -71,24 +61,7 @@ pub async fn get_current_user(
     } else {
         warn!("No client IP found in request");
     }
-    if let Some(username) = session.get_current_user()? {
-        let current_user = CurrentUser {
-            name: Some(username),
-            avatar: None,
-            userid: None,
-            email: None,
-            signature: None,
-            title: None,
-            group: None,
-            tags: None,
-            notify_count: None,
-            unread_count: None,
-            country: None,
-            access: Some(USER_ADMIN.to_string()),
-            geographic: None,
-            address: None,
-            phone: None,
-        };
+    if let Some(current_user) = session.get_current_user()? {
         let user_response = UserRespone::<CurrentUser> {
             data: current_user,
             error_code: 0,
@@ -123,8 +96,8 @@ pub async fn get_notices(session: Session) -> Result<HttpResponse, AWError> {
     if user.is_none() {
         return Ok(HttpResponse::Unauthorized().body("User is not logged in."));
     }
-    let username = user.unwrap();
-    info!("Fetching notices for user: {}", username);
+    let current_user = user.unwrap();
+    info!("Fetching notices for user: {}", current_user.name);
 
     // Simulate fetching notices for the user
     let notice_icon_list = NoticeIconList {

@@ -1,21 +1,23 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Serialize, Debug, ToSchema)]
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct LabelKey {
     pub label: Option<String>,
     pub key: Option<String>,
 }
 
-#[derive(Serialize, Debug, ToSchema)]
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct Geographic {
     pub province: Option<LabelKey>,
     pub city: Option<LabelKey>,
 }
 
-#[derive(Serialize, Debug, ToSchema)]
+pub const USER_ADMIN: &str = "admin";
+
+#[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct CurrentUser {
-    pub name: Option<String>,
+    pub name: String,
     pub avatar: Option<String>,
     pub userid: Option<String>,
     pub email: Option<String>,
@@ -34,6 +36,28 @@ pub struct CurrentUser {
     pub geographic: Option<Geographic>,
     pub address: Option<String>,
     pub phone: Option<String>,
+}
+
+impl CurrentUser {
+    pub fn new_admin(name: &str) -> Self {
+        CurrentUser {
+            name: name.to_string(),
+            avatar: None,
+            userid: None,
+            email: None,
+            signature: None,
+            title: None,
+            group: None,
+            tags: None,
+            notify_count: None,
+            unread_count: None,
+            country: None,
+            access: Some(USER_ADMIN.to_string()),
+            geographic: None,
+            address: None,
+            phone: None,
+        }
+    }
 }
 
 #[derive(Serialize, Debug, ToSchema)]

@@ -3,11 +3,12 @@ use actix_web::{Error as AWError, HttpResponse, post, web};
 use log::{error, info};
 
 use crate::{
-    controller::user::SESSION_KEY_USERNAME,
     model::{
         login::{FakeCaptcha, FakeCaptchaParams, LoginParams, LoginResult, PasswordParams},
         settings::SharedSettings,
+        user::CurrentUser,
     },
+    service::user::SessionExt,
 };
 
 #[utoipa::path(
@@ -41,9 +42,9 @@ pub async fn login_account(
         login_type: params.login_type,
         current_authority: String::from("admin"),
     };
-    session
-        .insert(SESSION_KEY_USERNAME, &params.username)
-        .unwrap(); // Store user information in session
+    let user_info = CurrentUser::new_admin(&params.username);
+    // Store user information in session
+    session.set_current_user(&user_info).unwrap();
     info!("Login successful, username: {}", params.username);
     Ok(HttpResponse::Ok().json(result))
 }
@@ -76,7 +77,7 @@ pub async fn get_captcha(
 )]
 #[post("/api/login/outLogin")]
 pub async fn logout_account(session: Session) -> Result<HttpResponse, AWError> {
-    session.remove(SESSION_KEY_USERNAME);
+    session.remove_current_user();
     info!("Logout successful");
     Ok(HttpResponse::Ok().finish())
 }
@@ -140,6 +141,6 @@ pub async fn change_password(
     info!("Username / password changed successfully");
 
     // logout
-    session.remove(SESSION_KEY_USERNAME);
+    session.remove_current_user();
     Ok(HttpResponse::Ok().finish())
 }

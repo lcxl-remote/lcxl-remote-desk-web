@@ -1619,6 +1619,7 @@ dependencies = [
  "clap",
  "config",
  "env_logger",
+ "futures-util",
  "log",
  "mime",
  "r2d2",
