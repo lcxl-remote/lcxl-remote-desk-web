@@ -65,9 +65,13 @@ sudo security authorizationdb write system.privilege.taskport.debug allow
 ```
 
 
+### Windows 使用DXGI API捕获屏幕
 
+参考文档：
 
+https://learn.microsoft.com/zh-cn/windows/win32/direct3ddxgi/desktop-dup-api
 
+相关代码入口：https://github.com/microsoftarchive/msdn-code-gallery-microsoft/blob/21cb9b6bc0da3b234c5854ecac449cb3bd261f29/Official%20Windows%20Platform%20Sample/DXGI%20desktop%20duplication%20sample/%5BC%2B%2B%5D-DXGI%20desktop%20duplication%20sample/C%2B%2B/DuplicationManager.cpp#L56
 
 
 
