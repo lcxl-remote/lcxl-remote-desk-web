@@ -2,9 +2,9 @@
 /* eslint-disable */
 import { request } from '@umijs/max';
 
-/** Signaling Handler GET /api/desk/signaling */
+/** Signaling Handler, return websocket stream. NOTE: The OpenAPI generated typescript service is not right. GET /api/desk/signaling */
 export async function signalingHandler(options?: { [key: string]: any }) {
-  return request<any>('/api/desk/signaling', {
+  return request<API.SignalingModel>('/api/desk/signaling', {
     method: 'GET',
     ...(options || {}),
   });

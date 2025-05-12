@@ -164,6 +164,13 @@ declare namespace API {
     success: boolean;
   };
 
+  type SignalingModel = {
+    /** signaling data */
+    signaling_data: string;
+    /** signaling type */
+    signaling_type: string;
+  };
+
   type SystemSettings = {
     /** Path to the configuration file. If not specified, a new one will be created in the "conf" directory. */
     config_file_path?: string;

@@ -12,7 +12,7 @@ use crate::{
     desk_error::DeskError,
     model::{
         settings::Settings,
-        turn::{ApiState, TurnInfo, TurnInterface, TurnQueryParams, TurnSession, TurnSessionStatistics},
+        turn::{TurnApiState, TurnInfo, TurnInterface, TurnQueryParams, TurnSession, TurnSessionStatistics},
     },
 };
 
@@ -23,7 +23,7 @@ static SOFTWARE: &str = concat!(
 );
 
 /// Starts the TURN server with the provided settings.
-pub async fn startup_turn_server(settings: &Settings) -> Result<ApiState, DeskError> {
+pub async fn startup_turn_server(settings: &Settings) -> Result<TurnApiState, DeskError> {
     let config = Arc::new(settings.to_turn_server_config()?);
 
     info!("Starting turn server with config {:?}", config);
@@ -37,7 +37,7 @@ pub async fn startup_turn_server(settings: &Settings) -> Result<ApiState, DeskEr
     );
 
     turn_server::server::start(&config, &statistics, &service).await?;
-    let api_state = ApiState {
+    let api_state = TurnApiState {
         config: config.clone(),
         uptime: Instant::now(),
         service,
@@ -55,7 +55,7 @@ pub async fn startup_turn_server(settings: &Settings) -> Result<ApiState, DeskEr
     ),
 )]
 #[get("/info")]
-pub async fn get_turn_info(api_state: web::Data<ApiState>) -> Result<HttpResponse, DeskError> {
+pub async fn get_turn_info(api_state: web::Data<TurnApiState>) -> Result<HttpResponse, DeskError> {
     let sessions = api_state.service.get_sessions();
     let mut interfaces = Vec::new();
     for interface in api_state.config.turn.interfaces.iter() {
@@ -90,7 +90,7 @@ pub async fn get_turn_info(api_state: web::Data<ApiState>) -> Result<HttpRespons
 )]
 #[get("/session")]
 pub async fn get_turn_session(
-    api_state: web::Data<ApiState>,
+    api_state: web::Data<TurnApiState>,
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskError> {
     if let Some(session) = api_state
@@ -122,7 +122,7 @@ pub async fn get_turn_session(
 )]
 #[get("/session/statistics")]
 pub async fn get_turn_session_statistics(
-    api_state: web::Data<ApiState>,
+    api_state: web::Data<TurnApiState>,
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskError> {
     let addr: SessionAddr = query.into_inner().into();
@@ -150,7 +150,7 @@ pub async fn get_turn_session_statistics(
 )]
 #[delete("/session")]
 pub async fn delete_turn_session(
-    api_state: web::Data<ApiState>,
+    api_state: web::Data<TurnApiState>,
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskError> {
     if api_state

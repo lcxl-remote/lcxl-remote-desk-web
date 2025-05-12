@@ -10,9 +10,9 @@ import { useEffect, useRef, useState } from "react";
 const Desk: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
-
-  //const [socket, setSocket] = useState();
-  let socket = null;
+  const remote_video = useRef<HTMLVideoElement>(null);
+  const [socket, setSocket] = useState<WebSocket>();
+  //let socket = null;
   useEffect(() => {
     (async () => {
       const { location } = window;
@@ -35,8 +35,8 @@ const Desk: React.FC = () => {
       };
 
 
-      //setSocket(sock);
-      socket = sock;
+      setSocket(sock);
+      //socket = sock;
       return () => {
         sock.close();
       };
@@ -46,6 +46,7 @@ const Desk: React.FC = () => {
 
   return (
     <PageContainer>
+    <video ref={remote_video} autoPlay muted />
       <Divider />
 
     </PageContainer>

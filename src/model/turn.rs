@@ -13,7 +13,7 @@ use crate::desk_error::{CustomDeskError, DeskError};
 
 use super::common::ErrorCode;
 
-pub struct ApiState {
+pub struct TurnApiState {
     pub config: Arc<Config>,
     pub service: Service<Observer>,
     pub statistics: Statistics,

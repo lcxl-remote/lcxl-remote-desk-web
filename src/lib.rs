@@ -74,7 +74,7 @@ pub async fn run() -> Result<Server, DeskError> {
     }
 
     //start turn server
-    let turn_api_server = web::Data::new(startup_turn_server(&settings).await?);
+    let turn_api_state = web::Data::new(startup_turn_server(&settings).await?);
 
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
@@ -82,7 +82,7 @@ pub async fn run() -> Result<Server, DeskError> {
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
             .app_data(shared_settings.clone())
-            .app_data(turn_api_server.clone())
+            .app_data(turn_api_state.clone())
             .app_data(
                 web::JsonConfig::default()
                     .limit(4096 * 1024 << 2)

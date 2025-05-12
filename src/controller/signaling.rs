@@ -1,18 +1,23 @@
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
-use log::info;
+use log::{error, info};
 
-use crate::service::{signaling::handle_signaling, user::SessionExt};
+use crate::{
+    model::{settings::SharedSettings, signaling::SignalingModel},
+    service::{signaling::handle_signaling, user::SessionExt},
+};
 
 #[utoipa::path(
-    summary = "Signaling Handler",
+    summary = "Signaling Handler, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
     responses(
-        (status = 200, description = "return websocket stream")
+        (status = 200, description = "return websocket stream", body = SignalingModel),
+
     ),
 )]
 #[get("/signaling")]
 pub async fn signaling_handler(
     req: HttpRequest,
+    settings: web::Data<SharedSettings>,
     session: Session,
     stream: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -34,7 +39,12 @@ pub async fn signaling_handler(
     // start task but don't wait for it
     rt::spawn(async move {
         // receive messages from websocket
-        handle_signaling(stream, session).await;
+        let result = handle_signaling(settings, stream, session, user).await;
+        if let Err(e) = result {
+            error!("Error handling signaling: {}", e);
+        } else {
+            info!("Signaling handled successfully");
+        }
     });
 
     // respond immediately with response connected to WS session
