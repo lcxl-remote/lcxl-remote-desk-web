@@ -5,3 +5,4 @@ pub mod settings;
 pub mod files;
 pub mod turn;
 pub mod signaling;
+pub mod record_screen;

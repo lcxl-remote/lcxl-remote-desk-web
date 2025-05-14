@@ -1917,6 +1917,8 @@ dependencies = [
  "uuid",
  "webrtc",
  "windows",
+ "windows-core",
+ "windows-result",
 ]
 
 [[package]]

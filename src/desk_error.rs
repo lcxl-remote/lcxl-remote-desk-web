@@ -52,6 +52,8 @@ pub enum DeskError {
     TokioTaskJoinError(tokio::task::JoinError),
     /// An actix ws closed error occurred.
     ActixWsClosed(actix_ws::Closed),
+    #[cfg(target_os = "windows")]
+    WindowsResultError(windows_result::Error),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -91,6 +93,8 @@ impl Display for DeskError {
             DeskError::AnyhowError(error) => error.fmt(f),
             DeskError::TokioTaskJoinError(error) => error.fmt(f),
             DeskError::ActixWsClosed(closed) => closed.fmt(f),
+            #[cfg(target_os="windows")]
+            DeskError::WindowsResultError(error) => error.fmt(f),
         }
     }
 }
@@ -155,6 +159,12 @@ impl From<actix_ws::Closed> for DeskError {
     }
 }
 
+#[cfg(target_os="windows")]
+impl From<windows_result::Error> for DeskError {
+    fn from(err: windows_result::Error) -> Self {
+        DeskError::WindowsResultError(err)
+    }
+}
 
 impl ResponseError for DeskError {
     fn status_code(&self) -> actix_web::http::StatusCode {
