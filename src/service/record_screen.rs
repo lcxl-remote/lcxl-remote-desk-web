@@ -1,6 +1,9 @@
-use std::sync::Arc;
+use std::{ptr, sync::Arc};
 
-use crate::desk_error::DeskError;
+use crate::{
+    desk_error::{CustomDeskError, DeskError},
+    model::common::ErrorCode,
+};
 use log::warn;
 use windows::Win32::{
     Foundation::HMODULE,
@@ -10,27 +13,23 @@ use windows::Win32::{
             D3D_DRIVER_TYPE_WARP,
         },
         Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-            D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
-            ID3D11Texture2D,
+            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS,
-            DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_DESC,
-            DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC, IDXGIAdapter, IDXGIDevice, IDXGIFactory4,
-            IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+            Common::DXGI_FORMAT_B8G8R8A8_UNORM, CreateDXGIFactory2, IDXGIAdapter, IDXGIDevice, IDXGIFactory4, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM
         },
     },
 };
 use windows_core::Interface;
 
 pub struct ScreenRecordManager {
-    pub device: Arc<ID3D11Device>,
+    pub device: ID3D11Device,
+    pub device_context: ID3D11DeviceContext,
     pub dxgi_adapter: IDXGIAdapter,
 }
 
 impl ScreenRecordManager {
-    pub fn new() -> Result<Self, DeskError> {
+    pub fn new() -> Result<Arc<Self>, DeskError> {
         let driver_types: [D3D_DRIVER_TYPE; 3] = [
             D3D_DRIVER_TYPE_HARDWARE,
             D3D_DRIVER_TYPE_WARP,
@@ -40,6 +39,9 @@ impl ScreenRecordManager {
         let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 
         let mut device = None;
+        //let mut feature_level = D3D_FEATURE_LEVEL_11_1;
+
+        let mut device_context = None;
         let mut result = Ok(());
 
         for driver_type in driver_types {
@@ -52,8 +54,9 @@ impl ScreenRecordManager {
                     None,
                     D3D11_SDK_VERSION,
                     Some(&mut device),
+                    //Some(&mut feature_level),
                     None,
-                    None,
+                    Some(&mut device_context),
                 )
             };
             if let Err(error) = result.clone() {
@@ -70,13 +73,16 @@ impl ScreenRecordManager {
         result?;
 
         let device = device.unwrap();
+        let device_context = device_context.unwrap();
+        
         let dxgi_device = device.cast::<IDXGIDevice>()?;
         let dxgi_adapter = unsafe { dxgi_device.GetParent::<IDXGIAdapter>() }?;
         log::info!("ScreenRecordManager initialized successfully");
-        Ok(ScreenRecordManager {
-            device: Arc::new(device),
+        Ok(Arc::new(ScreenRecordManager {
+            device,
+            device_context,
             dxgi_adapter,
-        })
+        }))
     }
 
     pub fn get_output_list(&self) -> Result<Vec<DXGI_OUTPUT_DESC>, DeskError> {
@@ -109,15 +115,25 @@ impl ScreenRecordManager {
     }
 }
 
-pub struct SceenOutput {
-    pub device: Arc<ID3D11Device>,
+trait ScreenRecordManagerArc {
+    fn get_screen_output(&self, output_index: u32) -> Result<ScreenOutput, DeskError>;
+}
+
+impl ScreenRecordManagerArc for Arc<ScreenRecordManager> {
+    fn get_screen_output(&self, output_index: u32) -> Result<ScreenOutput, DeskError> {
+        ScreenOutput::new(self.clone(), output_index)
+    }
+}
+
+pub struct ScreenOutput {
+    pub manager: Arc<ScreenRecordManager>,
     pub dup_output: IDXGIOutputDuplication,
     pub dxgi_output_desc: DXGI_OUTDUPL_DESC,
 }
 
-impl SceenOutput {
+impl ScreenOutput {
     pub fn new(
-        screen_record_manager: &ScreenRecordManager,
+        screen_record_manager: Arc<ScreenRecordManager>,
         output_index: u32,
     ) -> Result<Self, DeskError> {
         let output = unsafe { screen_record_manager.dxgi_adapter.EnumOutputs(output_index) }?;
@@ -125,7 +141,7 @@ impl SceenOutput {
         let output1 = output.cast::<IDXGIOutput1>()?;
 
         // get the device from the manager and pass it to DuplicateOutput
-        let pdevice = screen_record_manager.device.as_ref();
+        let pdevice = &screen_record_manager.device;
 
         let dup_output = unsafe { output1.DuplicateOutput(pdevice) }?;
         let dxgi_output_desc = unsafe { dup_output.GetDesc() };
@@ -135,8 +151,8 @@ impl SceenOutput {
             dxgi_output_desc
         );
 
-        Ok(SceenOutput {
-            device: screen_record_manager.device.clone(),
+        Ok(ScreenOutput {
+            manager: screen_record_manager,
             dup_output,
             dxgi_output_desc,
         })
@@ -174,21 +190,71 @@ impl SceenOutput {
         let texture2d: *mut Option<ID3D11Texture2D> = &mut None;
         let pptexture2d = Some(texture2d);
         unsafe {
-            self.device
+            self.manager
+                .device
                 .CreateTexture2D(&copy_buffer_desc, None, pptexture2d)
         }?;
         //TODO?
         let texture2d = unsafe { texture2d.as_ref().unwrap().clone().unwrap() };
+        unsafe { texture2d.SetEvictionPriority(DXGI_RESOURCE_PRIORITY_MAXIMUM.0) };
+        let surface = texture2d.cast::<IDXGISurface>()?;
 
+        unsafe {
+            self.manager
+                .device_context
+                .CopyResource(&texture2d, &acquired_desktop_image)
+        };
+        let mut locked_rect = DXGI_MAPPED_RECT::default();
+
+        let frame_buffer = unsafe {
+            surface.Map(&mut locked_rect, DXGI_MAP_READ)?;
+            core::slice::from_raw_parts(
+                locked_rect.pBits,
+                locked_rect.Pitch as usize * copy_buffer_desc.Height as usize,
+            )
+        };
+        // TODO: need to optimize this: clone the frame_buffer to avoid lifetime issues
+
+        let frame_buffer = frame_buffer.to_vec();
 
         Ok(SceenFrame {
             frame_info,
-            acquired_desktop_image,
+            texture2d_desc: copy_buffer_desc,
+            frame_buffer,
         })
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SceenFrame {
     pub frame_info: DXGI_OUTDUPL_FRAME_INFO,
-    pub acquired_desktop_image: ID3D11Texture2D,
+    pub texture2d_desc: D3D11_TEXTURE2D_DESC,
+    pub frame_buffer: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    #[test]
+    fn test_screen() -> Result<(), DeskError> {
+        env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+        let manager = ScreenRecordManager::new()?;
+        let list = manager.get_output_list()?;
+        assert!(!list.is_empty());
+
+        let screent_output = manager.get_screen_output(0)?;
+        let frame = screent_output.get_frame(false)?;
+        log::info!("frame_info={:?}, texture2d_desc={:?}, frame_buffer.len={}", frame.frame_info, frame.texture2d_desc, frame.frame_buffer.len());
+        let name = format!("screenshot_1.png");
+        repng::encode(
+            File::create(name.clone()).unwrap(),
+            frame.texture2d_desc.Width ,
+            frame.texture2d_desc.Height,
+            &frame.frame_buffer,
+        )?;
+        Ok(())
+    }
 }
