@@ -1,22 +1,25 @@
-use std::{ptr, sync::Arc};
+use std::sync::Arc;
 
-use crate::{
-    desk_error::{CustomDeskError, DeskError},
-    model::common::ErrorCode,
-};
+use crate::desk_error::DeskError;
 use log::warn;
 use windows::Win32::{
     Foundation::HMODULE,
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_REFERENCE,
-            D3D_DRIVER_TYPE_WARP,
+            D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
         },
         Direct3D11::{
-            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING
+            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+            D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
+            ID3D11DeviceContext, ID3D11Texture2D,
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, CreateDXGIFactory2, IDXGIAdapter, IDXGIDevice, IDXGIFactory4, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface, DXGI_CREATE_FACTORY_FLAGS, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM
+            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_NOT_FOUND, DXGI_MAP_READ,
+            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
+            IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
     },
 };
@@ -35,7 +38,12 @@ impl ScreenRecordManager {
             D3D_DRIVER_TYPE_WARP,
             D3D_DRIVER_TYPE_REFERENCE,
         ];
-
+        let feature_levels: [D3D_FEATURE_LEVEL; 4] = [
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_9_1,
+        ];
         let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 
         let mut device = None;
@@ -51,7 +59,8 @@ impl ScreenRecordManager {
                     driver_type,
                     HMODULE::default(),
                     flags,
-                    None,
+                    Some(&feature_levels),
+                    //None,
                     D3D11_SDK_VERSION,
                     Some(&mut device),
                     //Some(&mut feature_level),
@@ -74,7 +83,7 @@ impl ScreenRecordManager {
 
         let device = device.unwrap();
         let device_context = device_context.unwrap();
-        
+
         let dxgi_device = device.cast::<IDXGIDevice>()?;
         let dxgi_adapter = unsafe { dxgi_device.GetParent::<IDXGIAdapter>() }?;
         log::info!("ScreenRecordManager initialized successfully");
@@ -115,7 +124,7 @@ impl ScreenRecordManager {
     }
 }
 
-trait ScreenRecordManagerArc {
+pub trait ScreenRecordManagerArc {
     fn get_screen_output(&self, output_index: u32) -> Result<ScreenOutput, DeskError>;
 }
 
@@ -129,6 +138,8 @@ pub struct ScreenOutput {
     pub manager: Arc<ScreenRecordManager>,
     pub dup_output: IDXGIOutputDuplication,
     pub dxgi_output_desc: DXGI_OUTDUPL_DESC,
+    pub texture2d: ID3D11Texture2D,
+    pub surface: IDXGISurface,
 }
 
 impl ScreenOutput {
@@ -151,31 +162,14 @@ impl ScreenOutput {
             dxgi_output_desc
         );
 
-        Ok(ScreenOutput {
-            manager: screen_record_manager,
-            dup_output,
-            dxgi_output_desc,
-        })
-    }
-    /// DXGI_ERROR_WAIT_TIMEOUT
-    pub fn get_frame(&self, draw_mouse: bool) -> Result<SceenFrame, DeskError> {
-        let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { std::mem::zeroed() };
-        let mut desktop_resource: Option<IDXGIResource> = None;
-
-        unsafe {
-            self.dup_output
-                .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)
-        }?;
-        let desktop_resource = desktop_resource.unwrap();
-
-        let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
         // Staging buffer/texture
         let mut copy_buffer_desc: D3D11_TEXTURE2D_DESC = unsafe { std::mem::zeroed() };
 
-        copy_buffer_desc.Width = self.dxgi_output_desc.ModeDesc.Width;
-        copy_buffer_desc.Height = self.dxgi_output_desc.ModeDesc.Height;
+        copy_buffer_desc.Width = dxgi_output_desc.ModeDesc.Width;
+        copy_buffer_desc.Height = dxgi_output_desc.ModeDesc.Height;
         copy_buffer_desc.MipLevels = 1;
         copy_buffer_desc.ArraySize = 1;
+        //The format must be DXGI_FORMAT_B8G8R8A8_UNORM, see https://learn.microsoft.com/zh-cn/windows/win32/direct3ddxgi/desktop-dup-api#updating-the-desktop-image-data
         copy_buffer_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         copy_buffer_desc.SampleDesc.Count = 1;
         copy_buffer_desc.SampleDesc.Quality = 0;
@@ -185,41 +179,87 @@ impl ScreenOutput {
         copy_buffer_desc.MiscFlags = 0;
 
         // create a texture to hold the screen capture
-        // raw pointer to texture2d
 
-        let texture2d: *mut Option<ID3D11Texture2D> = &mut None;
-        let pptexture2d = Some(texture2d);
+        let mut texture2d = None;
         unsafe {
-            self.manager
-                .device
-                .CreateTexture2D(&copy_buffer_desc, None, pptexture2d)
+            screen_record_manager.device.CreateTexture2D(
+                &copy_buffer_desc,
+                None,
+                Some(&mut texture2d),
+            )
         }?;
-        //TODO?
-        let texture2d = unsafe { texture2d.as_ref().unwrap().clone().unwrap() };
+        let texture2d = texture2d.unwrap();
+
         unsafe { texture2d.SetEvictionPriority(DXGI_RESOURCE_PRIORITY_MAXIMUM.0) };
         let surface = texture2d.cast::<IDXGISurface>()?;
+
+        Ok(ScreenOutput {
+            manager: screen_record_manager,
+            dup_output,
+            dxgi_output_desc,
+            texture2d,
+            surface,
+        })
+    }
+    /// DXGI_ERROR_WAIT_TIMEOUT
+    pub fn get_frame(&self, draw_mouse: bool) -> Result<SceenFrame, DeskError> {
+        let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { std::mem::zeroed() };
+        let mut desktop_resource: Option<IDXGIResource> = None;
+
+        unsafe {
+            let ummap_result = self.surface.Unmap();
+            if let Err(e) = ummap_result {
+                log::warn!(
+                    "Failed to unmap surface: code: {}, message: {}",
+                    e.code(),
+                    e.message()
+                );
+            }
+
+            let release_result = self.dup_output.ReleaseFrame();
+            if let Err(e) = release_result {
+                log::warn!(
+                    "Failed to release frame: code: {}, message: {}",
+                    e.code(),
+                    e.message()
+                );
+            }
+
+            self.dup_output
+                .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)?;
+        };
+        let desktop_resource = desktop_resource.unwrap();
+
+        let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
 
         unsafe {
             self.manager
                 .device_context
-                .CopyResource(&texture2d, &acquired_desktop_image)
+                .CopyResource(&self.texture2d, &acquired_desktop_image)
         };
         let mut locked_rect = DXGI_MAPPED_RECT::default();
 
         let frame_buffer = unsafe {
-            surface.Map(&mut locked_rect, DXGI_MAP_READ)?;
+            self.surface.Map(&mut locked_rect, DXGI_MAP_READ)?;
             core::slice::from_raw_parts(
                 locked_rect.pBits,
-                locked_rect.Pitch as usize * copy_buffer_desc.Height as usize,
+                locked_rect.Pitch as usize * self.dxgi_output_desc.ModeDesc.Height as usize,
             )
         };
         // TODO: need to optimize this: clone the frame_buffer to avoid lifetime issues
-
-        let frame_buffer = frame_buffer.to_vec();
+        log::info!("Start to convert frame_buffer from bgra format to rgba format.");
+        let mut rgb_data = Vec::<u8>::with_capacity(frame_buffer.len());
+        for chunk in frame_buffer.chunks(4) {
+            rgb_data.push(chunk[2]);
+            rgb_data.push(chunk[1]);
+            rgb_data.push(chunk[0]);
+            rgb_data.push(chunk[3]); // alpha channel
+        }
+        let frame_buffer = rgb_data;
+        log::info!("End to convert frame_buffer.");
 
         Ok(SceenFrame {
             frame_info,
-            texture2d_desc: copy_buffer_desc,
             frame_buffer,
         })
     }
@@ -228,13 +268,12 @@ impl ScreenOutput {
 #[derive(Debug, Clone)]
 pub struct SceenFrame {
     pub frame_info: DXGI_OUTDUPL_FRAME_INFO,
-    pub texture2d_desc: D3D11_TEXTURE2D_DESC,
     pub frame_buffer: Vec<u8>,
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
+    use std::env;
 
     use super::*;
 
@@ -246,15 +285,31 @@ mod tests {
         assert!(!list.is_empty());
 
         let screent_output = manager.get_screen_output(0)?;
-        let frame = screent_output.get_frame(false)?;
-        log::info!("frame_info={:?}, texture2d_desc={:?}, frame_buffer.len={}", frame.frame_info, frame.texture2d_desc, frame.frame_buffer.len());
-        let name = format!("screenshot_1.png");
-        repng::encode(
-            File::create(name.clone()).unwrap(),
-            frame.texture2d_desc.Width ,
-            frame.texture2d_desc.Height,
-            &frame.frame_buffer,
-        )?;
+        let tmp_dir = env::temp_dir();
+        let tmp_dir = tmp_dir.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(tmp_dir.as_path())?;
+
+        for i in 0..10 {
+            let frame = screent_output.get_frame(false)?;
+            log::info!(
+                "frame_info={:?}, frame_buffer.len={}",
+                frame.frame_info,
+                frame.frame_buffer.len()
+            );
+
+            let name = tmp_dir.join(format!("screenshot_{}.bmp", i));
+            image::save_buffer(
+                name.as_path(),
+                &frame.frame_buffer,
+                screent_output.dxgi_output_desc.ModeDesc.Width,
+                screent_output.dxgi_output_desc.ModeDesc.Height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+            log::info!("saved screenshot to {}", name.to_string_lossy().to_string());
+        }
+        std::fs::remove_dir_all(tmp_dir.as_path())?;
+
         Ok(())
     }
 }

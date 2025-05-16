@@ -80,7 +80,10 @@ impl SignalingModel {
 }
 
 pub trait SignalingSessionExt {
-    async fn send_signaling(&mut self, signaling_model: &SignalingModel) -> Result<(), DeskError>;
+    fn send_signaling(
+        &mut self,
+        signaling_model: &SignalingModel,
+    ) -> impl std::future::Future<Output = Result<(), DeskError>> + Send;
 }
 
 impl SignalingSessionExt for Session {

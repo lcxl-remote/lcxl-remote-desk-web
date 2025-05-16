@@ -31,7 +31,7 @@ env_logger = "0.11"
 log = "0.4"
 actix-session = { version = "0.10", features = ["cookie-session"] }
 uuid = "1.16"
-actix-http = "3.10"
+actix-http = "3.11.0"
 actix-service = "2.0"
 turn-server = { version = "3.4", features = ["udp", "tcp"] }
 anyhow = "1.0"
@@ -39,7 +39,7 @@ mime = "0.3"
 futures-util = "0.3"
 bytestring = "1.4"
 webrtc = "0.12"
-repng = "0.2.2"
+image = "0.25.6"
 
 
 
