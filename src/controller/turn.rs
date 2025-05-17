@@ -1,52 +1,16 @@
-use std::{sync::Arc, time::Instant};
-
 use actix_web::{HttpResponse, delete, get, web};
-use log::info;
 use turn_server::{
-    observer::Observer,
-    statistics::{Statistics, prometheus::generate_metrics},
-    turn::{PortAllocatePools, Service, SessionAddr},
+    statistics::prometheus::generate_metrics,
+    turn::{PortAllocatePools, SessionAddr},
 };
 
 use crate::{
     desk_error::DeskError,
-    model::{
-        settings::Settings,
-        turn::{TurnApiState, TurnInfo, TurnInterface, TurnQueryParams, TurnSession, TurnSessionStatistics},
+    model::turn::{
+        TurnApiState, TurnInfo, TurnInterface, TurnQueryParams, TurnSession, TurnSessionStatistics,
     },
+    service::turn::SOFTWARE,
 };
-
-#[rustfmt::skip]
-static SOFTWARE: &str = concat!(
-    "lcxl-web-remote-desk-turn-rs.",
-    env!("CARGO_PKG_VERSION")
-);
-
-/// Starts the TURN server with the provided settings.
-pub async fn startup_turn_server(settings: &Settings) -> Result<TurnApiState, DeskError> {
-    let config = Arc::new(settings.to_turn_server_config()?);
-
-    info!("Starting turn server with config {:?}", config);
-
-    let statistics = Statistics::default();
-    let service = Service::new(
-        SOFTWARE.to_string(),
-        config.turn.realm.clone(),
-        config.turn.get_externals(),
-        Observer::new(config.clone(), statistics.clone()).await?,
-    );
-
-    turn_server::server::start(&config, &statistics, &service).await?;
-    let api_state = TurnApiState {
-        config: config.clone(),
-        uptime: Instant::now(),
-        service,
-        statistics,
-    };
-
-    info!("Turn server starteds successfully.");
-    Ok(api_state)
-}
 
 #[utoipa::path(
     summary = "Get turn server info",

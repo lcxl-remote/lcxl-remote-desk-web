@@ -17,10 +17,15 @@ use actix_web::{
 };
 use clap::Parser as _;
 use controller::{
-    files::{delete_file, list_files}, login::{change_password, get_captcha, login_account, logout_account}, settings::{query_settings, update_settings}, signaling::signaling_handler, turn::{
+    files::{delete_file, list_files},
+    login::{change_password, get_captcha, login_account, logout_account},
+    settings::{query_settings, update_settings},
+    signaling::signaling_handler,
+    turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
-        get_turn_session_statistics, startup_turn_server,
-    }, user::{get_current_user, get_notices, reject_anonymous_users}
+        get_turn_session_statistics,
+    },
+    user::{get_current_user, get_notices, reject_anonymous_users},
 };
 use desk_error::DeskError;
 use log::{info, warn};
@@ -28,6 +33,7 @@ use model::{
     common::{ErrorCode, RestResponse},
     settings::{Args, Settings, SharedSettings, UserSettings},
 };
+use service::turn::startup_turn_server;
 use utils::network::check_ipv6_available;
 use utoipa_actix_web::AppExt;
 use utoipa_rapidoc::RapiDoc;
@@ -74,7 +80,7 @@ pub async fn run() -> Result<Server, DeskError> {
     }
 
     //start turn server
-    let turn_api_state = web::Data::new(startup_turn_server(&settings).await?);
+    let turn_api_state = web::Data::new(startup_turn_server(shared_settings.clone()).await?);
 
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {

@@ -246,7 +246,6 @@ impl ScreenOutput {
                 locked_rect.Pitch as usize * self.dxgi_output_desc.ModeDesc.Height as usize,
             )
         };
-        // TODO: need to optimize this: clone the frame_buffer to avoid lifetime issues
         log::info!("Start to convert frame_buffer from bgra format to rgba format.");
         let mut rgb_data = Vec::<u8>::with_capacity(frame_buffer.len());
         for chunk in frame_buffer.chunks(4) {
@@ -308,7 +307,7 @@ mod tests {
             .unwrap();
             log::info!("saved screenshot to {}", name.to_string_lossy().to_string());
         }
-        std::fs::remove_dir_all(tmp_dir.as_path())?;
+        //std::fs::remove_dir_all(tmp_dir.as_path())?;
 
         Ok(())
     }

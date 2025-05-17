@@ -3,19 +3,21 @@ use std::{str::FromStr, sync::Arc, time::Instant};
 use serde::{Deserialize, Serialize};
 use turn_server::{
     config::{Config, Interface, Transport},
-    observer::Observer,
     statistics::Statistics,
     turn::{Service, SessionAddr},
 };
 use utoipa::{IntoParams, ToSchema};
 
-use crate::desk_error::{CustomDeskError, DeskError};
+use crate::{
+    desk_error::{CustomDeskError, DeskError},
+    service::turn::TurnObserver,
+};
 
 use super::common::ErrorCode;
 
 pub struct TurnApiState {
     pub config: Arc<Config>,
-    pub service: Service<Observer>,
+    pub service: Service<TurnObserver>,
     pub statistics: Statistics,
     pub uptime: Instant,
 }
@@ -34,7 +36,12 @@ impl FromStr for TurnTransport {
         Ok(match value {
             "udp" => Self::UDP,
             "tcp" => Self::TCP,
-            _ => return Err(DeskError::CustomError(CustomDeskError::new(ErrorCode::SYSTEM_ERROR, format!("unknown transport: {value}")))),
+            _ => {
+                return Err(DeskError::CustomError(CustomDeskError::new(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!("unknown transport: {value}"),
+                )));
+            }
         })
     }
 }

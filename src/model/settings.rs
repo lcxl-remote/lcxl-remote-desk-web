@@ -291,6 +291,7 @@ impl Settings {
     }
 }
 
+#[derive(Debug)]
 pub struct SharedSettings(pub Mutex<Settings>);
 
 impl SharedSettings {
