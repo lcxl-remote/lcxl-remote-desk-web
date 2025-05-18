@@ -1,4 +1,4 @@
-use std::{ops::Index, sync::Arc};
+use std::sync::Arc;
 
 use crate::desk_error::DeskError;
 use log::warn;

@@ -10,10 +10,7 @@ use turn_server::{
 
 use crate::{
     desk_error::DeskError,
-    model::{
-        settings::{Settings, SharedSettings},
-        turn::TurnApiState,
-    },
+    model::{settings::SharedSettings, turn::TurnApiState},
 };
 
 #[rustfmt::skip]

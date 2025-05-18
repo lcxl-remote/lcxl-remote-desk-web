@@ -2109,6 +2109,7 @@ dependencies = [
  "actix-web",
  "actix-ws",
  "anyhow",
+ "bytes",
  "bytestring",
  "chrono",
  "clap",

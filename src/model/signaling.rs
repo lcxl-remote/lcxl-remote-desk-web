@@ -25,6 +25,16 @@ impl SignalingType {
     pub const CANID: SignalingType = SignalingType(SIGNALING_TYPE_CODE_CANID);
 
     pub const ERROR: SignalingType = SignalingType(SIGNALING_TYPE_CODE_ERROR);
+
+    fn new(code: i32) -> Self {
+        SignalingType(code)
+    }
+}
+
+impl From<i32> for SignalingType {
+    fn from(code: i32) -> Self {
+        SignalingType::new(code)
+    }
 }
 
 /// Query parameters for listing files.
@@ -38,7 +48,7 @@ pub struct SignalingModel {
     pub signaling_status_code: i32,
     pub signaling_message: Option<String>,
     /// signaling data
-    pub signaling_data: String,
+    pub signaling_data: Option<String>,
 }
 
 impl SignalingModel {
@@ -48,7 +58,7 @@ impl SignalingModel {
             signaling_success: true,
             signaling_status_code: 200,
             signaling_message: None,
-            signaling_data: signaling_data.to_string(),
+            signaling_data: Some(signaling_data.to_string()),
         }
     }
 
@@ -64,7 +74,7 @@ impl SignalingModel {
             signaling_success: true,
             signaling_status_code: 200,
             signaling_message: None,
-            signaling_data: serde_json::to_string(signaling_data)?,
+            signaling_data: Some(serde_json::to_string(signaling_data)?),
         })
     }
 
@@ -74,7 +84,7 @@ impl SignalingModel {
             signaling_success: false,
             signaling_status_code: 500,
             signaling_message: Some(message.to_string()),
-            signaling_data: String::new(),
+            signaling_data: None,
         }
     }
 }
@@ -97,6 +107,6 @@ impl SignalingSessionExt for Session {
 /// see https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitSignalingData {
-    pub ice_server: RTCIceServer,
+    pub ice_servers: Vec<RTCIceServer>,
     pub user_name: String,
 }
