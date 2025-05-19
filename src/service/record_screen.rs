@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::desk_error::DeskError;
+use crate::{desk_error::DeskError, model::record_screen::DisplayInfo};
 use log::warn;
 use windows::Win32::{
     Foundation::HMODULE,
@@ -21,10 +21,9 @@ use windows::Win32::{
             DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
             IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
-        Gdi::{DISPLAY_DEVICE_STATE_FLAGS, DISPLAY_DEVICEW, EnumDisplayDevicesW},
     },
 };
-use windows_core::{Interface, PCWSTR};
+use windows_core::Interface;
 
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
@@ -95,55 +94,15 @@ impl ScreenRecordManager {
         }))
     }
 
-    pub fn get_output_list(&self) -> Result<Vec<DXGI_OUTPUT_DESC>, DeskError> {
+    pub fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
         let mut output_list = vec![];
         let mut output_index = 0;
         loop {
             let result = unsafe { self.dxgi_adapter.EnumOutputs(output_index) };
             if let Ok(output) = result {
                 let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
-                let null_char_index = output_desc
-                    .DeviceName
-                    .iter()
-                    .position(|&item| item == 0u16)
-                    .unwrap_or(output_desc.DeviceName.len());
-                let name: String =
-                    String::from_utf16_lossy(&output_desc.DeviceName[..null_char_index]);
 
-                let mut display_device = DISPLAY_DEVICEW {
-                    cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
-                    DeviceName: [0u16; 32],
-                    DeviceString: [0u16; 128],
-                    StateFlags: DISPLAY_DEVICE_STATE_FLAGS(0),
-                    DeviceID: [0u16; 128],
-                    DeviceKey: [0u16; 128],
-                };
-                let succeed = unsafe {
-                    EnumDisplayDevicesW(
-                        PCWSTR::from_raw(output_desc.DeviceName.as_ptr()),
-                        output_index,
-                        &mut display_device,
-                        0,
-                    )
-                };
-                if succeed.as_bool() {
-                    log::info!(
-                        "Successfully enumerated display device: {:?}",
-                        display_device
-                    );
-                    let null_char_index = display_device
-                        .DeviceString
-                        .iter()
-                        .position(|&item| item == 0u16)
-                        .unwrap_or(output_desc.DeviceName.len());
-                    let name: String =
-                        String::from_utf16_lossy(&display_device.DeviceString[..null_char_index]);
-
-                    log::info!("Display device name: {}", name);
-                }
-                log::info!("Found output, name={}, desc={:?}", name, output_desc);
-
-                output_list.push(output_desc);
+                output_list.push(DisplayInfo::from(output_desc));
             } else if let Err(error) = result {
                 if error.code() != DXGI_ERROR_NOT_FOUND {
                     log::error!(
@@ -348,7 +307,7 @@ mod tests {
             .unwrap();
             log::info!("saved screenshot to {}", name.to_string_lossy().to_string());
         }
-        //std::fs::remove_dir_all(tmp_dir.as_path())?;
+        std::fs::remove_dir_all(tmp_dir.as_path())?;
 
         Ok(())
     }

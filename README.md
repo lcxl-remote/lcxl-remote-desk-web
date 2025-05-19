@@ -52,6 +52,7 @@ LCXL Web Remote Desk 提供了以下功能：
 因此如果需要在 VSCode 中使用 LLDB 调试 Rust 项目，建议安装 MSYS2 。具体步骤如下：
 * 参考 [MSYS2 官方文档](https://www.msys2.org/) 进行安装和配置。
 * 安装 GCC 工具链（`pacman -S mingw-w64-ucrt-x86_64-gcc`）。
+    * 如果需要ffmpeg的支持，则需要执行以下命令：`pacman -S mingw-w64-ucrt-x86_64-ffmpeg`
 * 设置环境变量，将 MSYS2 下的 gcc 的 `bin` 目录添加到系统的 PATH 环境变量中。加入 MYSYS2 安装在 `C:\msys64` 中，则需要添加 `C:\msys64\ucrt64\bin` 到 PATH 中。
 * 将 rust 的工具链切到 gnu 版本：
     * `rustup toolchain install stable-x86_64-pc-windows-gnu`
@@ -77,4 +78,11 @@ https://learn.microsoft.com/zh-cn/windows/win32/direct3ddxgi/desktop-dup-api
 
 
 
+## 其他
 
+### GStreamer实现的基于webrtc的远程桌面控制
+
+* 基本教程：https://gstreamer.freedesktop.org/documentation/tutorials/index.html?gi-language=c
+* 运行于游览器的js项目：https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/tree/main/net/webrtc/gstwebrtc-api
+* 服务端实现：https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/blob/main/net/webrtc/src/webrtcsink/imp.rs
+    * enable-data-channel-navigation=true
