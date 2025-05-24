@@ -37,7 +37,7 @@ pub enum DeskError {
     /// A JSON serialization/deserialization error occurred.
     JsonError(serde_json::Error),
     /// A Rusqlite database error occurred.
-    RusqliteError(rusqlite::Error),
+    // RusqliteError(rusqlite::Error),
     /// A configuration error occurred.
     ConfigError(config::ConfigError),
     /// A TOML edit error occurred.
@@ -45,7 +45,7 @@ pub enum DeskError {
     /// A TOML ser error occurred.
     TomlError(toml::ser::Error),
     /// A connection pool error occurred.
-    R2d2Error(r2d2::Error),
+    // R2d2Error(r2d2::Error),
     // Anyhow error occurred.
     AnyhowError(anyhow::Error),
     /// A join error occurred.
@@ -57,6 +57,10 @@ pub enum DeskError {
     WindowsResultError(windows_result::Error),
     /// A webrtc error occurred.
     WebrtcError(webrtc::Error),
+    /// A yuv error occurred.
+    YuvError(yuv::YuvError),
+    /// A openh264 error occurred.
+    Openh264Error(openh264::Error),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -87,18 +91,20 @@ impl Display for DeskError {
         match self {
             DeskError::IoError(error) => error.fmt(f),
             DeskError::JsonError(error) => error.fmt(f),
-            DeskError::RusqliteError(error) => error.fmt(f),
+            //DeskError::RusqliteError(error) => error.fmt(f),
             DeskError::ConfigError(error) => error.fmt(f),
             DeskError::TomlEditError(error) => error.fmt(f),
             DeskError::TomlError(error) => error.fmt(f),
-            DeskError::R2d2Error(error) => error.fmt(f),
+            //DeskError::R2d2Error(error) => error.fmt(f),
             DeskError::CustomError(error) => error.fmt(f),
             DeskError::AnyhowError(error) => error.fmt(f),
             DeskError::TokioTaskJoinError(error) => error.fmt(f),
             DeskError::ActixWsClosed(closed) => closed.fmt(f),
-            #[cfg(target_os="windows")]
+            #[cfg(target_os = "windows")]
             DeskError::WindowsResultError(error) => error.fmt(f),
-            DeskError::WebrtcError(error)=>error.fmt(f),
+            DeskError::WebrtcError(error) => error.fmt(f),
+            DeskError::YuvError(error) => error.fmt(f),
+            DeskError::Openh264Error(error) => error.fmt(f),
         }
     }
 }
@@ -114,13 +120,13 @@ impl From<serde_json::Error> for DeskError {
         DeskError::JsonError(err)
     }
 }
-
+/*
 impl From<rusqlite::Error> for DeskError {
     fn from(err: rusqlite::Error) -> Self {
         DeskError::RusqliteError(err)
     }
 }
-
+ */
 impl From<config::ConfigError> for DeskError {
     fn from(err: config::ConfigError) -> Self {
         DeskError::ConfigError(err)
@@ -138,13 +144,13 @@ impl From<toml::ser::Error> for DeskError {
         DeskError::TomlError(err)
     }
 }
-
+/*
 impl From<r2d2::Error> for DeskError {
     fn from(err: r2d2::Error) -> Self {
         DeskError::R2d2Error(err)
     }
 }
-
+*/
 impl From<anyhow::Error> for DeskError {
     fn from(err: anyhow::Error) -> Self {
         DeskError::AnyhowError(err)
@@ -163,7 +169,7 @@ impl From<actix_ws::Closed> for DeskError {
     }
 }
 
-#[cfg(target_os="windows")]
+#[cfg(target_os = "windows")]
 impl From<windows_result::Error> for DeskError {
     fn from(err: windows_result::Error) -> Self {
         DeskError::WindowsResultError(err)
@@ -176,6 +182,17 @@ impl From<webrtc::Error> for DeskError {
     }
 }
 
+impl From<yuv::YuvError> for DeskError {
+    fn from(err: yuv::YuvError) -> Self {
+        DeskError::YuvError(err)
+    }
+}
+
+impl From<openh264::Error> for DeskError {
+    fn from(err: openh264::Error) -> Self {
+        DeskError::Openh264Error(err)
+    }
+}
 
 impl ResponseError for DeskError {
     fn status_code(&self) -> actix_web::http::StatusCode {

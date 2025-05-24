@@ -21,10 +21,7 @@ toml_edit = { version = "0.22", features = ["serde"] }
 toml = "0.8"
 config = { version = "0.15", features = ["toml"] }
 clap = { version = "4.5", features = ["derive"] }
-rusqlite = { version = "0.34", features = ["chrono", "bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
-r2d2_sqlite = "0.27"
-r2d2 = "0.8"
 env_logger = "0.11"
 log = "0.4"
 actix-session = { version = "0.10", features = ["cookie-session"] }
@@ -39,6 +36,8 @@ bytestring = "1.4"
 webrtc = "0.13"
 image = "0.25"
 bytes = "1.10"
+yuv = "0.8"
+openh264 = "0.8"
 
 
 [target.'cfg(target_os = "windows")'.dependencies]

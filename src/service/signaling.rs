@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fs::File, io::BufReader, sync::Arc};
 
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
@@ -6,16 +6,24 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::StreamExt;
 use log::{error, info, warn};
+use tokio::sync::Notify;
+use tokio::time::Duration;
 use webrtc::{
     api::{
-        APIBuilder, interceptor_registry::register_default_interceptors, media_engine::MediaEngine,
+        APIBuilder,
+        interceptor_registry::register_default_interceptors,
+        media_engine::{MIME_TYPE_H264, MediaEngine},
     },
-    ice_transport::ice_server::RTCIceServer,
+    ice_transport::{ice_connection_state::RTCIceConnectionState, ice_server::RTCIceServer},
     interceptor::registry::Registry,
+    media::{Sample, io::h264_reader::H264Reader},
     peer_connection::{
         RTCPeerConnection, configuration::RTCConfiguration,
+        peer_connection_state::RTCPeerConnectionState,
         sdp::session_description::RTCSessionDescription,
     },
+    rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
+    track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
 };
 
 use crate::{
@@ -28,6 +36,9 @@ use crate::{
             SignalingSessionExt, SignalingType,
         },
         user::CurrentUser,
+    },
+    service::record_screen::{
+        H264ScreenOutput, ScreenOutputVideoNal, ScreenRecordManager, ScreenRecordManagerArc,
     },
 };
 
@@ -137,6 +148,99 @@ impl SignalingContext {
 
         // Create a new RTCPeerConnection
         let rtc_peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let notify_tx = Arc::new(Notify::new());
+        let notify_video = notify_tx.clone();
+        let notify_audio = notify_tx.clone();
+
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let video_done_tx = done_tx.clone();
+        let audio_done_tx = done_tx.clone();
+
+        let video_track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_H264.to_owned(),
+                ..Default::default()
+            },
+            "video".to_owned(),
+            "webrtc-rs".to_owned(),
+        ));
+        // Add this newly created track to the PeerConnection
+        let rtp_sender = rtc_peer_connection
+            .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await?;
+
+        // Read incoming RTCP packets
+        // Before these packets are returned they are processed by interceptors. For things
+        // like NACK this needs to be called.
+        tokio::spawn(async move {
+            let mut rtcp_buf = vec![0u8; 1500];
+            while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
+            Result::<(), DeskError>::Ok(())
+        });
+        //要改
+        let video_file_name = "test".to_owned();
+        tokio::spawn(async move {
+            let manager = ScreenRecordManager::new()?;
+            let screen_output = manager.get_screen_output(0)?;
+
+            let mut h264_screen_output = H264ScreenOutput::new(screen_output);
+
+            // Wait for connection established
+            notify_video.notified().await;
+
+            println!("play video from disk file {video_file_name}");
+
+            // It is important to use a time.Ticker instead of time.Sleep because
+            // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
+            // * works around latency issues with Sleep
+            let mut ticker = tokio::time::interval(Duration::from_millis(33));
+            loop {
+                let nal_info = h264_screen_output.get_nal()?;
+
+                video_track
+                    .write_sample(&Sample {
+                        data: nal_info.nal_bytes,
+                        duration: Duration::from_secs(1),
+                        ..Default::default()
+                    })
+                    .await?;
+
+                let _ = ticker.tick().await;
+            }
+
+            let _ = video_done_tx.try_send(());
+
+            Result::<(), DeskError>::Ok(())
+        });
+        // Set the handler for ICE connection state
+        // This will notify you when the peer has connected/disconnected
+        rtc_peer_connection.on_ice_connection_state_change(Box::new(
+            move |connection_state: RTCIceConnectionState| {
+                println!("Connection State has changed {connection_state}");
+                if connection_state == RTCIceConnectionState::Connected {
+                    notify_tx.notify_waiters();
+                }
+                Box::pin(async {})
+            },
+        ));
+
+        // Set the handler for Peer connection state
+        // This will notify you when the peer has connected/disconnected
+        rtc_peer_connection.on_peer_connection_state_change(Box::new(
+            move |s: RTCPeerConnectionState| {
+                println!("Peer Connection State has changed: {s}");
+
+                if s == RTCPeerConnectionState::Failed {
+                    // Wait until PeerConnection has had no network activity for 30 seconds or another failure. It may be reconnected using an ICE Restart.
+                    // Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
+                    // Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
+                    println!("Peer Connection has gone to failed exiting");
+                    let _ = done_tx.try_send(());
+                }
+
+                Box::pin(async {})
+            },
+        ));
 
         Ok(Self {
             settings,

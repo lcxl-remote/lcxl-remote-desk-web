@@ -49,14 +49,17 @@ LCXL Web Remote Desk 提供了以下功能：
 
 在 Windows 上进行 Rust 开发和调试，推荐使用 Visual Studio Code (VSCode) 和 LLDB 调试器。不过 Rust 在 Windows 平台默认的工具链是 MSVC 工具链，而 LLDB 针对 MSVC 工具链支持不太好，可以查看以下 issue： https://github.com/vadimcn/codelldb/wiki/Windows#debugging-rust-on-windows 
 
-因此如果需要在 VSCode 中使用 LLDB 调试 Rust 项目，建议安装 MSYS2 。具体步骤如下：
-* 参考 [MSYS2 官方文档](https://www.msys2.org/) 进行安装和配置。
-* 安装 GCC 工具链（`pacman -S mingw-w64-ucrt-x86_64-gcc`）。
-    * 如果需要ffmpeg的支持，则需要执行以下命令：`pacman -S mingw-w64-ucrt-x86_64-ffmpeg`
-* 设置环境变量，将 MSYS2 下的 gcc 的 `bin` 目录添加到系统的 PATH 环境变量中。加入 MYSYS2 安装在 `C:\msys64` 中，则需要添加 `C:\msys64\ucrt64\bin` 到 PATH 中。
-* 将 rust 的工具链切到 gnu 版本：
+因此如果需要在 VSCode 中使用 LLDB 调试 Rust 项目，~~建议安装 MSYS2(切到gnu版本会导致gstreamer编译失败)~~ 。具体步骤如下：
+* ~~参考 [MSYS2 官方文档](https://www.msys2.org/) 进行安装和配置。~~
+* ~~安装 GCC 工具链（`pacman -S mingw-w64-ucrt-x86_64-gcc`）。~~
+    * ~~如果需要ffmpeg的支持，则需要执行以下命令：`pacman -S mingw-w64-ucrt-x86_64-ffmpeg`~~
+* ~~设置环境变量，将 MSYS2 下的 gcc 的 `bin` 目录添加到系统的 PATH 环境变量中。加入 MYSYS2 安装在 `C:\msys64` 中，则需要添加 `C:\msys64\ucrt64\bin` 到 PATH 中。~~
+* ~~将 rust 的工具链切到 gnu 版本~~：
     * `rustup toolchain install stable-x86_64-pc-windows-gnu`
     * `rustup default stable-x86_64-pc-windows-gnu`
+* 变更LLDB的配置(需要rust 1.87版本，参见[issue](https://github.com/vadimcn/codelldb/issues/1195#issuecomment-2732752040))：
+    * `rustup toolchain install stable-x86_64-pc-windows-gnu`
+    * 打开Vscode的配置页面，搜索`lldb.script` 按照文档说的进行变更操作：`"lldb.script": { "lang.rust.toolchain": "stable-x86_64-pc-windows-gnu" }`
 
 ### MacOS 调试环境配置
 
@@ -86,3 +89,36 @@ https://learn.microsoft.com/zh-cn/windows/win32/direct3ddxgi/desktop-dup-api
 * 运行于游览器的js项目：https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/tree/main/net/webrtc/gstwebrtc-api
 * 服务端实现：https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs/-/blob/main/net/webrtc/src/webrtcsink/imp.rs
     * enable-data-channel-navigation=true
+
+* 插件（c语言）：https://gitlab.freedesktop.org/gstreamer/gstreamer/-/tree/main/subprojects 下的 gst-plugins-xxx 目录
+* 插件（rust）：https://gitlab.freedesktop.org/gstreamer/gst-plugins-rs
+
+安装依赖，官方文档：https://gitlab.freedesktop.org/gstreamer/gstreamer-rs#windows 推荐走msi安装的方式，msys2的方式不推荐。
+
+#### ~~msys2的安装方式~~
+
+可能有点过时。新的安装命令如下：
+```bash
+cd 'C:\msys64\usr\bin\'
+pacman -S glib2-devel \
+    mingw-w64-ucrt-x86_64-pkg-config \
+    mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base \
+    mingw-w64-ucrt-x86_64-gst-plugins-good mingw-w64-ucrt-x86_64-gst-plugins-bad \
+    mingw-w64-ucrt-x86_64-gst-plugins-ugly mingw-w64-ucrt-x86_64-gst-libav \
+    mingw-w64-ucrt-x86_64-gst-rtsp-server
+```
+安装之后pkg-config还是会失败，需要下载一个独立的pkg-config：https://sourceforge.net/projects/pkgconfiglite/ ，然后指定Path路径要比msys2的路径还要前面。然后再添加pkg的环境变量`PKG_CONFIG_PATH` = `C:\msys64\usr\lib\pkgconfig;C:\msys64\ucrt64\lib\pkgconfig`：
+
+#### msi的安装方式
+
+打开 `https://gstreamer.freedesktop.org/data/pkg/windows/1.26.1/msvc/` 下载 `gstreamer-1.0-devel-msvc-x86_64-1.26.1.msi` 和 `gstreamer-1.0-msvc-x86_64-1.26.1.msi` 并进行安装。
+
+设置`PATH` 环境变量，添加 `C:\Program Files\gstreamer\1.0\msvc_x86_64\bin`
+
+### 高性能图片编码转换工具
+
+* yuv：可以将brga转换成yuv，走cpu加速
+    * https://crates.io/crates/yuv
+    * https://github.com/awxkee/yuvutils-rs
+* pic-scale：图片缩放：
+    * https://github.com/awxkee/pic-scale

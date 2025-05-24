@@ -1,7 +1,9 @@
-use std::sync::Arc;
+use std::{io::Read, sync::Arc};
 
 use crate::{desk_error::DeskError, model::record_screen::DisplayInfo};
 use log::warn;
+use openh264::OpenH264API;
+use std::fmt::Debug;
 use windows::Win32::{
     Foundation::HMODULE,
     Graphics::{
@@ -24,7 +26,10 @@ use windows::Win32::{
     },
 };
 use windows_core::Interface;
-
+use yuv::{
+    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
+    bgra_to_yuv420,
+};
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
     pub device_context: ID3D11DeviceContext,
@@ -246,16 +251,6 @@ impl ScreenOutput {
                 locked_rect.Pitch as usize * self.dxgi_output_desc.ModeDesc.Height as usize,
             )
         };
-        log::info!("Start to convert frame_buffer from bgra format to rgba format.");
-        let mut rgb_data = Vec::<u8>::with_capacity(frame_buffer.len());
-        for chunk in frame_buffer.chunks(4) {
-            rgb_data.push(chunk[2]);
-            rgb_data.push(chunk[1]);
-            rgb_data.push(chunk[0]);
-            rgb_data.push(chunk[3]); // alpha channel
-        }
-        let frame_buffer = rgb_data;
-        log::info!("End to convert frame_buffer.");
 
         Ok(SceenFrame {
             frame_info,
@@ -264,15 +259,123 @@ impl ScreenOutput {
     }
 }
 
+pub struct NalInfo {
+    pub nal_bytes: bytes::Bytes,
+}
+
+pub trait ScreenOutputVideoNal {
+    fn get_nal(&mut self) -> Result<NalInfo, DeskError>;
+}
+
+#[derive(Debug)]
+pub struct YuvPlanarImageWrapper<'a, T>
+where
+    T: Copy + Debug,
+{
+    pub inner: YuvPlanarImageMut<'a, T>,
+}
+
+impl<'a, T> YuvPlanarImageWrapper<'a, T>
+where
+    T: Copy + Debug,
+{
+    pub fn new(inner: YuvPlanarImageMut<'a, T>) -> Self {
+        Self { inner }
+    }
+}
+
+impl openh264::formats::YUVSource for YuvPlanarImageWrapper<'_, u8> {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.inner.width as usize, self.inner.height as usize)
+    }
+
+    fn strides(&self) -> (usize, usize, usize) {
+        (
+            self.inner.y_stride as usize,
+            self.inner.u_stride as usize,
+            self.inner.v_stride as usize,
+        )
+    }
+
+    fn y(&self) -> &[u8] {
+        self.inner.y_plane.borrow()
+    }
+
+    fn u(&self) -> &[u8] {
+        self.inner.u_plane.borrow()
+    }
+
+    fn v(&self) -> &[u8] {
+        self.inner.v_plane.borrow()
+    }
+}
+pub struct H264ScreenOutput {
+    pub screen_output: ScreenOutput,
+    pub encoder: openh264::encoder::Encoder,
+    pub nal_prefix_parsed: bool,
+}
+
+impl H264ScreenOutput {
+    pub fn new(screen_output: ScreenOutput) -> Self {
+        let config = openh264::encoder::EncoderConfig::new();
+        let api = OpenH264API::from_source();
+        let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
+
+        Self {
+            screen_output,
+            encoder,
+            nal_prefix_parsed: false,
+        }
+    }
+}
+
+impl ScreenOutputVideoNal for H264ScreenOutput {
+    fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
+        let screen_frame = self.screen_output.get_frame(true)?;
+
+        let width = self.screen_output.dxgi_output_desc.ModeDesc.Width;
+        let height = self.screen_output.dxgi_output_desc.ModeDesc.Height;
+        let src_stride = width * 4;
+        let mut planar_image = YuvPlanarImageMut::<u8>::alloc(
+            width as u32,
+            height as u32,
+            YuvChromaSubsampling::Yuv420,
+        );
+
+        bgra_to_yuv420(
+            &mut planar_image,
+            screen_frame.frame_buffer,
+            src_stride,
+            YuvRange::Limited,
+            YuvStandardMatrix::Bt601,
+            YuvConversionMode::Balanced,
+        )?;
+        let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
+
+        let encoded_bit_stream = self.encoder.encode(&yuv_source)?;
+        let encoded_bit_bytes = bytes::Bytes::from(encoded_bit_stream.to_vec());
+        log::info!(
+            "frame_type={:?}, num_layers={:?}",
+            encoded_bit_stream.frame_type(),
+            encoded_bit_stream.num_layers()
+        );
+        Ok(NalInfo {
+            nal_bytes: encoded_bit_bytes,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct SceenFrame {
+pub struct SceenFrame<'a> {
     pub frame_info: DXGI_OUTDUPL_FRAME_INFO,
-    pub frame_buffer: Vec<u8>,
+    pub frame_buffer: &'a [u8],
 }
 
 #[cfg(test)]
 mod tests {
     use std::env;
+
+    use yuv::bgra_to_rgba;
 
     use super::*;
 
@@ -295,13 +398,28 @@ mod tests {
                 frame.frame_info,
                 frame.frame_buffer.len()
             );
+            let mut rgb_data = vec![0u8; frame.frame_buffer.len()];
+            let rgb_data_array = rgb_data.as_mut_slice();
+            let width = screent_output.dxgi_output_desc.ModeDesc.Width;
+            let height = screent_output.dxgi_output_desc.ModeDesc.Height;
+            let src_stride = width * 4;
+            let dst_stride = width * 4;
+            // convert bgra to rgba
+            bgra_to_rgba(
+                frame.frame_buffer,
+                src_stride,
+                rgb_data_array,
+                dst_stride,
+                width,
+                height,
+            )?;
 
             let name = tmp_dir.join(format!("screenshot_{}.bmp", i));
             image::save_buffer(
                 name.as_path(),
-                &frame.frame_buffer,
-                screent_output.dxgi_output_desc.ModeDesc.Width,
-                screent_output.dxgi_output_desc.ModeDesc.Height,
+                rgb_data_array,
+                width,
+                height,
                 image::ExtendedColorType::Rgba8,
             )
             .unwrap();

@@ -1,8 +1,9 @@
 pub mod common;
-pub mod user;
-pub mod login;
-pub mod settings;
 pub mod files;
-pub mod turn;
-pub mod signaling;
+pub mod login;
 pub mod record_screen;
+pub mod settings;
+pub mod signaling;
+pub mod terminal;
+pub mod turn;
+pub mod user;
