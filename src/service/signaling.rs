@@ -6,8 +6,8 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::StreamExt;
 use log::{error, info, warn};
-use tokio::sync::Notify;
 use tokio::time::Duration;
+use tokio::{sync::Notify, time::Instant};
 use webrtc::{
     api::{
         APIBuilder,
@@ -142,7 +142,7 @@ impl SignalingContext {
 
         // Prepare the configuration
         let config = RTCConfiguration {
-            ice_servers,
+            //ice_servers,
             ..Default::default()
         };
 
@@ -195,8 +195,9 @@ impl SignalingContext {
             // * works around latency issues with Sleep
             let mut ticker = tokio::time::interval(Duration::from_millis(33));
             loop {
+                let start = Instant::now();
                 let nal_info = h264_screen_output.get_nal()?;
-
+                let time1 = start.elapsed();
                 video_track
                     .write_sample(&Sample {
                         data: nal_info.nal_bytes,
@@ -204,6 +205,12 @@ impl SignalingContext {
                         ..Default::default()
                     })
                     .await?;
+                let time2 = start.elapsed();
+                log::info!(
+                    "caption scrren time: {} μs, write sample time: {} μs",
+                    time1.as_micros(),
+                    time2.as_micros() - time1.as_micros()
+                );
 
                 let _ = ticker.tick().await;
             }
@@ -253,10 +260,10 @@ impl SignalingContext {
     pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskError> {
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         match signaling_model.signaling_type {
-            SIGNALING_TYPE_CODE_INIT => {
+            SIGNALING_TYPE_CODE_INIT => {} // handle_hello(session, user),
+            SIGNALING_TYPE_CODE_OFFER => {
                 self.handle_offer(&signaling_model).await?;
-            } // handle_hello(session, user),
-            SIGNALING_TYPE_CODE_OFFER => {}
+            }
             SIGNALING_TYPE_CODE_ANSWER => {}
             SIGNALING_TYPE_CODE_CANID => {}
             _ => {
@@ -298,6 +305,7 @@ impl SignalingContext {
             return Ok(());
         }
         let signaling_data = signaling_model.signaling_data.clone().unwrap();
+        log::info!("Received offer: {}", signaling_data);
         let offer = serde_json::from_str::<RTCSessionDescription>(&signaling_data)?;
 
         // Set the remote SessionDescription
@@ -330,7 +338,7 @@ impl SignalingContext {
                 .await?;
             return Ok(());
         }
-        let local_desc = self.rtc_peer_connection.local_description().await.unwrap();
+        let local_desc = option.unwrap();
         let json_str = serde_json::to_string(&local_desc)?;
         log::info!("local description: {}", json_str);
 

@@ -2091,6 +2091,7 @@ dependencies = [
  "utoipa-swagger-ui",
  "uuid",
  "webrtc",
+ "webrtc-ice",
  "windows",
  "windows-core",
  "windows-result",

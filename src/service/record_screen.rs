@@ -390,7 +390,6 @@ mod tests {
         let tmp_dir = env::temp_dir();
         let tmp_dir = tmp_dir.join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(tmp_dir.as_path())?;
-
         for i in 0..10 {
             let frame = screent_output.get_frame(false)?;
             log::info!(
@@ -413,7 +412,6 @@ mod tests {
                 width,
                 height,
             )?;
-
             let name = tmp_dir.join(format!("screenshot_{}.bmp", i));
             image::save_buffer(
                 name.as_path(),

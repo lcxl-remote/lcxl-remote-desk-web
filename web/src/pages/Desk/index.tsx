@@ -46,8 +46,8 @@ const Desk: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
   const remote_video = useRef<HTMLVideoElement>(null);
-  const [socket, setSocket] = useState<WebSocket>();
-  const [peerconnection, setPeerconnection] = useState<RTCPeerConnection>();
+  const socketRef = useRef<WebSocket>();
+  const peerconnectionRef = useRef<RTCPeerConnection>();
   //let socket = null;
   useEffect(() => {
     (async () => {
@@ -72,20 +72,35 @@ const Desk: React.FC = () => {
             const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as InitSignalingData;
 
             let pc = new RTCPeerConnection({
-              iceServers: init_signaling_data.ice_servers
+              //iceServers: init_signaling_data.ice_servers
             });
-            pc.oniceconnectionstatechange = e => console.log(pc.iceConnectionState);
-            pc.onicecandidate = event => {
-              if (event.candidate === null) {
-                console.log(JSON.stringify(pc.localDescription))
-              }
-            };
             pc.ontrack = function (event) {
+              console.log("ontrack=" + event);
               var el = remote_video.current!;
               el.srcObject = event.streams[0]
               el.autoplay = true
               el.controls = true
             };
+            pc.oniceconnectionstatechange = e => {
+              console.log("event=" + e + ", pc.iceConnectionState=" + pc.iceConnectionState);
+            };
+            pc.onicecandidate = event => {
+              if (event.candidate === null) {
+                const local_description_json = JSON.stringify(pc.localDescription);
+                console.log("event.candidate === null, pc.localDescription=" + local_description_json)
+
+                let offer_sginaling = {
+                  signaling_type: SIGNALING_TYPE_CODE_OFFER,
+                  signaling_success: true,
+                  signaling_data: local_description_json,
+                  signaling_status_code: 0,
+                } as SignalingModel;
+                let offer_signaling_json = JSON.stringify(offer_sginaling);
+
+                sock.send(offer_signaling_json);
+              }
+            };
+
 
             // Offer to receive 1 audio, and 1 video track
             pc.addTransceiver('video', { 'direction': 'sendrecv' });
@@ -93,21 +108,21 @@ const Desk: React.FC = () => {
 
             pc.createOffer().then(d => {
               pc.setLocalDescription(d);
-
               const local_description_json = JSON.stringify(d);
-              let offer_sginaling = {
-                signaling_type: SIGNALING_TYPE_CODE_OFFER,
-                signaling_success: true,
-                signaling_data: local_description_json,
-                signaling_status_code: 0,
-              } as SignalingModel;
-              let offer_signaling_json = JSON.stringify(offer_sginaling);
-              sock.send(offer_signaling_json);
+              console.info("create offer, local description=" + local_description_json);
+
+
             }).catch((reason) => { console.log(reason) });
 
-            setPeerconnection(pc);
+            peerconnectionRef.current = pc;
 
             break;
+          case SIGNALING_TYPE_CODE_ANSWER:
+            const answer_description_json = JSON.parse(signaling_model.signaling_data!) as RTCSessionDescriptionInit;
+            console.info("set remote description answer_description_json=" + signaling_model.signaling_data);
+            peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answer_description_json));
+            break;
+
           default:
             break;
         }
@@ -120,8 +135,7 @@ const Desk: React.FC = () => {
       };
 
 
-      setSocket(sock);
-      //socket = sock;
+      socketRef.current = sock;
       return () => {
         sock.close();
       };
