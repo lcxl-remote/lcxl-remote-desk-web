@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use actix_web::web;
 use serde_json::json;
-use tokio::runtime::Handle;
+use tokio::runtime::{self, Handle, Runtime};
 use turn_server::{
     statistics::Statistics,
     turn::{Observer, Service, SessionAddr},
@@ -37,12 +37,14 @@ impl TurnObserver {
 impl Observer for TurnObserver {
     fn get_password(&self, username: &str) -> Option<String> {
         // Match the static authentication information first.
-        let handle = Handle::current();
+
         // Spawn a local task to get user settings from shared settings.
         log::info!("get_password: username={}", username);
-
-        let user_settings = handle.block_on(async move {
-            let settings = self.settings.lock().await;
+        let new_settings = self.settings.clone();
+        //let rt  = Runtime::new()?;
+        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        let user_settings = rt.block_on(async move {
+            let settings = new_settings.lock().await;
             settings.user.clone()
         });
 
