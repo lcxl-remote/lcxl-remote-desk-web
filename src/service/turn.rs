@@ -41,11 +41,15 @@ impl Observer for TurnObserver {
         // Spawn a local task to get user settings from shared settings.
         log::info!("get_password: username={}", username);
         let new_settings = self.settings.clone();
-        //let rt  = Runtime::new()?;
-        let rt = runtime::Builder::new_current_thread().build().unwrap();
-        let user_settings = rt.block_on(async move {
-            let settings = new_settings.lock().await;
-            settings.user.clone()
+        let handle = Handle::current();
+        let user_settings = futures::executor::block_on(async move {
+            handle
+                .spawn(async move {
+                    let settings = new_settings.lock().await;
+                    settings.user.clone()
+                })
+                .await
+                .unwrap()
         });
 
         if user_settings.login_user_name == username {

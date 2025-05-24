@@ -38,6 +38,7 @@ image = "0.25"
 bytes = "1.10"
 yuv = "0.8"
 openh264 = "0.8"
+futures = "0.3.31"
 
 
 [target.'cfg(target_os = "windows")'.dependencies]

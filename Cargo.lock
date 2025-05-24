@@ -2071,6 +2071,7 @@ dependencies = [
  "clap",
  "config",
  "env_logger",
+ "futures",
  "futures-util",
  "image",
  "log",

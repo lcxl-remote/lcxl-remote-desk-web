@@ -73,34 +73,40 @@ const Desk: React.FC = () => {
 
             let pc = new RTCPeerConnection({
               iceServers: init_signaling_data.ice_servers
-            })
-            pc.oniceconnectionstatechange = e => console.log(pc.iceConnectionState)
+            });
+            pc.oniceconnectionstatechange = e => console.log(pc.iceConnectionState);
             pc.onicecandidate = event => {
               if (event.candidate === null) {
                 console.log(JSON.stringify(pc.localDescription))
               }
-            }
+            };
             pc.ontrack = function (event) {
               var el = remote_video.current!;
               el.srcObject = event.streams[0]
               el.autoplay = true
               el.controls = true
-            }
+            };
 
             // Offer to receive 1 audio, and 1 video track
-            pc.addTransceiver('video', { 'direction': 'sendrecv' })
-            pc.addTransceiver('audio', { 'direction': 'sendrecv' })
+            pc.addTransceiver('video', { 'direction': 'sendrecv' });
+            pc.addTransceiver('audio', { 'direction': 'sendrecv' });
 
-            pc.createOffer().then(d => pc.setLocalDescription(d)).catch((reason) => { console.log(reason) })
-            const local_description_json = JSON.stringify(pc.localDescription);
-            let offer_sginaling = {
-              signaling_type: SIGNALING_TYPE_CODE_OFFER,
-              signaling_success: true,
-              signaling_data: local_description_json,
-            } as SignalingModel;
-            let offer_signaling_json = JSON.stringify(offer_sginaling);
+            pc.createOffer().then(d => {
+              pc.setLocalDescription(d);
+
+              const local_description_json = JSON.stringify(d);
+              let offer_sginaling = {
+                signaling_type: SIGNALING_TYPE_CODE_OFFER,
+                signaling_success: true,
+                signaling_data: local_description_json,
+                signaling_status_code: 0,
+              } as SignalingModel;
+              let offer_signaling_json = JSON.stringify(offer_sginaling);
+              sock.send(offer_signaling_json);
+            }).catch((reason) => { console.log(reason) });
+
             setPeerconnection(pc);
-            sock.send(offer_signaling_json);
+
             break;
           default:
             break;
