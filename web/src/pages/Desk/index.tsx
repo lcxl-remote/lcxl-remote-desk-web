@@ -75,14 +75,14 @@ const Desk: React.FC = () => {
               //iceServers: init_signaling_data.ice_servers
             });
             pc.ontrack = function (event) {
-              console.log("ontrack=" + event);
+              console.log("ontrack", event);
               var el = remote_video.current!;
               el.srcObject = event.streams[0]
               el.autoplay = true
               el.controls = true
             };
             pc.oniceconnectionstatechange = e => {
-              console.log("event=" + e + ", pc.iceConnectionState=" + pc.iceConnectionState);
+              console.log("pc.iceConnectionState=" + pc.iceConnectionState+", event is ", e );
             };
             pc.onicecandidate = event => {
               if (event.candidate === null) {

@@ -174,21 +174,21 @@ impl SignalingContext {
         // like NACK this needs to be called.
         tokio::spawn(async move {
             let mut rtcp_buf = vec![0u8; 1500];
+            log::info!("Start to read incoming RTCP packets");
             while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
+            log::info!("Finished to read incoming RTCP packets");
             Result::<(), DeskError>::Ok(())
         });
-        //要改
-        let video_file_name = "test".to_owned();
+
         tokio::spawn(async move {
             let manager = ScreenRecordManager::new()?;
             let screen_output = manager.get_screen_output(0)?;
 
             let mut h264_screen_output = H264ScreenOutput::new(screen_output);
-
             // Wait for connection established
             notify_video.notified().await;
 
-            println!("play video from disk file {video_file_name}");
+            println!("Start to capture screen and send to peer");
 
             // It is important to use a time.Ticker instead of time.Sleep because
             // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
@@ -198,6 +198,7 @@ impl SignalingContext {
                 let start = Instant::now();
                 let nal_info = h264_screen_output.get_nal()?;
                 let time1 = start.elapsed();
+                log::info!("caption scrren time: {} μs", time1.as_micros(),);
                 video_track
                     .write_sample(&Sample {
                         data: nal_info.nal_bytes,
@@ -207,9 +208,8 @@ impl SignalingContext {
                     .await?;
                 let time2 = start.elapsed();
                 log::info!(
-                    "caption scrren time: {} μs, write sample time: {} μs",
-                    time1.as_micros(),
-                    time2.as_micros() - time1.as_micros()
+                    "write sample time: {} μs",
+                    time2.as_micros() - time1.as_micros(),
                 );
 
                 let _ = ticker.tick().await;
