@@ -72,7 +72,7 @@ const Desk: React.FC = () => {
             const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as InitSignalingData;
 
             let pc = new RTCPeerConnection({
-              //iceServers: init_signaling_data.ice_servers
+              iceServers: init_signaling_data.ice_servers
             });
             pc.ontrack = function (event) {
               console.log("ontrack", event);
@@ -82,7 +82,7 @@ const Desk: React.FC = () => {
               el.controls = true
             };
             pc.oniceconnectionstatechange = e => {
-              console.log("pc.iceConnectionState=" + pc.iceConnectionState+", event is ", e );
+              console.log("pc.iceConnectionState=" + pc.iceConnectionState + ", event is ", e);
             };
             pc.onicecandidate = event => {
               if (event.candidate === null) {
@@ -112,7 +112,8 @@ const Desk: React.FC = () => {
               console.info("create offer, local description=" + local_description_json);
 
 
-            }).catch((reason) => { console.log(reason) });
+            }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
+
 
             peerconnectionRef.current = pc;
 

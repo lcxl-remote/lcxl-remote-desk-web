@@ -1,4 +1,4 @@
-use std::{io::Read, sync::Arc};
+use std::sync::Arc;
 
 use crate::{desk_error::DeskError, model::record_screen::DisplayInfo};
 use log::warn;
@@ -331,8 +331,12 @@ impl H264ScreenOutput {
 
 impl ScreenOutputVideoNal for H264ScreenOutput {
     fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
+        log::debug!("Start to get screen output frame");
         let screen_frame = self.screen_output.get_frame(true)?;
-
+        log::debug!(
+            "Got screen output frame, info={:?}",
+            screen_frame.frame_info
+        );
         let width = self.screen_output.dxgi_output_desc.ModeDesc.Width;
         let height = self.screen_output.dxgi_output_desc.ModeDesc.Height;
         let src_stride = width * 4;
@@ -350,11 +354,13 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             YuvStandardMatrix::Bt601,
             YuvConversionMode::Balanced,
         )?;
+        log::debug!("Converted to YUV420 format");
         let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
 
         let encoded_bit_stream = self.encoder.encode(&yuv_source)?;
+        log::debug!("Encoded to H.264 format");
         let encoded_bit_bytes = bytes::Bytes::from(encoded_bit_stream.to_vec());
-        log::info!(
+        log::debug!(
             "frame_type={:?}, num_layers={:?}",
             encoded_bit_stream.frame_type(),
             encoded_bit_stream.num_layers()

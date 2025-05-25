@@ -61,6 +61,8 @@ pub enum DeskError {
     YuvError(yuv::YuvError),
     /// A openh264 error occurred.
     Openh264Error(openh264::Error),
+    /// A log parse level error occurred.
+    ParseLevelError(log::ParseLevelError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -105,6 +107,7 @@ impl Display for DeskError {
             DeskError::WebrtcError(error) => error.fmt(f),
             DeskError::YuvError(error) => error.fmt(f),
             DeskError::Openh264Error(error) => error.fmt(f),
+            DeskError::ParseLevelError(error) => error.fmt(f),
         }
     }
 }
@@ -191,6 +194,12 @@ impl From<yuv::YuvError> for DeskError {
 impl From<openh264::Error> for DeskError {
     fn from(err: openh264::Error) -> Self {
         DeskError::Openh264Error(err)
+    }
+}
+
+impl From<log::ParseLevelError> for DeskError {
+    fn from(err: log::ParseLevelError) -> Self {
+        DeskError::ParseLevelError(err)
     }
 }
 

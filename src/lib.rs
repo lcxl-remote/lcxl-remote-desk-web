@@ -4,7 +4,7 @@ pub mod model;
 pub mod service;
 pub mod utils;
 
-use std::env;
+use std::{env, str::FromStr};
 
 use actix_server::Server;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
@@ -28,7 +28,7 @@ use controller::{
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
 use desk_error::DeskError;
-use log::{info, warn};
+use log::{LevelFilter, info, warn};
 use model::{
     common::{ErrorCode, RestResponse},
     settings::{Args, Settings, SharedSettings, UserSettings},
@@ -46,9 +46,13 @@ pub async fn run() -> Result<Server, DeskError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
 
-    env_logger::init_from_env(
-        env_logger::Env::new().default_filter_or(settings.system.log_level.as_str()),
-    );
+    //env_logger::init_from_env(
+    //    env_logger::Env::new().default_filter_or(settings.system.log_level.as_str()),
+    //);
+    env_logger::builder()
+        .format_timestamp_micros()
+        .filter_level(LevelFilter::from_str(settings.system.log_level.as_str())?)
+        .init();
     info!("Server args: {:?}", args);
     info!("Server settings: {:?}", settings);
     // Get server execution file path

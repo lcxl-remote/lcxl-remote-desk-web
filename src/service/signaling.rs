@@ -1,4 +1,4 @@
-use std::{fs::File, io::BufReader, sync::Arc};
+use std::sync::Arc;
 
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
@@ -16,7 +16,7 @@ use webrtc::{
     },
     ice_transport::{ice_connection_state::RTCIceConnectionState, ice_server::RTCIceServer},
     interceptor::registry::Registry,
-    media::{Sample, io::h264_reader::H264Reader},
+    media::Sample,
     peer_connection::{
         RTCPeerConnection, configuration::RTCConfiguration,
         peer_connection_state::RTCPeerConnectionState,
@@ -142,7 +142,7 @@ impl SignalingContext {
 
         // Prepare the configuration
         let config = RTCConfiguration {
-            //ice_servers,
+            ice_servers,
             ..Default::default()
         };
 
@@ -195,10 +195,20 @@ impl SignalingContext {
             // * works around latency issues with Sleep
             let mut ticker = tokio::time::interval(Duration::from_millis(33));
             loop {
+                log::debug!("begin caption scrren");
                 let start = Instant::now();
-                let nal_info = h264_screen_output.get_nal()?;
+                let nal_info_result = h264_screen_output.get_nal();
+                if nal_info_result.is_err() {
+                    log::error!(
+                        "Failed to get nal info, error={}",
+                        nal_info_result.err().unwrap()
+                    );
+                    continue;
+                }
+                let nal_info = nal_info_result.unwrap();
+
                 let time1 = start.elapsed();
-                log::info!("caption scrren time: {} μs", time1.as_micros(),);
+                log::debug!("caption scrren time: {} μs", time1.as_micros(),);
                 video_track
                     .write_sample(&Sample {
                         data: nal_info.nal_bytes,
@@ -207,7 +217,7 @@ impl SignalingContext {
                     })
                     .await?;
                 let time2 = start.elapsed();
-                log::info!(
+                log::debug!(
                     "write sample time: {} μs",
                     time2.as_micros() - time1.as_micros(),
                 );
