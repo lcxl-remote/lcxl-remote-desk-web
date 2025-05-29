@@ -1,7 +1,10 @@
 use actix_ws::Session;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
-use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::{
+    ice_transport::{ice_connection_state::RTCIceConnectionState, ice_server::RTCIceServer},
+    peer_connection::peer_connection_state::RTCPeerConnectionState,
+};
 
 use crate::desk_error::DeskError;
 
@@ -109,4 +112,41 @@ impl SignalingSessionExt for Session {
 pub struct InitSignalingData {
     pub ice_servers: Vec<RTCIceServer>,
     pub user_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WebRTConnectionState {
+    Init,
+    Connected,
+    Closed,
+}
+
+impl std::fmt::Display for WebRTConnectionState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl From<&RTCIceConnectionState> for WebRTConnectionState {
+    fn from(value: &RTCIceConnectionState) -> Self {
+        match value {
+            RTCIceConnectionState::Unspecified
+            | RTCIceConnectionState::New
+            | RTCIceConnectionState::Checking => WebRTConnectionState::Init,
+            RTCIceConnectionState::Connected => WebRTConnectionState::Connected,
+            _ => WebRTConnectionState::Closed,
+        }
+    }
+}
+
+impl From<&RTCPeerConnectionState> for WebRTConnectionState {
+    fn from(value: &RTCPeerConnectionState) -> Self {
+        match value {
+            RTCPeerConnectionState::Unspecified
+            | RTCPeerConnectionState::New
+            | RTCPeerConnectionState::Connecting => WebRTConnectionState::Init,
+            RTCPeerConnectionState::Connected => WebRTConnectionState::Connected,
+            _ => WebRTConnectionState::Closed,
+        }
+    }
 }

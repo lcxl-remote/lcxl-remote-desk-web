@@ -5,6 +5,8 @@ import { useIntl, useModel } from "@umijs/max";
 import { Alert, Divider, message } from "antd";
 import { useEffect, useRef, useState } from "react";
 
+import styles from './index.less'; // 告诉 umi 编译这个 less
+
 const SIGNALING_TYPE_CODE_INIT = 0;
 const SIGNALING_TYPE_CODE_OFFER = 100;
 const SIGNALING_TYPE_CODE_ANSWER = 101;
@@ -79,7 +81,8 @@ const Desk: React.FC = () => {
               var el = remote_video.current!;
               el.srcObject = event.streams[0]
               el.autoplay = true
-              el.controls = true
+              el.controls = false
+              el.onresize = (event,) => { console.log("video on resize, width=" + el.clientWidth + ", height=" + el.clientHeight + ", event=", event) }
             };
             pc.oniceconnectionstatechange = e => {
               console.log("pc.iceConnectionState=" + pc.iceConnectionState + ", event is ", e);
@@ -138,7 +141,10 @@ const Desk: React.FC = () => {
 
       socketRef.current = sock;
       return () => {
+        console.log("关闭websocket", sock);
         sock.close();
+        console.log("关闭webrtc peer connection",  peerconnectionRef.current);
+        peerconnectionRef.current?.close();
       };
     })();
   }, []);
@@ -146,7 +152,7 @@ const Desk: React.FC = () => {
 
   return (
     <PageContainer>
-      <video ref={remote_video} autoPlay muted />
+      <video ref={remote_video} autoPlay muted className={styles.videoContainer} />
       <Divider />
 
     </PageContainer>

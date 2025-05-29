@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{desk_error::DeskError, model::record_screen::DisplayInfo};
 use log::warn;
-use openh264::OpenH264API;
+use openh264::{encoder::{BitRate, IntraFramePeriod}, OpenH264API};
 use std::fmt::Debug;
 use windows::Win32::{
     Foundation::HMODULE,
@@ -317,10 +317,9 @@ pub struct H264ScreenOutput {
 
 impl H264ScreenOutput {
     pub fn new(screen_output: ScreenOutput) -> Self {
-        let config = openh264::encoder::EncoderConfig::new();
+        let config = openh264::encoder::EncoderConfig::new().intra_frame_period(IntraFramePeriod::from_num_frames(30)).bitrate(BitRate::from_bps(10_000_000));
         let api = OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
-
         Self {
             screen_output,
             encoder,

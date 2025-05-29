@@ -7,7 +7,7 @@ use bytestring::ByteString;
 use futures_util::StreamExt;
 use log::{error, info, warn};
 use tokio::time::Duration;
-use tokio::{sync::Notify, time::Instant};
+use tokio::time::Instant;
 use webrtc::{
     api::{
         APIBuilder,
@@ -26,6 +26,8 @@ use webrtc::{
     track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
 };
 
+use crate::model::common::ErrorCode;
+use crate::model::signaling::WebRTConnectionState;
 use crate::{
     desk_error::DeskError,
     model::{
@@ -148,13 +150,12 @@ impl SignalingContext {
 
         // Create a new RTCPeerConnection
         let rtc_peer_connection = Arc::new(api.new_peer_connection(config).await?);
-        let notify_tx = Arc::new(Notify::new());
-        let notify_video = notify_tx.clone();
-        let notify_audio = notify_tx.clone();
 
-        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
-        let video_done_tx = done_tx.clone();
-        let audio_done_tx = done_tx.clone();
+        let (ice_connection_state_tx, ice_connection_state_rx) =
+            tokio::sync::watch::channel(WebRTConnectionState::Init);
+        let ice_connection_state_tx_2 = ice_connection_state_tx.clone();
+        let mut video_ice_connection_state_rx = ice_connection_state_rx.clone();
+        let audio_ice_connection_state_rx = ice_connection_state_rx.clone();
 
         let video_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
@@ -186,7 +187,25 @@ impl SignalingContext {
 
             let mut h264_screen_output = H264ScreenOutput::new(screen_output);
             // Wait for connection established
-            notify_video.notified().await;
+            while let Ok(_) = video_ice_connection_state_rx.changed().await {
+                let state = *video_ice_connection_state_rx.borrow_and_update();
+                match state {
+                    WebRTConnectionState::Init => {
+                        log::info!("current state is {}, keep wait", state);
+                    }
+                    WebRTConnectionState::Connected => {
+                        log::info!("RTC is connected");
+                        break;
+                    }
+                    _ => {
+                        log::error!("Unexcepted state {}, exit to capture screen", state);
+                        return DeskError::custom_error(
+                            ErrorCode::SYSTEM_ERROR,
+                            format!("Unexcepted state {}", state),
+                        );
+                    }
+                }
+            }
 
             println!("Start to capture screen and send to peer");
 
@@ -221,22 +240,40 @@ impl SignalingContext {
                     "write sample time: {} μs",
                     time2.as_micros() - time1.as_micros(),
                 );
+                tokio::select! {
+                 _ = ticker.tick() => {},
+                 _ = video_ice_connection_state_rx.changed() => {
+                    let state = *video_ice_connection_state_rx.borrow_and_update();
+                    match state {
+                        WebRTConnectionState::Init => {
+                            log::warn!("current state is {}, it should be happened?", state);
+                        },
+                        WebRTConnectionState::Connected => {
+                            log::warn!("RTC is connected");
 
-                let _ = ticker.tick().await;
+                        },
+                        _ => {
+                            log::error!("Unexcepted state {}, exit to capture screen", state);
+                            break;
+                        },
+                    }
+                 },
+                }
             }
-
-            let _ = video_done_tx.try_send(());
-
             Result::<(), DeskError>::Ok(())
         });
         // Set the handler for ICE connection state
         // This will notify you when the peer has connected/disconnected
         rtc_peer_connection.on_ice_connection_state_change(Box::new(
             move |connection_state: RTCIceConnectionState| {
-                println!("Connection State has changed {connection_state}");
-                if connection_state == RTCIceConnectionState::Connected {
-                    notify_tx.notify_waiters();
+                log::info!("RTC ice connection State has changed {connection_state}");
+                let state = WebRTConnectionState::from(&connection_state);
+                if state != WebRTConnectionState::Init {
+                    if let Err(error) = ice_connection_state_tx.send(state) {
+                        log::error!("Failed to send connection state: {:?}", error)
+                    }
                 }
+
                 Box::pin(async {})
             },
         ));
@@ -245,14 +282,12 @@ impl SignalingContext {
         // This will notify you when the peer has connected/disconnected
         rtc_peer_connection.on_peer_connection_state_change(Box::new(
             move |s: RTCPeerConnectionState| {
-                println!("Peer Connection State has changed: {s}");
-
-                if s == RTCPeerConnectionState::Failed {
-                    // Wait until PeerConnection has had no network activity for 30 seconds or another failure. It may be reconnected using an ICE Restart.
-                    // Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
-                    // Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
-                    println!("Peer Connection has gone to failed exiting");
-                    let _ = done_tx.try_send(());
+                log::info!("Peer Connection State has changed: {s}");
+                let state = WebRTConnectionState::from(&s);
+                if state == WebRTConnectionState::Closed {
+                    if let Err(error) = ice_connection_state_tx_2.send(state) {
+                        log::error!("Failed to send connection state: {:?}", error)
+                    }
                 }
 
                 Box::pin(async {})
@@ -358,7 +393,6 @@ impl SignalingContext {
                 &json_str,
             ))
             .await?;
-
         Ok(())
     }
 }
