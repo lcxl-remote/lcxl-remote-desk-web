@@ -154,7 +154,7 @@ impl SignalingContext {
         let (ice_connection_state_tx, ice_connection_state_rx) =
             tokio::sync::watch::channel(WebRTConnectionState::Init);
         let ice_connection_state_tx_2 = ice_connection_state_tx.clone();
-        let mut video_ice_connection_state_rx = ice_connection_state_rx.clone();
+        let video_ice_connection_state_rx = ice_connection_state_rx.clone();
         let audio_ice_connection_state_rx = ice_connection_state_rx.clone();
 
         let video_track = Arc::new(TrackLocalStaticSample::new(
@@ -182,85 +182,11 @@ impl SignalingContext {
         });
 
         tokio::spawn(async move {
-            let manager = ScreenRecordManager::new()?;
-            let screen_output = manager.get_screen_output(0)?;
-
-            let mut h264_screen_output = H264ScreenOutput::new(screen_output);
-            // Wait for connection established
-            while let Ok(_) = video_ice_connection_state_rx.changed().await {
-                let state = *video_ice_connection_state_rx.borrow_and_update();
-                match state {
-                    WebRTConnectionState::Init => {
-                        log::info!("current state is {}, keep wait", state);
-                    }
-                    WebRTConnectionState::Connected => {
-                        log::info!("RTC is connected");
-                        break;
-                    }
-                    _ => {
-                        log::error!("Unexcepted state {}, exit to capture screen", state);
-                        return DeskError::custom_error(
-                            ErrorCode::SYSTEM_ERROR,
-                            format!("Unexcepted state {}", state),
-                        );
-                    }
-                }
-            }
-
-            println!("Start to capture screen and send to peer");
-
-            // It is important to use a time.Ticker instead of time.Sleep because
-            // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
-            // * works around latency issues with Sleep
-            let mut ticker = tokio::time::interval(Duration::from_millis(33));
-            loop {
-                log::debug!("begin caption scrren");
-                let start = Instant::now();
-                let nal_info_result = h264_screen_output.get_nal();
-                if nal_info_result.is_err() {
-                    log::error!(
-                        "Failed to get nal info, error={}",
-                        nal_info_result.err().unwrap()
-                    );
-                    continue;
-                }
-                let nal_info = nal_info_result.unwrap();
-
-                let time1 = start.elapsed();
-                log::debug!("caption scrren time: {} μs", time1.as_micros(),);
-                video_track
-                    .write_sample(&Sample {
-                        data: nal_info.nal_bytes,
-                        duration: Duration::from_secs(1),
-                        ..Default::default()
-                    })
-                    .await?;
-                let time2 = start.elapsed();
-                log::debug!(
-                    "write sample time: {} μs",
-                    time2.as_micros() - time1.as_micros(),
-                );
-                tokio::select! {
-                 _ = ticker.tick() => {},
-                 _ = video_ice_connection_state_rx.changed() => {
-                    let state = *video_ice_connection_state_rx.borrow_and_update();
-                    match state {
-                        WebRTConnectionState::Init => {
-                            log::warn!("current state is {}, it should be happened?", state);
-                        },
-                        WebRTConnectionState::Connected => {
-                            log::warn!("RTC is connected");
-
-                        },
-                        _ => {
-                            log::error!("Unexcepted state {}, exit to capture screen", state);
-                            break;
-                        },
-                    }
-                 },
-                }
-            }
-            Result::<(), DeskError>::Ok(())
+            let result =
+                SignalingContext::capture_screen_task(video_ice_connection_state_rx, video_track)
+                    .await;
+            log::warn!("Capture screen task result: {:?}", result);
+            return result;
         });
         // Set the handler for ICE connection state
         // This will notify you when the peer has connected/disconnected
@@ -300,6 +226,92 @@ impl SignalingContext {
             user,
             rtc_peer_connection,
         })
+    }
+
+    pub async fn capture_screen_task(
+        mut video_ice_connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
+        video_track: Arc<TrackLocalStaticSample>,
+    ) -> Result<(), DeskError> {
+        log::info!("Preparing to capture screen...");
+        let manager = ScreenRecordManager::new()?;
+        let screen_output = manager.get_screen_output(0)?;
+
+        let mut h264_screen_output = H264ScreenOutput::new(screen_output);
+        // Wait for connection established
+        while let Ok(_) = video_ice_connection_state_rx.changed().await {
+            let state = *video_ice_connection_state_rx.borrow_and_update();
+            match state {
+                WebRTConnectionState::Init => {
+                    log::info!("current state is {}, keep wait", state);
+                }
+                WebRTConnectionState::Connected => {
+                    log::info!("RTC is connected");
+                    break;
+                }
+                _ => {
+                    log::error!("Unexcepted state {}, exit to capture screen", state);
+                    return DeskError::custom_error(
+                        ErrorCode::SYSTEM_ERROR,
+                        format!("Unexcepted state {}", state),
+                    );
+                }
+            }
+        }
+
+        log::info!("Start to capture screen and send to peer");
+
+        // It is important to use a time.Ticker instead of time.Sleep because
+        // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
+        // * works around latency issues with Sleep
+        let mut ticker = tokio::time::interval(Duration::from_millis(33));
+        loop {
+            log::debug!("begin caption scrren");
+            let start = Instant::now();
+            let nal_info_result = h264_screen_output.get_nal();
+            if nal_info_result.is_err() {
+                log::error!(
+                    "Failed to get nal info, error={}",
+                    nal_info_result.err().unwrap()
+                );
+                continue;
+            }
+            let nal_info = nal_info_result.unwrap();
+
+            let time1 = start.elapsed();
+            log::debug!("caption scrren time: {} μs", time1.as_micros(),);
+            video_track
+                .write_sample(&Sample {
+                    data: nal_info.nal_bytes,
+                    duration: Duration::from_secs(1),
+                    ..Default::default()
+                })
+                .await?;
+            let time2 = start.elapsed();
+            log::debug!(
+                "write sample time: {} μs",
+                time2.as_micros() - time1.as_micros(),
+            );
+            tokio::select! {
+             _ = ticker.tick() => {},
+             _ = video_ice_connection_state_rx.changed() => {
+                let state = *video_ice_connection_state_rx.borrow_and_update();
+                match state {
+                    WebRTConnectionState::Init => {
+                        log::warn!("current state is {}, it should be happened?", state);
+                    },
+                    WebRTConnectionState::Connected => {
+                        log::warn!("RTC is connected");
+
+                    },
+                    _ => {
+                        log::error!("Unexcepted state {}, exit to capture screen", state);
+                        break;
+                    },
+                }
+             },
+            }
+        }
+        Result::<(), DeskError>::Ok(())
     }
 
     pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskError> {
