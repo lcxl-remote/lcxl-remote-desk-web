@@ -1,4 +1,7 @@
-use std::fmt::{self, Display};
+use std::{
+    backtrace::{self, Backtrace},
+    fmt::{self, Display},
+};
 
 use actix_web::ResponseError;
 
@@ -33,7 +36,7 @@ impl CustomDeskError {
 #[derive(Debug)]
 pub enum DeskError {
     /// An I/O error occurred.
-    IoError(std::io::Error),
+    IoError(Backtrace, std::io::Error),
     /// A JSON serialization/deserialization error occurred.
     JsonError(serde_json::Error),
     /// A Rusqlite database error occurred.
@@ -54,7 +57,7 @@ pub enum DeskError {
     ActixWsClosed(actix_ws::Closed),
     /// A Windows result error occurred.
     #[cfg(target_os = "windows")]
-    WindowsResultError(windows_result::Error),
+    WindowsResultError(Backtrace, windows_result::Error),
     /// A webrtc error occurred.
     WebrtcError(webrtc::Error),
     /// A yuv error occurred.
@@ -90,8 +93,12 @@ impl DeskError {
 
 impl Display for DeskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DeskError::IoError(error) => error.fmt(f),
+        let mut _backtrace = &Backtrace::disabled();
+        let err_fmt_result = match self {
+            DeskError::IoError(backtrace, error) => {
+                _backtrace = backtrace;
+                error.fmt(f)
+            }
             DeskError::JsonError(error) => error.fmt(f),
             //DeskError::RusqliteError(error) => error.fmt(f),
             DeskError::ConfigError(error) => error.fmt(f),
@@ -103,18 +110,25 @@ impl Display for DeskError {
             DeskError::TokioTaskJoinError(error) => error.fmt(f),
             DeskError::ActixWsClosed(closed) => closed.fmt(f),
             #[cfg(target_os = "windows")]
-            DeskError::WindowsResultError(error) => error.fmt(f),
+            DeskError::WindowsResultError(backtrace, error) => {
+                _backtrace = backtrace;
+                error.fmt(f)
+            }
             DeskError::WebrtcError(error) => error.fmt(f),
             DeskError::YuvError(error) => error.fmt(f),
             DeskError::Openh264Error(error) => error.fmt(f),
             DeskError::ParseLevelError(error) => error.fmt(f),
+        };
+        if let Err(error) = err_fmt_result {
+            log::error!("Failed to format error: {:?}", error)
         }
+        _backtrace.fmt(f)
     }
 }
 
 impl From<std::io::Error> for DeskError {
     fn from(err: std::io::Error) -> Self {
-        DeskError::IoError(err)
+        DeskError::IoError(backtrace::Backtrace::capture(), err)
     }
 }
 
@@ -175,7 +189,7 @@ impl From<actix_ws::Closed> for DeskError {
 #[cfg(target_os = "windows")]
 impl From<windows_result::Error> for DeskError {
     fn from(err: windows_result::Error) -> Self {
-        DeskError::WindowsResultError(err)
+        DeskError::WindowsResultError(backtrace::Backtrace::capture(), err)
     }
 }
 

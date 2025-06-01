@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
+use actix_ws::{CloseCode, CloseReason};
 use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::StreamExt;
@@ -181,11 +182,23 @@ impl SignalingContext {
             Result::<(), DeskError>::Ok(())
         });
 
+        let session2 = session.clone();
         tokio::spawn(async move {
             let result =
                 SignalingContext::capture_screen_task(video_ice_connection_state_rx, video_track)
                     .await;
-            log::warn!("Capture screen task result: {:?}", result);
+
+            if let Err(error) = result {
+                log::error!("Capture screen task failed, error: {:?}", error);
+                session2
+                    .close(Some(CloseReason::from((
+                        CloseCode::Abnormal,
+                        error.to_string(),
+                    ))))
+                    .await?;
+                return Err(error);
+            }
+
             return result;
         });
         // Set the handler for ICE connection state

@@ -45,10 +45,8 @@ use uuid::Uuid;
 pub async fn run() -> Result<Server, DeskError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
-
-    //env_logger::init_from_env(
-    //    env_logger::Env::new().default_filter_or(settings.system.log_level.as_str()),
-    //);
+    // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
+    unsafe { env::set_var("RUST_BACKTRACE", "1") };
     env_logger::builder()
         .format_timestamp_micros()
         .filter_level(LevelFilter::from_str(settings.system.log_level.as_str())?)
