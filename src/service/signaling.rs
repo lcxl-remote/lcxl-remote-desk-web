@@ -184,7 +184,7 @@ impl SignalingContext {
 
         let session2 = session.clone();
         // Spawn a blocking task to capture screen and send video
-        tokio::task::spawn_blocking(|| async move {
+        tokio::spawn(async move {
             let result =
                 SignalingContext::capture_screen_task(video_ice_connection_state_rx, video_track)
                     .await;
@@ -277,7 +277,7 @@ impl SignalingContext {
         // It is important to use a time.Ticker instead of time.Sleep because
         // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
         // * works around latency issues with Sleep
-        let mut ticker = tokio::time::interval(Duration::from_millis(33));
+        let mut ticker = tokio::time::interval(Duration::from_millis(3));
         loop {
             log::debug!("begin caption scrren");
             let start = Instant::now();
