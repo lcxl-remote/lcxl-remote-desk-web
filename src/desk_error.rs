@@ -59,7 +59,7 @@ pub enum DeskError {
     #[cfg(target_os = "windows")]
     WindowsResultError(Backtrace, windows_result::Error),
     /// A webrtc error occurred.
-    WebrtcError(webrtc::Error),
+    WebrtcError(Backtrace, webrtc::Error),
     /// A yuv error occurred.
     YuvError(yuv::YuvError),
     /// A openh264 error occurred.
@@ -114,7 +114,10 @@ impl Display for DeskError {
                 _backtrace = backtrace;
                 error.fmt(f)
             }
-            DeskError::WebrtcError(error) => error.fmt(f),
+            DeskError::WebrtcError(backtrace, error) => {
+                _backtrace = backtrace;
+                error.fmt(f)
+            }
             DeskError::YuvError(error) => error.fmt(f),
             DeskError::Openh264Error(error) => error.fmt(f),
             DeskError::ParseLevelError(error) => error.fmt(f),
@@ -195,7 +198,7 @@ impl From<windows_result::Error> for DeskError {
 
 impl From<webrtc::Error> for DeskError {
     fn from(err: webrtc::Error) -> Self {
-        DeskError::WebrtcError(err)
+        DeskError::WebrtcError(backtrace::Backtrace::capture(), err)
     }
 }
 

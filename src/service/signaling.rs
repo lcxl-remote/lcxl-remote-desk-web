@@ -183,7 +183,8 @@ impl SignalingContext {
         });
 
         let session2 = session.clone();
-        tokio::spawn(async move {
+        // Spawn a blocking task to capture screen and send video
+        tokio::task::spawn_blocking(|| async move {
             let result =
                 SignalingContext::capture_screen_task(video_ice_connection_state_rx, video_track)
                     .await;
@@ -282,6 +283,13 @@ impl SignalingContext {
             let start = Instant::now();
             let nal_info_result = h264_screen_output.get_nal();
             if nal_info_result.is_err() {
+                if let Err(DeskError::CustomError(err)) = nal_info_result {
+                    if err.error_code == ErrorCode::CAPTURE_SCREEN_TIMEOUT_ERROR {
+                        continue;
+                    }
+                    log::error!("Failed to get nal info, custom error={}", err);
+                    continue;
+                }
                 log::error!(
                     "Failed to get nal info, error={}",
                     nal_info_result.err().unwrap()

@@ -10,7 +10,7 @@ pub struct RestResponse<T: ToSchema> {
     message: Option<String>,
     data: Option<T>,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ErrorCode(i32);
 
 impl ErrorCode {
@@ -20,6 +20,8 @@ impl ErrorCode {
     pub const NOT_ALLOW_DELETE_FILE: ErrorCode = ErrorCode(21);
     pub const FILE_CHANGED: ErrorCode = ErrorCode(22);
     pub const WINDOWS_ERROR: ErrorCode = ErrorCode(1000);
+
+    pub const CAPTURE_SCREEN_TIMEOUT_ERROR: ErrorCode = ErrorCode(1001);
 }
 
 impl Display for ErrorCode {

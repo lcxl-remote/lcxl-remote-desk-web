@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use actix_web::web;
 use serde_json::json;
-use tokio::runtime::{self, Handle, Runtime};
+use tokio::runtime::Handle;
 use turn_server::{
     statistics::Statistics,
     turn::{Observer, Service, SessionAddr},

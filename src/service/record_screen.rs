@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
-use crate::{desk_error::DeskError, model::record_screen::DisplayInfo};
+use crate::{
+    desk_error::DeskError,
+    model::{common::ErrorCode, record_screen::DisplayInfo},
+};
 use log::warn;
-use openh264::{encoder::{BitRate, IntraFramePeriod}, OpenH264API};
+use openh264::{
+    OpenH264API,
+    encoder::{BitRate, IntraFramePeriod},
+};
 use std::fmt::Debug;
 use windows::Win32::{
-    Foundation::HMODULE,
+    Foundation::{GENERIC_ALL, HMODULE},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_REFERENCE,
@@ -18,11 +24,16 @@ use windows::Win32::{
             ID3D11DeviceContext, ID3D11Texture2D,
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_NOT_FOUND, DXGI_MAP_READ,
-            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
-            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
-            IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
+            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND,
+            DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC,
+            DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM,
+            IDXGIAdapter, IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+            IDXGISurface,
         },
+    },
+    System::StationsAndDesktops::{
+        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, OpenInputDesktop,
+        SetThreadDesktop,
     },
 };
 use windows_core::Interface;
@@ -38,6 +49,18 @@ pub struct ScreenRecordManager {
 
 impl ScreenRecordManager {
     pub fn new() -> Result<Arc<Self>, DeskError> {
+        // get desktop
+        unsafe {
+            let current_deskop = OpenInputDesktop(
+                DESKTOP_CONTROL_FLAGS(0),
+                false,
+                DESKTOP_ACCESS_FLAGS(GENERIC_ALL.0),
+            )?;
+            SetThreadDesktop(current_deskop)?;
+            CloseDesktop(current_deskop)?;
+        };
+
+        // init dxgi factory
         let driver_types: [D3D_DRIVER_TYPE; 3] = [
             D3D_DRIVER_TYPE_HARDWARE,
             D3D_DRIVER_TYPE_WARP,
@@ -141,6 +164,7 @@ impl ScreenRecordManagerArc for Arc<ScreenRecordManager> {
 
 pub struct ScreenOutput {
     pub manager: Arc<ScreenRecordManager>,
+    pub output_index: u32,
     pub dup_output: IDXGIOutputDuplication,
     pub dxgi_output_desc: DXGI_OUTDUPL_DESC,
     pub texture2d: ID3D11Texture2D,
@@ -155,7 +179,6 @@ impl ScreenOutput {
         let output = unsafe { screen_record_manager.dxgi_adapter.EnumOutputs(output_index) }?;
 
         let output1 = output.cast::<IDXGIOutput1>()?;
-
         // get the device from the manager and pass it to DuplicateOutput
         let pdevice = &screen_record_manager.device;
 
@@ -200,6 +223,7 @@ impl ScreenOutput {
 
         Ok(ScreenOutput {
             manager: screen_record_manager,
+            output_index,
             dup_output,
             dxgi_output_desc,
             texture2d,
@@ -317,7 +341,9 @@ pub struct H264ScreenOutput {
 
 impl H264ScreenOutput {
     pub fn new(screen_output: ScreenOutput) -> Self {
-        let config = openh264::encoder::EncoderConfig::new().intra_frame_period(IntraFramePeriod::from_num_frames(30)).bitrate(BitRate::from_bps(10_000_000));
+        let config = openh264::encoder::EncoderConfig::new()
+            .intra_frame_period(IntraFramePeriod::from_num_frames(30))
+            .bitrate(BitRate::from_bps(10_000_000));
         let api = OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
         Self {
@@ -331,7 +357,36 @@ impl H264ScreenOutput {
 impl ScreenOutputVideoNal for H264ScreenOutput {
     fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
         log::debug!("Start to get screen output frame");
-        let screen_frame = self.screen_output.get_frame(true)?;
+        let mut result = self.screen_output.get_frame(true);
+        if let Err(error) = result {
+            if let DeskError::WindowsResultError(bt, err) = error {
+                if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                    log::warn!("capture frame timeout, will retry, error={:?}", err);
+                    return DeskError::custom_error(
+                        ErrorCode::CAPTURE_SCREEN_TIMEOUT_ERROR,
+                        format!("capture frame timeout, will retry, error={:?}", err),
+                    );
+                } else if err.code() == DXGI_ERROR_ACCESS_LOST {
+                    log::error!(
+                        "We lost access to the screen output, need to reinitialize the screen output, error={:?}, backtrace={}",
+                        err,
+                        bt
+                    );
+                    let new_sceen_output = ScreenOutput::new(
+                        self.screen_output.manager.clone(),
+                        self.screen_output.output_index,
+                    )?;
+                    self.screen_output = new_sceen_output;
+                    result = self.screen_output.get_frame(true);
+                } else {
+                    return Err(DeskError::WindowsResultError(bt, err));
+                }
+            } else {
+                return Err(error);
+            }
+        }
+
+        let screen_frame = result?;
         log::debug!(
             "Got screen output frame, info={:?}",
             screen_frame.frame_info
