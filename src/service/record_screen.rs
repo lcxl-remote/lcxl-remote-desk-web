@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     desk_error::DeskError,
-    model::{common::ErrorCode, record_screen::DisplayInfo},
+    model::{common::ErrorCode, record_screen::DisplayInfo, settings::Settings},
 };
 use log::warn;
 use openh264::{
@@ -19,16 +19,16 @@ use windows::Win32::{
             D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
         },
         Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-            D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device,
-            ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
+            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
+            ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND,
-            DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC,
-            DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM,
-            IDXGIAdapter, IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
-            IDXGISurface,
+            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_INVALID_CALL,
+            DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
+            DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
+            IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
     },
     System::StationsAndDesktops::{
@@ -48,7 +48,7 @@ pub struct ScreenRecordManager {
 }
 
 impl ScreenRecordManager {
-    pub fn new() -> Result<Arc<Self>, DeskError> {
+    pub fn new(settings: &Settings) -> Result<Arc<Self>, DeskError> {
         // get desktop
         unsafe {
             let current_deskop = OpenInputDesktop(
@@ -75,7 +75,11 @@ impl ScreenRecordManager {
             D3D_FEATURE_LEVEL_10_0,
             D3D_FEATURE_LEVEL_9_1,
         ];
-        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+        let mut flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+        if settings.desk.enable_d3d_debug {
+            log::info!("Enable d3d debug flag");
+            flags |= D3D11_CREATE_DEVICE_DEBUG;
+        }
 
         let mut device = None;
         //let mut feature_level = D3D_FEATURE_LEVEL_11_1;
@@ -337,22 +341,24 @@ impl openh264::formats::YUVSource for YuvPlanarImageWrapper<'_, u8> {
     }
 }
 pub struct H264ScreenOutput {
-    pub screen_output: ScreenOutput,
+    pub manager: Arc<ScreenRecordManager>,
+    pub output_index: u32,
+    pub screen_output: Option<ScreenOutput>,
     pub encoder: openh264::encoder::Encoder,
-    pub nal_prefix_parsed: bool,
 }
 
 impl H264ScreenOutput {
-    pub fn new(screen_output: ScreenOutput) -> Self {
+    pub fn new(manager: Arc<ScreenRecordManager>, output_index: u32) -> Self {
         let config = openh264::encoder::EncoderConfig::new()
             .intra_frame_period(IntraFramePeriod::from_num_frames(30))
             .bitrate(BitRate::from_bps(10_000_000));
         let api = OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
         Self {
-            screen_output,
+            manager,
+            output_index,
+            screen_output: None,
             encoder,
-            nal_prefix_parsed: false,
         }
     }
 }
@@ -360,7 +366,13 @@ impl H264ScreenOutput {
 impl ScreenOutputVideoNal for H264ScreenOutput {
     fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
         log::debug!("Start to get screen output frame");
-        let mut result = self.screen_output.get_frame(true);
+        if self.screen_output.is_none() {
+            log::info!("screen output is none, need to create screen output");
+            let new_screen_output = self.manager.get_screen_output(self.output_index)?;
+            self.screen_output = Some(new_screen_output);
+        }
+        let mut screen_output = self.screen_output.as_mut().unwrap();
+        let mut result = screen_output.get_frame(true);
         if let Err(error) = result {
             if let DeskError::WindowsResultError(bt, err) = error {
                 if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
@@ -369,18 +381,20 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
                         ErrorCode::CAPTURE_SCREEN_TIMEOUT_ERROR,
                         format!("capture frame timeout, will retry, error={:?}", err),
                     );
-                } else if err.code() == DXGI_ERROR_ACCESS_LOST {
+                } else if err.code() == DXGI_ERROR_ACCESS_LOST
+                    || err.code() == DXGI_ERROR_INVALID_CALL
+                {
                     log::error!(
                         "We lost access to the screen output, need to reinitialize the screen output, error={:?}, backtrace={}",
                         err,
                         bt
                     );
-                    let new_sceen_output = ScreenOutput::new(
-                        self.screen_output.manager.clone(),
-                        self.screen_output.output_index,
-                    )?;
-                    self.screen_output = new_sceen_output;
-                    result = self.screen_output.get_frame(true);
+                    self.screen_output = None;
+                    let new_screen_output = self.manager.get_screen_output(self.output_index)?;
+                    self.screen_output = Some(new_screen_output);
+                    screen_output = self.screen_output.as_mut().unwrap();
+
+                    result = screen_output.get_frame(true);
                 } else {
                     return Err(DeskError::WindowsResultError(bt, err));
                 }
@@ -394,8 +408,8 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             "Got screen output frame, info={:?}",
             screen_frame.frame_info
         );
-        let width = self.screen_output.dxgi_output_desc.ModeDesc.Width;
-        let height = self.screen_output.dxgi_output_desc.ModeDesc.Height;
+        let width = screen_output.dxgi_output_desc.ModeDesc.Width;
+        let height = screen_output.dxgi_output_desc.ModeDesc.Height;
         let src_stride = width * 4;
         let mut planar_image = YuvPlanarImageMut::<u8>::alloc(
             width as u32,
@@ -445,7 +459,8 @@ mod tests {
     #[test]
     fn test_screen() -> Result<(), DeskError> {
         env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
-        let manager = ScreenRecordManager::new()?;
+        let settings = Settings::default();
+        let manager = ScreenRecordManager::new(&settings)?;
         let list = manager.get_output_list()?;
         assert!(!list.is_empty());
 

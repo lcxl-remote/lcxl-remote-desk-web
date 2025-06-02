@@ -110,6 +110,22 @@ pub struct ListSettings {
     pub filter_dup_file_by_dir_path: Option<bool>,
 }
 
+/// Desk settings
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DeskSettings {
+    /// Enable D3D debug mode
+    pub enable_d3d_debug: bool,
+}
+
+impl Default for DeskSettings {
+    fn default() -> Self {
+        Self {
+            enable_d3d_debug: false,
+        }
+    }
+}
+
 /// Turn Server Settings
 /// See also `turn_server::config::Config`
 
@@ -163,6 +179,9 @@ pub struct Settings {
     pub list: ListSettings,
     /// Turn settings
     pub turn: TurnSettings,
+
+    /// Desk settings
+    pub desk: DeskSettings,
 }
 
 impl Default for SystemSettings {

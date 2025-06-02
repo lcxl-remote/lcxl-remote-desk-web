@@ -28,6 +28,7 @@ use webrtc::{
 };
 
 use crate::model::common::ErrorCode;
+use crate::model::settings::Settings;
 use crate::model::signaling::WebRTConnectionState;
 use crate::{
     desk_error::DeskError,
@@ -192,9 +193,12 @@ impl SignalingContext {
             .build()?;
         // Spawn a blocking task to capture screen and send video
         capture_screen_runtime.spawn(async move {
-            let result =
-                SignalingContext::capture_screen_task(video_ice_connection_state_rx, video_track)
-                    .await;
+            let result = SignalingContext::capture_screen_task(
+                tmp_settings,
+                video_ice_connection_state_rx,
+                video_track,
+            )
+            .await;
 
             if let Err(error) = result {
                 log::error!("Capture screen task failed, error: {:?}", error);
@@ -251,14 +255,14 @@ impl SignalingContext {
     }
 
     pub async fn capture_screen_task(
+        settings: Settings,
         mut video_ice_connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
     ) -> Result<(), DeskError> {
         log::info!("Preparing to capture screen...");
-        let manager = ScreenRecordManager::new()?;
-        let screen_output = manager.get_screen_output(0)?;
+        let manager = ScreenRecordManager::new(&settings)?;
 
-        let mut h264_screen_output = H264ScreenOutput::new(screen_output);
+        let mut h264_screen_output = H264ScreenOutput::new(manager, 0);
         // Wait for connection established
         while let Ok(_) = video_ice_connection_state_rx.changed().await {
             let state = *video_ice_connection_state_rx.borrow_and_update();
