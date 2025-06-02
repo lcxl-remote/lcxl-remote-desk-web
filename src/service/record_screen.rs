@@ -57,7 +57,10 @@ impl ScreenRecordManager {
                 DESKTOP_ACCESS_FLAGS(GENERIC_ALL.0),
             )?;
             SetThreadDesktop(current_deskop)?;
-            CloseDesktop(current_deskop)?;
+            let result = CloseDesktop(current_deskop);
+            if let Err(err) = result {
+                log::warn!("Failed to close desktop, ignore, error: {:?}", err);
+            }
         };
 
         // init dxgi factory

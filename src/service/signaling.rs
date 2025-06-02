@@ -94,6 +94,8 @@ pub struct SignalingContext {
     pub session: Session,
     pub user: CurrentUser,
     pub rtc_peer_connection: Arc<RTCPeerConnection>,
+    /// capture screen task runtime
+    pub capture_screen_runtime: tokio::runtime::Runtime,
 }
 
 impl SignalingContext {
@@ -183,8 +185,13 @@ impl SignalingContext {
         });
 
         let session2 = session.clone();
+        let capture_screen_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("capture_screen_task")
+            .build()?;
         // Spawn a blocking task to capture screen and send video
-        tokio::spawn(async move {
+        capture_screen_runtime.spawn(async move {
             let result =
                 SignalingContext::capture_screen_task(video_ice_connection_state_rx, video_track)
                     .await;
@@ -239,6 +246,7 @@ impl SignalingContext {
             session,
             user,
             rtc_peer_connection,
+            capture_screen_runtime,
         })
     }
 
