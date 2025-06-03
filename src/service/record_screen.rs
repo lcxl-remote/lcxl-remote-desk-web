@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{backtrace::Backtrace, sync::Arc};
 
 use crate::{
     desk_error::DeskError,
@@ -24,9 +24,9 @@ use windows::Win32::{
             ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_INVALID_CALL,
-            DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
-            DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
+            DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ,
+            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
             DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
             IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
@@ -396,6 +396,12 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
 
                     result = screen_output.get_frame(true);
                 } else {
+                    if err.code() == DXGI_ERROR_DEVICE_REMOVED {
+                        let removed_reason =
+                            unsafe { self.manager.device.GetDeviceRemovedReason() };
+                        log::error!("Device removed reason: {:?}", removed_reason);
+                        return Err(DeskError::WindowsResultError(Backtrace::disabled(), err));
+                    }
                     return Err(DeskError::WindowsResultError(bt, err));
                 }
             } else {
@@ -451,14 +457,25 @@ pub struct SceenFrame<'a> {
 #[cfg(test)]
 mod tests {
     use std::env;
-
+    use std::sync::Once;
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::System::StationsAndDesktops::EnumWindowStationsW;
+    use windows::Win32::UI::Shell::{IsUserAnAdmin, MULTIKEYHELPW};
     use yuv::bgra_to_rgba;
 
     use super::*;
 
+    static INIT: Once = Once::new();
+
+    pub fn initialize() {
+        INIT.call_once(|| {
+            // initialization code here
+            env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+        });
+    }
     #[test]
     fn test_screen() -> Result<(), DeskError> {
-        env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+        initialize();
         let settings = Settings::default();
         let manager = ScreenRecordManager::new(&settings)?;
         let list = manager.get_output_list()?;
@@ -503,6 +520,37 @@ mod tests {
         }
         std::fs::remove_dir_all(tmp_dir.as_path())?;
 
+        Ok(())
+    }
+
+    unsafe extern "system" fn enum_proc(
+        param0: windows_core::PCWSTR,
+        param1: LPARAM,
+    ) -> windows_core::BOOL {
+        let result = unsafe { param0.to_string() };
+        let windows_station_list_pointer = param1.0 as *mut Vec<String>;
+        if let Ok(name) = result {
+            log::info!("add windows station: {}", name);
+            let windows_station_list = unsafe { windows_station_list_pointer.as_mut().unwrap() };
+            windows_station_list.push(name);
+        } else if let Err(e) = result {
+            log::error!("failed to add windows station :{:?}", e);
+        }
+
+        return windows_core::BOOL::from(true);
+    }
+    #[test]
+    fn test_windows_api() -> Result<(), DeskError> {
+        initialize();
+        let is_admin = unsafe { IsUserAnAdmin() };
+
+        log::info!("is user an admin: {}", is_admin.as_bool());
+        let mut windows_station_list = Vec::<String>::new();
+        let windows_station_list_pointer = &raw mut windows_station_list;
+        let lparam = LPARAM(windows_station_list_pointer as isize);
+        let result = unsafe { EnumWindowStationsW(Some(enum_proc), lparam) };
+        log::info!("EnumWindowStationsW result: {:?}", result);
+        log::info!("windows_station_list: {:?}", windows_station_list);
         Ok(())
     }
 }
