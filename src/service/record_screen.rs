@@ -457,9 +457,10 @@ pub struct SceenFrame<'a> {
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::f32::consts::E;
     use std::sync::Once;
     use windows::Win32::Foundation::LPARAM;
-    use windows::Win32::System::StationsAndDesktops::EnumWindowStationsW;
+    use windows::Win32::System::StationsAndDesktops::{CloseWindowStation, EnumDesktopsW, EnumWindowStationsW, OpenWindowStationW};
     use windows::Win32::UI::Shell::{IsUserAnAdmin, MULTIKEYHELPW};
     use yuv::bgra_to_rgba;
 
@@ -539,6 +540,7 @@ mod tests {
 
         return windows_core::BOOL::from(true);
     }
+
     #[test]
     fn test_windows_api() -> Result<(), DeskError> {
         initialize();
@@ -551,6 +553,28 @@ mod tests {
         let result = unsafe { EnumWindowStationsW(Some(enum_proc), lparam) };
         log::info!("EnumWindowStationsW result: {:?}", result);
         log::info!("windows_station_list: {:?}", windows_station_list);
+
+        for station in &windows_station_list {
+            log::info!("station: {}", station);
+            let station_name_utf16: Vec<u16> = station.encode_utf16().collect();
+            let station_name_ptr = windows::core::PCWSTR::from_raw(station_name_utf16.as_ptr());
+            let open_result = unsafe { OpenWindowStationW(station_name_ptr, true, 0) };
+
+            if let Ok(handle) = open_result {
+                let mut desktop_list = Vec::<String>::new();
+                let desktop_list_pointer = &raw mut desktop_list;
+                let lparam = LPARAM(desktop_list_pointer as isize);
+                let enum_result = unsafe { EnumDesktopsW(Some(handle), Some(enum_proc), lparam) };
+                log::info!("EnumDesktopsW result: {:?}", enum_result);
+                log::info!("desktop_list: {:?}", desktop_list);
+
+                let close_result = unsafe { CloseWindowStation(handle) };
+                log::info!("CloseWindowStation result: {:?}", close_result);
+            } else if let Err(e) = open_result {
+                log::error!("OpenWindowStationW error: {}", e);
+            }
+        }
+
         Ok(())
     }
 }
