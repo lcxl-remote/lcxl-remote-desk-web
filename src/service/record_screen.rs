@@ -48,8 +48,8 @@ pub struct ScreenRecordManager {
 }
 
 impl ScreenRecordManager {
-    pub fn new(settings: &Settings) -> Result<Arc<Self>, DeskError> {
-        // get desktop
+
+    pub fn set_thread_desktop() -> Result<(), DeskError> {
         unsafe {
             let current_deskop = OpenInputDesktop(
                 DESKTOP_CONTROL_FLAGS(0),
@@ -62,6 +62,13 @@ impl ScreenRecordManager {
                 log::warn!("Failed to close desktop, ignore, error: {:?}", err);
             }
         };
+        Ok(())
+    }
+
+
+    pub fn new(settings: &Settings) -> Result<Arc<Self>, DeskError> {
+        // get desktop
+        Self::set_thread_desktop()?;
 
         // init dxgi factory
         let driver_types: [D3D_DRIVER_TYPE; 3] = [
@@ -457,11 +464,11 @@ pub struct SceenFrame<'a> {
 #[cfg(test)]
 mod tests {
     use std::env;
-    use std::f32::consts::E;
+    
     use std::sync::Once;
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::System::StationsAndDesktops::{CloseWindowStation, EnumDesktopsW, EnumWindowStationsW, OpenWindowStationW};
-    use windows::Win32::UI::Shell::{IsUserAnAdmin, MULTIKEYHELPW};
+    use windows::Win32::UI::Shell::IsUserAnAdmin;
     use yuv::bgra_to_rgba;
 
     use super::*;
@@ -472,8 +479,12 @@ mod tests {
         INIT.call_once(|| {
             // initialization code here
             env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+
+            let result = ScreenRecordManager::set_thread_desktop();
+            log::info!("set thread desktop result: {:?}", result);
         });
     }
+
     #[test]
     fn test_screen() -> Result<(), DeskError> {
         initialize();
