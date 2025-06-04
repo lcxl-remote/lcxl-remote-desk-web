@@ -48,7 +48,6 @@ pub struct ScreenRecordManager {
 }
 
 impl ScreenRecordManager {
-
     pub fn set_thread_desktop() -> Result<(), DeskError> {
         unsafe {
             let current_deskop = OpenInputDesktop(
@@ -64,7 +63,6 @@ impl ScreenRecordManager {
         };
         Ok(())
     }
-
 
     pub fn new(settings: &Settings) -> Result<Arc<Self>, DeskError> {
         // get desktop
@@ -464,10 +462,13 @@ pub struct SceenFrame<'a> {
 #[cfg(test)]
 mod tests {
     use std::env;
-    
+
     use std::sync::Once;
     use windows::Win32::Foundation::LPARAM;
-    use windows::Win32::System::StationsAndDesktops::{CloseWindowStation, EnumDesktopsW, EnumWindowStationsW, OpenWindowStationW};
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseWindowStation, EnumDesktopsW, EnumWindowStationsW, GetProcessWindowStation, HWINSTA,
+        OpenWindowStationW,
+    };
     use windows::Win32::UI::Shell::IsUserAnAdmin;
     use yuv::bgra_to_rgba;
 
@@ -542,16 +543,24 @@ mod tests {
         let result = unsafe { param0.to_string() };
         let windows_station_list_pointer = param1.0 as *mut Vec<String>;
         if let Ok(name) = result {
-            log::info!("add windows station: {}", name);
+            log::info!("add: {}", name);
             let windows_station_list = unsafe { windows_station_list_pointer.as_mut().unwrap() };
             windows_station_list.push(name);
         } else if let Err(e) = result {
-            log::error!("failed to add windows station :{:?}", e);
+            log::error!("failed to add: {:?}", e);
         }
 
         return windows_core::BOOL::from(true);
     }
 
+    fn list_desktop_by_station_handle(handle: HWINSTA) {
+        let mut desktop_list = Vec::<String>::new();
+        let desktop_list_pointer = &raw mut desktop_list;
+        let lparam = LPARAM(desktop_list_pointer as isize);
+        let enum_result = unsafe { EnumDesktopsW(Some(handle), Some(enum_proc), lparam) };
+        log::info!("EnumDesktopsW result: {:?}", enum_result);
+        log::info!("desktop_list: {:?}", desktop_list);
+    }
     #[test]
     fn test_windows_api() -> Result<(), DeskError> {
         initialize();
@@ -572,12 +581,7 @@ mod tests {
             let open_result = unsafe { OpenWindowStationW(station_name_ptr, true, 0) };
 
             if let Ok(handle) = open_result {
-                let mut desktop_list = Vec::<String>::new();
-                let desktop_list_pointer = &raw mut desktop_list;
-                let lparam = LPARAM(desktop_list_pointer as isize);
-                let enum_result = unsafe { EnumDesktopsW(Some(handle), Some(enum_proc), lparam) };
-                log::info!("EnumDesktopsW result: {:?}", enum_result);
-                log::info!("desktop_list: {:?}", desktop_list);
+                list_desktop_by_station_handle(handle);
 
                 let close_result = unsafe { CloseWindowStation(handle) };
                 log::info!("CloseWindowStation result: {:?}", close_result);
@@ -585,7 +589,13 @@ mod tests {
                 log::error!("OpenWindowStationW error: {}", e);
             }
         }
-
+        let result = unsafe { GetProcessWindowStation() };
+        if let Ok(handle) = result {
+            log::info!("GetProcessWindowStation handle: {:?}", handle);
+            list_desktop_by_station_handle(handle);
+        } else if let Err(e) = result {
+            log::error!("GetProcessWindowStation error: {}", e);
+        }
         Ok(())
     }
 }

@@ -54,6 +54,9 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_Graphics_Gdi",
     "Win32_System_StationsAndDesktops",
+    "Win32_Media_Audio",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
 ] }
 windows-result = "0.3"
 windows-core = "0.61"
