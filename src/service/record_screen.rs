@@ -463,6 +463,7 @@ pub struct SceenFrame<'a> {
 mod tests {
     use std::env;
 
+    use log::LevelFilter;
     use std::sync::Once;
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::System::StationsAndDesktops::{
@@ -479,7 +480,10 @@ mod tests {
     pub fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+            env_logger::builder()
+                .format_timestamp_micros()
+                .filter_level(LevelFilter::Debug)
+                .init();
 
             let result = ScreenRecordManager::set_thread_desktop();
             log::info!("set thread desktop result: {:?}", result);

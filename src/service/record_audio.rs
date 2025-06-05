@@ -36,7 +36,6 @@ impl AudioRecord {
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
         let pformat = unsafe { audio_client.GetMixFormat()? };
         let format = unsafe { *pformat };
-        
 
         log::info!(
             "Audio format: cbSize={}, nAvgBytesPerSec={}, nBlockAlign={}, nChannels={}, nSamplesPerSec={}, wBitsPerSample={}, wFormatTag={}",
@@ -61,7 +60,8 @@ impl AudioRecord {
         };
         unsafe { CoTaskMemFree(Some(pformat as *mut _)) };
         let buffer_frame_count = unsafe { audio_client.GetBufferSize() }?;
-        let hns_actual_duration = REFTIMES_PER_SEC as u64 * buffer_frame_count as u64 / format.nSamplesPerSec as u64;
+        let hns_actual_duration =
+            REFTIMES_PER_SEC as u64 * buffer_frame_count as u64 / format.nSamplesPerSec as u64;
 
         let audio_capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }?;
         Ok(AudioRecord {
@@ -98,7 +98,16 @@ impl AudioRecord {
                 None,
             )?
         };
-        let buffer_vec = if dwflags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+        log::debug!(
+            "dwflags: {}, buffer pointer: {:#x}, size: {}",
+            dwflags,
+            pdata as usize,
+            numframestoread
+        );
+        let buffer_vec = if dwflags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0
+            || pdata.is_null()
+            || numframestoread <= 0
+        {
             Vec::<u8>::new()
         } else {
             let buffer = unsafe { std::slice::from_raw_parts(pdata, numframestoread as usize) };
@@ -135,13 +144,18 @@ impl Drop for AudioRecord {
 mod tests {
     use std::{sync::Once, thread::sleep, time};
 
+    use log::LevelFilter;
+
     use super::*;
 
     static INIT: Once = Once::new();
     pub fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+            env_logger::builder()
+                .format_timestamp_micros()
+                .filter_level(LevelFilter::Debug)
+                .init();
         });
     }
 
@@ -151,7 +165,9 @@ mod tests {
 
         let audio_record = AudioRecord::new()?;
         audio_record.start()?;
-        let dur = time::Duration::from_millis((audio_record.hns_actual_duration/REFTIMES_PER_MILLISEC/2) as u64);
+        let dur = time::Duration::from_millis(
+            (audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
+        );
         log::info!("sleep for {:?}", dur);
         sleep(dur);
         let buffer = audio_record.get_buffer()?;
