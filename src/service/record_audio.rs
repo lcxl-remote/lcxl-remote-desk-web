@@ -1,16 +1,27 @@
 use windows::Win32::{
     Media::Audio::{
-        AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, IAudioCaptureClient, IAudioClient,
-        IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, eConsole, eRender,
+        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
+        eConsole, eRender,
     },
     System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+        CoUninitialize,
     },
 };
 
 use crate::desk_error::DeskError;
 
-pub struct AudioRecord {}
+/// REFERENCE_TIME time units per second and per millisecond
+const REFTIMES_PER_SEC: u64 = 10000000;
+const REFTIMES_PER_MILLISEC: u64 = REFTIMES_PER_SEC / 1000;
+
+pub struct AudioRecord {
+    pub format: WAVEFORMATEX,
+    pub audio_client: IAudioClient,
+    pub audio_capture_client: IAudioCaptureClient,
+    pub hns_actual_duration: u64,
+}
 
 impl AudioRecord {
     /// Create a new instance of AudioRecord. Initializes COM
@@ -24,26 +35,128 @@ impl AudioRecord {
 
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
         let pformat = unsafe { audio_client.GetMixFormat()? };
+        let format = unsafe { *pformat };
+        
+
+        log::info!(
+            "Audio format: cbSize={}, nAvgBytesPerSec={}, nBlockAlign={}, nChannels={}, nSamplesPerSec={}, wBitsPerSample={}, wFormatTag={}",
+            format.cbSize as u16,
+            format.nAvgBytesPerSec as u32,
+            format.nBlockAlign as u16,
+            format.nChannels as u16,
+            format.nSamplesPerSec as u32,
+            format.wBitsPerSample as u16,
+            format.wFormatTag as u16
+        );
 
         unsafe {
             audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_LOOPBACK,
-                0,
+                REFTIMES_PER_SEC as i64,
                 0,
                 pformat,
                 None,
             )?
         };
+        unsafe { CoTaskMemFree(Some(pformat as *mut _)) };
         let buffer_frame_count = unsafe { audio_client.GetBufferSize() }?;
+        let hns_actual_duration = REFTIMES_PER_SEC as u64 * buffer_frame_count as u64 / format.nSamplesPerSec as u64;
 
         let audio_capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }?;
-        Ok(AudioRecord {})
+        Ok(AudioRecord {
+            format,
+            audio_client,
+            audio_capture_client,
+            hns_actual_duration,
+        })
+    }
+
+    pub fn start(&self) -> Result<(), DeskError> {
+        log::info!("Start to record audio...");
+        unsafe { self.audio_client.Start() }?;
+        log::info!("Audio recording started.");
+        Ok(())
+    }
+
+    pub fn get_buffer_size(&self) -> Result<u32, DeskError> {
+        let packet_size = unsafe { self.audio_capture_client.GetNextPacketSize() }?;
+        Ok(packet_size)
+    }
+
+    pub fn get_buffer(&self) -> Result<Vec<u8>, DeskError> {
+        let mut pdata: *mut u8 = std::ptr::null_mut();
+        let mut numframestoread: u32 = 0;
+        let mut dwflags: u32 = 0;
+
+        unsafe {
+            self.audio_capture_client.GetBuffer(
+                &mut pdata,
+                &mut numframestoread,
+                &mut dwflags,
+                None,
+                None,
+            )?
+        };
+        let buffer_vec = if dwflags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+            Vec::<u8>::new()
+        } else {
+            let buffer = unsafe { std::slice::from_raw_parts(pdata, numframestoread as usize) };
+            buffer.to_vec()
+        };
+
+        unsafe {
+            self.audio_capture_client.ReleaseBuffer(numframestoread)?;
+        }
+        Ok(buffer_vec)
+    }
+
+    pub fn stop(&self) -> Result<(), DeskError> {
+        log::info!("stopping audio capture client");
+        unsafe {
+            self.audio_client.Stop()?;
+        }
+        log::info!("audio capture client stopped");
+
+        Ok(())
     }
 }
 
 impl Drop for AudioRecord {
     fn drop(&mut self) {
-        unsafe { CoUninitialize() };
+        unsafe {
+            log::info!("dropping AudioRecord, uninitializing COM");
+            CoUninitialize();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Once, thread::sleep, time};
+
+    use super::*;
+
+    static INIT: Once = Once::new();
+    pub fn initialize() {
+        INIT.call_once(|| {
+            // initialization code here
+            env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+        });
+    }
+
+    #[test]
+    fn test_audio() -> Result<(), DeskError> {
+        initialize();
+
+        let audio_record = AudioRecord::new()?;
+        audio_record.start()?;
+        let dur = time::Duration::from_millis((audio_record.hns_actual_duration/REFTIMES_PER_MILLISEC/2) as u64);
+        log::info!("sleep for {:?}", dur);
+        sleep(dur);
+        let buffer = audio_record.get_buffer()?;
+        log::info!("buffer len: {}", buffer.len());
+        audio_record.stop()?;
+        Ok(())
     }
 }
