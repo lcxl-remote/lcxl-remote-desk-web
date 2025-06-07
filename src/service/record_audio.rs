@@ -140,6 +140,47 @@ impl Drop for AudioRecord {
     }
 }
 
+pub struct OpusAudioRecord {
+    pub record: AudioRecord,
+    pub encoder: opusic_c::Encoder,
+}
+
+// 48000Hz * 1 channel * 20 ms / 1000 = 960
+const MONO_20MS: usize = 48000 * 2 * 20 / 1000;
+
+impl OpusAudioRecord {
+    pub fn new() -> Result<Self, DeskError> {
+        let record = AudioRecord::new()?;
+        let opus_audio_record = OpusAudioRecord {
+            record,
+            encoder: opusic_c::Encoder::new(
+                opusic_c::Channels::Stereo,
+                opusic_c::SampleRate::Hz48000,
+                opusic_c::Application::Audio,
+            )?,
+        };
+        Ok(opus_audio_record)
+    }
+
+    pub fn start(&self) -> Result<(), DeskError> {
+        self.record.start()
+    }
+
+    pub fn stop(&self) -> Result<(), DeskError> {
+        self.record.stop()
+    }
+
+    pub fn get_buffer(&mut self) -> Result<Vec<u8>, DeskError> {
+        let buffer = self.record.get_buffer()?;
+        let mut output = [0; 256];
+        let len = self
+            .encoder
+            .encode_to(&[0_i16; MONO_20MS], &mut output)
+            .unwrap();
+        Ok(output.to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{sync::Once, thread::sleep, time};

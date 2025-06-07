@@ -53,6 +53,10 @@ LCXL Web Remote Desk 提供了以下功能：
 * ~~参考 [MSYS2 官方文档](https://www.msys2.org/) 进行安装和配置。~~
 * ~~安装 GCC 工具链（`pacman -S mingw-w64-ucrt-x86_64-gcc`）。~~
     * ~~如果需要ffmpeg的支持，则需要执行以下命令：`pacman -S mingw-w64-ucrt-x86_64-ffmpeg`~~
+    * 如果需要安装opus，则执行以下命令：
+        * `pacman -S mingw-w64-ucrt-x86_64-make`
+        * `pacman -S mingw-w64-ucrt-x86_64-cmake`
+        * `pacman -S mingw-w64-ucrt-x86_64-pkg-config`
 * ~~设置环境变量，将 MSYS2 下的 gcc 的 `bin` 目录添加到系统的 PATH 环境变量中。加入 MYSYS2 安装在 `C:\msys64` 中，则需要添加 `C:\msys64\ucrt64\bin` 到 PATH 中。~~
 * ~~将 rust 的工具链切到 gnu 版本~~：
     * `rustup toolchain install stable-x86_64-pc-windows-gnu`

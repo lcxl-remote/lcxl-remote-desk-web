@@ -64,6 +64,8 @@ pub enum DeskError {
     YuvError(yuv::YuvError),
     /// A openh264 error occurred.
     Openh264Error(openh264::Error),
+    /// A opus error occurred.
+    OpusError(opusic_c::ErrorCode),
     /// A log parse level error occurred.
     ParseLevelError(log::ParseLevelError),
     /// Desk custom error
@@ -120,6 +122,7 @@ impl Display for DeskError {
             }
             DeskError::YuvError(error) => error.fmt(f),
             DeskError::Openh264Error(error) => error.fmt(f),
+            DeskError::OpusError(error) => f.write_fmt(format_args!("{:?}", error)),
             DeskError::ParseLevelError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
@@ -211,6 +214,12 @@ impl From<yuv::YuvError> for DeskError {
 impl From<openh264::Error> for DeskError {
     fn from(err: openh264::Error) -> Self {
         DeskError::Openh264Error(err)
+    }
+}
+
+impl From<opus::Error> for DeskError {
+    fn from(err: opus::Error) -> Self {
+        DeskError::OpusError(err)
     }
 }
 

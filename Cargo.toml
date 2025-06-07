@@ -25,7 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 env_logger = "0.11"
 log = "0.4"
 actix-session = { version = "0.10", features = ["cookie-session"] }
-uuid = "1.16"
+uuid = "1.17"
 actix-http = "3.11"
 actix-service = "2.0"
 turn-server = { version = "3.4", features = ["udp", "tcp", "api"] }
@@ -40,6 +40,7 @@ yuv = "0.8"
 openh264 = "0.8"
 futures = "0.3"
 webrtc-ice = "0.13"
+opusic-c = "1.5"
 
 
 [target.'cfg(target_os = "windows")'.dependencies]
