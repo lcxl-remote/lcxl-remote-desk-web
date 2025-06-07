@@ -217,8 +217,8 @@ impl From<openh264::Error> for DeskError {
     }
 }
 
-impl From<opus::Error> for DeskError {
-    fn from(err: opus::Error) -> Self {
+impl From<opusic_c::ErrorCode> for DeskError {
+    fn from(err: opusic_c::ErrorCode) -> Self {
         DeskError::OpusError(err)
     }
 }

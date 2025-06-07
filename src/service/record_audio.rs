@@ -1,3 +1,4 @@
+use futures::SinkExt;
 use windows::Win32::{
     Media::Audio::{
         AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -143,10 +144,8 @@ impl Drop for AudioRecord {
 pub struct OpusAudioRecord {
     pub record: AudioRecord,
     pub encoder: opusic_c::Encoder,
+    pub buffer: Vec<u8>,
 }
-
-// 48000Hz * 1 channel * 20 ms / 1000 = 960
-const MONO_20MS: usize = 48000 * 2 * 20 / 1000;
 
 impl OpusAudioRecord {
     pub fn new() -> Result<Self, DeskError> {
@@ -158,6 +157,7 @@ impl OpusAudioRecord {
                 opusic_c::SampleRate::Hz48000,
                 opusic_c::Application::Audio,
             )?,
+            buffer: Vec::new(),
         };
         Ok(opus_audio_record)
     }
@@ -172,11 +172,31 @@ impl OpusAudioRecord {
 
     pub fn get_buffer(&mut self) -> Result<Vec<u8>, DeskError> {
         let buffer = self.record.get_buffer()?;
-        let mut output = [0; 256];
+        if !buffer.is_empty() {
+            log::debug!(
+                "extend buffer (size={}) to opus audio buffer (size={})",
+                buffer.len(),
+                self.buffer.len()
+            );
+            self.buffer.extend(buffer);
+        }
+
+        const SIZE_20MS: usize = opusic_c::frame_bytes_size(
+            opusic_c::SampleRate::Hz48000,
+            opusic_c::Channels::Stereo,
+            20,
+        );
+
+        // u16 = u8*2
+        if self.buffer.len() * 2 < SIZE_20MS {
+            return Ok(Vec::new());
+        }
+        let input_buffer = Vec::<u16>::with_capacity(SIZE_20MS);
+
+        let mut output = Vec::new();
         let len = self
             .encoder
-            .encode_to(&[0_i16; MONO_20MS], &mut output)
-            .unwrap();
+            .encode_to_vec(input_buffer.as_slice(), &mut output)?;
         Ok(output.to_vec())
     }
 }
