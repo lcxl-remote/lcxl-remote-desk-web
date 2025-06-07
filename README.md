@@ -61,7 +61,7 @@ LCXL Web Remote Desk 提供了以下功能：
 * ~~将 rust 的工具链切到 gnu 版本~~：
     * `rustup toolchain install stable-x86_64-pc-windows-gnu`
     * `rustup default stable-x86_64-pc-windows-gnu`
-* 变更LLDB的配置(需要rust 1.87版本，参见[issue](https://github.com/vadimcn/codelldb/issues/1195#issuecomment-2732752040))：
+* (1,87版本有bug，无法编译cmake文件)~~变更LLDB的配置(需要rust 1.87版本，参见[issue](https://github.com/vadimcn/codelldb/issues/1195#issuecomment-2732752040))：~~
     * `rustup toolchain install stable-x86_64-pc-windows-gnu`
     * 打开Vscode的配置页面，搜索`lldb.script` 按照文档说的进行变更操作：`"lldb.script": { "lang.rust.toolchain": "stable-x86_64-pc-windows-gnu" }`
 
