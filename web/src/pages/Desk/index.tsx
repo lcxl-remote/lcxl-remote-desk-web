@@ -48,6 +48,7 @@ const Desk: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
   const remote_video = useRef<HTMLVideoElement>(null);
+  const remote_audio = useRef<HTMLAudioElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
   //let socket = null;
@@ -78,11 +79,24 @@ const Desk: React.FC = () => {
             });
             pc.ontrack = function (event) {
               console.log("ontrack", event);
-              var el = remote_video.current!;
-              el.srcObject = event.streams[0]
-              el.autoplay = true
-              el.controls = false
-              el.onresize = (event,) => { console.log("video on resize, width=" + el.clientWidth + ", height=" + el.clientHeight + ", event=", event) }
+              switch (event.track.kind) {
+                case 'video':
+                  var el = remote_video.current!;
+                  el.srcObject = event.streams[0];
+                  el.autoplay = true;
+                  el.controls = false;
+                  el.onresize = (event,) => { console.log("video on resize, width=" + el.clientWidth + ", height=" + el.clientHeight + ", event=", event) };
+                  break;
+                case 'audio':
+                  var audio_ref = remote_audio.current!;
+                  audio_ref.srcObject = event.streams[0];
+                  audio_ref.autoplay = true;
+                  audio_ref.controls = false;
+                  break;
+                default:
+                  console.error("Unknown track kind", event.track.kind);
+                  throw new Error("Unknown track kind");
+              };
             };
             pc.oniceconnectionstatechange = e => {
               console.log("pc.iceConnectionState=" + pc.iceConnectionState + ", event is ", e);
@@ -143,7 +157,7 @@ const Desk: React.FC = () => {
       return () => {
         console.log("关闭websocket", sock);
         sock.close();
-        console.log("关闭webrtc peer connection",  peerconnectionRef.current);
+        console.log("关闭webrtc peer connection", peerconnectionRef.current);
         peerconnectionRef.current?.close();
       };
     })();
@@ -153,6 +167,7 @@ const Desk: React.FC = () => {
   return (
     <PageContainer>
       <video ref={remote_video} autoPlay muted className={styles.videoContainer} />
+      <audio ref={remote_audio} autoPlay muted />
       <Divider />
 
     </PageContainer>

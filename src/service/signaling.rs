@@ -9,6 +9,7 @@ use futures_util::StreamExt;
 use log::{error, info, warn};
 use tokio::time::Duration;
 use tokio::time::Instant;
+use webrtc::api::media_engine::MIME_TYPE_OPUS;
 use webrtc::{
     api::{
         APIBuilder,
@@ -30,6 +31,7 @@ use webrtc::{
 use crate::model::common::ErrorCode;
 use crate::model::settings::Settings;
 use crate::model::signaling::WebRTConnectionState;
+use crate::service::record_audio::{OpusAudioCapture, REFTIMES_PER_MILLISEC};
 use crate::{
     desk_error::DeskError,
     model::{
@@ -41,9 +43,7 @@ use crate::{
         },
         user::CurrentUser,
     },
-    service::record_screen::{
-        H264ScreenOutput, ScreenOutputVideoNal, ScreenRecordManager, ScreenRecordManagerArc,
-    },
+    service::record_screen::{H264ScreenOutput, ScreenOutputVideoNal, ScreenRecordManager},
 };
 
 pub async fn handle_signaling(
@@ -97,6 +97,8 @@ pub struct SignalingContext {
     pub rtc_peer_connection: Arc<RTCPeerConnection>,
     /// capture screen task runtime
     pub capture_screen_runtime: tokio::runtime::Runtime,
+    /// capture audio task runtime
+    pub capture_audio_runtime: tokio::runtime::Runtime,
 }
 
 impl SignalingContext {
@@ -105,18 +107,18 @@ impl SignalingContext {
         mut session: Session,
         user: CurrentUser,
     ) -> Result<Self, DeskError> {
-        let tmp_settings = {
+        let local_settings = {
             let shared_settings = settings.lock().await;
             shared_settings.clone()
         };
         let mut urls = Vec::<String>::new();
-        for interface in tmp_settings.turn.interfaces.iter() {
+        for interface in local_settings.turn.interfaces.iter() {
             urls.push(format!("turn:{}", interface.external.to_string()));
         }
         let ice_server = RTCIceServer {
             urls: urls,
-            username: tmp_settings.user.login_user_name.clone(),
-            credential: tmp_settings.user.login_password.clone(),
+            username: local_settings.user.login_user_name.clone(),
+            credential: local_settings.user.login_password.clone(),
         };
         let ice_servers = vec![ice_server];
         let init_signaling_data = InitSignalingData {
@@ -179,22 +181,48 @@ impl SignalingContext {
         // like NACK this needs to be called.
         tokio::spawn(async move {
             let mut rtcp_buf = vec![0u8; 1500];
-            log::info!("Start to read incoming RTCP packets");
+            log::info!("Start to read incoming video RTCP packets");
             while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
-            log::info!("Finished to read incoming RTCP packets");
+            log::info!("Finished to read incoming video RTCP packets");
             Result::<(), DeskError>::Ok(())
         });
 
-        let session2 = session.clone();
+        let audio_track = Arc::new(TrackLocalStaticSample::new(
+            RTCRtpCodecCapability {
+                mime_type: MIME_TYPE_OPUS.to_owned(),
+                ..Default::default()
+            },
+            "audio".to_owned(),
+            "webrtc-rs".to_owned(),
+        ));
+
+        // Add this newly created track to the PeerConnection
+        let rtp_sender = rtc_peer_connection
+            .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal + Send + Sync>)
+            .await?;
+        // Read incoming RTCP packets
+        // Before these packets are returned they are processed by interceptors. For things
+        // like NACK this needs to be called.
+        tokio::spawn(async move {
+            let mut rtcp_buf = vec![0u8; 1500];
+            log::info!("Start to read incoming audio RTCP packets");
+            while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
+            log::info!("Finished to read incoming audio RTCP packets");
+            Result::<(), DeskError>::Ok(())
+        });
+
+        let session_for_video = session.clone();
         let capture_screen_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(1)
             .thread_name("capture_screen_task")
             .build()?;
+        let screen_settings = local_settings.clone();
+
         // Spawn a blocking task to capture screen and send video
         capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
-                tmp_settings,
+                screen_settings,
                 video_ice_connection_state_rx,
                 video_track,
             )
@@ -202,7 +230,7 @@ impl SignalingContext {
 
             if let Err(error) = result {
                 log::error!("Capture screen task failed, error: {:?}", error);
-                session2
+                session_for_video
                     .close(Some(CloseReason::from((
                         CloseCode::Abnormal,
                         error.to_string(),
@@ -210,18 +238,49 @@ impl SignalingContext {
                     .await?;
                 return Err(error);
             }
-
+            log::info!("Capture screen task completed successfully");
             return result;
         });
+
+        let session_for_audio = session.clone();
+        let capture_audio_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("capture_audio_task")
+            .build()?;
+
+        let audio_settings = local_settings.clone();
+        capture_audio_runtime.spawn(async move {
+            let result = SignalingContext::capture_audio_task(
+                audio_settings,
+                audio_ice_connection_state_rx,
+                audio_track,
+            )
+            .await;
+
+            if let Err(error) = result {
+                log::error!("Capture audio task failed, error: {:?}", error);
+                session_for_audio
+                    .close(Some(CloseReason::from((
+                        CloseCode::Abnormal,
+                        error.to_string(),
+                    ))))
+                    .await?;
+                return Err(error);
+            }
+            log::info!("Capture audio task completed successfully");
+            return result;
+        });
+
         // Set the handler for ICE connection state
         // This will notify you when the peer has connected/disconnected
         rtc_peer_connection.on_ice_connection_state_change(Box::new(
             move |connection_state: RTCIceConnectionState| {
-                log::info!("RTC ice connection State has changed {connection_state}");
+                log::info!("RTC ice connection state has changed {connection_state}");
                 let state = WebRTConnectionState::from(&connection_state);
                 if state != WebRTConnectionState::Init {
                     if let Err(error) = ice_connection_state_tx.send(state) {
-                        log::error!("Failed to send connection state: {:?}", error)
+                        log::error!("Failed to send connection state: {:?}", error);
                     }
                 }
 
@@ -233,11 +292,11 @@ impl SignalingContext {
         // This will notify you when the peer has connected/disconnected
         rtc_peer_connection.on_peer_connection_state_change(Box::new(
             move |s: RTCPeerConnectionState| {
-                log::info!("Peer Connection State has changed: {s}");
+                log::info!("Peer connection state has changed: {s}");
                 let state = WebRTConnectionState::from(&s);
                 if state == WebRTConnectionState::Closed {
                     if let Err(error) = ice_connection_state_tx_2.send(state) {
-                        log::error!("Failed to send connection state: {:?}", error)
+                        log::error!("Failed to send connection state: {:?}", error);
                     }
                 }
 
@@ -251,12 +310,14 @@ impl SignalingContext {
             user,
             rtc_peer_connection,
             capture_screen_runtime,
+            capture_audio_runtime,
         })
     }
 
+    /// Start the screen capture task
     pub async fn capture_screen_task(
         settings: Settings,
-        mut video_ice_connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
+        mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
     ) -> Result<(), DeskError> {
         log::info!("Preparing to capture screen...");
@@ -264,8 +325,8 @@ impl SignalingContext {
 
         let mut h264_screen_output = H264ScreenOutput::new(manager, 0);
         // Wait for connection established
-        while let Ok(_) = video_ice_connection_state_rx.changed().await {
-            let state = *video_ice_connection_state_rx.borrow_and_update();
+        while let Ok(_) = connection_state_rx.changed().await {
+            let state = *connection_state_rx.borrow_and_update();
             match state {
                 WebRTConnectionState::Init => {
                     log::info!("current state is {}, keep wait", state);
@@ -326,8 +387,8 @@ impl SignalingContext {
             );
             tokio::select! {
              _ = ticker.tick() => {},
-             _ = video_ice_connection_state_rx.changed() => {
-                let state = *video_ice_connection_state_rx.borrow_and_update();
+             _ = connection_state_rx.changed() => {
+                let state = *connection_state_rx.borrow_and_update();
                 match state {
                     WebRTConnectionState::Init => {
                         log::warn!("current state is {}, it should be happened?", state);
@@ -344,6 +405,89 @@ impl SignalingContext {
              },
             }
         }
+        Result::<(), DeskError>::Ok(())
+    }
+
+    /// Capture audio and send it to the remote peer
+    pub async fn capture_audio_task(
+        settings: Settings,
+        mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
+        audio_track: Arc<TrackLocalStaticSample>,
+    ) -> Result<(), DeskError> {
+        log::info!("Preparing to capture audio...");
+        let mut opus_audio_capture = OpusAudioCapture::new()?;
+
+        // Wait for connection established
+        while let Ok(_) = connection_state_rx.changed().await {
+            let state = *connection_state_rx.borrow_and_update();
+            match state {
+                WebRTConnectionState::Init => {
+                    log::info!("current state is {}, keep wait", state);
+                }
+                WebRTConnectionState::Connected => {
+                    log::info!("RTC is connected");
+                    break;
+                }
+                _ => {
+                    log::error!("Unexcepted state {}, exit to capture audio", state);
+                    return DeskError::custom_error(
+                        ErrorCode::SYSTEM_ERROR,
+                        format!("Unexcepted state {}", state),
+                    );
+                }
+            }
+        }
+
+        log::info!("Start to capture audio and send to peer");
+        opus_audio_capture.start()?;
+        let mills =
+            (opus_audio_capture.record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64;
+        // It is important to use a time.Ticker instead of time.Sleep because
+        // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
+        // * works around latency issues with Sleep
+        let mut ticker = tokio::time::interval(Duration::from_millis(mills));
+        loop {
+            log::debug!("begin capture audio");
+            let start = Instant::now();
+            let buffer = opus_audio_capture.get_buffer()?;
+            let time1 = start.elapsed();
+            log::debug!("capture audio time: {} μs", time1.as_micros(),);
+            if !buffer.is_empty() {
+                audio_track
+                    .write_sample(&Sample {
+                        data: Bytes::copy_from_slice(buffer.as_slice()),
+                        duration: Duration::from_millis(mills),
+                        ..Default::default()
+                    })
+                    .await?;
+                let time2 = start.elapsed();
+                log::debug!(
+                    "write sample time: {} μs",
+                    time2.as_micros() - time1.as_micros(),
+                );
+            }
+
+            tokio::select! {
+             _ = ticker.tick() => {},
+             _ = connection_state_rx.changed() => {
+                let state = *connection_state_rx.borrow_and_update();
+                match state {
+                    WebRTConnectionState::Init => {
+                        log::warn!("current state is {}, it should be happened?", state);
+                    },
+                    WebRTConnectionState::Connected => {
+                        log::warn!("RTC is connected");
+
+                    },
+                    _ => {
+                        log::error!("Unexcepted state {}, exit to capture audio", state);
+                        break;
+                    },
+                }
+             },
+            }
+        }
+        opus_audio_capture.stop()?;
         Result::<(), DeskError>::Ok(())
     }
 

@@ -1,4 +1,3 @@
-use futures::SinkExt;
 use windows::Win32::{
     Media::Audio::{
         AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -11,20 +10,20 @@ use windows::Win32::{
     },
 };
 
-use crate::desk_error::DeskError;
+use crate::{desk_error::DeskError, model::common::ErrorCode};
 
 /// REFERENCE_TIME time units per second and per millisecond
 const REFTIMES_PER_SEC: u64 = 10000000;
-const REFTIMES_PER_MILLISEC: u64 = REFTIMES_PER_SEC / 1000;
+pub const REFTIMES_PER_MILLISEC: u64 = REFTIMES_PER_SEC / 1000;
 
-pub struct AudioRecord {
+pub struct AudioCapture {
     pub format: WAVEFORMATEX,
     pub audio_client: IAudioClient,
     pub audio_capture_client: IAudioCaptureClient,
     pub hns_actual_duration: u64,
 }
 
-impl AudioRecord {
+impl AudioCapture {
     /// Create a new instance of AudioRecord. Initializes COM
     /// see https://learn.microsoft.com/zh-cn/windows/win32/coreaudio/capturing-a-stream
     pub fn new() -> Result<Self, DeskError> {
@@ -65,7 +64,7 @@ impl AudioRecord {
             REFTIMES_PER_SEC as u64 * buffer_frame_count as u64 / format.nSamplesPerSec as u64;
 
         let audio_capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }?;
-        Ok(AudioRecord {
+        Ok(AudioCapture {
             format,
             audio_client,
             audio_capture_client,
@@ -100,7 +99,7 @@ impl AudioRecord {
             )?
         };
         log::debug!(
-            "dwflags: {}, buffer pointer: {:#x}, size: {}",
+            "dwflags: {}, buffer pointer: {:#x}, frame number: {}",
             dwflags,
             pdata as usize,
             numframestoread
@@ -111,7 +110,12 @@ impl AudioRecord {
         {
             Vec::<u8>::new()
         } else {
-            let buffer = unsafe { std::slice::from_raw_parts(pdata, numframestoread as usize) };
+            let pdata_len: usize = numframestoread as usize
+                * self.format.wBitsPerSample as usize
+                * self.format.nChannels as usize
+                / 8; // Calculate the length of the buffer in bytes
+
+            let buffer = unsafe { std::slice::from_raw_parts(pdata, pdata_len) };
             buffer.to_vec()
         };
 
@@ -132,7 +136,7 @@ impl AudioRecord {
     }
 }
 
-impl Drop for AudioRecord {
+impl Drop for AudioCapture {
     fn drop(&mut self) {
         unsafe {
             log::info!("dropping AudioRecord, uninitializing COM");
@@ -141,16 +145,21 @@ impl Drop for AudioRecord {
     }
 }
 
-pub struct OpusAudioRecord {
-    pub record: AudioRecord,
+pub struct OpusAudioCapture {
+    pub record: AudioCapture,
     pub encoder: opusic_c::Encoder,
     pub buffer: Vec<u8>,
 }
+/// Workaround for Arc not being Send + Sync
+/// This is only works in single thread, so it is safe to use in this case.
+unsafe impl Send for OpusAudioCapture {}
 
-impl OpusAudioRecord {
+unsafe impl Sync for OpusAudioCapture {}
+
+impl OpusAudioCapture {
     pub fn new() -> Result<Self, DeskError> {
-        let record = AudioRecord::new()?;
-        let opus_audio_record = OpusAudioRecord {
+        let record = AudioCapture::new()?;
+        let opus_audio_record = OpusAudioCapture {
             record,
             encoder: opusic_c::Encoder::new(
                 opusic_c::Channels::Stereo,
@@ -187,17 +196,46 @@ impl OpusAudioRecord {
             20,
         );
 
-        // u16 = u8*2
-        if self.buffer.len() * 2 < SIZE_20MS {
+        // u32 = u8*4
+
+        if self.buffer.len() < SIZE_20MS * self.record.format.wBitsPerSample as usize / 8 {
             return Ok(Vec::new());
         }
-        let input_buffer = Vec::<u16>::with_capacity(SIZE_20MS);
+        let result = if self.record.format.wBitsPerSample == 32 {
+            let input_buffer = unsafe {
+                core::slice::from_raw_parts(self.buffer.as_ptr() as *const f32, SIZE_20MS)
+            };
 
-        let mut output = Vec::new();
-        let len = self
-            .encoder
-            .encode_to_vec(input_buffer.as_slice(), &mut output)?;
-        Ok(output.to_vec())
+            let mut output = Vec::with_capacity(SIZE_20MS * 4);
+            let len = self
+                .encoder
+                .encode_float_to_vec(input_buffer, &mut output)?;
+            log::debug!("encode_float_to_vec len={}", len);
+            Ok(output.to_vec())
+        } else if self.record.format.wBitsPerSample == 16 {
+            let input_buffer = unsafe {
+                core::slice::from_raw_parts(self.buffer.as_ptr() as *const u16, SIZE_20MS)
+            };
+
+            let mut output = Vec::new();
+            let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
+            log::debug!("encode_to_vec len={}", len);
+
+            Ok(output.to_vec())
+        } else {
+            DeskError::custom_error(
+                ErrorCode::SYSTEM_ERROR,
+                format!(
+                    "Unsupport bit per sample: {}",
+                    self.record.format.wBitsPerSample as u16
+                ),
+            )
+        };
+        let current_buffer_len = self.buffer.len();
+        let removed = self.buffer.drain(0..current_buffer_len);
+        // let current_buffer_len = self.buffer.len();
+        log::debug!("removed {} bytes from buffer", removed.len());
+        result
     }
 }
 
@@ -224,7 +262,7 @@ mod tests {
     fn test_audio() -> Result<(), DeskError> {
         initialize();
 
-        let audio_record = AudioRecord::new()?;
+        let audio_record = AudioCapture::new()?;
         audio_record.start()?;
         let dur = time::Duration::from_millis(
             (audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
@@ -232,8 +270,36 @@ mod tests {
         log::info!("sleep for {:?}", dur);
         sleep(dur);
         let buffer = audio_record.get_buffer()?;
-        log::info!("buffer len: {}", buffer.len());
+        log::info!("buffer1 len: {}", buffer.len());
+
+        sleep(dur);
+        let buffer = audio_record.get_buffer()?;
+        log::info!("buffer2 len: {}", buffer.len());
+
+        sleep(dur);
+        let buffer = audio_record.get_buffer()?;
+        log::info!("buffer3 len: {}", buffer.len());
         audio_record.stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_opus_audio() -> Result<(), DeskError> {
+        initialize();
+
+        let mut opus_audio_record = OpusAudioCapture::new()?;
+        opus_audio_record.start()?;
+        let dur = time::Duration::from_millis(
+            (opus_audio_record.record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
+        );
+        sleep(dur);
+        let buffer = opus_audio_record.get_buffer()?;
+        log::info!("buffer1 len: {}", buffer.len());
+
+        sleep(dur);
+        let buffer = opus_audio_record.get_buffer()?;
+        log::info!("buffer2 len: {}", buffer.len());
+        opus_audio_record.stop()?;
         Ok(())
     }
 }
