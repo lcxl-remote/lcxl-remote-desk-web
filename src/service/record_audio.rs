@@ -180,8 +180,11 @@ impl OpusAudioCapture {
     }
 
     pub fn get_buffer(&mut self) -> Result<Vec<u8>, DeskError> {
-        let buffer = self.record.get_buffer()?;
-        if !buffer.is_empty() {
+        loop {
+            let buffer = self.record.get_buffer()?;
+            if buffer.is_empty() {
+                break;
+            }
             log::debug!(
                 "extend buffer (size={}) to opus audio buffer (size={})",
                 buffer.len(),
@@ -196,46 +199,49 @@ impl OpusAudioCapture {
             20,
         );
 
+        let mut encoded_buffer = Vec::<u8>::new();
         // u32 = u8*4
+        loop {
+            let frame_20ms_byte_len = SIZE_20MS * self.record.format.wBitsPerSample as usize / 8;
+            if self.buffer.len() < frame_20ms_byte_len {
+                break;
+            }
+            let mut result = if self.record.format.wBitsPerSample == 32 {
+                let input_buffer = unsafe {
+                    core::slice::from_raw_parts(self.buffer.as_ptr() as *const f32, SIZE_20MS)
+                };
 
-        if self.buffer.len() < SIZE_20MS * self.record.format.wBitsPerSample as usize / 8 {
-            return Ok(Vec::new());
+                let mut output = Vec::with_capacity(SIZE_20MS * 4);
+                let len = self
+                    .encoder
+                    .encode_float_to_vec(input_buffer, &mut output)?;
+                log::debug!("encode_float_to_vec len={}", len);
+                output.to_vec()
+            } else if self.record.format.wBitsPerSample == 16 {
+                let input_buffer = unsafe {
+                    core::slice::from_raw_parts(self.buffer.as_ptr() as *const u16, SIZE_20MS)
+                };
+
+                let mut output = Vec::new();
+                let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
+                log::debug!("encode_to_vec len={}", len);
+
+                output.to_vec()
+            } else {
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!(
+                        "Unsupport bit per sample: {}",
+                        self.record.format.wBitsPerSample as u16
+                    ),
+                );
+            };
+            encoded_buffer.append(&mut result);
+            let removed: Vec<u8> = self.buffer.drain(0..frame_20ms_byte_len).collect();
+            // let current_buffer_len = self.buffer.len();
+            log::debug!("removed {} bytes from buffer", removed.len());
         }
-        let result = if self.record.format.wBitsPerSample == 32 {
-            let input_buffer = unsafe {
-                core::slice::from_raw_parts(self.buffer.as_ptr() as *const f32, SIZE_20MS)
-            };
-
-            let mut output = Vec::with_capacity(SIZE_20MS * 4);
-            let len = self
-                .encoder
-                .encode_float_to_vec(input_buffer, &mut output)?;
-            log::debug!("encode_float_to_vec len={}", len);
-            Ok(output.to_vec())
-        } else if self.record.format.wBitsPerSample == 16 {
-            let input_buffer = unsafe {
-                core::slice::from_raw_parts(self.buffer.as_ptr() as *const u16, SIZE_20MS)
-            };
-
-            let mut output = Vec::new();
-            let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
-            log::debug!("encode_to_vec len={}", len);
-
-            Ok(output.to_vec())
-        } else {
-            DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
-                format!(
-                    "Unsupport bit per sample: {}",
-                    self.record.format.wBitsPerSample as u16
-                ),
-            )
-        };
-        let current_buffer_len = self.buffer.len();
-        let removed = self.buffer.drain(0..current_buffer_len);
-        // let current_buffer_len = self.buffer.len();
-        log::debug!("removed {} bytes from buffer", removed.len());
-        result
+        Ok(encoded_buffer)
     }
 }
 

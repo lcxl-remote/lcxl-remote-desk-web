@@ -81,17 +81,17 @@ const Desk: React.FC = () => {
               console.log("ontrack", event);
               switch (event.track.kind) {
                 case 'video':
-                  var el = remote_video.current!;
-                  el.srcObject = event.streams[0];
-                  el.autoplay = true;
-                  el.controls = false;
-                  el.onresize = (event,) => { console.log("video on resize, width=" + el.clientWidth + ", height=" + el.clientHeight + ", event=", event) };
+                  var video_ref = remote_video.current!;
+                  video_ref.srcObject = event.streams[0];
+                  video_ref.autoplay = true;
+                  video_ref.controls = false;
+                  video_ref.onresize = (event,) => { console.log("video on resize, width=" + video_ref.clientWidth + ", height=" + video_ref.clientHeight + ", event=", event) };
                   break;
                 case 'audio':
                   var audio_ref = remote_audio.current!;
                   audio_ref.srcObject = event.streams[0];
                   audio_ref.autoplay = true;
-                  audio_ref.controls = false;
+                  audio_ref.controls = true;
                   break;
                 default:
                   console.error("Unknown track kind", event.track.kind);
@@ -127,13 +127,8 @@ const Desk: React.FC = () => {
               pc.setLocalDescription(d);
               const local_description_json = JSON.stringify(d);
               console.info("create offer, local description=" + local_description_json);
-
-
             }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
-
-
             peerconnectionRef.current = pc;
-
             break;
           case SIGNALING_TYPE_CODE_ANSWER:
             const answer_description_json = JSON.parse(signaling_model.signaling_data!) as RTCSessionDescriptionInit;
