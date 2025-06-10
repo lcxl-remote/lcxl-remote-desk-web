@@ -34,14 +34,17 @@ mime = "0.3"
 futures-util = "0.3"
 bytestring = "1.4"
 webrtc = "0.13"
-image = "0.25"
 bytes = "1.10"
 yuv = "0.8"
 openh264 = "0.8"
 futures = "0.3"
 webrtc-ice = "0.13"
 opusic-c = "1.5"
+rtp = "0.13"
+webrtc-media = "0.10"
 
+[dev-dependencies]
+image = "0.25"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

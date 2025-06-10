@@ -212,7 +212,7 @@ impl OpusAudioCapture {
                 };
 
                 let mut output = Vec::with_capacity(SIZE_20MS * 4);
-                
+
                 let len = self
                     .encoder
                     .encode_float_to_vec(input_buffer, &mut output)?;
@@ -248,9 +248,13 @@ impl OpusAudioCapture {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Once, thread::sleep, time};
+    use std::{env, fs::File, sync::Once, thread::sleep, time};
 
+    use bytes::Bytes;
     use log::LevelFilter;
+
+    use webrtc::{media::io::ogg_writer::OggWriter, rtp};
+    use webrtc_media::io::Writer;
 
     use super::*;
 
@@ -294,6 +298,15 @@ mod tests {
     fn test_opus_audio() -> Result<(), DeskError> {
         initialize();
 
+        // initialize ogg writer
+        let tmp_dir = env::temp_dir();
+        let tmp_dir = tmp_dir.join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(tmp_dir.as_path())?;
+        let name = tmp_dir.join(format!("record.ogg"));
+
+        let mut ogg_write = OggWriter::new(File::create(name.as_path())?, 48000, 2)?;
+        let mut current_timesamp = 0usize;
+
         let mut opus_audio_record = OpusAudioCapture::new()?;
         opus_audio_record.start()?;
         let dur = time::Duration::from_millis(
@@ -302,11 +315,45 @@ mod tests {
         sleep(dur);
         let buffer = opus_audio_record.get_buffer()?;
         log::info!("buffer1 len: {}", buffer.len());
+        let buffer_bytes = Bytes::from(buffer);
+
+        let mut pkt = rtp::packet::Packet {
+            header: rtp::header::Header::default(),
+            payload: buffer_bytes,
+        };
+        current_timesamp += opusic_c::frame_bytes_size(
+            opusic_c::SampleRate::Hz48000,
+            opusic_c::Channels::Stereo,
+            500,
+        );
+        pkt.header.timestamp = current_timesamp as u32;
+
+        ogg_write.write_rtp(&pkt)?;
 
         sleep(dur);
         let buffer = opus_audio_record.get_buffer()?;
         log::info!("buffer2 len: {}", buffer.len());
+
+        let buffer_bytes = Bytes::from(buffer);
+
+        let mut pkt = rtp::packet::Packet {
+            header: rtp::header::Header::default(),
+            payload: buffer_bytes,
+        };
+
+        current_timesamp += opusic_c::frame_bytes_size(
+            opusic_c::SampleRate::Hz48000,
+            opusic_c::Channels::Stereo,
+            500,
+        );
+        pkt.header.timestamp = current_timesamp as u32;
+
+        ogg_write.write_rtp(&pkt)?;
+
+        // stop recording and write the final packet to the file
         opus_audio_record.stop()?;
+        ogg_write.close()?;
+        log::info!("Written audio data to {}", name.to_string_lossy());
         Ok(())
     }
 }
