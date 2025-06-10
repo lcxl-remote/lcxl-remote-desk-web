@@ -382,7 +382,7 @@ impl SignalingContext {
                 .await?;
             let time2 = start.elapsed();
             log::debug!(
-                "write sample time: {} μs",
+                "write video sample time: {} μs",
                 time2.as_micros() - time1.as_micros(),
             );
             tokio::select! {
@@ -451,7 +451,11 @@ impl SignalingContext {
             let start = Instant::now();
             let buffer = opus_audio_capture.get_buffer()?;
             let time1 = start.elapsed();
-            log::debug!("capture audio time: {} μs", time1.as_micros(),);
+            log::debug!(
+                "capture audio time: {} μs, buffer len: {}",
+                time1.as_micros(),
+                buffer.len(),
+            );
             if !buffer.is_empty() {
                 audio_track
                     .write_sample(&Sample {
@@ -462,7 +466,7 @@ impl SignalingContext {
                     .await?;
                 let time2 = start.elapsed();
                 log::debug!(
-                    "write sample time: {} μs",
+                    "write audio sample time: {} μs",
                     time2.as_micros() - time1.as_micros(),
                 );
             }

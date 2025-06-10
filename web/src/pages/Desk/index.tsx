@@ -162,7 +162,7 @@ const Desk: React.FC = () => {
   return (
     <PageContainer>
       <video ref={remote_video} autoPlay muted className={styles.videoContainer} />
-      <audio ref={remote_audio} autoPlay muted />
+      <audio ref={remote_audio} autoPlay />
       <Divider />
 
     </PageContainer>

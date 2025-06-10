@@ -212,6 +212,7 @@ impl OpusAudioCapture {
                 };
 
                 let mut output = Vec::with_capacity(SIZE_20MS * 4);
+                
                 let len = self
                     .encoder
                     .encode_float_to_vec(input_buffer, &mut output)?;
