@@ -1,8 +1,12 @@
 use windows::Win32::{
-    Media::Audio::{
-        AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-        IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX,
-        eConsole, eRender,
+    Media::{
+        Audio::{
+            AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+            IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
+            WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eConsole, eRender,
+        },
+        KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
+        Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
     },
     System::Com::{
         CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
@@ -36,6 +40,24 @@ impl AudioCapture {
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
         let pformat = unsafe { audio_client.GetMixFormat()? };
         let format = unsafe { *pformat };
+        if format.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 {
+            let extensible_format = pformat as *mut WAVEFORMATEXTENSIBLE;
+            let tmp_format = *unsafe { extensible_format.as_ref().unwrap() };
+            let dw_channel_mask = tmp_format.dwChannelMask;
+            let sub_format = tmp_format.SubFormat;
+            let valid_bits_pre_sample = unsafe { tmp_format.Samples.wValidBitsPerSample };
+            let sample_pre_block = unsafe { tmp_format.Samples.wSamplesPerBlock };
+            log::info!(
+                "Audio extensible format: SubFormat={:?}, dwChannelMask={}, wValidBitsPerSample={}, wSamplesPerBlock={}",
+                sub_format,
+                dw_channel_mask,
+                valid_bits_pre_sample,
+                sample_pre_block
+            );
+            if sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {
+                log::info!("Audio format is IEEE_FLOAT");
+            }
+        }
 
         log::info!(
             "Audio format: cbSize={}, nAvgBytesPerSec={}, nBlockAlign={}, nChannels={}, nSamplesPerSec={}, wBitsPerSample={}, wFormatTag={}",
@@ -104,17 +126,14 @@ impl AudioCapture {
             pdata as usize,
             numframestoread
         );
+        let pdata_len: usize = numframestoread as usize * self.format.nBlockAlign as usize; // Calculate the length of the buffer in bytes
+
         let buffer_vec = if dwflags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0
             || pdata.is_null()
             || numframestoread <= 0
         {
-            Vec::<u8>::new()
+            vec![0; numframestoread as usize]
         } else {
-            let pdata_len: usize = numframestoread as usize
-                * self.format.wBitsPerSample as usize
-                * self.format.nChannels as usize
-                / 8; // Calculate the length of the buffer in bytes
-
             let buffer = unsafe { std::slice::from_raw_parts(pdata, pdata_len) };
             buffer.to_vec()
         };
@@ -145,6 +164,12 @@ impl Drop for AudioCapture {
     }
 }
 
+#[derive(Debug)]
+pub struct OpusAudioBuffer {
+    pub data: Vec<u8>,            // Raw audio data
+    pub origin_num_frames: usize, // Number of frames in the original
+}
+
 pub struct OpusAudioCapture {
     pub record: AudioCapture,
     pub encoder: opusic_c::Encoder,
@@ -168,6 +193,7 @@ impl OpusAudioCapture {
             )?,
             buffer: Vec::new(),
         };
+
         Ok(opus_audio_record)
     }
 
@@ -179,7 +205,7 @@ impl OpusAudioCapture {
         self.record.stop()
     }
 
-    pub fn get_buffer(&mut self) -> Result<Vec<u8>, DeskError> {
+    pub fn get_buffer(&mut self) -> Result<OpusAudioBuffer, DeskError> {
         loop {
             let buffer = self.record.get_buffer()?;
             if buffer.is_empty() {
@@ -198,6 +224,7 @@ impl OpusAudioCapture {
             opusic_c::Channels::Stereo,
             20,
         );
+        let mut origin_num_frames = 0; // origin_num_frames
 
         let mut encoded_buffer = Vec::<u8>::new();
         // u32 = u8*4
@@ -211,13 +238,13 @@ impl OpusAudioCapture {
                     core::slice::from_raw_parts(self.buffer.as_ptr() as *const f32, SIZE_20MS)
                 };
 
-                let mut output = Vec::with_capacity(SIZE_20MS * 4);
+                let mut output = [0; 4000];
 
                 let len = self
                     .encoder
-                    .encode_float_to_vec(input_buffer, &mut output)?;
-                log::debug!("encode_float_to_vec len={}", len);
-                output.to_vec()
+                    .encode_float_to_slice(input_buffer, &mut output)?;1111?
+                log::debug!("encode_float_to_slice len={}", len);
+                output[..len].to_vec()
             } else if self.record.format.wBitsPerSample == 16 {
                 let input_buffer = unsafe {
                     core::slice::from_raw_parts(self.buffer.as_ptr() as *const u16, SIZE_20MS)
@@ -241,8 +268,12 @@ impl OpusAudioCapture {
             let removed: Vec<u8> = self.buffer.drain(0..frame_20ms_byte_len).collect();
             // let current_buffer_len = self.buffer.len();
             log::debug!("removed {} bytes from buffer", removed.len());
+            origin_num_frames += removed.len() / self.record.format.nBlockAlign as usize;
         }
-        Ok(encoded_buffer)
+        Ok(OpusAudioBuffer {
+            data: encoded_buffer,
+            origin_num_frames,
+        })
     }
 }
 
@@ -312,43 +343,27 @@ mod tests {
         let dur = time::Duration::from_millis(
             (opus_audio_record.record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
         );
-        sleep(dur);
-        let buffer = opus_audio_record.get_buffer()?;
-        log::info!("buffer1 len: {}", buffer.len());
-        let buffer_bytes = Bytes::from(buffer);
+        for i in 0..10 {
+            sleep(dur);
+            let buffer = opus_audio_record.get_buffer()?;
+            log::info!(
+                "buffer {} len: {}, origin_num_frames: {}",
+                i,
+                buffer.data.len(),
+                buffer.origin_num_frames
+            );
+            let buffer_bytes = Bytes::from(buffer.data);
 
-        let mut pkt = rtp::packet::Packet {
-            header: rtp::header::Header::default(),
-            payload: buffer_bytes,
-        };
-        current_timesamp += opusic_c::frame_bytes_size(
-            opusic_c::SampleRate::Hz48000,
-            opusic_c::Channels::Stereo,
-            500,
-        );
-        pkt.header.timestamp = current_timesamp as u32;
+            let mut pkt = rtp::packet::Packet {
+                header: rtp::header::Header::default(),
+                payload: buffer_bytes,
+            };
+            current_timesamp += buffer.origin_num_frames;
+            pkt.header.timestamp = current_timesamp as u32;
+            log::info!("current_timesamp: {}", pkt.header.timestamp);
 
-        ogg_write.write_rtp(&pkt)?;
-
-        sleep(dur);
-        let buffer = opus_audio_record.get_buffer()?;
-        log::info!("buffer2 len: {}", buffer.len());
-
-        let buffer_bytes = Bytes::from(buffer);
-
-        let mut pkt = rtp::packet::Packet {
-            header: rtp::header::Header::default(),
-            payload: buffer_bytes,
-        };
-
-        current_timesamp += opusic_c::frame_bytes_size(
-            opusic_c::SampleRate::Hz48000,
-            opusic_c::Channels::Stereo,
-            500,
-        );
-        pkt.header.timestamp = current_timesamp as u32;
-
-        ogg_write.write_rtp(&pkt)?;
+            ogg_write.write_rtp(&pkt)?;
+        }
 
         // stop recording and write the final packet to the file
         opus_audio_record.stop()?;

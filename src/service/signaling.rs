@@ -454,12 +454,12 @@ impl SignalingContext {
             log::debug!(
                 "capture audio time: {} μs, buffer len: {}",
                 time1.as_micros(),
-                buffer.len(),
+                buffer.data.len(),
             );
-            if !buffer.is_empty() {
+            if !buffer.data.is_empty() {
                 audio_track
                     .write_sample(&Sample {
-                        data: Bytes::copy_from_slice(buffer.as_slice()),
+                        data: Bytes::copy_from_slice(buffer.data.as_slice()),
                         duration: Duration::from_millis(mills),
                         ..Default::default()
                     })
