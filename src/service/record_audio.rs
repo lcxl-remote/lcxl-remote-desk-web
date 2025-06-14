@@ -242,7 +242,7 @@ impl OpusAudioCapture {
 
                 let len = self
                     .encoder
-                    .encode_float_to_slice(input_buffer, &mut output)?;1111?
+                    .encode_float_to_slice(input_buffer, &mut output)?;
                 log::debug!("encode_float_to_slice len={}", len);
                 output[..len].to_vec()
             } else if self.record.format.wBitsPerSample == 16 {
