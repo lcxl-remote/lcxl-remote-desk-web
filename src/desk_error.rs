@@ -69,7 +69,8 @@ pub enum DeskError {
     /// A openh264 error occurred.
     Openh264Error(openh264::Error),
     /// A opus error occurred.
-    OpusError(Backtrace, opusic_c::ErrorCode),
+    OpusError(Backtrace, opus::Error),
+    //OpusError(Backtrace, opusic_c::ErrorCode),
     /// A log parse level error occurred.
     ParseLevelError(log::ParseLevelError),
     /// Desk custom error
@@ -237,9 +238,15 @@ impl From<openh264::Error> for DeskError {
         DeskError::Openh264Error(err)
     }
 }
-
+/*
 impl From<opusic_c::ErrorCode> for DeskError {
     fn from(err: opusic_c::ErrorCode) -> Self {
+        DeskError::OpusError(backtrace::Backtrace::capture(), err)
+    }
+}
+ */
+impl From<opus::Error> for DeskError {
+    fn from(err: opus::Error) -> Self {
         DeskError::OpusError(backtrace::Backtrace::capture(), err)
     }
 }

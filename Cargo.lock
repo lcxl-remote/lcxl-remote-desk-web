@@ -498,6 +498,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "audiopus_sys"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62314a1546a2064e033665d658e88c620a62904be945f8147e6b16c3db9f8651"
+dependencies = [
+ "cmake",
+ "log",
+ "pkg-config",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2087,7 +2098,7 @@ dependencies = [
  "log",
  "mime",
  "openh264",
- "opusic-c",
+ "opus",
  "rtp",
  "serde",
  "serde_json",
@@ -2479,21 +2490,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "opusic-c"
-version = "1.5.2"
+name = "opus"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91b8825303ca8a55b9087d1e99e9cb5f4e4a9de00a7ff507f87a951a56d5323d"
+checksum = "6526409b274a7e98e55ff59d96aafd38e6cd34d46b7dbbc32ce126dffcd75e8e"
 dependencies = [
- "opusic-sys",
-]
-
-[[package]]
-name = "opusic-sys"
-version = "0.5.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "984e4589427afc4c5469a128675e65e1e3b03d8e98b5bf8a8e96c4cc5e84ed2f"
-dependencies = [
- "cmake",
+ "audiopus_sys",
  "libc",
 ]
 

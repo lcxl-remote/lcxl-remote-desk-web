@@ -1,16 +1,15 @@
+use std::ptr::null_mut;
+
 use windows::Win32::{
     Media::{
         Audio::{
-            AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-            IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-            WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eConsole, eRender,
+            eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM
         },
         KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
         Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
     },
     System::Com::{
-        CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-        CoUninitialize,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED
     },
 };
 
@@ -70,6 +69,22 @@ impl AudioCapture {
             format.wFormatTag as u16
         );
 
+        let pcm_format = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_PCM as u16,
+            nChannels: 2,
+            nSamplesPerSec: 44100,
+            nAvgBytesPerSec: 44100*4,
+            nBlockAlign: 4,
+            wBitsPerSample: 16,
+            cbSize: 0,
+        };
+        let mut closet_format_match: *mut WAVEFORMATEX = null_mut();
+        let result = unsafe { audio_client.IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, &pcm_format, Some(&mut closet_format_match)) };
+        if result.is_ok() {
+            log::info!("Support pcm, closet_format_match={:?}", closet_format_match);
+        } else {
+            log::info!("not support pcm closet_format_match={:?}", closet_format_match);
+        }
         unsafe {
             audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
@@ -172,7 +187,8 @@ pub struct OpusAudioBuffer {
 
 pub struct OpusAudioCapture {
     pub record: AudioCapture,
-    pub encoder: opusic_c::Encoder,
+    //pub encoder: opusic_c::Encoder,
+    pub encoder: opus::Encoder,
     pub buffer: Vec<u8>,
 }
 /// Workaround for Arc not being Send + Sync
@@ -184,13 +200,17 @@ unsafe impl Sync for OpusAudioCapture {}
 impl OpusAudioCapture {
     pub fn new() -> Result<Self, DeskError> {
         let record = AudioCapture::new()?;
-        let opus_audio_record = OpusAudioCapture {
-            record,
-            encoder: opusic_c::Encoder::new(
+        /* 
+        let encoder = opusic_c::Encoder::new(
                 opusic_c::Channels::Stereo,
                 opusic_c::SampleRate::Hz48000,
                 opusic_c::Application::Audio,
-            )?,
+            )?;
+*/
+        let encoder = opus::Encoder::new(48000, opus::Channels::Stereo, opus::Application::Audio)?;
+        let opus_audio_record = OpusAudioCapture {
+            record,
+            encoder,
             buffer: Vec::new(),
         };
 
@@ -219,11 +239,14 @@ impl OpusAudioCapture {
             self.buffer.extend(buffer);
         }
 
+        /*
         const SIZE_20MS: usize = opusic_c::frame_bytes_size(
             opusic_c::SampleRate::Hz48000,
             opusic_c::Channels::Stereo,
             20,
         );
+         */
+        const SIZE_20MS: usize = 48000*2/1000*20;
         let mut origin_num_frames = 0; // origin_num_frames
 
         let mut encoded_buffer = Vec::<u8>::new();
@@ -240,21 +263,25 @@ impl OpusAudioCapture {
 
                 let mut output = [0; 4000];
 
+                /*
                 let len = self
                     .encoder
                     .encode_float_to_slice(input_buffer, &mut output)?;
+                 */
+                let len = self.encoder.encode_float(input_buffer, &mut output)?;
                 log::debug!("encode_float_to_slice len={}", len);
                 output[..len].to_vec()
             } else if self.record.format.wBitsPerSample == 16 {
                 let input_buffer = unsafe {
-                    core::slice::from_raw_parts(self.buffer.as_ptr() as *const u16, SIZE_20MS)
+                    core::slice::from_raw_parts(self.buffer.as_ptr() as *const i16, SIZE_20MS)
                 };
 
-                let mut output = Vec::new();
-                let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
+                let mut output = [0; 4000];
+                //let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
+                let len = self.encoder.encode(input_buffer, &mut output)?;
                 log::debug!("encode_to_vec len={}", len);
 
-                output.to_vec()
+                output[..len].to_vec()
             } else {
                 return DeskError::custom_error(
                     ErrorCode::SYSTEM_ERROR,
