@@ -126,3 +126,6 @@ pacman -S glib2-devel \
     * https://github.com/awxkee/yuvutils-rs
 * pic-scale：图片缩放：
     * https://github.com/awxkee/pic-scale
+
+
+### 切换播放设备，例如切换到耳机会造成当前的无法录音
