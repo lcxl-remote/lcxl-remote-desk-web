@@ -31,7 +31,9 @@ use webrtc::{
 use crate::model::common::ErrorCode;
 use crate::model::settings::Settings;
 use crate::model::signaling::WebRTConnectionState;
-use crate::service::record_audio::{OpusAudioCapture, REFTIMES_PER_MILLISEC};
+use crate::service::record_audio::{
+    OpusAudioCapture, REFTIMES_PER_MILLISEC, destroy_thread, init_thread,
+};
 use crate::{
     desk_error::DeskError,
     model::{
@@ -251,6 +253,7 @@ impl SignalingContext {
 
         let audio_settings = local_settings.clone();
         capture_audio_runtime.spawn(async move {
+            init_thread()?;
             let result = SignalingContext::capture_audio_task(
                 audio_settings,
                 audio_ice_connection_state_rx,
@@ -268,7 +271,8 @@ impl SignalingContext {
                     .await?;
                 return Err(error);
             }
-            log::info!("Capture audio task completed successfully");
+            log::info!("Capture audio task completed");
+            destroy_thread()?;
             return result;
         });
 

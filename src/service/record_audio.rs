@@ -1,31 +1,43 @@
 use std::ptr::null_mut;
 
-use utoipa::Number;
+use crate::{desk_error::DeskError, model::common::ErrorCode};
 use windows::Win32::{
+    Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
     Media::{
         Audio::{
             AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-            IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-            WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eConsole, eRender,
+            DEVICE_STATE_ACTIVE, EDataFlow, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+            IMMEndpoint, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+            WAVEFORMATEXTENSIBLE_0, eCapture, eConsole, eRender,
         },
         KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
-        MediaFoundation::MF_PD_ASF_DATA_START_OFFSET,
         Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
     },
     System::Com::{
         CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-        CoUninitialize,
+        CoUninitialize, STGM_READ,
     },
 };
-
-use crate::{desk_error::DeskError, model::common::ErrorCode};
+use windows_core::GUID;
+use windows_core::Interface;
 
 /// REFERENCE_TIME time units per second and per millisecond
 const REFTIMES_PER_SEC: u64 = 10000000;
 pub const REFTIMES_PER_MILLISEC: u64 = REFTIMES_PER_SEC / 1000;
 
+pub fn init_thread() -> Result<(), DeskError> {
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
+    Ok(())
+}
+
+pub fn destroy_thread() -> Result<(), DeskError> {
+    log::info!("dropping thread, uninitializing COM");
+    unsafe { CoUninitialize() };
+    Ok(())
+}
+
 pub struct AudioCapture {
-    pub format: WAVEFORMATEX,
+    pub format: WAVEFORMATEXTENSIBLE,
     pub audio_client: IAudioClient,
     pub audio_capture_client: IAudioCaptureClient,
     pub hns_actual_duration: u64,
@@ -37,25 +49,22 @@ pub struct AudioBuffer<T> {
     pub num_frames: usize, // Number of frames
 }
 
-fn log_wave_format(pformat: *mut WAVEFORMATEX) {
-    let format = unsafe { *pformat };
+fn log_wave_format(format: &WAVEFORMATEXTENSIBLE) {
     let mut log_str = format!(
         "Audio format: cbSize={}, nAvgBytesPerSec={}, nBlockAlign={}, nChannels={}, nSamplesPerSec={}, wBitsPerSample={}, wFormatTag={}",
-        format.cbSize as u16,
-        format.nAvgBytesPerSec as u32,
-        format.nBlockAlign as u16,
-        format.nChannels as u16,
-        format.nSamplesPerSec as u32,
-        format.wBitsPerSample as u16,
-        format.wFormatTag as u16
+        format.Format.cbSize as u16,
+        format.Format.nAvgBytesPerSec as u32,
+        format.Format.nBlockAlign as u16,
+        format.Format.nChannels as u16,
+        format.Format.nSamplesPerSec as u32,
+        format.Format.wBitsPerSample as u16,
+        format.Format.wFormatTag as u16
     );
-    if format.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 {
-        let extensible_format = pformat as *mut WAVEFORMATEXTENSIBLE;
-        let tmp_format = *unsafe { extensible_format.as_ref().unwrap() };
-        let dw_channel_mask = tmp_format.dwChannelMask;
-        let sub_format = tmp_format.SubFormat;
-        let valid_bits_pre_sample = unsafe { tmp_format.Samples.wValidBitsPerSample };
-        let sample_pre_block = unsafe { tmp_format.Samples.wSamplesPerBlock };
+    if format.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 {
+        let dw_channel_mask = format.dwChannelMask;
+        let sub_format = format.SubFormat;
+        let valid_bits_pre_sample = unsafe { format.Samples.wValidBitsPerSample };
+        let sample_pre_block = unsafe { format.Samples.wSamplesPerBlock };
         log_str+= format!(
                 "\nAudio extensible format: SubFormat={:?}, dwChannelMask={}, wValidBitsPerSample={}, wSamplesPerBlock={}",
                 sub_format,
@@ -70,23 +79,78 @@ fn log_wave_format(pformat: *mut WAVEFORMATEX) {
     log::info!("{}", log_str);
 }
 
+#[derive(Debug, Clone)]
+pub enum AudioDataFlow {
+    Render,
+    Capture,
+}
+
+#[derive(Debug, Clone)]
+pub struct AudioDevice {
+    pub id: String,
+    pub firendly_name: String,
+    pub data_flow: AudioDataFlow,
+}
+
 impl AudioCapture {
+    pub fn enum_devices(dataflow: EDataFlow) -> Result<Vec<AudioDevice>, DeskError> {
+        let device_enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+        let collection =
+            unsafe { device_enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE)? };
+        let count = unsafe { collection.GetCount()? };
+        let mut devices = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let device = unsafe { collection.Item(i) }?;
+
+            let device_id_ptr = unsafe { device.GetId() }?;
+            let device_id = unsafe { device_id_ptr.to_string() }?;
+            unsafe { CoTaskMemFree(Some(device_id_ptr.as_ptr() as *const _)) };
+            let prop_store = unsafe { device.OpenPropertyStore(STGM_READ) }?;
+
+            let prop_var = unsafe { prop_store.GetValue(&PKEY_Device_FriendlyName) }?;
+            let firendly_name = if !prop_var.is_empty() {
+                let firendly_name_ptr = unsafe { prop_var.Anonymous.Anonymous.Anonymous.pwszVal };
+                unsafe { firendly_name_ptr.to_string()? }
+            } else {
+                "".to_string()
+            };
+            let endpoint = device.cast::<IMMEndpoint>()?;
+            let data_flow = unsafe { endpoint.GetDataFlow() }?;
+            println!(
+                "index: {}, device_id: {}, firendly_name: {}, data flow: {:?}",
+                i, device_id, firendly_name, data_flow
+            );
+            let audio_data_flow = if data_flow == eCapture {
+                AudioDataFlow::Capture
+            } else if data_flow == eRender {
+                AudioDataFlow::Render
+            } else {
+                panic!("Should not be happend")
+            };
+            devices.push(AudioDevice {
+                id: device_id,
+                firendly_name: firendly_name,
+                data_flow: audio_data_flow,
+            });
+        }
+        Ok(devices)
+    }
+
     /// Create a new instance of AudioRecord. Initializes COM
     /// see https://learn.microsoft.com/zh-cn/windows/win32/coreaudio/capturing-a-stream
     pub fn new() -> Result<Self, DeskError> {
-        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
-
         let device_enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
         let device = unsafe { device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
 
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
         let p_mix_format = unsafe { audio_client.GetMixFormat()? };
-        let mut pformat = p_mix_format;
+        let pformat = p_mix_format;
+        let format = AudioCapture::get_wave_format_tensible(p_mix_format);
+        log_wave_format(&format);
 
-        log_wave_format(pformat);
-
-        let mut pcm_format = WAVEFORMATEX {
+        let pcm_format = WAVEFORMATEX {
             wFormatTag: WAVE_FORMAT_PCM as u16,
             nChannels: 2,
             nSamplesPerSec: 48000,
@@ -110,7 +174,8 @@ impl AudioCapture {
             log::info!("not support pcm");
         }
         if let Some(closet_format) = unsafe { closet_format_match.as_mut() } {
-            log_wave_format(closet_format);
+            let format = AudioCapture::get_wave_format_tensible(closet_format);
+            log_wave_format(&format);
         }
 
         unsafe { CoTaskMemFree(Some(closet_format_match as *mut _)) };
@@ -126,9 +191,9 @@ impl AudioCapture {
         };
         unsafe { CoTaskMemFree(Some(p_mix_format as *mut _)) };
         let buffer_frame_count = unsafe { audio_client.GetBufferSize() }?;
-        let format = unsafe { *pformat };
-        let hns_actual_duration =
-            REFTIMES_PER_SEC as u64 * buffer_frame_count as u64 / format.nSamplesPerSec as u64;
+
+        let hns_actual_duration = REFTIMES_PER_SEC as u64 * buffer_frame_count as u64
+            / format.Format.nSamplesPerSec as u64;
 
         let audio_capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }?;
         Ok(AudioCapture {
@@ -137,6 +202,20 @@ impl AudioCapture {
             audio_capture_client,
             hns_actual_duration,
         })
+    }
+
+    fn get_wave_format_tensible(format: *mut WAVEFORMATEX) -> WAVEFORMATEXTENSIBLE {
+        let tmp_format = unsafe { *format };
+        if tmp_format.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 {
+            let p_wave_format_extensible = format as *mut WAVEFORMATEXTENSIBLE;
+            return unsafe { *p_wave_format_extensible };
+        }
+        WAVEFORMATEXTENSIBLE {
+            Format: tmp_format,
+            Samples: WAVEFORMATEXTENSIBLE_0 { wReserved: 0 },
+            dwChannelMask: 0,
+            SubFormat: GUID::default(),
+        }
     }
 
     pub fn start(&self) -> Result<(), DeskError> {
@@ -174,12 +253,10 @@ impl AudioCapture {
             pdata as usize,
             numframestoread
         );
-        if size_of::<T>() != self.format.wBitsPerSample as usize / 8 {
-            panic!("Data type size mismatch with audio format");
-        }
-        let mut p_data_with_type = pdata as *mut T; // Cast the pointer to
+
+        let p_data_with_type = pdata as *mut T; // Cast the pointer to T type
         let pdata_len: usize =
-            numframestoread as usize * self.format.nBlockAlign as usize / size_of::<T>(); // Calculate the length of the buffer in bytes
+            numframestoread as usize * self.format.Format.nBlockAlign as usize / size_of::<T>(); // Calculate the length of the buffer in bytes
 
         let buffer_vec = if p_data_with_type.is_null() || numframestoread <= 0 {
             vec![]
@@ -205,6 +282,9 @@ impl AudioCapture {
     where
         T: std::clone::Clone + Default,
     {
+        if size_of::<T>() != self.format.Format.wBitsPerSample as usize / 8 {
+            panic!("Data type size mismatch with audio format");
+        }
         let mut buffer = vec![];
         let mut num_frames: usize = 0;
         loop {
@@ -236,15 +316,6 @@ impl AudioCapture {
         log::info!("audio capture client stopped");
 
         Ok(())
-    }
-}
-
-impl Drop for AudioCapture {
-    fn drop(&mut self) {
-        unsafe {
-            log::info!("dropping AudioRecord, uninitializing COM");
-            CoUninitialize();
-        }
     }
 }
 
@@ -296,7 +367,7 @@ impl OpusAudioCapture {
 
     pub fn get_buffer(&mut self) -> Result<OpusAudioBuffer, DeskError> {
         //let buffer = self.record.get_buffer()?;
-        let buffer = if self.record.format.wBitsPerSample == 32 {
+        let buffer = if self.record.format.Format.wBitsPerSample == 32 {
             let float_buffer = self.record.get_buffer::<f32>()?;
             unsafe {
                 core::slice::from_raw_parts(
@@ -304,7 +375,7 @@ impl OpusAudioCapture {
                     float_buffer.buffer.len() * 4,
                 )
             }
-        } else if self.record.format.wBitsPerSample == 16 {
+        } else if self.record.format.Format.wBitsPerSample == 16 {
             let i16_buffer = self.record.get_buffer::<i16>()?;
             unsafe {
                 core::slice::from_raw_parts(
@@ -317,7 +388,7 @@ impl OpusAudioCapture {
                 ErrorCode::SYSTEM_ERROR,
                 format!(
                     "Unsupport bit per sample: {}",
-                    self.record.format.wBitsPerSample as u16
+                    self.record.format.Format.wBitsPerSample as u16
                 ),
             );
         };
@@ -343,11 +414,12 @@ impl OpusAudioCapture {
         let mut encoded_buffer = Vec::<u8>::new();
         // u32 = u8*4
         loop {
-            let frame_20ms_byte_len = SIZE_20MS * self.record.format.wBitsPerSample as usize / 8;
+            let frame_20ms_byte_len =
+                SIZE_20MS * self.record.format.Format.wBitsPerSample as usize / 8;
             if self.buffer.len() < frame_20ms_byte_len {
                 break;
             }
-            let mut result = if self.record.format.wBitsPerSample == 32 {
+            let mut result = if self.record.format.Format.wBitsPerSample == 32 {
                 let input_buffer = unsafe {
                     core::slice::from_raw_parts(self.buffer.as_ptr() as *const f32, SIZE_20MS)
                 };
@@ -362,7 +434,7 @@ impl OpusAudioCapture {
                 let len = self.encoder.encode_float(input_buffer, &mut output)?;
                 log::debug!("encode_float_to_slice len={}", len);
                 output[..len].to_vec()
-            } else if self.record.format.wBitsPerSample == 16 {
+            } else if self.record.format.Format.wBitsPerSample == 16 {
                 let input_buffer = unsafe {
                     core::slice::from_raw_parts(self.buffer.as_ptr() as *const i16, SIZE_20MS)
                 };
@@ -378,7 +450,7 @@ impl OpusAudioCapture {
                     ErrorCode::SYSTEM_ERROR,
                     format!(
                         "Unsupport bit per sample: {}",
-                        self.record.format.wBitsPerSample as u16
+                        self.record.format.Format.wBitsPerSample as u16
                     ),
                 );
             };
@@ -386,7 +458,7 @@ impl OpusAudioCapture {
             let removed: Vec<u8> = self.buffer.drain(0..frame_20ms_byte_len).collect();
             // let current_buffer_len = self.buffer.len();
             log::debug!("removed {} bytes from buffer", removed.len());
-            origin_num_frames += removed.len() / self.record.format.nBlockAlign as usize;
+            origin_num_frames += removed.len() / self.record.format.Format.nBlockAlign as usize;
         }
         Ok(OpusAudioBuffer {
             data: encoded_buffer,
@@ -404,6 +476,7 @@ mod tests {
 
     use webrtc::{media::io::ogg_writer::OggWriter, rtp};
     use webrtc_media::io::Writer;
+    use windows::Win32::Media::Audio::{eAll, eCapture};
 
     use super::*;
 
@@ -415,31 +488,21 @@ mod tests {
                 .format_timestamp_micros()
                 .filter_level(LevelFilter::Debug)
                 .init();
+            init_thread().unwrap();
         });
     }
 
     #[test]
-    fn test_audio() -> Result<(), DeskError> {
+    fn test_device_info() -> Result<(), DeskError> {
         initialize();
 
-        let audio_record = AudioCapture::new()?;
-        audio_record.start()?;
-        let dur = time::Duration::from_millis(
-            (audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
-        );
-        log::info!("sleep for {:?}", dur);
-        sleep(dur);
-        let buffer = audio_record.get_buffer::<f32>()?;
-        log::info!("buffer1 len: {}", buffer.buffer.len());
+        let devices = AudioCapture::enum_devices(eAll)?;
+        log::debug!("all devices: {:?}", devices);
 
-        sleep(dur);
-        let buffer = audio_record.get_buffer::<f32>()?;
-        log::info!("buffer2 len: {}", buffer.buffer.len());
-
-        sleep(dur);
-        let buffer = audio_record.get_buffer::<f32>()?;
-        log::info!("buffer3 len: {}", buffer.buffer.len());
-        audio_record.stop()?;
+        let devices = AudioCapture::enum_devices(eCapture)?;
+        log::debug!("capture devices: {:?}", devices);
+        let devices = AudioCapture::enum_devices(eRender)?;
+        log::debug!("rennder devices: {:?}", devices);
         Ok(())
     }
 
@@ -456,7 +519,7 @@ mod tests {
             bits_per_sample: 32,
             sample_format: hound::SampleFormat::Float,
         };
-        let mut writer = hound::WavWriter::create("sine.wav", spec).unwrap();
+        let mut writer = hound::WavWriter::create("sample/sine.wav", spec).unwrap();
         let dur = time::Duration::from_millis(
             (audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
         );

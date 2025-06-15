@@ -73,6 +73,8 @@ pub enum DeskError {
     //OpusError(Backtrace, opusic_c::ErrorCode),
     /// A log parse level error occurred.
     ParseLevelError(log::ParseLevelError),
+    /// A from utf16 error occurred.
+    FromUtf16Error(std::string::FromUtf16Error),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -107,11 +109,9 @@ impl Display for DeskError {
                 error.fmt(f)
             }
             DeskError::JsonError(error) => error.fmt(f),
-            //DeskError::RusqliteError(error) => error.fmt(f),
             DeskError::ConfigError(error) => error.fmt(f),
             DeskError::TomlEditError(error) => error.fmt(f),
             DeskError::TomlError(error) => error.fmt(f),
-            //DeskError::R2d2Error(error) => error.fmt(f),
             DeskError::CustomError(error) => error.fmt(f),
             DeskError::AnyhowError(error) => error.fmt(f),
             DeskError::TokioTaskJoinError(error) => error.fmt(f),
@@ -134,6 +134,7 @@ impl Display for DeskError {
                 f.write_fmt(format_args!("{:?}", error))
             }
             DeskError::ParseLevelError(error) => error.fmt(f),
+            DeskError::FromUtf16Error(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -254,6 +255,12 @@ impl From<opus::Error> for DeskError {
 impl From<log::ParseLevelError> for DeskError {
     fn from(err: log::ParseLevelError) -> Self {
         DeskError::ParseLevelError(err)
+    }
+}
+
+impl From<std::string::FromUtf16Error> for DeskError {
+    fn from(err: std::string::FromUtf16Error) -> Self {
+        DeskError::FromUtf16Error(err)
     }
 }
 
