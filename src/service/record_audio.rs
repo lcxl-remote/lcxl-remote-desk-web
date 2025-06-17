@@ -366,23 +366,99 @@ impl OpusAudioCapture {
     }
 
     pub fn get_buffer(&mut self) -> Result<OpusAudioBuffer, DeskError> {
-        //let buffer = self.record.get_buffer()?;
-        let buffer = if self.record.format.Format.wBitsPerSample == 32 {
-            let float_buffer = self.record.get_buffer::<f32>()?;
-            unsafe {
-                core::slice::from_raw_parts(
-                    float_buffer.buffer.as_ptr() as *const u8,
-                    float_buffer.buffer.len() * 4,
-                )
-            }
+        const SIZE_20MS: usize = 48000 * 2 / 1000 * 20;
+        let frame_20ms_byte_len = SIZE_20MS * self.record.format.Format.wBitsPerSample as usize / 8;
+        // the internal buffer is not enough to hold a 20ms frame, read more data from the audio device
+        if self.buffer.len() < frame_20ms_byte_len {
+            if self.record.format.Format.wBitsPerSample == 32 {
+                let float_buffer = self.record.get_buffer::<f32>()?;
+                let buffer = unsafe {
+                    core::slice::from_raw_parts(
+                        float_buffer.buffer.as_ptr() as *const u8,
+                        float_buffer.buffer.len() * 4,
+                    )
+                };
+                if !buffer.is_empty() {
+                    log::debug!(
+                        "extend buffer (size={}) to opus audio buffer (size={})",
+                        buffer.len(),
+                        self.buffer.len()
+                    );
+                    self.buffer.extend(buffer);
+                }
+            } else if self.record.format.Format.wBitsPerSample == 16 {
+                let i16_buffer = self.record.get_buffer::<i16>()?;
+                let buffer = unsafe {
+                    core::slice::from_raw_parts(
+                        i16_buffer.buffer.as_ptr() as *const u8,
+                        i16_buffer.buffer.len() * 2,
+                    )
+                };
+                if !buffer.is_empty() {
+                    log::debug!(
+                        "extend buffer (size={}) to opus audio buffer (size={})",
+                        buffer.len(),
+                        self.buffer.len()
+                    );
+                    self.buffer.extend(buffer);
+                }
+            } else {
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!(
+                        "Unsupport bit per sample: {}",
+                        self.record.format.Format.wBitsPerSample as u16
+                    ),
+                );
+            };
+        }
+
+        /*
+        const SIZE_20MS: usize = opusic_c::frame_bytes_size(
+            opusic_c::SampleRate::Hz48000,
+            opusic_c::Channels::Stereo,
+            20,
+        );
+         */
+
+        let origin_num_frames = 0; // origin_num_frames
+
+        let encoded_buffer = Vec::<u8>::new();
+
+        if self.buffer.len() < frame_20ms_byte_len {
+            return Ok(OpusAudioBuffer {
+                data: encoded_buffer,
+                origin_num_frames,
+            });
+        }
+        // u32 = u8*4
+
+        let encoded_buffer = if self.record.format.Format.wBitsPerSample == 32 {
+            let input_buffer = unsafe {
+                core::slice::from_raw_parts(self.buffer.as_ptr() as *const f32, SIZE_20MS)
+            };
+
+            let mut output = [0; 4000];
+
+            /*
+            let len = self
+                .encoder
+                .encode_float_to_slice(input_buffer, &mut output)?;
+             */
+            let len = self.encoder.encode_float(input_buffer, &mut output)?;
+            log::debug!("encode_float_to_slice len={}", len);
+            output[..len].to_vec()
         } else if self.record.format.Format.wBitsPerSample == 16 {
-            let i16_buffer = self.record.get_buffer::<i16>()?;
-            unsafe {
-                core::slice::from_raw_parts(
-                    i16_buffer.buffer.as_ptr() as *const u8,
-                    i16_buffer.buffer.len() * 2,
-                )
-            }
+            let input_buffer = unsafe {
+                core::slice::from_raw_parts(self.buffer.as_ptr() as *const i16, SIZE_20MS)
+            };
+
+            let mut output = [0; 4000];
+            //let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
+            let len = self.encoder.encode(input_buffer, &mut output)?;
+            log::debug!("encode_to_vec len={}", len);
+
+            output[..len].to_vec()
         } else {
             return DeskError::custom_error(
                 ErrorCode::SYSTEM_ERROR,
@@ -393,73 +469,11 @@ impl OpusAudioCapture {
             );
         };
 
-        if !buffer.is_empty() {
-            log::debug!(
-                "extend buffer (size={}) to opus audio buffer (size={})",
-                buffer.len(),
-                self.buffer.len()
-            );
-            self.buffer.extend(buffer);
-        }
-        /*
-        const SIZE_20MS: usize = opusic_c::frame_bytes_size(
-            opusic_c::SampleRate::Hz48000,
-            opusic_c::Channels::Stereo,
-            20,
-        );
-         */
-        const SIZE_20MS: usize = 48000 * 2 / 1000 * 20;
-        let mut origin_num_frames = 0; // origin_num_frames
+        let removed: Vec<u8> = self.buffer.drain(0..frame_20ms_byte_len).collect();
+        // let current_buffer_len = self.buffer.len();
+        log::debug!("removed {} bytes from buffer", removed.len());
+        let origin_num_frames = removed.len() / self.record.format.Format.nBlockAlign as usize;
 
-        let mut encoded_buffer = Vec::<u8>::new();
-        // u32 = u8*4
-        loop {
-            let frame_20ms_byte_len =
-                SIZE_20MS * self.record.format.Format.wBitsPerSample as usize / 8;
-            if self.buffer.len() < frame_20ms_byte_len {
-                break;
-            }
-            let mut result = if self.record.format.Format.wBitsPerSample == 32 {
-                let input_buffer = unsafe {
-                    core::slice::from_raw_parts(self.buffer.as_ptr() as *const f32, SIZE_20MS)
-                };
-
-                let mut output = [0; 4000];
-
-                /*
-                let len = self
-                    .encoder
-                    .encode_float_to_slice(input_buffer, &mut output)?;
-                 */
-                let len = self.encoder.encode_float(input_buffer, &mut output)?;
-                log::debug!("encode_float_to_slice len={}", len);
-                output[..len].to_vec()
-            } else if self.record.format.Format.wBitsPerSample == 16 {
-                let input_buffer = unsafe {
-                    core::slice::from_raw_parts(self.buffer.as_ptr() as *const i16, SIZE_20MS)
-                };
-
-                let mut output = [0; 4000];
-                //let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
-                let len = self.encoder.encode(input_buffer, &mut output)?;
-                log::debug!("encode_to_vec len={}", len);
-
-                output[..len].to_vec()
-            } else {
-                return DeskError::custom_error(
-                    ErrorCode::SYSTEM_ERROR,
-                    format!(
-                        "Unsupport bit per sample: {}",
-                        self.record.format.Format.wBitsPerSample as u16
-                    ),
-                );
-            };
-            encoded_buffer.append(&mut result);
-            let removed: Vec<u8> = self.buffer.drain(0..frame_20ms_byte_len).collect();
-            // let current_buffer_len = self.buffer.len();
-            log::debug!("removed {} bytes from buffer", removed.len());
-            origin_num_frames += removed.len() / self.record.format.Format.nBlockAlign as usize;
-        }
         Ok(OpusAudioBuffer {
             data: encoded_buffer,
             origin_num_frames,
@@ -533,6 +547,40 @@ mod tests {
             }
         }
         audio_record.stop()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_opus_decode() -> Result<(), DeskError> {
+        initialize();
+        let mut current_timesamp = 0usize;
+
+        let mut opus_audio_record = OpusAudioCapture::new()?;
+        opus_audio_record.start()?;
+        let dur = time::Duration::from_millis(
+            (opus_audio_record.record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
+        );
+        for i in 0..10 {
+            sleep(dur);
+            let buffer = opus_audio_record.get_buffer()?;
+            log::info!(
+                "buffer {} len: {}, origin_num_frames: {}",
+                i,
+                buffer.data.len(),
+                buffer.origin_num_frames
+            );
+            // decode again
+            let mut decoder = opus::Decoder::new(48000, opus::Channels::Stereo)?;
+            let mut decoded_buffer = vec![0f32; buffer.origin_num_frames * 2];
+
+            let sample_size =
+                decoder.decode_float(&buffer.data, decoded_buffer.as_mut_slice(), true)?;
+            log::info!("decoded sample size: {}", sample_size,);
+        }
+
+        // stop recording and write the final packet to the file
+        opus_audio_record.stop()?;
+
         Ok(())
     }
 

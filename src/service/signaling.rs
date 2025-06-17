@@ -444,27 +444,32 @@ impl SignalingContext {
 
         log::info!("Start to capture audio and send to peer");
         opus_audio_capture.start()?;
-        let mills =
-            (opus_audio_capture.record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64;
+        // sleep 5ms
+        let mills = 5u64;
         // It is important to use a time.Ticker instead of time.Sleep because
         // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(Duration::from_millis(mills));
         loop {
             log::debug!("begin capture audio");
-            let start = Instant::now();
-            let buffer = opus_audio_capture.get_buffer()?;
-            let time1 = start.elapsed();
-            log::debug!(
-                "capture audio time: {} μs, buffer len: {}",
-                time1.as_micros(),
-                buffer.data.len(),
-            );
-            if !buffer.data.is_empty() {
+            loop {
+                let start = Instant::now();
+                let buffer = opus_audio_capture.get_buffer()?;
+                let time1 = start.elapsed();
+                log::debug!(
+                    "capture audio time: {} μs, buffer len: {}",
+                    time1.as_micros(),
+                    buffer.data.len(),
+                );
+                if buffer.data.is_empty() {
+                    break;
+                }
+
                 audio_track
                     .write_sample(&Sample {
                         data: Bytes::copy_from_slice(buffer.data.as_slice()),
-                        duration: Duration::from_millis(mills),
+                        //TODO sleep 20ms
+                        duration: Duration::from_millis(20),
                         ..Default::default()
                     })
                     .await?;
@@ -474,7 +479,6 @@ impl SignalingContext {
                     time2.as_micros() - time1.as_micros(),
                 );
             }
-
             tokio::select! {
              _ = ticker.tick() => {},
              _ = connection_state_rx.changed() => {
