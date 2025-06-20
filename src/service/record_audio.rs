@@ -247,7 +247,7 @@ impl AudioCapture {
                 None,
             )?
         };
-        log::debug!(
+        log::trace!(
             "dwflags: {}, buffer pointer: {:#x}, frame number: {}",
             dwflags,
             pdata as usize,
@@ -297,7 +297,7 @@ impl AudioCapture {
             buffer.extend(one_buffer.buffer);
             num_frames += one_buffer.num_frames;
 
-            log::debug!(
+            log::trace!(
                 "add {} frames, buffer size: {} bytes, total {} frames, total buffer size: {} bytes",
                 one_buffer.num_frames,
                 one_buffer_len,
@@ -340,13 +340,6 @@ unsafe impl Sync for OpusAudioCapture {}
 impl OpusAudioCapture {
     pub fn new() -> Result<Self, DeskError> {
         let record = AudioCapture::new()?;
-        /*
-                let encoder = opusic_c::Encoder::new(
-                        opusic_c::Channels::Stereo,
-                        opusic_c::SampleRate::Hz48000,
-                        opusic_c::Application::Audio,
-                    )?;
-        */
         let encoder = opus::Encoder::new(48000, opus::Channels::Stereo, opus::Application::Audio)?;
         let opus_audio_record = OpusAudioCapture {
             record,
@@ -379,7 +372,7 @@ impl OpusAudioCapture {
                     )
                 };
                 if !buffer.is_empty() {
-                    log::debug!(
+                    log::trace!(
                         "extend buffer (size={}) to opus audio buffer (size={})",
                         buffer.len(),
                         self.buffer.len()
@@ -395,7 +388,7 @@ impl OpusAudioCapture {
                     )
                 };
                 if !buffer.is_empty() {
-                    log::debug!(
+                    log::trace!(
                         "extend buffer (size={}) to opus audio buffer (size={})",
                         buffer.len(),
                         self.buffer.len()
@@ -446,7 +439,7 @@ impl OpusAudioCapture {
                 .encode_float_to_slice(input_buffer, &mut output)?;
              */
             let len = self.encoder.encode_float(input_buffer, &mut output)?;
-            log::debug!("encode_float_to_slice len={}", len);
+            log::trace!("encode_float_to_slice len={}", len);
             output[..len].to_vec()
         } else if self.record.format.Format.wBitsPerSample == 16 {
             let input_buffer = unsafe {
@@ -456,7 +449,7 @@ impl OpusAudioCapture {
             let mut output = [0; 4000];
             //let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
             let len = self.encoder.encode(input_buffer, &mut output)?;
-            log::debug!("encode_to_vec len={}", len);
+            log::trace!("encode_to_vec len={}", len);
 
             output[..len].to_vec()
         } else {
@@ -471,7 +464,7 @@ impl OpusAudioCapture {
 
         let removed: Vec<u8> = self.buffer.drain(0..frame_20ms_byte_len).collect();
         // let current_buffer_len = self.buffer.len();
-        log::debug!("removed {} bytes from buffer", removed.len());
+        log::trace!("removed {} bytes from buffer", removed.len());
         let origin_num_frames = removed.len() / self.record.format.Format.nBlockAlign as usize;
 
         Ok(OpusAudioBuffer {

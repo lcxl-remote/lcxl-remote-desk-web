@@ -370,7 +370,7 @@ impl H264ScreenOutput {
 
 impl ScreenOutputVideoNal for H264ScreenOutput {
     fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
-        log::debug!("Start to get screen output frame");
+        log::trace!("Start to get screen output frame");
         if self.screen_output.is_none() {
             log::info!("screen output is none, need to create screen output");
             let new_screen_output = self.manager.get_screen_output(self.output_index)?;
@@ -415,7 +415,7 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
         }
 
         let screen_frame = result?;
-        log::debug!(
+        log::trace!(
             "Got screen output frame, info={:?}",
             screen_frame.frame_info
         );
@@ -436,13 +436,13 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             YuvStandardMatrix::Bt601,
             YuvConversionMode::Balanced,
         )?;
-        log::debug!("Converted to YUV420 format");
+        log::trace!("Converted to YUV420 format");
         let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
 
         let encoded_bit_stream = self.encoder.encode(&yuv_source)?;
-        log::debug!("Encoded to H.264 format");
+        log::trace!("Encoded to H.264 format");
         let encoded_bit_bytes = bytes::Bytes::from(encoded_bit_stream.to_vec());
-        log::debug!(
+        log::trace!(
             "frame_type={:?}, num_layers={:?}",
             encoded_bit_stream.frame_type(),
             encoded_bit_stream.num_layers()

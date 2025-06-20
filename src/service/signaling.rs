@@ -31,9 +31,7 @@ use webrtc::{
 use crate::model::common::ErrorCode;
 use crate::model::settings::Settings;
 use crate::model::signaling::WebRTConnectionState;
-use crate::service::record_audio::{
-    OpusAudioCapture, REFTIMES_PER_MILLISEC, destroy_thread, init_thread,
-};
+use crate::service::record_audio::{OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
     desk_error::DeskError,
     model::{
@@ -87,8 +85,8 @@ pub async fn handle_signaling(
             }
         }
     }
-    let result = signaling_context.rtc_peer_connection.close().await;
-    info!("Signaling session ended, result={:?}", result);
+
+    signaling_context.shutdown().await?;
     Ok(())
 }
 
@@ -318,6 +316,21 @@ impl SignalingContext {
         })
     }
 
+    pub async fn shutdown(self) -> Result<(), DeskError> {
+        let result = self.rtc_peer_connection.close().await;
+        info!("Signaling session ended, result={:?}", result);
+        // shutdown tokio runtime need in a sync context, so we use spawn_blocking to do it
+        tokio::task::spawn_blocking(move || {
+            info!("Begin to shutdown capture screen&audio runtime");
+            self.capture_screen_runtime
+                .shutdown_timeout(Duration::from_secs(100000));
+            self.capture_audio_runtime
+                .shutdown_timeout(Duration::from_secs(100000));
+            info!("End to shutdown capture screen&audio runtime");
+        })
+        .await?;
+        Ok(())
+    }
     /// Start the screen capture task
     pub async fn capture_screen_task(
         settings: Settings,
@@ -356,7 +369,7 @@ impl SignalingContext {
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(Duration::from_millis(3));
         loop {
-            log::debug!("begin caption scrren");
+            log::trace!("begin caption scrren");
             let start = Instant::now();
             let nal_info_result = h264_screen_output.get_nal();
             if nal_info_result.is_err() {
@@ -376,7 +389,7 @@ impl SignalingContext {
             let nal_info = nal_info_result.unwrap();
 
             let time1 = start.elapsed();
-            log::debug!("caption scrren time: {} μs", time1.as_micros(),);
+            log::trace!("caption scrren time: {} μs", time1.as_micros(),);
             video_track
                 .write_sample(&Sample {
                     data: nal_info.nal_bytes,
@@ -385,7 +398,7 @@ impl SignalingContext {
                 })
                 .await?;
             let time2 = start.elapsed();
-            log::debug!(
+            log::trace!(
                 "write video sample time: {} μs",
                 time2.as_micros() - time1.as_micros(),
             );
@@ -451,12 +464,12 @@ impl SignalingContext {
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(Duration::from_millis(mills));
         loop {
-            log::debug!("begin capture audio");
+            log::trace!("begin capture audio");
             loop {
                 let start = Instant::now();
                 let buffer = opus_audio_capture.get_buffer()?;
                 let time1 = start.elapsed();
-                log::debug!(
+                log::trace!(
                     "capture audio time: {} μs, buffer len: {}",
                     time1.as_micros(),
                     buffer.data.len(),
@@ -474,7 +487,7 @@ impl SignalingContext {
                     })
                     .await?;
                 let time2 = start.elapsed();
-                log::debug!(
+                log::trace!(
                     "write audio sample time: {} μs",
                     time2.as_micros() - time1.as_micros(),
                 );
@@ -489,7 +502,6 @@ impl SignalingContext {
                     },
                     WebRTConnectionState::Connected => {
                         log::warn!("RTC is connected");
-
                     },
                     _ => {
                         log::error!("Unexcepted state {}, exit to capture audio", state);
