@@ -580,9 +580,11 @@ mod tests {
 
         for station in &windows_station_list {
             log::info!("station: {}", station);
-            let station_name_utf16: Vec<u16> = station.encode_utf16().collect();
+            let mut station_name_utf16: Vec<u16> = station.encode_utf16().collect();
+            // add null terminator to the station name utf16
+            station_name_utf16.push(0);
             let station_name_ptr = windows::core::PCWSTR::from_raw(station_name_utf16.as_ptr());
-            let open_result = unsafe { OpenWindowStationW(station_name_ptr, true, 0) };
+            let open_result = unsafe { OpenWindowStationW(station_name_ptr, true, GENERIC_ALL.0) };
 
             if let Ok(handle) = open_result {
                 list_desktop_by_station_handle(handle);
@@ -600,6 +602,7 @@ mod tests {
         } else if let Err(e) = result {
             log::error!("GetProcessWindowStation error: {}", e);
         }
+
         Ok(())
     }
 }

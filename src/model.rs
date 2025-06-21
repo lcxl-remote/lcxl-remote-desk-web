@@ -1,6 +1,7 @@
 pub mod common;
 pub mod files;
 pub mod login;
+pub mod record_audio;
 pub mod record_screen;
 pub mod settings;
 pub mod signaling;

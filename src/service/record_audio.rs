@@ -1,15 +1,21 @@
 use std::ptr::null_mut;
 
-use crate::{desk_error::DeskError, model::common::ErrorCode};
+use crate::{
+    desk_error::DeskError,
+    model::{
+        common::ErrorCode,
+        record_audio::{AudioDataFlow, AudioDevice},
+    },
+};
 use windows::Win32::{
     Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
     Media::{
         Audio::{
             AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, EDataFlow, IAudioCaptureClient,
-            IAudioClient, IMMDeviceEnumerator, IMMEndpoint, MMDeviceEnumerator, WAVE_FORMAT_PCM,
-            WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, eCapture, eConsole,
-            eRender,
+            IAudioClient, IMMDevice, IMMDeviceEnumerator, IMMEndpoint, MMDeviceEnumerator,
+            WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, eCapture,
+            eConsole, eRender,
         },
         KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
         Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
@@ -81,33 +87,33 @@ fn log_wave_format(format: &WAVEFORMATEXTENSIBLE) {
     log::info!("{}", log_str);
 }
 
-#[derive(Debug, Clone)]
-pub enum AudioDataFlow {
-    Render,
-    Capture,
-}
-
-#[derive(Debug, Clone)]
-pub struct AudioDevice {
-    pub id: String,
-    pub firendly_name: String,
-    pub data_flow: AudioDataFlow,
-}
-
 impl AudioCapture {
+    pub fn get_device_id(device: &IMMDevice) -> Result<String, DeskError> {
+        let device_id_ptr = unsafe { device.GetId() }?;
+        let device_id = unsafe { device_id_ptr.to_string() }?;
+        unsafe { CoTaskMemFree(Some(device_id_ptr.as_ptr() as *const _)) };
+        return Ok(device_id);
+    }
+
+    /// Enumerates audio devices based on the specified data flow.
     pub fn enum_devices(dataflow: EDataFlow) -> Result<Vec<AudioDevice>, DeskError> {
         let device_enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
+
+        // get default audio endpoint for render and capture
+        let default_render_device =
+            unsafe { device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
+        let default_render_device_id = Self::get_device_id(&default_render_device)?;
+        let default_capture_device =
+            unsafe { device_enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }?;
+        let default_capture_device_id = Self::get_device_id(&default_capture_device)?;
         let collection =
             unsafe { device_enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE)? };
         let count = unsafe { collection.GetCount()? };
         let mut devices = Vec::with_capacity(count as usize);
         for i in 0..count {
             let device = unsafe { collection.Item(i) }?;
-
-            let device_id_ptr = unsafe { device.GetId() }?;
-            let device_id = unsafe { device_id_ptr.to_string() }?;
-            unsafe { CoTaskMemFree(Some(device_id_ptr.as_ptr() as *const _)) };
+            let device_id = Self::get_device_id(&device)?;
             let prop_store = unsafe { device.OpenPropertyStore(STGM_READ) }?;
 
             let prop_var = unsafe { prop_store.GetValue(&PKEY_Device_FriendlyName) }?;
@@ -119,21 +125,30 @@ impl AudioCapture {
             };
             let endpoint = device.cast::<IMMEndpoint>()?;
             let data_flow = unsafe { endpoint.GetDataFlow() }?;
-            println!(
+            log::info!(
                 "index: {}, device_id: {}, firendly_name: {}, data flow: {:?}",
-                i, device_id, firendly_name, data_flow
+                i,
+                device_id,
+                firendly_name,
+                data_flow
             );
-            let audio_data_flow = if data_flow == eCapture {
-                AudioDataFlow::Capture
+            let audio_data_flow;
+            let default_device;
+
+            if data_flow == eCapture {
+                audio_data_flow = AudioDataFlow::Capture;
+                default_device = device_id == default_capture_device_id;
             } else if data_flow == eRender {
-                AudioDataFlow::Render
+                audio_data_flow = AudioDataFlow::Render;
+                default_device = device_id == default_render_device_id;
             } else {
                 panic!("Should not be happend")
-            };
+            }
             devices.push(AudioDevice {
                 id: device_id,
                 firendly_name: firendly_name,
                 data_flow: audio_data_flow,
+                default: default_device,
             });
         }
         Ok(devices)

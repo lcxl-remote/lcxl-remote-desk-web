@@ -12,25 +12,12 @@ const SIGNALING_TYPE_CODE_OFFER = 100;
 const SIGNALING_TYPE_CODE_ANSWER = 101;
 const SIGNALING_TYPE_CODE_CANID = 200;
 const SIGNALING_TYPE_CODE_ERROR = 1000;
-
+const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 1001;
 type SignalingModel = {
   /**
    * Signaling type
    */
   signaling_type: number;
-  /** 
-   * Check if signaling is succeed
-   */
-  signaling_success: boolean;
-  /** 
-   * Signaling status code
-   */
-  signaling_status_code: number;
-  /** 
-   * Signaling message
-   * 
-   */
-  signaling_message?: string;
 
   /**
    * Signaling data
@@ -66,10 +53,6 @@ const Desk: React.FC = () => {
       sock.onmessage = (event) => {
         console.log('收到消息:', event.data);
         const signaling_model = JSON.parse(event.data) as SignalingModel;
-        if (!signaling_model.signaling_success) {
-          console.error("Received error data", signaling_model);
-          return;
-        }
         switch (signaling_model.signaling_type) {
           case SIGNALING_TYPE_CODE_INIT:
             const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as InitSignalingData;

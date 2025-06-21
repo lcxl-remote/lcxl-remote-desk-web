@@ -6,7 +6,7 @@ use webrtc::{
     peer_connection::peer_connection_state::RTCPeerConnectionState,
 };
 
-use crate::desk_error::DeskError;
+use crate::{desk_error::DeskError, model::record_audio::AudioDevice};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SignalingType(i32);
@@ -16,6 +16,7 @@ pub const SIGNALING_TYPE_CODE_OFFER: i32 = 100;
 pub const SIGNALING_TYPE_CODE_ANSWER: i32 = 101;
 pub const SIGNALING_TYPE_CODE_CANID: i32 = 200;
 pub const SIGNALING_TYPE_CODE_ERROR: i32 = 1000;
+pub const SIGNALING_TYPE_CODE_UNKNOWN_TYPE: i32 = 1001;
 
 /// Signaling types.
 impl SignalingType {
@@ -27,7 +28,10 @@ impl SignalingType {
 
     pub const CANID: SignalingType = SignalingType(SIGNALING_TYPE_CODE_CANID);
 
+    // error
     pub const ERROR: SignalingType = SignalingType(SIGNALING_TYPE_CODE_ERROR);
+    // unknown signaling type
+    pub const UNKNOWN_TYPE: SignalingType = SignalingType(SIGNALING_TYPE_CODE_UNKNOWN_TYPE);
 
     fn new(code: i32) -> Self {
         SignalingType(code)
@@ -45,11 +49,17 @@ impl From<i32> for SignalingType {
 pub struct SignalingModel {
     /// signaling type
     pub signaling_type: i32,
-    /// signaling success flag
-    pub signaling_success: bool,
-    /// signaling status code, use http status code
-    pub signaling_status_code: i32,
-    pub signaling_message: Option<String>,
+    /// signaling data
+    pub signaling_data: Option<String>,
+}
+
+/// Query parameters for listing files.
+#[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
+pub struct SignalingErrorData {
+    /// signaling type which errors occurred.
+    pub signaling_type: i32,
+    /// error message
+    pub message: String,
     /// signaling data
     pub signaling_data: Option<String>,
 }
@@ -58,9 +68,6 @@ impl SignalingModel {
     pub fn new_str_data(signaling_type: SignalingType, signaling_data: &str) -> Self {
         Self {
             signaling_type: signaling_type.0,
-            signaling_success: true,
-            signaling_status_code: 200,
-            signaling_message: None,
             signaling_data: Some(signaling_data.to_string()),
         }
     }
@@ -74,21 +81,17 @@ impl SignalingModel {
     {
         Ok(Self {
             signaling_type: signaling_type.0,
-            signaling_success: true,
-            signaling_status_code: 200,
-            signaling_message: None,
             signaling_data: Some(serde_json::to_string(signaling_data)?),
         })
     }
 
-    pub fn error(signaling_type: SignalingType, message: &str) -> Self {
-        Self {
+    pub fn error(signaling_type: SignalingType, message: &str) -> Result<Self, DeskError> {
+        let error_data = SignalingErrorData {
             signaling_type: signaling_type.0,
-            signaling_success: false,
-            signaling_status_code: 500,
-            signaling_message: Some(message.to_string()),
+            message: message.to_string(),
             signaling_data: None,
-        }
+        };
+        SignalingModel::new_json_data(SignalingType::ERROR, &error_data)
     }
 }
 
@@ -112,6 +115,7 @@ impl SignalingSessionExt for Session {
 pub struct InitSignalingData {
     pub ice_servers: Vec<RTCIceServer>,
     pub user_name: String,
+    pub audio_device_list: Vec<AudioDevice>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

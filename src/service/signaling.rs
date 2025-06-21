@@ -27,11 +27,12 @@ use webrtc::{
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
 };
+use windows::Win32::Media::Audio::eAll;
 
 use crate::model::common::ErrorCode;
 use crate::model::settings::Settings;
 use crate::model::signaling::WebRTConnectionState;
-use crate::service::record_audio::{OpusAudioCapture, destroy_thread, init_thread};
+use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
     desk_error::DeskError,
     model::{
@@ -121,15 +122,6 @@ impl SignalingContext {
             credential: local_settings.user.login_password.clone(),
         };
         let ice_servers = vec![ice_server];
-        let init_signaling_data = InitSignalingData {
-            ice_servers: ice_servers.clone(),
-            user_name: user.name.clone(),
-        };
-        info!("Sending init signaling");
-        let hello_signaling_model =
-            SignalingModel::new_json_data(SignalingType::INIT, &init_signaling_data)?;
-        session.send_signaling(&hello_signaling_model).await?;
-        info!("Init signaling sent");
 
         // new rtc_peer_connection
         // Create a MediaEngine object to configure the supported codec
@@ -150,13 +142,58 @@ impl SignalingContext {
 
         // Prepare the configuration
         let config = RTCConfiguration {
-            ice_servers,
+            ice_servers: ice_servers.clone(),
             ..Default::default()
         };
 
         // Create a new RTCPeerConnection
         let rtc_peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
+        let capture_screen_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("capture_screen_task")
+            .build()?;
+
+        let capture_audio_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("capture_audio_task")
+            .build()?;
+
+        // get audio device
+        let spawn_handle = capture_audio_runtime.spawn(async move {
+            init_thread()?;
+            let result = AudioCapture::enum_devices(eAll);
+            destroy_thread()?;
+            return result;
+        });
+        let audio_device_list = spawn_handle.await??;
+
+        let init_signaling_data = InitSignalingData {
+            ice_servers: ice_servers.clone(),
+            user_name: user.name.clone(),
+            audio_device_list,
+        };
+
+        info!("Sending init signaling");
+        let hello_signaling_model =
+            SignalingModel::new_json_data(SignalingType::INIT, &init_signaling_data)?;
+        session.send_signaling(&hello_signaling_model).await?;
+        info!("Sent init signaling: {:?}", hello_signaling_model);
+
+        Ok(Self {
+            settings,
+            session,
+            user,
+            rtc_peer_connection,
+            capture_screen_runtime,
+            capture_audio_runtime,
+        })
+    }
+
+    /// Starts the WebRTC connection
+    pub async fn start_webrtc(&mut self) -> Result<(), DeskError> {
         let (ice_connection_state_tx, ice_connection_state_rx) =
             tokio::sync::watch::channel(WebRTConnectionState::Init);
         let ice_connection_state_tx_2 = ice_connection_state_tx.clone();
@@ -172,7 +209,8 @@ impl SignalingContext {
             "webrtc-rs".to_owned(),
         ));
         // Add this newly created track to the PeerConnection
-        let rtp_sender = rtc_peer_connection
+        let rtp_sender = self
+            .rtc_peer_connection
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
 
@@ -197,7 +235,8 @@ impl SignalingContext {
         ));
 
         // Add this newly created track to the PeerConnection
-        let rtp_sender = rtc_peer_connection
+        let rtp_sender = self
+            .rtc_peer_connection
             .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
         // Read incoming RTCP packets
@@ -211,16 +250,13 @@ impl SignalingContext {
             Result::<(), DeskError>::Ok(())
         });
 
-        let session_for_video = session.clone();
-        let capture_screen_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("capture_screen_task")
-            .build()?;
+        let session_for_video = self.session.clone();
+
+        let local_settings = self.settings.lock().await.clone();
         let screen_settings = local_settings.clone();
 
         // Spawn a blocking task to capture screen and send video
-        capture_screen_runtime.spawn(async move {
+        self.capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
                 screen_settings,
                 video_ice_connection_state_rx,
@@ -242,15 +278,10 @@ impl SignalingContext {
             return result;
         });
 
-        let session_for_audio = session.clone();
-        let capture_audio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("capture_audio_task")
-            .build()?;
+        let session_for_audio = self.session.clone();
 
         let audio_settings = local_settings.clone();
-        capture_audio_runtime.spawn(async move {
+        self.capture_audio_runtime.spawn(async move {
             init_thread()?;
             let result = SignalingContext::capture_audio_task(
                 audio_settings,
@@ -276,24 +307,25 @@ impl SignalingContext {
 
         // Set the handler for ICE connection state
         // This will notify you when the peer has connected/disconnected
-        rtc_peer_connection.on_ice_connection_state_change(Box::new(
-            move |connection_state: RTCIceConnectionState| {
-                log::info!("RTC ice connection state has changed {connection_state}");
-                let state = WebRTConnectionState::from(&connection_state);
-                if state != WebRTConnectionState::Init {
-                    if let Err(error) = ice_connection_state_tx.send(state) {
-                        log::error!("Failed to send connection state: {:?}", error);
+        self.rtc_peer_connection
+            .on_ice_connection_state_change(Box::new(
+                move |connection_state: RTCIceConnectionState| {
+                    log::info!("RTC ice connection state has changed {connection_state}");
+                    let state = WebRTConnectionState::from(&connection_state);
+                    if state != WebRTConnectionState::Init {
+                        if let Err(error) = ice_connection_state_tx.send(state) {
+                            log::error!("Failed to send connection state: {:?}", error);
+                        }
                     }
-                }
 
-                Box::pin(async {})
-            },
-        ));
+                    Box::pin(async {})
+                },
+            ));
 
         // Set the handler for Peer connection state
         // This will notify you when the peer has connected/disconnected
-        rtc_peer_connection.on_peer_connection_state_change(Box::new(
-            move |s: RTCPeerConnectionState| {
+        self.rtc_peer_connection
+            .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
                 log::info!("Peer connection state has changed: {s}");
                 let state = WebRTConnectionState::from(&s);
                 if state == WebRTConnectionState::Closed {
@@ -303,17 +335,8 @@ impl SignalingContext {
                 }
 
                 Box::pin(async {})
-            },
-        ));
-
-        Ok(Self {
-            settings,
-            session,
-            user,
-            rtc_peer_connection,
-            capture_screen_runtime,
-            capture_audio_runtime,
-        })
+            }));
+        Ok(())
     }
 
     pub async fn shutdown(self) -> Result<(), DeskError> {
@@ -526,8 +549,8 @@ impl SignalingContext {
             SIGNALING_TYPE_CODE_CANID => {}
             _ => {
                 error!("Unknown signaling type: {}", signaling_model.signaling_type);
-                let error_signaling = SignalingModel::error(
-                    SignalingType::ERROR,
+                let error_signaling = SignalingModel::new_str_data(
+                    SignalingType::UNKNOWN_TYPE,
                     &format!(
                         "Failed to handle signaling type: {}",
                         signaling_model.signaling_type
@@ -558,7 +581,7 @@ impl SignalingContext {
                 .send_signaling(&SignalingModel::error(
                     SignalingType::from(signaling_model.signaling_type),
                     "No signaling data provided",
-                ))
+                )?)
                 .await?;
             return Ok(());
         }
@@ -566,6 +589,8 @@ impl SignalingContext {
         log::info!("Received offer: {}", signaling_data);
         let offer = serde_json::from_str::<RTCSessionDescription>(&signaling_data)?;
 
+        // start webrtc first
+        self.start_webrtc().await?;
         // Set the remote SessionDescription
         self.rtc_peer_connection
             .set_remote_description(offer)
@@ -592,7 +617,7 @@ impl SignalingContext {
                 .send_signaling(&SignalingModel::error(
                     SignalingType::from(signaling_model.signaling_type),
                     "generate local_description failed!",
-                ))
+                )?)
                 .await?;
             return Ok(());
         }
