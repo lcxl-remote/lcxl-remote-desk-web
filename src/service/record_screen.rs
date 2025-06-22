@@ -462,15 +462,19 @@ pub struct SceenFrame<'a> {
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::path::PathBuf;
 
     use log::LevelFilter;
     use std::sync::Once;
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::System::StationsAndDesktops::{
-        CloseWindowStation, EnumDesktopsW, EnumWindowStationsW, GetProcessWindowStation, HWINSTA,
-        OpenWindowStationW,
+        CloseWindowStation, CreateDesktopW, EnumDesktopsW, EnumWindowStationsW,
+        GetProcessWindowStation, GetThreadDesktop, HWINSTA, OpenDesktopW, OpenWindowStationW,
+        SwitchDesktop,
     };
+    use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Shell::IsUserAnAdmin;
+    use windows::Win32::UI::WindowsAndMessaging::{MB_OK, MessageBoxW};
     use yuv::bgra_to_rgba;
 
     use super::*;
@@ -564,6 +568,90 @@ mod tests {
         let enum_result = unsafe { EnumDesktopsW(Some(handle), Some(enum_proc), lparam) };
         log::info!("EnumDesktopsW result: {:?}", enum_result);
         log::info!("desktop_list: {:?}", desktop_list);
+
+        let settings = Settings::default();
+        let manager = ScreenRecordManager::new(&settings).unwrap();
+
+        for desktop_name in desktop_list {
+            let mut desktop_name_utf16: Vec<u16> = desktop_name.encode_utf16().collect();
+            // add null terminator to the station name utf16
+            desktop_name_utf16.push(0);
+            let desktop_name_ptr = windows::core::PCWSTR::from_raw(desktop_name_utf16.as_ptr());
+
+            let hdesk_result = unsafe {
+                OpenDesktopW(
+                    desktop_name_ptr,
+                    DESKTOP_CONTROL_FLAGS(0),
+                    true,
+                    GENERIC_ALL.0,
+                )
+            };
+            if let Err(e) = hdesk_result {
+                log::error!("Failed to open desktop {}: {}", desktop_name, e);
+                continue;
+            }
+
+            let hdesk = hdesk_result.unwrap();
+            let result = unsafe { SetThreadDesktop(hdesk) };
+
+            let _ = unsafe { CloseDesktop(hdesk) };
+
+            if let Err(e) = result {
+                log::error!("Failed to set thread desktop {}: {}", desktop_name, e);
+                continue;
+            }
+
+            let list_result = manager.get_output_list();
+            if let Err(e) = list_result {
+                log::error!("Failed to get output list {}: {}", desktop_name, e);
+                continue;
+            }
+
+            let output_list = list_result.unwrap();
+            log::info!(
+                "Output list for desktop {}: {:?}",
+                desktop_name,
+                output_list
+            );
+            for index in 0..output_list.len() {
+                let screent_output = manager.get_screen_output(index as u32).unwrap();
+                // first frame is black, skip it
+                screent_output.get_frame(false).unwrap();
+                let frame = screent_output.get_frame(false).unwrap();
+                log::info!(
+                    "frame_info={:?}, frame_buffer.len={}",
+                    frame.frame_info,
+                    frame.frame_buffer.len()
+                );
+                let mut rgb_data = vec![0u8; frame.frame_buffer.len()];
+                let rgb_data_array = rgb_data.as_mut_slice();
+                let width = screent_output.dxgi_output_desc.ModeDesc.Width;
+                let height = screent_output.dxgi_output_desc.ModeDesc.Height;
+                let src_stride = width * 4;
+                let dst_stride = width * 4;
+                // convert bgra to rgba
+                bgra_to_rgba(
+                    frame.frame_buffer,
+                    src_stride,
+                    rgb_data_array,
+                    dst_stride,
+                    width,
+                    height,
+                )
+                .unwrap();
+                let tmp_dir = PathBuf::from("sample");
+                let name = tmp_dir.join(format!("screenshot_{}_{}.bmp", desktop_name, index));
+                image::save_buffer(
+                    name.as_path(),
+                    rgb_data_array,
+                    width,
+                    height,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .unwrap();
+                log::info!("saved screenshot to {}", name.to_string_lossy().to_string());
+            }
+        }
     }
     #[test]
     fn test_windows_api() -> Result<(), DeskError> {
@@ -603,6 +691,40 @@ mod tests {
             log::error!("GetProcessWindowStation error: {}", e);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_switch_desktop() -> Result<(), DeskError> {
+        let h_old = unsafe { GetThreadDesktop(GetCurrentThreadId()) }?;
+        let mut desktop_name_utf16: Vec<u16> = "Test".encode_utf16().collect();
+        // add null terminator to the station name utf16
+        desktop_name_utf16.push(0);
+        let desktop_name_ptr = windows::core::PCWSTR::from_raw(desktop_name_utf16.as_ptr());
+
+        let h_new = unsafe {
+            CreateDesktopW(
+                desktop_name_ptr,
+                windows::core::PCWSTR::null(),
+                None,
+                DESKTOP_CONTROL_FLAGS(0),
+                GENERIC_ALL.0,
+                None,
+            )
+        }?;
+
+        unsafe { SetThreadDesktop(h_new) }?;
+        unsafe { SwitchDesktop(h_new) }?;
+
+        let text_utf16: Vec<u16> = "成功!".encode_utf16().chain([0u16]).collect();
+        let text_ptr = windows::core::PCWSTR::from_raw(text_utf16.as_ptr());
+
+        let caption_utf16: Vec<u16> = "测试!".encode_utf16().chain([0u16]).collect();
+        let caption_ptr = windows::core::PCWSTR::from_raw(caption_utf16.as_ptr());
+
+        unsafe { MessageBoxW(None, text_ptr, caption_ptr, MB_OK) };
+        unsafe { SwitchDesktop(h_old) }?;
+        unsafe { CloseDesktop(h_new) }?;
         Ok(())
     }
 }
