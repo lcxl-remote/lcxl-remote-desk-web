@@ -724,7 +724,7 @@ mod tests {
 
         unsafe { MessageBoxW(None, text_ptr, caption_ptr, MB_OK) };
         unsafe { SwitchDesktop(h_old) }?;
-        unsafe { CloseDesktop(h_new) }?;
+        let _ = unsafe { CloseDesktop(h_new) };
         Ok(())
     }
 }
