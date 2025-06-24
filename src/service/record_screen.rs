@@ -6,40 +6,40 @@ use crate::{
 };
 use log::warn;
 use openh264::{
-    encoder::{BitRate, IntraFramePeriod},
     OpenH264API,
+    encoder::{BitRate, IntraFramePeriod},
 };
 use std::fmt::Debug;
 use windows::Win32::{
-    Foundation::{E_ACCESSDENIED, GENERIC_ALL, HMODULE},
+    Foundation::{GENERIC_ALL, HMODULE},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_REFERENCE,
-            D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0,
-            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_9_1,
+            D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
         },
         Direct3D11::{
-            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
             D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
-            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
+            ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
-            IDXGIOutputDuplication, IDXGIResource, IDXGISurface, DXGI_ERROR_ACCESS_LOST,
-            DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND,
-            DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_DESC,
-            DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM,
+            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
+            DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ,
+            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
+            IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
     },
     System::StationsAndDesktops::{
-        CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS,
-        DESKTOP_CONTROL_FLAGS,
+        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetProcessWindowStation,
+        OpenInputDesktop, SetThreadDesktop,
     },
 };
 use windows_core::Interface;
 use yuv::{
-    bgra_to_yuv420, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange,
-    YuvStandardMatrix,
+    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
+    bgra_to_yuv420,
 };
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
@@ -50,6 +50,13 @@ pub struct ScreenRecordManager {
 impl ScreenRecordManager {
     pub fn set_thread_input_desktop() -> Result<(), DeskError> {
         unsafe {
+            let result = GetProcessWindowStation();
+            if let Err(err) = result {
+                log::error!("GetProcessWindowStation failed, error: {:?}", err);
+            } else if let Ok(station) = result {
+                log::info!("GetProcessWindowStation success, handle: {:?}", station);
+            }
+
             let current_deskop = OpenInputDesktop(
                 DESKTOP_CONTROL_FLAGS(0),
                 false,
@@ -470,12 +477,12 @@ mod tests {
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::System::StationsAndDesktops::{
         CloseWindowStation, CreateDesktopW, EnumDesktopsW, EnumWindowStationsW,
-        GetProcessWindowStation, GetThreadDesktop, OpenDesktopW, OpenWindowStationW, SwitchDesktop,
-        HWINSTA,
+        GetProcessWindowStation, GetThreadDesktop, HWINSTA, OpenDesktopW, OpenWindowStationW,
+        SwitchDesktop,
     };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Shell::IsUserAnAdmin;
-    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK};
+    use windows::Win32::UI::WindowsAndMessaging::{MB_OK, MessageBoxW};
     use yuv::bgra_to_rgba;
 
     use super::*;
@@ -670,7 +677,11 @@ mod tests {
                 let close_result = unsafe { CloseWindowStation(handle) };
                 log::info!("CloseWindowStation result: {:?}", close_result);
             } else if let Err(e) = open_result {
-                log::error!("OpenWindowStationW error: {}", e);
+                log::error!(
+                    "OpenWindowStationW error, station: {}, error: {}",
+                    station,
+                    e
+                );
             }
         }
         let result = unsafe { GetProcessWindowStation() };

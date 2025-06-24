@@ -101,12 +101,31 @@ impl AudioCapture {
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
 
         // get default audio endpoint for render and capture
-        let default_render_device =
-            unsafe { device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
-        let default_render_device_id = Self::get_device_id(&default_render_device)?;
-        let default_capture_device =
-            unsafe { device_enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }?;
-        let default_capture_device_id = Self::get_device_id(&default_capture_device)?;
+        let result = unsafe { device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole) };
+        let default_render_device_id = match result {
+            Ok(device) => {
+                let device_id = AudioCapture::get_device_id(&device)?;
+                log::info!("Default render audio endpoint: {}", device_id);
+                Some(device_id)
+            }
+            Err(error) => {
+                log::warn!("Failed to get default render audio endpoint: {}", error);
+                None
+            }
+        };
+
+        let result = unsafe { device_enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) };
+        let default_capture_device_id = match result {
+            Ok(device) => {
+                let device_id = AudioCapture::get_device_id(&device)?;
+                log::info!("Default capture audio endpoint: {:?}", device_id);
+                Some(device_id)
+            }
+            Err(error) => {
+                log::warn!("Failed to get default capture audio endpoint: {}", error);
+                None
+            }
+        };
         let collection =
             unsafe { device_enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE)? };
         let count = unsafe { collection.GetCount()? };
@@ -137,10 +156,14 @@ impl AudioCapture {
 
             if data_flow == eCapture {
                 audio_data_flow = AudioDataFlow::Capture;
-                default_device = device_id == default_capture_device_id;
+                default_device = default_capture_device_id
+                    .as_ref()
+                    .is_some_and(|d| *d == device_id);
             } else if data_flow == eRender {
                 audio_data_flow = AudioDataFlow::Render;
-                default_device = device_id == default_render_device_id;
+                default_device = default_render_device_id
+                    .as_ref()
+                    .is_some_and(|d| *d == device_id);
             } else {
                 panic!("Should not be happend")
             }
