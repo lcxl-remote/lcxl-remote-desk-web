@@ -6,40 +6,40 @@ use crate::{
 };
 use log::warn;
 use openh264::{
-    OpenH264API,
     encoder::{BitRate, IntraFramePeriod},
+    OpenH264API,
 };
 use std::fmt::Debug;
 use windows::Win32::{
-    Foundation::{GENERIC_ALL, HMODULE},
+    Foundation::{E_ACCESSDENIED, GENERIC_ALL, HMODULE},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_REFERENCE,
-            D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_10_0,
-            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
+            D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_9_1,
         },
         Direct3D11::{
+            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
             D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
-            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
-            ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
-            DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ,
-            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
-            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
-            IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
+            Common::DXGI_FORMAT_B8G8R8A8_UNORM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
+            IDXGIOutputDuplication, IDXGIResource, IDXGISurface, DXGI_ERROR_ACCESS_LOST,
+            DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND,
+            DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_DESC,
+            DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM,
         },
     },
     System::StationsAndDesktops::{
-        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, OpenInputDesktop,
-        SetThreadDesktop,
+        CloseDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_ACCESS_FLAGS,
+        DESKTOP_CONTROL_FLAGS,
     },
 };
 use windows_core::Interface;
 use yuv::{
-    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
-    bgra_to_yuv420,
+    bgra_to_yuv420, YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange,
+    YuvStandardMatrix,
 };
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
@@ -48,13 +48,14 @@ pub struct ScreenRecordManager {
 }
 
 impl ScreenRecordManager {
-    pub fn set_thread_desktop() -> Result<(), DeskError> {
+    pub fn set_thread_input_desktop() -> Result<(), DeskError> {
         unsafe {
             let current_deskop = OpenInputDesktop(
                 DESKTOP_CONTROL_FLAGS(0),
                 false,
                 DESKTOP_ACCESS_FLAGS(GENERIC_ALL.0),
             )?;
+            log::info!("OpenInputDesktop success, handle: {:?}", current_deskop);
             SetThreadDesktop(current_deskop)?;
             let result = CloseDesktop(current_deskop);
             if let Err(err) = result {
@@ -66,7 +67,7 @@ impl ScreenRecordManager {
 
     pub fn new(settings: &Settings) -> Result<Arc<Self>, DeskError> {
         // get desktop
-        Self::set_thread_desktop()?;
+        //Self::set_thread_desktop()?;
 
         // init dxgi factory
         let driver_types: [D3D_DRIVER_TYPE; 3] = [
@@ -461,20 +462,20 @@ pub struct SceenFrame<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::{env, thread};
 
     use log::LevelFilter;
-    use std::sync::Once;
+    use std::sync::{Barrier, Once};
     use windows::Win32::Foundation::LPARAM;
     use windows::Win32::System::StationsAndDesktops::{
         CloseWindowStation, CreateDesktopW, EnumDesktopsW, EnumWindowStationsW,
-        GetProcessWindowStation, GetThreadDesktop, HWINSTA, OpenDesktopW, OpenWindowStationW,
-        SwitchDesktop,
+        GetProcessWindowStation, GetThreadDesktop, OpenDesktopW, OpenWindowStationW, SwitchDesktop,
+        HWINSTA,
     };
     use windows::Win32::System::Threading::GetCurrentThreadId;
     use windows::Win32::UI::Shell::IsUserAnAdmin;
-    use windows::Win32::UI::WindowsAndMessaging::{MB_OK, MessageBoxW};
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK};
     use yuv::bgra_to_rgba;
 
     use super::*;
@@ -489,9 +490,50 @@ mod tests {
                 .filter_level(LevelFilter::Debug)
                 .init();
 
-            let result = ScreenRecordManager::set_thread_desktop();
+            let result = ScreenRecordManager::set_thread_input_desktop();
             log::info!("set thread desktop result: {:?}", result);
         });
+    }
+
+    /// Save screenshot to file
+    fn save_screenshot_to_file(
+        screent_output: &ScreenOutput,
+        bmp_path: &Path,
+    ) -> Result<(), DeskError> {
+        let frame = screent_output.get_frame(false)?;
+        log::info!(
+            "frame_info={:?}, frame_buffer.len={}",
+            frame.frame_info,
+            frame.frame_buffer.len()
+        );
+        let mut rgb_data = vec![0u8; frame.frame_buffer.len()];
+        let rgb_data_array = rgb_data.as_mut_slice();
+        let width = screent_output.dxgi_output_desc.ModeDesc.Width;
+        let height = screent_output.dxgi_output_desc.ModeDesc.Height;
+        let src_stride = width * 4;
+        let dst_stride = width * 4;
+        // convert bgra to rgba
+        bgra_to_rgba(
+            frame.frame_buffer,
+            src_stride,
+            rgb_data_array,
+            dst_stride,
+            width,
+            height,
+        )?;
+        image::save_buffer(
+            bmp_path,
+            rgb_data_array,
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+        log::info!(
+            "saved screenshot to {}",
+            bmp_path.to_string_lossy().to_string()
+        );
+        Ok(())
     }
 
     #[test]
@@ -503,41 +545,12 @@ mod tests {
         assert!(!list.is_empty());
 
         let screent_output = manager.get_screen_output(0)?;
-        let tmp_dir = env::temp_dir();
-        let tmp_dir = tmp_dir.join(uuid::Uuid::new_v4().to_string());
+        let tmp_dir = PathBuf::from("sample/screenshot");
         std::fs::create_dir_all(tmp_dir.as_path())?;
+
         for i in 0..10 {
-            let frame = screent_output.get_frame(false)?;
-            log::info!(
-                "frame_info={:?}, frame_buffer.len={}",
-                frame.frame_info,
-                frame.frame_buffer.len()
-            );
-            let mut rgb_data = vec![0u8; frame.frame_buffer.len()];
-            let rgb_data_array = rgb_data.as_mut_slice();
-            let width = screent_output.dxgi_output_desc.ModeDesc.Width;
-            let height = screent_output.dxgi_output_desc.ModeDesc.Height;
-            let src_stride = width * 4;
-            let dst_stride = width * 4;
-            // convert bgra to rgba
-            bgra_to_rgba(
-                frame.frame_buffer,
-                src_stride,
-                rgb_data_array,
-                dst_stride,
-                width,
-                height,
-            )?;
             let name = tmp_dir.join(format!("screenshot_{}.bmp", i));
-            image::save_buffer(
-                name.as_path(),
-                rgb_data_array,
-                width,
-                height,
-                image::ExtendedColorType::Rgba8,
-            )
-            .unwrap();
-            log::info!("saved screenshot to {}", name.to_string_lossy().to_string());
+            save_screenshot_to_file(&screent_output, name.as_path())?;
         }
         std::fs::remove_dir_all(tmp_dir.as_path())?;
 
@@ -614,42 +627,19 @@ mod tests {
                 output_list
             );
             for index in 0..output_list.len() {
-                let screent_output = manager.get_screen_output(index as u32).unwrap();
+                let screent_output_result = manager.get_screen_output(index as u32);
+                if let Err(e) = screent_output_result {
+                    log::error!("Failed to get screen output {}: {}", desktop_name, e);
+                    continue;
+                }
+                let screent_output = screent_output_result.unwrap();
                 // first frame is black, skip it
                 screent_output.get_frame(false).unwrap();
-                let frame = screent_output.get_frame(false).unwrap();
-                log::info!(
-                    "frame_info={:?}, frame_buffer.len={}",
-                    frame.frame_info,
-                    frame.frame_buffer.len()
-                );
-                let mut rgb_data = vec![0u8; frame.frame_buffer.len()];
-                let rgb_data_array = rgb_data.as_mut_slice();
-                let width = screent_output.dxgi_output_desc.ModeDesc.Width;
-                let height = screent_output.dxgi_output_desc.ModeDesc.Height;
-                let src_stride = width * 4;
-                let dst_stride = width * 4;
-                // convert bgra to rgba
-                bgra_to_rgba(
-                    frame.frame_buffer,
-                    src_stride,
-                    rgb_data_array,
-                    dst_stride,
-                    width,
-                    height,
-                )
-                .unwrap();
+
                 let tmp_dir = PathBuf::from("sample");
                 let name = tmp_dir.join(format!("screenshot_{}_{}.bmp", desktop_name, index));
-                image::save_buffer(
-                    name.as_path(),
-                    rgb_data_array,
-                    width,
-                    height,
-                    image::ExtendedColorType::Rgba8,
-                )
-                .unwrap();
-                log::info!("saved screenshot to {}", name.to_string_lossy().to_string());
+
+                save_screenshot_to_file(&screent_output, name.as_path()).unwrap();
             }
         }
     }
@@ -696,12 +686,57 @@ mod tests {
 
     #[test]
     fn test_switch_desktop() -> Result<(), DeskError> {
-        let h_old = unsafe { GetThreadDesktop(GetCurrentThreadId()) }?;
-        let mut desktop_name_utf16: Vec<u16> = "Test".encode_utf16().collect();
-        // add null terminator to the station name utf16
-        desktop_name_utf16.push(0);
-        let desktop_name_ptr = windows::core::PCWSTR::from_raw(desktop_name_utf16.as_ptr());
+        initialize();
+        let current_thread_id = unsafe { GetCurrentThreadId() };
+        log::info!("Current thread id: {}", current_thread_id);
 
+        let h_old = unsafe { GetThreadDesktop(current_thread_id) }?;
+        let barrier = Arc::new(Barrier::new(2));
+        let b = barrier.clone();
+        let thread_handle = thread::spawn(move || {
+            let h_old = unsafe { GetThreadDesktop(current_thread_id) }.unwrap();
+            log::info!(
+                "Get thread desktop handle: {:?}, from thread id: {}",
+                h_old,
+                current_thread_id
+            );
+            unsafe { SetThreadDesktop(h_old) }.unwrap();
+            let settings = Settings::default();
+            let manager = ScreenRecordManager::new(&settings).unwrap();
+
+            log::info!("Wait for barrier");
+            b.wait();
+            thread::sleep(std::time::Duration::from_secs(5)); // wait
+            log::info!("Start to capture screen");
+            let screent_output_result = manager.get_screen_output(0);
+            if let Err(e) = screent_output_result {
+                log::error!("Failed to get screen output: {}", e);
+                ScreenRecordManager::set_thread_input_desktop().unwrap();
+                let manager = ScreenRecordManager::new(&settings).unwrap();
+                let screent_output = manager.get_screen_output(0).unwrap();
+                screent_output.get_frame(false).unwrap();
+
+                let tmp_dir = PathBuf::from("sample");
+                let name = tmp_dir.join(format!("switch_desktop_screenshot_retry.bmp"));
+
+                save_screenshot_to_file(&screent_output, name.as_path()).unwrap();
+                return;
+            }
+            let screent_output = screent_output_result.unwrap();
+            // first frame is black, skip it
+            screent_output.get_frame(false).unwrap();
+
+            let tmp_dir = PathBuf::from("sample");
+            let name = tmp_dir.join(format!("switch_desktop_screenshot.bmp"));
+
+            save_screenshot_to_file(&screent_output, name.as_path()).unwrap();
+        });
+
+        log::info!("Old desktop handle: {:?}", h_old);
+        // add null terminator to the station name utf16
+        let desktop_name_utf16: Vec<u16> = "Test".encode_utf16().chain([0u16]).collect();
+        let desktop_name_ptr = windows::core::PCWSTR::from_raw(desktop_name_utf16.as_ptr());
+        barrier.wait();
         let h_new = unsafe {
             CreateDesktopW(
                 desktop_name_ptr,
@@ -712,7 +747,7 @@ mod tests {
                 None,
             )
         }?;
-
+        log::info!("New desktop handle: {:?}", h_new);
         unsafe { SetThreadDesktop(h_new) }?;
         unsafe { SwitchDesktop(h_new) }?;
 
@@ -725,6 +760,9 @@ mod tests {
         unsafe { MessageBoxW(None, text_ptr, caption_ptr, MB_OK) };
         unsafe { SwitchDesktop(h_old) }?;
         let _ = unsafe { CloseDesktop(h_new) };
+
+        // wait for the thread to finish
+        let _ = thread_handle.join();
         Ok(())
     }
 }
