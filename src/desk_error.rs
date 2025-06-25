@@ -75,6 +75,8 @@ pub enum DeskError {
     ParseLevelError(log::ParseLevelError),
     /// A from utf16 error occurred.
     FromUtf16Error(std::string::FromUtf16Error),
+    /// A which error occurred.
+    WhichError(which::Error),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -135,6 +137,7 @@ impl Display for DeskError {
             }
             DeskError::ParseLevelError(error) => error.fmt(f),
             DeskError::FromUtf16Error(error) => error.fmt(f),
+            DeskError::WhichError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -261,6 +264,12 @@ impl From<log::ParseLevelError> for DeskError {
 impl From<std::string::FromUtf16Error> for DeskError {
     fn from(err: std::string::FromUtf16Error) -> Self {
         DeskError::FromUtf16Error(err)
+    }
+}
+
+impl From<which::Error> for DeskError {
+    fn from(err: which::Error) -> Self {
+        DeskError::WhichError(err)
     }
 }
 

@@ -44,10 +44,6 @@ rtp = "0.13"
 webrtc-media = "0.10"
 opus = "0.3"
 
-[dev-dependencies]
-image = "0.25"
-hound = "3.5"
-
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_UI_Shell",
@@ -68,9 +64,18 @@ windows = { version = "0.61", features = [
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
     "Win32_System_Variant",
     "Win32_System_Threading",
     "Win32_Devices_FunctionDiscovery",
 ] }
 windows-result = "0.3"
 windows-core = "0.61"
+
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+which = "8.0"
+
+
+[dev-dependencies]
+image = "0.25"
+hound = "3.5"
