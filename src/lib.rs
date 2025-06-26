@@ -20,7 +20,7 @@ use controller::{
     files::{delete_file, list_files},
     login::{change_password, get_captcha, login_account, logout_account},
     settings::{query_settings, update_settings},
-    signaling::signaling_handler,
+    signaling::open_signaling_handle,
     turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
         get_turn_session_statistics,
@@ -41,6 +41,8 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
+
+use crate::controller::terminal::{list_terminal, open_terminal_session};
 
 pub async fn run() -> Result<Server, DeskError> {
     let args = Args::parse();
@@ -124,7 +126,9 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(update_settings)
                             .service(delete_file)
                             .service(list_files)
-                            .service(signaling_handler),
+                            .service(open_signaling_handle)
+                            .service(list_terminal)
+                            .service(open_terminal_session),
                     )
                     .service(
                         utoipa_actix_web::scope("/turn")

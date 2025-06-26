@@ -54,4 +54,5 @@ export default {
   'menu.desk': '桌面',
   'menu.desk.file-list': '文件列表',
   'menu.desk.desk': "桌面",
+  'menu.desk.terminal': "终端",
 };

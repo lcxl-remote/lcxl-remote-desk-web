@@ -54,4 +54,5 @@ export default {
   'menu.desk': 'Desk',
   'menu.desk.file-list': 'File List',
   'menu.desk.desk': "Desktop",
+  'menu.desk.terminal': "Terminal",
 };

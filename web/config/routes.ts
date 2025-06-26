@@ -41,6 +41,11 @@ export default [
         path: '/desk/desk',
         component: './Desk',
       },
+      {
+        name: 'terminal',
+        path: '/desk/terminal',
+        component: './DeskTerminal',
+      },
     ],
   },
   {

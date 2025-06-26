@@ -8,14 +8,14 @@ use crate::{
 };
 
 #[utoipa::path(
-    summary = "Signaling Handler, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
+    summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
     responses(
         (status = 200, description = "return websocket stream", body = SignalingModel),
 
     ),
 )]
 #[get("/signaling")]
-pub async fn signaling_handler(
+pub async fn open_signaling_handle(
     req: HttpRequest,
     settings: web::Data<SharedSettings>,
     session: Session,

@@ -37,7 +37,7 @@ pub async fn list_terminal(settings: web::Data<SharedSettings>) -> Result<HttpRe
     ),
 )]
 #[get("/terminal")]
-pub async fn terminal_session(
+pub async fn open_terminal_session(
     req: HttpRequest,
     query_list: web::Query<StartTerminalSession>,
     settings: web::Data<SharedSettings>,
@@ -50,17 +50,19 @@ pub async fn terminal_session(
         return Err(actix_web::error::ErrorUnauthorized("User not logged in"));
     }
     let user = user.unwrap();
-    if query_list.terminal_command.is_empty() {
+    if query_list.command.is_empty() {
         return Err(actix_web::error::ErrorBadRequest(
             "No terminal command provided",
         ));
     }
     info!(
         "User {} is starting terminal session, command: {:?}",
-        user.name, query_list.terminal_command
+        user.name, query_list.command
     );
-    let terminal_command_list = query_list.terminal_command.clone();
-    let execute_file_path = &terminal_command_list[0];
+    let terminal_command = query_list.command.clone();
+    // split the terminal command into a list of arguments
+    let terminal_command_list: Vec<&str> = terminal_command.split(",").collect();
+    let execute_file_path = terminal_command_list[0];
 
     let args_list = &terminal_command_list[1..];
     let child = Command::new(execute_file_path)
