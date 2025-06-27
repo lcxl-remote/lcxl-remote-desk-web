@@ -42,7 +42,8 @@ const DeskTerminal: React.FC = () => {
     (async () => {
       const { location } = window;
 
-      let command = encodeURIComponent("C:\\Windows\\System32\\cmd.exe");
+      //let command = encodeURIComponent("C:\\Windows\\System32\\cmd.exe");
+      let command = encodeURIComponent("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
       const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
       const wsUri = `${proto}://${location.host}/api/desk/terminal?command=${command}`;
       const sock = new WebSocket(wsUri);

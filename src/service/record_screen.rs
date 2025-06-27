@@ -470,7 +470,7 @@ pub struct SceenFrame<'a> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::{env, thread};
+    use std::thread;
 
     use log::LevelFilter;
     use std::sync::{Barrier, Once};
