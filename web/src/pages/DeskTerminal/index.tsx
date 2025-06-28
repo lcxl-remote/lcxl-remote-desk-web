@@ -9,13 +9,16 @@ import { FitAddon } from '@xterm/addon-fit';
 import { AttachAddon } from "@xterm/addon-attach";
 
 import '@xterm/xterm/css/xterm.css'
+import { listTerminal } from "@/services/desk/listTerminal";
+import { DefaultOptionType } from "antd/es/select";
 
 const DeskTerminal: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
   const socketRef = useRef<WebSocket>();
+  const [commandSelectOptions, setCommandSelectOptions] = useState<DefaultOptionType[] | undefined>();
 
-  const [terminal, setTerminal] = useState<Terminal|null>(null);
+  const [terminal, setTerminal] = useState<Terminal | null>(null);
 
   const initTerminal = (sock: WebSocket) => {
     const terminal = new Terminal({ cursorBlink: true, windowsMode: true });
@@ -40,6 +43,15 @@ const DeskTerminal: React.FC = () => {
     (async () => {
       const { location } = window;
 
+      const response = await listTerminal();
+      let select_options = response.commands.map((command: string[]) => {
+        let option: DefaultOptionType = {
+          label: command[0],
+          value: JSON.stringify(command),
+        };
+        return option;
+      });
+      setCommandSelectOptions(select_options);
       //let command = encodeURIComponent("C:\\Windows\\System32\\cmd.exe");
       let command = encodeURIComponent("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
       const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
@@ -65,7 +77,7 @@ const DeskTerminal: React.FC = () => {
 
   return (
     <PageContainer>
-    <Select showSearch />
+      <Select showSearch options={commandSelectOptions} style={{ width: '100%' }}/>
       <div id="terminal-container" style={{ width: "100%", height: "100%" }}></div>
     </PageContainer>
 

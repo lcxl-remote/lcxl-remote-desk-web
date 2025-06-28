@@ -34,6 +34,10 @@ pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<Termin
         terminal_list.push(vec![path.to_string_lossy().into_owned()]);
     }
 
+    if let Ok(path) = which::which("wsl") {
+        terminal_list.push(vec![path.to_string_lossy().into_owned()]);
+    }
+
     return Ok(TerminalList {
         commands: terminal_list,
     });
