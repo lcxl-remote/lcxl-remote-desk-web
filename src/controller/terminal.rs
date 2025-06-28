@@ -7,7 +7,11 @@ use tokio::process::Command;
 
 use crate::{
     desk_error::DeskError,
-    model::{settings::SharedSettings, signaling::SignalingModel, terminal::StartTerminalSession},
+    model::{
+        settings::SharedSettings,
+        signaling::SignalingModel,
+        terminal::{StartTerminalSession, TerminalList},
+    },
     service::{
         terminal::{fetch_terminal_list, handle_terminal},
         user::SessionExt,
@@ -17,7 +21,7 @@ use crate::{
 #[utoipa::path(
     summary = "List terminal",
     responses(
-        (status = 200, description = "return terminal command list", body = Vec<Vec<String>>),
+        (status = 200, description = "return terminal command list", body = TerminalList),
 
     ),
 )]

@@ -137,6 +137,11 @@ declare namespace API {
     total: number;
   };
 
+  type openTerminalSessionParams = {
+    /** The command to start the terminal session. with the format of "path/to/executable,arg1,arg2" */
+    command: string;
+  };
+
   type PasswordParams = {
     /** New password (optional) */
     new_password?: any;
@@ -166,9 +171,9 @@ declare namespace API {
 
   type SignalingModel = {
     /** signaling data */
-    signaling_data: string;
+    signaling_data?: any;
     /** signaling type */
-    signaling_type: string;
+    signaling_type: number;
   };
 
   type SystemSettings = {
@@ -186,6 +191,11 @@ declare namespace API {
     log_level?: string;
     /** port number for the server to bind to */
     port?: number;
+  };
+
+  type TerminalList = {
+    /** terminal command list */
+    commands: string[][];
   };
 
   type TurnInfo = {

@@ -11,15 +11,15 @@ use tokio::{
 };
 use windows::Win32::Globalization::GetOEMCP;
 
+#[cfg(target_os = "windows")]
+use crate::model::terminal::TerminalList;
 use crate::{
     desk_error::DeskError,
     model::{settings::SharedSettings, user::CurrentUser},
 };
 
 #[cfg(target_os = "windows")]
-pub fn fetch_terminal_list(
-    settings: web::Data<SharedSettings>,
-) -> Result<Vec<Vec<String>>, DeskError> {
+pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<TerminalList, DeskError> {
     let mut terminal_list = Vec::<Vec<String>>::new();
 
     if let Ok(path) = which::which("cmd") {
@@ -34,7 +34,9 @@ pub fn fetch_terminal_list(
         terminal_list.push(vec![path.to_string_lossy().into_owned()]);
     }
 
-    return Ok(terminal_list);
+    return Ok(TerminalList {
+        commands: terminal_list,
+    });
 }
 
 pub fn convert_to_utf8_bytes(decoder: &mut Decoder, stdout_buf_vec: &mut Vec<u8>) -> Vec<u8> {
@@ -200,7 +202,7 @@ mod tests {
         let settings = web::Data::new(SharedSettings::from(Settings::default()));
         let result = fetch_terminal_list(settings)?;
         println!("Terminal list: {:?}", result);
-        assert!(!result.is_empty()); // Ensure that the terminal list is not empty
+        assert!(!result.commands.is_empty()); // Ensure that the terminal list is not empty
         Ok(())
     }
 }

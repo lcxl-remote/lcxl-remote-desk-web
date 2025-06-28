@@ -13,10 +13,12 @@ import * as getTurnMetrics from './getTurnMetrics';
 import * as getTurnSession from './getTurnSession';
 import * as getTurnSessionStatistics from './getTurnSessionStatistics';
 import * as listFiles from './listFiles';
+import * as listTerminal from './listTerminal';
 import * as loginAccount from './loginAccount';
 import * as logoutAccount from './logoutAccount';
+import * as openSignalingHandle from './openSignalingHandle';
+import * as openTerminalSession from './openTerminalSession';
 import * as querySettings from './querySettings';
-import * as signalingHandler from './signalingHandler';
 import * as updateSettings from './updateSettings';
 export default {
   getCurrentUser,
@@ -25,7 +27,9 @@ export default {
   listFiles,
   querySettings,
   updateSettings,
-  signalingHandler,
+  openSignalingHandle,
+  openTerminalSession,
+  listTerminal,
   loginAccount,
   getCaptcha,
   logoutAccount,

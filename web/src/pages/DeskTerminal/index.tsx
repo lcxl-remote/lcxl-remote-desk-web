@@ -2,7 +2,7 @@ import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
 import { PageContainer, ProForm, ProFormDigit, ProFormSelect, ProFormSwitch, ProFormText } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
-import { Alert, Divider, message } from "antd";
+import { Alert, Divider, message, Select } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -15,14 +15,12 @@ const DeskTerminal: React.FC = () => {
   const intl = useIntl();
   const socketRef = useRef<WebSocket>();
 
-  const [terminal, setTerminal] = useState(null);
+  const [terminal, setTerminal] = useState<Terminal|null>(null);
 
   const initTerminal = (sock: WebSocket) => {
-    const prefix = 'admin $ ';
+    const terminal = new Terminal({ cursorBlink: true, windowsMode: true });
 
-    const terminal: any = new Terminal({ cursorBlink: true, windowsMode: true });
-
-    terminal.open(document.getElementById('terminal-container'));
+    terminal.open(document.getElementById('terminal-container')!);
 
     const fitAddon = new FitAddon();
     // terminal 的尺寸与父元素匹配
@@ -58,12 +56,16 @@ const DeskTerminal: React.FC = () => {
       return () => {
         console.log("关闭websocket", sock);
         sock.close();
+        console.log("关闭xterm");
+        terminal?.dispose();
+        setTerminal(null);
       };
     })();
   }, []);
 
   return (
     <PageContainer>
+    <Select showSearch />
       <div id="terminal-container" style={{ width: "100%", height: "100%" }}></div>
     </PageContainer>
 
