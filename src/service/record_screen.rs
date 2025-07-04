@@ -19,14 +19,18 @@ use windows::Win32::{
             D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
         },
         Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
-            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING, D3D11CreateDevice,
-            ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
+            D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
         },
         Dxgi::{
             Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
             DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ,
-            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTPUT_DESC,
+            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
+            DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
             DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
             IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
@@ -182,14 +186,36 @@ impl ScreenRecordManagerArc for Arc<ScreenRecordManager> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
 pub struct ScreenOutput {
     pub manager: Arc<ScreenRecordManager>,
     pub output_index: u32,
+    pub digx_output_desc: DXGI_OUTPUT_DESC,
     pub dup_output: IDXGIOutputDuplication,
-    pub dxgi_output_desc: DXGI_OUTDUPL_DESC,
+    pub dup_output_desc: DXGI_OUTDUPL_DESC,
     pub texture2d: ID3D11Texture2D,
     pub surface: IDXGISurface,
+    pub pointer_shape_buffer: Vec<u8>,
+    pub last_mouse_update_time: i64,
+    pub pointer_position: Point,
+    pub pointer_shape_info: DXGI_OUTDUPL_POINTER_SHAPE_INFO,
 }
+
+/// Workaround for DXGI_OUTPUT_DESC.Monitor not being Send + Sync
+/// This is only works in single thread, so it is safe to use in this case.
+unsafe impl Send for ScreenOutput {}
+unsafe impl Sync for ScreenOutput {}
+
+pub const POINTER_SHAPE_TYPE_MONOCHROME: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32;
+pub const POINTER_SHAPE_TYPE_COLOR: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32;
+pub const POINTER_SHAPE_TYPE_MASKED_COLOR: u32 =
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32;
+const BPP: i32 = 4;
 
 impl ScreenOutput {
     pub fn new(
@@ -198,23 +224,25 @@ impl ScreenOutput {
     ) -> Result<Self, DeskError> {
         let output = unsafe { screen_record_manager.dxgi_adapter.EnumOutputs(output_index) }?;
 
+        let digx_output_desc = unsafe { output.GetDesc() }?;
         let output1 = output.cast::<IDXGIOutput1>()?;
         // get the device from the manager and pass it to DuplicateOutput
         let pdevice = &screen_record_manager.device;
 
         let dup_output = unsafe { output1.DuplicateOutput(pdevice) }?;
-        let dxgi_output_desc = unsafe { dup_output.GetDesc() };
+        let dup_output_desc = unsafe { dup_output.GetDesc() };
         log::info!(
-            "output_index {}, dxgi_output_desc {:?}",
+            "output_index {}, dxgi_output_desc {:?}, dup_output_desc {:?}",
             output_index,
-            dxgi_output_desc
+            digx_output_desc,
+            dup_output_desc
         );
 
         // Staging buffer/texture
         let mut copy_buffer_desc: D3D11_TEXTURE2D_DESC = unsafe { std::mem::zeroed() };
 
-        copy_buffer_desc.Width = dxgi_output_desc.ModeDesc.Width;
-        copy_buffer_desc.Height = dxgi_output_desc.ModeDesc.Height;
+        copy_buffer_desc.Width = dup_output_desc.ModeDesc.Width;
+        copy_buffer_desc.Height = dup_output_desc.ModeDesc.Height;
         copy_buffer_desc.MipLevels = 1;
         copy_buffer_desc.ArraySize = 1;
         //The format must be DXGI_FORMAT_B8G8R8A8_UNORM, see https://learn.microsoft.com/zh-cn/windows/win32/direct3ddxgi/desktop-dup-api#updating-the-desktop-image-data
@@ -244,14 +272,19 @@ impl ScreenOutput {
         Ok(ScreenOutput {
             manager: screen_record_manager,
             output_index,
+            digx_output_desc,
             dup_output,
-            dxgi_output_desc,
+            dup_output_desc,
             texture2d,
             surface,
+            pointer_shape_buffer: vec![],
+            last_mouse_update_time: 0,
+            pointer_position: Point::default(),
+            pointer_shape_info: DXGI_OUTDUPL_POINTER_SHAPE_INFO::default(),
         })
     }
     /// DXGI_ERROR_WAIT_TIMEOUT
-    pub fn get_frame(&self, draw_mouse: bool) -> Result<SceenFrame, DeskError> {
+    pub fn get_frame(&mut self, draw_mouse: bool) -> Result<SceenFrame, DeskError> {
         let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { std::mem::zeroed() };
         let mut desktop_resource: Option<IDXGIResource> = None;
 
@@ -281,18 +314,24 @@ impl ScreenOutput {
 
         let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
 
+        // draw mouse cursor if needed
+        if draw_mouse {
+            self.draw_mouse(&frame_info, &acquired_desktop_image)?;
+        }
+
         unsafe {
             self.manager
                 .device_context
                 .CopyResource(&self.texture2d, &acquired_desktop_image)
         };
+
         let mut locked_rect = DXGI_MAPPED_RECT::default();
 
         let frame_buffer = unsafe {
             self.surface.Map(&mut locked_rect, DXGI_MAP_READ)?;
             core::slice::from_raw_parts(
                 locked_rect.pBits,
-                locked_rect.Pitch as usize * self.dxgi_output_desc.ModeDesc.Height as usize,
+                locked_rect.Pitch as usize * self.dup_output_desc.ModeDesc.Height as usize,
             )
         };
 
@@ -300,6 +339,330 @@ impl ScreenOutput {
             frame_info,
             frame_buffer,
         })
+    }
+
+    /// Draw mouse cursor on the screen
+    pub fn draw_mouse(
+        &mut self,
+        frame_info: &DXGI_OUTDUPL_FRAME_INFO,
+        acquired_desktop_image: &ID3D11Texture2D,
+    ) -> Result<(), DeskError> {
+        // A non-zero mouse update timestamp indicates that there is a mouse position update and optionally a shape change
+        if frame_info.LastMouseUpdateTime == 0 {
+            return Ok(());
+        }
+        let mut update_position = true;
+        if !frame_info.PointerPosition.Visible.as_bool() {
+            update_position = false;
+        }
+        if self.last_mouse_update_time > frame_info.LastMouseUpdateTime {
+            update_position = false;
+        }
+        if update_position {
+            self.last_mouse_update_time = frame_info.LastMouseUpdateTime;
+            self.pointer_position.x = frame_info.PointerPosition.Position.x;
+            self.pointer_position.y = frame_info.PointerPosition.Position.y;
+        }
+        if frame_info.PointerShapeBufferSize == 0 {
+            return Ok(());
+        }
+        if frame_info.PointerShapeBufferSize > self.pointer_shape_buffer.len() as u32 {
+            // resize buffer if needed
+            self.pointer_shape_buffer = vec![0u8; frame_info.PointerShapeBufferSize as usize];
+        }
+        let mut buffer_size_required: u32 = 0;
+        let result = unsafe {
+            self.dup_output.GetFramePointerShape(
+                frame_info.PointerShapeBufferSize,
+                self.pointer_shape_buffer.as_mut_ptr() as *mut _,
+                &mut buffer_size_required,
+                &mut self.pointer_shape_info,
+            )
+        };
+        if let Err(error) = result {
+            log::error!("Failed to get frame pointer shape: {}", error);
+            self.pointer_shape_buffer = vec![];
+            return Err(DeskError::from(error));
+        }
+
+        if !frame_info.PointerPosition.Visible.as_bool() {
+            return Ok(());
+        }
+
+        match self.pointer_shape_info.Type {
+            //DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME | DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR
+            POINTER_SHAPE_TYPE_MONOCHROME | POINTER_SHAPE_TYPE_MASKED_COLOR => {
+                self.process_mono_and_masked_pointer(acquired_desktop_image)?;
+            }
+            //DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR
+            POINTER_SHAPE_TYPE_COLOR => {}
+            _ => {
+                log::warn!(
+                    "Unsupported pointer shape type: {}",
+                    self.pointer_shape_info.Type
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn process_mono_and_masked_pointer(
+        &mut self,
+        acquired_desktop_image: &ID3D11Texture2D,
+    ) -> Result<(), DeskError> {
+        if self.pointer_shape_info.Type != POINTER_SHAPE_TYPE_MONOCHROME
+            && self.pointer_shape_info.Type != POINTER_SHAPE_TYPE_MASKED_COLOR
+        {
+            panic!("Invalid pointer shape type");
+        }
+        let is_mono = self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_MONOCHROME;
+        // Desktop dimensions
+        let mut full_desc: D3D11_TEXTURE2D_DESC = D3D11_TEXTURE2D_DESC::default();
+        unsafe { acquired_desktop_image.GetDesc(&mut full_desc) };
+        let desktop_width = full_desc.Width;
+        let desktop_height = full_desc.Height;
+        // Pointer position
+        let given_left = self.pointer_position.x;
+        let given_top = self.pointer_position.y;
+
+        // Figure out if any adjustment is needed for out of bound positions
+        let ptr_width = if given_left < 0 {
+            given_left + self.pointer_shape_info.Width as i32
+        } else if (given_left + self.pointer_shape_info.Width as i32) > desktop_width as i32 {
+            desktop_width as i32 - given_left
+        } else {
+            self.pointer_shape_info.Width as i32
+        };
+
+        if is_mono {
+            self.pointer_shape_info.Height = self.pointer_shape_info.Height / 2;
+        }
+
+        let ptr_height = if given_top < 0 {
+            given_top + self.pointer_shape_info.Height as i32
+        } else if (given_top + self.pointer_shape_info.Height as i32) > desktop_height as i32 {
+            desktop_height as i32 - given_top
+        } else {
+            self.pointer_shape_info.Height as i32
+        };
+
+        if is_mono {
+            self.pointer_shape_info.Height = self.pointer_shape_info.Height * 2;
+        }
+
+        let ptr_left = if given_left < 0 { 0 } else { given_left };
+        let ptr_top = if given_top < 0 { 0 } else { given_top };
+
+        // Staging buffer/texture
+        let mut copy_buffer_desc = D3D11_TEXTURE2D_DESC::default();
+        copy_buffer_desc.Width = ptr_width as u32;
+        copy_buffer_desc.Height = ptr_height as u32;
+        copy_buffer_desc.MipLevels = 1;
+        copy_buffer_desc.ArraySize = 1;
+        copy_buffer_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        copy_buffer_desc.SampleDesc.Count = 1;
+        copy_buffer_desc.SampleDesc.Quality = 0;
+        copy_buffer_desc.Usage = D3D11_USAGE_STAGING;
+        copy_buffer_desc.BindFlags = 0;
+        copy_buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        copy_buffer_desc.MiscFlags = 0;
+
+        let mut copy_buffer = None;
+        unsafe {
+            self.manager
+                .device
+                .CreateTexture2D(&copy_buffer_desc, None, Some(&mut copy_buffer))
+        }?;
+        let copy_buffer = copy_buffer.unwrap();
+        // Copy needed part of desktop image
+        let mut d3d11_box = D3D11_BOX::default();
+        d3d11_box.left = ptr_left as u32;
+        d3d11_box.top = ptr_top as u32;
+        d3d11_box.right = (ptr_left + ptr_width) as u32;
+        d3d11_box.bottom = (ptr_top + ptr_height) as u32;
+
+        unsafe {
+            self.manager.device_context.CopySubresourceRegion(
+                &copy_buffer,
+                0,
+                0,
+                0,
+                0,
+                acquired_desktop_image,
+                0,
+                Some(&d3d11_box),
+            )
+        };
+        // QI for IDXGISurface
+        let copy_resource = copy_buffer.cast::<IDXGISurface>()?;
+        // Map pixels
+        let mut mapped_surface = DXGI_MAPPED_RECT::default();
+        unsafe { copy_resource.Map(&mut mapped_surface, DXGI_MAP_READ) }?;
+
+        // New mouseshape buffer
+        let mut init_buffer = vec![0u8; (ptr_width * ptr_height * BPP) as usize];
+        let init_buffer_32 = unsafe {
+            core::slice::from_raw_parts_mut(
+                init_buffer.as_mut_ptr() as *mut u32,
+                init_buffer.len() / size_of::<u32>(),
+            )
+        };
+
+        let desktop_32 = mapped_surface.pBits as *const u32;
+        let desktop_pitch_in_pixels = (mapped_surface.Pitch / size_of::<u32>() as i32) as u32;
+
+        // What to skip (pixel offset)
+        let skip_x = if given_left < 0 {
+            (-1 * given_left) as u32
+        } else {
+            0
+        };
+        let skip_y = if given_top < 0 {
+            (-1 * given_top) as u32
+        } else {
+            0
+        };
+
+        if is_mono {
+            for row in 0..ptr_height {
+                // Set mask
+                let mut mask = 0x80u8;
+                mask = mask >> (skip_x % 8);
+                for col in 0..ptr_width {
+                    // Get masks using appropriate offsets
+                    let and_mask = self.pointer_shape_buffer[((col + skip_x as i32) / 8
+                        + (row + skip_y as i32) * (self.pointer_shape_info.Pitch as i32))
+                        as usize]
+                        & mask;
+                    let xor_mask = self.pointer_shape_buffer[((col + skip_x as i32) / 8
+                        + (row + skip_y as i32 + (self.pointer_shape_info.Height as i32 / 2))
+                            * (self.pointer_shape_info.Pitch as i32))
+                        as usize]
+                        & mask;
+                    let and_mask_32 = if and_mask != 0 {
+                        0xFFFFFFFF as u32
+                    } else {
+                        0xFF000000
+                    };
+                    let xor_mask_32 = if xor_mask != 0 {
+                        0x00FFFFFF as u32
+                    } else {
+                        0x00000000
+                    };
+
+                    // Set new pixel
+                    init_buffer_32[(row * ptr_width + col) as usize] = (unsafe {
+                        *desktop_32
+                            .wrapping_add((row * desktop_pitch_in_pixels as i32 + col) as usize)
+                    } & and_mask_32)
+                        ^ xor_mask_32;
+
+                    // Adjust mask
+                    if mask == 0x01 {
+                        mask = 0x80;
+                    } else {
+                        mask = mask >> 1;
+                    }
+                }
+            }
+        } else {
+            let buffer_32 = unsafe {
+                core::slice::from_raw_parts_mut(
+                    self.pointer_shape_buffer.as_mut_ptr() as *mut u32,
+                    self.pointer_shape_buffer.len() / size_of::<u32>(),
+                )
+            };
+
+            // Iterate through pixels
+            for row in 0..ptr_height {
+                for col in 0..ptr_width {
+                    // Set up mask
+                    let mask_val = 0xFF000000
+                        & buffer_32[(col
+                            + skip_x as i32
+                            + (row + skip_y as i32)
+                                * (self.pointer_shape_info.Pitch as i32 / size_of::<u32>() as i32))
+                            as usize];
+                    if mask_val != 0 {
+                        // Mask was 0xFF
+                        buffer_32[(row * ptr_width + col) as usize] = (unsafe {
+                            *desktop_32
+                                .wrapping_add((row * desktop_pitch_in_pixels as i32 + col) as usize)
+                        } ^ buffer_32[(col
+                            + skip_x as i32
+                            + (row + skip_y as i32)
+                                * (self.pointer_shape_info.Pitch as i32 / size_of::<u32>() as i32))
+                            as usize])
+                            | 0xFF000000;
+                    } else {
+                        // Mask was 0x00
+                        buffer_32[(row * ptr_width + col) as usize] = buffer_32[(col
+                            + skip_x as i32
+                            + (row + skip_y as i32)
+                                * (self.pointer_shape_info.Pitch as i32 / size_of::<u32>() as i32))
+                            as usize]
+                            | 0xFF000000;
+                    }
+                }
+            }
+        }
+
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = 0;
+        // Set texture properties
+        desc.Width = ptr_width as u32;
+        desc.Height = ptr_height as u32;
+
+        // Set up init data
+        let mut init_data = D3D11_SUBRESOURCE_DATA::default();
+        init_data.pSysMem = if self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_COLOR {
+            self.pointer_shape_buffer.as_ptr() as *const _
+        } else {
+            init_buffer.as_ptr() as *const _
+        };
+        init_data.SysMemPitch = if self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_COLOR {
+            self.pointer_shape_info.Pitch
+        } else {
+            (ptr_width * BPP) as u32
+        };
+        init_data.SysMemSlicePitch = 0;
+
+        // Create mouseshape as texture
+        let mut mouse_tex = None;
+        unsafe {
+            self.manager
+                .device
+                .CreateTexture2D(&desc, Some(&init_data), Some(&mut mouse_tex))
+        }?;
+        let mouse_tex = mouse_tex.unwrap();
+
+        // Copy back to desktop image
+        let mut mouse_box = D3D11_BOX::default();
+        mouse_box.right = ptr_width as u32;
+        mouse_box.bottom = ptr_height as u32;
+        mouse_box.front = 0;
+        mouse_box.back = 1;
+        unsafe {
+            self.manager.device_context.CopySubresourceRegion(
+                acquired_desktop_image,
+                0,
+                0,
+                0,
+                0,
+                &mouse_tex,
+                0,
+                Some(&mouse_box),
+            )
+        };
+        Ok(())
     }
 }
 
@@ -385,6 +748,9 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             self.screen_output = Some(new_screen_output);
         }
         let mut screen_output = self.screen_output.as_mut().unwrap();
+        let width = screen_output.dup_output_desc.ModeDesc.Width;
+        let height = screen_output.dup_output_desc.ModeDesc.Height;
+
         let mut result = screen_output.get_frame(true);
         if let Err(error) = result {
             if let DeskError::WindowsResultError(bt, err) = error {
@@ -427,8 +793,7 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             "Got screen output frame, info={:?}",
             screen_frame.frame_info
         );
-        let width = screen_output.dxgi_output_desc.ModeDesc.Width;
-        let height = screen_output.dxgi_output_desc.ModeDesc.Height;
+
         let src_stride = width * 4;
         let mut planar_image = YuvPlanarImageMut::<u8>::alloc(
             width as u32,
@@ -504,9 +869,12 @@ mod tests {
 
     /// Save screenshot to file
     fn save_screenshot_to_file(
-        screent_output: &ScreenOutput,
+        screent_output: &mut ScreenOutput,
         bmp_path: &Path,
     ) -> Result<(), DeskError> {
+        let width = screent_output.dup_output_desc.ModeDesc.Width;
+        let height = screent_output.dup_output_desc.ModeDesc.Height;
+
         let frame = screent_output.get_frame(false)?;
         log::info!(
             "frame_info={:?}, frame_buffer.len={}",
@@ -515,8 +883,7 @@ mod tests {
         );
         let mut rgb_data = vec![0u8; frame.frame_buffer.len()];
         let rgb_data_array = rgb_data.as_mut_slice();
-        let width = screent_output.dxgi_output_desc.ModeDesc.Width;
-        let height = screent_output.dxgi_output_desc.ModeDesc.Height;
+
         let src_stride = width * 4;
         let dst_stride = width * 4;
         // convert bgra to rgba
@@ -551,13 +918,13 @@ mod tests {
         let list = manager.get_output_list()?;
         assert!(!list.is_empty());
 
-        let screent_output = manager.get_screen_output(0)?;
+        let mut screent_output = manager.get_screen_output(0)?;
         let tmp_dir = PathBuf::from("sample/screenshot");
         std::fs::create_dir_all(tmp_dir.as_path())?;
 
         for i in 0..10 {
             let name = tmp_dir.join(format!("screenshot_{}.bmp", i));
-            save_screenshot_to_file(&screent_output, name.as_path())?;
+            save_screenshot_to_file(&mut screent_output, name.as_path())?;
         }
         std::fs::remove_dir_all(tmp_dir.as_path())?;
 
@@ -639,14 +1006,14 @@ mod tests {
                     log::error!("Failed to get screen output {}: {}", desktop_name, e);
                     continue;
                 }
-                let screent_output = screent_output_result.unwrap();
+                let mut screent_output = screent_output_result.unwrap();
                 // first frame is black, skip it
                 screent_output.get_frame(false).unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
                 let name = tmp_dir.join(format!("screenshot_{}_{}.bmp", desktop_name, index));
 
-                save_screenshot_to_file(&screent_output, name.as_path()).unwrap();
+                save_screenshot_to_file(&mut screent_output, name.as_path()).unwrap();
             }
         }
     }
@@ -724,23 +1091,23 @@ mod tests {
                 log::error!("Failed to get screen output: {}", e);
                 ScreenRecordManager::set_thread_input_desktop().unwrap();
                 let manager = ScreenRecordManager::new(&settings).unwrap();
-                let screent_output = manager.get_screen_output(0).unwrap();
+                let mut screent_output = manager.get_screen_output(0).unwrap();
                 screent_output.get_frame(false).unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
                 let name = tmp_dir.join(format!("switch_desktop_screenshot_retry.bmp"));
 
-                save_screenshot_to_file(&screent_output, name.as_path()).unwrap();
+                save_screenshot_to_file(&mut screent_output, name.as_path()).unwrap();
                 return;
             }
-            let screent_output = screent_output_result.unwrap();
+            let mut screent_output = screent_output_result.unwrap();
             // first frame is black, skip it
             screent_output.get_frame(false).unwrap();
 
             let tmp_dir = PathBuf::from("sample");
             let name = tmp_dir.join(format!("switch_desktop_screenshot.bmp"));
 
-            save_screenshot_to_file(&screent_output, name.as_path()).unwrap();
+            save_screenshot_to_file(&mut screent_output, name.as_path()).unwrap();
         });
 
         log::info!("Old desktop handle: {:?}", h_old);
