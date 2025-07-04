@@ -5,6 +5,7 @@ use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytestring::ByteString;
 use encoding_rs::{Decoder, Encoder};
 use futures::StreamExt;
+use regex::Regex;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Child,
@@ -17,25 +18,34 @@ use crate::{
     desk_error::DeskError,
     model::{settings::SharedSettings, user::CurrentUser},
 };
-
+/// Fetches the list of available terminals on a Windows
+/// see alse: https://github.com/microsoft/vscode/blob/main/src/vs/platform/terminal/node/windowsShellHelper.ts
 #[cfg(target_os = "windows")]
 pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<TerminalList, DeskError> {
+    let shell_list = [
+        "cmd",
+        "powershell",
+        "bash",
+        "wsl",
+        "WindowsTerminal",
+        "node",
+        "julia",
+    ];
+    let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?\.exe"];
     let mut terminal_list = Vec::<Vec<String>>::new();
 
-    if let Ok(path) = which::which("cmd") {
-        terminal_list.push(vec![path.to_string_lossy().into_owned()]);
+    for shell in shell_list {
+        if let Ok(path) = which::which(shell) {
+            terminal_list.push(vec![path.to_string_lossy().into_owned()]);
+        }
     }
 
-    if let Ok(path) = which::which("powershell") {
-        terminal_list.push(vec![path.to_string_lossy().into_owned()]);
-    }
-
-    if let Ok(path) = which::which("bash") {
-        terminal_list.push(vec![path.to_string_lossy().into_owned()]);
-    }
-
-    if let Ok(path) = which::which("wsl") {
-        terminal_list.push(vec![path.to_string_lossy().into_owned()]);
+    for regex in shell_regexe_list {
+        if let Ok(paths) = which::which_re(Regex::new(regex)?) {
+            for path in paths {
+                terminal_list.push(vec![path.to_string_lossy().into_owned()]);
+            }
+        }
     }
 
     return Ok(TerminalList {
@@ -43,7 +53,7 @@ pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<Termin
     });
 }
 
-pub fn convert_to_utf8_bytes(decoder: &mut Decoder, stdout_buf_vec: &mut Vec<u8>) -> Vec<u8> {
+pub fn convert_to_utf8_str(decoder: &mut Decoder, stdout_buf_vec: &mut Vec<u8>) -> String {
     let mut intermediate_buffer_bytes = [0u8; 4096];
     // Is there a safe way to create a stack-allocated &mut str?
     let intermediate_buffer: &mut str =
@@ -54,11 +64,14 @@ pub fn convert_to_utf8_bytes(decoder: &mut Decoder, stdout_buf_vec: &mut Vec<u8>
     let removed: Vec<u8> = stdout_buf_vec.drain(0..decoder_read).collect();
     log::trace!("removed {} bytes from buffer", removed.len());
     let utf8_buffer = intermediate_buffer.as_bytes()[..decoder_written].to_vec();
-    return utf8_buffer;
+    String::from_utf8_lossy(&utf8_buffer).to_string()
 }
 
 pub fn convert_str_to_encoding_bytes(encoder: &mut Encoder, utf8_byte_str: &ByteString) -> Vec<u8> {
-    let mut utf8_str_buffer = utf8_byte_str.to_string();
+    let utf8_str_buffer = utf8_byte_str.to_string();
+    // replace \r with \r\n
+    let mut utf8_str_buffer = utf8_str_buffer.replace("\r", "\r\n");
+
     let mut output_vec = Vec::<u8>::new();
     loop {
         let mut intermediate_buffer_bytes = [0u8; 4096];
@@ -125,10 +138,11 @@ pub async fn handle_terminal(
                 }
                 stdout_buf_vec.extend_from_slice(&stdout_buf[..result.unwrap()]); // Extend the vector
 
-                log::debug!("Received stdout content and sending to client: {:?}", stdout_buf_vec);
+                log::debug!("Received stdout content: {:?}", stdout_buf_vec);
 
-                let utf8_buffer = convert_to_utf8_bytes(&mut decoder, &mut stdout_buf_vec);
-                session.binary(utf8_buffer).await?;
+                let utf8_buffer = convert_to_utf8_str(&mut decoder, &mut stdout_buf_vec);
+                log::debug!("Sending stdout content to client: {:?}", utf8_buffer);
+                session.text(utf8_buffer).await?;
             },
             result = stderr.read(stderr_buf) => {
                 if let Err(e) = result {
@@ -141,10 +155,11 @@ pub async fn handle_terminal(
                 }
                 stderr_buf_vec.extend_from_slice(&stderr_buf[..result.unwrap()]); // Extend the vector
 
-                log::debug!("Received stderr content and sending to client: {:?}", stderr_buf_vec);
+                log::debug!("Received stderr content: {:?}", stderr_buf_vec);
 
-                let utf8_buffer = convert_to_utf8_bytes(&mut decoder, &mut stderr_buf_vec);
-                session.binary(utf8_buffer).await?;
+                let utf8_buffer = convert_to_utf8_str(&mut decoder, &mut stderr_buf_vec);
+                log::debug!("Sending stderr content to client: {:?}", utf8_buffer);
+                session.text(utf8_buffer).await?;
             },
             result = stream.next() => {
                 if result.is_none() {

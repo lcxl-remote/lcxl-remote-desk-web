@@ -77,6 +77,8 @@ pub enum DeskError {
     FromUtf16Error(std::string::FromUtf16Error),
     /// A which error occurred.
     WhichError(which::Error),
+    /// A regex error occurred.
+    RegexError(regex::Error),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -137,6 +139,7 @@ impl Display for DeskError {
             }
             DeskError::ParseLevelError(error) => error.fmt(f),
             DeskError::FromUtf16Error(error) => error.fmt(f),
+            DeskError::RegexError(error) => error.fmt(f),
             DeskError::WhichError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
@@ -270,6 +273,12 @@ impl From<std::string::FromUtf16Error> for DeskError {
 impl From<which::Error> for DeskError {
     fn from(err: which::Error) -> Self {
         DeskError::WhichError(err)
+    }
+}
+
+impl From<regex::Error> for DeskError {
+    fn from(err: regex::Error) -> Self {
+        DeskError::RegexError(err)
     }
 }
 

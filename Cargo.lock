@@ -2156,6 +2156,7 @@ dependencies = [
  "mime",
  "openh264",
  "opus",
+ "regex",
  "rtp",
  "serde",
  "serde_json",
@@ -4471,6 +4472,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fabb953106c3c8eea8306e4393700d7657561cb43122571b172bbfb7c7ba1d"
 dependencies = [
  "env_home",
+ "regex",
  "rustix",
  "winsafe",
 ]
