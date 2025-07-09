@@ -4,6 +4,7 @@ use windows::Win32::{
         Dxgi::DXGI_OUTPUT_DESC,
         Gdi::{DISPLAY_DEVICE_STATE_FLAGS, DISPLAY_DEVICEW, EnumDisplayDevicesW},
     },
+    Media::MediaFoundation::{MF_FLOAT2, MF_FLOAT3},
 };
 use windows_core::PCWSTR;
 
@@ -110,4 +111,10 @@ impl From<DXGI_OUTPUT_DESC> for DisplayInfo {
     fn from(output_desc: DXGI_OUTPUT_DESC) -> Self {
         DisplayInfo::from_digx_output_desc(&output_desc)
     }
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VERTEX {
+    pub pos: MF_FLOAT3,
+    pub tex_coord: MF_FLOAT2,
 }

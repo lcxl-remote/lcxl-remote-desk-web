@@ -2,7 +2,11 @@ use std::{backtrace::Backtrace, sync::Arc};
 
 use crate::{
     desk_error::DeskError,
-    model::{common::ErrorCode, record_screen::DisplayInfo, settings::Settings},
+    model::{
+        common::ErrorCode,
+        record_screen::{DisplayInfo, VERTEX},
+        settings::Settings,
+    },
 };
 use log::warn;
 use openh264::{
@@ -16,31 +20,43 @@ use windows::Win32::{
         Direct3D::{
             D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_REFERENCE,
             D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_9_1, D3D_FEATURE_LEVEL_10_0,
-            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0, D3D11_SRV_DIMENSION_TEXTURE2D,
+            Fxc::D3DCompile, ID3DInclude,
         },
         Direct3D11::{
-            D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_READ,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_SDK_VERSION,
-            D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
-            D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+            D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC,
+            D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA,
+            D3D11_BLEND_ZERO, D3D11_BOX, D3D11_BUFFER_DESC, D3D11_COLOR_WRITE_ENABLE_ALL,
+            D3D11_COMPARISON_NEVER, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_DEBUG, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_FLOAT32_MAX,
+            D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_SAMPLER_DESC,
+            D3D11_SDK_VERSION, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SUBRESOURCE_DATA,
+            D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+            D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11BlendState, ID3D11Device,
+            ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RenderTargetView,
+            ID3D11SamplerState, ID3D11Texture2D, ID3D11VertexShader,
         },
         Dxgi::{
-            Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED,
-            DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ,
-            DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO,
-            DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
-            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+            Common::{
+                DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT,
+            },
+            DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL,
+            DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
+            DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
             DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
             DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
             IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
+        Hlsl::D3D_COMPILE_STANDARD_FILE_INCLUDE,
     },
+    Media::MediaFoundation::{MF_FLOAT2, MF_FLOAT3},
     System::StationsAndDesktops::{
         CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetProcessWindowStation,
         OpenInputDesktop, SetThreadDesktop,
     },
 };
-use windows_core::Interface;
+use windows_core::{Interface, s};
 use yuv::{
     YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
     bgra_to_yuv420,
@@ -49,6 +65,12 @@ pub struct ScreenRecordManager {
     pub device: ID3D11Device,
     pub device_context: ID3D11DeviceContext,
     pub dxgi_adapter: IDXGIAdapter,
+    pub blend_state: ID3D11BlendState,
+
+    pub vertex_shader: ID3D11VertexShader,
+    pub input_layout: ID3D11InputLayout,
+    pub pixel_shader: ID3D11PixelShader,
+    pub sampler_linear: [Option<ID3D11SamplerState>; 1],
 }
 
 impl ScreenRecordManager {
@@ -74,6 +96,145 @@ impl ScreenRecordManager {
             }
         };
         Ok(())
+    }
+
+    pub fn make_rtv(
+        &self,
+        back_buffer: &ID3D11Texture2D,
+    ) -> Result<[Option<ID3D11RenderTargetView>; 1], DeskError> {
+        // Create a render target view
+        let mut rtv = None;
+        unsafe {
+            self.device
+                .CreateRenderTargetView(back_buffer, None, Some(&mut rtv))
+        }?;
+        let rtv = [rtv];
+        // Set new render target
+        unsafe { self.device_context.OMSetRenderTargets(Some(&rtv), None) };
+
+        return Ok(rtv);
+    }
+
+    pub fn init_shaders(
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+    ) -> Result<(ID3D11VertexShader, ID3D11InputLayout, ID3D11PixelShader), DeskError> {
+        //https://learn.microsoft.com/zh-cn/windows/win32/api/d3dcompiler/nf-d3dcompiler-d3dcompile
+        let vertex_shader_code = include_str!("shaders/VertexShader.hlsl");
+        let pixel_shader_code = include_str!("shaders/PixelShader.hlsl");
+
+        let mut vertex_shader = None;
+        let mut error_msg = None;
+        let compile_result = unsafe {
+            D3DCompile(
+                vertex_shader_code.as_ptr() as *const _,
+                vertex_shader_code.len(),
+                s!("VertexShader.hlsl"),
+                None,
+                None,
+                s!("main"),
+                s!("vs_4_0_level_9_3"),
+                0,
+                0,
+                &mut vertex_shader,
+                Some(&mut error_msg),
+            )
+        };
+        if let Err(complie_error) = compile_result {
+            if let Some(blob) = error_msg {
+                // ansi format string?
+                let blob_array = unsafe {
+                    core::slice::from_raw_parts(
+                        blob.GetBufferPointer() as *const u8,
+                        blob.GetBufferSize(),
+                    )
+                };
+                let error_message = String::from_utf8_lossy(blob_array);
+                log::error!("Vertex Shader Compile Error: {}", error_message);
+                return Err(DeskError::from(complie_error));
+            }
+        }
+
+        let mut pixel_shader = None;
+        let mut error_msg = None;
+        let compile_result = unsafe {
+            D3DCompile(
+                pixel_shader_code.as_ptr() as *const _,
+                pixel_shader_code.len(),
+                s!("PixelShader.hlsl"),
+                None,
+                None,
+                s!("main"),
+                s!("ps_4_0_level_9_3"),
+                0,
+                0,
+                &mut pixel_shader,
+                Some(&mut error_msg),
+            )
+        };
+        if let Err(complie_error) = compile_result {
+            if let Some(blob) = error_msg {
+                // ansi format string?
+                let blob_array = unsafe {
+                    core::slice::from_raw_parts(
+                        blob.GetBufferPointer() as *const u8,
+                        blob.GetBufferSize(),
+                    )
+                };
+                let error_message = String::from_utf8_lossy(blob_array);
+                log::error!("Pixel Shader Compile Error: {}", error_message);
+                return Err(DeskError::from(complie_error));
+            }
+        }
+        let vertex_shader = vertex_shader.unwrap();
+        let vertex_shader_blob = unsafe {
+            core::slice::from_raw_parts(
+                vertex_shader.GetBufferPointer() as *const u8,
+                vertex_shader.GetBufferSize(),
+            )
+        };
+        let mut vertex_shader = None;
+        unsafe { device.CreateVertexShader(vertex_shader_blob, None, Some(&mut vertex_shader)) }?;
+        let vertex_shader = vertex_shader.unwrap();
+
+        let layout = [
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: s!("POSITION"),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32B32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 0,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: s!("TEXCOORD"),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 12,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+        ];
+        let mut input_layout = None;
+        unsafe { device.CreateInputLayout(&layout, vertex_shader_blob, Some(&mut input_layout)) }?;
+        let input_layout = input_layout.unwrap();
+        unsafe { device_context.IASetInputLayout(&input_layout) };
+
+        let pixel_shader = pixel_shader.unwrap();
+        let pixel_shader_blob = unsafe {
+            core::slice::from_raw_parts(
+                pixel_shader.GetBufferPointer() as *const u8,
+                pixel_shader.GetBufferSize(),
+            )
+        };
+
+        let mut pixel_shader = None;
+        unsafe { device.CreatePixelShader(pixel_shader_blob, None, Some(&mut pixel_shader)) }?;
+
+        let pixel_shader = pixel_shader.unwrap();
+        Ok((vertex_shader, input_layout, pixel_shader))
     }
 
     pub fn new(settings: &Settings) -> Result<Arc<Self>, DeskError> {
@@ -138,11 +299,49 @@ impl ScreenRecordManager {
 
         let dxgi_device = device.cast::<IDXGIDevice>()?;
         let dxgi_adapter = unsafe { dxgi_device.GetParent::<IDXGIAdapter>() }?;
+
+        // Create the sample state
+        let mut samp_desc = D3D11_SAMPLER_DESC::default();
+
+        samp_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        samp_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samp_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samp_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        samp_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        samp_desc.MinLOD = 0.0;
+        samp_desc.MaxLOD = D3D11_FLOAT32_MAX;
+        let mut sampler_linear = None;
+        unsafe { device.CreateSamplerState(&samp_desc, Some(&mut sampler_linear)) }?;
+        let sampler_linear = [sampler_linear];
+        // Create the blend state
+        let mut blend_state_desc = D3D11_BLEND_DESC::default();
+        blend_state_desc.AlphaToCoverageEnable = false.into();
+        blend_state_desc.IndependentBlendEnable = false.into();
+        blend_state_desc.RenderTarget[0].BlendEnable = true.into();
+        blend_state_desc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        blend_state_desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        blend_state_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        blend_state_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        blend_state_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        blend_state_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        blend_state_desc.RenderTarget[0].RenderTargetWriteMask =
+            D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
+        let mut blend_state = None;
+        unsafe { device.CreateBlendState(&blend_state_desc, Some(&mut blend_state)) }?;
+        let blend_state = blend_state.unwrap();
+
+        let (vertex_shader, input_layout, pixel_shader) =
+            ScreenRecordManager::init_shaders(&device, &device_context)?;
         log::info!("ScreenRecordManager initialized successfully");
         Ok(Arc::new(ScreenRecordManager {
             device,
             device_context,
             dxgi_adapter,
+            blend_state,
+            vertex_shader,
+            input_layout,
+            pixel_shader,
+            sampler_linear,
         }))
     }
 
@@ -203,6 +402,7 @@ pub struct ScreenOutput {
     pub pointer_shape_buffer: Vec<u8>,
     pub last_mouse_update_time: i64,
     pub pointer_position: Point,
+    pub pointer_visible: bool,
     pub pointer_shape_info: DXGI_OUTDUPL_POINTER_SHAPE_INFO,
 }
 
@@ -215,6 +415,8 @@ pub const POINTER_SHAPE_TYPE_MONOCHROME: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_M
 pub const POINTER_SHAPE_TYPE_COLOR: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32;
 pub const POINTER_SHAPE_TYPE_MASKED_COLOR: u32 =
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32;
+
+const NUMVERTICES: u32 = 6;
 const BPP: i32 = 4;
 
 impl ScreenOutput {
@@ -280,6 +482,7 @@ impl ScreenOutput {
             pointer_shape_buffer: vec![],
             last_mouse_update_time: 0,
             pointer_position: Point::default(),
+            pointer_visible: false,
             pointer_shape_info: DXGI_OUTDUPL_POINTER_SHAPE_INFO::default(),
         })
     }
@@ -314,17 +517,15 @@ impl ScreenOutput {
 
         let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
 
-        // draw mouse cursor if needed
-        if draw_mouse {
-            self.draw_mouse(&frame_info, &acquired_desktop_image)?;
-        }
-
         unsafe {
             self.manager
                 .device_context
                 .CopyResource(&self.texture2d, &acquired_desktop_image)
         };
-
+        // draw mouse cursor if needed
+        if draw_mouse {
+            self.draw_mouse(&frame_info)?;
+        }
         let mut locked_rect = DXGI_MAPPED_RECT::default();
 
         let frame_buffer = unsafe {
@@ -342,17 +543,11 @@ impl ScreenOutput {
     }
 
     /// Draw mouse cursor on the screen
-    pub fn draw_mouse(
-        &mut self,
-        frame_info: &DXGI_OUTDUPL_FRAME_INFO,
-        acquired_desktop_image: &ID3D11Texture2D,
-    ) -> Result<(), DeskError> {
+    pub fn draw_mouse(&mut self, frame_info: &DXGI_OUTDUPL_FRAME_INFO) -> Result<(), DeskError> {
         // A non-zero mouse update timestamp indicates that there is a mouse position update and optionally a shape change
-        if frame_info.LastMouseUpdateTime == 0 {
-            return Ok(());
-        }
+
         let mut update_position = true;
-        if !frame_info.PointerPosition.Visible.as_bool() {
+        if frame_info.LastMouseUpdateTime == 0 {
             update_position = false;
         }
         if self.last_mouse_update_time > frame_info.LastMouseUpdateTime {
@@ -362,65 +557,51 @@ impl ScreenOutput {
             self.last_mouse_update_time = frame_info.LastMouseUpdateTime;
             self.pointer_position.x = frame_info.PointerPosition.Position.x;
             self.pointer_position.y = frame_info.PointerPosition.Position.y;
-        }
-        if frame_info.PointerShapeBufferSize == 0 {
-            return Ok(());
-        }
-        if frame_info.PointerShapeBufferSize > self.pointer_shape_buffer.len() as u32 {
-            // resize buffer if needed
-            self.pointer_shape_buffer = vec![0u8; frame_info.PointerShapeBufferSize as usize];
-        }
-        let mut buffer_size_required: u32 = 0;
-        let result = unsafe {
-            self.dup_output.GetFramePointerShape(
-                frame_info.PointerShapeBufferSize,
-                self.pointer_shape_buffer.as_mut_ptr() as *mut _,
-                &mut buffer_size_required,
-                &mut self.pointer_shape_info,
-            )
-        };
-        if let Err(error) = result {
-            log::error!("Failed to get frame pointer shape: {}", error);
-            self.pointer_shape_buffer = vec![];
-            return Err(DeskError::from(error));
-        }
+            self.pointer_visible = frame_info.PointerPosition.Visible.as_bool();
 
-        if !frame_info.PointerPosition.Visible.as_bool() {
-            return Ok(());
-        }
-
-        match self.pointer_shape_info.Type {
-            //DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME | DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR
-            POINTER_SHAPE_TYPE_MONOCHROME | POINTER_SHAPE_TYPE_MASKED_COLOR => {
-                self.process_mono_and_masked_pointer(acquired_desktop_image)?;
-            }
-            //DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR
-            POINTER_SHAPE_TYPE_COLOR => {}
-            _ => {
-                log::warn!(
-                    "Unsupported pointer shape type: {}",
-                    self.pointer_shape_info.Type
-                );
+            if self.pointer_visible {
+                // check if the mouse shape has changed
+                if frame_info.PointerShapeBufferSize > 0 {
+                    self.pointer_shape_buffer =
+                        vec![0u8; frame_info.PointerShapeBufferSize as usize];
+                    let mut buffer_size_required: u32 = 0;
+                    let result = unsafe {
+                        self.dup_output.GetFramePointerShape(
+                            frame_info.PointerShapeBufferSize,
+                            self.pointer_shape_buffer.as_mut_ptr() as *mut _,
+                            &mut buffer_size_required,
+                            &mut self.pointer_shape_info,
+                        )
+                    };
+                    if let Err(error) = result {
+                        log::error!("Failed to get frame pointer shape: {}", error);
+                        self.pointer_shape_buffer = vec![];
+                        return Err(DeskError::from(error));
+                    }
+                    log::debug!("Pointer shape info: {:?}", self.pointer_shape_info);
+                }
+            } else {
+                // mouse is not visible, clear the pointer shape buffer
+                self.pointer_shape_buffer = vec![];
             }
         }
-        Ok(())
-    }
 
-    fn process_mono_and_masked_pointer(
-        &mut self,
-        acquired_desktop_image: &ID3D11Texture2D,
-    ) -> Result<(), DeskError> {
-        if self.pointer_shape_info.Type != POINTER_SHAPE_TYPE_MONOCHROME
-            && self.pointer_shape_info.Type != POINTER_SHAPE_TYPE_MASKED_COLOR
-        {
-            panic!("Invalid pointer shape type");
+        if !self.pointer_visible {
+            log::trace!("Pointer is not visible, skipping drawing pointer shape.");
+            // If the pointer is not visible, we don't need to draw anything. Just return.
+            return Ok(());
         }
+
         let is_mono = self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_MONOCHROME;
         // Desktop dimensions
         let mut full_desc: D3D11_TEXTURE2D_DESC = D3D11_TEXTURE2D_DESC::default();
-        unsafe { acquired_desktop_image.GetDesc(&mut full_desc) };
-        let desktop_width = full_desc.Width;
-        let desktop_height = full_desc.Height;
+        unsafe { self.texture2d.GetDesc(&mut full_desc) };
+        let desktop_width = full_desc.Width as i32;
+        let desktop_height = full_desc.Height as i32;
+
+        // Center of desktop dimensions
+        let center_x = desktop_width / 2;
+        let center_y = desktop_height / 2;
         // Pointer position
         let given_left = self.pointer_position.x;
         let given_top = self.pointer_position.y;
@@ -452,6 +633,261 @@ impl ScreenOutput {
 
         let ptr_left = if given_left < 0 { 0 } else { given_left };
         let ptr_top = if given_top < 0 { 0 } else { given_top };
+        log::trace!(
+            "desktop_width: {desktop_width}, 
+            desktop_height: {desktop_height}, 
+            given_left: {given_left}, 
+            given_top: {given_top},
+            ptr_width: {ptr_width}, 
+            ptr_height: {ptr_height}, 
+            ptr_left: {ptr_left}, 
+            ptr_top: {ptr_top},
+            is_mono: {is_mono}, 
+            "
+        );
+        // New mouseshape buffer
+        let mut init_buffer = vec![0u8; (ptr_width * ptr_height * BPP) as usize];
+        match self.pointer_shape_info.Type {
+            //DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME | DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR
+            POINTER_SHAPE_TYPE_MONOCHROME | POINTER_SHAPE_TYPE_MASKED_COLOR => {
+                self.process_mono_and_masked_pointer(
+                    &mut init_buffer,
+                    is_mono,
+                    ptr_width,
+                    ptr_height,
+                    ptr_left,
+                    ptr_top,
+                    given_left,
+                    given_top,
+                )?;
+            }
+            //DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR
+            POINTER_SHAPE_TYPE_COLOR => {}
+            _ => {
+                log::warn!(
+                    "Unsupported pointer shape type: {}",
+                    self.pointer_shape_info.Type
+                );
+            }
+        }
+
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+        desc.CPUAccessFlags = 0;
+        desc.MiscFlags = 0;
+        // Set texture properties
+        desc.Width = ptr_width as u32;
+        desc.Height = ptr_height as u32;
+
+        // Set up init data
+        let mut init_data = D3D11_SUBRESOURCE_DATA::default();
+        init_data.pSysMem = if self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_COLOR {
+            self.pointer_shape_buffer.as_ptr() as *const _
+        } else {
+            init_buffer.as_ptr() as *const _
+        };
+        init_data.SysMemPitch = if self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_COLOR {
+            self.pointer_shape_info.Pitch
+        } else {
+            (ptr_width * BPP) as u32
+        };
+        init_data.SysMemSlicePitch = 0;
+
+        // Create mouseshape as texture
+        let mut mouse_tex = None;
+        unsafe {
+            self.manager
+                .device
+                .CreateTexture2D(&desc, Some(&init_data), Some(&mut mouse_tex))
+        }?;
+        let mouse_tex = mouse_tex.unwrap();
+
+        // Position will be changed based on mouse position
+        let mut vertices = [
+            VERTEX {
+                pos: MF_FLOAT3 {
+                    x: -1.0,
+                    y: -1.0,
+                    z: 0.0,
+                },
+                tex_coord: MF_FLOAT2 { x: 0.0, y: 1.0 },
+            },
+            VERTEX {
+                pos: MF_FLOAT3 {
+                    x: -1.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
+                tex_coord: MF_FLOAT2 { x: 0.0, y: 0.0 },
+            },
+            VERTEX {
+                pos: MF_FLOAT3 {
+                    x: 1.0,
+                    y: -1.0,
+                    z: 0.0,
+                },
+                tex_coord: MF_FLOAT2 { x: 1.0, y: 1.0 },
+            },
+            VERTEX {
+                pos: MF_FLOAT3 {
+                    x: 1.0,
+                    y: -1.0,
+                    z: 0.0,
+                },
+                tex_coord: MF_FLOAT2 { x: 1.0, y: 1.0 },
+            },
+            VERTEX {
+                pos: MF_FLOAT3 {
+                    x: -1.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
+                tex_coord: MF_FLOAT2 { x: 0.0, y: 0.0 },
+            },
+            VERTEX {
+                pos: MF_FLOAT3 {
+                    x: 1.0,
+                    y: 1.0,
+                    z: 0.0,
+                },
+                tex_coord: MF_FLOAT2 { x: 1.0, y: 0.0 },
+            },
+        ];
+
+        // Set shader resource properties
+        let mut s_desc = D3D11_SHADER_RESOURCE_VIEW_DESC::default();
+        s_desc.Format = desc.Format;
+        s_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        s_desc.Anonymous.Texture2D.MostDetailedMip = desc.MipLevels - 1;
+        s_desc.Anonymous.Texture2D.MipLevels = desc.MipLevels;
+
+        // VERTEX creation
+        vertices[0].pos.x = (ptr_left - center_x) as f32 / center_x as f32;
+        vertices[0].pos.y = -1.0 * ((ptr_top + ptr_height) - center_y) as f32 / center_y as f32;
+        vertices[1].pos.x = (ptr_left - center_x) as f32 / center_x as f32;
+        vertices[1].pos.y = -1.0 * (ptr_top - center_y) as f32 / center_y as f32;
+        vertices[2].pos.x = ((ptr_left + ptr_width) - center_x) as f32 / center_x as f32;
+        vertices[2].pos.y = -1.0 * ((ptr_top + ptr_height) - center_y) as f32 / center_y as f32;
+        vertices[3].pos.x = vertices[2].pos.x;
+        vertices[3].pos.y = vertices[2].pos.y;
+        vertices[4].pos.x = vertices[1].pos.x;
+        vertices[4].pos.y = vertices[1].pos.y;
+        vertices[5].pos.x = ((ptr_left + ptr_width) - center_x) as f32 / center_x as f32;
+        vertices[5].pos.y = -1.0 * (ptr_top - center_y) as f32 / center_y as f32;
+
+        let mut shader_res = None;
+        // Create shader resource from texture
+        unsafe {
+            self.manager.device.CreateShaderResourceView(
+                &mouse_tex,
+                Some(&s_desc),
+                Some(&mut shader_res),
+            )
+        }?;
+
+        let mut b_desc = D3D11_BUFFER_DESC::default();
+
+        b_desc.Usage = D3D11_USAGE_DEFAULT;
+        b_desc.ByteWidth = size_of::<VERTEX>() as u32 * NUMVERTICES;
+        b_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER.0 as u32;
+        b_desc.CPUAccessFlags = 0;
+
+        let mut init_data = D3D11_SUBRESOURCE_DATA::default();
+        init_data.pSysMem = vertices.as_ptr() as *const _;
+
+        // Create vertex buffer
+        let mut vertex_buffer_mouse = None;
+        unsafe {
+            self.manager.device.CreateBuffer(
+                &b_desc,
+                Some(&init_data),
+                Some(&mut vertex_buffer_mouse),
+            )
+        }?;
+        // Set resources
+        let blend_factor = [0.0f32, 0.0f32, 0.0f32, 0.0f32];
+        let stride = size_of::<VERTEX>() as u32;
+        let offset = 0;
+        unsafe {
+            let rtv = self.manager.make_rtv(&mut self.texture2d)?;
+            self.manager.device_context.IASetVertexBuffers(
+                0,
+                1,
+                Some(&vertex_buffer_mouse),
+                Some(&stride),
+                Some(&offset),
+            );
+            self.manager.device_context.OMSetBlendState(
+                &self.manager.blend_state,
+                Some(&blend_factor),
+                0xFFFFFFFF,
+            );
+            self.manager
+                .device_context
+                .OMSetRenderTargets(Some(&rtv), None);
+            self.manager
+                .device_context
+                .VSSetShader(&self.manager.vertex_shader, None);
+            self.manager
+                .device_context
+                .PSSetShader(&self.manager.pixel_shader, None);
+            self.manager
+                .device_context
+                .PSSetShaderResources(0, Some(&[shader_res]));
+            self.manager
+                .device_context
+                .PSSetSamplers(0, Some(&self.manager.sampler_linear));
+
+            // Draw
+            self.manager.device_context.Draw(NUMVERTICES, 0);
+        }
+        // Copy back to desktop image
+        /*
+               {
+                   let mut mouse_box = D3D11_BOX::default();
+                   mouse_box.right = ptr_width as u32;
+                   mouse_box.bottom = ptr_height as u32;
+                   mouse_box.front = 0;
+                   mouse_box.back = 1;
+                   unsafe {
+                       self.manager.device_context.CopySubresourceRegion(
+                           &self.texture2d,
+                           0,
+                           ptr_left as u32,
+                           ptr_top as u32,
+                           0,
+                           &mouse_tex,
+                           0,
+                           Some(&mouse_box),
+                       )
+                   };
+               }
+        */
+        Ok(())
+    }
+
+    fn process_mono_and_masked_pointer(
+        &mut self,
+        init_buffer: &mut Vec<u8>,
+        is_mono: bool,
+        ptr_width: i32,
+        ptr_height: i32,
+        ptr_left: i32,
+        ptr_top: i32,
+        given_left: i32,
+        given_top: i32,
+    ) -> Result<(), DeskError> {
+        if self.pointer_shape_info.Type != POINTER_SHAPE_TYPE_MONOCHROME
+            && self.pointer_shape_info.Type != POINTER_SHAPE_TYPE_MASKED_COLOR
+        {
+            panic!("Invalid pointer shape type");
+        }
 
         // Staging buffer/texture
         let mut copy_buffer_desc = D3D11_TEXTURE2D_DESC::default();
@@ -488,7 +924,7 @@ impl ScreenOutput {
                 0,
                 0,
                 0,
-                acquired_desktop_image,
+                &self.texture2d,
                 0,
                 Some(&d3d11_box),
             )
@@ -500,7 +936,6 @@ impl ScreenOutput {
         unsafe { copy_resource.Map(&mut mapped_surface, DXGI_MAP_READ) }?;
 
         // New mouseshape buffer
-        let mut init_buffer = vec![0u8; (ptr_width * ptr_height * BPP) as usize];
         let init_buffer_32 = unsafe {
             core::slice::from_raw_parts_mut(
                 init_buffer.as_mut_ptr() as *mut u32,
@@ -585,7 +1020,7 @@ impl ScreenOutput {
                             as usize];
                     if mask_val != 0 {
                         // Mask was 0xFF
-                        buffer_32[(row * ptr_width + col) as usize] = (unsafe {
+                        init_buffer_32[(row * ptr_width + col) as usize] = (unsafe {
                             *desktop_32
                                 .wrapping_add((row * desktop_pitch_in_pixels as i32 + col) as usize)
                         } ^ buffer_32[(col
@@ -596,7 +1031,7 @@ impl ScreenOutput {
                             | 0xFF000000;
                     } else {
                         // Mask was 0x00
-                        buffer_32[(row * ptr_width + col) as usize] = buffer_32[(col
+                        init_buffer_32[(row * ptr_width + col) as usize] = buffer_32[(col
                             + skip_x as i32
                             + (row + skip_y as i32)
                                 * (self.pointer_shape_info.Pitch as i32 / size_of::<u32>() as i32))
@@ -606,62 +1041,6 @@ impl ScreenOutput {
                 }
             }
         }
-
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
-        desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
-        desc.CPUAccessFlags = 0;
-        desc.MiscFlags = 0;
-        // Set texture properties
-        desc.Width = ptr_width as u32;
-        desc.Height = ptr_height as u32;
-
-        // Set up init data
-        let mut init_data = D3D11_SUBRESOURCE_DATA::default();
-        init_data.pSysMem = if self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_COLOR {
-            self.pointer_shape_buffer.as_ptr() as *const _
-        } else {
-            init_buffer.as_ptr() as *const _
-        };
-        init_data.SysMemPitch = if self.pointer_shape_info.Type == POINTER_SHAPE_TYPE_COLOR {
-            self.pointer_shape_info.Pitch
-        } else {
-            (ptr_width * BPP) as u32
-        };
-        init_data.SysMemSlicePitch = 0;
-
-        // Create mouseshape as texture
-        let mut mouse_tex = None;
-        unsafe {
-            self.manager
-                .device
-                .CreateTexture2D(&desc, Some(&init_data), Some(&mut mouse_tex))
-        }?;
-        let mouse_tex = mouse_tex.unwrap();
-
-        // Copy back to desktop image
-        let mut mouse_box = D3D11_BOX::default();
-        mouse_box.right = ptr_width as u32;
-        mouse_box.bottom = ptr_height as u32;
-        mouse_box.front = 0;
-        mouse_box.back = 1;
-        unsafe {
-            self.manager.device_context.CopySubresourceRegion(
-                acquired_desktop_image,
-                0,
-                0,
-                0,
-                0,
-                &mouse_tex,
-                0,
-                Some(&mouse_box),
-            )
-        };
         Ok(())
     }
 }
@@ -857,11 +1236,13 @@ mod tests {
     pub fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            env_logger::builder()
+            let result = env_logger::builder()
                 .format_timestamp_micros()
-                .filter_level(LevelFilter::Debug)
-                .init();
-
+                .filter_level(LevelFilter::Trace)
+                .try_init();
+            if let Err(e) = result {
+                log::warn!("Failed to initialize logger: {:?}", e);
+            }
             let result = ScreenRecordManager::set_thread_input_desktop();
             log::info!("set thread desktop result: {:?}", result);
         });
@@ -875,7 +1256,7 @@ mod tests {
         let width = screent_output.dup_output_desc.ModeDesc.Width;
         let height = screent_output.dup_output_desc.ModeDesc.Height;
 
-        let frame = screent_output.get_frame(false)?;
+        let frame = screent_output.get_frame(true)?;
         log::info!(
             "frame_info={:?}, frame_buffer.len={}",
             frame.frame_info,
@@ -926,7 +1307,7 @@ mod tests {
             let name = tmp_dir.join(format!("screenshot_{}.bmp", i));
             save_screenshot_to_file(&mut screent_output, name.as_path())?;
         }
-        std::fs::remove_dir_all(tmp_dir.as_path())?;
+        //std::fs::remove_dir_all(tmp_dir.as_path())?;
 
         Ok(())
     }
