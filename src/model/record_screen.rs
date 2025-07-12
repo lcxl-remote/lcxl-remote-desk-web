@@ -1,7 +1,10 @@
 use windows::Win32::{
     Foundation::RECT,
     Graphics::{
-        Dxgi::DXGI_OUTPUT_DESC,
+        Dxgi::{
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
+        },
         Gdi::{DISPLAY_DEVICE_STATE_FLAGS, DISPLAY_DEVICEW, EnumDisplayDevicesW},
     },
     Media::MediaFoundation::{MF_FLOAT2, MF_FLOAT3},
@@ -118,3 +121,69 @@ pub struct VERTEX {
     pub pos: MF_FLOAT3,
     pub tex_coord: MF_FLOAT2,
 }
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+pub const POINTER_SHAPE_TYPE_MONOCHROME: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32;
+pub const POINTER_SHAPE_TYPE_COLOR: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32;
+pub const POINTER_SHAPE_TYPE_MASKED_COLOR: u32 =
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32;
+
+/// FIXME: can not find the type of XMFLOAT2 and XMFLOAT3 in windows-rs, use MF_FLOAT3 and MF_FLOAT2 instead
+pub const VERTICES: [VERTEX; 6] = [
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: -1.0,
+            y: -1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 0.0, y: 1.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: -1.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 0.0, y: 0.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: 1.0,
+            y: -1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 1.0, y: 1.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: 1.0,
+            y: -1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 1.0, y: 1.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: -1.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 0.0, y: 0.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: 1.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 1.0, y: 0.0 },
+    },
+];
+
+pub const NUMVERTICES: u32 = VERTICES.len() as u32;
+pub const BPP: i32 = 4;
