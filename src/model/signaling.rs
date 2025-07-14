@@ -6,7 +6,10 @@ use webrtc::{
     peer_connection::peer_connection_state::RTCPeerConnectionState,
 };
 
-use crate::{desk_error::DeskError, model::record_audio::AudioDevice};
+use crate::{
+    desk_error::DeskError,
+    model::{record_audio::AudioDevice, record_screen::DisplayInfo},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SignalingType(i32);
@@ -116,6 +119,7 @@ pub struct InitSignalingData {
     pub ice_servers: Vec<RTCIceServer>,
     pub user_name: String,
     pub audio_device_list: Vec<AudioDevice>,
+    pub video_device_list: Vec<DisplayInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

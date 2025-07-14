@@ -38,6 +38,9 @@ const Desk: React.FC = () => {
   const remote_audio = useRef<HTMLAudioElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
+
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
   //let socket = null;
   useEffect(() => {
     (async () => {
@@ -132,19 +135,42 @@ const Desk: React.FC = () => {
 
 
       socketRef.current = sock;
+
+      const resizeObserver = new ResizeObserver(entries => {
+        for (let entry of entries) {
+          console.log("The size of video element changed: ", entry);
+          setDimensions({
+            width: entry.contentRect.width,
+            height: entry.contentRect.height,
+          });
+        }
+      });
+
+      resizeObserver.observe(remote_video.current!);
+
       return () => {
         console.log("关闭websocket", sock);
         sock.close();
         console.log("关闭webrtc peer connection", peerconnectionRef.current);
         peerconnectionRef.current?.close();
+        resizeObserver.disconnect();
       };
     })();
   }, []);
 
 
+  const handleMouseMove = (event: MouseEvent) => {
+    // Access mouse coordinates from the event object
+    // console.log("Mouse move on video element: ", event);
+    setMousePosition({
+      x: event.clientX, // X-coordinate relative to the viewport
+      y: event.clientY, // Y-coordinate relative to the viewport
+    });
+  };
+
   return (
     <PageContainer>
-      <video ref={remote_video} autoPlay muted className={styles.videoContainer} />
+      <video ref={remote_video} autoPlay muted className={styles.videoContainer} onMouseMove={handleMouseMove} />
       <audio ref={remote_audio} autoPlay />
       <Divider />
 

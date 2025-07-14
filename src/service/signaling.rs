@@ -30,6 +30,7 @@ use webrtc::{
 use windows::Win32::Media::Audio::eAll;
 
 use crate::model::common::ErrorCode;
+use crate::model::record_screen::DisplayInfo;
 use crate::model::settings::Settings;
 use crate::model::signaling::WebRTConnectionState;
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
@@ -49,7 +50,7 @@ use crate::{
 
 pub async fn handle_signaling(
     settings: web::Data<SharedSettings>,
-    mut stream: AggregatedMessageStream,
+    stream: AggregatedMessageStream,
     session: Session,
     user: CurrentUser,
 ) -> Result<(), DeskError> {
@@ -57,6 +58,16 @@ pub async fn handle_signaling(
     // Handle signaling logic here
     let mut signaling_context = SignalingContext::init_signaling(settings, session, user).await?;
 
+    let result = do_handle_signaling(&mut signaling_context, stream).await;
+    // Shutdown function must be invoked to clean up resources.
+    signaling_context.shutdown().await?;
+    result
+}
+
+pub async fn do_handle_signaling(
+    signaling_context: &mut SignalingContext,
+    mut stream: AggregatedMessageStream,
+) -> Result<(), DeskError> {
     while let Some(msg) = stream.next().await {
         match msg {
             Ok(AggregatedMessage::Text(text)) => {
@@ -86,11 +97,8 @@ pub async fn handle_signaling(
             }
         }
     }
-
-    signaling_context.shutdown().await?;
     Ok(())
 }
-
 pub struct SignalingContext {
     pub settings: web::Data<SharedSettings>,
     pub session: Session,
@@ -170,10 +178,22 @@ impl SignalingContext {
         });
         let audio_device_list = spawn_handle.await??;
 
+        // get video device
+        let settings_for_video = local_settings.clone();
+        let spawn_handle: tokio::task::JoinHandle<Result<Vec<DisplayInfo>, DeskError>> =
+            capture_screen_runtime.spawn(async move {
+                ScreenRecordManager::set_thread_input_desktop()?;
+
+                let manager = ScreenRecordManager::new(&settings_for_video)?;
+                manager.get_output_list()
+            });
+        let video_device_list = spawn_handle.await??;
+
         let init_signaling_data = InitSignalingData {
             ice_servers: ice_servers.clone(),
             user_name: user.name.clone(),
             audio_device_list,
+            video_device_list,
         };
 
         info!("Sending init signaling");
