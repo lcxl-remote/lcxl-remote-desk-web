@@ -1,11 +1,12 @@
 import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
-import { PageContainer, ProForm, ProFormDigit, ProFormSelect, ProFormSwitch, ProFormText } from "@ant-design/pro-components";
+import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormSelect, ProFormSwitch, ProFormText } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
-import { Alert, Divider, message } from "antd";
+import { Alert, Button, Divider, FloatButton, message, Modal } from "antd";
 import { useEffect, useRef, useState } from "react";
 
 import styles from './index.less'; // 告诉 umi 编译这个 less
+import { CommentOutlined, CustomerServiceOutlined } from "@ant-design/icons";
 
 const SIGNALING_TYPE_CODE_INIT = 0;
 const SIGNALING_TYPE_CODE_OFFER = 100;
@@ -13,22 +14,6 @@ const SIGNALING_TYPE_CODE_ANSWER = 101;
 const SIGNALING_TYPE_CODE_CANID = 200;
 const SIGNALING_TYPE_CODE_ERROR = 1000;
 const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 1001;
-type SignalingModel = {
-  /**
-   * Signaling type
-   */
-  signaling_type: number;
-
-  /**
-   * Signaling data
-   */
-  signaling_data?: string;
-};
-
-type InitSignalingData = {
-  ice_servers: RTCIceServer[],
-  user_name: string,
-};
 
 
 const Desk: React.FC = () => {
@@ -41,6 +26,7 @@ const Desk: React.FC = () => {
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
+  const [isModalOpen, setIsModalOpen] = useState(true);
   //let socket = null;
   useEffect(() => {
     (async () => {
@@ -55,10 +41,10 @@ const Desk: React.FC = () => {
       };
       sock.onmessage = (event) => {
         console.log('收到消息:', event.data);
-        const signaling_model = JSON.parse(event.data) as SignalingModel;
+        const signaling_model = JSON.parse(event.data) as API.SignalingModel;
         switch (signaling_model.signaling_type) {
           case SIGNALING_TYPE_CODE_INIT:
-            const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as InitSignalingData;
+            const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as API.InitSignalingData;
 
             let pc = new RTCPeerConnection({
               iceServers: init_signaling_data.ice_servers
@@ -94,10 +80,8 @@ const Desk: React.FC = () => {
 
                 let offer_sginaling = {
                   signaling_type: SIGNALING_TYPE_CODE_OFFER,
-                  signaling_success: true,
                   signaling_data: local_description_json,
-                  signaling_status_code: 0,
-                } as SignalingModel;
+                } as API.SignalingModel;
                 let offer_signaling_json = JSON.stringify(offer_sginaling);
 
                 sock.send(offer_signaling_json);
@@ -168,12 +152,80 @@ const Desk: React.FC = () => {
     });
   };
 
+  const showModal = () => {
+    setIsModalOpen(true);
+  };
+
+  const handleOk = () => {
+    setIsModalOpen(false);
+  };
+
+  const handleCancel = () => {
+    setIsModalOpen(false);
+  };
+
   return (
     <PageContainer>
       <video ref={remote_video} autoPlay muted className={styles.videoContainer} onMouseMove={handleMouseMove} />
       <audio ref={remote_audio} autoPlay />
       <Divider />
 
+      <FloatButton.Group
+        /*open={true}*/
+        shape="square"
+        trigger="hover"
+        /*style={{ insetInlineEnd: 24 }}*/
+        icon={<CustomerServiceOutlined />}
+      >
+        <FloatButton tooltip={<div>全屏</div>} />
+        <FloatButton />
+        <FloatButton icon={<CommentOutlined />} />
+      </FloatButton.Group>
+
+      <Modal
+        title="Basic Modal"
+        closable={{ 'aria-label': 'Custom Close Button' }}
+        open={isModalOpen}
+        footer={false}
+      >
+
+        <ProForm
+          submitter={{
+            render: (props, doms) => {
+              return [...doms,
+              <Button htmlType="button" onClick={handleCancel} key="close">
+                关闭
+              </Button>];
+            },
+          }}
+        >
+          <ProForm.Group>
+            <ProFormSelect
+              name="device"
+              label="显示器"
+              valueEnum={{
+                open: '未解决',
+                closed: '已解决',
+              }}
+              placeholder="请选择一个显示器"
+              rules={[{ required: true, message: 'Please select your country!' }]}
+            />
+          </ProForm.Group>
+          <ProForm.Group>
+            <ProFormText
+              name={['contract', 'name']}
+              label="合同名称"
+              placeholder="请输入名称"
+            />
+            <ProFormText
+              name="name"
+              label="签约客户名称"
+              tooltip="最长为 24 位"
+              placeholder="请输入名称"
+            />
+          </ProForm.Group>
+        </ProForm>
+      </Modal>
     </PageContainer>
 
   );

@@ -112,11 +112,28 @@ impl SignalingSessionExt for Session {
     }
 }
 
+#[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Hash, ToSchema)]
+pub struct LcxlRTCIceServer {
+    pub urls: Vec<String>,
+    pub username: String,
+    pub credential: String,
+}
+
+impl From<RTCIceServer> for LcxlRTCIceServer {
+    fn from(value: RTCIceServer) -> Self {
+        LcxlRTCIceServer {
+            urls: value.urls,
+            username: value.username,
+            credential: value.credential,
+        }
+    }
+}
+
 /// InitSignalingData is used to initialize signaling data.
 /// see https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InitSignalingData {
-    pub ice_servers: Vec<RTCIceServer>,
+    pub ice_servers: Vec<LcxlRTCIceServer>,
     pub user_name: String,
     pub audio_device_list: Vec<AudioDevice>,
     pub video_device_list: Vec<DisplayInfo>,

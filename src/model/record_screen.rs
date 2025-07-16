@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use windows::Win32::{
     Foundation::RECT,
     Graphics::{
@@ -12,7 +13,7 @@ use windows::Win32::{
 };
 use windows_core::PCWSTR;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub struct DisplayRect {
     pub left: i32,
     pub top: i32,
@@ -31,7 +32,7 @@ impl From<RECT> for DisplayRect {
     }
 }
 /// Display Info
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DisplayInfo {
     pub device_name: String,
     pub display_device_name: Option<String>,

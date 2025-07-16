@@ -3,7 +3,10 @@ use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use log::{error, info};
 
 use crate::{
-    model::{settings::SharedSettings, signaling::SignalingModel},
+    model::{
+        settings::SharedSettings,
+        signaling::{InitSignalingData, SignalingErrorData, SignalingModel},
+    },
     service::{signaling::handle_signaling, user::SessionExt},
 };
 
@@ -11,7 +14,8 @@ use crate::{
     summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
     responses(
         (status = 200, description = "return websocket stream", body = SignalingModel),
-
+        (status = 500, description = "return websocket stream", body = SignalingErrorData),
+        (status = 201, description = "init signaling data", body = InitSignalingData),
     ),
 )]
 #[get("/signaling")]

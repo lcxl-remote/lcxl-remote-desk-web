@@ -1,4 +1,17 @@
 declare namespace API {
+  type AudioDataFlow = 'Render' | 'Capture';
+
+  type AudioDevice = {
+    /** data flow of the device (render or capture) */
+    data_flow: AudioDataFlow;
+    /** is default device for this data flow? */
+    default: boolean;
+    /** audio device friendly name, e.g. "Speakers (Definition Audio)" */
+    firendly_name: string;
+    /** device id */
+    id: string;
+  };
+
   type CurrentUser = {
     access?: any;
     address?: any;
@@ -27,6 +40,21 @@ declare namespace API {
   type deleteTurnSessionParams = {
     address: string;
     interface: string;
+  };
+
+  type DisplayInfo = {
+    attached_to_desktop: boolean;
+    desktop_coordinates: DisplayRect;
+    device_name: string;
+    display_device_name?: any;
+    rotation: number;
+  };
+
+  type DisplayRect = {
+    bottom: number;
+    left: number;
+    right: number;
+    top: number;
   };
 
   type FakeCaptcha = {
@@ -72,9 +100,22 @@ declare namespace API {
     interface: string;
   };
 
+  type InitSignalingData = {
+    audio_device_list: AudioDevice[];
+    ice_servers: LcxlRTCIceServer[];
+    user_name: string;
+    video_device_list: DisplayInfo[];
+  };
+
   type LabelKey = {
     key?: any;
     label?: any;
+  };
+
+  type LcxlRTCIceServer = {
+    credential: string;
+    urls: string[];
+    username: string;
   };
 
   type listFilesParams = {
@@ -167,6 +208,15 @@ declare namespace API {
     };
     message?: any;
     success: boolean;
+  };
+
+  type SignalingErrorData = {
+    /** error message */
+    message: string;
+    /** signaling data */
+    signaling_data?: any;
+    /** signaling type which errors occurred. */
+    signaling_type: number;
   };
 
   type SignalingModel = {

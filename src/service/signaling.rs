@@ -32,7 +32,7 @@ use windows::Win32::Media::Audio::eAll;
 use crate::model::common::ErrorCode;
 use crate::model::record_screen::DisplayInfo;
 use crate::model::settings::Settings;
-use crate::model::signaling::WebRTConnectionState;
+use crate::model::signaling::{LcxlRTCIceServer, WebRTConnectionState};
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
     desk_error::DeskError,
@@ -129,7 +129,6 @@ impl SignalingContext {
             username: local_settings.user.login_user_name.clone(),
             credential: local_settings.user.login_password.clone(),
         };
-        let ice_servers = vec![ice_server];
 
         // new rtc_peer_connection
         // Create a MediaEngine object to configure the supported codec
@@ -150,7 +149,7 @@ impl SignalingContext {
 
         // Prepare the configuration
         let config = RTCConfiguration {
-            ice_servers: ice_servers.clone(),
+            ice_servers: vec![ice_server.clone()],
             ..Default::default()
         };
 
@@ -190,7 +189,7 @@ impl SignalingContext {
         let video_device_list = spawn_handle.await??;
 
         let init_signaling_data = InitSignalingData {
-            ice_servers: ice_servers.clone(),
+            ice_servers: vec![LcxlRTCIceServer::from(ice_server.clone())],
             user_name: user.name.clone(),
             audio_device_list,
             video_device_list,
