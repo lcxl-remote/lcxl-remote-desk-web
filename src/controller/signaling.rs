@@ -4,6 +4,7 @@ use log::{error, info};
 
 use crate::{
     model::{
+        record_audio::SelectedAudioDevice,
         settings::SharedSettings,
         signaling::{InitSignalingData, SignalingErrorData, SignalingModel},
     },
@@ -16,6 +17,7 @@ use crate::{
         (status = 200, description = "return websocket stream", body = SignalingModel),
         (status = 500, description = "return websocket stream", body = SignalingErrorData),
         (status = 201, description = "init signaling data", body = InitSignalingData),
+        (status = 202, description = "init signaling data", body = SelectedAudioDevice),
     ),
 )]
 #[get("/signaling")]

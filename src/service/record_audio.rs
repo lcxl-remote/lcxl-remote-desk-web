@@ -4,7 +4,7 @@ use crate::{
     desk_error::DeskError,
     model::{
         common::ErrorCode,
-        record_audio::{AudioDataFlow, AudioDevice},
+        record_audio::{AudioDataFlow, AudioDevice, SelectedAudioDevice},
     },
 };
 use windows::Win32::{
@@ -179,10 +179,34 @@ impl AudioCapture {
 
     /// Create a new instance of AudioRecord. Initializes COM
     /// see https://learn.microsoft.com/zh-cn/windows/win32/coreaudio/capturing-a-stream
-    pub fn new() -> Result<Self, DeskError> {
+    #[allow(unreachable_patterns)]
+    pub fn new(audio_device: SelectedAudioDevice) -> Result<Self, DeskError> {
         let device_enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
-        let device = unsafe { device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?;
+        let dataflow = match audio_device.audio_data_flow {
+            AudioDataFlow::Render => eRender,
+            AudioDataFlow::Capture => eCapture,
+            _ => {
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!(
+                        "Unknown audio data flow: {:?}",
+                        audio_device.audio_data_flow
+                    ),
+                );
+            }
+        };
+        let device = unsafe {
+            if let Some(device_id) = audio_device.audio_device_id {
+                let raw_device_id = format!("{}\0", device_id)
+                    .encode_utf16()
+                    .collect::<Vec<u16>>();
+                device_enumerator
+                    .GetDevice(windows::core::PCWSTR::from_raw(raw_device_id.as_ptr()))?
+            } else {
+                device_enumerator.GetDefaultAudioEndpoint(dataflow, eConsole)?
+            }
+        };
 
         let audio_client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
         let p_mix_format = unsafe { audio_client.GetMixFormat()? };
@@ -217,12 +241,17 @@ impl AudioCapture {
             let format = AudioCapture::get_wave_format_tensible(closet_format);
             log_wave_format(&format);
         }
-
+        // see https://learn.microsoft.com/zh-cn/windows/win32/coreaudio/loopback-recording
+        let streamflags = if dataflow == eRender {
+            AUDCLNT_STREAMFLAGS_LOOPBACK
+        } else {
+            0
+        };
         unsafe { CoTaskMemFree(Some(closet_format_match as *mut _)) };
         unsafe {
             audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                streamflags,
                 REFTIMES_PER_SEC as i64,
                 0,
                 pformat,
@@ -380,6 +409,7 @@ pub struct OpusAudioBuffer {
 }
 
 pub struct OpusAudioCapture {
+    pub audio_device: SelectedAudioDevice,
     pub capture: AudioCapture,
     //pub encoder: opusic_c::Encoder,
     pub encoder: opus::Encoder,
@@ -392,10 +422,11 @@ unsafe impl Send for OpusAudioCapture {}
 unsafe impl Sync for OpusAudioCapture {}
 
 impl OpusAudioCapture {
-    pub fn new() -> Result<Self, DeskError> {
-        let capture = AudioCapture::new()?;
+    pub fn new(audio_device: SelectedAudioDevice) -> Result<Self, DeskError> {
+        let capture = AudioCapture::new(audio_device.clone())?;
         let encoder = opus::Encoder::new(48000, opus::Channels::Stereo, opus::Application::Audio)?;
         let opus_audio_record = OpusAudioCapture {
+            audio_device,
             capture,
             encoder,
             buffer: Vec::new(),
@@ -460,7 +491,7 @@ impl OpusAudioCapture {
                         log::warn!(
                             "audio device is invalidated, will try to reinitialize the audio device"
                         );
-                        let capture = AudioCapture::new()?;
+                        let capture = AudioCapture::new(self.audio_device.clone())?;
                         capture.start()?;
                         self.capture = capture;
                         log::info!("audio device reinitialized successfully");
@@ -568,7 +599,7 @@ mod tests {
     fn test_write_wav() -> Result<(), DeskError> {
         initialize();
 
-        let audio_record = AudioCapture::new()?;
+        let audio_record = AudioCapture::new(SelectedAudioDevice::default())?;
         audio_record.start()?;
 
         let spec = hound::WavSpec {
@@ -599,7 +630,7 @@ mod tests {
         initialize();
         let mut current_timesamp = 0usize;
 
-        let mut opus_audio_capture = OpusAudioCapture::new()?;
+        let mut opus_audio_capture = OpusAudioCapture::new(SelectedAudioDevice::default())?;
         opus_audio_capture.start()?;
         let dur = time::Duration::from_millis(
             (opus_audio_capture.capture.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
@@ -641,7 +672,7 @@ mod tests {
         let mut ogg_write = OggWriter::new(File::create(name.as_path())?, 48000, 2)?;
         let mut current_timesamp = 0usize;
 
-        let mut opus_audio_record = OpusAudioCapture::new()?;
+        let mut opus_audio_record = OpusAudioCapture::new(SelectedAudioDevice::default())?;
         opus_audio_record.start()?;
         let dur = time::Duration::from_millis(
             (opus_audio_record.capture.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,

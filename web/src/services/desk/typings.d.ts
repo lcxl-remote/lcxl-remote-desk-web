@@ -210,6 +210,12 @@ declare namespace API {
     success: boolean;
   };
 
+  type SelectedAudioDevice = {
+    audio_data_flow: AudioDataFlow;
+    /** audio device id, None for default audio device */
+    audio_device_id?: any;
+  };
+
   type SignalingErrorData = {
     /** error message */
     message: string;

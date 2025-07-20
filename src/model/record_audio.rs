@@ -18,3 +18,20 @@ pub struct AudioDevice {
     /// is default device for this data flow?
     pub default: bool,
 }
+
+/// Selected Audio Device Model
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SelectedAudioDevice {
+    pub audio_data_flow: AudioDataFlow,
+    /// audio device id, None for default audio device
+    pub audio_device_id: Option<String>,
+}
+
+impl Default for SelectedAudioDevice {
+    fn default() -> Self {
+        SelectedAudioDevice {
+            audio_data_flow: AudioDataFlow::Render,
+            audio_device_id: None,
+        }
+    }
+}

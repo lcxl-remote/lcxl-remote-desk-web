@@ -10,6 +10,9 @@ use log::{error, info, warn};
 use tokio::time::Duration;
 use tokio::time::Instant;
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
+use webrtc::data_channel::RTCDataChannel;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::peer_connection::math_rand_alpha;
 use webrtc::{
     api::{
         APIBuilder,
@@ -22,7 +25,6 @@ use webrtc::{
     peer_connection::{
         RTCPeerConnection, configuration::RTCConfiguration,
         peer_connection_state::RTCPeerConnectionState,
-        sdp::session_description::RTCSessionDescription,
     },
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
@@ -30,9 +32,10 @@ use webrtc::{
 use windows::Win32::Media::Audio::eAll;
 
 use crate::model::common::ErrorCode;
+use crate::model::record_audio::SelectedAudioDevice;
 use crate::model::record_screen::DisplayInfo;
 use crate::model::settings::Settings;
-use crate::model::signaling::{LcxlRTCIceServer, WebRTConnectionState};
+use crate::model::signaling::{LcxlRTCIceServer, OfferModel, SignalingState, WebRTConnectionState};
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
     desk_error::DeskError,
@@ -108,6 +111,7 @@ pub struct SignalingContext {
     pub capture_screen_runtime: tokio::runtime::Runtime,
     /// capture audio task runtime
     pub capture_audio_runtime: tokio::runtime::Runtime,
+    pub signaling_state: tokio::sync::RwLock<SignalingState>,
 }
 
 impl SignalingContext {
@@ -208,11 +212,12 @@ impl SignalingContext {
             rtc_peer_connection,
             capture_screen_runtime,
             capture_audio_runtime,
+            signaling_state: tokio::sync::RwLock::new(SignalingState::default()),
         })
     }
 
     /// Starts the WebRTC connection
-    pub async fn start_webrtc(&mut self) -> Result<(), DeskError> {
+    pub async fn start_webrtc(&mut self, offer_model: &OfferModel) -> Result<(), DeskError> {
         let (ice_connection_state_tx, ice_connection_state_rx) =
             tokio::sync::watch::channel(WebRTConnectionState::Init);
         let ice_connection_state_tx_2 = ice_connection_state_tx.clone();
@@ -275,11 +280,13 @@ impl SignalingContext {
         let screen_settings = local_settings.clone();
 
         // Spawn a blocking task to capture screen and send video
+        let output_index = offer_model.video_device_index;
         self.capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
                 screen_settings,
                 video_ice_connection_state_rx,
                 video_track,
+                output_index,
             )
             .await;
 
@@ -300,29 +307,36 @@ impl SignalingContext {
         let session_for_audio = self.session.clone();
 
         let audio_settings = local_settings.clone();
-        self.capture_audio_runtime.spawn(async move {
-            init_thread()?;
-            let result = SignalingContext::capture_audio_task(
-                audio_settings,
-                audio_ice_connection_state_rx,
-                audio_track,
-            )
-            .await;
+        let audio_device = offer_model.audio_device.clone();
+        if let Some(audio_device) = audio_device {
+            log::info!("Start to capture audio with device: {:?}", audio_device);
+            self.capture_audio_runtime.spawn(async move {
+                init_thread()?;
+                let result = SignalingContext::capture_audio_task(
+                    audio_settings,
+                    audio_ice_connection_state_rx,
+                    audio_track,
+                    audio_device,
+                )
+                .await;
 
-            if let Err(error) = result {
-                log::error!("Capture audio task failed, error: {:?}", error);
-                session_for_audio
-                    .close(Some(CloseReason::from((
-                        CloseCode::Abnormal,
-                        error.to_string(),
-                    ))))
-                    .await?;
-                return Err(error);
-            }
-            log::info!("Capture audio task completed");
-            destroy_thread()?;
-            return result;
-        });
+                if let Err(error) = result {
+                    log::error!("Capture audio task failed, error: {:?}", error);
+                    session_for_audio
+                        .close(Some(CloseReason::from((
+                            CloseCode::Abnormal,
+                            error.to_string(),
+                        ))))
+                        .await?;
+                    return Err(error);
+                }
+                log::info!("Capture audio task completed");
+                destroy_thread()?;
+                return result;
+            });
+        } else {
+            log::info!("Will not capture audio because no device is selected");
+        }
 
         // Set the handler for ICE connection state
         // This will notify you when the peer has connected/disconnected
@@ -355,6 +369,52 @@ impl SignalingContext {
 
                 Box::pin(async {})
             }));
+
+        // Register data channel creation handling
+        // Used for mouse event, keyboard event, clipboard manage, file copy, etc.
+        self.rtc_peer_connection.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
+            let d_label = d.label().to_owned();
+            let d_id = d.id();
+            log::info!("New DataChannel {d_label} {d_id}");
+
+            // Register channel opening handling
+            Box::pin(async move {
+                let d2 = Arc::clone(&d);
+                let d_label2 = d_label.clone();
+                let d_id2 = d_id;
+                d.on_close(Box::new(move || {
+                    log::warn!("Data channel closed");
+                    Box::pin(async {})
+                }));
+
+                d.on_open(Box::new(move || {
+                    log::info!("Data channel '{d_label2}'-'{d_id2}' open. Random messages will now be sent to any connected DataChannels every 5 seconds");
+
+                    Box::pin(async move {
+                        let mut result = webrtc::error::Result::<usize>::Ok(0);
+                        while result.is_ok() {
+                            let timeout = tokio::time::sleep(Duration::from_secs(5));
+                            tokio::pin!(timeout);
+
+                            tokio::select! {
+                                _ = timeout.as_mut() =>{
+                                    let message = math_rand_alpha(15);
+                                    log::info!("Sending '{message}'");
+                                    result = d2.send_text(message).await.map_err(Into::into);
+                                }
+                            };
+                        }
+                    })
+                }));
+
+                // Register text message handling
+                d.on_message(Box::new(move |msg: DataChannelMessage| {
+                    let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
+                    log::debug!("Message from DataChannel '{d_label}': '{msg_str}'");
+                    Box::pin(async {})
+                }));
+            })
+        }));
         Ok(())
     }
 
@@ -378,11 +438,12 @@ impl SignalingContext {
         settings: Settings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
+        output_index: u32,
     ) -> Result<(), DeskError> {
         log::info!("Preparing to capture screen...");
         let manager = ScreenRecordManager::new(&settings)?;
 
-        let mut h264_screen_output = H264ScreenOutput::new(manager, 0);
+        let mut h264_screen_output = H264ScreenOutput::new(manager, output_index);
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
             let state = *connection_state_rx.borrow_and_update();
@@ -472,9 +533,10 @@ impl SignalingContext {
         settings: Settings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         audio_track: Arc<TrackLocalStaticSample>,
+        audio_device: SelectedAudioDevice,
     ) -> Result<(), DeskError> {
         log::info!("Preparing to capture audio...");
-        let mut opus_audio_capture = OpusAudioCapture::new()?;
+        let mut opus_audio_capture = OpusAudioCapture::new(audio_device)?;
 
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
@@ -606,13 +668,13 @@ impl SignalingContext {
         }
         let signaling_data = signaling_model.signaling_data.clone().unwrap();
         log::info!("Received offer: {}", signaling_data);
-        let offer = serde_json::from_str::<RTCSessionDescription>(&signaling_data)?;
+        let offer_model = serde_json::from_str::<OfferModel>(&signaling_data)?;
 
         // start webrtc first
-        self.start_webrtc().await?;
+        self.start_webrtc(&offer_model).await?;
         // Set the remote SessionDescription
         self.rtc_peer_connection
-            .set_remote_description(offer)
+            .set_remote_description(offer_model.offer)
             .await?;
         let answer = self.rtc_peer_connection.create_answer(None).await?;
 

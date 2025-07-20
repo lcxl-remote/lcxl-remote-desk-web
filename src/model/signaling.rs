@@ -3,13 +3,24 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use webrtc::{
     ice_transport::{ice_connection_state::RTCIceConnectionState, ice_server::RTCIceServer},
-    peer_connection::peer_connection_state::RTCPeerConnectionState,
+    peer_connection::{
+        peer_connection_state::RTCPeerConnectionState,
+        sdp::session_description::RTCSessionDescription,
+    },
 };
 
 use crate::{
     desk_error::DeskError,
-    model::{record_audio::AudioDevice, record_screen::DisplayInfo},
+    model::{
+        record_audio::{AudioDevice, SelectedAudioDevice},
+        record_screen::DisplayInfo,
+    },
 };
+
+pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
+pub const DATA_CHANNEL_LABEL_KEYBOARD_EVENT: &str = "keyboard_event";
+pub const DATA_CHANNEL_LABEL_CLIPBOARD_EVENT: &str = "clipboard_event";
+pub const DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT: &str = "file_transfer_event";
 
 #[derive(Debug, Clone, Copy)]
 pub struct SignalingType(i32);
@@ -23,7 +34,7 @@ pub const SIGNALING_TYPE_CODE_UNKNOWN_TYPE: i32 = 1001;
 
 /// Signaling types.
 impl SignalingType {
-    /// Hello message
+    /// Init message
     pub const INIT: SignalingType = SignalingType(SIGNALING_TYPE_CODE_INIT);
 
     pub const OFFER: SignalingType = SignalingType(SIGNALING_TYPE_CODE_OFFER);
@@ -174,4 +185,22 @@ impl From<&RTCPeerConnectionState> for WebRTConnectionState {
             _ => WebRTConnectionState::Closed,
         }
     }
+}
+
+/// Signaling State
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SignalingState {
+    /// accept control from remote peer
+    pub accept_control: bool,
+    /// show mouse cursor on remote screen
+    pub show_mouse: bool,
+}
+
+/// Offer Model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OfferModel {
+    pub offer: RTCSessionDescription,
+    pub video_device_index: u32,
+    /// selected audio device
+    pub audio_device: Option<SelectedAudioDevice>,
 }
