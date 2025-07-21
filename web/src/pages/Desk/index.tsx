@@ -17,8 +17,7 @@ const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 1001;
 
 type OfferModel = {
   offer: RTCSessionDescription,
-  video_device_index: number,
-  audio_device?: API.SelectedAudioDevice,
+  desk_config: API.DeskConfig,
 };
 
 const Desk: React.FC = () => {
@@ -126,11 +125,15 @@ const Desk: React.FC = () => {
             if (event.candidate === null) {
               const offer_model = {
                 offer: pc.localDescription!,
-                video_device_index: 0,
-                audio_device: {
-                  audio_data_flow: "Render",
-                  audio_device_id: null
-                } as API.SelectedAudioDevice,
+                desk_config: {
+                  video_device_index: 0,
+                  // Video encode bitrate in bps: 10 Mbps
+                  video_encode_bps: 10_000_000,
+                  audio_device: {
+                    audio_data_flow: "Render",
+                    audio_device_id: null
+                  }
+                }
               } as OfferModel;
 
               console.log("event.candidate === null, offer_model: ", offer_model)

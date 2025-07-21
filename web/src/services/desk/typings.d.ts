@@ -42,6 +42,13 @@ declare namespace API {
     interface: string;
   };
 
+  type DeskConfig = {
+    audio_device?: null | SelectedAudioDevice;
+    video_device_index: number;
+    /** Video encode bitrate in bps (bits per second) */
+    video_encode_bps: number;
+  };
+
   type DisplayInfo = {
     attached_to_desktop: boolean;
     desktop_coordinates: DisplayRect;

@@ -1177,10 +1177,10 @@ pub struct H264ScreenOutput {
 }
 
 impl H264ScreenOutput {
-    pub fn new(manager: Arc<ScreenRecordManager>, output_index: u32) -> Self {
+    pub fn new(manager: Arc<ScreenRecordManager>, output_index: u32, bps: u32) -> Self {
         let config = openh264::encoder::EncoderConfig::new()
             .intra_frame_period(IntraFramePeriod::from_num_frames(30))
-            .bitrate(BitRate::from_bps(10_000_000));
+            .bitrate(BitRate::from_bps(bps));
         let api = OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
         Self {

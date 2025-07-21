@@ -196,11 +196,18 @@ pub struct SignalingState {
     pub show_mouse: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeskConfig {
+    pub video_device_index: u32,
+    /// Video encode bitrate in bps (bits per second)
+    pub video_encode_bps: u32,
+    /// Selected audio device
+    pub audio_device: Option<SelectedAudioDevice>,
+}
+
 /// Offer Model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfferModel {
     pub offer: RTCSessionDescription,
-    pub video_device_index: u32,
-    /// selected audio device
-    pub audio_device: Option<SelectedAudioDevice>,
+    pub desk_config: DeskConfig,
 }

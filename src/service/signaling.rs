@@ -280,13 +280,15 @@ impl SignalingContext {
         let screen_settings = local_settings.clone();
 
         // Spawn a blocking task to capture screen and send video
-        let output_index = offer_model.video_device_index;
+        let output_index = offer_model.desk_config.video_device_index;
+        let bps = offer_model.desk_config.video_encode_bps;
         self.capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
                 screen_settings,
                 video_ice_connection_state_rx,
                 video_track,
                 output_index,
+                bps,
             )
             .await;
 
@@ -307,7 +309,7 @@ impl SignalingContext {
         let session_for_audio = self.session.clone();
 
         let audio_settings = local_settings.clone();
-        let audio_device = offer_model.audio_device.clone();
+        let audio_device = offer_model.desk_config.audio_device.clone();
         if let Some(audio_device) = audio_device {
             log::info!("Start to capture audio with device: {:?}", audio_device);
             self.capture_audio_runtime.spawn(async move {
@@ -439,11 +441,12 @@ impl SignalingContext {
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
         output_index: u32,
+        bps: u32,
     ) -> Result<(), DeskError> {
         log::info!("Preparing to capture screen...");
         let manager = ScreenRecordManager::new(&settings)?;
 
-        let mut h264_screen_output = H264ScreenOutput::new(manager, output_index);
+        let mut h264_screen_output = H264ScreenOutput::new(manager, output_index, bps);
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
             let state = *connection_state_rx.borrow_and_update();
