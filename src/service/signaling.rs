@@ -121,7 +121,7 @@ impl SignalingContext {
         user: CurrentUser,
     ) -> Result<Self, DeskError> {
         let local_settings = {
-            let shared_settings = settings.lock().await;
+            let shared_settings = settings.read().await;
             shared_settings.clone()
         };
         let mut urls = Vec::<String>::new();
@@ -276,12 +276,12 @@ impl SignalingContext {
 
         let session_for_video = self.session.clone();
 
-        let local_settings = self.settings.lock().await.clone();
+        let local_settings = self.settings.read().await.clone();
         let screen_settings = local_settings.clone();
 
         // Spawn a blocking task to capture screen and send video
-        let output_index = offer_model.desk_config.video_device_index;
-        let bps = offer_model.desk_config.video_encode_bps;
+        let output_index = offer_model.desk_settings.video_device_index;
+        let bps = offer_model.desk_settings.video_encode_bps;
         self.capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
                 screen_settings,
@@ -309,7 +309,7 @@ impl SignalingContext {
         let session_for_audio = self.session.clone();
 
         let audio_settings = local_settings.clone();
-        let audio_device = offer_model.desk_config.audio_device.clone();
+        let audio_device = offer_model.desk_settings.audio_device.clone();
         if let Some(audio_device) = audio_device {
             log::info!("Start to capture audio with device: {:?}", audio_device);
             self.capture_audio_runtime.spawn(async move {

@@ -1,20 +1,15 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    ops::Deref,
-    path::PathBuf,
-};
+use std::{collections::HashMap, fs, ops::Deref, path::PathBuf};
 
 use ::serde::{Deserialize, Serialize};
 use chrono::{DateTime, Local};
 use clap::Parser;
 use config::{Config, Environment, File};
 use log::{debug, info};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use turn_server::config::Interface;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::desk_error::DeskError;
+use crate::{desk_error::DeskError, model::record_audio::SelectedAudioDevice};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -29,8 +24,6 @@ pub struct Args {
 pub struct SystemSettings {
     /// Path to the configuration file. If not specified, a new one will be created in the "conf" directory.
     pub config_file_path: String,
-    /// Path to the database file. If not specified, a new one will be created in the "conf" directory.
-    pub db_path: String,
     /// Enable IPv6 support
     pub enable_ipv6: bool,
     /// port number for the server to bind to
@@ -51,22 +44,6 @@ pub struct UserSettings {
     pub login_user_name: String,
     /// login password
     pub login_password: String,
-}
-
-/// Scan settings
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-#[serde(default)]
-pub struct ScanSettings {
-    /// Scan path
-    pub scan_path: String,
-    /// Optional list of file extensions to include in the scan. If not provided, all files will be scanned.
-    pub include_file_extensions: Option<HashSet<String>>,
-    /// Minimum file size in bytes to include in the scan. If not provided, there is no minimum size limit.
-    pub min_file_size: Option<u64>,
-    /// Maximum file size in bytes to include in the scan. If not provided, there is no maximum size limit.
-    pub max_file_size: Option<u64>,
-    /// Ignore path to ignore during scan. If not provided, no paths will be ignored.
-    pub ignore_paths: Option<HashSet<String>>,
 }
 
 /// Query parameters for listing files.
@@ -111,17 +88,26 @@ pub struct ListSettings {
 }
 
 /// Desk settings
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct DeskSettings {
     /// Enable D3D debug mode
     pub enable_d3d_debug: bool,
+    /// Video device index
+    pub video_device_index: u32,
+    /// Video encode bitrate in bps (bits per second)
+    pub video_encode_bps: u32,
+    /// Selected audio device
+    pub audio_device: Option<SelectedAudioDevice>,
 }
 
 impl Default for DeskSettings {
     fn default() -> Self {
         Self {
             enable_d3d_debug: false,
+            video_device_index: 0,
+            video_encode_bps: 10_1000_1000,
+            audio_device: None,
         }
     }
 }
@@ -173,8 +159,6 @@ pub struct Settings {
     pub system: SystemSettings,
     /// User settings
     pub user: UserSettings,
-    /// Scan settings
-    pub scan: ScanSettings,
     /// List settings
     pub list: ListSettings,
     /// Turn settings
@@ -188,7 +172,6 @@ impl Default for SystemSettings {
     fn default() -> Self {
         Self {
             config_file_path: "conf/config".to_string(),
-            db_path: "conf/dfremover.db".to_string(),
             enable_ipv6: true,
             port: 8081,
             listen_addr_ipv4: "0.0.0.0".to_string(),
@@ -230,18 +213,6 @@ impl Default for UserSettings {
         Self {
             login_user_name: "admin".to_string(),
             login_password: "".to_string(),
-        }
-    }
-}
-
-impl Default for ScanSettings {
-    fn default() -> Self {
-        Self {
-            scan_path: "data/".to_string(),
-            include_file_extensions: None,
-            min_file_size: None,
-            max_file_size: None,
-            ignore_paths: None,
         }
     }
 }
@@ -311,16 +282,16 @@ impl Settings {
 }
 
 #[derive(Debug)]
-pub struct SharedSettings(pub Mutex<Settings>);
+pub struct SharedSettings(pub RwLock<Settings>);
 
 impl SharedSettings {
     pub fn from(setting: Settings) -> Self {
-        SharedSettings(Mutex::new(setting))
+        SharedSettings(RwLock::new(setting))
     }
 }
 
 impl Deref for SharedSettings {
-    type Target = Mutex<Settings>;
+    type Target = RwLock<Settings>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }

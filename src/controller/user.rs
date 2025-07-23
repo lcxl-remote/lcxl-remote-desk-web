@@ -48,7 +48,7 @@ pub async fn get_current_user(
                 info!("Client IP is loopback, auto login as admin");
                 // Allow access for loopback IPs
                 let login_user_name = {
-                    let settings = settings.lock().await;
+                    let settings = settings.read().await;
                     settings.user.login_user_name.clone()
                 };
                 let user_info = CurrentUser::new_admin(&login_user_name);

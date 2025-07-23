@@ -27,7 +27,7 @@ pub async fn login_account(
 ) -> Result<HttpResponse, AWError> {
     let params = requst_json.into_inner();
     {
-        let settings = settings.lock().await;
+        let settings = settings.read().await;
         if settings.user.login_user_name != params.username {
             error!("Username does not match");
             return Ok(HttpResponse::Forbidden().body("Illegal username or password"));
@@ -97,7 +97,7 @@ pub async fn change_password(
     session: Session,
 ) -> Result<HttpResponse, AWError> {
     let params = requst_json.into_inner();
-    let mut settings = settings.lock().await;
+    let mut settings = settings.write().await;
     if params.password.is_empty() || params.username.is_empty() {
         error!("Username or password is empty");
         return Ok(HttpResponse::Forbidden().body("Illegal username or password"));

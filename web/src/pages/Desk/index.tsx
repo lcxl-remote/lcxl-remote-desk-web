@@ -17,7 +17,7 @@ const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 1001;
 
 type OfferModel = {
   offer: RTCSessionDescription,
-  desk_config: API.DeskConfig,
+  desk_settings: API.DeskSettings,
 };
 
 const Desk: React.FC = () => {
@@ -125,7 +125,7 @@ const Desk: React.FC = () => {
             if (event.candidate === null) {
               const offer_model = {
                 offer: pc.localDescription!,
-                desk_config: {
+                desk_settings: {
                   video_device_index: 0,
                   // Video encode bitrate in bps: 10 Mbps
                   video_encode_bps: 10_000_000,

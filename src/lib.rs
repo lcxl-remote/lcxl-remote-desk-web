@@ -69,7 +69,7 @@ pub async fn run() -> Result<Server, DeskError> {
 
     // check user and passwd
     let passwd = {
-        let settings = shared_settings.lock().await;
+        let settings = shared_settings.read().await;
         settings.user.login_password.clone()
     };
     if passwd == UserSettings::default().login_password {
@@ -77,7 +77,7 @@ pub async fn run() -> Result<Server, DeskError> {
         let random_uuid = Uuid::new_v4();
         let uuid_str = String::from(random_uuid);
         let new_password = &uuid_str[..6];
-        let mut settings = shared_settings.lock().await;
+        let mut settings = shared_settings.write().await;
         settings.user.login_password = String::from(new_password);
         info!("New random password: {}", new_password);
         settings.save()?;

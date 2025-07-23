@@ -45,7 +45,7 @@ impl Observer for TurnObserver {
         let user_settings = futures::executor::block_on(async move {
             handle
                 .spawn(async move {
-                    let settings = new_settings.lock().await;
+                    let settings = new_settings.read().await;
                     settings.user.clone()
                 })
                 .await
@@ -188,7 +188,7 @@ pub async fn startup_turn_server(
     settings: web::Data<SharedSettings>,
 ) -> Result<TurnApiState, DeskError> {
     let config = {
-        let settings = settings.lock().await;
+        let settings = settings.read().await;
         Arc::new(settings.to_turn_server_config()?)
     };
     log::info!("Starting turn server with config {:?}", config);

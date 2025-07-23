@@ -14,7 +14,7 @@ use crate::model::{
 )]
 #[get("/settings")]
 pub async fn query_settings(settings: web::Data<SharedSettings>) -> Result<HttpResponse, AWError> {
-    let settings = settings.lock().await;
+    let settings = settings.read().await;
     let system_settings = settings.system.clone();
     info!(
         "Query settings successfully, settings: {:?}",
@@ -36,7 +36,7 @@ pub async fn update_settings(
     settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, AWError> {
     let params = requst_json.into_inner();
-    let mut settings = settings.lock().await;
+    let mut settings = settings.write().await;
     settings.system = params;
     // save new settings to file
     settings.save()?;

@@ -11,10 +11,7 @@ use webrtc::{
 
 use crate::{
     desk_error::DeskError,
-    model::{
-        record_audio::{AudioDevice, SelectedAudioDevice},
-        record_screen::DisplayInfo,
-    },
+    model::{record_audio::AudioDevice, record_screen::DisplayInfo, settings::DeskSettings},
 };
 
 pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
@@ -196,18 +193,9 @@ pub struct SignalingState {
     pub show_mouse: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct DeskConfig {
-    pub video_device_index: u32,
-    /// Video encode bitrate in bps (bits per second)
-    pub video_encode_bps: u32,
-    /// Selected audio device
-    pub audio_device: Option<SelectedAudioDevice>,
-}
-
 /// Offer Model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfferModel {
     pub offer: RTCSessionDescription,
-    pub desk_config: DeskConfig,
+    pub desk_settings: DeskSettings,
 }

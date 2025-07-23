@@ -2,13 +2,13 @@ declare namespace API {
   type AudioDataFlow = 'Render' | 'Capture';
 
   type AudioDevice = {
-    /** data flow of the device (render or capture) */
+    /** Data flow of the device (render or capture) */
     data_flow: AudioDataFlow;
-    /** is default device for this data flow? */
+    /** Is default device for this data flow? */
     default: boolean;
-    /** audio device friendly name, e.g. "Speakers (Definition Audio)" */
+    /** Audio device friendly name, e.g. "Speakers (Definition Audio)" */
     firendly_name: string;
-    /** device id */
+    /** Device id */
     id: string;
   };
 
@@ -42,25 +42,37 @@ declare namespace API {
     interface: string;
   };
 
-  type DeskConfig = {
+  type DeskSettings = {
     audio_device?: null | SelectedAudioDevice;
-    video_device_index: number;
+    /** Enable D3D debug mode */
+    enable_d3d_debug?: boolean;
+    /** Video device index */
+    video_device_index?: number;
     /** Video encode bitrate in bps (bits per second) */
-    video_encode_bps: number;
+    video_encode_bps?: number;
   };
 
   type DisplayInfo = {
+    /** Is the display attached to the desktop */
     attached_to_desktop: boolean;
+    /** Display device rect coordinates on the desktop */
     desktop_coordinates: DisplayRect;
+    /** Display device name, e.g. "\\.\DISPLAY1" */
     device_name: string;
+    /** Display device friendly name, e.g. "Generic PnP Monitor" */
     display_device_name?: any;
+    /** Display rotation angle in degrees, e.g. 0, 90, 180, 270 */
     rotation: number;
   };
 
   type DisplayRect = {
+    /** Bottom coordinate of the rectangle */
     bottom: number;
+    /** Left coordinate of the rectangle */
     left: number;
+    /** Right coordinate of the rectangle */
     right: number;
+    /** Top coordinate of the rectangle */
     top: number;
   };
 
@@ -206,7 +218,6 @@ declare namespace API {
     /** System settings for the application. This struct is used to load and save settings from a configuration file. */
     data?: {
       config_file_path?: string;
-      db_path?: string;
       enable_ipv6?: boolean;
       listen_addr_ipv4?: string;
       listen_addr_ipv6?: string;
@@ -218,8 +229,9 @@ declare namespace API {
   };
 
   type SelectedAudioDevice = {
+    /** Audio data flow (render or capture) */
     audio_data_flow: AudioDataFlow;
-    /** audio device id, None for default audio device */
+    /** Audio device id, None for default audio device */
     audio_device_id?: any;
   };
 
@@ -242,8 +254,6 @@ declare namespace API {
   type SystemSettings = {
     /** Path to the configuration file. If not specified, a new one will be created in the "conf" directory. */
     config_file_path?: string;
-    /** Path to the database file. If not specified, a new one will be created in the "conf" directory. */
-    db_path?: string;
     /** Enable IPv6 support */
     enable_ipv6?: boolean;
     /** listen ipv4 address for the server to bind to */

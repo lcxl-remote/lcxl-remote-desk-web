@@ -13,11 +13,16 @@ use windows::Win32::{
 };
 use windows_core::PCWSTR;
 
+/// Display Rectangle Struct
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub struct DisplayRect {
+    /// Left coordinate of the rectangle
     pub left: i32,
+    /// Top coordinate of the rectangle
     pub top: i32,
+    /// Right coordinate of the rectangle
     pub right: i32,
+    /// Bottom coordinate of the rectangle
     pub bottom: i32,
 }
 
@@ -34,10 +39,15 @@ impl From<RECT> for DisplayRect {
 /// Display Info
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DisplayInfo {
+    /// Display device name, e.g. "\\.\DISPLAY1"
     pub device_name: String,
+    /// Display device friendly name, e.g. "Generic PnP Monitor"
     pub display_device_name: Option<String>,
+    /// Display device rect coordinates on the desktop
     pub desktop_coordinates: DisplayRect,
+    /// Is the display attached to the desktop
     pub attached_to_desktop: bool,
+    /// Display rotation angle in degrees, e.g. 0, 90, 180, 270
     pub rotation: i32,
 }
 
