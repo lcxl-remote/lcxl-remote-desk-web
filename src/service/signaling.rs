@@ -197,6 +197,7 @@ impl SignalingContext {
             user_name: user.name.clone(),
             audio_device_list,
             video_device_list,
+            desk_settings: local_settings.desk,
         };
 
         info!("Sending init signaling");
@@ -446,7 +447,7 @@ impl SignalingContext {
         log::info!("Preparing to capture screen...");
         let manager = ScreenRecordManager::new(&settings)?;
 
-        let mut h264_screen_output = H264ScreenOutput::new(manager, output_index, bps);
+        let mut h264_screen_output = H264ScreenOutput::new(manager, output_index, bps)?;
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
             let state = *connection_state_rx.borrow_and_update();
@@ -715,6 +716,13 @@ impl SignalingContext {
                 &json_str,
             ))
             .await?;
+        // Save to config file
+        {
+            let mut settings = self.settings.write().await;
+            settings.desk = offer_model.desk_settings;
+            settings.save()?;
+        }
+
         Ok(())
     }
 }

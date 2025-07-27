@@ -99,20 +99,21 @@ impl ScreenRecordManager {
         Ok(())
     }
 
+    /// make_rtv creates a render target view for the given back buffer texture.
     pub fn make_rtv(
         &self,
         back_buffer: &ID3D11Texture2D,
     ) -> Result<[Option<ID3D11RenderTargetView>; 1], DeskError> {
         // Create a render target view
-        let mut rtv = None;
-        unsafe {
+        let rtv = unsafe {
+            let mut rtv = None;
             self.device
-                .CreateRenderTargetView(back_buffer, None, Some(&mut rtv))
-        }?;
-        let rtv = [rtv];
-        // Set new render target
-        unsafe { self.device_context.OMSetRenderTargets(Some(&rtv), None) };
-
+                .CreateRenderTargetView(back_buffer, None, Some(&mut rtv))?;
+            let rtv = [rtv];
+            // Set new render target
+            self.device_context.OMSetRenderTargets(Some(&rtv), None);
+            rtv
+        };
         return Ok(rtv);
     }
 
@@ -407,8 +408,8 @@ pub struct ScreenOutput {
     pub output_index: u32,
     pub dup_output: IDXGIOutputDuplication,
     pub dup_output_desc: DXGI_OUTDUPL_DESC,
-    pub cpu_access_texture_2d: ID3D11Texture2D,
-    pub cpu_access_surface: IDXGISurface,
+    pub copy_buffer_texture_2d: ID3D11Texture2D,
+    pub copy_buffer_surface: IDXGISurface,
     pub pointer_shape_buffer: Vec<u8>,
     pub last_mouse_update_time: i64,
     pub pointer_position: Point,
@@ -456,17 +457,17 @@ impl ScreenOutput {
         copy_buffer_desc.MiscFlags = 0;
 
         // create a texture to hold the screen capture
-        let mut cpu_access_texture_2d = None;
+        let mut copy_buffer_texture_2d = None;
         unsafe {
             screen_record_manager.device.CreateTexture2D(
                 &copy_buffer_desc,
                 None,
-                Some(&mut cpu_access_texture_2d),
+                Some(&mut copy_buffer_texture_2d),
             )
         }?;
-        let cpu_access_texture_2d = cpu_access_texture_2d.unwrap();
-        unsafe { cpu_access_texture_2d.SetEvictionPriority(DXGI_RESOURCE_PRIORITY_MAXIMUM.0) };
-        let cpu_access_surface = cpu_access_texture_2d.cast::<IDXGISurface>()?;
+        let copy_buffer_texture_2d = copy_buffer_texture_2d.unwrap();
+        unsafe { copy_buffer_texture_2d.SetEvictionPriority(DXGI_RESOURCE_PRIORITY_MAXIMUM.0) };
+        let copy_buffer_surface = copy_buffer_texture_2d.cast::<IDXGISurface>()?;
 
         // Create render target texture
         let render_target_texture_2d = ScreenOutput::create_render_target_texture(
@@ -486,8 +487,8 @@ impl ScreenOutput {
             output_index,
             dup_output,
             dup_output_desc,
-            cpu_access_texture_2d,
-            cpu_access_surface,
+            copy_buffer_texture_2d,
+            copy_buffer_surface,
             pointer_shape_buffer: vec![],
             last_mouse_update_time: 0,
             pointer_position: Point::default(),
@@ -497,33 +498,37 @@ impl ScreenOutput {
             rtv,
         })
     }
+
+    fn reinit(&mut self) -> Result<(), DeskError> {
+        let new_screen_output = ScreenOutput::new(self.manager.clone(), self.output_index)?;
+        *self = new_screen_output;
+        Ok(())
+    }
+
     /// DXGI_ERROR_WAIT_TIMEOUT
     pub fn get_frame(&mut self, draw_mouse: bool) -> Result<SceenFrame, DeskError> {
         let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { std::mem::zeroed() };
         let mut desktop_resource: Option<IDXGIResource> = None;
 
         unsafe {
-            let ummap_result = self.cpu_access_surface.Unmap();
-            if let Err(e) = ummap_result {
-                log::warn!(
-                    "Failed to unmap surface: code: {}, message: {}",
-                    e.code(),
-                    e.message()
-                );
-            }
+            let result =
+                self.dup_output
+                    .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource);
 
-            let release_result = self.dup_output.ReleaseFrame();
-            if let Err(e) = release_result {
-                log::warn!(
-                    "Failed to release frame: code: {}, message: {}",
-                    e.code(),
-                    e.message()
-                );
+            if let Err(err) = result {
+                if err.code() == DXGI_ERROR_ACCESS_LOST || err.code() == DXGI_ERROR_INVALID_CALL {
+                    // reinit the output and try again
+                    self.reinit()?;
+                    self.dup_output.AcquireNextFrame(
+                        500,
+                        &mut frame_info,
+                        &mut desktop_resource,
+                    )?;
+                } else {
+                    return Err(DeskError::WindowsResultError(Backtrace::capture(), err));
+                }
             }
-
-            self.dup_output
-                .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)?;
-        };
+        }
         let desktop_resource = desktop_resource.unwrap();
 
         let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
@@ -538,12 +543,12 @@ impl ScreenOutput {
         unsafe {
             self.manager
                 .device_context
-                .CopyResource(&self.cpu_access_texture_2d, &self.render_target_texture_2d);
+                .CopyResource(&self.copy_buffer_texture_2d, &self.render_target_texture_2d);
         };
         let mut locked_rect = DXGI_MAPPED_RECT::default();
 
         let frame_buffer = unsafe {
-            self.cpu_access_surface
+            self.copy_buffer_surface
                 .Map(&mut locked_rect, DXGI_MAP_READ)?;
             core::slice::from_raw_parts(
                 locked_rect.pBits,
@@ -554,6 +559,8 @@ impl ScreenOutput {
         Ok(SceenFrame {
             frame_info,
             frame_buffer,
+            copy_buffer_surface: &self.copy_buffer_surface,
+            dup_output: &self.dup_output,
         })
     }
 
@@ -1170,41 +1177,36 @@ impl openh264::formats::YUVSource for YuvPlanarImageWrapper<'_, u8> {
     }
 }
 pub struct H264ScreenOutput {
-    pub manager: Arc<ScreenRecordManager>,
-    pub output_index: u32,
-    pub screen_output: Option<ScreenOutput>,
+    pub screen_output: ScreenOutput,
     pub encoder: openh264::encoder::Encoder,
 }
 
 impl H264ScreenOutput {
-    pub fn new(manager: Arc<ScreenRecordManager>, output_index: u32, bps: u32) -> Self {
+    pub fn new(
+        manager: Arc<ScreenRecordManager>,
+        output_index: u32,
+        bps: u32,
+    ) -> Result<Self, DeskError> {
         let config = openh264::encoder::EncoderConfig::new()
             .intra_frame_period(IntraFramePeriod::from_num_frames(30))
             .bitrate(BitRate::from_bps(bps));
         let api = OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
-        Self {
-            manager,
-            output_index,
-            screen_output: None,
+        Ok(Self {
+            screen_output: ScreenOutput::new(manager.clone(), output_index)?,
             encoder,
-        }
+        })
     }
 }
 
 impl ScreenOutputVideoNal for H264ScreenOutput {
     fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
         log::trace!("Start to get screen output frame");
-        if self.screen_output.is_none() {
-            log::info!("screen output is none, need to create screen output");
-            let new_screen_output = self.manager.get_screen_output(self.output_index)?;
-            self.screen_output = Some(new_screen_output);
-        }
-        let mut screen_output = self.screen_output.as_mut().unwrap();
-        let width = screen_output.dup_output_desc.ModeDesc.Width;
-        let height = screen_output.dup_output_desc.ModeDesc.Height;
 
-        let mut result = screen_output.get_frame(true);
+        let width = self.screen_output.dup_output_desc.ModeDesc.Width;
+        let height = self.screen_output.dup_output_desc.ModeDesc.Height;
+        let manager = self.screen_output.manager.clone();
+        let result = self.screen_output.get_frame(true);
         if let Err(error) = result {
             if let DeskError::WindowsResultError(bt, err) = error {
                 if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
@@ -1213,24 +1215,9 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
                         ErrorCode::CAPTURE_SCREEN_TIMEOUT_ERROR,
                         format!("capture frame timeout, will retry, error={:?}", err),
                     );
-                } else if err.code() == DXGI_ERROR_ACCESS_LOST
-                    || err.code() == DXGI_ERROR_INVALID_CALL
-                {
-                    log::error!(
-                        "We lost access to the screen output, need to reinitialize the screen output, error={:?}, backtrace={}",
-                        err,
-                        bt
-                    );
-                    self.screen_output = None;
-                    let new_screen_output = self.manager.get_screen_output(self.output_index)?;
-                    self.screen_output = Some(new_screen_output);
-                    screen_output = self.screen_output.as_mut().unwrap();
-
-                    result = screen_output.get_frame(true);
                 } else {
                     if err.code() == DXGI_ERROR_DEVICE_REMOVED {
-                        let removed_reason =
-                            unsafe { self.manager.device.GetDeviceRemovedReason() };
+                        let removed_reason = unsafe { manager.device.GetDeviceRemovedReason() };
                         log::error!("Device removed reason: {:?}", removed_reason);
                         return Err(DeskError::WindowsResultError(Backtrace::disabled(), err));
                     }
@@ -1283,6 +1270,32 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
 pub struct SceenFrame<'a> {
     pub frame_info: DXGI_OUTDUPL_FRAME_INFO,
     pub frame_buffer: &'a [u8],
+    pub copy_buffer_surface: &'a IDXGISurface,
+    pub dup_output: &'a IDXGIOutputDuplication,
+}
+
+impl Drop for SceenFrame<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            let ummap_result = self.copy_buffer_surface.Unmap();
+            if let Err(e) = ummap_result {
+                log::warn!(
+                    "Failed to unmap surface: code: {}, message: {}",
+                    e.code(),
+                    e.message()
+                );
+            }
+
+            let release_result = self.dup_output.ReleaseFrame();
+            if let Err(e) = release_result {
+                log::warn!(
+                    "Failed to release frame: code: {}, message: {}",
+                    e.code(),
+                    e.message()
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

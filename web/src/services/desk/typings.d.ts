@@ -120,9 +120,15 @@ declare namespace API {
   };
 
   type InitSignalingData = {
+    /** Audio device list */
     audio_device_list: AudioDevice[];
+    /** Current desk settings */
+    desk_settings: DeskSettings;
+    /** ICE servers to use for signaling. */
     ice_servers: LcxlRTCIceServer[];
+    /** User name for signaling. */
     user_name: string;
+    /** Video device list */
     video_device_list: DisplayInfo[];
   };
 

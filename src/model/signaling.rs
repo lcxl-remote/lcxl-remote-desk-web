@@ -25,7 +25,12 @@ pub struct SignalingType(i32);
 pub const SIGNALING_TYPE_CODE_INIT: i32 = 0;
 pub const SIGNALING_TYPE_CODE_OFFER: i32 = 100;
 pub const SIGNALING_TYPE_CODE_ANSWER: i32 = 101;
-pub const SIGNALING_TYPE_CODE_CANID: i32 = 200;
+pub const SIGNALING_TYPE_CODE_CANID: i32 = 102;
+
+pub const SIGNALING_TYPE_CODE_REQUIRE_CONTROL: i32 = 201;
+pub const SIGNALING_TYPE_CODE_ACCEPT_CONTROL: i32 = 202;
+pub const SIGNALING_TYPE_CODE_DENY_CONTROL: i32 = 203;
+
 pub const SIGNALING_TYPE_CODE_ERROR: i32 = 1000;
 pub const SIGNALING_TYPE_CODE_UNKNOWN_TYPE: i32 = 1001;
 
@@ -141,10 +146,16 @@ impl From<RTCIceServer> for LcxlRTCIceServer {
 /// see https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InitSignalingData {
+    /// ICE servers to use for signaling.
     pub ice_servers: Vec<LcxlRTCIceServer>,
+    /// User name for signaling.
     pub user_name: String,
+    /// Audio device list
     pub audio_device_list: Vec<AudioDevice>,
+    /// Video device list
     pub video_device_list: Vec<DisplayInfo>,
+    /// Current desk settings
+    pub desk_settings: DeskSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

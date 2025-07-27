@@ -1,6 +1,6 @@
 import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
-import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormSelect, ProFormSlider, ProFormSwitch, ProFormText, ProFormTreeSelect, RequestOptionsType } from "@ant-design/pro-components";
+import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormInstance, ProFormSelect, ProFormSlider, ProFormSwitch, ProFormText, ProFormTreeSelect, RequestOptionsType } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
 import { Alert, Button, Divider, Flex, FloatButton, message, Modal } from "antd";
 import { useEffect, useRef, useState } from "react";
@@ -11,7 +11,12 @@ import { CommentOutlined, CustomerServiceOutlined, FullscreenOutlined, SettingOu
 const SIGNALING_TYPE_CODE_INIT = 0;
 const SIGNALING_TYPE_CODE_OFFER = 100;
 const SIGNALING_TYPE_CODE_ANSWER = 101;
-const SIGNALING_TYPE_CODE_CANID = 200;
+const SIGNALING_TYPE_CODE_CANID = 102;
+
+const SIGNALING_TYPE_CODE_REQUIRE_CONTROL = 201;
+const SIGNALING_TYPE_CODE_ACCEPT_CONTROL = 202;
+const SIGNALING_TYPE_CODE_DENY_CONTROL = 203;
+
 const SIGNALING_TYPE_CODE_ERROR = 1000;
 const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 1001;
 
@@ -27,10 +32,11 @@ const Desk: React.FC = () => {
   const remote_audio = useRef<HTMLAudioElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
+  const formRef = useRef<ProFormInstance>();
 
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
-  const [isModalOpen, setIsModalOpen] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
   const [initSignalingData, setInitSignalingData] = useState<API.InitSignalingData>();
 
   const handleRemoteVideoResize = (event: UIEvent) => {
@@ -75,6 +81,103 @@ const Desk: React.FC = () => {
   };
 
 
+  /**
+   * Handle WebSocket message event
+   * @param event - WebSocket message event
+   */
+  const handleWebSocketMessage = (event: MessageEvent) => {
+    const sock = socketRef.current!;
+    console.log('收到消息:', event.data);
+
+    const signaling_model = JSON.parse(event.data) as API.SignalingModel;
+    switch (signaling_model.signaling_type) {
+      case SIGNALING_TYPE_CODE_INIT:
+        const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as API.InitSignalingData;
+        console.log('初始化信令数据:', init_signaling_data);
+        setInitSignalingData(init_signaling_data);
+
+        let pc = new RTCPeerConnection({
+          iceServers: init_signaling_data.ice_servers
+        });
+        pc.ontrack = function (event) {
+          console.log("ontrack", event);
+          switch (event.track.kind) {
+            case 'video':
+              var video_ref = remote_video.current!;
+              video_ref.srcObject = event.streams[0];
+              video_ref.autoplay = true;
+              video_ref.controls = false;
+              addRemoteVideoEvent(video_ref);
+              break;
+            case 'audio':
+              var audio_ref = remote_audio.current!;
+              audio_ref.srcObject = event.streams[0];
+              audio_ref.autoplay = true;
+              audio_ref.controls = true;
+              break;
+            default:
+              console.error("Unknown track kind", event.track.kind);
+              throw new Error("Unknown track kind");
+          };
+        };
+        pc.oniceconnectionstatechange = e => {
+          console.log("pc.iceConnectionState=" + pc.iceConnectionState + ", event is ", e);
+        };
+        pc.onicecandidate = event => {
+          if (event.candidate === null) {
+            const offer_model = {
+              offer: pc.localDescription!,
+              desk_settings: {
+                video_device_index: 0,
+                // Video encode bitrate in bps: 10 Mbps
+                video_encode_bps: 10_000_000,
+                audio_device: {
+                  audio_data_flow: "Render",
+                  audio_device_id: null
+                }
+              }
+            } as OfferModel;
+
+            console.log("event.candidate === null, offer_model: ", offer_model)
+
+            let offer_sginaling = {
+              signaling_type: SIGNALING_TYPE_CODE_OFFER,
+              signaling_data: JSON.stringify(offer_model),
+            } as API.SignalingModel;
+            let offer_signaling_json = JSON.stringify(offer_sginaling);
+
+            sock.send(offer_signaling_json);
+          }
+        };
+
+
+        // Offer to receive 1 audio, and 1 video track
+        pc.addTransceiver('video', { 'direction': 'sendrecv' });
+        pc.addTransceiver('audio', { 'direction': 'sendrecv' });
+
+        pc.createOffer().then(d => {
+          pc.setLocalDescription(d);
+          const local_description_json = JSON.stringify(d);
+          console.info("create offer, local description=" + local_description_json);
+        }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
+        peerconnectionRef.current = pc;
+        formRef?.current?.setFieldsValue(
+          {
+            ...init_signaling_data.desk_settings
+          }
+        );
+        setIsModalOpen(true);
+        break;
+      case SIGNALING_TYPE_CODE_ANSWER:
+        const answer_description_json = JSON.parse(signaling_model.signaling_data!) as RTCSessionDescriptionInit;
+        console.info("set remote description answer_description_json=" + signaling_model.signaling_data);
+        peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answer_description_json));
+        break;
+
+      default:
+        break;
+    }
+  }
   //let socket = null;
   useEffect(() => {
     const { location } = window;
@@ -82,103 +185,18 @@ const Desk: React.FC = () => {
     const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
     const wsUri = `${proto}://${location.host}/api/desk/signaling`;
     const sock = new WebSocket(wsUri);
+    socketRef.current = sock;
 
     sock.onopen = (event) => {
       console.log('连接成功', event);
     };
-    sock.onmessage = (event) => {
-      console.log('收到消息:', event.data);
-      const signaling_model = JSON.parse(event.data) as API.SignalingModel;
-      switch (signaling_model.signaling_type) {
-        case SIGNALING_TYPE_CODE_INIT:
-          const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as API.InitSignalingData;
-          setInitSignalingData(init_signaling_data);
-
-          let pc = new RTCPeerConnection({
-            iceServers: init_signaling_data.ice_servers
-          });
-          pc.ontrack = function (event) {
-            console.log("ontrack", event);
-            switch (event.track.kind) {
-              case 'video':
-                var video_ref = remote_video.current!;
-                video_ref.srcObject = event.streams[0];
-                video_ref.autoplay = true;
-                video_ref.controls = false;
-                addRemoteVideoEvent(video_ref);
-                break;
-              case 'audio':
-                var audio_ref = remote_audio.current!;
-                audio_ref.srcObject = event.streams[0];
-                audio_ref.autoplay = true;
-                audio_ref.controls = true;
-                break;
-              default:
-                console.error("Unknown track kind", event.track.kind);
-                throw new Error("Unknown track kind");
-            };
-          };
-          pc.oniceconnectionstatechange = e => {
-            console.log("pc.iceConnectionState=" + pc.iceConnectionState + ", event is ", e);
-          };
-          pc.onicecandidate = event => {
-            if (event.candidate === null) {
-              const offer_model = {
-                offer: pc.localDescription!,
-                desk_settings: {
-                  video_device_index: 0,
-                  // Video encode bitrate in bps: 10 Mbps
-                  video_encode_bps: 10_000_000,
-                  audio_device: {
-                    audio_data_flow: "Render",
-                    audio_device_id: null
-                  }
-                }
-              } as OfferModel;
-
-              console.log("event.candidate === null, offer_model: ", offer_model)
-
-              let offer_sginaling = {
-                signaling_type: SIGNALING_TYPE_CODE_OFFER,
-                signaling_data: JSON.stringify(offer_model),
-              } as API.SignalingModel;
-              let offer_signaling_json = JSON.stringify(offer_sginaling);
-
-              sock.send(offer_signaling_json);
-            }
-          };
-
-
-          // Offer to receive 1 audio, and 1 video track
-          pc.addTransceiver('video', { 'direction': 'sendrecv' });
-          pc.addTransceiver('audio', { 'direction': 'sendrecv' });
-
-          pc.createOffer().then(d => {
-            pc.setLocalDescription(d);
-            const local_description_json = JSON.stringify(d);
-            console.info("create offer, local description=" + local_description_json);
-          }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
-          peerconnectionRef.current = pc;
-          break;
-        case SIGNALING_TYPE_CODE_ANSWER:
-          const answer_description_json = JSON.parse(signaling_model.signaling_data!) as RTCSessionDescriptionInit;
-          console.info("set remote description answer_description_json=" + signaling_model.signaling_data);
-          peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answer_description_json));
-          break;
-
-        default:
-          break;
-      }
-    };
+    sock.onmessage = handleWebSocketMessage;
     sock.onerror = (event) => {
       console.error('WebSocket 错误:', event);
     };
     sock.onclose = (event) => {
       console.log('连接关闭', event);
     };
-
-
-    socketRef.current = sock;
 
     const resizeObserver = new ResizeObserver(entries => {
       for (let entry of entries) {
@@ -201,14 +219,11 @@ const Desk: React.FC = () => {
     };
   }, []);
 
-
-
-
   const showModal = () => {
     setIsModalOpen(true);
   };
 
-  const handleOk = async (formData) => {
+  const handleOk = async (formData: Record<string, any>) => {
     console.log(formData);
     setIsModalOpen(false);
     return;
@@ -218,10 +233,10 @@ const Desk: React.FC = () => {
     setIsModalOpen(false);
   };
 
-  const videoDeviceSelectMap = initSignalingData?.video_device_list.reduce((map, item) => {
-    map.set(item.device_name, `${item.display_device_name} (${item.desktop_coordinates.right}x${item.desktop_coordinates.bottom})`);
+  const videoDeviceSelectMap = initSignalingData?.video_device_list.reduce((map, item, currentIndex) => {
+    map.set(currentIndex, `${item.display_device_name} (${item.desktop_coordinates.right}x${item.desktop_coordinates.bottom})`);
     return map;
-  }, new Map<string, string>);
+  }, new Map<number, string>);
 
   const audioDeviceSelectMap = initSignalingData?.audio_device_list.reduce((map, item) => {
     const default_audio_device = {
@@ -274,7 +289,8 @@ const Desk: React.FC = () => {
         footer={false}
       >
 
-        <ProForm
+        <ProForm<API.DeskSettings>
+          formRef={formRef}
           grid={true}
           submitter={{
             render: (props, doms) => {
@@ -290,7 +306,7 @@ const Desk: React.FC = () => {
         >
           <ProForm.Group>
             <ProFormSelect
-              name="device"
+              name="video_device_index"
               label="显示设备"
               valueEnum={videoDeviceSelectMap}
               placeholder="请选择一个显示设备"
@@ -298,14 +314,14 @@ const Desk: React.FC = () => {
             />
           </ProForm.Group>
           <ProForm.Group>
-            <ProFormSwitch name="switch" label="捕获音频" colProps={{
+            <ProFormSwitch name="enable_audio" label="捕获音频" colProps={{
               span: 4,
             }} />
             {/* noStyle shouldUpdate 是必选的，写了 name 就会失效 */}
             <ProForm.Item noStyle shouldUpdate>
               {(form) => {
                 return (<ProFormSelect
-                  name="audio"
+                  name="audio_device"
                   label="音频设备"
                   valueEnum={audioDeviceSelectMap}
                   placeholder="请选择一个音频设备"
@@ -314,6 +330,7 @@ const Desk: React.FC = () => {
                     span: 20,
                   }}
                   disabled={!form.getFieldValue("switch")}
+                  convertValue={(value,namePath)=>JSON.stringify(value)}
                 />)
               }}
             </ProForm.Item>
@@ -354,10 +371,10 @@ const Desk: React.FC = () => {
               span: 8,
             }} />
             <ProFormDigit
-              label="码率Mbps"
-              name="ideo_encode_mbps"
-              min={1}
-              max={1000}
+              label="码率 bps"
+              name="video_encode_bps"
+              min={1000}
+              max={1000_000_000_000}
               fieldProps={{ precision: 0 }}
               colProps={{
                 span: 8,
