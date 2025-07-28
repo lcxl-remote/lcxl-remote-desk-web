@@ -3,7 +3,7 @@ import { updateSettings } from "@/services/desk/updateSettings";
 import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormInstance, ProFormSelect, ProFormSlider, ProFormSwitch, ProFormText, ProFormTreeSelect, RequestOptionsType } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
 import { Alert, Button, Divider, Flex, FloatButton, message, Modal } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from './index.less'; // 告诉 umi 编译这个 less
 import { CommentOutlined, CustomerServiceOutlined, FullscreenOutlined, SettingOutlined } from "@ant-design/icons";
@@ -32,12 +32,29 @@ const Desk: React.FC = () => {
   const remote_audio = useRef<HTMLAudioElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
-  const formRef = useRef<ProFormInstance>();
 
+  const [formInstance, setFormInstance] = useState<ProFormInstance<API.DeskSettings>>();
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [initSignalingData, setInitSignalingData] = useState<API.InitSignalingData>();
+
+  const formRef = useCallback(node => {
+    const _formInstance = node as ProFormInstance<API.DeskSettings>;
+    if (_formInstance !== null) {
+      if (formInstance == null) {
+        setFormInstance(_formInstance);
+      }
+      if (initSignalingData != null) {
+        _formInstance.setFieldsValue(
+          {
+            ...initSignalingData.desk_settings
+          }
+        );
+      }
+    }
+  }, [initSignalingData]);
+  //const formRef = useRef<ProFormInstance>();
 
   const handleRemoteVideoResize = (event: UIEvent) => {
     var video_ref = remote_video.current!;
@@ -95,77 +112,6 @@ const Desk: React.FC = () => {
         const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as API.InitSignalingData;
         console.log('初始化信令数据:', init_signaling_data);
         setInitSignalingData(init_signaling_data);
-
-        let pc = new RTCPeerConnection({
-          iceServers: init_signaling_data.ice_servers
-        });
-        pc.ontrack = function (event) {
-          console.log("ontrack", event);
-          switch (event.track.kind) {
-            case 'video':
-              var video_ref = remote_video.current!;
-              video_ref.srcObject = event.streams[0];
-              video_ref.autoplay = true;
-              video_ref.controls = false;
-              addRemoteVideoEvent(video_ref);
-              break;
-            case 'audio':
-              var audio_ref = remote_audio.current!;
-              audio_ref.srcObject = event.streams[0];
-              audio_ref.autoplay = true;
-              audio_ref.controls = true;
-              break;
-            default:
-              console.error("Unknown track kind", event.track.kind);
-              throw new Error("Unknown track kind");
-          };
-        };
-        pc.oniceconnectionstatechange = e => {
-          console.log("pc.iceConnectionState=" + pc.iceConnectionState + ", event is ", e);
-        };
-        pc.onicecandidate = event => {
-          if (event.candidate === null) {
-            const offer_model = {
-              offer: pc.localDescription!,
-              desk_settings: {
-                video_device_index: 0,
-                // Video encode bitrate in bps: 10 Mbps
-                video_encode_bps: 10_000_000,
-                audio_device: {
-                  audio_data_flow: "Render",
-                  audio_device_id: null
-                }
-              }
-            } as OfferModel;
-
-            console.log("event.candidate === null, offer_model: ", offer_model)
-
-            let offer_sginaling = {
-              signaling_type: SIGNALING_TYPE_CODE_OFFER,
-              signaling_data: JSON.stringify(offer_model),
-            } as API.SignalingModel;
-            let offer_signaling_json = JSON.stringify(offer_sginaling);
-
-            sock.send(offer_signaling_json);
-          }
-        };
-
-
-        // Offer to receive 1 audio, and 1 video track
-        pc.addTransceiver('video', { 'direction': 'sendrecv' });
-        pc.addTransceiver('audio', { 'direction': 'sendrecv' });
-
-        pc.createOffer().then(d => {
-          pc.setLocalDescription(d);
-          const local_description_json = JSON.stringify(d);
-          console.info("create offer, local description=" + local_description_json);
-        }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
-        peerconnectionRef.current = pc;
-        formRef?.current?.setFieldsValue(
-          {
-            ...init_signaling_data.desk_settings
-          }
-        );
         setIsModalOpen(true);
         break;
       case SIGNALING_TYPE_CODE_ANSWER:
@@ -225,9 +171,81 @@ const Desk: React.FC = () => {
 
   const handleOk = async (formData: Record<string, any>) => {
     console.log(formData);
+    if (!peerconnectionRef.current) {
+      // 创建一个新的RTCPeerConnection实例
+      peerconnectionRef.current = createRTCPeerConnection();
+    }
     setIsModalOpen(false);
     return;
   };
+
+  const createRTCPeerConnection = () => {
+    let pc = new RTCPeerConnection({
+      iceServers: initSignalingData!.ice_servers
+    });
+    pc.ontrack = function (event) {
+      console.log("ontrack", event);
+      switch (event.track.kind) {
+        case 'video':
+          var video_ref = remote_video.current!;
+          video_ref.srcObject = event.streams[0];
+          video_ref.autoplay = true;
+          video_ref.controls = false;
+          addRemoteVideoEvent(video_ref);
+          break;
+        case 'audio':
+          var audio_ref = remote_audio.current!;
+          audio_ref.srcObject = event.streams[0];
+          audio_ref.autoplay = true;
+          audio_ref.controls = true;
+          break;
+        default:
+          console.error("Unknown track kind", event.track.kind);
+          throw new Error("Unknown track kind");
+      };
+    };
+    pc.oniceconnectionstatechange = e => {
+      console.log("pc.iceConnectionState=" + pc.iceConnectionState + ", event is ", e);
+    };
+    pc.onicecandidate = event => {
+      if (event.candidate === null) {
+        const offer_model = {
+          offer: pc.localDescription!,
+          desk_settings: {
+            video_device_index: 0,
+            // Video encode bitrate in bps: 10 Mbps
+            video_encode_bps: 10_000_000,
+            audio_device: {
+              audio_data_flow: "Render",
+              audio_device_id: null
+            }
+          }
+        } as OfferModel;
+
+        console.log("event.candidate === null, offer_model: ", offer_model)
+
+        let offer_sginaling = {
+          signaling_type: SIGNALING_TYPE_CODE_OFFER,
+          signaling_data: JSON.stringify(offer_model),
+        } as API.SignalingModel;
+        let offer_signaling_json = JSON.stringify(offer_sginaling);
+
+        socketRef.current!.send(offer_signaling_json);
+      }
+    };
+
+
+    // Offer to receive 1 audio, and 1 video track
+    pc.addTransceiver('video', { 'direction': 'sendrecv' });
+    pc.addTransceiver('audio', { 'direction': 'sendrecv' });
+
+    pc.createOffer().then(d => {
+      pc.setLocalDescription(d);
+      const local_description_json = JSON.stringify(d);
+      console.info("create offer, local description=" + local_description_json);
+    }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
+    return pc;
+  }
 
   const handleCancel = () => {
     setIsModalOpen(false);
@@ -330,7 +348,7 @@ const Desk: React.FC = () => {
                     span: 20,
                   }}
                   disabled={!form.getFieldValue("switch")}
-                  convertValue={(value,namePath)=>JSON.stringify(value)}
+                  convertValue={(value, namePath) => JSON.stringify(value)}
                 />)
               }}
             </ProForm.Item>
