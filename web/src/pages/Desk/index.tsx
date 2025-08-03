@@ -25,6 +25,9 @@ type OfferModel = {
   desk_settings: API.DeskSettings,
 };
 
+type DeskFormValues = API.DeskSettings & {
+  enable_audio?: boolean,
+}
 const Desk: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
@@ -33,14 +36,14 @@ const Desk: React.FC = () => {
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
 
-  const [formInstance, setFormInstance] = useState<ProFormInstance<API.DeskSettings>>();
+  const [formInstance, setFormInstance] = useState<ProFormInstance<DeskFormValues>>();
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [initSignalingData, setInitSignalingData] = useState<API.InitSignalingData>();
 
   const formRef = useCallback(node => {
-    const _formInstance = node as ProFormInstance<API.DeskSettings>;
+    const _formInstance = node as ProFormInstance<DeskFormValues>;
     if (_formInstance !== null) {
       if (formInstance == null) {
         setFormInstance(_formInstance);
@@ -48,6 +51,7 @@ const Desk: React.FC = () => {
       if (initSignalingData != null) {
         _formInstance.setFieldsValue(
           {
+            enable_audio: initSignalingData.desk_settings.audio_device != null,
             ...initSignalingData.desk_settings
           }
         );
@@ -169,17 +173,23 @@ const Desk: React.FC = () => {
     setIsModalOpen(true);
   };
 
-  const handleOk = async (formData: Record<string, any>) => {
-    console.log(formData);
+  const handleOk = async (formData: DeskFormValues) => {
+    console.log(JSON.stringify(formData));
+    if (!formData.enable_audio) {
+      formData.audio_device = null;
+    }
+    delete formData.enable_audio;
+    console.log(JSON.stringify(formData));
+    const desk_settings = formData
     if (!peerconnectionRef.current) {
       // 创建一个新的RTCPeerConnection实例
-      peerconnectionRef.current = createRTCPeerConnection();
+      peerconnectionRef.current = createRTCPeerConnection(desk_settings);
     }
     setIsModalOpen(false);
     return;
   };
 
-  const createRTCPeerConnection = () => {
+  const createRTCPeerConnection = (desk_settings: API.DeskSettings) => {
     let pc = new RTCPeerConnection({
       iceServers: initSignalingData!.ice_servers
     });
@@ -211,15 +221,7 @@ const Desk: React.FC = () => {
       if (event.candidate === null) {
         const offer_model = {
           offer: pc.localDescription!,
-          desk_settings: {
-            video_device_index: 0,
-            // Video encode bitrate in bps: 10 Mbps
-            video_encode_bps: 10_000_000,
-            audio_device: {
-              audio_data_flow: "Render",
-              audio_device_id: null
-            }
-          }
+          desk_settings,
         } as OfferModel;
 
         console.log("event.candidate === null, offer_model: ", offer_model)
@@ -244,6 +246,7 @@ const Desk: React.FC = () => {
       const local_description_json = JSON.stringify(d);
       console.info("create offer, local description=" + local_description_json);
     }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
+
     return pc;
   }
 
@@ -307,7 +310,7 @@ const Desk: React.FC = () => {
         footer={false}
       >
 
-        <ProForm<API.DeskSettings>
+        <ProForm<DeskFormValues>
           formRef={formRef}
           grid={true}
           submitter={{
@@ -321,7 +324,9 @@ const Desk: React.FC = () => {
             },
           }}
           onFinish={handleOk}
+
         >
+          <Divider plain>显示配置</Divider>
           <ProForm.Group>
             <ProFormSelect
               name="video_device_index"
@@ -331,6 +336,38 @@ const Desk: React.FC = () => {
               rules={[{ required: true, message: '请选择一个显示设备!' }]}
             />
           </ProForm.Group>
+          <ProForm.Group>
+            <ProFormSwitch name="show_mouse" label="显示远程鼠标" colProps={{
+              span: 8,
+            }} />
+          </ProForm.Group>
+
+          <ProForm.Group>
+            <ProFormSwitch name="adaptive_web_page_resolution" label="自适应网页分辨率" colProps={{
+              span: 8,
+            }} />
+            <ProForm.Item noStyle shouldUpdate>
+              {(form) => {
+                return (<ProFormSlider
+                  name="video_zoom_ratio"
+                  label="远程分辨率缩放"
+                  min={10}
+                  marks={{
+                    25: '25%',
+                    50: '50%',
+                    75: '75%',
+                    100: '100%',
+                  }}
+                  colProps={{
+                    span: 16,
+                  }}
+                  disabled={form.getFieldValue("adaptive_web_page_resolution")}
+                />)
+              }}
+            </ProForm.Item>
+
+          </ProForm.Group>
+          <Divider plain>音频配置</Divider>
           <ProForm.Group>
             <ProFormSwitch name="enable_audio" label="捕获音频" colProps={{
               span: 4,
@@ -347,40 +384,32 @@ const Desk: React.FC = () => {
                   colProps={{
                     span: 20,
                   }}
-                  disabled={!form.getFieldValue("switch")}
-                  convertValue={(value, namePath) => JSON.stringify(value)}
+                  disabled={!form.getFieldValue("enable_audio")}
+                  convertValue={(value, namePath) => {
+                    let result = value;
+                    if (typeof value != "string") {
+                      result = JSON.stringify(value)
+                    }
+                    return result;
+                  }}
+                  transform={(value, namePath, allValues) => {
+                    let result = value;
+                    if (typeof value == "string") {
+                      result = JSON.parse(value);
+                    }
+                    return { audio_device: result };
+                  }}
                 />)
               }}
             </ProForm.Item>
           </ProForm.Group>
-          <Divider />
-          <ProForm.Group>
-            <ProFormSwitch name="switch" label="自适应网页分辨率" colProps={{
-              span: 8,
-            }} />
-            <ProFormSlider
-              name="slider"
-              label="远程分辨率缩放"
-              min={10}
-              marks={{
-                25: '25%',
-                50: '50%',
-                75: '75%',
-                100: '100%',
-              }}
-              colProps={{
-                span: 16,
-              }}
-            />
-          </ProForm.Group>
-          <Divider />
+          <Divider plain>编码配置</Divider>
           <ProForm.Group>
             <ProFormSelect
-              name="video_encode_type"
+              name="video_encoder"
               label="视频编码"
               valueEnum={videoEncodeTypeSelectMap}
-              placeholder="请选择一个视频编码"
-              rules={[{ required: true, message: '请选择一个视频编码' }]}
+              placeholder="自动检测"
               colProps={{
                 span: 8,
               }}
@@ -401,14 +430,18 @@ const Desk: React.FC = () => {
           </ProForm.Group>
           <ProForm.Group>
             <ProFormSelect
-              name="audio_encode_type"
+              name="audio_encoder"
               label="音频编码"
               valueEnum={audioEncodeTypeSelectMap}
-              placeholder="请选择一个音频编码"
-              rules={[{ required: true, message: '请选择一个音频编码' }]}
+              placeholder="自动检测"
             />
           </ProForm.Group>
-
+          <Divider plain>高级</Divider>
+          <ProForm.Group>
+            <ProFormSwitch name="enable_d3d_debug" label="开启D3D调试" colProps={{
+              span: 8,
+            }} />
+          </ProForm.Group>
         </ProForm>
       </Modal>
     </PageContainer>

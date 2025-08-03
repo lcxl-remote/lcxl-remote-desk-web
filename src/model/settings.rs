@@ -97,8 +97,18 @@ pub struct DeskSettings {
     pub video_device_index: u32,
     /// Video encode bitrate in bps (bits per second)
     pub video_encode_bps: u32,
+    /// Enable adaptive web page resolution
+    pub adaptive_web_page_resolution: bool,
+    /// Video zoom ratio (e.g., 50 for 50% zoom)
+    pub video_zoom_ratio: u32,
+    /// Enable mouse display on the screen
+    pub show_mouse: bool,
+    /// Video encoder name, None for auto detection
+    pub video_encoder: Option<String>,
     /// Selected audio device
     pub audio_device: Option<SelectedAudioDevice>,
+    /// Audio encoder name, None for auto detection
+    pub audio_encoder: Option<String>,
 }
 
 impl Default for DeskSettings {
@@ -107,7 +117,12 @@ impl Default for DeskSettings {
             enable_d3d_debug: false,
             video_device_index: 0,
             video_encode_bps: 10_1000_1000,
+            adaptive_web_page_resolution: false,
+            video_zoom_ratio: 100,
+            show_mouse: true,
+            video_encoder: None,
             audio_device: None,
+            audio_encoder: None,
         }
     }
 }

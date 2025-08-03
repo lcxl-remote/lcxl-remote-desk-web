@@ -43,13 +43,23 @@ declare namespace API {
   };
 
   type DeskSettings = {
+    /** Enable adaptive web page resolution */
+    adaptive_web_page_resolution?: boolean;
     audio_device?: null | SelectedAudioDevice;
+    /** Audio encoder name, None for auto detection */
+    audio_encoder?: any;
     /** Enable D3D debug mode */
     enable_d3d_debug?: boolean;
+    /** Enable mouse display on the screen */
+    show_mouse?: boolean;
     /** Video device index */
     video_device_index?: number;
     /** Video encode bitrate in bps (bits per second) */
     video_encode_bps?: number;
+    /** Video encoder name, None for auto detection */
+    video_encoder?: any;
+    /** Video zoom ratio (e.g., 50 for 50% zoom) */
+    video_zoom_ratio?: number;
   };
 
   type DisplayInfo = {

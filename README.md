@@ -129,3 +129,12 @@ pacman -S glib2-devel \
 
 
 ### 切换播放设备，例如切换到耳机会造成当前的无法录音
+
+
+### cargo 依赖冲突处理
+
+参考：https://github.com/qiwihui/blog/issues/68
+
+主要注意这一点：**对于库的每个实例，任何静态变量或全局状态都将被复制，如果没有一些特殊方法，它们就无法通信。**
+
+这个导致turn-serve库和app之间的prometheus的metrics无法一起使用，因为它们各自维护了一个独立的prometheus全局实例。

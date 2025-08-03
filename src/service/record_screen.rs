@@ -1,5 +1,3 @@
-use std::{backtrace::Backtrace, sync::Arc};
-
 use crate::{
     desk_error::DeskError,
     model::{
@@ -17,7 +15,12 @@ use openh264::{
     OpenH264API,
     encoder::{BitRate, IntraFramePeriod},
 };
+use prometheus::{Histogram, register_histogram};
 use std::fmt::Debug;
+use std::{
+    backtrace::Backtrace,
+    sync::{Arc, LazyLock},
+};
 use windows::Win32::{
     Foundation::{GENERIC_ALL, HMODULE},
     Graphics::{
@@ -62,6 +65,14 @@ use yuv::{
     YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
     bgra_to_yuv420,
 };
+
+pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<Histogram> =
+    LazyLock::new(|| register_histogram!("capture_screen_histogram", "help").unwrap());
+pub static CONVERT_TO_YUV_HISTOGRAM: LazyLock<Histogram> =
+    LazyLock::new(|| register_histogram!("convert_to_yuv_histogram", "help").unwrap());
+pub static ENCODE_TO_H264_HISTOGRAM: LazyLock<Histogram> =
+    LazyLock::new(|| register_histogram!("encode_to_h264_histogram", "help").unwrap());
+
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
     pub device_context: ID3D11DeviceContext,
@@ -1202,7 +1213,7 @@ impl H264ScreenOutput {
 impl ScreenOutputVideoNal for H264ScreenOutput {
     fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
         log::trace!("Start to get screen output frame");
-
+        let capture_scrren_timer = CAPTURE_SCREEN_HISTOGRAM.start_timer();
         let width = self.screen_output.dup_output_desc.ModeDesc.Width;
         let height = self.screen_output.dup_output_desc.ModeDesc.Height;
         let manager = self.screen_output.manager.clone();
@@ -1240,7 +1251,8 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             height as u32,
             YuvChromaSubsampling::Yuv420,
         );
-
+        capture_scrren_timer.stop_and_record();
+        let convert_to_yuv_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
         bgra_to_yuv420(
             &mut planar_image,
             screen_frame.frame_buffer,
@@ -1250,6 +1262,8 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             YuvConversionMode::Balanced,
         )?;
         log::trace!("Converted to YUV420 format");
+        convert_to_yuv_timer.stop_and_record();
+        let encode_to_h264_timer = ENCODE_TO_H264_HISTOGRAM.start_timer();
         let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
 
         let encoded_bit_stream = self.encoder.encode(&yuv_source)?;
@@ -1260,6 +1274,7 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             encoded_bit_stream.frame_type(),
             encoded_bit_stream.num_layers()
         );
+        encode_to_h264_timer.stop_and_record();
         Ok(NalInfo {
             nal_bytes: encoded_bit_bytes,
         })
