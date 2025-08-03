@@ -21,7 +21,7 @@ impl ErrorCode {
     pub const FILE_CHANGED: ErrorCode = ErrorCode(22);
     pub const WINDOWS_ERROR: ErrorCode = ErrorCode(1000);
 
-    pub const CAPTURE_SCREEN_TIMEOUT_ERROR: ErrorCode = ErrorCode(1001);
+    pub const CAPTURE_SCREEN_NEED_RETRY: ErrorCode = ErrorCode(1001);
 }
 
 impl Display for ErrorCode {

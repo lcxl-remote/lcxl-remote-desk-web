@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
@@ -7,6 +7,7 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::StreamExt;
 use log::{error, info, warn};
+use prometheus::{Histogram, register_histogram};
 use tokio::time::Duration;
 use tokio::time::Instant;
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
@@ -50,6 +51,12 @@ use crate::{
     },
     service::record_screen::{H264ScreenOutput, ScreenOutputVideoNal, ScreenRecordManager},
 };
+
+pub static WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM: LazyLock<Histogram> =
+    LazyLock::new(|| register_histogram!("webrtc_video_write_sample_histogram", "help").unwrap());
+
+pub static WEBRTC_AUDIO_WRITE_SAMPLE_HISTOGRAM: LazyLock<Histogram> =
+    LazyLock::new(|| register_histogram!("webrtc_audio_write_sample_histogram", "help").unwrap());
 
 pub async fn handle_signaling(
     settings: web::Data<SharedSettings>,
@@ -476,39 +483,7 @@ impl SignalingContext {
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(Duration::from_millis(3));
         loop {
-            log::trace!("begin caption scrren");
-            let start = Instant::now();
-            let nal_info_result = h264_screen_output.get_nal();
-            if nal_info_result.is_err() {
-                if let Err(DeskError::CustomError(err)) = nal_info_result {
-                    if err.error_code == ErrorCode::CAPTURE_SCREEN_TIMEOUT_ERROR {
-                        continue;
-                    }
-                    log::error!("Failed to get nal info, custom error={}", err);
-                    continue;
-                }
-                log::error!(
-                    "Failed to get nal info, error={}",
-                    nal_info_result.err().unwrap()
-                );
-                continue;
-            }
-            let nal_info = nal_info_result.unwrap();
-
-            let time1 = start.elapsed();
-            log::trace!("caption scrren time: {} μs", time1.as_micros(),);
-            video_track
-                .write_sample(&Sample {
-                    data: nal_info.nal_bytes,
-                    duration: Duration::from_secs(1),
-                    ..Default::default()
-                })
-                .await?;
-            let time2 = start.elapsed();
-            log::trace!(
-                "write video sample time: {} μs",
-                time2.as_micros() - time1.as_micros(),
-            );
+            // check if the connection is still alive
             tokio::select! {
              _ = ticker.tick() => {},
              _ = connection_state_rx.changed() => {
@@ -528,6 +503,32 @@ impl SignalingContext {
                 }
              },
             }
+            log::trace!("begin caption scrren");
+            let nal_info_result = h264_screen_output.get_nal();
+            if nal_info_result.is_err() {
+                if let Err(DeskError::CustomError(err)) = nal_info_result {
+                    if err.error_code == ErrorCode::CAPTURE_SCREEN_NEED_RETRY {
+                        continue;
+                    }
+                    log::error!("Failed to get nal info, custom error={}", err);
+                    continue;
+                }
+                log::error!(
+                    "Failed to get nal info, error={}",
+                    nal_info_result.err().unwrap()
+                );
+                continue;
+            }
+            let nal_info = nal_info_result.unwrap();
+            let timer = WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM.start_timer();
+            video_track
+                .write_sample(&Sample {
+                    data: nal_info.nal_bytes,
+                    duration: Duration::from_secs(1),
+                    ..Default::default()
+                })
+                .await?;
+            timer.stop_and_record();
         }
         Result::<(), DeskError>::Ok(())
     }
@@ -572,34 +573,7 @@ impl SignalingContext {
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(Duration::from_millis(mills));
         loop {
-            log::trace!("begin capture audio");
-            loop {
-                let start = Instant::now();
-                let buffer = opus_audio_capture.get_buffer()?;
-                let time1 = start.elapsed();
-                log::trace!(
-                    "capture audio time: {} μs, buffer len: {}",
-                    time1.as_micros(),
-                    buffer.data.len(),
-                );
-                if buffer.data.is_empty() {
-                    break;
-                }
-
-                audio_track
-                    .write_sample(&Sample {
-                        data: Bytes::copy_from_slice(buffer.data.as_slice()),
-                        //TODO sleep 20ms
-                        duration: Duration::from_millis(20),
-                        ..Default::default()
-                    })
-                    .await?;
-                let time2 = start.elapsed();
-                log::trace!(
-                    "write audio sample time: {} μs",
-                    time2.as_micros() - time1.as_micros(),
-                );
-            }
+            // check if the connection is still alive
             tokio::select! {
              _ = ticker.tick() => {},
              _ = connection_state_rx.changed() => {
@@ -617,6 +591,30 @@ impl SignalingContext {
                     },
                 }
              },
+            }
+            log::trace!("begin capture audio");
+            loop {
+                let start = Instant::now();
+                let buffer = opus_audio_capture.get_buffer()?;
+                let time1 = start.elapsed();
+                log::trace!(
+                    "capture audio time: {} μs, buffer len: {}",
+                    time1.as_micros(),
+                    buffer.data.len(),
+                );
+                if buffer.data.is_empty() {
+                    break;
+                }
+                let timer = WEBRTC_AUDIO_WRITE_SAMPLE_HISTOGRAM.start_timer();
+                audio_track
+                    .write_sample(&Sample {
+                        data: Bytes::copy_from_slice(buffer.data.as_slice()),
+                        //TODO sleep 20ms
+                        duration: Duration::from_millis(20),
+                        ..Default::default()
+                    })
+                    .await?;
+                timer.stop_and_record();
             }
         }
         opus_audio_capture.stop()?;

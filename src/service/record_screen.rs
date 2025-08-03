@@ -510,35 +510,14 @@ impl ScreenOutput {
         })
     }
 
-    fn reinit(&mut self) -> Result<(), DeskError> {
-        let new_screen_output = ScreenOutput::new(self.manager.clone(), self.output_index)?;
-        *self = new_screen_output;
-        Ok(())
-    }
-
     /// DXGI_ERROR_WAIT_TIMEOUT
-    pub fn get_frame(&mut self, draw_mouse: bool) -> Result<SceenFrame, DeskError> {
+    pub fn get_frame<'a>(&mut self, draw_mouse: bool) -> Result<SceenFrame<'a>, DeskError> {
         let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { std::mem::zeroed() };
         let mut desktop_resource: Option<IDXGIResource> = None;
 
         unsafe {
-            let result =
-                self.dup_output
-                    .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource);
-
-            if let Err(err) = result {
-                if err.code() == DXGI_ERROR_ACCESS_LOST || err.code() == DXGI_ERROR_INVALID_CALL {
-                    // reinit the output and try again
-                    self.reinit()?;
-                    self.dup_output.AcquireNextFrame(
-                        500,
-                        &mut frame_info,
-                        &mut desktop_resource,
-                    )?;
-                } else {
-                    return Err(DeskError::WindowsResultError(Backtrace::capture(), err));
-                }
-            }
+            self.dup_output
+                .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)?;
         }
         let desktop_resource = desktop_resource.unwrap();
 
@@ -570,8 +549,8 @@ impl ScreenOutput {
         Ok(SceenFrame {
             frame_info,
             frame_buffer,
-            copy_buffer_surface: &self.copy_buffer_surface,
-            dup_output: &self.dup_output,
+            copy_buffer_surface: self.copy_buffer_surface.clone(),
+            dup_output: self.dup_output.clone(),
         })
     }
 
@@ -1188,7 +1167,9 @@ impl openh264::formats::YUVSource for YuvPlanarImageWrapper<'_, u8> {
     }
 }
 pub struct H264ScreenOutput {
-    pub screen_output: ScreenOutput,
+    pub manager: Arc<ScreenRecordManager>,
+    pub output_index: u32,
+    pub screen_output: Option<ScreenOutput>,
     pub encoder: openh264::encoder::Encoder,
 }
 
@@ -1204,7 +1185,9 @@ impl H264ScreenOutput {
         let api = OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
         Ok(Self {
-            screen_output: ScreenOutput::new(manager.clone(), output_index)?,
+            manager: manager.clone(),
+            output_index,
+            screen_output: Some(ScreenOutput::new(manager.clone(), output_index)?),
             encoder,
         })
     }
@@ -1214,21 +1197,33 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
     fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
         log::trace!("Start to get screen output frame");
         let capture_scrren_timer = CAPTURE_SCREEN_HISTOGRAM.start_timer();
-        let width = self.screen_output.dup_output_desc.ModeDesc.Width;
-        let height = self.screen_output.dup_output_desc.ModeDesc.Height;
-        let manager = self.screen_output.manager.clone();
-        let result = self.screen_output.get_frame(true);
+        if self.screen_output.is_none() {
+            self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
+        }
+        let screen_output = self.screen_output.as_mut().unwrap();
+        let width = screen_output.dup_output_desc.ModeDesc.Width;
+        let height = screen_output.dup_output_desc.ModeDesc.Height;
+        let result = screen_output.get_frame(true);
         if let Err(error) = result {
             if let DeskError::WindowsResultError(bt, err) = error {
                 if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
                     log::warn!("capture frame timeout, will retry, error={:?}", err);
                     return DeskError::custom_error(
-                        ErrorCode::CAPTURE_SCREEN_TIMEOUT_ERROR,
+                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
                         format!("capture frame timeout, will retry, error={:?}", err),
+                    );
+                } else if err.code() == DXGI_ERROR_ACCESS_LOST
+                    || err.code() == DXGI_ERROR_INVALID_CALL
+                {
+                    self.screen_output = None;
+                    return DeskError::custom_error(
+                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
+                        format!("capture frame is lost, will retry, error={:?}", err),
                     );
                 } else {
                     if err.code() == DXGI_ERROR_DEVICE_REMOVED {
-                        let removed_reason = unsafe { manager.device.GetDeviceRemovedReason() };
+                        let removed_reason =
+                            unsafe { self.manager.device.GetDeviceRemovedReason() };
                         log::error!("Device removed reason: {:?}", removed_reason);
                         return Err(DeskError::WindowsResultError(Backtrace::disabled(), err));
                     }
@@ -1244,15 +1239,16 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             "Got screen output frame, info={:?}",
             screen_frame.frame_info
         );
+        capture_scrren_timer.stop_and_record();
 
+        let convert_to_yuv_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
         let src_stride = width * 4;
         let mut planar_image = YuvPlanarImageMut::<u8>::alloc(
             width as u32,
             height as u32,
             YuvChromaSubsampling::Yuv420,
         );
-        capture_scrren_timer.stop_and_record();
-        let convert_to_yuv_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
+
         bgra_to_yuv420(
             &mut planar_image,
             screen_frame.frame_buffer,
@@ -1263,6 +1259,7 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
         )?;
         log::trace!("Converted to YUV420 format");
         convert_to_yuv_timer.stop_and_record();
+
         let encode_to_h264_timer = ENCODE_TO_H264_HISTOGRAM.start_timer();
         let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
 
@@ -1285,8 +1282,8 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
 pub struct SceenFrame<'a> {
     pub frame_info: DXGI_OUTDUPL_FRAME_INFO,
     pub frame_buffer: &'a [u8],
-    pub copy_buffer_surface: &'a IDXGISurface,
-    pub dup_output: &'a IDXGIOutputDuplication,
+    pub copy_buffer_surface: IDXGISurface,
+    pub dup_output: IDXGIOutputDuplication,
 }
 
 impl Drop for SceenFrame<'_> {
