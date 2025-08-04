@@ -15,11 +15,14 @@ use openh264::{
     OpenH264API,
     encoder::{BitRate, IntraFramePeriod},
 };
-use prometheus::{Histogram, register_histogram};
-use std::fmt::Debug;
+use prometheus::{Histogram, HistogramVec, register_histogram, register_histogram_vec};
 use std::{
     backtrace::Backtrace,
     sync::{Arc, LazyLock},
+};
+use std::{
+    fmt::Debug,
+    time::{Duration, Instant},
 };
 use windows::Win32::{
     Foundation::{GENERIC_ALL, HMODULE},
@@ -70,8 +73,9 @@ pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<Histogram> =
     LazyLock::new(|| register_histogram!("capture_screen_histogram", "help").unwrap());
 pub static CONVERT_TO_YUV_HISTOGRAM: LazyLock<Histogram> =
     LazyLock::new(|| register_histogram!("convert_to_yuv_histogram", "help").unwrap());
-pub static ENCODE_TO_H264_HISTOGRAM: LazyLock<Histogram> =
-    LazyLock::new(|| register_histogram!("encode_to_h264_histogram", "help").unwrap());
+pub static ENCODE_TO_H264_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!("encode_to_h264_histogram", "help", &["frame_type"]).unwrap()
+});
 
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
@@ -1260,10 +1264,18 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
         log::trace!("Converted to YUV420 format");
         convert_to_yuv_timer.stop_and_record();
 
-        let encode_to_h264_timer = ENCODE_TO_H264_HISTOGRAM.start_timer();
+        let encode_to_h264_timer = Instant::now();
         let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
 
         let encoded_bit_stream = self.encoder.encode(&yuv_source)?;
+        let frame_type_str = match encoded_bit_stream.frame_type() {
+            openh264::encoder::FrameType::Invalid => "Invalid",
+            openh264::encoder::FrameType::IDR => "IDR",
+            openh264::encoder::FrameType::I => "I",
+            openh264::encoder::FrameType::P => "P",
+            openh264::encoder::FrameType::Skip => "Skip",
+            openh264::encoder::FrameType::IPMixed => "IPMixed",
+        };
         log::trace!("Encoded to H.264 format");
         let encoded_bit_bytes = bytes::Bytes::from(encoded_bit_stream.to_vec());
         log::trace!(
@@ -1271,11 +1283,21 @@ impl ScreenOutputVideoNal for H264ScreenOutput {
             encoded_bit_stream.frame_type(),
             encoded_bit_stream.num_layers()
         );
-        encode_to_h264_timer.stop_and_record();
+        ENCODE_TO_H264_HISTOGRAM
+            .with_label_values(&[frame_type_str])
+            .observe(duration_to_seconds(
+                Instant::now().saturating_duration_since(encode_to_h264_timer),
+            ));
         Ok(NalInfo {
             nal_bytes: encoded_bit_bytes,
         })
     }
+}
+
+#[inline]
+pub fn duration_to_seconds(d: Duration) -> f64 {
+    let nanos = f64::from(d.subsec_nanos()) / 1e9;
+    d.as_secs() as f64 + nanos
 }
 
 #[derive(Debug, Clone)]
