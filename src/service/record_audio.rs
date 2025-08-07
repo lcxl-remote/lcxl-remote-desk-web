@@ -628,7 +628,6 @@ mod tests {
     #[test]
     fn test_opus_decode() -> Result<(), DeskError> {
         initialize();
-        let mut current_timesamp = 0usize;
 
         let mut opus_audio_capture = OpusAudioCapture::new(SelectedAudioDevice::default())?;
         opus_audio_capture.start()?;

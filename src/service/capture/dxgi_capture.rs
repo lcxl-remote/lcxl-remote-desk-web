@@ -1,31 +1,11 @@
-use crate::{
-    desk_error::DeskError,
-    model::{
-        common::ErrorCode,
-        record_screen::{
-            BPP, DisplayInfo, NUMVERTICES, POINTER_SHAPE_TYPE_COLOR,
-            POINTER_SHAPE_TYPE_MASKED_COLOR, POINTER_SHAPE_TYPE_MONOCHROME, Point, VERTEX,
-            VERTICES,
-        },
-        settings::Settings,
-    },
-};
-use log::warn;
-use openh264::{
-    OpenH264API,
-    encoder::{BitRate, IntraFramePeriod},
-};
-use prometheus::{Histogram, HistogramVec, register_histogram, register_histogram_vec};
 use std::{
     backtrace::Backtrace,
     sync::{Arc, LazyLock},
 };
-use std::{
-    fmt::Debug,
-    time::{Duration, Instant},
-};
+
+use prometheus::{Histogram, register_histogram};
 use windows::Win32::{
-    Foundation::{GENERIC_ALL, HMODULE},
+    Foundation::{GENERIC_ALL, HMODULE, RECT},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_REFERENCE,
@@ -54,28 +34,193 @@ use windows::Win32::{
             DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL,
             DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
             DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-            DXGI_OUTPUT_DESC, DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice,
-            IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
+            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
+            IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
+        Gdi::{DISPLAY_DEVICE_STATE_FLAGS, DISPLAY_DEVICEW, EnumDisplayDevicesW},
     },
+    Media::MediaFoundation::{MF_FLOAT2, MF_FLOAT3},
     System::StationsAndDesktops::{
         CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetProcessWindowStation,
         OpenInputDesktop, SetThreadDesktop,
     },
 };
-use windows_core::{Interface, s};
-use yuv::{
-    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
-    bgra_to_yuv420,
+use windows_core::{Interface, PCWSTR, s};
+
+use crate::{
+    desk_error::DeskError,
+    model::{
+        capture::{DisplayInfo, DisplayRect, ImageCapture, ImageInfo, ImageType},
+        common::ErrorCode,
+        settings::DeskSettings,
+    },
 };
 
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<Histogram> =
     LazyLock::new(|| register_histogram!("capture_screen_histogram", "help").unwrap());
-pub static CONVERT_TO_YUV_HISTOGRAM: LazyLock<Histogram> =
-    LazyLock::new(|| register_histogram!("convert_to_yuv_histogram", "help").unwrap());
-pub static ENCODE_TO_H264_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
-    register_histogram_vec!("encode_to_h264_histogram", "help", &["frame_type"]).unwrap()
-});
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VERTEX {
+    pub pos: MF_FLOAT3,
+    pub tex_coord: MF_FLOAT2,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+pub const POINTER_SHAPE_TYPE_MONOCHROME: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32;
+pub const POINTER_SHAPE_TYPE_COLOR: u32 = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32;
+pub const POINTER_SHAPE_TYPE_MASKED_COLOR: u32 =
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0 as u32;
+
+/// FIXME: can not find the type of XMFLOAT2 and XMFLOAT3 in windows-rs, use MF_FLOAT3 and MF_FLOAT2 instead
+pub const VERTICES: [VERTEX; 6] = [
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: -1.0,
+            y: -1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 0.0, y: 1.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: -1.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 0.0, y: 0.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: 1.0,
+            y: -1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 1.0, y: 1.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: 1.0,
+            y: -1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 1.0, y: 1.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: -1.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 0.0, y: 0.0 },
+    },
+    VERTEX {
+        pos: MF_FLOAT3 {
+            x: 1.0,
+            y: 1.0,
+            z: 0.0,
+        },
+        tex_coord: MF_FLOAT2 { x: 1.0, y: 0.0 },
+    },
+];
+
+pub const NUMVERTICES: u32 = VERTICES.len() as u32;
+pub const BPP: i32 = 4;
+
+impl From<RECT> for DisplayRect {
+    fn from(value: RECT) -> Self {
+        DisplayRect {
+            left: value.left,
+            top: value.top,
+            right: value.right,
+            bottom: value.bottom,
+        }
+    }
+}
+
+impl DisplayInfo {
+    pub fn from_digx_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> Self {
+        log::debug!(
+            "Converting DXGI_OUTPUT_DESC to DisplayInfo, output_desc: {:?}",
+            output_desc
+        );
+
+        let null_char_index = output_desc
+            .DeviceName
+            .iter()
+            .position(|&item| item == 0u16)
+            .unwrap_or(output_desc.DeviceName.len());
+        let device_name: String =
+            String::from_utf16_lossy(&output_desc.DeviceName[..null_char_index]);
+
+        let mut display_device = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            DeviceName: [0u16; 32],
+            DeviceString: [0u16; 128],
+            StateFlags: DISPLAY_DEVICE_STATE_FLAGS(0),
+            DeviceID: [0u16; 128],
+            DeviceKey: [0u16; 128],
+        };
+        let succeed = unsafe {
+            EnumDisplayDevicesW(
+                PCWSTR::from_raw(output_desc.DeviceName.as_ptr()),
+                0,
+                &mut display_device,
+                0,
+            )
+        };
+        let display_device_name = if succeed.as_bool() {
+            log::info!(
+                "Successfully enumerated display device: {:?}",
+                display_device
+            );
+            let null_char_index = display_device
+                .DeviceString
+                .iter()
+                .position(|&item| item == 0u16)
+                .unwrap_or(output_desc.DeviceName.len());
+            let name: String =
+                String::from_utf16_lossy(&display_device.DeviceString[..null_char_index]);
+
+            log::debug!("Display device name: {}", name);
+            Some(name)
+        } else {
+            None
+        };
+        let desktop_coordinates = output_desc.DesktopCoordinates.into();
+        let attached_to_desktop = output_desc.AttachedToDesktop.as_bool();
+        let rotation = output_desc.Rotation.0;
+
+        log::info!(
+            "Found output, name={}, display_device_name={:?}, desktop_coordinates={:?}, attached_to_desktop={}, rotation={}",
+            device_name,
+            display_device_name,
+            desktop_coordinates,
+            attached_to_desktop,
+            rotation
+        );
+        DisplayInfo {
+            device_name,
+            display_device_name,
+            desktop_coordinates,
+            attached_to_desktop,
+            rotation,
+        }
+    }
+}
+
+impl From<DXGI_OUTPUT_DESC> for DisplayInfo {
+    fn from(output_desc: DXGI_OUTPUT_DESC) -> Self {
+        DisplayInfo::from_digx_output_desc(&output_desc)
+    }
+}
 
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
@@ -267,9 +412,9 @@ impl ScreenRecordManager {
         Ok((vertex_shader, input_layout, pixel_shader))
     }
 
-    pub fn new(settings: &Settings) -> Result<Arc<Self>, DeskError> {
+    pub fn new(settings: &DeskSettings) -> Result<Arc<Self>, DeskError> {
         // get desktop
-        //Self::set_thread_desktop()?;
+        Self::set_thread_input_desktop()?;
 
         // init dxgi factory
         let driver_types: [D3D_DRIVER_TYPE; 3] = [
@@ -284,7 +429,7 @@ impl ScreenRecordManager {
             D3D_FEATURE_LEVEL_9_1,
         ];
         let mut flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-        if settings.desk.enable_d3d_debug {
+        if settings.enable_d3d_debug {
             log::info!("Enable d3d debug flag");
             flags |= D3D11_CREATE_DEVICE_DEBUG;
         }
@@ -312,7 +457,7 @@ impl ScreenRecordManager {
                 )
             };
             if let Err(error) = result.clone() {
-                warn!(
+                log::warn!(
                     "Failed to create device with driver type {:?}, code: {}",
                     driver_type,
                     error.code()
@@ -376,35 +521,6 @@ impl ScreenRecordManager {
             pixel_shader,
             sampler_linear,
         }))
-    }
-
-    pub fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
-        let mut output_list = vec![];
-        let mut output_index = 0;
-        loop {
-            let result = unsafe { self.dxgi_adapter.EnumOutputs(output_index) };
-            if let Ok(output) = result {
-                let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
-
-                output_list.push(DisplayInfo::from(output_desc));
-            } else if let Err(error) = result {
-                if error.code() != DXGI_ERROR_NOT_FOUND {
-                    log::error!(
-                        "Failed to enumerate outputs, code: {}, message: {}",
-                        error.code(),
-                        error.message()
-                    );
-                    return Err(DeskError::from(error));
-                }
-                log::warn!(
-                    "Output index not found, finished enumeration. Total outputs found: {}",
-                    output_index
-                );
-                break;
-            }
-            output_index += 1;
-        }
-        Ok(output_list)
     }
 }
 
@@ -551,7 +667,8 @@ impl ScreenOutput {
         };
 
         Ok(SceenFrame {
-            frame_info,
+            height: self.dup_output_desc.ModeDesc.Height,
+            width: self.dup_output_desc.ModeDesc.Width,
             frame_buffer,
             copy_buffer_surface: self.copy_buffer_surface.clone(),
             dup_output: self.dup_output.clone(),
@@ -1120,189 +1237,10 @@ impl ScreenOutput {
     }
 }
 
-pub struct NalInfo {
-    pub nal_bytes: bytes::Bytes,
-}
-
-pub trait ScreenOutputVideoNal {
-    fn get_nal(&mut self) -> Result<NalInfo, DeskError>;
-}
-
-#[derive(Debug)]
-pub struct YuvPlanarImageWrapper<'a, T>
-where
-    T: Copy + Debug,
-{
-    pub inner: YuvPlanarImageMut<'a, T>,
-}
-
-impl<'a, T> YuvPlanarImageWrapper<'a, T>
-where
-    T: Copy + Debug,
-{
-    pub fn new(inner: YuvPlanarImageMut<'a, T>) -> Self {
-        Self { inner }
-    }
-}
-
-impl openh264::formats::YUVSource for YuvPlanarImageWrapper<'_, u8> {
-    fn dimensions(&self) -> (usize, usize) {
-        (self.inner.width as usize, self.inner.height as usize)
-    }
-
-    fn strides(&self) -> (usize, usize, usize) {
-        (
-            self.inner.y_stride as usize,
-            self.inner.u_stride as usize,
-            self.inner.v_stride as usize,
-        )
-    }
-
-    fn y(&self) -> &[u8] {
-        self.inner.y_plane.borrow()
-    }
-
-    fn u(&self) -> &[u8] {
-        self.inner.u_plane.borrow()
-    }
-
-    fn v(&self) -> &[u8] {
-        self.inner.v_plane.borrow()
-    }
-}
-pub struct H264ScreenOutput {
-    pub manager: Arc<ScreenRecordManager>,
-    pub output_index: u32,
-    pub screen_output: Option<ScreenOutput>,
-    pub encoder: openh264::encoder::Encoder,
-}
-
-impl H264ScreenOutput {
-    pub fn new(
-        manager: Arc<ScreenRecordManager>,
-        output_index: u32,
-        bps: u32,
-    ) -> Result<Self, DeskError> {
-        let config = openh264::encoder::EncoderConfig::new()
-            .intra_frame_period(IntraFramePeriod::from_num_frames(30))
-            .bitrate(BitRate::from_bps(bps));
-        let api = OpenH264API::from_source();
-        let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
-        Ok(Self {
-            manager: manager.clone(),
-            output_index,
-            screen_output: Some(ScreenOutput::new(manager.clone(), output_index)?),
-            encoder,
-        })
-    }
-}
-
-impl ScreenOutputVideoNal for H264ScreenOutput {
-    fn get_nal(&mut self) -> Result<NalInfo, DeskError> {
-        log::trace!("Start to get screen output frame");
-        let capture_scrren_timer = CAPTURE_SCREEN_HISTOGRAM.start_timer();
-        if self.screen_output.is_none() {
-            self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
-        }
-        let screen_output = self.screen_output.as_mut().unwrap();
-        let width = screen_output.dup_output_desc.ModeDesc.Width;
-        let height = screen_output.dup_output_desc.ModeDesc.Height;
-        let result = screen_output.get_frame(true);
-        if let Err(error) = result {
-            if let DeskError::WindowsResultError(bt, err) = error {
-                if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
-                    log::warn!("capture frame timeout, will retry, error={:?}", err);
-                    return DeskError::custom_error(
-                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
-                        format!("capture frame timeout, will retry, error={:?}", err),
-                    );
-                } else if err.code() == DXGI_ERROR_ACCESS_LOST
-                    || err.code() == DXGI_ERROR_INVALID_CALL
-                {
-                    self.screen_output = None;
-                    return DeskError::custom_error(
-                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
-                        format!("capture frame is lost, will retry, error={:?}", err),
-                    );
-                } else {
-                    if err.code() == DXGI_ERROR_DEVICE_REMOVED {
-                        let removed_reason =
-                            unsafe { self.manager.device.GetDeviceRemovedReason() };
-                        log::error!("Device removed reason: {:?}", removed_reason);
-                        return Err(DeskError::WindowsResultError(Backtrace::disabled(), err));
-                    }
-                    return Err(DeskError::WindowsResultError(bt, err));
-                }
-            } else {
-                return Err(error);
-            }
-        }
-
-        let screen_frame = result?;
-        log::trace!(
-            "Got screen output frame, info={:?}",
-            screen_frame.frame_info
-        );
-        capture_scrren_timer.stop_and_record();
-
-        let convert_to_yuv_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
-        let src_stride = width * 4;
-        let mut planar_image = YuvPlanarImageMut::<u8>::alloc(
-            width as u32,
-            height as u32,
-            YuvChromaSubsampling::Yuv420,
-        );
-
-        bgra_to_yuv420(
-            &mut planar_image,
-            screen_frame.frame_buffer,
-            src_stride,
-            YuvRange::Limited,
-            YuvStandardMatrix::Bt601,
-            YuvConversionMode::Balanced,
-        )?;
-        log::trace!("Converted to YUV420 format");
-        convert_to_yuv_timer.stop_and_record();
-
-        let encode_to_h264_timer = Instant::now();
-        let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
-
-        let encoded_bit_stream = self.encoder.encode(&yuv_source)?;
-        let frame_type_str = match encoded_bit_stream.frame_type() {
-            openh264::encoder::FrameType::Invalid => "Invalid",
-            openh264::encoder::FrameType::IDR => "IDR",
-            openh264::encoder::FrameType::I => "I",
-            openh264::encoder::FrameType::P => "P",
-            openh264::encoder::FrameType::Skip => "Skip",
-            openh264::encoder::FrameType::IPMixed => "IPMixed",
-        };
-        log::trace!("Encoded to H.264 format");
-        let encoded_bit_bytes = bytes::Bytes::from(encoded_bit_stream.to_vec());
-        log::trace!(
-            "frame_type={:?}, num_layers={:?}",
-            encoded_bit_stream.frame_type(),
-            encoded_bit_stream.num_layers()
-        );
-        ENCODE_TO_H264_HISTOGRAM
-            .with_label_values(&[frame_type_str])
-            .observe(duration_to_seconds(
-                Instant::now().saturating_duration_since(encode_to_h264_timer),
-            ));
-        Ok(NalInfo {
-            nal_bytes: encoded_bit_bytes,
-        })
-    }
-}
-
-#[inline]
-pub fn duration_to_seconds(d: Duration) -> f64 {
-    let nanos = f64::from(d.subsec_nanos()) / 1e9;
-    d.as_secs() as f64 + nanos
-}
-
 #[derive(Debug, Clone)]
 pub struct SceenFrame<'a> {
-    pub frame_info: DXGI_OUTDUPL_FRAME_INFO,
+    pub height: u32,
+    pub width: u32,
     pub frame_buffer: &'a [u8],
     pub copy_buffer_surface: IDXGISurface,
     pub dup_output: IDXGIOutputDuplication,
@@ -1329,6 +1267,120 @@ impl Drop for SceenFrame<'_> {
                 );
             }
         }
+    }
+}
+
+impl ImageInfo for SceenFrame<'_> {
+    fn get_type(&self) -> ImageType {
+        ImageType::BRGA
+    }
+
+    fn get_data(&self) -> &[u8] {
+        self.frame_buffer
+    }
+
+    fn get_width(&self) -> u32 {
+        self.width
+    }
+
+    fn get_height(&self) -> u32 {
+        self.height
+    }
+}
+
+pub struct DigxImageCapture {
+    pub manager: Arc<ScreenRecordManager>,
+    pub output_index: u32,
+    pub screen_output: Option<ScreenOutput>,
+}
+
+impl DigxImageCapture {
+    pub fn new(settings: &DeskSettings) -> Result<Self, DeskError> {
+        let manager = ScreenRecordManager::new(settings)?;
+        let screen_output = Some(ScreenOutput::new(
+            manager.clone(),
+            settings.video_device_index,
+        )?);
+        Ok(DigxImageCapture {
+            manager,
+            screen_output,
+            output_index: settings.video_device_index,
+        })
+    }
+}
+
+impl ImageCapture for DigxImageCapture {
+    fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+        log::trace!("Start to get screen output frame");
+        let capture_scrren_timer = CAPTURE_SCREEN_HISTOGRAM.start_timer();
+        if self.screen_output.is_none() {
+            self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
+        }
+        let screen_output = self.screen_output.as_mut().unwrap();
+        let result = screen_output.get_frame(show_mouse);
+        if let Err(error) = result {
+            if let DeskError::WindowsResultError(bt, err) = error {
+                if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                    log::warn!("capture frame timeout, will retry, error={:?}", err);
+                    capture_scrren_timer.stop_and_discard();
+                    return DeskError::custom_error(
+                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
+                        format!("capture frame timeout, will retry, error={:?}", err),
+                    );
+                } else if err.code() == DXGI_ERROR_ACCESS_LOST
+                    || err.code() == DXGI_ERROR_INVALID_CALL
+                {
+                    self.screen_output = None;
+                    capture_scrren_timer.stop_and_discard();
+                    return DeskError::custom_error(
+                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
+                        format!("capture frame is lost, will retry, error={:?}", err),
+                    );
+                } else {
+                    if err.code() == DXGI_ERROR_DEVICE_REMOVED {
+                        let removed_reason =
+                            unsafe { self.manager.device.GetDeviceRemovedReason() };
+                        log::error!("Device removed reason: {:?}", removed_reason);
+                        return Err(DeskError::WindowsResultError(Backtrace::disabled(), err));
+                    }
+                    return Err(DeskError::WindowsResultError(bt, err));
+                }
+            } else {
+                return Err(error);
+            }
+        }
+
+        let screen_frame = result?;
+        Ok(Box::new(screen_frame))
+    }
+
+    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
+        let mut output_list = vec![];
+        let mut output_index = 0;
+        loop {
+            let result = unsafe { self.manager.dxgi_adapter.EnumOutputs(output_index) };
+            if let Ok(output) = result {
+                let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
+
+                output_list.push(DisplayInfo::from(output_desc));
+            } else if let Err(error) = result {
+                if error.code() != DXGI_ERROR_NOT_FOUND {
+                    log::error!(
+                        "Failed to enumerate outputs, code: {}, message: {}",
+                        error.code(),
+                        error.message()
+                    );
+                    return Err(DeskError::from(error));
+                }
+                log::warn!(
+                    "Output index not found, finished enumeration. Total outputs found: {}",
+                    output_index
+                );
+                break;
+            }
+            output_index += 1;
+        }
+        Ok(output_list)
     }
 }
 
@@ -1372,37 +1424,30 @@ mod tests {
 
     /// Save screenshot to file
     fn save_screenshot_to_file(
-        screent_output: &mut ScreenOutput,
+        capture: &mut DigxImageCapture,
         bmp_path: &Path,
     ) -> Result<(), DeskError> {
-        let width = screent_output.dup_output_desc.ModeDesc.Width;
-        let height = screent_output.dup_output_desc.ModeDesc.Height;
-
-        let frame = screent_output.get_frame(true)?;
-        log::info!(
-            "frame_info={:?}, frame_buffer.len={}",
-            frame.frame_info,
-            frame.frame_buffer.len()
-        );
-        let mut rgb_data = vec![0u8; frame.frame_buffer.len()];
+        let frame = capture.capture(true)?;
+        log::info!("frame_buffer.len={}", frame.get_data().len());
+        let mut rgb_data = vec![0u8; frame.get_data().len()];
         let rgb_data_array = rgb_data.as_mut_slice();
 
-        let src_stride = width * 4;
-        let dst_stride = width * 4;
+        let src_stride = frame.get_width() * 4;
+        let dst_stride = frame.get_width() * 4;
         // convert bgra to rgba
         bgra_to_rgba(
-            frame.frame_buffer,
+            frame.get_data(),
             src_stride,
             rgb_data_array,
             dst_stride,
-            width,
-            height,
+            frame.get_width(),
+            frame.get_height(),
         )?;
         image::save_buffer(
             bmp_path,
             rgb_data_array,
-            width,
-            height,
+            frame.get_width(),
+            frame.get_height(),
             image::ExtendedColorType::Rgba8,
         )
         .unwrap();
@@ -1416,18 +1461,18 @@ mod tests {
     #[test]
     fn test_screen() -> Result<(), DeskError> {
         initialize();
-        let settings = Settings::default();
-        let manager = ScreenRecordManager::new(&settings)?;
-        let list = manager.get_output_list()?;
+        let settings = DeskSettings::default();
+        let mut capture = DigxImageCapture::new(&settings)?;
+
+        let list = capture.get_output_list()?;
         assert!(!list.is_empty());
 
-        let mut screent_output = manager.get_screen_output(0)?;
         let tmp_dir = PathBuf::from("sample/screenshot");
         std::fs::create_dir_all(tmp_dir.as_path())?;
 
         for i in 0..10 {
             let name = tmp_dir.join(format!("screenshot_{}.bmp", i));
-            save_screenshot_to_file(&mut screent_output, name.as_path())?;
+            save_screenshot_to_file(&mut capture, name.as_path())?;
         }
         //std::fs::remove_dir_all(tmp_dir.as_path())?;
 
@@ -1459,8 +1504,7 @@ mod tests {
         log::info!("EnumDesktopsW result: {:?}", enum_result);
         log::info!("desktop_list: {:?}", desktop_list);
 
-        let settings = Settings::default();
-        let manager = ScreenRecordManager::new(&settings).unwrap();
+        let mut settings = DeskSettings::default();
 
         for desktop_name in desktop_list {
             let mut desktop_name_utf16: Vec<u16> = desktop_name.encode_utf16().collect();
@@ -1491,7 +1535,8 @@ mod tests {
                 continue;
             }
 
-            let list_result = manager.get_output_list();
+            let capture = DigxImageCapture::new(&settings).unwrap();
+            let list_result = capture.get_output_list();
             if let Err(e) = list_result {
                 log::error!("Failed to get output list {}: {}", desktop_name, e);
                 continue;
@@ -1503,20 +1548,23 @@ mod tests {
                 desktop_name,
                 output_list
             );
+            drop(capture);
             for index in 0..output_list.len() {
-                let screent_output_result = manager.get_screen_output(index as u32);
-                if let Err(e) = screent_output_result {
+                settings.video_device_index = index as u32;
+                let capture_result = DigxImageCapture::new(&settings);
+                if let Err(e) = capture_result {
                     log::error!("Failed to get screen output {}: {}", desktop_name, e);
                     continue;
                 }
-                let mut screent_output = screent_output_result.unwrap();
+
+                let mut capture = capture_result.unwrap();
                 // first frame is black, skip it
-                screent_output.get_frame(false).unwrap();
+                capture.capture(false).unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
                 let name = tmp_dir.join(format!("screenshot_{}_{}.bmp", desktop_name, index));
 
-                save_screenshot_to_file(&mut screent_output, name.as_path()).unwrap();
+                save_screenshot_to_file(&mut capture, name.as_path()).unwrap();
             }
         }
     }
@@ -1582,35 +1630,32 @@ mod tests {
                 current_thread_id
             );
             unsafe { SetThreadDesktop(h_old) }.unwrap();
-            let settings = Settings::default();
-            let manager = ScreenRecordManager::new(&settings).unwrap();
+            let settings = DeskSettings::default();
+            let mut capture = DigxImageCapture::new(&settings).unwrap();
 
             log::info!("Wait for barrier");
             b.wait();
             thread::sleep(std::time::Duration::from_secs(5)); // wait
             log::info!("Start to capture screen");
-            let screent_output_result = manager.get_screen_output(0);
+            let screent_output_result = capture.capture(true);
             if let Err(e) = screent_output_result {
                 log::error!("Failed to get screen output: {}", e);
-                ScreenRecordManager::set_thread_input_desktop().unwrap();
-                let manager = ScreenRecordManager::new(&settings).unwrap();
-                let mut screent_output = manager.get_screen_output(0).unwrap();
-                screent_output.get_frame(false).unwrap();
+
+                let mut capture = DigxImageCapture::new(&settings).unwrap();
+                capture.capture(true).unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
                 let name = tmp_dir.join(format!("switch_desktop_screenshot_retry.bmp"));
 
-                save_screenshot_to_file(&mut screent_output, name.as_path()).unwrap();
+                save_screenshot_to_file(&mut capture, name.as_path()).unwrap();
                 return;
             }
-            let mut screent_output = screent_output_result.unwrap();
-            // first frame is black, skip it
-            screent_output.get_frame(false).unwrap();
+            screent_output_result.unwrap();
 
             let tmp_dir = PathBuf::from("sample");
             let name = tmp_dir.join(format!("switch_desktop_screenshot.bmp"));
 
-            save_screenshot_to_file(&mut screent_output, name.as_path()).unwrap();
+            save_screenshot_to_file(&mut capture, name.as_path()).unwrap();
         });
 
         log::info!("Old desktop handle: {:?}", h_old);

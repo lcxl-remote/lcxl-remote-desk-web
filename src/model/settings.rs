@@ -90,6 +90,19 @@ pub struct ListSettings {
 /// Desk settings
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
+pub struct H264EncoderSettings {
+    pub bps: u32,
+}
+
+impl Default for H264EncoderSettings {
+    fn default() -> Self {
+        Self { bps: 10_000_000 }
+    }
+}
+
+/// Desk settings
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(default)]
 pub struct DeskSettings {
     /// Enable D3D debug mode
     pub enable_d3d_debug: bool,
@@ -103,12 +116,16 @@ pub struct DeskSettings {
     pub video_zoom_ratio: u32,
     /// Enable mouse display on the screen
     pub show_mouse: bool,
+    /// Selected image capture device
+    pub image_capture: Option<String>,
     /// Video encoder name, None for auto detection
     pub video_encoder: Option<String>,
     /// Selected audio device
     pub audio_device: Option<SelectedAudioDevice>,
     /// Audio encoder name, None for auto detection
     pub audio_encoder: Option<String>,
+    /// h264 encoder settings
+    pub h264_encoder: Option<H264EncoderSettings>,
 }
 
 impl Default for DeskSettings {
@@ -120,9 +137,11 @@ impl Default for DeskSettings {
             adaptive_web_page_resolution: false,
             video_zoom_ratio: 100,
             show_mouse: true,
+            image_capture: None,
             video_encoder: None,
             audio_device: None,
             audio_encoder: None,
+            h264_encoder: None,
         }
     }
 }

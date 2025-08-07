@@ -1,8 +1,9 @@
+pub mod capture;
 pub mod common;
+pub mod encoder;
 pub mod files;
 pub mod login;
 pub mod record_audio;
-pub mod record_screen;
 pub mod settings;
 pub mod signaling;
 pub mod terminal;

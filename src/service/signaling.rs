@@ -32,11 +32,13 @@ use webrtc::{
 };
 use windows::Win32::Media::Audio::eAll;
 
+use crate::model::capture::DisplayInfo;
 use crate::model::common::ErrorCode;
 use crate::model::record_audio::SelectedAudioDevice;
-use crate::model::record_screen::DisplayInfo;
-use crate::model::settings::Settings;
+use crate::model::settings::{DeskSettings, Settings};
 use crate::model::signaling::{LcxlRTCIceServer, OfferModel, SignalingState, WebRTConnectionState};
+use crate::service::capture::capture_factory::create_image_capture;
+use crate::service::encoder::encoder_factory::create_video_encoder;
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
     desk_error::DeskError,
@@ -49,7 +51,6 @@ use crate::{
         },
         user::CurrentUser,
     },
-    service::record_screen::{H264ScreenOutput, ScreenOutputVideoNal, ScreenRecordManager},
 };
 
 pub static WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM: LazyLock<Histogram> =
@@ -192,10 +193,8 @@ impl SignalingContext {
         let settings_for_video = local_settings.clone();
         let spawn_handle: tokio::task::JoinHandle<Result<Vec<DisplayInfo>, DeskError>> =
             capture_screen_runtime.spawn(async move {
-                ScreenRecordManager::set_thread_input_desktop()?;
-
-                let manager = ScreenRecordManager::new(&settings_for_video)?;
-                manager.get_output_list()
+                let capture = create_image_capture(&settings_for_video.desk)?;
+                capture.get_output_list()
             });
         let video_device_list = spawn_handle.await??;
 
@@ -285,18 +284,14 @@ impl SignalingContext {
         let session_for_video = self.session.clone();
 
         let local_settings = self.settings.read().await.clone();
-        let screen_settings = local_settings.clone();
 
         // Spawn a blocking task to capture screen and send video
-        let output_index = offer_model.desk_settings.video_device_index;
-        let bps = offer_model.desk_settings.video_encode_bps;
+        let desk_settings = offer_model.desk_settings.clone();
         self.capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
-                screen_settings,
+                desk_settings,
                 video_ice_connection_state_rx,
                 video_track,
-                output_index,
-                bps,
             )
             .await;
 
@@ -445,16 +440,14 @@ impl SignalingContext {
     }
     /// Start the screen capture task
     pub async fn capture_screen_task(
-        settings: Settings,
+        settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
-        output_index: u32,
-        bps: u32,
     ) -> Result<(), DeskError> {
         log::info!("Preparing to capture screen...");
-        let manager = ScreenRecordManager::new(&settings)?;
+        let mut capture = create_image_capture(&settings)?;
+        let mut encoder = create_video_encoder(&settings)?;
 
-        let mut h264_screen_output = H264ScreenOutput::new(manager, output_index, bps)?;
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
             let state = *connection_state_rx.borrow_and_update();
@@ -504,7 +497,7 @@ impl SignalingContext {
              },
             }
             log::trace!("begin caption scrren");
-            let nal_info_result = h264_screen_output.get_nal();
+            let nal_info_result = capture.capture(true);
             if nal_info_result.is_err() {
                 if let Err(DeskError::CustomError(err)) = nal_info_result {
                     if err.error_code == ErrorCode::CAPTURE_SCREEN_NEED_RETRY {
@@ -519,7 +512,9 @@ impl SignalingContext {
                 );
                 continue;
             }
+
             let nal_info = nal_info_result.unwrap();
+            let nal_info = encoder.encode(nal_info.as_ref())?;
             let timer = WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM.start_timer();
             video_track
                 .write_sample(&Sample {

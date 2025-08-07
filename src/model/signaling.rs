@@ -11,7 +11,7 @@ use webrtc::{
 
 use crate::{
     desk_error::DeskError,
-    model::{record_audio::AudioDevice, record_screen::DisplayInfo, settings::DeskSettings},
+    model::{capture::DisplayInfo, record_audio::AudioDevice, settings::DeskSettings},
 };
 
 pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
