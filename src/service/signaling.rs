@@ -37,8 +37,8 @@ use crate::model::common::ErrorCode;
 use crate::model::record_audio::SelectedAudioDevice;
 use crate::model::settings::{DeskSettings, Settings};
 use crate::model::signaling::{LcxlRTCIceServer, OfferModel, SignalingState, WebRTConnectionState};
-use crate::service::capture::capture_factory::create_image_capture;
-use crate::service::encoder::encoder_factory::create_video_encoder;
+use crate::service::capture::image_capture_factory::create_image_capture;
+use crate::service::encoder::video_encoder_factory::create_video_encoder;
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
     desk_error::DeskError,

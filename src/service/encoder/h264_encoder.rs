@@ -10,13 +10,13 @@ use openh264::{
 use prometheus::{Histogram, HistogramVec, register_histogram, register_histogram_vec};
 use yuv::{
     YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
-    bgra_to_yuv420,
+    bgra_to_yuv420, rgb_to_yuv420,
 };
 
 use crate::{
     desk_error::DeskError,
     model::{
-        capture::ImageInfo,
+        capture::{ImageInfo, ImageType},
         encoder::{NalInfo, VideoEncoder},
         settings::H264EncoderSettings,
     },
@@ -106,15 +106,25 @@ impl VideoEncoder for H264Encoder {
             height as u32,
             YuvChromaSubsampling::Yuv420,
         );
+        match image_info.get_type() {
+            ImageType::BGRA => bgra_to_yuv420(
+                &mut planar_image,
+                image_info.get_data(),
+                src_stride,
+                YuvRange::Limited,
+                YuvStandardMatrix::Bt601,
+                YuvConversionMode::Balanced,
+            )?,
+            ImageType::RGB => rgb_to_yuv420(
+                &mut planar_image,
+                image_info.get_data(),
+                src_stride,
+                YuvRange::Limited,
+                YuvStandardMatrix::Bt601,
+                YuvConversionMode::Balanced,
+            )?,
+        };
 
-        bgra_to_yuv420(
-            &mut planar_image,
-            image_info.get_data(),
-            src_stride,
-            YuvRange::Limited,
-            YuvStandardMatrix::Bt601,
-            YuvConversionMode::Balanced,
-        )?;
         log::trace!("Converted to YUV420 format");
         convert_to_yuv_timer.stop_and_record();
 

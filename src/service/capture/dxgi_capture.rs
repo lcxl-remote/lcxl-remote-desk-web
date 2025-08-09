@@ -1272,7 +1272,7 @@ impl Drop for SceenFrame<'_> {
 
 impl ImageInfo for SceenFrame<'_> {
     fn get_type(&self) -> ImageType {
-        ImageType::BRGA
+        ImageType::BGRA
     }
 
     fn get_data(&self) -> &[u8] {

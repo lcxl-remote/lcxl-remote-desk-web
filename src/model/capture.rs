@@ -4,7 +4,8 @@ use utoipa::ToSchema;
 use crate::desk_error::DeskError;
 
 pub enum ImageType {
-    BRGA,
+    BGRA,
+    RGB,
 }
 pub trait ImageInfo {
     fn get_type(&self) -> ImageType;
