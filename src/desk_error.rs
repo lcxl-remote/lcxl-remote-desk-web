@@ -5,7 +5,10 @@ use std::{
 
 use actix_web::ResponseError;
 
-use crate::model::common::{ErrorCode, RestResponse};
+use crate::model::{
+    common::{ErrorCode, RestResponse},
+    signaling::WebRTConnectionState,
+};
 
 #[derive(Debug)]
 pub struct CustomDeskError {
@@ -53,6 +56,8 @@ pub enum DeskError {
     AnyhowError(anyhow::Error),
     /// A join error occurred.
     TokioTaskJoinError(tokio::task::JoinError),
+    /// A tokio send error occurred.
+    TokioSendError(tokio::sync::watch::error::SendError<WebRTConnectionState>),
     /// An actix ws closed error occurred.
     ActixWsClosed(actix_ws::Closed),
     /// A Windows result error occurred.
@@ -141,6 +146,7 @@ impl Display for DeskError {
             DeskError::FromUtf16Error(error) => error.fmt(f),
             DeskError::RegexError(error) => error.fmt(f),
             DeskError::WhichError(error) => error.fmt(f),
+            DeskError::TokioSendError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -200,6 +206,12 @@ impl From<anyhow::Error> for DeskError {
 impl From<tokio::task::JoinError> for DeskError {
     fn from(err: tokio::task::JoinError) -> Self {
         DeskError::TokioTaskJoinError(err)
+    }
+}
+
+impl From<tokio::sync::watch::error::SendError<WebRTConnectionState>> for DeskError {
+    fn from(err: tokio::sync::watch::error::SendError<WebRTConnectionState>) -> Self {
+        DeskError::TokioSendError(err)
     }
 }
 

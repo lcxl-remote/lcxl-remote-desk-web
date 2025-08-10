@@ -15,7 +15,10 @@ use windows_core::PCWSTR;
 
 use crate::{
     desk_error::DeskError,
-    model::capture::{DisplayInfo, DisplayRect, ImageCapture, ImageInfo, ImageType},
+    model::{
+        capture::{DisplayInfo, DisplayRect, ImageCapture, ImageInfo, ImageType},
+        settings::DeskSettings,
+    },
 };
 
 enum GDIHDCType {
@@ -76,6 +79,13 @@ impl Drop for GDIHBITMAP {
 }
 
 pub struct GdiImageCapture {}
+
+impl GdiImageCapture {
+    pub fn new(settings: &DeskSettings) -> Result<Self, DeskError> {
+        log::debug!("Creating GDIImageCapture with settings: {:?}", settings);
+        Ok(GdiImageCapture {})
+    }
+}
 
 pub struct GDIImageInfo {
     pub bitmap_buffer: Vec<u8>,
@@ -242,11 +252,22 @@ impl ImageCapture for GdiImageCapture {
             let result =
                 unsafe { EnumDisplayDevicesW(null_str, dev_index, &mut display_device, 0) };
             if !result.as_bool() {
+                log::debug!("End of enum display devices: idevnum: {}", dev_index);
                 break;
             }
 
             let display_name = u16array_to_string(&display_device.DeviceString);
             let device_name = u16array_to_string(&display_device.DeviceName);
+            let device_id = u16array_to_string(&display_device.DeviceID);
+            let device_key = u16array_to_string(&display_device.DeviceKey);
+            log::debug!(
+                "idevnum: {}, display device: {}, device name: {}, device id: {}, device key: {}",
+                dev_index,
+                display_name,
+                device_name,
+                device_id,
+                device_key
+            );
 
             let mut dev_mode = DEVMODEW::default();
             dev_mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
@@ -262,6 +283,7 @@ impl ImageCapture for GdiImageCapture {
                 )
             };
             if !result.as_bool() {
+                log::warn!("Failed to get current settings for device {}", device_name);
                 break;
             }
             let display_info = DisplayInfo {
@@ -292,14 +314,29 @@ fn u16array_to_string(u16array: &[u16]) -> String {
 }
 
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Once};
 
+    use log::LevelFilter;
     use yuv::bgra_to_rgba;
 
     use super::*;
+    static INIT: Once = Once::new();
 
+    fn initialize() {
+        INIT.call_once(|| {
+            // initialization code here
+            let result = env_logger::builder()
+                .format_timestamp_micros()
+                .filter_level(LevelFilter::Trace)
+                .try_init();
+            if let Err(e) = result {
+                log::warn!("Failed to initialize logger: {:?}", e);
+            }
+        });
+    }
     #[test]
     fn test_capture_image() -> Result<(), DeskError> {
+        initialize();
         let mut image_capture = GdiImageCapture {};
         let image_info = image_capture.capture(true)?;
 
@@ -327,6 +364,9 @@ mod tests {
             image::ExtendedColorType::Rgba8,
         )
         .unwrap();
+
+        let output_list = image_capture.get_output_list()?;
+        log::info!("output_list={:?}", output_list);
         Ok(())
     }
 }

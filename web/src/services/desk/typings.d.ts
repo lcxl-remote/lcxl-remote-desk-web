@@ -50,6 +50,9 @@ declare namespace API {
     audio_encoder?: any;
     /** Enable D3D debug mode */
     enable_d3d_debug?: boolean;
+    h264_encoder?: null | H264EncoderSettings;
+    /** Selected image capture device */
+    image_capture?: any;
     /** Enable mouse display on the screen */
     show_mouse?: boolean;
     /** Video device index */
@@ -58,6 +61,8 @@ declare namespace API {
     video_encode_bps?: number;
     /** Video encoder name, None for auto detection */
     video_encoder?: any;
+    /** Video frame rate (e.g., 30 fps) */
+    video_fps?: number;
     /** Video zoom ratio (e.g., 50 for 50% zoom) */
     video_zoom_ratio?: number;
   };
@@ -127,6 +132,10 @@ declare namespace API {
   type getTurnSessionStatisticsParams = {
     address: string;
     interface: string;
+  };
+
+  type H264EncoderSettings = {
+    bps?: number;
   };
 
   type InitSignalingData = {
@@ -252,6 +261,8 @@ declare namespace API {
   };
 
   type SignalingErrorData = {
+    /** error code */
+    error_code: number;
     /** error message */
     message: string;
     /** signaling data */

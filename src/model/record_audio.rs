@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Audio Data Flow Enum
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub enum AudioDataFlow {
     /// Render audio to speakers or headphones
     Render,
@@ -24,7 +24,7 @@ pub struct AudioDevice {
 }
 
 /// Selected Audio Device Model
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct SelectedAudioDevice {
     /// Audio data flow (render or capture)
     pub audio_data_flow: AudioDataFlow,

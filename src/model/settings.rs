@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, ops::Deref, path::PathBuf};
+use std::{collections::HashMap, fs, ops::Deref, path::PathBuf, time::Duration};
 
 use ::serde::{Deserialize, Serialize};
 use chrono::{DateTime, Local};
@@ -88,7 +88,7 @@ pub struct ListSettings {
 }
 
 /// Desk settings
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct H264EncoderSettings {
     pub bps: u32,
@@ -101,7 +101,7 @@ impl Default for H264EncoderSettings {
 }
 
 /// Desk settings
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
 #[serde(default)]
 pub struct DeskSettings {
     /// Enable D3D debug mode
@@ -114,6 +114,8 @@ pub struct DeskSettings {
     pub adaptive_web_page_resolution: bool,
     /// Video zoom ratio (e.g., 50 for 50% zoom)
     pub video_zoom_ratio: u32,
+    /// Video frame rate (e.g., 30 fps)
+    pub video_fps: u32,
     /// Enable mouse display on the screen
     pub show_mouse: bool,
     /// Selected image capture device
@@ -128,14 +130,25 @@ pub struct DeskSettings {
     pub h264_encoder: Option<H264EncoderSettings>,
 }
 
+impl DeskSettings {
+    pub fn get_duration_by_video_fps(&self) -> Duration {
+        let mut video_fps = self.video_fps;
+        if video_fps <= 0 {
+            video_fps = 1;
+        }
+        Duration::from_micros((1000_000 as f32 / video_fps as f32) as u64)
+    }
+}
+
 impl Default for DeskSettings {
     fn default() -> Self {
         Self {
             enable_d3d_debug: false,
             video_device_index: 0,
-            video_encode_bps: 10_1000_1000,
+            video_encode_bps: 10_000_000,
             adaptive_web_page_resolution: false,
             video_zoom_ratio: 100,
+            video_fps: 60,
             show_mouse: true,
             image_capture: None,
             video_encoder: None,

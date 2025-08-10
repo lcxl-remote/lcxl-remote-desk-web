@@ -13,8 +13,8 @@ use crate::{
 #[utoipa::path(
     summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
     responses(
-        (status = 200, description = "return websocket stream", body = SignalingModel),
-        (status = 500, description = "return websocket stream", body = SignalingErrorData),
+        (status = 200, description = "websocket signaling model", body = SignalingModel),
+        (status = 500, description = "websocket signaling error data", body = SignalingErrorData),
         (status = 201, description = "init signaling data", body = InitSignalingData),
         (status = 202, description = "desk config", body = DeskSettings),
     ),

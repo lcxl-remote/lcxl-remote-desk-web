@@ -7,13 +7,11 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::StreamExt;
 use log::{error, info, warn};
-use prometheus::{Histogram, register_histogram};
+use prometheus::{Histogram, HistogramVec, register_histogram, register_histogram_vec};
 use tokio::time::Duration;
 use tokio::time::Instant;
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::peer_connection::math_rand_alpha;
 use webrtc::{
     api::{
         APIBuilder,
@@ -32,12 +30,16 @@ use webrtc::{
 };
 use windows::Win32::Media::Audio::eAll;
 
-use crate::model::capture::DisplayInfo;
+use crate::model::capture::{DisplayInfo, ImageCaptureTypeHelper};
 use crate::model::common::ErrorCode;
 use crate::model::record_audio::SelectedAudioDevice;
 use crate::model::settings::{DeskSettings, Settings};
-use crate::model::signaling::{LcxlRTCIceServer, OfferModel, SignalingState, WebRTConnectionState};
+use crate::model::signaling::{
+    LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
+    WebRTConnectionState,
+};
 use crate::service::capture::image_capture_factory::create_image_capture;
+use crate::service::data_channel::handle_data_channel_event;
 use crate::service::encoder::video_encoder_factory::create_video_encoder;
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
@@ -53,6 +55,9 @@ use crate::{
     },
 };
 
+pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!("capture_screen_histogram", "help", &["type"]).unwrap()
+});
 pub static WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM: LazyLock<Histogram> =
     LazyLock::new(|| register_histogram!("webrtc_video_write_sample_histogram", "help").unwrap());
 
@@ -110,16 +115,21 @@ pub async fn do_handle_signaling(
     }
     Ok(())
 }
+/// Signaling context for handling WebSocket messages.
 pub struct SignalingContext {
     pub settings: web::Data<SharedSettings>,
     pub session: Session,
     pub user: CurrentUser,
+    /// RTC peer connection
     pub rtc_peer_connection: Arc<RTCPeerConnection>,
-    /// capture screen task runtime
+    /// Capture screen task runtime
     pub capture_screen_runtime: tokio::runtime::Runtime,
-    /// capture audio task runtime
+    /// Capture audio task runtime
     pub capture_audio_runtime: tokio::runtime::Runtime,
-    pub signaling_state: tokio::sync::RwLock<SignalingState>,
+    /// Signaling state
+    pub signaling_state: Arc<tokio::sync::RwLock<SignalingState>>,
+    /// Tokio watch sender for WebRTConnectionState updates
+    pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
 }
 
 impl SignalingContext {
@@ -219,17 +229,19 @@ impl SignalingContext {
             rtc_peer_connection,
             capture_screen_runtime,
             capture_audio_runtime,
-            signaling_state: tokio::sync::RwLock::new(SignalingState::default()),
+            signaling_state: Arc::new(tokio::sync::RwLock::new(SignalingState::default())),
+            update_setting_sender: None,
         })
     }
 
     /// Starts the WebRTC connection
     pub async fn start_webrtc(&mut self, offer_model: &OfferModel) -> Result<(), DeskError> {
-        let (ice_connection_state_tx, ice_connection_state_rx) =
+        let (ice_state_change_sender, ice_connection_state_rx) =
             tokio::sync::watch::channel(WebRTConnectionState::Init);
-        let ice_connection_state_tx_2 = ice_connection_state_tx.clone();
-        let video_ice_connection_state_rx = ice_connection_state_rx.clone();
-        let audio_ice_connection_state_rx = ice_connection_state_rx.clone();
+        let peer_state_change_sender = ice_state_change_sender.clone();
+        let update_setting_sender = ice_state_change_sender.clone();
+        let video_state_receiver = ice_connection_state_rx.clone();
+        let audio_state_receiver = ice_connection_state_rx.clone();
 
         let video_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
@@ -290,7 +302,7 @@ impl SignalingContext {
         self.capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
                 desk_settings,
-                video_ice_connection_state_rx,
+                video_state_receiver,
                 video_track,
             )
             .await;
@@ -319,7 +331,7 @@ impl SignalingContext {
                 init_thread()?;
                 let result = SignalingContext::capture_audio_task(
                     audio_settings,
-                    audio_ice_connection_state_rx,
+                    audio_state_receiver,
                     audio_track,
                     audio_device,
                 )
@@ -351,7 +363,7 @@ impl SignalingContext {
                     log::info!("RTC ice connection state has changed {connection_state}");
                     let state = WebRTConnectionState::from(&connection_state);
                     if state != WebRTConnectionState::Init {
-                        if let Err(error) = ice_connection_state_tx.send(state) {
+                        if let Err(error) = ice_state_change_sender.send(state) {
                             log::error!("Failed to send connection state: {:?}", error);
                         }
                     }
@@ -367,7 +379,7 @@ impl SignalingContext {
                 log::info!("Peer connection state has changed: {s}");
                 let state = WebRTConnectionState::from(&s);
                 if state == WebRTConnectionState::Closed {
-                    if let Err(error) = ice_connection_state_tx_2.send(state) {
+                    if let Err(error) = peer_state_change_sender.send(state) {
                         log::error!("Failed to send connection state: {:?}", error);
                     }
                 }
@@ -377,49 +389,18 @@ impl SignalingContext {
 
         // Register data channel creation handling
         // Used for mouse event, keyboard event, clipboard manage, file copy, etc.
-        self.rtc_peer_connection.on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
-            let d_label = d.label().to_owned();
-            let d_id = d.id();
-            log::info!("New DataChannel {d_label} {d_id}");
+        self.rtc_peer_connection
+            .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
+                let d_label = d.label().to_owned();
+                let d_id = d.id();
+                log::info!("New DataChannel {d_label} {d_id}");
 
-            // Register channel opening handling
-            Box::pin(async move {
-                let d2 = Arc::clone(&d);
-                let d_label2 = d_label.clone();
-                let d_id2 = d_id;
-                d.on_close(Box::new(move || {
-                    log::warn!("Data channel closed");
-                    Box::pin(async {})
-                }));
-
-                d.on_open(Box::new(move || {
-                    log::info!("Data channel '{d_label2}'-'{d_id2}' open. Random messages will now be sent to any connected DataChannels every 5 seconds");
-
-                    Box::pin(async move {
-                        let mut result = webrtc::error::Result::<usize>::Ok(0);
-                        while result.is_ok() {
-                            let timeout = tokio::time::sleep(Duration::from_secs(5));
-                            tokio::pin!(timeout);
-
-                            tokio::select! {
-                                _ = timeout.as_mut() =>{
-                                    let message = math_rand_alpha(15);
-                                    log::info!("Sending '{message}'");
-                                    result = d2.send_text(message).await.map_err(Into::into);
-                                }
-                            };
-                        }
-                    })
-                }));
-
-                // Register text message handling
-                d.on_message(Box::new(move |msg: DataChannelMessage| {
-                    let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
-                    log::debug!("Message from DataChannel '{d_label}': '{msg_str}'");
-                    Box::pin(async {})
-                }));
-            })
-        }));
+                // Register channel opening handling
+                Box::pin(async move {
+                    handle_data_channel_event(d.clone()).await;
+                })
+            }));
+        self.update_setting_sender = Some(update_setting_sender);
         Ok(())
     }
 
@@ -440,17 +421,22 @@ impl SignalingContext {
     }
     /// Start the screen capture task
     pub async fn capture_screen_task(
-        settings: DeskSettings,
+        desk_settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
     ) -> Result<(), DeskError> {
-        log::info!("Preparing to capture screen...");
-        let mut capture = create_image_capture(&settings)?;
-        let mut encoder = create_video_encoder(&settings)?;
+        let mut desk_settings = desk_settings;
+        log::info!(
+            "Preparing to capture screen, desk settings: {:?}",
+            desk_settings
+        );
+        let mut capture = create_image_capture(&desk_settings)?;
+        let mut encoder = create_video_encoder(&desk_settings)?;
+        let mut image_capture_type = desk_settings.get_image_capture_type()?.to_string();
 
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
-            let state = *connection_state_rx.borrow_and_update();
+            let state = connection_state_rx.borrow_and_update().clone();
             match state {
                 WebRTConnectionState::Init => {
                     log::info!("current state is {}, keep wait", state);
@@ -474,13 +460,14 @@ impl SignalingContext {
         // It is important to use a time.Ticker instead of time.Sleep because
         // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
         // * works around latency issues with Sleep
-        let mut ticker = tokio::time::interval(Duration::from_millis(3));
+        let mut ticker = tokio::time::interval(desk_settings.get_duration_by_video_fps());
         loop {
+            //ticker = tokio::time::interval(Duration::from_millis(3));
             // check if the connection is still alive
             tokio::select! {
              _ = ticker.tick() => {},
              _ = connection_state_rx.changed() => {
-                let state = *connection_state_rx.borrow_and_update();
+                let state = connection_state_rx.borrow_and_update().clone();
                 match state {
                     WebRTConnectionState::Init => {
                         log::warn!("current state is {}, it should be happened?", state);
@@ -488,6 +475,14 @@ impl SignalingContext {
                     WebRTConnectionState::Connected => {
                         log::warn!("RTC is connected");
 
+                    },
+                    WebRTConnectionState::UpdateSettings(new_desk_setting)=> {
+                        log::info!("update settings {:?}", new_desk_setting);
+                        // update desk settings with new values
+                        desk_settings = new_desk_setting;
+                        // update ticker interval based on new settings
+                        ticker = tokio::time::interval(desk_settings.get_duration_by_video_fps());
+                        image_capture_type = desk_settings.get_image_capture_type()?.to_string();
                     },
                     _ => {
                         log::error!("Unexcepted state {}, exit to capture screen", state);
@@ -497,10 +492,14 @@ impl SignalingContext {
              },
             }
             log::trace!("begin caption scrren");
-            let nal_info_result = capture.capture(true);
-            if nal_info_result.is_err() {
-                if let Err(DeskError::CustomError(err)) = nal_info_result {
+            let timer = CAPTURE_SCREEN_HISTOGRAM
+                .with_label_values(&[image_capture_type.as_str()])
+                .start_timer();
+            let image_info_result = capture.capture(desk_settings.show_mouse);
+            if image_info_result.is_err() {
+                if let Err(DeskError::CustomError(err)) = image_info_result {
                     if err.error_code == ErrorCode::CAPTURE_SCREEN_NEED_RETRY {
+                        timer.stop_and_discard();
                         continue;
                     }
                     log::error!("Failed to get nal info, custom error={}", err);
@@ -508,13 +507,13 @@ impl SignalingContext {
                 }
                 log::error!(
                     "Failed to get nal info, error={}",
-                    nal_info_result.err().unwrap()
+                    image_info_result.err().unwrap()
                 );
                 continue;
             }
-
-            let nal_info = nal_info_result.unwrap();
-            let nal_info = encoder.encode(nal_info.as_ref())?;
+            timer.stop_and_record();
+            let image_info = image_info_result.unwrap();
+            let nal_info = encoder.encode(image_info.as_ref())?;
             let timer = WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM.start_timer();
             video_track
                 .write_sample(&Sample {
@@ -535,12 +534,12 @@ impl SignalingContext {
         audio_track: Arc<TrackLocalStaticSample>,
         audio_device: SelectedAudioDevice,
     ) -> Result<(), DeskError> {
-        log::info!("Preparing to capture audio...");
+        log::info!("Preparing to capture audio, desk_settings={:?}", settings);
         let mut opus_audio_capture = OpusAudioCapture::new(audio_device)?;
 
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
-            let state = *connection_state_rx.borrow_and_update();
+            let state = connection_state_rx.borrow_and_update().clone();
             match state {
                 WebRTConnectionState::Init => {
                     log::info!("current state is {}, keep wait", state);
@@ -572,13 +571,16 @@ impl SignalingContext {
             tokio::select! {
              _ = ticker.tick() => {},
              _ = connection_state_rx.changed() => {
-                let state = *connection_state_rx.borrow_and_update();
+                let state = connection_state_rx.borrow_and_update().clone();
                 match state {
                     WebRTConnectionState::Init => {
                         log::warn!("current state is {}, it should be happened?", state);
                     },
                     WebRTConnectionState::Connected => {
                         log::warn!("RTC is connected");
+                    },
+                    WebRTConnectionState::UpdateSettings(desk_setting)=> {
+                        log::info!("update settings {:?}", desk_setting);
                     },
                     _ => {
                         log::error!("Unexcepted state {}, exit to capture audio", state);
@@ -618,6 +620,18 @@ impl SignalingContext {
 
     pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskError> {
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
+
+        if signaling_model.signaling_data == None {
+            self.session
+                .send_signaling(&SignalingModel::error(
+                    signaling_model.signaling_type.into(),
+                    ErrorCode::BLANK_SIGNALING_DATA,
+                    "No signaling data provided",
+                )?)
+                .await?;
+            return Ok(());
+        }
+
         match signaling_model.signaling_type {
             SIGNALING_TYPE_CODE_INIT => {} // handle_hello(session, user),
             SIGNALING_TYPE_CODE_OFFER => {
@@ -625,6 +639,9 @@ impl SignalingContext {
             }
             SIGNALING_TYPE_CODE_ANSWER => {}
             SIGNALING_TYPE_CODE_CANID => {}
+            SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS => {
+                self.handle_update_desk_settings(&signaling_model).await?;
+            }
             _ => {
                 error!("Unknown signaling type: {}", signaling_model.signaling_type);
                 let error_signaling = SignalingModel::new_str_data(
@@ -654,15 +671,6 @@ impl SignalingContext {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        if signaling_model.signaling_data == None {
-            self.session
-                .send_signaling(&SignalingModel::error(
-                    SignalingType::from(signaling_model.signaling_type),
-                    "No signaling data provided",
-                )?)
-                .await?;
-            return Ok(());
-        }
         let signaling_data = signaling_model.signaling_data.clone().unwrap();
         log::info!("Received offer: {}", signaling_data);
         let offer_model = serde_json::from_str::<OfferModel>(&signaling_data)?;
@@ -693,7 +701,8 @@ impl SignalingContext {
         if option.is_none() {
             self.session
                 .send_signaling(&SignalingModel::error(
-                    SignalingType::from(signaling_model.signaling_type),
+                    signaling_model.signaling_type.into(),
+                    ErrorCode::GENERATE_LOCAL_DESCRIPTION_FAILED,
                     "generate local_description failed!",
                 )?)
                 .await?;
@@ -716,6 +725,19 @@ impl SignalingContext {
             settings.save()?;
         }
 
+        Ok(())
+    }
+
+    pub async fn handle_update_desk_settings(
+        &mut self,
+        signaling_model: &SignalingModel,
+    ) -> Result<(), DeskError> {
+        let desk_settings = signaling_model.get_data_with_default::<DeskSettings>()?;
+        if let Some(ref sender) = self.update_setting_sender {
+            sender.send(WebRTConnectionState::UpdateSettings(desk_settings))?;
+        } else {
+            log::error!("update setting sender is not set");
+        }
         Ok(())
     }
 }

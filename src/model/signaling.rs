@@ -10,8 +10,10 @@ use webrtc::{
 };
 
 use crate::{
-    desk_error::DeskError,
-    model::{capture::DisplayInfo, record_audio::AudioDevice, settings::DeskSettings},
+    desk_error::{CustomDeskError, DeskError},
+    model::{
+        capture::DisplayInfo, common::ErrorCode, record_audio::AudioDevice, settings::DeskSettings,
+    },
 };
 
 pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
@@ -30,6 +32,8 @@ pub const SIGNALING_TYPE_CODE_CANID: i32 = 102;
 pub const SIGNALING_TYPE_CODE_REQUIRE_CONTROL: i32 = 201;
 pub const SIGNALING_TYPE_CODE_ACCEPT_CONTROL: i32 = 202;
 pub const SIGNALING_TYPE_CODE_DENY_CONTROL: i32 = 203;
+
+pub const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS: i32 = 301;
 
 pub const SIGNALING_TYPE_CODE_ERROR: i32 = 1000;
 pub const SIGNALING_TYPE_CODE_UNKNOWN_TYPE: i32 = 1001;
@@ -74,6 +78,8 @@ pub struct SignalingModel {
 pub struct SignalingErrorData {
     /// signaling type which errors occurred.
     pub signaling_type: i32,
+    /// error code
+    pub error_code: i32,
     /// error message
     pub message: String,
     /// signaling data
@@ -101,13 +107,49 @@ impl SignalingModel {
         })
     }
 
-    pub fn error(signaling_type: SignalingType, message: &str) -> Result<Self, DeskError> {
+    pub fn error(
+        signaling_type: SignalingType,
+        error_code: ErrorCode,
+        message: &str,
+    ) -> Result<Self, DeskError> {
         let error_data = SignalingErrorData {
             signaling_type: signaling_type.0,
+            error_code: error_code.0,
             message: message.to_string(),
             signaling_data: None,
         };
         SignalingModel::new_json_data(SignalingType::ERROR, &error_data)
+    }
+
+    pub fn custom_desk_error(
+        signaling_type: SignalingType,
+        error: CustomDeskError,
+    ) -> Result<Self, DeskError> {
+        Self::error(signaling_type, error.error_code, &error.message)
+    }
+
+    /// Get data with type
+    pub fn get_data_with_type<T>(&self) -> Result<Option<T>, DeskError>
+    where
+        T: for<'a> Deserialize<'a>,
+    {
+        if let Some(data) = self.signaling_data.clone() {
+            Ok(Some(serde_json::from_str::<T>(&data)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get data with type
+    pub fn get_data_with_default<T>(&self) -> Result<T, DeskError>
+    where
+        T: for<'a> Deserialize<'a> + Default,
+    {
+        if let Some(data) = self.signaling_data.clone() {
+            Ok(serde_json::from_str::<T>(&data)?)
+        } else {
+            Ok(T::default())
+        }
     }
 }
 
@@ -158,10 +200,11 @@ pub struct InitSignalingData {
     pub desk_settings: DeskSettings,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WebRTConnectionState {
     Init,
     Connected,
+    UpdateSettings(DeskSettings),
     Closed,
 }
 
@@ -200,8 +243,6 @@ impl From<&RTCPeerConnectionState> for WebRTConnectionState {
 pub struct SignalingState {
     /// accept control from remote peer
     pub accept_control: bool,
-    /// show mouse cursor on remote screen
-    pub show_mouse: bool,
 }
 
 /// Offer Model

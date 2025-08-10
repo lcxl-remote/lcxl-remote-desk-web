@@ -18,13 +18,25 @@ pub trait ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError>;
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError>;
 }
-
+/// Image Capture Type Enum
 pub enum ImageCaptureType {
+    /// Capture image from DIGX device
     DIGX,
+    /// Capture image from DGI device
+    DGI,
+}
+
+impl std::fmt::Display for ImageCaptureType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ImageCaptureType::DIGX => write!(f, "DIGX"),
+            ImageCaptureType::DGI => write!(f, "DGI"),
+        }
+    }
 }
 
 pub trait ImageCaptureTypeHelper {
-    fn get_capture_type(&self) -> Result<ImageCaptureType, DeskError>;
+    fn get_image_capture_type(&self) -> Result<ImageCaptureType, DeskError>;
 }
 
 /// Display Rectangle Struct

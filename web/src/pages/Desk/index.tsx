@@ -17,6 +17,8 @@ const SIGNALING_TYPE_CODE_REQUIRE_CONTROL = 201;
 const SIGNALING_TYPE_CODE_ACCEPT_CONTROL = 202;
 const SIGNALING_TYPE_CODE_DENY_CONTROL = 203;
 
+const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS = 301;
+
 const SIGNALING_TYPE_CODE_ERROR = 1000;
 const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 1001;
 
@@ -101,7 +103,16 @@ const Desk: React.FC = () => {
 
   };
 
+  const sendSignalingMessage = (signaling_type: number, signaling_data: any) => {
+    const sock = socketRef.current!;
+    let sginaling = {
+      signaling_type,
+      signaling_data: JSON.stringify(signaling_data),
+    } as API.SignalingModel;
+    let signaling_json = JSON.stringify(sginaling);
 
+    sock.send(signaling_json);
+  }
   /**
    * Handle WebSocket message event
    * @param event - WebSocket message event
@@ -184,6 +195,9 @@ const Desk: React.FC = () => {
     if (!peerconnectionRef.current) {
       // 创建一个新的RTCPeerConnection实例
       peerconnectionRef.current = createRTCPeerConnection(desk_settings);
+    } else {
+      // 更新配置
+      sendSignalingMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, desk_settings);
     }
     setIsModalOpen(false);
     return;
@@ -226,13 +240,7 @@ const Desk: React.FC = () => {
 
         console.log("event.candidate === null, offer_model: ", offer_model)
 
-        let offer_sginaling = {
-          signaling_type: SIGNALING_TYPE_CODE_OFFER,
-          signaling_data: JSON.stringify(offer_model),
-        } as API.SignalingModel;
-        let offer_signaling_json = JSON.stringify(offer_sginaling);
-
-        socketRef.current!.send(offer_signaling_json);
+        sendSignalingMessage(SIGNALING_TYPE_CODE_OFFER, offer_model);
       }
     };
 

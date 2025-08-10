@@ -11,7 +11,7 @@ pub struct RestResponse<T: ToSchema> {
     data: Option<T>,
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ErrorCode(i32);
+pub struct ErrorCode(pub i32);
 
 impl ErrorCode {
     pub const SUCCESS: ErrorCode = ErrorCode(0);
@@ -22,6 +22,12 @@ impl ErrorCode {
     pub const WINDOWS_ERROR: ErrorCode = ErrorCode(1000);
 
     pub const CAPTURE_SCREEN_NEED_RETRY: ErrorCode = ErrorCode(1001);
+
+    pub const GENERATE_LOCAL_DESCRIPTION_FAILED: ErrorCode = ErrorCode(10001);
+    pub const BLANK_SIGNALING_DATA: ErrorCode = ErrorCode(10002);
+    pub fn new(code: i32) -> Self {
+        ErrorCode(code)
+    }
 }
 
 impl Display for ErrorCode {

@@ -1,9 +1,5 @@
-use std::{
-    backtrace::Backtrace,
-    sync::{Arc, LazyLock},
-};
+use std::{backtrace::Backtrace, sync::Arc};
 
-use prometheus::{Histogram, register_histogram};
 use windows::Win32::{
     Foundation::{GENERIC_ALL, HMODULE, RECT},
     Graphics::{
@@ -57,9 +53,6 @@ use crate::{
         settings::DeskSettings,
     },
 };
-
-pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<Histogram> =
-    LazyLock::new(|| register_histogram!("capture_screen_histogram", "help").unwrap());
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1312,7 +1305,6 @@ impl DigxImageCapture {
 impl ImageCapture for DigxImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         log::trace!("Start to get screen output frame");
-        let capture_scrren_timer = CAPTURE_SCREEN_HISTOGRAM.start_timer();
         if self.screen_output.is_none() {
             self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
         }
@@ -1322,7 +1314,7 @@ impl ImageCapture for DigxImageCapture {
             if let DeskError::WindowsResultError(bt, err) = error {
                 if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
                     log::warn!("capture frame timeout, will retry, error={:?}", err);
-                    capture_scrren_timer.stop_and_discard();
+
                     return DeskError::custom_error(
                         ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
                         format!("capture frame timeout, will retry, error={:?}", err),
@@ -1331,7 +1323,7 @@ impl ImageCapture for DigxImageCapture {
                     || err.code() == DXGI_ERROR_INVALID_CALL
                 {
                     self.screen_output = None;
-                    capture_scrren_timer.stop_and_discard();
+
                     return DeskError::custom_error(
                         ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
                         format!("capture frame is lost, will retry, error={:?}", err),
