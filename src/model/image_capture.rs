@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 use utoipa::ToSchema;
 
 use crate::desk_error::DeskError;
@@ -17,8 +18,10 @@ pub trait ImageInfo {
 pub trait ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError>;
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError>;
+    fn get_capture_type(&self) -> ImageCaptureType;
 }
 /// Image Capture Type Enum
+#[derive(EnumIter, IntoStaticStr, EnumString)]
 pub enum ImageCaptureType {
     /// Capture image from DIGX device
     DIGX,
@@ -26,12 +29,9 @@ pub enum ImageCaptureType {
     DGI,
 }
 
-impl std::fmt::Display for ImageCaptureType {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            ImageCaptureType::DIGX => write!(f, "DIGX"),
-            ImageCaptureType::DGI => write!(f, "DGI"),
-        }
+impl Default for ImageCaptureType {
+    fn default() -> Self {
+        ImageCaptureType::DIGX
     }
 }
 

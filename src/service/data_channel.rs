@@ -1,16 +1,25 @@
 use std::{sync::Arc, time::Duration};
 
+use tokio::sync::RwLock;
 use webrtc::{
     data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage},
     peer_connection::math_rand_alpha,
 };
 
-pub async fn handle_data_channel_event(data_channel: Arc<RTCDataChannel>) {
+use crate::model::signaling::SignalingState;
+
+pub async fn handle_data_channel_event(signaling_state: Arc<RwLock<SignalingState>>, data_channel: Arc<RTCDataChannel>) {
     let d_label = data_channel.label().to_owned();
     let data_channel_sender = Arc::clone(&data_channel);
     let d_id = data_channel.id();
     let d_label2 = d_label.clone();
     let d_id2 = d_id;
+    if !signaling_state.read().await.accept_control {
+        log::warn!("Data channel '{d_label}'-'{d_id}' rejected");
+        let _ = data_channel.close().await;
+        return;
+    }
+    //data_channel.close();
     data_channel.on_close(Box::new(move || {
         log::warn!("Data channel closed");
         Box::pin(async {})

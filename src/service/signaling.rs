@@ -30,7 +30,7 @@ use webrtc::{
 };
 use windows::Win32::Media::Audio::eAll;
 
-use crate::model::capture::{DisplayInfo, ImageCaptureTypeHelper};
+use crate::model::image_capture::DisplayInfo;
 use crate::model::common::ErrorCode;
 use crate::model::record_audio::SelectedAudioDevice;
 use crate::model::settings::{DeskSettings, Settings};
@@ -38,9 +38,9 @@ use crate::model::signaling::{
     LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
     WebRTConnectionState,
 };
-use crate::service::capture::image_capture_factory::create_image_capture;
+use crate::service::image_capture::image_capture_factory::create_image_capture;
 use crate::service::data_channel::handle_data_channel_event;
-use crate::service::encoder::video_encoder_factory::create_video_encoder;
+use crate::service::video_encoder::video_encoder_factory::create_video_encoder;
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::{
     desk_error::DeskError,
@@ -389,15 +389,16 @@ impl SignalingContext {
 
         // Register data channel creation handling
         // Used for mouse event, keyboard event, clipboard manage, file copy, etc.
+        let signaling_state_for_data_channel = self.signaling_state.clone();
         self.rtc_peer_connection
             .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
                 let d_label = d.label().to_owned();
                 let d_id = d.id();
                 log::info!("New DataChannel {d_label} {d_id}");
-
+                let signaling_state = signaling_state_for_data_channel.clone();
                 // Register channel opening handling
                 Box::pin(async move {
-                    handle_data_channel_event(d.clone()).await;
+                    handle_data_channel_event(signaling_state, d.clone()).await;
                 })
             }));
         self.update_setting_sender = Some(update_setting_sender);
@@ -432,7 +433,7 @@ impl SignalingContext {
         );
         let mut capture = create_image_capture(&desk_settings)?;
         let mut encoder = create_video_encoder(&desk_settings)?;
-        let mut image_capture_type = desk_settings.get_image_capture_type()?.to_string();
+        let mut image_capture_type = capture.get_capture_type().into();
 
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
@@ -482,7 +483,7 @@ impl SignalingContext {
                         desk_settings = new_desk_setting;
                         // update ticker interval based on new settings
                         ticker = tokio::time::interval(desk_settings.get_duration_by_video_fps());
-                        image_capture_type = desk_settings.get_image_capture_type()?.to_string();
+                        image_capture_type = capture.get_capture_type().into();
                     },
                     _ => {
                         log::error!("Unexcepted state {}, exit to capture screen", state);
@@ -493,7 +494,7 @@ impl SignalingContext {
             }
             log::trace!("begin caption scrren");
             let timer = CAPTURE_SCREEN_HISTOGRAM
-                .with_label_values(&[image_capture_type.as_str()])
+                .with_label_values(&[image_capture_type])
                 .start_timer();
             let image_info_result = capture.capture(desk_settings.show_mouse);
             if image_info_result.is_err() {
@@ -734,9 +735,10 @@ impl SignalingContext {
     ) -> Result<(), DeskError> {
         let desk_settings = signaling_model.get_data_with_default::<DeskSettings>()?;
         if let Some(ref sender) = self.update_setting_sender {
+            log::info!("Sending update desk settings: {:?}", desk_settings);
             sender.send(WebRTConnectionState::UpdateSettings(desk_settings))?;
         } else {
-            log::error!("update setting sender is not set");
+            log::error!("Update setting sender is not set");
         }
         Ok(())
     }

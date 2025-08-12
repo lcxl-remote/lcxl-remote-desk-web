@@ -16,8 +16,8 @@ use yuv::{
 use crate::{
     desk_error::DeskError,
     model::{
-        capture::{ImageInfo, ImageType},
-        encoder::{NalInfo, VideoEncoder},
+        image_capture::{ImageInfo, ImageType},
+        video_encoder::{NalInfo, VideoEncoder},
         settings::H264EncoderSettings,
     },
 };

@@ -48,7 +48,7 @@ use windows_core::{Interface, PCWSTR, s};
 use crate::{
     desk_error::DeskError,
     model::{
-        capture::{DisplayInfo, DisplayRect, ImageCapture, ImageInfo, ImageType},
+        image_capture::{DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType},
         common::ErrorCode,
         settings::DeskSettings,
     },
@@ -1373,6 +1373,10 @@ impl ImageCapture for DigxImageCapture {
             output_index += 1;
         }
         Ok(output_list)
+    }
+    
+    fn get_capture_type(&self) -> ImageCaptureType {
+        ImageCaptureType::DIGX
     }
 }
 

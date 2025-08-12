@@ -1,6 +1,6 @@
-pub mod capture;
+pub mod image_capture;
 pub mod data_channel;
-pub mod encoder;
+pub mod video_encoder;
 pub mod record_audio;
 pub mod signaling;
 pub mod terminal;

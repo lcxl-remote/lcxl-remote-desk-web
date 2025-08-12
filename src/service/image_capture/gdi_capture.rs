@@ -16,7 +16,7 @@ use windows_core::PCWSTR;
 use crate::{
     desk_error::DeskError,
     model::{
-        capture::{DisplayInfo, DisplayRect, ImageCapture, ImageInfo, ImageType},
+        image_capture::{DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType},
         settings::DeskSettings,
     },
 };
@@ -302,6 +302,10 @@ impl ImageCapture for GdiImageCapture {
             dev_index += 1;
         }
         Ok(display_info_list)
+    }
+
+    fn get_capture_type(&self) -> ImageCaptureType {
+        ImageCaptureType::DGI
     }
 }
 

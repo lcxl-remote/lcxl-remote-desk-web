@@ -2,10 +2,10 @@ use crate::{
     desk_error::DeskError,
     model::{
         common::ErrorCode,
-        encoder::{VideoEncoder, VideoEncoderType, VideoEncoderTypeHelper},
+        video_encoder::{VideoEncoder, VideoEncoderType, VideoEncoderTypeHelper},
         settings::DeskSettings,
     },
-    service::encoder::h264_encoder::H264Encoder,
+    service::video_encoder::h264_encoder::H264Encoder,
 };
 
 impl VideoEncoderTypeHelper for DeskSettings {

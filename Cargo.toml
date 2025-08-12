@@ -49,6 +49,9 @@ regex = "1.11"
 # turn-server dependencies prometheus 0.13.4, if use 0.14, promethueus global variable will not be shared between app with turn-server lib
 prometheus = "0.13.4"
 
+strum = "0.27"
+strum_macros = "0.27"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_UI_Shell",

@@ -1,6 +1,6 @@
 use crate::{
     desk_error::DeskError,
-    model::{capture::ImageInfo, settings::H264EncoderSettings},
+    model::{image_capture::ImageInfo, settings::H264EncoderSettings},
 };
 
 pub struct NalInfo {

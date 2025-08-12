@@ -1,6 +1,7 @@
-pub mod capture;
+pub mod image_capture;
 pub mod common;
-pub mod encoder;
+pub mod data_channel;
+pub mod video_encoder;
 pub mod files;
 pub mod login;
 pub mod record_audio;
