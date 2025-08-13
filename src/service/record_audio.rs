@@ -3,8 +3,8 @@ use std::ptr::null_mut;
 use crate::{
     desk_error::DeskError,
     model::{
+        audio_capture::{AudioDataFlow, AudioDevice, SelectedAudioDevice},
         common::ErrorCode,
-        record_audio::{AudioDataFlow, AudioDevice, SelectedAudioDevice},
     },
 };
 use windows::Win32::{

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use turn_server::config::Interface;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::{desk_error::DeskError, model::record_audio::SelectedAudioDevice};
+use crate::{desk_error::DeskError, model::audio_capture::SelectedAudioDevice};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -120,6 +120,8 @@ pub struct DeskSettings {
     pub show_mouse: bool,
     /// Selected image capture device
     pub image_capture: Option<String>,
+    /// Selected audio capture device
+    pub audio_capture: Option<String>,
     /// Video encoder name, None for auto detection
     pub video_encoder: Option<String>,
     /// Selected audio device
@@ -151,6 +153,7 @@ impl Default for DeskSettings {
             video_fps: 60,
             show_mouse: true,
             image_capture: None,
+            audio_capture: None,
             video_encoder: None,
             audio_device: None,
             audio_encoder: None,

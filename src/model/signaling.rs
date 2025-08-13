@@ -12,7 +12,8 @@ use webrtc::{
 use crate::{
     desk_error::{CustomDeskError, DeskError},
     model::{
-        image_capture::DisplayInfo, common::ErrorCode, record_audio::AudioDevice, settings::DeskSettings,
+        audio_capture::AudioDevice, common::ErrorCode, image_capture::DisplayInfo,
+        settings::DeskSettings,
     },
 };
 

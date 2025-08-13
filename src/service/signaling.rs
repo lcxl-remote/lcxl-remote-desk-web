@@ -30,18 +30,18 @@ use webrtc::{
 };
 use windows::Win32::Media::Audio::eAll;
 
-use crate::model::image_capture::DisplayInfo;
+use crate::model::audio_capture::SelectedAudioDevice;
 use crate::model::common::ErrorCode;
-use crate::model::record_audio::SelectedAudioDevice;
+use crate::model::image_capture::DisplayInfo;
 use crate::model::settings::{DeskSettings, Settings};
 use crate::model::signaling::{
     LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
     WebRTConnectionState,
 };
-use crate::service::image_capture::image_capture_factory::create_image_capture;
 use crate::service::data_channel::handle_data_channel_event;
-use crate::service::video_encoder::video_encoder_factory::create_video_encoder;
+use crate::service::image_capture::image_capture_factory::create_image_capture;
 use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
+use crate::service::video_encoder::video_encoder_factory::create_video_encoder;
 use crate::{
     desk_error::DeskError,
     model::{
