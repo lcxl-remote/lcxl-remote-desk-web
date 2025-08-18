@@ -225,11 +225,11 @@ impl AudioCapture for WasapiAudioCapture {
     }
 
     fn stop(&self) -> Result<(), DeskError> {
-        log::info!("stopping audio capture client");
+        log::info!("stopping wasapi audio capture client");
         unsafe {
             self.audio_client.Stop()?;
         }
-        log::info!("audio capture client stopped");
+        log::info!("Wasapi audio capture client stopped");
 
         Ok(())
     }
