@@ -74,7 +74,7 @@ pub fn align_slice_byte<T>(data: &[u8]) -> &[T] {
 
 pub trait AudioCapture {
     /// Start capturing audio
-    fn start(&self) -> Result<(), DeskError>;
+    fn start(&self) -> Result<WaveFormat, DeskError>;
     /// Enumerates audio devices based on the specified data flow.
     fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError>;
 
@@ -99,4 +99,14 @@ impl Default for AudioCaptureType {
 
 pub trait AudioCaptureTypeHelper {
     fn get_audio_capture_type(&self) -> Result<AudioCaptureType, DeskError>;
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct WaveFormat {
+    pub format_tag: u16,
+    pub channels: u16,
+    pub samples_per_sec: u32,
+    pub avg_bytes_per_sec: u32,
+    pub block_align: u16,
+    pub bits_per_sample: u16,
 }

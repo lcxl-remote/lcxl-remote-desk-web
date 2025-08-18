@@ -4,7 +4,7 @@ use crate::{
     desk_error::DeskError,
     model::{
         audio_capture::{
-            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, SelectedAudioDevice,
+            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, SelectedAudioDevice, WaveFormat,
         },
         common::ErrorCode,
         settings::DeskSettings,
@@ -209,11 +209,19 @@ impl AudioCapture for WasapiAudioCapture {
         Ok(Box::new(WasapiAudioBuffer { buffer, num_frames }))
     }
 
-    fn start(&self) -> Result<(), DeskError> {
+    fn start(&self) -> Result<WaveFormat, DeskError> {
         log::info!("Start to record audio...");
         unsafe { self.audio_client.Start() }?;
         log::info!("Audio recording started.");
-        Ok(())
+
+        Ok(WaveFormat {
+            format_tag: self.format.Format.wFormatTag,
+            channels: self.format.Format.nChannels,
+            samples_per_sec: self.format.Format.nSamplesPerSec,
+            avg_bytes_per_sec: self.format.Format.nAvgBytesPerSec,
+            block_align: self.format.Format.nBlockAlign,
+            bits_per_sample: self.format.Format.wBitsPerSample,
+        })
     }
 
     fn stop(&self) -> Result<(), DeskError> {
