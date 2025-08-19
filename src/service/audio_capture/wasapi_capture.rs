@@ -14,10 +14,11 @@ use windows::Win32::{
     Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
     Media::{
         Audio::{
-            AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-            DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
-            IMMEndpoint, MMDeviceEnumerator, WAVE_FORMAT_PCM, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
-            WAVEFORMATEXTENSIBLE_0, eAll, eCapture, eConsole, eRender,
+            AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient,
+            IMMDevice, IMMDeviceEnumerator, IMMEndpoint, MMDeviceEnumerator, WAVE_FORMAT_PCM,
+            WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, eAll, eCapture, eConsole,
+            eRender,
         },
         KernelStreaming::WAVE_FORMAT_EXTENSIBLE,
         Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT,
@@ -49,6 +50,9 @@ pub struct WasapiAudioCapture {
     pub audio_client: IAudioClient,
     pub audio_capture_client: IAudioCaptureClient,
     pub hns_actual_duration: u64,
+    /// Indicates if the audio capture has started
+    /// This is used to prevent starting the capture multiple times
+    pub started: bool,
 }
 
 /// FIXME Workaround for Box not being Send + Sync
@@ -70,6 +74,19 @@ impl AudioBuffer for WasapiAudioBuffer {
 
     fn get_num_frames(&self) -> usize {
         self.num_frames
+    }
+}
+
+impl From<WAVEFORMATEX> for WaveFormat {
+    fn from(format: WAVEFORMATEX) -> Self {
+        WaveFormat {
+            format_tag: format.wFormatTag,
+            channels: format.nChannels,
+            samples_per_sec: format.nSamplesPerSec,
+            avg_bytes_per_sec: format.nAvgBytesPerSec,
+            block_align: format.nBlockAlign,
+            bits_per_sample: format.wBitsPerSample,
+        }
     }
 }
 
@@ -185,11 +202,24 @@ impl AudioCapture for WasapiAudioCapture {
         Ok(devices)
     }
 
-    fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + '_>, DeskError> {
+    fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError> {
         let mut buffer = vec![];
         let mut num_frames: usize = 0;
         loop {
-            let one_buffer = self.get_one_buffer()?;
+            let result = self.get_one_buffer();
+            if let Err(error) = result {
+                if let DeskError::WindowsResultError(ref _backtrace, ref windows_error) = error {
+                    if windows_error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
+                        log::warn!("audio device is invalidated");
+                        return DeskError::custom_error(
+                            ErrorCode::ACTION_NEED_RETRY,
+                            "Audio device is invalidated, please retry".to_string(),
+                        );
+                    }
+                }
+                return Err(error);
+            }
+            let one_buffer = result?;
             if one_buffer.buffer.is_empty() {
                 break;
             }
@@ -209,29 +239,42 @@ impl AudioCapture for WasapiAudioCapture {
         Ok(Box::new(WasapiAudioBuffer { buffer, num_frames }))
     }
 
-    fn start(&self) -> Result<WaveFormat, DeskError> {
+    fn start(&mut self) -> Result<WaveFormat, DeskError> {
+        if self.started {
+            log::warn!("Audio capture has already started, ignoring start request.");
+            return Ok(self.format.Format.into());
+        }
         log::info!("Start to record audio...");
         unsafe { self.audio_client.Start() }?;
         log::info!("Audio recording started.");
-
-        Ok(WaveFormat {
-            format_tag: self.format.Format.wFormatTag,
-            channels: self.format.Format.nChannels,
-            samples_per_sec: self.format.Format.nSamplesPerSec,
-            avg_bytes_per_sec: self.format.Format.nAvgBytesPerSec,
-            block_align: self.format.Format.nBlockAlign,
-            bits_per_sample: self.format.Format.wBitsPerSample,
-        })
+        self.started = true;
+        Ok(self.format.Format.into())
     }
 
-    fn stop(&self) -> Result<(), DeskError> {
+    fn stop(&mut self) -> Result<(), DeskError> {
+        if !self.started {
+            log::warn!("Audio capture has not started, ignoring stop request.");
+            return Ok(());
+        }
         log::info!("stopping wasapi audio capture client");
         unsafe {
             self.audio_client.Stop()?;
         }
         log::info!("Wasapi audio capture client stopped");
-
+        self.started = false;
         Ok(())
+    }
+}
+
+impl Drop for WasapiAudioCapture {
+    fn drop(&mut self) {
+        log::info!("Dropping WasapiAudioCapture, stopping audio client");
+        if self.started {
+            let _ = self.stop();
+        }
+        log::info!("WasapiAudioCapture dropped");
+        // Uninitialize COM
+        let _ = destroy_thread();
     }
 }
 
@@ -343,6 +386,7 @@ impl WasapiAudioCapture {
             audio_client,
             audio_capture_client,
             hns_actual_duration,
+            started: false,
         })
     }
 
@@ -443,7 +487,7 @@ mod tests {
     fn test_write_wav() -> Result<(), DeskError> {
         initialize();
         let desk_settings = DeskSettings::default();
-        let audio_record = WasapiAudioCapture::new(&desk_settings)?;
+        let mut audio_record = WasapiAudioCapture::new(&desk_settings)?;
         audio_record.start()?;
 
         let spec = hound::WavSpec {

@@ -28,19 +28,18 @@ use webrtc::{
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
 };
-use windows::Win32::Media::Audio::eAll;
 
-use crate::model::audio_capture::SelectedAudioDevice;
 use crate::model::common::ErrorCode;
 use crate::model::image_capture::DisplayInfo;
-use crate::model::settings::{DeskSettings, Settings};
+use crate::model::settings::DeskSettings;
 use crate::model::signaling::{
     LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
     WebRTConnectionState,
 };
+use crate::service::audio_capture::audio_capture_factory::create_audio_capture;
+use crate::service::audio_encoder::audio_encoder_factory::create_audio_encoder;
 use crate::service::data_channel::handle_data_channel_event;
 use crate::service::image_capture::image_capture_factory::create_image_capture;
-use crate::service::record_audio::{AudioCapture, OpusAudioCapture, destroy_thread, init_thread};
 use crate::service::video_encoder::video_encoder_factory::create_video_encoder;
 use crate::{
     desk_error::DeskError,
@@ -191,11 +190,10 @@ impl SignalingContext {
             .build()?;
 
         // get audio device
+        let settings_for_audio = local_settings.clone();
         let spawn_handle = capture_audio_runtime.spawn(async move {
-            init_thread()?;
-            let result = AudioCapture::enum_devices(eAll);
-            destroy_thread()?;
-            return result;
+            let capture = create_audio_capture(&settings_for_audio.desk)?;
+            capture.get_devices_list()
         });
         let audio_device_list = spawn_handle.await??;
 
@@ -328,12 +326,10 @@ impl SignalingContext {
         if let Some(audio_device) = audio_device {
             log::info!("Start to capture audio with device: {:?}", audio_device);
             self.capture_audio_runtime.spawn(async move {
-                init_thread()?;
                 let result = SignalingContext::capture_audio_task(
-                    audio_settings,
+                    audio_settings.desk,
                     audio_state_receiver,
                     audio_track,
-                    audio_device,
                 )
                 .await;
 
@@ -348,7 +344,6 @@ impl SignalingContext {
                     return Err(error);
                 }
                 log::info!("Capture audio task completed");
-                destroy_thread()?;
                 return result;
             });
         } else {
@@ -499,7 +494,7 @@ impl SignalingContext {
             let image_info_result = capture.capture(desk_settings.show_mouse);
             if image_info_result.is_err() {
                 if let Err(DeskError::CustomError(err)) = image_info_result {
-                    if err.error_code == ErrorCode::CAPTURE_SCREEN_NEED_RETRY {
+                    if err.error_code == ErrorCode::ACTION_NEED_RETRY {
                         timer.stop_and_discard();
                         continue;
                     }
@@ -530,13 +525,17 @@ impl SignalingContext {
 
     /// Capture audio and send it to the remote peer
     pub async fn capture_audio_task(
-        settings: Settings,
+        desk_settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         audio_track: Arc<TrackLocalStaticSample>,
-        audio_device: SelectedAudioDevice,
     ) -> Result<(), DeskError> {
-        log::info!("Preparing to capture audio, desk_settings={:?}", settings);
-        let mut opus_audio_capture = OpusAudioCapture::new(audio_device)?;
+        log::info!(
+            "Preparing to capture audio, desk_settings={:?}",
+            desk_settings
+        );
+        let mut capture = create_audio_capture(&desk_settings)?;
+
+        //let mut opus_audio_capture = OpusAudioCapture::new(audio_device)?;
 
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
@@ -560,7 +559,9 @@ impl SignalingContext {
         }
 
         log::info!("Start to capture audio and send to peer");
-        opus_audio_capture.start()?;
+        //opus_audio_capture.start()?;
+        let wave_format = capture.start()?;
+        let mut encoder = create_audio_encoder(&desk_settings, wave_format)?;
         // sleep 5ms
         let mills = 5u64;
         // It is important to use a time.Ticker instead of time.Sleep because
@@ -593,7 +594,26 @@ impl SignalingContext {
             log::trace!("begin capture audio");
             loop {
                 let start = Instant::now();
-                let buffer = opus_audio_capture.get_buffer()?;
+                //let buffer = opus_audio_capture.get_buffer()?;
+                let result = capture.get_buffer();
+                if result.is_err() {
+                    if let Err(DeskError::CustomError(ref err)) = result {
+                        if err.error_code == ErrorCode::ACTION_NEED_RETRY {
+                            // recreate audio capture
+                            log::warn!("Failed to get audio buffer, recreate audio capture");
+                            capture = create_audio_capture(&desk_settings)?;
+                            capture.start()?;
+                            continue;
+                        }
+                    }
+                    log::error!("Failed to get audio buffer, error: {:?}", result.err());
+                    break;
+                }
+
+                let buffer = result?;
+
+                let buffer = encoder.encode(buffer.as_ref())?;
+
                 let time1 = start.elapsed();
                 log::trace!(
                     "capture audio time: {} μs, buffer len: {}",
@@ -615,7 +635,8 @@ impl SignalingContext {
                 timer.stop_and_record();
             }
         }
-        opus_audio_capture.stop()?;
+        //opus_audio_capture.stop()?;
+        capture.stop()?;
         Result::<(), DeskError>::Ok(())
     }
 

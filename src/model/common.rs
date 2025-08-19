@@ -21,7 +21,7 @@ impl ErrorCode {
     pub const FILE_CHANGED: ErrorCode = ErrorCode(22);
     pub const WINDOWS_ERROR: ErrorCode = ErrorCode(1000);
 
-    pub const CAPTURE_SCREEN_NEED_RETRY: ErrorCode = ErrorCode(1001);
+    pub const ACTION_NEED_RETRY: ErrorCode = ErrorCode(1001);
 
     pub const GENERATE_LOCAL_DESCRIPTION_FAILED: ErrorCode = ErrorCode(10001);
     pub const BLANK_SIGNALING_DATA: ErrorCode = ErrorCode(10002);

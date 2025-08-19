@@ -48,8 +48,10 @@ use windows_core::{Interface, PCWSTR, s};
 use crate::{
     desk_error::DeskError,
     model::{
-        image_capture::{DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType},
         common::ErrorCode,
+        image_capture::{
+            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType,
+        },
         settings::DeskSettings,
     },
 };
@@ -1316,7 +1318,7 @@ impl ImageCapture for DigxImageCapture {
                     log::warn!("capture frame timeout, will retry, error={:?}", err);
 
                     return DeskError::custom_error(
-                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
+                        ErrorCode::ACTION_NEED_RETRY,
                         format!("capture frame timeout, will retry, error={:?}", err),
                     );
                 } else if err.code() == DXGI_ERROR_ACCESS_LOST
@@ -1325,7 +1327,7 @@ impl ImageCapture for DigxImageCapture {
                     self.screen_output = None;
 
                     return DeskError::custom_error(
-                        ErrorCode::CAPTURE_SCREEN_NEED_RETRY,
+                        ErrorCode::ACTION_NEED_RETRY,
                         format!("capture frame is lost, will retry, error={:?}", err),
                     );
                 } else {
@@ -1374,7 +1376,7 @@ impl ImageCapture for DigxImageCapture {
         }
         Ok(output_list)
     }
-    
+
     fn get_capture_type(&self) -> ImageCaptureType {
         ImageCaptureType::DIGX
     }

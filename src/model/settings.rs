@@ -100,6 +100,24 @@ impl Default for H264EncoderSettings {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[serde(default)]
+pub struct OpusEncoderSettings {
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub application: String, // e.g., "audio", "voip", etc.
+}
+
+impl Default for OpusEncoderSettings {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48000,
+            channels: 2,
+            application: "audio".to_string(),
+        }
+    }
+}
+
 /// Desk settings
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
 #[serde(default)]
@@ -130,6 +148,8 @@ pub struct DeskSettings {
     pub audio_encoder: Option<String>,
     /// h264 encoder settings
     pub h264_encoder: Option<H264EncoderSettings>,
+    /// opus encoder settings
+    pub opus_encoder: Option<OpusEncoderSettings>,
 }
 
 impl DeskSettings {
@@ -158,6 +178,7 @@ impl Default for DeskSettings {
             audio_device: None,
             audio_encoder: None,
             h264_encoder: None,
+            opus_encoder: None,
         }
     }
 }

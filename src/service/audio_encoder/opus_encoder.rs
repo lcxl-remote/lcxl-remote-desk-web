@@ -25,7 +25,32 @@ unsafe impl Sync for OpusAudioEncoder {}
 
 impl OpusAudioEncoder {
     pub fn new(settings: &DeskSettings, wave_format: WaveFormat) -> Result<Self, DeskError> {
-        let encoder = opus::Encoder::new(48000, opus::Channels::Stereo, opus::Application::Audio)?;
+        let opus_settings = settings.opus_encoder.clone().unwrap_or_default();
+        let channels = match opus_settings.channels {
+            1 => opus::Channels::Mono,
+            2 => opus::Channels::Stereo,
+            _ => {
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!("Unsupported number of channels: {}", opus_settings.channels),
+                );
+            }
+        };
+        let application = match opus_settings.application.as_str() {
+            "Audio" => opus::Application::Audio,
+            "Voip" => opus::Application::Voip,
+            "LowDelay" => opus::Application::LowDelay,
+            _ => {
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!(
+                        "Unsupported Opus application: {}",
+                        opus_settings.application
+                    ),
+                );
+            }
+        };
+        let encoder = opus::Encoder::new(opus_settings.sample_rate, channels, application)?;
         Ok(Self {
             encoder,
             buffer: vec![],

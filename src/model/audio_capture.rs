@@ -74,14 +74,14 @@ pub fn align_slice_byte<T>(data: &[u8]) -> &[T] {
 
 pub trait AudioCapture {
     /// Start capturing audio
-    fn start(&self) -> Result<WaveFormat, DeskError>;
+    fn start(&mut self) -> Result<WaveFormat, DeskError>;
     /// Enumerates audio devices based on the specified data flow.
     fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError>;
 
     /// Get audio buffer
-    fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + '_>, DeskError>;
+    fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError>;
 
-    fn stop(&self) -> Result<(), DeskError>;
+    fn stop(&mut self) -> Result<(), DeskError>;
 }
 
 /// Image Capture Type Enum

@@ -1,11 +1,15 @@
 use std::str::FromStr;
 
+use strum::IntoEnumIterator;
+
 use crate::{
     desk_error::DeskError,
     model::{
-        audio_encoder::{AudioEncoderType, AudioEncoderTypeHelper},
+        audio_capture::WaveFormat,
+        audio_encoder::{AudioEncoder, AudioEncoderType, AudioEncoderTypeHelper},
         settings::DeskSettings,
     },
+    service::audio_encoder::opus_encoder::OpusAudioEncoder,
 };
 
 impl AudioEncoderTypeHelper for DeskSettings {
@@ -25,4 +29,22 @@ impl AudioEncoderTypeHelper for DeskSettings {
 
         Ok(AudioEncoderType::default())
     }
+}
+
+/// Create a video encoder based on the settings.
+pub fn create_audio_encoder(
+    desk_settings: &DeskSettings,
+    wave_format: WaveFormat,
+) -> Result<Box<dyn AudioEncoder + Send + Sync>, DeskError> {
+    let capture: Box<dyn AudioEncoder + Send + Sync> =
+        match desk_settings.get_audio_encoder_type()? {
+            AudioEncoderType::OPUS => Box::new(OpusAudioEncoder::new(desk_settings, wave_format)?),
+        };
+    Ok(capture)
+}
+
+pub fn audio_encoder_list() -> Vec<String> {
+    AudioEncoderType::iter()
+        .map(|x| Into::<&'static str>::into(x).to_string())
+        .collect()
 }
