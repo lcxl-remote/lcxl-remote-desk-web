@@ -21,17 +21,25 @@ pub trait ImageCapture {
     fn get_capture_type(&self) -> ImageCaptureType;
 }
 /// Image Capture Type Enum
-#[derive(EnumIter, IntoStaticStr, EnumString)]
+#[derive(EnumIter, IntoStaticStr, EnumString, Debug)]
 pub enum ImageCaptureType {
     /// Capture image from DIGX device
+    #[cfg(target_os = "windows")]
     DIGX,
     /// Capture image from DGI device
+    #[cfg(target_os = "windows")]
     DGI,
+    /// Capture image from X11 device
+    #[cfg(target_os = "linux")]
+    X11,
 }
 
 impl Default for ImageCaptureType {
     fn default() -> Self {
-        ImageCaptureType::DIGX
+        #[cfg(target_os = "windows")]
+        return ImageCaptureType::DIGX;
+        #[cfg(target_os = "linux")]
+        return ImageCaptureType::X11;
     }
 }
 

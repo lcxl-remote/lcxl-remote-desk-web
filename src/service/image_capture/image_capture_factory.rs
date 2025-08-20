@@ -2,13 +2,17 @@ use std::str::FromStr;
 
 use strum::IntoEnumIterator;
 
+#[cfg(target_os = "linux")]
+use crate::service::image_capture::x11_capture::X11ImageCapture;
+#[cfg(target_os = "windows")]
+use crate::service::image_capture::{dxgi_capture::DigxImageCapture, gdi_capture::GdiImageCapture};
 use crate::{
     desk_error::DeskError,
     model::{
+        common::ErrorCode,
         image_capture::{ImageCapture, ImageCaptureType, ImageCaptureTypeHelper},
         settings::DeskSettings,
     },
-    service::image_capture::{dxgi_capture::DigxImageCapture, gdi_capture::GdiImageCapture},
 };
 
 impl ImageCaptureTypeHelper for DeskSettings {
@@ -35,11 +39,21 @@ impl ImageCaptureTypeHelper for DeskSettings {
 pub fn create_image_capture(
     desk_settings: &DeskSettings,
 ) -> Result<Box<dyn ImageCapture + Send + Sync>, DeskError> {
-    let capture: Box<dyn ImageCapture + Send + Sync> =
-        match desk_settings.get_image_capture_type()? {
-            ImageCaptureType::DIGX => Box::new(DigxImageCapture::new(desk_settings)?),
-            ImageCaptureType::DGI => Box::new(GdiImageCapture::new(desk_settings)?),
-        };
+    let image_capture_type = desk_settings.get_image_capture_type()?;
+    let capture: Box<dyn ImageCapture + Send + Sync> = match image_capture_type {
+        #[cfg(target_os = "windows")]
+        ImageCaptureType::DIGX => Box::new(DigxImageCapture::new(desk_settings)?),
+        #[cfg(target_os = "windows")]
+        ImageCaptureType::DGI => Box::new(GdiImageCapture::new(desk_settings)?),
+        #[cfg(target_os = "linux")]
+        ImageCaptureType::X11 => Box::new(X11ImageCapture::new(desk_settings)?),
+        _ => {
+            return DeskError::custom_error(
+                ErrorCode::SYSTEM_ERROR,
+                format!("Unsupported capture type:{:?}", image_capture_type),
+            );
+        }
+    };
     Ok(capture)
 }
 
