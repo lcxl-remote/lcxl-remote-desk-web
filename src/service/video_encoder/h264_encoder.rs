@@ -17,8 +17,8 @@ use crate::{
     desk_error::DeskError,
     model::{
         image_capture::{ImageInfo, ImageType},
-        video_encoder::{NalInfo, VideoEncoder},
         settings::H264EncoderSettings,
+        video_encoder::{NalInfo, VideoEncoder},
     },
 };
 use std::fmt::Debug;

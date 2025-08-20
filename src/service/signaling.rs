@@ -7,7 +7,7 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use futures_util::StreamExt;
 use log::{error, info, warn};
-use prometheus::{Histogram, HistogramVec, register_histogram, register_histogram_vec};
+use prometheus::{HistogramVec, register_histogram_vec};
 use tokio::time::Duration;
 use tokio::time::Instant;
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
@@ -57,11 +57,9 @@ use crate::{
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("capture_screen_histogram", "help", &["type"]).unwrap()
 });
-pub static WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM: LazyLock<Histogram> =
-    LazyLock::new(|| register_histogram!("webrtc_video_write_sample_histogram", "help").unwrap());
-
-pub static WEBRTC_AUDIO_WRITE_SAMPLE_HISTOGRAM: LazyLock<Histogram> =
-    LazyLock::new(|| register_histogram!("webrtc_audio_write_sample_histogram", "help").unwrap());
+pub static WEBRTC_WRITE_SAMPLE_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
+    register_histogram_vec!("webrtc_write_sample_histogram", "help", &["type"]).unwrap()
+});
 
 pub async fn handle_signaling(
     settings: web::Data<SharedSettings>,
@@ -510,7 +508,9 @@ impl SignalingContext {
             timer.stop_and_record();
             let image_info = image_info_result.unwrap();
             let nal_info = encoder.encode(image_info.as_ref())?;
-            let timer = WEBRTC_VIDEO_WRITE_SAMPLE_HISTOGRAM.start_timer();
+            let timer = WEBRTC_WRITE_SAMPLE_HISTOGRAM
+                .with_label_values(&["video"])
+                .start_timer();
             video_track
                 .write_sample(&Sample {
                     data: nal_info.nal_bytes,
@@ -623,7 +623,9 @@ impl SignalingContext {
                 if buffer.data.is_empty() {
                     break;
                 }
-                let timer = WEBRTC_AUDIO_WRITE_SAMPLE_HISTOGRAM.start_timer();
+                let timer = WEBRTC_WRITE_SAMPLE_HISTOGRAM
+                    .with_label_values(&["audio"])
+                    .start_timer();
                 audio_track
                     .write_sample(&Sample {
                         data: Bytes::copy_from_slice(buffer.data.as_slice()),
