@@ -63,6 +63,10 @@ pub enum DeskError {
     /// A Windows result error occurred.
     #[cfg(target_os = "windows")]
     WindowsResultError(Backtrace, windows_result::Error),
+    #[cfg(target_os = "linux")]
+    X11ConnectError(x11rb::errors::ConnectError),
+    #[cfg(target_os = "linux")]
+    X11ConnectionError(x11rb::errors::ConnectionError),
     /// A webrtc error occurred.
     WebrtcError(Backtrace, webrtc::Error),
     /// A webrtc media error occurred.
@@ -147,6 +151,10 @@ impl Display for DeskError {
             DeskError::RegexError(error) => error.fmt(f),
             DeskError::WhichError(error) => error.fmt(f),
             DeskError::TokioSendError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            DeskError::X11ConnectError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            DeskError::X11ConnectionError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -225,6 +233,20 @@ impl From<actix_ws::Closed> for DeskError {
 impl From<windows_result::Error> for DeskError {
     fn from(err: windows_result::Error) -> Self {
         DeskError::WindowsResultError(backtrace::Backtrace::capture(), err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<x11rb::errors::ConnectError> for DeskError {
+    fn from(err: x11rb::errors::ConnectError) -> Self {
+        DeskError::X11ConnectError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<x11rb::errors::ConnectionError> for DeskError {
+    fn from(err: x11rb::errors::ConnectionError) -> Self {
+        DeskError::X11ConnectionError(err)
     }
 }
 

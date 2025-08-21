@@ -88,12 +88,18 @@ pub trait AudioCapture {
 #[derive(EnumIter, IntoStaticStr, EnumString)]
 pub enum AudioCaptureType {
     /// Capture audio from WASAPI device
+    #[cfg(target_os = "windows")]
     WASAPI,
+    #[cfg(target_os = "linux")]
+    ALSA,
 }
 
 impl Default for AudioCaptureType {
     fn default() -> Self {
-        AudioCaptureType::WASAPI
+        #[cfg(target_os = "windows")]
+        return AudioCaptureType::WASAPI;
+        #[cfg(target_os = "linux")]
+        return AudioCaptureType::ALSA;
     }
 }
 

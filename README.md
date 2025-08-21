@@ -82,6 +82,10 @@ https://learn.microsoft.com/zh-cn/windows/win32/direct3ddxgi/desktop-dup-api
 相关代码入口：https://github.com/microsoftarchive/msdn-code-gallery-microsoft/blob/21cb9b6bc0da3b234c5854ecac449cb3bd261f29/Official%20Windows%20Platform%20Sample/DXGI%20desktop%20duplication%20sample/%5BC%2B%2B%5D-DXGI%20desktop%20duplication%20sample/C%2B%2B/DuplicationManager.cpp#L56
 
 
+### Linux 下捕获屏幕
+
+X11:相关包：xcap, x11rb
+wayload相关包: Smithay 
 
 
 

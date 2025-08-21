@@ -2,14 +2,18 @@ use std::str::FromStr;
 
 use strum::IntoEnumIterator;
 
+#[cfg(target_os = "linux")]
+use crate::service::audio_capture::alsa_capture::AlsaAudioCapture;
 use crate::{
     desk_error::DeskError,
     model::{
         audio_capture::{AudioCapture, AudioCaptureType, AudioCaptureTypeHelper},
         settings::DeskSettings,
     },
-    service::audio_capture::wasapi_capture::WasapiAudioCapture,
 };
+
+#[cfg(target_os = "windows")]
+use crete::service::audio_capture::wasapi_capture::WasapiAudioCapture;
 
 impl AudioCaptureTypeHelper for DeskSettings {
     /// Returns the appropriate EncoderType based on the settings.
@@ -37,7 +41,10 @@ pub fn create_audio_capture(
 ) -> Result<Box<dyn AudioCapture + Send + Sync>, DeskError> {
     let capture: Box<dyn AudioCapture + Send + Sync> =
         match desk_settings.get_audio_capture_type()? {
+            #[cfg(target_os = "windows")]
             AudioCaptureType::WASAPI => Box::new(WasapiAudioCapture::new(desk_settings)?),
+            #[cfg(target_os = "linux")]
+            AudioCaptureType::ALSA => Box::new(AlsaAudioCapture::new(desk_settings)?),
         };
     Ok(capture)
 }
