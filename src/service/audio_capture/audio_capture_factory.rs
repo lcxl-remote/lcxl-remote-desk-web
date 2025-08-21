@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[cfg(target_os = "windows")]
-use crete::service::audio_capture::wasapi_capture::WasapiAudioCapture;
+use crate::service::audio_capture::wasapi_capture::WasapiAudioCapture;
 
 impl AudioCaptureTypeHelper for DeskSettings {
     /// Returns the appropriate EncoderType based on the settings.
