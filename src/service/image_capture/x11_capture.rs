@@ -1,12 +1,13 @@
 use std::{mem, ptr};
 
-use libc::{IPC_CREAT, IPC_PRIVATE, SHM_RDONLY, shmat, shmget};
+use libc::{IPC_CREAT, IPC_PRIVATE, IPC_RMID, SHM_RDONLY, shmat, shmctl, shmdt, shmget};
 use x11rb::{
     connection::{Connection, RequestConnection},
     errors::ConnectionError,
     protocol::{
         randr::{self, ConnectionExt},
         shm::{self, ConnectionExt as _},
+        xproto::{ConnectionExt as _, ImageFormat},
     },
     rust_connection::RustConnection,
 };
@@ -14,10 +15,12 @@ use x11rb::{
 use crate::{
     desk_error::DeskError,
     model::{
-        image_capture::{DisplayInfo, ImageCapture, ImageCaptureType, ImageInfo},
+        image_capture::{DisplayInfo, ImageCapture, ImageCaptureType, ImageInfo, ImageType},
         settings::DeskSettings,
     },
 };
+
+const PLANE_MASK: u32 = !1;
 
 #[derive(Debug, Copy, Clone)]
 #[repr(C)]
@@ -48,11 +51,46 @@ pub struct X11ImageCapture {
     shm_id: Option<i32>,
     seg: Option<u32>,
 }
+
+/// Workaround for *const not being Send + Sync
+/// This is only works in single thread, so it is safe to use in this case.
+unsafe impl Send for X11ImageCapture {}
+
+unsafe impl Sync for X11ImageCapture {}
+
+pub struct X11ImageInfo {
+    pub data: Vec<u8>,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl ImageInfo for X11ImageInfo {
+    fn get_type(&self) -> ImageType {
+        ImageType::BGRA
+    }
+
+    fn get_data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn get_width(&self) -> u32 {
+        self.width as u32
+    }
+
+    fn get_height(&self) -> u32 {
+        self.height as u32
+    }
+}
+
 /// X11 capture implementation for Linux systems.
 /// see https://github.com/klarity-app/captis/blob/master/src/linux.rs
 impl ImageCapture for X11ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
-        todo!()
+        let image_info = match self.seg {
+            Some(_) => self.capture_shm(0)?,
+            None => self.capture_standard(0)?,
+        };
+        Ok(image_info)
     }
 
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
@@ -61,6 +99,18 @@ impl ImageCapture for X11ImageCapture {
 
     fn get_capture_type(&self) -> ImageCaptureType {
         ImageCaptureType::X11
+    }
+}
+
+impl Drop for X11ImageCapture {
+    fn drop(&mut self) {
+        if let Some(seg) = self.seg {
+            self.connection.shm_detach(seg).ok();
+            unsafe {
+                shmdt(self.shm_addr as _);
+                shmctl(self.shm_id.unwrap(), IPC_RMID, ptr::null_mut());
+            }
+        }
     }
 }
 
@@ -127,6 +177,85 @@ impl X11ImageCapture {
             shm_id,
             seg,
         })
+    }
+
+    /// Captures the screen using standard protocols, which are a lot less inefficient.
+    fn capture_standard(
+        &self,
+        index: usize,
+    ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+        let display = self.displays.get(index).ok_or_else(|| {
+            ConnectionError::IoError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Couldn't find specified Display",
+            ))
+        })?;
+
+        let screen = &self.connection.setup().roots[self.screen];
+
+        let root = screen.root;
+
+        let x11_image = self
+            .connection
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                root,
+                display.left as i16,
+                display.top as i16,
+                display.width,
+                display.height,
+                PLANE_MASK,
+            )?
+            .reply_unchecked()?
+            .ok_or(ConnectionError::UnknownError)?;
+
+        Ok(Box::new(X11ImageInfo {
+            data: x11_image.data,
+            width: display.width,
+            height: display.height,
+        }))
+    }
+
+    /// Captures the screen using the XShm protocol and shared memory causing the program to run
+    /// hella lot faster.
+    fn capture_shm(&self, index: usize) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+        let display = self.displays.get(index).ok_or_else(|| {
+            ConnectionError::IoError(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Couldn't find specified Display",
+            ))
+        })?;
+
+        let screen = &self.connection.setup().roots[self.screen];
+
+        let root = screen.root;
+
+        let reply = self
+            .connection
+            .shm_get_image(
+                root,
+                display.left as i16,
+                display.top as i16,
+                display.width,
+                display.height,
+                PLANE_MASK,
+                ImageFormat::Z_PIXMAP.into(),
+                unsafe { self.seg.unwrap_unchecked() },
+                0,
+            )?
+            .reply_unchecked()?
+            .ok_or(ConnectionError::UnknownError)?;
+
+        let data: &[u8] =
+            unsafe { std::slice::from_raw_parts(self.shm_addr as _, (reply.size * 4) as usize) };
+
+        let data = data.to_vec();
+
+        Ok(Box::new(X11ImageInfo {
+            data,
+            width: display.width,
+            height: display.height,
+        }))
     }
 }
 

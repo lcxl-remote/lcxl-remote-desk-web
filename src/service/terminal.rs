@@ -10,9 +10,9 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Child,
 };
+#[cfg(target_os = "windows")]
 use windows::Win32::Globalization::GetOEMCP;
 
-#[cfg(target_os = "windows")]
 use crate::model::terminal::TerminalList;
 use crate::{
     desk_error::DeskError,
@@ -31,6 +31,31 @@ pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<Termin
         "node",
         "julia",
     ];
+    let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?\.exe"];
+    let mut terminal_list = Vec::<Vec<String>>::new();
+
+    for shell in shell_list {
+        if let Ok(path) = which::which(shell) {
+            terminal_list.push(vec![path.to_string_lossy().into_owned()]);
+        }
+    }
+
+    for regex in shell_regexe_list {
+        if let Ok(paths) = which::which_re(Regex::new(regex)?) {
+            for path in paths {
+                terminal_list.push(vec![path.to_string_lossy().into_owned()]);
+            }
+        }
+    }
+
+    return Ok(TerminalList {
+        commands: terminal_list,
+    });
+}
+
+#[cfg(target_os = "linux")]
+pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<TerminalList, DeskError> {
+    let shell_list = ["bash", "csh", "fish", "ksh", "sh", "zsh"];
     let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?\.exe"];
     let mut terminal_list = Vec::<Vec<String>>::new();
 
@@ -108,10 +133,14 @@ pub async fn handle_terminal(
 ) -> Result<(), DeskError> {
     log::info!("Handling terminal session");
     // get oem code page
-    let oemcp = unsafe { GetOEMCP() };
-    log::info!("OEM Code Page: {}", oemcp);
-    let encoding = codepage::to_encoding(oemcp as u16).unwrap();
-
+    #[cfg(target_os = "windows")]
+    let encoding = {
+        let oemcp = unsafe { GetOEMCP() };
+        log::info!("OEM Code Page: {}", oemcp);
+        codepage::to_encoding(oemcp as u16).unwrap()
+    };
+    #[cfg(target_os = "linux")]
+    let encoding = encoding_rs::UTF_8;
     let mut decoder = encoding.new_decoder();
     let mut encoder = encoding.new_encoder();
 
@@ -139,7 +168,6 @@ pub async fn handle_terminal(
                 stdout_buf_vec.extend_from_slice(&stdout_buf[..result.unwrap()]); // Extend the vector
 
                 log::debug!("Received stdout content: {:?}", stdout_buf_vec);
-
                 let utf8_buffer = convert_to_utf8_str(&mut decoder, &mut stdout_buf_vec);
                 log::debug!("Sending stdout content to client: {:?}", utf8_buffer);
                 session.text(utf8_buffer).await?;
