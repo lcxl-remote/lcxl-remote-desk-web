@@ -48,7 +48,8 @@ pub struct X11ImageCapture {
     shm_id: Option<i32>,
     seg: Option<u32>,
 }
-
+/// X11 capture implementation for Linux systems.
+/// see https://github.com/klarity-app/captis/blob/master/src/linux.rs
 impl ImageCapture for X11ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         todo!()
