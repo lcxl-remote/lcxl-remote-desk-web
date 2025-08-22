@@ -45,6 +45,8 @@ declare namespace API {
   type DeskSettings = {
     /** Enable adaptive web page resolution */
     adaptive_web_page_resolution?: boolean;
+    /** Selected audio capture device */
+    audio_capture?: any;
     audio_device?: null | SelectedAudioDevice;
     /** Audio encoder name, None for auto detection */
     audio_encoder?: any;
@@ -53,6 +55,7 @@ declare namespace API {
     h264_encoder?: null | H264EncoderSettings;
     /** Selected image capture device */
     image_capture?: any;
+    opus_encoder?: null | OpusEncoderSettings;
     /** Enable mouse display on the screen */
     show_mouse?: boolean;
     /** Video device index */
@@ -225,6 +228,12 @@ declare namespace API {
   type openTerminalSessionParams = {
     /** The command to start the terminal session. with the format of "path/to/executable,arg1,arg2" */
     command: string;
+  };
+
+  type OpusEncoderSettings = {
+    application?: string;
+    channels?: number;
+    sample_rate?: number;
   };
 
   type PasswordParams = {
