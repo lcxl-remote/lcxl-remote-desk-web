@@ -56,7 +56,7 @@ pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<Termin
 #[cfg(target_os = "linux")]
 pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<TerminalList, DeskError> {
     let shell_list = ["bash", "csh", "fish", "ksh", "sh", "zsh"];
-    let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?\.exe"];
+    let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?"];
     let mut terminal_list = Vec::<Vec<String>>::new();
 
     for shell in shell_list {
@@ -89,13 +89,26 @@ pub fn convert_to_utf8_str(decoder: &mut Decoder, stdout_buf_vec: &mut Vec<u8>) 
     let removed: Vec<u8> = stdout_buf_vec.drain(0..decoder_read).collect();
     log::trace!("removed {} bytes from buffer", removed.len());
     let utf8_buffer = intermediate_buffer.as_bytes()[..decoder_written].to_vec();
-    String::from_utf8_lossy(&utf8_buffer).to_string()
+    let output = String::from_utf8_lossy(&utf8_buffer).to_string();
+    #[cfg(target_os = "linux")]
+    let output = output.replace("\n", "\r\n");
+    return output;
 }
 
 pub fn convert_str_to_encoding_bytes(encoder: &mut Encoder, utf8_byte_str: &ByteString) -> Vec<u8> {
-    let utf8_str_buffer = utf8_byte_str.to_string();
-    // replace \r with \r\n
-    let mut utf8_str_buffer = utf8_str_buffer.replace("\r", "\r\n");
+    let mut utf8_str_buffer = utf8_byte_str.to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        // replace \r with \r\n
+        utf8_str_buffer = utf8_str_buffer.replace("\r", "\r\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // replace \r with \n
+        utf8_str_buffer = utf8_str_buffer.replace("\r", "\n");
+    }
 
     let mut output_vec = Vec::<u8>::new();
     loop {
