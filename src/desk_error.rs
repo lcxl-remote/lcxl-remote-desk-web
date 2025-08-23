@@ -67,6 +67,8 @@ pub enum DeskError {
     X11ConnectError(x11rb::errors::ConnectError),
     #[cfg(target_os = "linux")]
     X11ConnectionError(x11rb::errors::ConnectionError),
+    #[cfg(target_os = "linux")]
+    AlsaError(alsa::Error),
     /// A webrtc error occurred.
     WebrtcError(Backtrace, webrtc::Error),
     /// A webrtc media error occurred.
@@ -155,6 +157,8 @@ impl Display for DeskError {
             DeskError::X11ConnectError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
             DeskError::X11ConnectionError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            DeskError::AlsaError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -247,6 +251,13 @@ impl From<x11rb::errors::ConnectError> for DeskError {
 impl From<x11rb::errors::ConnectionError> for DeskError {
     fn from(err: x11rb::errors::ConnectionError) -> Self {
         DeskError::X11ConnectionError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<alsa::Error> for DeskError {
+    fn from(err: alsa::Error) -> Self {
+        DeskError::AlsaError(err)
     }
 }
 

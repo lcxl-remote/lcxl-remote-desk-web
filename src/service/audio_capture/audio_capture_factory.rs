@@ -38,14 +38,13 @@ impl AudioCaptureTypeHelper for DeskSettings {
 /// Create a video encoder based on the settings.
 pub fn create_audio_capture(
     desk_settings: &DeskSettings,
-) -> Result<Box<dyn AudioCapture + Send + Sync>, DeskError> {
-    let capture: Box<dyn AudioCapture + Send + Sync> =
-        match desk_settings.get_audio_capture_type()? {
-            #[cfg(target_os = "windows")]
-            AudioCaptureType::WASAPI => Box::new(WasapiAudioCapture::new(desk_settings)?),
-            #[cfg(target_os = "linux")]
-            AudioCaptureType::ALSA => Box::new(AlsaAudioCapture::new(desk_settings)?),
-        };
+) -> Result<Box<dyn AudioCapture + Send>, DeskError> {
+    let capture: Box<dyn AudioCapture + Send> = match desk_settings.get_audio_capture_type()? {
+        #[cfg(target_os = "windows")]
+        AudioCaptureType::WASAPI => Box::new(WasapiAudioCapture::new(desk_settings)?),
+        #[cfg(target_os = "linux")]
+        AudioCaptureType::ALSA => Box::new(AlsaAudioCapture::new(desk_settings)?),
+    };
     Ok(capture)
 }
 
