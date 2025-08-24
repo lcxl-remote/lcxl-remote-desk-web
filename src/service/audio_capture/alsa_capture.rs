@@ -1,4 +1,10 @@
-use alsa::{Direction, PCM};
+use std::ffi::CString;
+
+use alsa::{
+    Direction, PCM, ValueOr,
+    device_name::HintIter,
+    pcm::{Access, Format, HwParams},
+};
 
 use crate::{
     desk_error::DeskError,
@@ -15,13 +21,27 @@ pub struct AlsaAudioCapture {
 
 impl AudioCapture for AlsaAudioCapture {
     fn start(&mut self) -> Result<WaveFormat, DeskError> {
+        {
+            // For this example, we assume 44100Hz, one channel, 16 bit audio.
+            let hwp = HwParams::any(&self.pcm)?;
+            hwp.set_channels(1)?;
+            hwp.set_rate(44100, ValueOr::Nearest)?;
+            hwp.set_format(Format::s16())?;
+            hwp.set_access(Access::RWInterleaved)?;
+            self.pcm.hw_params(&hwp)?;
+        }
         self.pcm.start()?;
         let wave_format = WaveFormat::default();
         Ok(wave_format)
     }
 
     fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
-        todo!()
+        let i = HintIter::new(None, &*CString::new("pcm").unwrap()).unwrap();
+        for a in i {
+            log::info!("{:?}", a)
+        }
+        let mut audio_device_list = vec![];
+        Ok(audio_device_list)
     }
 
     fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError> {
@@ -29,7 +49,7 @@ impl AudioCapture for AlsaAudioCapture {
     }
 
     fn stop(&mut self) -> Result<(), DeskError> {
-        self.pcm.drop();
+        self.pcm.drop()?;
         Ok(())
     }
 }
@@ -38,5 +58,32 @@ impl AlsaAudioCapture {
     pub fn new(desk_settings: &DeskSettings) -> Result<Self, DeskError> {
         let pcm = PCM::new("default", Direction::Capture, false)?;
         Ok(Self { pcm })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Once;
+
+    use log::LevelFilter;
+
+    use super::*;
+    use crate::utils::logs::init_logs;
+    static INIT: Once = Once::new();
+    pub fn initialize() {
+        INIT.call_once(|| {
+            // initialization code here
+            init_logs(LevelFilter::Debug).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_device_info() -> Result<(), DeskError> {
+        initialize();
+        let desk_settings = DeskSettings::default();
+        let capture = AlsaAudioCapture::new(&desk_settings)?;
+        let devices = capture.get_devices_list()?;
+        log::debug!("all devices: {:?}", devices);
+        Ok(())
     }
 }
