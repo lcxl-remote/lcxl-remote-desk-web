@@ -20,6 +20,13 @@ pub trait ImageCapture {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError>;
     fn get_capture_type(&self) -> ImageCaptureType;
 }
+
+/// Image Output Enumerator Trait
+pub trait ImageOutputEnumerator {
+    /// Enumerates image output devices.
+    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError>;
+}
+
 /// Image Capture Type Enum
 #[derive(EnumIter, IntoStaticStr, EnumString, Debug)]
 pub enum ImageCaptureType {

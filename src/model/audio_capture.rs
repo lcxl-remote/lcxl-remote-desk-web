@@ -84,6 +84,11 @@ pub trait AudioCapture {
     fn stop(&mut self) -> Result<(), DeskError>;
 }
 
+pub trait AudioDeviceEnumerator {
+    /// Enumerates audio devices based on the specified data flow.
+    fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError>;
+}
+
 /// Image Capture Type Enum
 #[derive(EnumIter, IntoStaticStr, EnumString)]
 pub enum AudioCaptureType {
