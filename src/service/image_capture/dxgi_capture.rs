@@ -1401,6 +1401,8 @@ mod tests {
     use windows_core::w;
     use yuv::bgra_to_rgba;
 
+    use crate::utils::logs::init_logs;
+
     use super::*;
 
     static INIT: Once = Once::new();
@@ -1408,13 +1410,7 @@ mod tests {
     pub fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            let result = env_logger::builder()
-                .format_timestamp_micros()
-                .filter_level(LevelFilter::Trace)
-                .try_init();
-            if let Err(e) = result {
-                log::warn!("Failed to initialize logger: {:?}", e);
-            }
+            init_logs(LevelFilter::Debug).unwrap();
             let result = ScreenRecordManager::set_thread_input_desktop();
             log::info!("set thread desktop result: {:?}", result);
         });

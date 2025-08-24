@@ -63,10 +63,13 @@ pub enum DeskError {
     /// A Windows result error occurred.
     #[cfg(target_os = "windows")]
     WindowsResultError(Backtrace, windows_result::Error),
+    /// A X11 connection error occurred.
     #[cfg(target_os = "linux")]
     X11ConnectError(x11rb::errors::ConnectError),
+    /// A X11 connection error occurred.
     #[cfg(target_os = "linux")]
     X11ConnectionError(x11rb::errors::ConnectionError),
+    /// A ALSA error occurred.
     #[cfg(target_os = "linux")]
     AlsaError(alsa::Error),
     /// A webrtc error occurred.
@@ -90,6 +93,8 @@ pub enum DeskError {
     WhichError(which::Error),
     /// A regex error occurred.
     RegexError(regex::Error),
+    /// A log set logger error occurred.
+    SetLoggerError(log::SetLoggerError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -159,6 +164,7 @@ impl Display for DeskError {
             DeskError::X11ConnectionError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
             DeskError::AlsaError(error) => error.fmt(f),
+            DeskError::SetLoggerError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -324,6 +330,12 @@ impl From<which::Error> for DeskError {
 impl From<regex::Error> for DeskError {
     fn from(err: regex::Error) -> Self {
         DeskError::RegexError(err)
+    }
+}
+
+impl From<log::SetLoggerError> for DeskError {
+    fn from(err: log::SetLoggerError) -> Self {
+        DeskError::SetLoggerError(err)
     }
 }
 

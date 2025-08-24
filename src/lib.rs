@@ -4,7 +4,7 @@ pub mod model;
 pub mod service;
 pub mod utils;
 
-use std::{env, str::FromStr};
+use std::env;
 
 use actix_server::Server;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
@@ -28,7 +28,7 @@ use controller::{
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
 use desk_error::DeskError;
-use log::{LevelFilter, info, warn};
+use log::{info, warn};
 use model::{
     common::{ErrorCode, RestResponse},
     settings::{Args, Settings, SharedSettings, UserSettings},
@@ -42,17 +42,15 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
-use crate::controller::terminal::{list_terminal, open_terminal_session};
+use crate::{controller::terminal::{list_terminal, open_terminal_session}, utils::logs::init_logs_by_str};
 
 pub async fn run() -> Result<Server, DeskError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
     // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
     unsafe { env::set_var("RUST_BACKTRACE", "1") };
-    env_logger::builder()
-        .format_timestamp_micros()
-        .filter_level(LevelFilter::from_str(settings.system.log_level.as_str())?)
-        .init();
+    // Initialize logging
+    init_logs_by_str(settings.system.log_level.as_str())?;
     info!("Server args: {:?}", args);
     info!("Server settings: {:?}", settings);
     // Get server execution file path

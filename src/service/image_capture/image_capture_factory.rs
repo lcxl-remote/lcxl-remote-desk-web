@@ -38,9 +38,9 @@ impl ImageCaptureTypeHelper for DeskSettings {
 /// Create a video encoder based on the settings.
 pub fn create_image_capture(
     desk_settings: &DeskSettings,
-) -> Result<Box<dyn ImageCapture + Send + Sync>, DeskError> {
+) -> Result<Box<dyn ImageCapture + Send>, DeskError> {
     let image_capture_type = desk_settings.get_image_capture_type()?;
-    let capture: Box<dyn ImageCapture + Send + Sync> = match image_capture_type {
+    let capture: Box<dyn ImageCapture + Send> = match image_capture_type {
         #[cfg(target_os = "windows")]
         ImageCaptureType::DIGX => Box::new(DigxImageCapture::new(desk_settings)?),
         #[cfg(target_os = "windows")]

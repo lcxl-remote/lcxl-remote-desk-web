@@ -16,7 +16,9 @@ use windows_core::PCWSTR;
 use crate::{
     desk_error::DeskError,
     model::{
-        image_capture::{DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType},
+        image_capture::{
+            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType,
+        },
         settings::DeskSettings,
     },
 };
@@ -323,19 +325,15 @@ mod tests {
     use log::LevelFilter;
     use yuv::bgra_to_rgba;
 
+    use crate::utils::logs::init_logs;
+
     use super::*;
     static INIT: Once = Once::new();
 
     fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            let result = env_logger::builder()
-                .format_timestamp_micros()
-                .filter_level(LevelFilter::Trace)
-                .try_init();
-            if let Err(e) = result {
-                log::warn!("Failed to initialize logger: {:?}", e);
-            }
+            init_logs(LevelFilter::Debug).unwrap();
         });
     }
     #[test]

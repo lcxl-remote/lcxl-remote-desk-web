@@ -567,16 +567,15 @@ mod tests {
     use webrtc_media::io::Writer;
     use windows::Win32::Media::Audio::{eAll, eCapture};
 
+    use crate::utils::logs::init_logs;
+
     use super::*;
 
     static INIT: Once = Once::new();
     pub fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            env_logger::builder()
-                .format_timestamp_micros()
-                .filter_level(LevelFilter::Debug)
-                .init();
+            init_logs(LevelFilter::Debug).unwrap();
             init_thread().unwrap();
         });
     }
