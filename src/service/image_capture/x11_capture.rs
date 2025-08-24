@@ -22,15 +22,6 @@ use crate::{
 
 const PLANE_MASK: u32 = !1;
 
-#[derive(Debug, Copy, Clone)]
-#[repr(C)]
-pub(crate) struct Bgr {
-    b: u8,
-    g: u8,
-    r: u8,
-    _padding: u8,
-}
-
 pub type CoordinateType = i16;
 pub type ProportionType = u16;
 
@@ -140,8 +131,7 @@ impl X11ImageCapture {
                 Ok(seg) => unsafe {
                     let shm_id = shmget(
                         IPC_PRIVATE,
-                        (screen.width_in_pixels as usize * screen.height_in_pixels as usize)
-                            * mem::size_of::<Bgr>(),
+                        (screen.width_in_pixels as usize * screen.height_in_pixels as usize) * 4,
                         IPC_CREAT | 0o777,
                     );
 
