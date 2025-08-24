@@ -9,7 +9,7 @@ use alsa::{
 use crate::{
     desk_error::DeskError,
     model::{
-        audio_capture::{AudioBuffer, AudioCapture, AudioDevice, WaveFormat},
+        audio_capture::{AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, WaveFormat},
         settings::DeskSettings,
     },
 };
@@ -36,11 +36,18 @@ impl AudioCapture for AlsaAudioCapture {
     }
 
     fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
-        let i = HintIter::new(None, &*CString::new("pcm").unwrap()).unwrap();
-        for a in i {
-            log::info!("{:?}", a)
+         let mut audio_device_list = vec![];
+        let hint_iter = HintIter::new(None, &*CString::new("pcm").unwrap()).unwrap();
+        for hint in hint_iter {
+            log::info!("{:?}", hint);
+            audio_device_list.push( AudioDevice{
+                id: hint.name.unwrap_or_default(),
+                firendly_name: hint.desc.unwrap_or_default(),
+                data_flow: AudioDataFlow::Capture,
+                default: false,
+            });
         }
-        let mut audio_device_list = vec![];
+       
         Ok(audio_device_list)
     }
 
