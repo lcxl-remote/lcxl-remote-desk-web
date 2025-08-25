@@ -1,16 +1,22 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "linux")]
 use crate::service::image_capture::x11_capture::X11ImageCapture;
 #[cfg(target_os = "windows")]
-use crate::service::image_capture::{dxgi_capture::DigxImageCapture, gdi_capture::GdiImageCapture};
+use crate::service::image_capture::{
+    dxgi_capture::{DigxImageCapture, DigxImageOutputEnumerator},
+    gdi_capture::{GdiImageCapture, GdiImageOutputEnumerator},
+};
 use crate::{
     desk_error::DeskError,
     model::{
         common::ErrorCode,
-        image_capture::{ImageCapture, ImageCaptureType, ImageCaptureTypeHelper},
+        image_capture::{
+            DisplayInfo, ImageCapture, ImageCaptureType, ImageCaptureTypeHelper,
+            ImageOutputEnumerator,
+        },
         settings::DeskSettings,
     },
 };
@@ -57,8 +63,35 @@ pub fn create_image_capture(
     Ok(capture)
 }
 
-pub fn image_capture_list() -> Vec<String> {
+pub fn image_capture_list() -> BTreeMap<String, Vec<DisplayInfo>> {
     ImageCaptureType::iter()
-        .map(|x| Into::<&'static str>::into(x).to_string())
+        .map(|x| {
+            (
+                Into::<&'static str>::into(x).to_string(),
+                get_image_output_list(x).unwrap(),
+            )
+        })
         .collect()
+}
+
+pub fn get_image_output_list(
+    image_capture_type: ImageCaptureType,
+) -> Result<Vec<DisplayInfo>, DeskError> {
+    let capture: Box<dyn ImageOutputEnumerator + Send> = match image_capture_type {
+        #[cfg(target_os = "windows")]
+        ImageCaptureType::DIGX => Box::new(DigxImageOutputEnumerator::new()),
+        #[cfg(target_os = "windows")]
+        ImageCaptureType::DGI => Box::new(GdiImageOutputEnumerator::new()),
+        #[cfg(target_os = "linux")]
+        ImageCaptureType::X11 => Box::new(X11ImageCapture::new(&dummy_settings)?),
+        _ => {
+            return DeskError::custom_error(
+                ErrorCode::SYSTEM_ERROR,
+                format!("Unsupported capture type:{:?}", image_capture_type),
+            );
+        }
+    };
+    let output_list = capture.get_output_list()?;
+
+    Ok(output_list)
 }

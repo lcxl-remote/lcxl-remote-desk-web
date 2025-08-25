@@ -4,7 +4,8 @@ use crate::{
     desk_error::DeskError,
     model::{
         audio_capture::{
-            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, SelectedAudioDevice, WaveFormat,
+            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
+            SelectedAudioDevice, WaveFormat,
         },
         common::ErrorCode,
         settings::DeskSettings,
@@ -120,8 +121,16 @@ fn log_wave_format(format: &WAVEFORMATEXTENSIBLE) {
     log::info!("{}", log_str);
 }
 
-impl AudioCapture for WasapiAudioCapture {
-    fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
+pub struct WasapiAudioDeviceEnumerator {}
+
+impl WasapiAudioDeviceEnumerator {
+    pub fn new() -> Self {
+        WasapiAudioDeviceEnumerator {}
+    }
+}
+
+impl AudioDeviceEnumerator for WasapiAudioDeviceEnumerator {
+    fn get_device_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
         let device_enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)? };
 
@@ -157,7 +166,7 @@ impl AudioCapture for WasapiAudioCapture {
         let mut devices = Vec::with_capacity(count as usize);
         for i in 0..count {
             let device = unsafe { collection.Item(i) }?;
-            let device_id = Self::get_device_id(&device)?;
+            let device_id = WasapiAudioCapture::get_device_id(&device)?;
             let prop_store = unsafe { device.OpenPropertyStore(STGM_READ) }?;
 
             let prop_var = unsafe { prop_store.GetValue(&PKEY_Device_FriendlyName) }?;
@@ -201,7 +210,9 @@ impl AudioCapture for WasapiAudioCapture {
         }
         Ok(devices)
     }
+}
 
+impl AudioCapture for WasapiAudioCapture {
     fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError> {
         let mut buffer = vec![];
         let mut num_frames: usize = 0;
@@ -475,9 +486,8 @@ mod tests {
     #[test]
     fn test_device_info() -> Result<(), DeskError> {
         initialize();
-        let desk_settings = DeskSettings::default();
-        let capture = WasapiAudioCapture::new(&desk_settings)?;
-        let devices = capture.get_devices_list()?;
+        let capture = WasapiAudioDeviceEnumerator::new();
+        let devices = capture.get_device_list()?;
         log::debug!("all devices: {:?}", devices);
         Ok(())
     }

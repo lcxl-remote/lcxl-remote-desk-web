@@ -75,8 +75,6 @@ pub fn align_slice_byte<T>(data: &[u8]) -> &[T] {
 pub trait AudioCapture {
     /// Start capturing audio
     fn start(&mut self) -> Result<WaveFormat, DeskError>;
-    /// Enumerates audio devices based on the specified data flow.
-    fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError>;
 
     /// Get audio buffer
     fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError>;
@@ -86,11 +84,11 @@ pub trait AudioCapture {
 
 pub trait AudioDeviceEnumerator {
     /// Enumerates audio devices based on the specified data flow.
-    fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError>;
+    fn get_device_list(&self) -> Result<Vec<AudioDevice>, DeskError>;
 }
 
 /// Image Capture Type Enum
-#[derive(EnumIter, IntoStaticStr, EnumString)]
+#[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
 pub enum AudioCaptureType {
     /// Capture audio from WASAPI device
     #[cfg(target_os = "windows")]

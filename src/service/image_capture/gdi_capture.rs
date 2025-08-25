@@ -17,7 +17,8 @@ use crate::{
     desk_error::DeskError,
     model::{
         image_capture::{
-            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType,
+            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
+            ImageOutputEnumerator, ImageType,
         },
         settings::DeskSettings,
     },
@@ -77,6 +78,84 @@ impl Drop for GDIHBITMAP {
         if !result.as_bool() {
             log::error!("Failed to delete object when drop GDIHBITMAP");
         }
+    }
+}
+
+pub struct GdiImageOutputEnumerator {}
+
+impl GdiImageOutputEnumerator {
+    pub fn new() -> Self {
+        GdiImageOutputEnumerator {}
+    }
+}
+
+impl ImageOutputEnumerator for GdiImageOutputEnumerator {
+    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
+        let mut dev_index = 0u32;
+        let mut display_info_list = Vec::new();
+        loop {
+            let mut display_device = DISPLAY_DEVICEW {
+                cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+                DeviceName: [0u16; 32],
+                DeviceString: [0u16; 128],
+                StateFlags: DISPLAY_DEVICE_STATE_FLAGS(0),
+                DeviceID: [0u16; 128],
+                DeviceKey: [0u16; 128],
+            };
+            let null_str = PCWSTR::null();
+            let result =
+                unsafe { EnumDisplayDevicesW(null_str, dev_index, &mut display_device, 0) };
+            if !result.as_bool() {
+                log::debug!("End of enum display devices: idevnum: {}", dev_index);
+                break;
+            }
+
+            let display_name = u16array_to_string(&display_device.DeviceString);
+            let device_name = u16array_to_string(&display_device.DeviceName);
+            let device_id = u16array_to_string(&display_device.DeviceID);
+            let device_key = u16array_to_string(&display_device.DeviceKey);
+            log::debug!(
+                "idevnum: {}, display device: {}, device name: {}, device id: {}, device key: {}",
+                dev_index,
+                display_name,
+                device_name,
+                device_id,
+                device_key
+            );
+
+            let mut dev_mode = DEVMODEW::default();
+            dev_mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+
+            let device_name_utf16 = format!("{}\0", device_name)
+                .encode_utf16()
+                .collect::<Vec<u16>>();
+            let result = unsafe {
+                EnumDisplaySettingsW(
+                    PCWSTR::from_raw(device_name_utf16.as_ptr()),
+                    ENUM_CURRENT_SETTINGS,
+                    &mut dev_mode,
+                )
+            };
+            if !result.as_bool() {
+                log::warn!("Failed to get current settings for device {}", device_name);
+                break;
+            }
+            let display_info = DisplayInfo {
+                device_name,
+                display_device_name: Some(display_name),
+                desktop_coordinates: DisplayRect {
+                    left: 0,
+                    top: 0,
+                    right: dev_mode.dmPelsWidth as i32,
+                    bottom: dev_mode.dmPelsHeight as i32,
+                },
+                attached_to_desktop: true,
+                rotation: 0,
+            };
+            display_info_list.push(display_info);
+            dev_index += 1;
+        }
+        Ok(display_info_list)
     }
 }
 
@@ -238,74 +317,6 @@ impl ImageCapture for GdiImageCapture {
         }))
     }
 
-    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
-        let mut dev_index = 0u32;
-        let mut display_info_list = Vec::new();
-        loop {
-            let mut display_device = DISPLAY_DEVICEW {
-                cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
-                DeviceName: [0u16; 32],
-                DeviceString: [0u16; 128],
-                StateFlags: DISPLAY_DEVICE_STATE_FLAGS(0),
-                DeviceID: [0u16; 128],
-                DeviceKey: [0u16; 128],
-            };
-            let null_str = PCWSTR::null();
-            let result =
-                unsafe { EnumDisplayDevicesW(null_str, dev_index, &mut display_device, 0) };
-            if !result.as_bool() {
-                log::debug!("End of enum display devices: idevnum: {}", dev_index);
-                break;
-            }
-
-            let display_name = u16array_to_string(&display_device.DeviceString);
-            let device_name = u16array_to_string(&display_device.DeviceName);
-            let device_id = u16array_to_string(&display_device.DeviceID);
-            let device_key = u16array_to_string(&display_device.DeviceKey);
-            log::debug!(
-                "idevnum: {}, display device: {}, device name: {}, device id: {}, device key: {}",
-                dev_index,
-                display_name,
-                device_name,
-                device_id,
-                device_key
-            );
-
-            let mut dev_mode = DEVMODEW::default();
-            dev_mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
-
-            let device_name_utf16 = format!("{}\0", device_name)
-                .encode_utf16()
-                .collect::<Vec<u16>>();
-            let result = unsafe {
-                EnumDisplaySettingsW(
-                    PCWSTR::from_raw(device_name_utf16.as_ptr()),
-                    ENUM_CURRENT_SETTINGS,
-                    &mut dev_mode,
-                )
-            };
-            if !result.as_bool() {
-                log::warn!("Failed to get current settings for device {}", device_name);
-                break;
-            }
-            let display_info = DisplayInfo {
-                device_name,
-                display_device_name: Some(display_name),
-                desktop_coordinates: DisplayRect {
-                    left: 0,
-                    top: 0,
-                    right: dev_mode.dmPelsWidth as i32,
-                    bottom: dev_mode.dmPelsHeight as i32,
-                },
-                attached_to_desktop: true,
-                rotation: 0,
-            };
-            display_info_list.push(display_info);
-            dev_index += 1;
-        }
-        Ok(display_info_list)
-    }
-
     fn get_capture_type(&self) -> ImageCaptureType {
         ImageCaptureType::DGI
     }
@@ -367,7 +378,7 @@ mod tests {
         )
         .unwrap();
 
-        let output_list = image_capture.get_output_list()?;
+        let output_list = GdiImageOutputEnumerator::new().get_output_list()?;
         log::info!("output_list={:?}", output_list);
         Ok(())
     }

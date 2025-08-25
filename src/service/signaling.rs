@@ -30,16 +30,19 @@ use webrtc::{
 };
 
 use crate::model::common::ErrorCode;
-use crate::model::image_capture::DisplayInfo;
 use crate::model::settings::DeskSettings;
 use crate::model::signaling::{
     LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
     WebRTConnectionState,
 };
-use crate::service::audio_capture::audio_capture_factory::create_audio_capture;
+use crate::service::audio_capture::audio_capture_factory::{
+    audio_capture_list, create_audio_capture,
+};
 use crate::service::audio_encoder::audio_encoder_factory::create_audio_encoder;
 use crate::service::data_channel::handle_data_channel_event;
-use crate::service::image_capture::image_capture_factory::create_image_capture;
+use crate::service::image_capture::image_capture_factory::{
+    create_image_capture, image_capture_list,
+};
 use crate::service::video_encoder::video_encoder_factory::create_video_encoder;
 use crate::{
     desk_error::DeskError,
@@ -188,21 +191,13 @@ impl SignalingContext {
             .build()?;
 
         // get audio device
-        let settings_for_audio = local_settings.clone();
-        let spawn_handle = capture_audio_runtime.spawn(async move {
-            let capture = create_audio_capture(&settings_for_audio.desk)?;
-            capture.get_devices_list()
-        });
-        let audio_device_list = spawn_handle.await??;
+        let spawn_handle = capture_audio_runtime.spawn(async move { audio_capture_list() });
+        let audio_device_list = spawn_handle.await?;
 
         // get video device
-        let settings_for_video = local_settings.clone();
-        let spawn_handle: tokio::task::JoinHandle<Result<Vec<DisplayInfo>, DeskError>> =
-            capture_screen_runtime.spawn(async move {
-                let capture = create_image_capture(&settings_for_video.desk)?;
-                capture.get_output_list()
-            });
-        let video_device_list = spawn_handle.await??;
+
+        let spawn_handle = capture_screen_runtime.spawn(async move { image_capture_list() });
+        let video_device_list = spawn_handle.await?;
 
         let init_signaling_data = InitSignalingData {
             ice_servers: vec![LcxlRTCIceServer::from(ice_server.clone())],

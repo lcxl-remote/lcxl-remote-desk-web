@@ -17,7 +17,6 @@ pub trait ImageInfo {
 
 pub trait ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError>;
-    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError>;
     fn get_capture_type(&self) -> ImageCaptureType;
 }
 
@@ -28,7 +27,7 @@ pub trait ImageOutputEnumerator {
 }
 
 /// Image Capture Type Enum
-#[derive(EnumIter, IntoStaticStr, EnumString, Debug)]
+#[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
 pub enum ImageCaptureType {
     /// Capture image from DIGX device
     #[cfg(target_os = "windows")]

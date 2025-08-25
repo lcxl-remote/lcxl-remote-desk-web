@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use actix_ws::Session;
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -194,9 +196,9 @@ pub struct InitSignalingData {
     /// User name for signaling.
     pub user_name: String,
     /// Audio device list
-    pub audio_device_list: Vec<AudioDevice>,
+    pub audio_device_list: BTreeMap<String, Vec<AudioDevice>>,
     /// Video device list
-    pub video_device_list: Vec<DisplayInfo>,
+    pub video_device_list: BTreeMap<String, Vec<DisplayInfo>>,
     /// Current desk settings
     pub desk_settings: DeskSettings,
 }

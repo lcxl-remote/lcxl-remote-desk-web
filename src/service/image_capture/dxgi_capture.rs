@@ -50,7 +50,8 @@ use crate::{
     model::{
         common::ErrorCode,
         image_capture::{
-            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo, ImageType,
+            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
+            ImageOutputEnumerator, ImageType,
         },
         settings::DeskSettings,
     },
@@ -1283,6 +1284,47 @@ impl ImageInfo for SceenFrame<'_> {
     }
 }
 
+pub struct DigxImageOutputEnumerator {}
+
+impl DigxImageOutputEnumerator {
+    pub fn new() -> Self {
+        DigxImageOutputEnumerator {}
+    }
+}
+
+impl ImageOutputEnumerator for DigxImageOutputEnumerator {
+    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
+        let settings = DeskSettings::default();
+        let manager = ScreenRecordManager::new(&settings)?;
+        let mut output_list = vec![];
+        let mut output_index = 0;
+        loop {
+            let result = unsafe { manager.dxgi_adapter.EnumOutputs(output_index) };
+            if let Ok(output) = result {
+                let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
+
+                output_list.push(DisplayInfo::from(output_desc));
+            } else if let Err(error) = result {
+                if error.code() != DXGI_ERROR_NOT_FOUND {
+                    log::error!(
+                        "Failed to enumerate outputs, code: {}, message: {}",
+                        error.code(),
+                        error.message()
+                    );
+                    return Err(DeskError::from(error));
+                }
+                log::warn!(
+                    "Output index not found, finished enumeration. Total outputs found: {}",
+                    output_index
+                );
+                break;
+            }
+            output_index += 1;
+        }
+        Ok(output_list)
+    }
+}
+
 pub struct DigxImageCapture {
     pub manager: Arc<ScreenRecordManager>,
     pub output_index: u32,
@@ -1346,35 +1388,6 @@ impl ImageCapture for DigxImageCapture {
 
         let screen_frame = result?;
         Ok(Box::new(screen_frame))
-    }
-
-    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
-        let mut output_list = vec![];
-        let mut output_index = 0;
-        loop {
-            let result = unsafe { self.manager.dxgi_adapter.EnumOutputs(output_index) };
-            if let Ok(output) = result {
-                let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
-
-                output_list.push(DisplayInfo::from(output_desc));
-            } else if let Err(error) = result {
-                if error.code() != DXGI_ERROR_NOT_FOUND {
-                    log::error!(
-                        "Failed to enumerate outputs, code: {}, message: {}",
-                        error.code(),
-                        error.message()
-                    );
-                    return Err(DeskError::from(error));
-                }
-                log::warn!(
-                    "Output index not found, finished enumeration. Total outputs found: {}",
-                    output_index
-                );
-                break;
-            }
-            output_index += 1;
-        }
-        Ok(output_list)
     }
 
     fn get_capture_type(&self) -> ImageCaptureType {
@@ -1458,7 +1471,7 @@ mod tests {
         let settings = DeskSettings::default();
         let mut capture = DigxImageCapture::new(&settings)?;
 
-        let list = capture.get_output_list()?;
+        let list = DigxImageOutputEnumerator::new().get_output_list()?;
         assert!(!list.is_empty());
 
         let tmp_dir = PathBuf::from("sample/screenshot");
@@ -1529,8 +1542,8 @@ mod tests {
                 continue;
             }
 
-            let capture = DigxImageCapture::new(&settings).unwrap();
-            let list_result = capture.get_output_list();
+            let enumerator = DigxImageOutputEnumerator::new();
+            let list_result = enumerator.get_output_list();
             if let Err(e) = list_result {
                 log::error!("Failed to get output list {}: {}", desktop_name, e);
                 continue;
@@ -1542,7 +1555,7 @@ mod tests {
                 desktop_name,
                 output_list
             );
-            drop(capture);
+            drop(enumerator);
             for index in 0..output_list.len() {
                 settings.video_device_index = index as u32;
                 let capture_result = DigxImageCapture::new(&settings);

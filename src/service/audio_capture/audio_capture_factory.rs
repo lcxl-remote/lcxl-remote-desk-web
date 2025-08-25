@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use strum::IntoEnumIterator;
 
@@ -7,13 +7,19 @@ use crate::service::audio_capture::alsa_capture::AlsaAudioCapture;
 use crate::{
     desk_error::DeskError,
     model::{
-        audio_capture::{AudioCapture, AudioCaptureType, AudioCaptureTypeHelper},
+        audio_capture::{
+            AudioCapture, AudioCaptureType, AudioCaptureTypeHelper, AudioDevice,
+            AudioDeviceEnumerator,
+        },
+        common::ErrorCode,
         settings::DeskSettings,
     },
 };
 
 #[cfg(target_os = "windows")]
-use crate::service::audio_capture::wasapi_capture::WasapiAudioCapture;
+use crate::service::audio_capture::wasapi_capture::{
+    WasapiAudioCapture, WasapiAudioDeviceEnumerator,
+};
 
 impl AudioCaptureTypeHelper for DeskSettings {
     /// Returns the appropriate EncoderType based on the settings.
@@ -48,8 +54,33 @@ pub fn create_audio_capture(
     Ok(capture)
 }
 
-pub fn audio_capture_list() -> Vec<String> {
+pub fn audio_capture_list() -> BTreeMap<String, Vec<AudioDevice>> {
     AudioCaptureType::iter()
-        .map(|x| Into::<&'static str>::into(x).to_string())
+        .map(|x| {
+            (
+                Into::<&'static str>::into(x).to_string(),
+                get_audio_device_list(x).unwrap(),
+            )
+        })
         .collect()
+}
+
+pub fn get_audio_device_list(
+    audio_capture_type: AudioCaptureType,
+) -> Result<Vec<AudioDevice>, DeskError> {
+    let capture: Box<dyn AudioDeviceEnumerator + Send> = match audio_capture_type {
+        #[cfg(target_os = "windows")]
+        AudioCaptureType::WASAPI => Box::new(WasapiAudioDeviceEnumerator::new()),
+        #[cfg(target_os = "linux")]
+        ImageCaptureType::X11 => Box::new(X11ImageCapture::new(&dummy_settings)?),
+        _ => {
+            return DeskError::custom_error(
+                ErrorCode::SYSTEM_ERROR,
+                format!("Unsupported capture type:{:?}", audio_capture_type),
+            );
+        }
+    };
+    let output_list = capture.get_device_list()?;
+
+    Ok(output_list)
 }
