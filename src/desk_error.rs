@@ -72,6 +72,8 @@ pub enum DeskError {
     /// A ALSA error occurred.
     #[cfg(target_os = "linux")]
     AlsaError(alsa::Error),
+    #[cfg(target_os = "linux")]
+    PipewireError(pipewire::Error),
     /// A webrtc error occurred.
     WebrtcError(Backtrace, webrtc::Error),
     /// A webrtc media error occurred.
@@ -165,6 +167,8 @@ impl Display for DeskError {
             #[cfg(target_os = "linux")]
             DeskError::AlsaError(error) => error.fmt(f),
             DeskError::SetLoggerError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            DeskError::PipewireError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -264,6 +268,13 @@ impl From<x11rb::errors::ConnectionError> for DeskError {
 impl From<alsa::Error> for DeskError {
     fn from(err: alsa::Error) -> Self {
         DeskError::AlsaError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<pipewire::Error> for DeskError {
+    fn from(err: pipewire::Error) -> Self {
+        DeskError::PipewireError(err)
     }
 }
 

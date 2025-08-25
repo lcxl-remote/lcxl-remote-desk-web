@@ -87,6 +87,8 @@ windows-core = "0.61"
 x11rb =  {version = "0.13", features = ["all-extensions"]}
 libc = "0.2"
 alsa = "0.9"
+# need install libpipewire-0.3-dev
+pipewire = "0.8"
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 which = { version = "8.0", features = ["regex"] }
