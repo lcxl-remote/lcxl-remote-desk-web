@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, str::FromStr};
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "linux")]
-use crate::service::audio_capture::alsa_capture::AlsaAudioCapture;
+use crate::service::audio_capture::alsa_capture::{AlsaAudioCapture, AlsaAudioDeviceEnumerator};
 use crate::{
     desk_error::DeskError,
     model::{
@@ -72,7 +72,7 @@ pub fn get_audio_device_list(
         #[cfg(target_os = "windows")]
         AudioCaptureType::WASAPI => Box::new(WasapiAudioDeviceEnumerator::new()),
         #[cfg(target_os = "linux")]
-        ImageCaptureType::X11 => Box::new(X11ImageCapture::new(&dummy_settings)?),
+        AudioCaptureType::ALSA => Box::new(AlsaAudioDeviceEnumerator::new()),
         _ => {
             return DeskError::custom_error(
                 ErrorCode::SYSTEM_ERROR,

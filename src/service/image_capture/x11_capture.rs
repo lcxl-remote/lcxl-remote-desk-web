@@ -15,7 +15,10 @@ use x11rb::{
 use crate::{
     desk_error::DeskError,
     model::{
-        image_capture::{DisplayInfo, ImageCapture, ImageCaptureType, ImageInfo, ImageType},
+        image_capture::{
+            DisplayInfo, ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator,
+            ImageType,
+        },
         settings::DeskSettings,
     },
 };
@@ -73,6 +76,20 @@ impl ImageInfo for X11ImageInfo {
     }
 }
 
+pub struct X11ImageOutputEnumerator {}
+
+impl X11ImageOutputEnumerator {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl ImageOutputEnumerator for X11ImageOutputEnumerator {
+    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
+        todo!()
+    }
+}
+
 /// X11 capture implementation for Linux systems.
 /// see https://github.com/klarity-app/captis/blob/master/src/linux.rs
 impl ImageCapture for X11ImageCapture {
@@ -82,10 +99,6 @@ impl ImageCapture for X11ImageCapture {
             None => self.capture_standard(0)?,
         };
         Ok(image_info)
-    }
-
-    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
-        todo!()
     }
 
     fn get_capture_type(&self) -> ImageCaptureType {

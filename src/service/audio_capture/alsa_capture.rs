@@ -9,10 +9,39 @@ use alsa::{
 use crate::{
     desk_error::DeskError,
     model::{
-        audio_capture::{AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, WaveFormat},
+        audio_capture::{
+            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
+            WaveFormat,
+        },
         settings::DeskSettings,
     },
 };
+
+pub struct AlsaAudioDeviceEnumerator {}
+
+impl AlsaAudioDeviceEnumerator {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl AudioDeviceEnumerator for AlsaAudioDeviceEnumerator {
+    fn get_device_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
+        let mut audio_device_list = vec![];
+        let hint_iter = HintIter::new(None, &*CString::new("pcm").unwrap()).unwrap();
+        for hint in hint_iter {
+            log::info!("{:?}", hint);
+            audio_device_list.push(AudioDevice {
+                id: hint.name.unwrap_or_default(),
+                firendly_name: hint.desc.unwrap_or_default(),
+                data_flow: AudioDataFlow::Capture,
+                default: false,
+            });
+        }
+
+        Ok(audio_device_list)
+    }
+}
 
 ///https://stackoverflow.com/questions/75576834/how-do-i-capture-currently-playing-audio-from-another-application-in-rust
 pub struct AlsaAudioCapture {
@@ -33,22 +62,6 @@ impl AudioCapture for AlsaAudioCapture {
         self.pcm.start()?;
         let wave_format = WaveFormat::default();
         Ok(wave_format)
-    }
-
-    fn get_devices_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
-         let mut audio_device_list = vec![];
-        let hint_iter = HintIter::new(None, &*CString::new("pcm").unwrap()).unwrap();
-        for hint in hint_iter {
-            log::info!("{:?}", hint);
-            audio_device_list.push( AudioDevice{
-                id: hint.name.unwrap_or_default(),
-                firendly_name: hint.desc.unwrap_or_default(),
-                data_flow: AudioDataFlow::Capture,
-                default: false,
-            });
-        }
-       
-        Ok(audio_device_list)
     }
 
     fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError> {
@@ -87,9 +100,8 @@ mod tests {
     #[test]
     fn test_device_info() -> Result<(), DeskError> {
         initialize();
-        let desk_settings = DeskSettings::default();
-        let capture = AlsaAudioCapture::new(&desk_settings)?;
-        let devices = capture.get_devices_list()?;
+        let capture = AlsaAudioDeviceEnumerator::new();
+        let devices = capture.get_device_list()?;
         log::debug!("all devices: {:?}", devices);
         Ok(())
     }

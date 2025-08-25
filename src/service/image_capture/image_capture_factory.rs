@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, str::FromStr};
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "linux")]
-use crate::service::image_capture::x11_capture::X11ImageCapture;
+use crate::service::image_capture::x11_capture::{X11ImageCapture, X11ImageOutputEnumerator};
 #[cfg(target_os = "windows")]
 use crate::service::image_capture::{
     dxgi_capture::{DigxImageCapture, DigxImageOutputEnumerator},
@@ -83,7 +83,7 @@ pub fn get_image_output_list(
         #[cfg(target_os = "windows")]
         ImageCaptureType::DGI => Box::new(GdiImageOutputEnumerator::new()),
         #[cfg(target_os = "linux")]
-        ImageCaptureType::X11 => Box::new(X11ImageCapture::new(&dummy_settings)?),
+        ImageCaptureType::X11 => Box::new(X11ImageOutputEnumerator::new()),
         _ => {
             return DeskError::custom_error(
                 ErrorCode::SYSTEM_ERROR,
