@@ -143,7 +143,7 @@ declare namespace API {
 
   type InitSignalingData = {
     /** Audio device list */
-    audio_device_list: AudioDevice[];
+    audio_device_list: Record<string, any>;
     /** Current desk settings */
     desk_settings: DeskSettings;
     /** ICE servers to use for signaling. */
@@ -151,7 +151,7 @@ declare namespace API {
     /** User name for signaling. */
     user_name: string;
     /** Video device list */
-    video_device_list: DisplayInfo[];
+    video_device_list: Record<string, any>;
   };
 
   type LabelKey = {

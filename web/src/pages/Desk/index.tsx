@@ -262,26 +262,16 @@ const Desk: React.FC = () => {
     setIsModalOpen(false);
   };
 
-  const videoDeviceSelectMap = initSignalingData?.video_device_list.reduce((map, item, currentIndex) => {
-    map.set(currentIndex, `${item.display_device_name} (${item.desktop_coordinates.right}x${item.desktop_coordinates.bottom})`);
+  const image_capture_list = initSignalingData != null ? Object.keys(initSignalingData.video_device_list) : undefined;
+  const imageCaptureSelectMap = image_capture_list?.reduce((map, item) => {
+    map.set(item, item);
     return map;
-  }, new Map<number, string>);
+  }, new Map<string, string>);
 
-  const audioDeviceSelectMap = initSignalingData?.audio_device_list.reduce((map, item) => {
-    const default_audio_device = {
-      audio_data_flow: item.data_flow,
-      audio_device_id: null,
-    } as API.SelectedAudioDevice;
-    const default_audio_device_json_str = JSON.stringify(default_audio_device);
-    let found_value = map.get(default_audio_device_json_str);
-    if (!found_value) {
-      map.set(default_audio_device_json_str, `[${item.data_flow}]默认设备`);
-    }
-    const audio_device = {
-      audio_data_flow: item.data_flow,
-      audio_device_id: item.id,
-    } as API.SelectedAudioDevice;
-    map.set(JSON.stringify(audio_device), `[${item.data_flow}]${item.firendly_name}${item.default ? "(当前默认)" : ""}`);
+
+  const audio_capture_list = initSignalingData != null ? Object.keys(initSignalingData.audio_device_list) : undefined;
+  const audioCaptureSelectMap = audio_capture_list?.reduce((map, item) => {
+    map.set(item, item);
     return map;
   }, new Map<string, string>);
 
@@ -337,14 +327,37 @@ const Desk: React.FC = () => {
           <Divider plain>显示配置</Divider>
           <ProForm.Group>
             <ProFormSelect
-              name="video_device_index"
-              label="显示设备"
-              valueEnum={videoDeviceSelectMap}
-              placeholder="请选择一个显示设备"
-              rules={[{ required: true, message: '请选择一个显示设备!' }]}
+              name="image_capture"
+              label="屏幕捕获模式"
+              valueEnum={imageCaptureSelectMap}
+              placeholder="请选择一个屏幕捕获模式"
+              rules={[{ required: true, message: '请选择一个屏幕捕获模式!' }]}
+
             />
           </ProForm.Group>
           <ProForm.Group>
+            <ProForm.Item noStyle shouldUpdate>
+              {(form) => {
+                const imageCapture = form.getFieldValue('image_capture');
+
+                const videoDeviceSelectMap = initSignalingData?.video_device_list[imageCapture]?.reduce((map, item, currentIndex) => {
+                  map.set(currentIndex, `${item.display_device_name} (${item.desktop_coordinates.right}x${item.desktop_coordinates.bottom})`);
+                  return map;
+                }, new Map<number, string>);
+                return (
+                  <ProFormSelect
+                    name="video_device_index"
+                    label="显示设备"
+                    valueEnum={videoDeviceSelectMap}
+                    placeholder="请选择一个显示设备"
+                    rules={[{ required: true, message: '请选择一个显示设备!' }]}
+                    colProps={{
+                      span: 16,
+                    }}
+                    disabled={!imageCapture}
+                  />)
+              }}</ProForm.Item>
+
             <ProFormSwitch name="show_mouse" label="显示远程鼠标" colProps={{
               span: 8,
             }} />
@@ -376,6 +389,26 @@ const Desk: React.FC = () => {
 
           </ProForm.Group>
           <Divider plain>音频配置</Divider>
+
+          <ProForm.Group>
+            <ProForm.Item noStyle shouldUpdate>
+              {(form) => {
+
+
+
+                return (
+                  <ProFormSelect
+                    name="audio_capture"
+                    label="音频捕获模式"
+                    valueEnum={audioCaptureSelectMap}
+                    placeholder="请选择一个音频捕获模式"
+                    rules={[{ required: true, message: '请选择一个音频捕获模式!' }]}
+                    disabled={!form.getFieldValue("enable_audio")}
+                  />);
+              }
+              }</ProForm.Item>
+          </ProForm.Group>
+
           <ProForm.Group>
             <ProFormSwitch name="enable_audio" label="捕获音频" colProps={{
               span: 4,
@@ -383,6 +416,26 @@ const Desk: React.FC = () => {
             {/* noStyle shouldUpdate 是必选的，写了 name 就会失效 */}
             <ProForm.Item noStyle shouldUpdate>
               {(form) => {
+
+                const audioCapture = form.getFieldValue('audio_capture');
+                const audioDeviceSelectMap = initSignalingData?.audio_device_list[audioCapture]?.reduce((map, item) => {
+                  const default_audio_device = {
+                    audio_data_flow: item.data_flow,
+                    audio_device_id: null,
+                  } as API.SelectedAudioDevice;
+                  const default_audio_device_json_str = JSON.stringify(default_audio_device);
+                  let found_value = map.get(default_audio_device_json_str);
+                  if (!found_value) {
+                    map.set(default_audio_device_json_str, `[${item.data_flow}]默认设备`);
+                  }
+                  const audio_device = {
+                    audio_data_flow: item.data_flow,
+                    audio_device_id: item.id,
+                  } as API.SelectedAudioDevice;
+                  map.set(JSON.stringify(audio_device), `[${item.data_flow}]${item.firendly_name}${item.default ? "(当前默认)" : ""}`);
+                  return map;
+                }, new Map<string, string>);
+
                 return (<ProFormSelect
                   name="audio_device"
                   label="音频设备"
@@ -392,7 +445,7 @@ const Desk: React.FC = () => {
                   colProps={{
                     span: 20,
                   }}
-                  disabled={!form.getFieldValue("enable_audio")}
+                  disabled={!form.getFieldValue("enable_audio") || !audioDeviceSelectMap}
                   convertValue={(value, namePath) => {
                     let result = value;
                     if (typeof value != "string") {

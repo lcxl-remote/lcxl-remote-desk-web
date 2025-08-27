@@ -125,6 +125,7 @@ pub struct WasapiAudioDeviceEnumerator {}
 
 impl WasapiAudioDeviceEnumerator {
     pub fn new() -> Self {
+        init_thread().unwrap();
         WasapiAudioDeviceEnumerator {}
     }
 }
@@ -209,6 +210,14 @@ impl AudioDeviceEnumerator for WasapiAudioDeviceEnumerator {
             });
         }
         Ok(devices)
+    }
+}
+
+impl Drop for WasapiAudioDeviceEnumerator {
+    fn drop(&mut self) {
+        log::info!("WasapiAudioDeviceEnumerator dropped");
+        // Uninitialize COM
+        let _ = destroy_thread();
     }
 }
 
