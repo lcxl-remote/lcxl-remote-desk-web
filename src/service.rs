@@ -2,8 +2,6 @@ pub mod audio_capture;
 pub mod audio_encoder;
 pub mod data_channel;
 pub mod image_capture;
-#[cfg(target_os = "windows")]
-pub mod record_audio;
 pub mod signaling;
 pub mod terminal;
 pub mod turn;

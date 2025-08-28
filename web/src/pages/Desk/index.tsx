@@ -391,6 +391,9 @@ const Desk: React.FC = () => {
           <Divider plain>音频配置</Divider>
 
           <ProForm.Group>
+            <ProFormSwitch name="enable_audio" label="捕获音频" colProps={{
+              span: 4,
+            }} />
             <ProForm.Item noStyle shouldUpdate>
               {(form) => {
 
@@ -402,17 +405,18 @@ const Desk: React.FC = () => {
                     label="音频捕获模式"
                     valueEnum={audioCaptureSelectMap}
                     placeholder="请选择一个音频捕获模式"
-                    rules={[{ required: true, message: '请选择一个音频捕获模式!' }]}
+                    rules={[{ required: form.getFieldValue("enable_audio"), message: '请选择一个音频捕获模式!' }]}
                     disabled={!form.getFieldValue("enable_audio")}
+                    colProps={{
+                      span: 20,
+                    }}
                   />);
               }
               }</ProForm.Item>
           </ProForm.Group>
 
           <ProForm.Group>
-            <ProFormSwitch name="enable_audio" label="捕获音频" colProps={{
-              span: 4,
-            }} />
+
             {/* noStyle shouldUpdate 是必选的，写了 name 就会失效 */}
             <ProForm.Item noStyle shouldUpdate>
               {(form) => {
@@ -441,10 +445,8 @@ const Desk: React.FC = () => {
                   label="音频设备"
                   valueEnum={audioDeviceSelectMap}
                   placeholder="请选择一个音频设备"
-                  rules={[{ required: form.getFieldValue("switch"), message: '请选择一个音频设备!' }]}
-                  colProps={{
-                    span: 20,
-                  }}
+                  rules={[{ required: form.getFieldValue("enable_audio"), message: '请选择一个音频设备!' }]}
+
                   disabled={!form.getFieldValue("enable_audio") || !audioDeviceSelectMap}
                   convertValue={(value, namePath) => {
                     let result = value;

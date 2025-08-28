@@ -113,7 +113,7 @@ impl Default for OpusEncoderSettings {
         Self {
             sample_rate: 48000,
             channels: 2,
-            application: "audio".to_string(),
+            application: "Audio".to_string(),
         }
     }
 }
