@@ -209,6 +209,7 @@ const Desk: React.FC = () => {
     });
     pc.ontrack = function (event) {
       console.log("ontrack", event);
+      console.log("get track setting: ", event.track.getSettings());
       switch (event.track.kind) {
         case 'video':
           var video_ref = remote_video.current!;

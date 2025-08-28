@@ -262,6 +262,7 @@ impl SignalingContext {
         let audio_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
                 mime_type: MIME_TYPE_OPUS.to_owned(),
+                channels: 2,
                 ..Default::default()
             },
             "audio".to_owned(),
