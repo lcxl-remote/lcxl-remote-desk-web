@@ -40,8 +40,8 @@ const Desk: React.FC = () => {
   // data channel
   const mouseEventDataChannelRef = useRef<RTCDataChannel>();
   const keyboardEventDataChannelRef = useRef<RTCDataChannel>();
-  const clipboardEventDataChannelRef = useRef<RTCDataChannel>();
-  const fileTransferEventDataChannelRef = useRef<RTCDataChannel>();
+  // const clipboardEventDataChannelRef = useRef<RTCDataChannel>();
+  // const fileTransferEventDataChannelRef = useRef<RTCDataChannel>();
 
   // use state
   const [formInstance, setFormInstance] = useState<ProFormInstance<DeskFormValues>>();
@@ -191,7 +191,15 @@ const Desk: React.FC = () => {
         peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answerDescriptionJson));
         break;
       case SIGNALING_TYPE_CODE_ACCEPT_CONTROL:
-        message.success("控制请求被接受，您现在可以控制远程桌面了");
+        message.success("控制请求被接受，准备初始化控制通道");
+        const peerconnection = peerconnectionRef.current!;
+        let mouseEventDataChannel = peerconnection.createDataChannel("mouse_event_channel", { ordered: false });
+        let keyboardEventDataChannel = peerconnection.createDataChannel("keyboard_event_channel", { ordered: true });
+        //peerconnection.createDataChannel("clipboard_event_channel", { ordered: true });
+        //peerconnection.createDataChannel("file_transfer_event_channel", { ordered: true });
+
+        mouseEventDataChannelRef.current = mouseEventDataChannel;
+        keyboardEventDataChannelRef.current = keyboardEventDataChannel;
         break;
       case SIGNALING_TYPE_CODE_DENY_CONTROL:
         message.error("控制请求被拒绝");
@@ -252,7 +260,12 @@ const Desk: React.FC = () => {
 
   const handleRequestControl = () => {
     if (!acceptControl) {
-      sendSignalingMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, {});
+      const requestControlData = {
+        accept: true,
+        accept_clipboard_sync: true,
+        accept_file_transfer: true,
+      } as API.SignalRequestControlData;
+      sendSignalingMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, requestControlData);
     }
   }
 
@@ -358,7 +371,7 @@ const Desk: React.FC = () => {
 
   return (
     <PageContainer>
-      <video ref={remoteVideo} autoPlay muted className={styles.videoContainer} tabIndex={0}/>
+      <video ref={remoteVideo} autoPlay muted className={styles.videoContainer} tabIndex={0} />
       <audio ref={remoteAudio} autoPlay />
       <Divider />
 
@@ -371,7 +384,7 @@ const Desk: React.FC = () => {
       >
         <FloatButton tooltip={<div>全屏</div>} icon={<FullscreenOutlined />} />
         <FloatButton icon={<SettingOutlined />} onClick={showModal} />
-        <FloatButton icon={<CommentOutlined />} tooltip={acceptControl?<div>退出控制</div>:<div>请求控制</div>} onClick={handleRequestControl}/>
+        <FloatButton icon={<CommentOutlined />} tooltip={acceptControl ? <div>退出控制</div> : <div>请求控制</div>} onClick={handleRequestControl} />
       </FloatButton.Group>
 
       <Modal

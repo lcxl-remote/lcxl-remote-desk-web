@@ -287,6 +287,12 @@ declare namespace API {
     signaling_type: number;
   };
 
+  type SignalRequestControlData = {
+    accept?: boolean;
+    accept_clipboard_sync?: boolean;
+    accept_file_transfer?: boolean;
+  };
+
   type SystemSettings = {
     /** Path to the configuration file. If not specified, a new one will be created in the "conf" directory. */
     config_file_path?: string;
