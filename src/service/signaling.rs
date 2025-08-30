@@ -30,9 +30,11 @@ use webrtc::{
 };
 
 use crate::model::common::ErrorCode;
+use crate::model::data_channel::SignalRequestControlData;
 use crate::model::settings::DeskSettings;
 use crate::model::signaling::{
-    LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
+    LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_ACCEPT_CONTROL,
+    SIGNALING_TYPE_CODE_REQUIRE_CONTROL, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
     WebRTConnectionState,
 };
 use crate::service::audio_capture::audio_capture_factory::{
@@ -662,6 +664,10 @@ impl SignalingContext {
             SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS => {
                 self.handle_update_desk_settings(&signaling_model).await?;
             }
+            SIGNALING_TYPE_CODE_REQUIRE_CONTROL => {
+                // send back a message to client
+                self.handle_request_control(&signaling_model).await?;
+            }
             _ => {
                 error!("Unknown signaling type: {}", signaling_model.signaling_type);
                 let error_signaling = SignalingModel::new_str_data(
@@ -759,6 +765,22 @@ impl SignalingContext {
         } else {
             log::error!("Update setting sender is not set");
         }
+        Ok(())
+    }
+    pub async fn handle_request_control(
+        &mut self,
+        signaling_model: &SignalingModel,
+    ) -> Result<(), DeskError> {
+        // TODO need implement more logic here
+        let request_control_data =
+            signaling_model.get_data_with_default::<SignalRequestControlData>()?;
+        log::info!("Request control data: {:?}", request_control_data);
+        self.signaling_state.write().await.accept_control = request_control_data.accept;
+        let response = SignalingModel::new_json_data(
+            SignalingType::from(SIGNALING_TYPE_CODE_ACCEPT_CONTROL),
+            &request_control_data,
+        )?;
+        self.session.send_signaling(&response).await?;
         Ok(())
     }
 }

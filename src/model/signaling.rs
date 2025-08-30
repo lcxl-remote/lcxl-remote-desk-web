@@ -19,11 +19,6 @@ use crate::{
     },
 };
 
-pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
-pub const DATA_CHANNEL_LABEL_KEYBOARD_EVENT: &str = "keyboard_event";
-pub const DATA_CHANNEL_LABEL_CLIPBOARD_EVENT: &str = "clipboard_event";
-pub const DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT: &str = "file_transfer_event";
-
 #[derive(Debug, Clone, Copy)]
 pub struct SignalingType(i32);
 

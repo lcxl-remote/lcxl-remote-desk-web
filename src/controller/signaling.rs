@@ -4,6 +4,7 @@ use log::{error, info};
 
 use crate::{
     model::{
+        data_channel::SignalRequestControlData,
         settings::{DeskSettings, SharedSettings},
         signaling::{InitSignalingData, SignalingErrorData, SignalingModel},
     },
@@ -17,6 +18,7 @@ use crate::{
         (status = 500, description = "websocket signaling error data", body = SignalingErrorData),
         (status = 201, description = "init signaling data", body = InitSignalingData),
         (status = 202, description = "desk config", body = DeskSettings),
+        (status = 203, description = "other response", body= SignalRequestControlData),
     ),
 )]
 #[get("/signaling")]

@@ -33,16 +33,23 @@ type DeskFormValues = API.DeskSettings & {
 const Desk: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
-  const remote_video = useRef<HTMLVideoElement>(null);
-  const remote_audio = useRef<HTMLAudioElement>(null);
+  const remoteVideo = useRef<HTMLVideoElement>(null);
+  const remoteAudio = useRef<HTMLAudioElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
+  // data channel
+  const mouseEventDataChannelRef = useRef<RTCDataChannel>();
+  const keyboardEventDataChannelRef = useRef<RTCDataChannel>();
+  const clipboardEventDataChannelRef = useRef<RTCDataChannel>();
+  const fileTransferEventDataChannelRef = useRef<RTCDataChannel>();
 
+  // use state
   const [formInstance, setFormInstance] = useState<ProFormInstance<DeskFormValues>>();
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [initSignalingData, setInitSignalingData] = useState<API.InitSignalingData>();
+  const [acceptControl, setAcceptControl] = useState(false);
 
   const formRef = useCallback(node => {
     const _formInstance = node as ProFormInstance<DeskFormValues>;
@@ -63,8 +70,8 @@ const Desk: React.FC = () => {
   //const formRef = useRef<ProFormInstance>();
 
   const handleRemoteVideoResize = (event: UIEvent) => {
-    var video_ref = remote_video.current!;
-    console.log("video on resize, width=" + video_ref.clientWidth + ", height=" + video_ref.clientHeight + ", event=", event);
+    var videoRef = remoteVideo.current!;
+    console.log("video on resize, width=" + videoRef.clientWidth + ", height=" + videoRef.clientHeight + ", event=", event);
   };
 
   const handleRemoteVideoMouseMove = (event: MouseEvent) => {
@@ -78,6 +85,19 @@ const Desk: React.FC = () => {
 
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
     console.log("key down, event=", event);
+    // 1. 只处理 Tab 键
+    if (event.key === 'Tab') {
+      event.preventDefault();   // 阻止浏览器的默认 Tab 行为
+      // 2. 如你想把焦点保持在视频容器上：
+      remoteVideo.current?.focus();
+      // 3. 如果你想让 Tab 在容器内部循环（例如容器内部有多个控件）：
+      //    const focusable = container.querySelectorAll('a, button, input, textarea, select, [tabindex]:not([tabindex="-1"])');
+      //    const currentIndex = [...focusable].indexOf(document.activeElement);
+      //    const nextIndex = e.shiftKey ? (currentIndex - 1 + focusable.length) % focusable.length
+      //                                 : (currentIndex + 1) % focusable.length;
+      //    focusable[nextIndex].focus();
+    }
+
   };
 
   const handleRemoteVideoKeyUp = (event: KeyboardEvent) => {
@@ -88,6 +108,33 @@ const Desk: React.FC = () => {
     console.log("video waiting, event=", event);
   }
 
+  const handleRemoteVideoClick = (event: MouseEvent) => {
+    console.log("video click, event=", event);
+  }
+
+  const handleRemoteVideoDblClick = (event: MouseEvent) => {
+    console.log("video double click, event=", event);
+  }
+
+  const handleRemoteVideoMouseUp = (event: MouseEvent) => {
+    event.preventDefault();
+    remoteVideo.current?.focus();
+    console.log("mouse up, event=", event);
+  };
+
+  const handleRemoteVideoMouseDown = (event: MouseEvent) => {
+    event.preventDefault();
+    remoteVideo.current?.focus();
+    console.log("mouse down, event=", event);
+  };
+
+  const handleRemoteVideoContextmenu = (event: MouseEvent) => {
+    // disable right click context menu
+    event.preventDefault();
+    remoteVideo.current?.focus();
+    console.log("context menu, event=", event);
+  }
+
   const addRemoteVideoEvent = (element: HTMLVideoElement) => {
     console.log("addRemoteVideoEvent");
     // Add resize event listener to the video element
@@ -95,23 +142,32 @@ const Desk: React.FC = () => {
     // Add mouse move event listener to the video element
     element.addEventListener("mousemove", handleRemoteVideoMouseMove);
 
+    element.addEventListener("mouseup", handleRemoteVideoMouseUp);
+
+    element.addEventListener("mousedown", handleRemoteVideoMouseDown);
+
+    element.addEventListener("click", handleRemoteVideoClick);
+
+    element.addEventListener("dblclick", handleRemoteVideoDblClick);
+
     element.addEventListener("keydown", handleRemoteVideoKeyDown);
 
     element.addEventListener("keyup", handleRemoteVideoKeyUp);
 
     element.addEventListener("waiting", handleRemoteVideoWaiting);
 
+    element.addEventListener("contextmenu", handleRemoteVideoContextmenu);
   };
 
-  const sendSignalingMessage = (signaling_type: number, signaling_data: any) => {
+  const sendSignalingMessage = (signalingType: number, signalingData: any) => {
     const sock = socketRef.current!;
     let sginaling = {
-      signaling_type,
-      signaling_data: JSON.stringify(signaling_data),
+      signaling_type: signalingType,
+      signaling_data: JSON.stringify(signalingData),
     } as API.SignalingModel;
-    let signaling_json = JSON.stringify(sginaling);
+    let signalingJson = JSON.stringify(sginaling);
 
-    sock.send(signaling_json);
+    sock.send(signalingJson);
   }
   /**
    * Handle WebSocket message event
@@ -121,21 +177,31 @@ const Desk: React.FC = () => {
     const sock = socketRef.current!;
     console.log('收到消息:', event.data);
 
-    const signaling_model = JSON.parse(event.data) as API.SignalingModel;
-    switch (signaling_model.signaling_type) {
+    const signalingModel = JSON.parse(event.data) as API.SignalingModel;
+    switch (signalingModel.signaling_type) {
       case SIGNALING_TYPE_CODE_INIT:
-        const init_signaling_data = JSON.parse(signaling_model.signaling_data!) as API.InitSignalingData;
-        console.log('初始化信令数据:', init_signaling_data);
-        setInitSignalingData(init_signaling_data);
+        const initSignalingData = JSON.parse(signalingModel.signaling_data!) as API.InitSignalingData;
+        console.log('初始化信令数据:', initSignalingData);
+        setInitSignalingData(initSignalingData);
         setIsModalOpen(true);
         break;
       case SIGNALING_TYPE_CODE_ANSWER:
-        const answer_description_json = JSON.parse(signaling_model.signaling_data!) as RTCSessionDescriptionInit;
-        console.info("set remote description answer_description_json=" + signaling_model.signaling_data);
-        peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answer_description_json));
+        const answerDescriptionJson = JSON.parse(signalingModel.signaling_data!) as RTCSessionDescriptionInit;
+        console.info("set remote description answer_description_json=" + signalingModel.signaling_data);
+        peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answerDescriptionJson));
         break;
-
+      case SIGNALING_TYPE_CODE_ACCEPT_CONTROL:
+        message.success("控制请求被接受，您现在可以控制远程桌面了");
+        break;
+      case SIGNALING_TYPE_CODE_DENY_CONTROL:
+        message.error("控制请求被拒绝");
+        break;
+      case SIGNALING_TYPE_CODE_ERROR:
+        const error_message = signalingModel.signaling_data;
+        message.error(`服务器错误: ${error_message}`);
+        break;
       default:
+        console.error("未知的 signaling_type: ", signalingModel.signaling_type);
         break;
     }
   }
@@ -169,7 +235,7 @@ const Desk: React.FC = () => {
       }
     });
 
-    resizeObserver.observe(remote_video.current!);
+    resizeObserver.observe(remoteVideo.current!);
 
     return () => {
       console.log("关闭websocket", sock);
@@ -183,6 +249,12 @@ const Desk: React.FC = () => {
   const showModal = () => {
     setIsModalOpen(true);
   };
+
+  const handleRequestControl = () => {
+    if (!acceptControl) {
+      sendSignalingMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, {});
+    }
+  }
 
   const handleOk = async (formData: DeskFormValues) => {
     console.log(JSON.stringify(formData));
@@ -212,14 +284,14 @@ const Desk: React.FC = () => {
       console.log("get track setting: ", event.track.getSettings());
       switch (event.track.kind) {
         case 'video':
-          var video_ref = remote_video.current!;
+          var video_ref = remoteVideo.current!;
           video_ref.srcObject = event.streams[0];
           video_ref.autoplay = true;
           video_ref.controls = false;
           addRemoteVideoEvent(video_ref);
           break;
         case 'audio':
-          var audio_ref = remote_audio.current!;
+          var audio_ref = remoteAudio.current!;
           audio_ref.srcObject = event.streams[0];
           audio_ref.autoplay = true;
           audio_ref.controls = true;
@@ -234,14 +306,14 @@ const Desk: React.FC = () => {
     };
     pc.onicecandidate = event => {
       if (event.candidate === null) {
-        const offer_model = {
+        const offerModel = {
           offer: pc.localDescription!,
           desk_settings,
         } as OfferModel;
 
-        console.log("event.candidate === null, offer_model: ", offer_model)
+        console.log("event.candidate === null, offer_model: ", offerModel)
 
-        sendSignalingMessage(SIGNALING_TYPE_CODE_OFFER, offer_model);
+        sendSignalingMessage(SIGNALING_TYPE_CODE_OFFER, offerModel);
       }
     };
 
@@ -252,8 +324,8 @@ const Desk: React.FC = () => {
 
     pc.createOffer().then(d => {
       pc.setLocalDescription(d);
-      const local_description_json = JSON.stringify(d);
-      console.info("create offer, local description=" + local_description_json);
+      const localDescriptionJson = JSON.stringify(d);
+      console.info("create offer, local description=" + localDescriptionJson);
     }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
 
     return pc;
@@ -263,15 +335,15 @@ const Desk: React.FC = () => {
     setIsModalOpen(false);
   };
 
-  const image_capture_list = initSignalingData != null ? Object.keys(initSignalingData.video_device_list) : undefined;
-  const imageCaptureSelectMap = image_capture_list?.reduce((map, item) => {
+  const imageCaptureList = initSignalingData != null ? Object.keys(initSignalingData.video_device_list) : undefined;
+  const imageCaptureSelectMap = imageCaptureList?.reduce((map, item) => {
     map.set(item, item);
     return map;
   }, new Map<string, string>);
 
 
-  const audio_capture_list = initSignalingData != null ? Object.keys(initSignalingData.audio_device_list) : undefined;
-  const audioCaptureSelectMap = audio_capture_list?.reduce((map, item) => {
+  const audioCaptureList = initSignalingData != null ? Object.keys(initSignalingData.audio_device_list) : undefined;
+  const audioCaptureSelectMap = audioCaptureList?.reduce((map, item) => {
     map.set(item, item);
     return map;
   }, new Map<string, string>);
@@ -286,8 +358,8 @@ const Desk: React.FC = () => {
 
   return (
     <PageContainer>
-      <video ref={remote_video} autoPlay muted className={styles.videoContainer} />
-      <audio ref={remote_audio} autoPlay />
+      <video ref={remoteVideo} autoPlay muted className={styles.videoContainer} tabIndex={0}/>
+      <audio ref={remoteAudio} autoPlay />
       <Divider />
 
       <FloatButton.Group
@@ -299,7 +371,7 @@ const Desk: React.FC = () => {
       >
         <FloatButton tooltip={<div>全屏</div>} icon={<FullscreenOutlined />} />
         <FloatButton icon={<SettingOutlined />} onClick={showModal} />
-        <FloatButton icon={<CommentOutlined />} />
+        <FloatButton icon={<CommentOutlined />} tooltip={acceptControl?<div>退出控制</div>:<div>请求控制</div>} onClick={handleRequestControl}/>
       </FloatButton.Group>
 
       <Modal
@@ -424,20 +496,20 @@ const Desk: React.FC = () => {
 
                 const audioCapture = form.getFieldValue('audio_capture');
                 const audioDeviceSelectMap = initSignalingData?.audio_device_list[audioCapture]?.reduce((map, item) => {
-                  const default_audio_device = {
+                  const defaultAudioDevice = {
                     audio_data_flow: item.data_flow,
                     audio_device_id: null,
                   } as API.SelectedAudioDevice;
-                  const default_audio_device_json_str = JSON.stringify(default_audio_device);
-                  let found_value = map.get(default_audio_device_json_str);
+                  const defaultAudioDeviceJsonStr = JSON.stringify(defaultAudioDevice);
+                  let found_value = map.get(defaultAudioDeviceJsonStr);
                   if (!found_value) {
-                    map.set(default_audio_device_json_str, `[${item.data_flow}]默认设备`);
+                    map.set(defaultAudioDeviceJsonStr, `[${item.data_flow}]默认设备`);
                   }
-                  const audio_device = {
+                  const audioDevice = {
                     audio_data_flow: item.data_flow,
                     audio_device_id: item.id,
                   } as API.SelectedAudioDevice;
-                  map.set(JSON.stringify(audio_device), `[${item.data_flow}]${item.firendly_name}${item.default ? "(当前默认)" : ""}`);
+                  map.set(JSON.stringify(audioDevice), `[${item.data_flow}]${item.firendly_name}${item.default ? "(当前默认)" : ""}`);
                   return map;
                 }, new Map<string, string>);
 
