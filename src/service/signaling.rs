@@ -34,8 +34,8 @@ use crate::model::data_channel::SignalRequestControlData;
 use crate::model::settings::DeskSettings;
 use crate::model::signaling::{
     LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_ACCEPT_CONTROL,
-    SIGNALING_TYPE_CODE_REQUIRE_CONTROL, SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState,
-    WebRTConnectionState,
+    SIGNALING_TYPE_CODE_CLOSE_CONTROL, SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
+    SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState, WebRTConnectionState,
 };
 use crate::service::audio_capture::audio_capture_factory::{
     audio_capture_list, create_audio_capture,
@@ -396,6 +396,7 @@ impl SignalingContext {
         Ok(())
     }
 
+    /// Shutdown the signaling context, including peer connection and capture tasks.
     pub async fn shutdown(self) -> Result<(), DeskError> {
         let result = self.rtc_peer_connection.close().await;
         info!("Signaling session ended, result={:?}", result);
@@ -411,6 +412,7 @@ impl SignalingContext {
         .await?;
         Ok(())
     }
+
     /// Start the screen capture task
     pub async fn capture_screen_task(
         desk_settings: DeskSettings,
@@ -754,6 +756,7 @@ impl SignalingContext {
         Ok(())
     }
 
+    /// Handle update desk settings signaling
     pub async fn handle_update_desk_settings(
         &mut self,
         signaling_model: &SignalingModel,
@@ -767,6 +770,7 @@ impl SignalingContext {
         }
         Ok(())
     }
+    /// Handle request control signaling
     pub async fn handle_request_control(
         &mut self,
         signaling_model: &SignalingModel,
@@ -776,10 +780,17 @@ impl SignalingContext {
             signaling_model.get_data_with_default::<SignalRequestControlData>()?;
         log::info!("Request control data: {:?}", request_control_data);
         self.signaling_state.write().await.accept_control = request_control_data.accept;
-        let response = SignalingModel::new_json_data(
-            SignalingType::from(SIGNALING_TYPE_CODE_ACCEPT_CONTROL),
-            &request_control_data,
-        )?;
+        let response = if request_control_data.accept {
+            SignalingModel::new_json_data(
+                SignalingType::from(SIGNALING_TYPE_CODE_ACCEPT_CONTROL),
+                &request_control_data,
+            )?
+        } else {
+            SignalingModel::new_json_data(
+                SignalingType::from(SIGNALING_TYPE_CODE_CLOSE_CONTROL),
+                &request_control_data,
+            )?
+        };
         self.session.send_signaling(&response).await?;
         Ok(())
     }

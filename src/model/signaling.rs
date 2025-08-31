@@ -30,6 +30,7 @@ pub const SIGNALING_TYPE_CODE_CANID: i32 = 102;
 pub const SIGNALING_TYPE_CODE_REQUIRE_CONTROL: i32 = 201;
 pub const SIGNALING_TYPE_CODE_ACCEPT_CONTROL: i32 = 202;
 pub const SIGNALING_TYPE_CODE_DENY_CONTROL: i32 = 203;
+pub const SIGNALING_TYPE_CODE_CLOSE_CONTROL: i32 = 204;
 
 pub const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS: i32 = 301;
 
@@ -165,10 +166,14 @@ impl SignalingSessionExt for Session {
     }
 }
 
+///RTC IceServer
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Hash, ToSchema)]
 pub struct LcxlRTCIceServer {
+    /// List of URLs associated with the ICE server, e.g. ["stun:stun.l.google.com:19302"]
     pub urls: Vec<String>,
+    /// Username for the ICE server, if any.
     pub username: String,
+    /// Credential for the ICE server, if any.
     pub credential: String,
 }
 
@@ -198,6 +203,7 @@ pub struct InitSignalingData {
     pub desk_settings: DeskSettings,
 }
 
+/// WebRTC Connection State
 #[derive(Debug, Clone, PartialEq)]
 pub enum WebRTConnectionState {
     Init,

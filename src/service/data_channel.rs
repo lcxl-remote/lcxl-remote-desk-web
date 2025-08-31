@@ -8,17 +8,16 @@ use webrtc::{
 
 use crate::model::signaling::SignalingState;
 
-pub async fn handle_data_channel_event(signaling_state: Arc<RwLock<SignalingState>>, data_channel: Arc<RTCDataChannel>) {
+pub async fn handle_data_channel_event(
+    signaling_state: Arc<RwLock<SignalingState>>,
+    data_channel: Arc<RTCDataChannel>,
+) {
     let d_label = data_channel.label().to_owned();
     let data_channel_sender = Arc::clone(&data_channel);
     let d_id = data_channel.id();
     let d_label2 = d_label.clone();
     let d_id2 = d_id;
-    if !signaling_state.read().await.accept_control {
-        log::warn!("Data channel '{d_label}'-'{d_id}' rejected");
-        let _ = data_channel.close().await;
-        return;
-    }
+
     //data_channel.close();
     data_channel.on_close(Box::new(move || {
         log::warn!("Data channel closed");
@@ -46,9 +45,20 @@ pub async fn handle_data_channel_event(signaling_state: Arc<RwLock<SignalingStat
                 }));
 
     // Register text message handling
+    let signaling_state2 = signaling_state.clone();
     data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
         let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
         log::debug!("Message from DataChannel '{d_label}': '{msg_str}'");
-        Box::pin(async {})
+        let d_label3 = d_label.clone();
+        let d_id3 = d_id.clone();
+        Box::pin({
+            let value = signaling_state2.clone();
+            async move {
+                if !value.read().await.accept_control {
+                    log::warn!("Data channel '{d_label3}'-'{d_id3}' rejected");
+                    return;
+                }
+            }
+        })
     }));
 }

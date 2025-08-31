@@ -4,7 +4,7 @@ use log::{error, info};
 
 use crate::{
     model::{
-        data_channel::SignalRequestControlData,
+        data_channel::{KeyboardEventData, MouseEventData, SignalRequestControlData},
         settings::{DeskSettings, SharedSettings},
         signaling::{InitSignalingData, SignalingErrorData, SignalingModel},
     },
@@ -19,6 +19,8 @@ use crate::{
         (status = 201, description = "init signaling data", body = InitSignalingData),
         (status = 202, description = "desk config", body = DeskSettings),
         (status = 203, description = "other response", body= SignalRequestControlData),
+        (status = 204, description = "mouse event data", body= MouseEventData),
+        (status = 205, description = "ketboard event data", body= KeyboardEventData),
     ),
 )]
 #[get("/signaling")]

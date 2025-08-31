@@ -833,7 +833,7 @@ impl ScreenOutput {
                         self.pointer_shape_buffer = vec![];
                         return Err(DeskError::from(error));
                     }
-                    log::debug!("Pointer shape info: {:?}", self.pointer_shape_info);
+                    log::trace!("Pointer shape info: {:?}", self.pointer_shape_info);
                 }
             } else {
                 // mouse is not visible, clear the pointer shape buffer

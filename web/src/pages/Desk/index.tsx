@@ -16,6 +16,7 @@ const SIGNALING_TYPE_CODE_CANID = 102;
 const SIGNALING_TYPE_CODE_REQUIRE_CONTROL = 201;
 const SIGNALING_TYPE_CODE_ACCEPT_CONTROL = 202;
 const SIGNALING_TYPE_CODE_DENY_CONTROL = 203;
+const SIGNALING_TYPE_CODE_CLOSE_CONTROL = 204;
 
 const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS = 301;
 
@@ -192,17 +193,15 @@ const Desk: React.FC = () => {
         break;
       case SIGNALING_TYPE_CODE_ACCEPT_CONTROL:
         message.success("控制请求被接受，准备初始化控制通道");
-        const peerconnection = peerconnectionRef.current!;
-        let mouseEventDataChannel = peerconnection.createDataChannel("mouse_event_channel", { ordered: false });
-        let keyboardEventDataChannel = peerconnection.createDataChannel("keyboard_event_channel", { ordered: true });
-        //peerconnection.createDataChannel("clipboard_event_channel", { ordered: true });
-        //peerconnection.createDataChannel("file_transfer_event_channel", { ordered: true });
-
-        mouseEventDataChannelRef.current = mouseEventDataChannel;
-        keyboardEventDataChannelRef.current = keyboardEventDataChannel;
+        setAcceptControl(true);
         break;
       case SIGNALING_TYPE_CODE_DENY_CONTROL:
         message.error("控制请求被拒绝");
+        break;
+      case SIGNALING_TYPE_CODE_CLOSE_CONTROL:
+        message.info("控制已被远程主机关闭");
+        setAcceptControl(false);
+
         break;
       case SIGNALING_TYPE_CODE_ERROR:
         const error_message = signalingModel.signaling_data;
@@ -334,6 +333,41 @@ const Desk: React.FC = () => {
     // Offer to receive 1 audio, and 1 video track
     pc.addTransceiver('video', { 'direction': 'sendrecv' });
     pc.addTransceiver('audio', { 'direction': 'sendrecv' });
+
+    //  create data channel for mouse and keyboard events before create offer
+    let mouseEventDataChannel = pc.createDataChannel("mouse_event_channel", { ordered: true });
+    let keyboardEventDataChannel = pc.createDataChannel("keyboard_event_channel", { ordered: true });
+
+    mouseEventDataChannel.onopen = (event) => {
+      console.log("mouse event data channel onopen, event=", event);
+    };
+
+    mouseEventDataChannel.onclose = (event) => {
+      console.log("mouse event data channel onclose, event=", event);
+    };
+
+    mouseEventDataChannel.onerror = (event) => {
+      console.log("mouse event data channel onerror, event=", event);
+    };
+    mouseEventDataChannel.onmessage = (event) => {
+      console.log("mouse event data channel onmessage, event=", event);
+    };
+
+    keyboardEventDataChannel.onopen = (event) => {
+      console.log("keyboard event data channel onopen, event=", event);
+    };
+    keyboardEventDataChannel.onclose = (event) => {
+      console.log("keyboard event data channel onclose, event=", event);
+    };
+    keyboardEventDataChannel.onerror = (event) => {
+      console.log("keyboard event data channel onerror, event=", event);
+    };
+    keyboardEventDataChannel.onmessage = (event) => {
+      console.log("keyboard event data channel onmessage, event=", event);
+    };
+
+    mouseEventDataChannelRef.current = mouseEventDataChannel;
+    keyboardEventDataChannelRef.current = keyboardEventDataChannel;
 
     pc.createOffer().then(d => {
       pc.setLocalDescription(d);

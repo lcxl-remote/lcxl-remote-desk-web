@@ -154,14 +154,40 @@ declare namespace API {
     video_device_list: Record<string, any>;
   };
 
+  type KeyboardEventData = {
+    /** whether the key is a system key */
+    alt_key: boolean;
+    /** key code, e.g. "KeyA", "Enter" */
+    code: string;
+    /** whether the ctrl key is pressed */
+    ctrl_key: boolean;
+    /** keyboard event type, e.g. "keydown", "keyup", "keypress" */
+    event: string;
+    /** whether the key is composing */
+    is_composing: boolean;
+    /** key value, e.g. "a", " */
+    key: string;
+    /** location of the key on the keyboard */
+    location: number;
+    /** whether the meta key is pressed */
+    meta_key: boolean;
+    /** whether the key is repeated */
+    repeat: boolean;
+    /** whether the shift key is pressed */
+    shift_key: boolean;
+  };
+
   type LabelKey = {
     key?: any;
     label?: any;
   };
 
   type LcxlRTCIceServer = {
+    /** Credential for the ICE server, if any. */
     credential: string;
+    /** List of URLs associated with the ICE server, e.g. ["stun:stun.l.google.com:19302"] */
     urls: string[];
+    /** Username for the ICE server, if any. */
     username: string;
   };
 
@@ -198,6 +224,21 @@ declare namespace API {
     currentAuthority: string;
     status: string;
     type: string;
+  };
+
+  type MouseEventData = {
+    /** Returns true if the alt key was down when the mouse event was fired. */
+    alt_key: boolean;
+    /** The button number that was pressed or released (if applicable) when the mouse event was fired. */
+    button: number;
+    /** The buttons being pressed (if any) when the mouse event was fired. */
+    buttons: number;
+    /** mouse event type, e.g. "mousemove", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "wheel" */
+    event: string;
+    /** mouse x coordinate */
+    x: number;
+    /** mouse y coordinate */
+    y: number;
   };
 
   type NoLogintUser = {
@@ -288,8 +329,11 @@ declare namespace API {
   };
 
   type SignalRequestControlData = {
+    /** whether the control request is accepted */
     accept?: boolean;
+    /** whether to accept clipboard sync */
     accept_clipboard_sync?: boolean;
+    /** whether to accept file transfer */
     accept_file_transfer?: boolean;
   };
 
