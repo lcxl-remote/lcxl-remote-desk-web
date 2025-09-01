@@ -235,9 +235,9 @@ declare namespace API {
     buttons: number;
     /** mouse event type, e.g. "mousemove", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "wheel" */
     event: string;
-    /** mouse x coordinate */
+    /** mouse x coordinate(relative to the viewport) */
     x: number;
-    /** mouse y coordinate */
+    /** mouse y coordinate(relative to the viewport) */
     y: number;
   };
 

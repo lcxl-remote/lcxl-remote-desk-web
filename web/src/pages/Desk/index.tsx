@@ -75,13 +75,34 @@ const Desk: React.FC = () => {
     console.log("video on resize, width=" + videoRef.clientWidth + ", height=" + videoRef.clientHeight + ", event=", event);
   };
 
+  const handleMouseEvent = (eventType: string, event: MouseEvent) => {
+    if (!acceptControl || !mouseEventDataChannelRef.current || mouseEventDataChannelRef.current.readyState !== "open") {
+      return;
+    }
+
+    if (dimensions.width == 0 || dimensions.height == 0) {
+      message.warning("视频尺寸未初始化，无法发送鼠标事件");
+      return;
+    }
+    const x_ratio = event.clientX / dimensions.width;
+    const y_ratio = event.clientY / dimensions.height;
+    const mouseEvent = {
+      event: eventType,
+      x: x_ratio,
+      y: y_ratio,
+      button: event.button,
+      buttons: event.buttons,
+      alt_key: event.altKey,
+    } as API.MouseEventData;
+    const mouseEventJson = JSON.stringify(mouseEvent);
+    if (eventType != "mousemove") {
+      console.log("send mouse event: ", mouseEventJson);
+    }
+    mouseEventDataChannelRef.current.send(mouseEventJson);
+  }
   const handleRemoteVideoMouseMove = (event: MouseEvent) => {
-    // Access mouse coordinates from the event object
-    // console.log("Mouse move on video element: ", event);
-    setMousePosition({
-      x: event.clientX, // X-coordinate relative to the viewport
-      y: event.clientY, // Y-coordinate relative to the viewport
-    });
+    handleMouseEvent("mousemove", event);
+
   };
 
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
@@ -120,12 +141,14 @@ const Desk: React.FC = () => {
   const handleRemoteVideoMouseUp = (event: MouseEvent) => {
     event.preventDefault();
     remoteVideo.current?.focus();
+    handleMouseEvent("mouseup", event);
     console.log("mouse up, event=", event);
   };
 
   const handleRemoteVideoMouseDown = (event: MouseEvent) => {
     event.preventDefault();
     remoteVideo.current?.focus();
+    handleMouseEvent("mousedown", event);
     console.log("mouse down, event=", event);
   };
 

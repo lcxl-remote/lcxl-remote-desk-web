@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::desk_error::DeskError;
+
 pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
 pub const DATA_CHANNEL_LABEL_KEYBOARD_EVENT: &str = "keyboard_event";
 pub const DATA_CHANNEL_LABEL_CLIPBOARD_EVENT: &str = "clipboard_event";
@@ -24,10 +26,10 @@ pub struct SignalRequestControlData {
 pub struct MouseEventData {
     /// mouse event type, e.g. "mousemove", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "wheel"
     pub event: String,
-    /// mouse x coordinate
-    pub x: i32,
-    /// mouse y coordinate
-    pub y: i32,
+    /// mouse x coordinate(relative to the viewport)
+    pub x: f64,
+    /// mouse y coordinate(relative to the viewport)
+    pub y: f64,
     ///Returns true if the alt key was down when the mouse event was fired.
     pub alt_key: bool,
     /// The button number that was pressed or released (if applicable) when the mouse event was fired.
@@ -60,4 +62,29 @@ pub struct KeyboardEventData {
     pub repeat: bool,
     /// whether the key is composing
     pub is_composing: bool,
+}
+
+/// Mouse Event Handler Trait
+pub trait MouseEventHandler {
+    /// Handle mouse event
+    fn handle_mouse_event(&self, event: &MouseEventData) -> Result<(), DeskError> {
+        match event.event.as_str() {
+            "mousemove" => self.handle_mouse_move(event),
+            "mousedown" => self.handle_mouse_down(event),
+            "mouseup" => self.handle_mouse_up(event),
+            _ => {
+                log::warn!("Unsupported mouse event type: {}", event.event);
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle mouse move event
+    fn handle_mouse_move(&self, event: &MouseEventData) -> Result<(), DeskError>;
+
+    /// Handle mouse down event
+    fn handle_mouse_down(&self, event: &MouseEventData) -> Result<(), DeskError>;
+
+    /// Handle mouse up event
+    fn handle_mouse_up(&self, event: &MouseEventData) -> Result<(), DeskError>;
 }

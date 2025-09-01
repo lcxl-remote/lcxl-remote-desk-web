@@ -2,6 +2,7 @@ pub mod audio_capture;
 pub mod audio_encoder;
 pub mod data_channel;
 pub mod image_capture;
+pub mod mouse_event;
 pub mod signaling;
 pub mod terminal;
 pub mod turn;
