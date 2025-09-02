@@ -18,6 +18,7 @@ pub trait ImageInfo {
 pub trait ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError>;
     fn get_capture_type(&self) -> ImageCaptureType;
+    fn get_current_output(&self) -> Result<DisplayInfo, DeskError>;
 }
 
 /// Image Output Enumerator Trait
@@ -54,7 +55,7 @@ pub trait ImageCaptureTypeHelper {
 }
 
 /// Display Rectangle Struct
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default)]
 pub struct DisplayRect {
     /// Left coordinate of the rectangle
     pub left: i32,
@@ -66,8 +67,20 @@ pub struct DisplayRect {
     pub bottom: i32,
 }
 
+impl DisplayRect {
+    /// Get width of the rectangle
+    pub fn width(&self) -> i32 {
+        self.right - self.left
+    }
+
+    /// Get height of the rectangle
+    pub fn height(&self) -> i32 {
+        self.bottom - self.top
+    }
+}
+
 /// Display Info
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct DisplayInfo {
     /// Display device name, e.g. "\\.\DISPLAY1"
     pub device_name: String,

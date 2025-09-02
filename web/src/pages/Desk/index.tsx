@@ -358,8 +358,8 @@ const Desk: React.FC = () => {
     pc.addTransceiver('audio', { 'direction': 'sendrecv' });
 
     //  create data channel for mouse and keyboard events before create offer
-    let mouseEventDataChannel = pc.createDataChannel("mouse_event_channel", { ordered: true });
-    let keyboardEventDataChannel = pc.createDataChannel("keyboard_event_channel", { ordered: true });
+    let mouseEventDataChannel = pc.createDataChannel("mouse_event", { ordered: true });
+    let keyboardEventDataChannel = pc.createDataChannel("keyboard_event", { ordered: true });
 
     mouseEventDataChannel.onopen = (event) => {
       console.log("mouse event data channel onopen, event=", event);

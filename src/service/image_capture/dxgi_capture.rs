@@ -1393,6 +1393,12 @@ impl ImageCapture for DigxImageCapture {
     fn get_capture_type(&self) -> ImageCaptureType {
         ImageCaptureType::DIGX
     }
+
+    fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
+        let output = unsafe { self.manager.dxgi_adapter.EnumOutputs(self.output_index)? };
+        let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
+        Ok(DisplayInfo::from(output_desc))
+    }
 }
 
 #[cfg(test)]

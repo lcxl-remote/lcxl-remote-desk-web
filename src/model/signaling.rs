@@ -243,10 +243,12 @@ impl From<&RTCPeerConnectionState> for WebRTConnectionState {
 }
 
 /// Signaling State
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SignalingState {
     /// accept control from remote peer
     pub accept_control: bool,
+    /// current display info
+    pub display_info: DisplayInfo,
 }
 
 /// Offer Model

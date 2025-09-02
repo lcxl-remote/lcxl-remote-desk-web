@@ -293,8 +293,10 @@ impl SignalingContext {
 
         // Spawn a blocking task to capture screen and send video
         let desk_settings = offer_model.desk_settings.clone();
+        let signaling_state_for_screen = self.signaling_state.clone();
         self.capture_screen_runtime.spawn(async move {
             let result = SignalingContext::capture_screen_task(
+                signaling_state_for_screen,
                 desk_settings,
                 video_state_receiver,
                 video_track,
@@ -415,6 +417,7 @@ impl SignalingContext {
 
     /// Start the screen capture task
     pub async fn capture_screen_task(
+        signaling_state: Arc<tokio::sync::RwLock<SignalingState>>,
         desk_settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
@@ -427,7 +430,16 @@ impl SignalingContext {
         let mut capture = create_image_capture(&desk_settings)?;
         let mut encoder = create_video_encoder(&desk_settings)?;
         let mut image_capture_type = capture.get_capture_type().into();
-
+        //TODO
+        let display_info = capture.get_current_output()?;
+        {
+            let mut signaling_state = signaling_state.write().await;
+            signaling_state.display_info = display_info;
+            log::info!(
+                "Set initial display info: {:?}",
+                signaling_state.display_info
+            );
+        }
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
             let state = connection_state_rx.borrow_and_update().clone();

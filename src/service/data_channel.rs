@@ -6,12 +6,24 @@ use webrtc::{
     peer_connection::math_rand_alpha,
 };
 
-use crate::model::signaling::SignalingState;
+use crate::{
+    model::{data_channel::DATA_CHANNEL_LABEL_MOUSE_EVENT, signaling::SignalingState},
+    service::mouse_event::handle_mouse_event,
+};
 
 pub async fn handle_data_channel_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
 ) {
+    match data_channel.label() {
+        DATA_CHANNEL_LABEL_MOUSE_EVENT => {
+            handle_mouse_event(signaling_state, data_channel).await;
+            return;
+        }
+        label => {
+            log::warn!("Unknown data channel label: {}", label);
+        }
+    }
     let d_label = data_channel.label().to_owned();
     let data_channel_sender = Arc::clone(&data_channel);
     let d_id = data_channel.id();
