@@ -38,6 +38,8 @@ const Desk: React.FC = () => {
   const remoteAudio = useRef<HTMLAudioElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
+  const acceptControlRef = useRef(false);
+  const dimensionsRef = useRef({ width: 0, height: 0 });
   // data channel
   const mouseEventDataChannelRef = useRef<RTCDataChannel>();
   const keyboardEventDataChannelRef = useRef<RTCDataChannel>();
@@ -46,8 +48,7 @@ const Desk: React.FC = () => {
 
   // use state
   const [formInstance, setFormInstance] = useState<ProFormInstance<DeskFormValues>>();
-  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
-  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [initSignalingData, setInitSignalingData] = useState<API.InitSignalingData>();
   const [acceptControl, setAcceptControl] = useState(false);
@@ -76,16 +77,16 @@ const Desk: React.FC = () => {
   };
 
   const handleMouseEvent = (eventType: string, event: MouseEvent) => {
-    if (!acceptControl || !mouseEventDataChannelRef.current || mouseEventDataChannelRef.current.readyState !== "open") {
+    if (!acceptControlRef.current || !mouseEventDataChannelRef.current || mouseEventDataChannelRef.current.readyState !== "open") {
       return;
     }
-
+    const dimensions = dimensionsRef.current;
     if (dimensions.width == 0 || dimensions.height == 0) {
       message.warning("视频尺寸未初始化，无法发送鼠标事件");
       return;
     }
-    const x_ratio = event.clientX / dimensions.width;
-    const y_ratio = event.clientY / dimensions.height;
+    const x_ratio = event.offsetX / dimensions.width;
+    const y_ratio = event.offsetY / dimensions.height;
     const mouseEvent = {
       event: eventType,
       x: x_ratio,
@@ -217,6 +218,7 @@ const Desk: React.FC = () => {
       case SIGNALING_TYPE_CODE_ACCEPT_CONTROL:
         message.success("控制请求被接受，准备初始化控制通道");
         setAcceptControl(true);
+        acceptControlRef.current = true;
         break;
       case SIGNALING_TYPE_CODE_DENY_CONTROL:
         message.error("控制请求被拒绝");
@@ -224,7 +226,7 @@ const Desk: React.FC = () => {
       case SIGNALING_TYPE_CODE_CLOSE_CONTROL:
         message.info("控制已被远程主机关闭");
         setAcceptControl(false);
-
+        acceptControlRef.current = false;
         break;
       case SIGNALING_TYPE_CODE_ERROR:
         const error_message = signalingModel.signaling_data;
@@ -258,10 +260,10 @@ const Desk: React.FC = () => {
     const resizeObserver = new ResizeObserver(entries => {
       for (let entry of entries) {
         console.log("The size of video element changed: ", entry);
-        setDimensions({
+        dimensionsRef.current = {
           width: entry.contentRect.width,
           height: entry.contentRect.height,
-        });
+        };
       }
     });
 
@@ -281,14 +283,14 @@ const Desk: React.FC = () => {
   };
 
   const handleRequestControl = () => {
-    if (!acceptControl) {
-      const requestControlData = {
-        accept: true,
-        accept_clipboard_sync: true,
-        accept_file_transfer: true,
-      } as API.SignalRequestControlData;
-      sendSignalingMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, requestControlData);
-    }
+
+    const requestControlData = {
+      accept: !acceptControl,
+      accept_clipboard_sync: !acceptControl,
+      accept_file_transfer: !acceptControl,
+    } as API.SignalRequestControlData;
+    sendSignalingMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, requestControlData);
+
   }
 
   const handleOk = async (formData: DeskFormValues) => {
