@@ -87,6 +87,13 @@ const Desk: React.FC = () => {
     }
     const x_ratio = event.offsetX / dimensions.width;
     const y_ratio = event.offsetY / dimensions.height;
+    let delta_x = 0;
+    let delta_y = 0;
+    if (eventType == "wheel") {
+      const wheelEvent = event as WheelEvent;
+      delta_x = wheelEvent.deltaX;
+      delta_y = wheelEvent.deltaY;
+    }
     const mouseEvent = {
       event: eventType,
       x: x_ratio,
@@ -94,6 +101,8 @@ const Desk: React.FC = () => {
       button: event.button,
       buttons: event.buttons,
       alt_key: event.altKey,
+      delta_x: delta_x,
+      delta_y: delta_y,
     } as API.MouseEventData;
     const mouseEventJson = JSON.stringify(mouseEvent);
     if (eventType != "mousemove") {
@@ -103,7 +112,6 @@ const Desk: React.FC = () => {
   }
   const handleRemoteVideoMouseMove = (event: MouseEvent) => {
     handleMouseEvent("mousemove", event);
-
   };
 
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
@@ -160,6 +168,14 @@ const Desk: React.FC = () => {
     console.log("context menu, event=", event);
   }
 
+  const handleRemoteVideoMousWheel = (event: WheelEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    remoteVideo.current?.focus();
+    handleMouseEvent("wheel", event);
+    console.log("mouse wheel, event=", event);
+  };
+
   const addRemoteVideoEvent = (element: HTMLVideoElement) => {
     console.log("addRemoteVideoEvent");
     // Add resize event listener to the video element
@@ -174,6 +190,8 @@ const Desk: React.FC = () => {
     element.addEventListener("click", handleRemoteVideoClick);
 
     element.addEventListener("dblclick", handleRemoteVideoDblClick);
+
+    element.addEventListener("wheel", handleRemoteVideoMousWheel, { passive: false });
 
     element.addEventListener("keydown", handleRemoteVideoKeyDown);
 

@@ -36,6 +36,11 @@ pub struct MouseEventData {
     pub button: i32,
     /// The buttons being pressed (if any) when the mouse event was fired.
     pub buttons: i32,
+
+    /// The distance that the mouse wheel has been rotated around the X axis (if applicable) when the mouse event was fired.
+    pub delta_x: f64,
+    /// The distance that the mouse wheel has been rotated around the Y axis (if applicable) when the mouse event was fired.
+    pub delta_y: f64,
 }
 
 /// Keyboard event data structure
@@ -72,6 +77,7 @@ pub trait MouseEventHandler {
             "mousemove" => self.handle_mouse_move(event),
             "mousedown" => self.handle_mouse_down(event),
             "mouseup" => self.handle_mouse_up(event),
+            "wheel" => self.handle_mouse_wheel(event),
             _ => {
                 log::warn!("Unsupported mouse event type: {}", event.event);
                 Ok(())
@@ -87,4 +93,6 @@ pub trait MouseEventHandler {
 
     /// Handle mouse up event
     fn handle_mouse_up(&self, event: &MouseEventData) -> Result<(), DeskError>;
+    /// Handle mouse wheel event
+    fn handle_mouse_wheel(&self, event: &MouseEventData) -> Result<(), DeskError>;
 }

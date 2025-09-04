@@ -233,6 +233,10 @@ declare namespace API {
     button: number;
     /** The buttons being pressed (if any) when the mouse event was fired. */
     buttons: number;
+    /** The distance that the mouse wheel has been rotated around the X axis (if applicable) when the mouse event was fired. */
+    delta_x: number;
+    /** The distance that the mouse wheel has been rotated around the Y axis (if applicable) when the mouse event was fired. */
+    delta_y: number;
     /** mouse event type, e.g. "mousemove", "mousedown", "mouseup", "click", "dblclick", "contextmenu", "wheel" */
     event: string;
     /** mouse x coordinate(relative to the viewport) */
