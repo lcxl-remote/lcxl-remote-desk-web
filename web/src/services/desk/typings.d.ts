@@ -157,7 +157,7 @@ declare namespace API {
   type KeyboardEventData = {
     /** whether the key is a system key */
     alt_key: boolean;
-    /** key code, e.g. "KeyA", "Enter" */
+    /** key code, e.g. "KeyA", "Enter", see https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/code#code_values */
     code: string;
     /** whether the ctrl key is pressed */
     ctrl_key: boolean;
@@ -165,8 +165,10 @@ declare namespace API {
     event: string;
     /** whether the key is composing */
     is_composing: boolean;
-    /** key value, e.g. "a", " */
+    /** key value, e.g. "a", see https://developer.mozilla.org/zh-CN/docs/Web/API/UI_Events/Keyboard_event_key_values */
     key: string;
+    /** physical key code, e.g. 65 for "a", see https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/keyCode */
+    key_code: number;
     /** location of the key on the keyboard */
     location: number;
     /** whether the meta key is pressed */

@@ -116,23 +116,14 @@ const Desk: React.FC = () => {
 
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
     console.log("key down, event=", event);
-    // 1. 只处理 Tab 键
-    if (event.key === 'Tab') {
-      event.preventDefault();   // 阻止浏览器的默认 Tab 行为
-      // 2. 如你想把焦点保持在视频容器上：
-      remoteVideo.current?.focus();
-      // 3. 如果你想让 Tab 在容器内部循环（例如容器内部有多个控件）：
-      //    const focusable = container.querySelectorAll('a, button, input, textarea, select, [tabindex]:not([tabindex="-1"])');
-      //    const currentIndex = [...focusable].indexOf(document.activeElement);
-      //    const nextIndex = e.shiftKey ? (currentIndex - 1 + focusable.length) % focusable.length
-      //                                 : (currentIndex + 1) % focusable.length;
-      //    focusable[nextIndex].focus();
-    }
-
+    event.preventDefault(); 
+    remoteVideo.current?.focus();
   };
 
   const handleRemoteVideoKeyUp = (event: KeyboardEvent) => {
     console.log("key up, event=", event);
+    event.preventDefault(); 
+    remoteVideo.current?.focus();
   };
 
   const handleRemoteVideoWaiting = (event: Event) => {
