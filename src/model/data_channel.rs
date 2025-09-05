@@ -96,3 +96,23 @@ pub trait MouseEventHandler {
     /// Handle mouse wheel event
     fn handle_mouse_wheel(&self, event: &MouseEventData) -> Result<(), DeskError>;
 }
+
+pub trait KeyboardEventHandler {
+    /// Handle keyboard event
+    fn handle_keyboard_event(&self, event: &KeyboardEventData) -> Result<(), DeskError> {
+        match event.event.as_str() {
+            "keydown" => self.handle_key_down(event),
+            "keyup" => self.handle_key_up(event),
+            _ => {
+                log::warn!("Unsupported keyboard event type: {}", event.event);
+                Ok(())
+            }
+        }
+    }
+    /// Handle key down event
+    fn handle_key_down(&self, event: &KeyboardEventData) -> Result<(), DeskError>;
+
+    /// Handle key up event
+    fn handle_key_up(&self, event: &KeyboardEventData) -> Result<(), DeskError>;
+    
+}

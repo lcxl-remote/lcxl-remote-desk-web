@@ -7,8 +7,11 @@ use webrtc::{
 };
 
 use crate::{
-    model::{data_channel::DATA_CHANNEL_LABEL_MOUSE_EVENT, signaling::SignalingState},
-    service::mouse_event::handle_mouse_event,
+    model::{
+        data_channel::{DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT},
+        signaling::SignalingState,
+    },
+    service::{keyboard_event::handle_keyboard_event, mouse_event::handle_mouse_event},
 };
 
 pub async fn handle_data_channel_event(
@@ -18,6 +21,10 @@ pub async fn handle_data_channel_event(
     match data_channel.label() {
         DATA_CHANNEL_LABEL_MOUSE_EVENT => {
             handle_mouse_event(signaling_state, data_channel).await;
+            return;
+        }
+        DATA_CHANNEL_LABEL_KEYBOARD_EVENT => {
+            handle_keyboard_event(signaling_state, data_channel).await;
             return;
         }
         label => {
