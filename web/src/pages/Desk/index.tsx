@@ -316,6 +316,19 @@ const Desk: React.FC = () => {
     setIsModalOpen(true);
   };
 
+  const handleFullScreen = () => {
+    const videoElement = remoteVideo.current;
+    if (videoElement) {
+      if (videoElement.requestFullscreen) {
+        videoElement.requestFullscreen();
+      } else if ((videoElement as any).webkitRequestFullscreen) { /* Safari */
+        (videoElement as any).webkitRequestFullscreen();
+      } else if ((videoElement as any).msRequestFullscreen) { /* IE11 */
+        (videoElement as any).msRequestFullscreen();
+      }
+    }
+  };
+  
   const handleRequestControl = () => {
 
     const requestControlData = {
@@ -475,7 +488,7 @@ const Desk: React.FC = () => {
         /*style={{ insetInlineEnd: 24 }}*/
         icon={<CustomerServiceOutlined />}
       >
-        <FloatButton tooltip={<div>全屏</div>} icon={<FullscreenOutlined />} />
+        <FloatButton tooltip={<div>全屏</div>} icon={<FullscreenOutlined />} onClick={handleFullScreen} />
         <FloatButton icon={<SettingOutlined />} onClick={showModal} />
         <FloatButton icon={<CommentOutlined />} tooltip={acceptControl ? <div>退出控制</div> : <div>请求控制</div>} onClick={handleRequestControl} />
       </FloatButton.Group>
