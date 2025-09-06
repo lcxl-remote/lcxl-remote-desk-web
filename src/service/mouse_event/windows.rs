@@ -1,10 +1,13 @@
-use windows::Win32::UI::{
-    Input::KeyboardAndMouse::{
-        INPUT, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-        MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-        MOUSEEVENTF_WHEEL, SendInput,
+use windows::Win32::{
+    Foundation::GetLastError,
+    UI::{
+        Input::KeyboardAndMouse::{
+            INPUT, INPUT_MOUSE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+            MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+            MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, SendInput,
+        },
+        WindowsAndMessaging::SetCursorPos,
     },
-    WindowsAndMessaging::SetCursorPos,
 };
 
 use crate::{
@@ -30,7 +33,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         let x = (event.x * self.width as f64) as i32;
         let y = (event.y * self.height as f64) as i32;
         let result = unsafe { SetCursorPos(x, y) };
-        if !result.is_err() {
+        if result.is_err() {
             log::error!(
                 "Failed to set cursor position to ({}, {}), error: {:?}",
                 x,
@@ -60,8 +63,15 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         input.Anonymous.mi.dwFlags = mouse_event_flags;
         let inputs = [input];
         unsafe {
-            SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);
-            //windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(mouse_event_flags, x, y, 0, 0)
+            let result = SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);
+            if result == 0 {
+                let last_error = GetLastError();
+                log::error!(
+                    "Failed to send mouse down event {}, error: {:?}",
+                    event.button,
+                    last_error
+                );
+            }
         };
         Ok(())
     }
@@ -82,8 +92,15 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         input.Anonymous.mi.dwFlags = mouse_event_flags;
         let inputs = [input];
         unsafe {
-            SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);
-            //windows::Win32::UI::Input::KeyboardAndMouse::mouse_event(mouse_event_flags, x, y, 0, 0)
+            let result = SendInput(&inputs, size_of::<[INPUT; 1]>() as i32);
+            if result == 0 {
+                let last_error = GetLastError();
+                log::error!(
+                    "Failed to send mouse up event {}, error: {:?}",
+                    event.button,
+                    last_error
+                );
+            }
         };
         Ok(())
     }

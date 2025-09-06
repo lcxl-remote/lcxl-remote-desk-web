@@ -54,7 +54,7 @@ pub struct KeyboardEventData {
     /// key code, e.g. "KeyA", "Enter", see https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/code#code_values
     pub code: String,
     /// physical key code, e.g. 65 for "a", see https://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent/keyCode
-    pub key_code: u8,
+    pub key_code: u32,
     /// whether the key is a system key
     pub alt_key: bool,
     /// whether the ctrl key is pressed
@@ -116,5 +116,4 @@ pub trait KeyboardEventHandler {
 
     /// Handle key up event
     fn handle_key_up(&self, event: &KeyboardEventData) -> Result<(), DeskError>;
-    
 }

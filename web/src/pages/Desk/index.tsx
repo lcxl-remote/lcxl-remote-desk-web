@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from './index.less'; // 告诉 umi 编译这个 less
 import { CommentOutlined, CustomerServiceOutlined, FullscreenOutlined, SettingOutlined } from "@ant-design/icons";
+import e from "express";
 
 const SIGNALING_TYPE_CODE_INIT = 0;
 const SIGNALING_TYPE_CODE_OFFER = 100;
@@ -114,16 +115,40 @@ const Desk: React.FC = () => {
     handleMouseEvent("mousemove", event);
   };
 
+  const handleKeyboardEvent = (eventType: string, event: KeyboardEvent) => {
+    if (!acceptControlRef.current || !keyboardEventDataChannelRef.current || keyboardEventDataChannelRef.current.readyState !== "open") {
+      return;
+    }
+    const keyboardEvent = {
+      event: eventType,
+      key: event.key,
+      code: event.code,
+      key_code: event.keyCode,
+      alt_key: event.altKey,
+      ctrl_key: event.ctrlKey,
+      shift_key: event.shiftKey,
+      meta_key: event.metaKey,
+      repeat: event.repeat,
+      location: event.location,
+      is_composing: event.isComposing,
+    } as API.KeyboardEventData;
+    const keyboardEventJson = JSON.stringify(keyboardEvent);
+    console.log("send keyboard event: ", keyboardEventJson);
+    keyboardEventDataChannelRef.current.send(keyboardEventJson);
+  }
+
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
     console.log("key down, event=", event);
-    event.preventDefault(); 
+    event.preventDefault();
     remoteVideo.current?.focus();
+    handleKeyboardEvent("keydown", event);
   };
 
   const handleRemoteVideoKeyUp = (event: KeyboardEvent) => {
     console.log("key up, event=", event);
-    event.preventDefault(); 
+    event.preventDefault();
     remoteVideo.current?.focus();
+    handleKeyboardEvent("keyup", event);
   };
 
   const handleRemoteVideoWaiting = (event: Event) => {
