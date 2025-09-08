@@ -36,6 +36,7 @@ impl KeyboardEventHandler for WindowsKeyboardEventHandler {
     fn handle_key_up(&self, event: &KeyboardEventData) -> Result<(), DeskError> {
         let mut input = INPUT::default();
         input.r#type = INPUT_KEYBOARD;
+        // see https://learn.microsoft.com/zh-cn/windows/win32/inputdev/virtual-key-codes
         input.Anonymous.ki.wVk = VIRTUAL_KEY(event.key_code as u16);
         input.Anonymous.ki.dwFlags = KEYEVENTF_KEYUP;
         let inputs = [input];

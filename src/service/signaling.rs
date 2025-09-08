@@ -10,6 +10,7 @@ use log::{error, info, warn};
 use prometheus::{HistogramVec, register_histogram_vec};
 use tokio::time::Duration;
 use tokio::time::Instant;
+use turn_server::config::Transport;
 use webrtc::api::media_engine::MIME_TYPE_OPUS;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::{
@@ -144,12 +145,26 @@ impl SignalingContext {
             let shared_settings = settings.read().await;
             shared_settings.clone()
         };
-        let mut urls = Vec::<String>::new();
+        let mut stun_urls = Vec::<String>::new();
+        let mut turn_urls = Vec::<String>::new();
         for interface in local_settings.turn.interfaces.iter() {
-            urls.push(format!("turn:{}", interface.external.to_string()));
+            if interface.transport == Transport::TCP {
+                turn_urls.push(format!(
+                    "turn:{}?transport=tcp",
+                    interface.external.to_string()
+                ));
+            } else {
+                stun_urls.push(format!("stun:{}", interface.external.to_string()));
+                turn_urls.push(format!("turn:{}", interface.external.to_string()));
+            }
         }
-        let ice_server = RTCIceServer {
-            urls: urls,
+        let ice_stun_server = RTCIceServer {
+            urls: stun_urls.clone(),
+            username: "".to_string(),
+            credential: "".to_string(),
+        };
+        let ice_turn_server = RTCIceServer {
+            urls: turn_urls,
             username: local_settings.user.login_user_name.clone(),
             credential: local_settings.user.login_password.clone(),
         };
@@ -173,7 +188,7 @@ impl SignalingContext {
 
         // Prepare the configuration
         let config = RTCConfiguration {
-            ice_servers: vec![ice_server.clone()],
+            ice_servers: vec![ice_stun_server.clone(), ice_turn_server.clone()],
             ..Default::default()
         };
 
@@ -202,7 +217,10 @@ impl SignalingContext {
         let video_device_list = spawn_handle.await?;
 
         let init_signaling_data = InitSignalingData {
-            ice_servers: vec![LcxlRTCIceServer::from(ice_server.clone())],
+            ice_servers: vec![
+                LcxlRTCIceServer::from(ice_stun_server.clone()),
+                LcxlRTCIceServer::from(ice_turn_server.clone()),
+            ],
             user_name: user.name.clone(),
             audio_device_list,
             video_device_list,
