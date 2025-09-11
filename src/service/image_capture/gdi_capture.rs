@@ -23,6 +23,7 @@ use crate::{
         },
         settings::DeskSettings,
     },
+    service::image_capture::windows::enum_display_resolutions,
 };
 
 enum GDIHDCType {
@@ -135,6 +136,7 @@ impl GdiImageOutputEnumerator {
             log::warn!("Failed to get current settings for device {}", device_name);
             return Ok(None);
         }
+        let resolutions = enum_display_resolutions(&device_name)?;
         Ok(Some(DisplayInfo {
             device_name,
             display_device_name: Some(display_name),
@@ -144,6 +146,7 @@ impl GdiImageOutputEnumerator {
                 right: dev_mode.dmPelsWidth as i32,
                 bottom: dev_mode.dmPelsHeight as i32,
             },
+            resolutions,
             attached_to_desktop: true,
             rotation: 0,
         }))

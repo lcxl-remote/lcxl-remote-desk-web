@@ -55,6 +55,7 @@ use crate::{
         },
         settings::DeskSettings,
     },
+    service::image_capture::windows::enum_display_resolutions,
 };
 
 #[repr(C)]
@@ -202,10 +203,14 @@ impl DisplayInfo {
             attached_to_desktop,
             rotation
         );
+
+        let resolutions = enum_display_resolutions(&device_name).unwrap_or(vec![]);
+
         DisplayInfo {
             device_name,
             display_device_name,
             desktop_coordinates,
+            resolutions,
             attached_to_desktop,
             rotation,
         }

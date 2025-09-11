@@ -88,6 +88,8 @@ pub struct DisplayInfo {
     pub display_device_name: Option<String>,
     /// Display device rect coordinates on the desktop
     pub desktop_coordinates: DisplayRect,
+    /// Supported display resolutions (width, height)
+    pub resolutions: Vec<(u32, u32)>,
     /// Is the display attached to the desktop
     pub attached_to_desktop: bool,
     /// Display rotation angle in degrees, e.g. 0, 90, 180, 270
