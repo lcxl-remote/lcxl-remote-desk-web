@@ -16,8 +16,8 @@ use crate::{
     desk_error::DeskError,
     model::{
         image_capture::{
-            DisplayInfo, ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator,
-            ImageType,
+            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
+            ImageOutputEnumerator, ImageType,
         },
         settings::DeskSettings,
     },
@@ -37,6 +37,7 @@ pub struct Display {
 }
 
 pub struct X11ImageCapture {
+    index: usize,
     screen: usize,
     connection: RustConnection,
     displays: Vec<Display>,
@@ -95,14 +96,37 @@ impl ImageOutputEnumerator for X11ImageOutputEnumerator {
 impl ImageCapture for X11ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         let image_info = match self.seg {
-            Some(_) => self.capture_shm(0)?,
-            None => self.capture_standard(0)?,
+            Some(_) => self.capture_shm(self.index)?,
+            None => self.capture_standard(self.index)?,
         };
         Ok(image_info)
     }
 
     fn get_capture_type(&self) -> ImageCaptureType {
         ImageCaptureType::X11
+    }
+
+    fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
+        self.displays
+            .get(self.index)
+            .map(|d| DisplayInfo {
+                device_name: "X11 Display".to_string(),
+                display_device_name: None,
+                desktop_coordinates: DisplayRect {
+                    left: d.left as i32,
+                    top: d.top as i32,
+                    right: (d.left + d.width as i16) as i32,
+                    bottom: (d.top + d.height as i16) as i32,
+                },
+                attached_to_desktop: true,
+                rotation: 0,
+            })
+            .ok_or_else(|| {
+                DeskError::X11ConnectionError(ConnectionError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Couldn't find primary display",
+                )))
+            })
     }
 }
 
@@ -172,6 +196,7 @@ impl X11ImageCapture {
 
         let (primary_display_index, displays) = get_displays(&connection, screen)?;
         Ok(X11ImageCapture {
+            index: settings.video_device_index as usize,
             screen,
             displays,
             primary_display_index,
