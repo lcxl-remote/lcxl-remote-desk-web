@@ -120,6 +120,7 @@ impl ImageCapture for X11ImageCapture {
                 },
                 attached_to_desktop: true,
                 rotation: 0,
+                resolutions: vec![],
             })
             .ok_or_else(|| {
                 DeskError::X11ConnectionError(ConnectionError::IoError(std::io::Error::new(

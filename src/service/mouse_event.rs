@@ -11,6 +11,9 @@ use crate::model::{
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 pub fn create_mouse_event_handler(
     width: i32,
     height: i32,
@@ -18,6 +21,10 @@ pub fn create_mouse_event_handler(
     #[cfg(target_os = "windows")]
     {
         Box::new(windows::WindowsMouseEventHandler::new(width, height))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(linux::UinputMouseEventHandler::new(width, height))
     }
 }
 

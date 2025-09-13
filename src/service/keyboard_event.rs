@@ -18,6 +18,10 @@ pub fn create_keyboard_event_handler() -> Box<dyn KeyboardEventHandler + Send + 
     {
         Box::new(windows::WindowsKeyboardEventHandler {})
     }
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(linux::UinputKeyboardEventHandler {})
+    }
 }
 
 pub async fn handle_keyboard_event(
