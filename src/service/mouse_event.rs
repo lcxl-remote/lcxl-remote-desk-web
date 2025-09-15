@@ -3,9 +3,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use webrtc::data_channel::RTCDataChannel;
 
-use crate::model::{
-    data_channel::{MouseEventData, MouseEventHandler},
-    signaling::SignalingState,
+use crate::{
+    desk_error::DeskError,
+    model::{
+        data_channel::{MouseEventData, MouseEventHandler},
+        signaling::SignalingState,
+    },
 };
 
 #[cfg(target_os = "windows")]
@@ -17,21 +20,25 @@ pub mod linux;
 pub fn create_mouse_event_handler(
     width: i32,
     height: i32,
-) -> Box<dyn MouseEventHandler + Send + Sync> {
+) -> Result<Box<dyn MouseEventHandler + Send + Sync>, DeskError> {
     #[cfg(target_os = "windows")]
     {
-        Box::new(windows::WindowsMouseEventHandler::new(width, height))
+        Ok(Box::new(windows::WindowsMouseEventHandler::new(
+            width, height,
+        )))
     }
     #[cfg(target_os = "linux")]
     {
-        Box::new(linux::UinputMouseEventHandler::new(width, height))
+        Ok(Box::new(linux::UinputMouseEventHandler::new(
+            width, height,
+        )?))
     }
 }
 
 pub async fn handle_mouse_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
-) {
+) -> Result<(), DeskError> {
     let (width, height) = {
         let desktop_coordinates = signaling_state
             .read()
@@ -40,7 +47,7 @@ pub async fn handle_mouse_event(
             .desktop_coordinates;
         (desktop_coordinates.width(), desktop_coordinates.height())
     };
-    let handler = Arc::new(create_mouse_event_handler(width, height));
+    let handler = Arc::new(create_mouse_event_handler(width, height)?);
     data_channel.on_message(Box::new(move |msg| {
         let signaling_state = signaling_state.clone();
         let handler = handler.clone();
@@ -64,4 +71,5 @@ pub async fn handle_mouse_event(
             }
         })
     }));
+    Ok(())
 }

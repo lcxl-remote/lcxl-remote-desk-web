@@ -3,9 +3,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use webrtc::data_channel::RTCDataChannel;
 
-use crate::model::{
-    data_channel::{KeyboardEventData, KeyboardEventHandler},
-    signaling::SignalingState,
+use crate::{
+    desk_error::DeskError,
+    model::{
+        data_channel::{KeyboardEventData, KeyboardEventHandler},
+        signaling::SignalingState,
+    },
 };
 
 #[cfg(target_os = "linux")]
@@ -13,22 +16,23 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-pub fn create_keyboard_event_handler() -> Box<dyn KeyboardEventHandler + Send + Sync> {
+pub fn create_keyboard_event_handler()
+-> Result<Box<dyn KeyboardEventHandler + Send + Sync>, DeskError> {
     #[cfg(target_os = "windows")]
     {
-        Box::new(windows::WindowsKeyboardEventHandler {})
+        Ok(Box::new(windows::WindowsKeyboardEventHandler {}))
     }
     #[cfg(target_os = "linux")]
     {
-        Box::new(linux::UinputKeyboardEventHandler {})
+        Ok(Box::new(linux::UinputKeyboardEventHandler {}))
     }
 }
 
 pub async fn handle_keyboard_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
-) {
-    let handler = Arc::new(create_keyboard_event_handler());
+) -> Result<(), DeskError> {
+    let handler = Arc::new(create_keyboard_event_handler()?);
     data_channel.on_message(Box::new(move |msg| {
         let signaling_state = signaling_state.clone();
         let handler = handler.clone();
@@ -52,4 +56,5 @@ pub async fn handle_keyboard_event(
             }
         })
     }));
+    Ok(())
 }

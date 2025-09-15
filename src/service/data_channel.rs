@@ -7,6 +7,7 @@ use webrtc::{
 };
 
 use crate::{
+    desk_error::DeskError,
     model::{
         data_channel::{DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT},
         signaling::SignalingState,
@@ -17,15 +18,15 @@ use crate::{
 pub async fn handle_data_channel_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
-) {
+) -> Result<(), DeskError> {
     match data_channel.label() {
         DATA_CHANNEL_LABEL_MOUSE_EVENT => {
-            handle_mouse_event(signaling_state, data_channel).await;
-            return;
+            handle_mouse_event(signaling_state, data_channel).await?;
+            return Ok(());
         }
         DATA_CHANNEL_LABEL_KEYBOARD_EVENT => {
-            handle_keyboard_event(signaling_state, data_channel).await;
-            return;
+            handle_keyboard_event(signaling_state, data_channel).await?;
+            return Ok(());
         }
         label => {
             log::warn!("Unknown data channel label: {}", label);
@@ -80,4 +81,5 @@ pub async fn handle_data_channel_event(
             }
         })
     }));
+    Ok(())
 }

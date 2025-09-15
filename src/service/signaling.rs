@@ -409,7 +409,10 @@ impl SignalingContext {
                 let signaling_state = signaling_state_for_data_channel.clone();
                 // Register channel opening handling
                 Box::pin(async move {
-                    handle_data_channel_event(signaling_state, d.clone()).await;
+                    let result = handle_data_channel_event(signaling_state, d.clone()).await;
+                    if let Err(error) = result {
+                        log::error!("Failed to handle data channel event: {:?}", error);
+                    }
                 })
             }));
         self.update_setting_sender = Some(update_setting_sender);
