@@ -1,4 +1,7 @@
-use evdev::{uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AttributeSet, AttributeSetRef, InputEvent, KeyCode, UinputAbsSetup};
+use evdev::{
+    AbsInfo, AbsoluteAxisCode, AttributeSet, AttributeSetRef, EventType, InputEvent, KeyCode,
+    KeyEvent, UinputAbsSetup, uinput::VirtualDevice,
+};
 
 use crate::{
     desk_error::DeskError,
@@ -18,7 +21,7 @@ impl UinputMouseEventHandler {
         keys.insert(evdev::KeyCode::BTN_MIDDLE);
 
         let abs_setup = AbsInfo::new(0, 0, 32767, 0, 0, 0);
-        
+
         let abs_x = UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs_setup.clone());
         let abs_y = UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs_setup.clone());
 
@@ -38,22 +41,52 @@ impl UinputMouseEventHandler {
 }
 
 impl MouseEventHandler for UinputMouseEventHandler {
-    fn handle_mouse_move(&self, event: &MouseEventData) -> Result<(), DeskError> {
-        let input_event = InputEvent::new(EV_REL)
-         self.virtual_device.emit()
-        todo!()
-    }
-
-    fn handle_mouse_down(&self, event: &MouseEventData) -> Result<(), DeskError> {
-        self.virtual_device.emit(event)?;
+    fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
+        let input_event_x = InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_X.0,
+            (event.x * 32767.0) as i32,
+        );
+        let input_event_y = InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_Y.0,
+            (event.y * 32767.0) as i32,
+        );
+        self.virtual_device.emit(&[input_event_x, input_event_y])?;
         Ok(())
     }
 
-    fn handle_mouse_up(&self, event: &MouseEventData) -> Result<(), DeskError> {
-        todo!()
+    fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
+        let code = match event.button {
+            0 => evdev::KeyCode::BTN_LEFT,
+            1 => evdev::KeyCode::BTN_RIGHT,
+            2 => evdev::KeyCode::BTN_MIDDLE,
+            _ => {
+                log::warn!("Unsupported mouse button: {}", event.button);
+                return Ok(());
+            }
+        };
+        let down_event = *KeyEvent::new(code, 1);
+        self.virtual_device.emit(&[down_event])?;
+        Ok(())
     }
 
-    fn handle_mouse_wheel(&self, event: &MouseEventData) -> Result<(), DeskError> {
+    fn handle_mouse_up(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
+        let code = match event.button {
+            0 => evdev::KeyCode::BTN_LEFT,
+            1 => evdev::KeyCode::BTN_RIGHT,
+            2 => evdev::KeyCode::BTN_MIDDLE,
+            _ => {
+                log::warn!("Unsupported mouse button: {}", event.button);
+                return Ok(());
+            }
+        };
+        let up_event = *KeyEvent::new(code, 0);
+        self.virtual_device.emit(&[up_event])?;
+        Ok(())
+    }
+
+    fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         todo!()
     }
 }

@@ -74,7 +74,7 @@ pub struct KeyboardEventData {
 /// Mouse Event Handler Trait
 pub trait MouseEventHandler {
     /// Handle mouse event
-    fn handle_mouse_event(&self, event: &MouseEventData) -> Result<(), DeskError> {
+    fn handle_mouse_event(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         match event.event.as_str() {
             "mousemove" => self.handle_mouse_move(event),
             "mousedown" => self.handle_mouse_down(event),
@@ -88,15 +88,15 @@ pub trait MouseEventHandler {
     }
 
     /// Handle mouse move event
-    fn handle_mouse_move(&self, event: &MouseEventData) -> Result<(), DeskError>;
+    fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), DeskError>;
 
     /// Handle mouse down event
-    fn handle_mouse_down(&self, event: &MouseEventData) -> Result<(), DeskError>;
+    fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), DeskError>;
 
     /// Handle mouse up event
-    fn handle_mouse_up(&self, event: &MouseEventData) -> Result<(), DeskError>;
+    fn handle_mouse_up(&mut self, event: &MouseEventData) -> Result<(), DeskError>;
     /// Handle mouse wheel event
-    fn handle_mouse_wheel(&self, event: &MouseEventData) -> Result<(), DeskError>;
+    fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), DeskError>;
 }
 
 pub trait KeyboardEventHandler {
