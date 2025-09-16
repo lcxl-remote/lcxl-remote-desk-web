@@ -87,6 +87,13 @@ impl MouseEventHandler for UinputMouseEventHandler {
     }
 
     fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
-        todo!()
+        let distance = event.delta_y as i32;
+        let wheel_input_event = InputEvent::new(
+            EventType::RELATIVE.0,
+            evdev::RelativeAxisCode::REL_WHEEL.0,
+            distance,
+        );
+        self.virtual_device.emit(&[wheel_input_event])?;
+        Ok(())
     }
 }

@@ -101,7 +101,7 @@ pub trait MouseEventHandler {
 
 pub trait KeyboardEventHandler {
     /// Handle keyboard event
-    fn handle_keyboard_event(&self, event: &KeyboardEventData) -> Result<(), DeskError> {
+    fn handle_keyboard_event(&mut self, event: &KeyboardEventData) -> Result<(), DeskError> {
         match event.event.as_str() {
             "keydown" => self.handle_key_down(event),
             "keyup" => self.handle_key_up(event),
@@ -112,8 +112,8 @@ pub trait KeyboardEventHandler {
         }
     }
     /// Handle key down event
-    fn handle_key_down(&self, event: &KeyboardEventData) -> Result<(), DeskError>;
+    fn handle_key_down(&mut self, event: &KeyboardEventData) -> Result<(), DeskError>;
 
     /// Handle key up event
-    fn handle_key_up(&self, event: &KeyboardEventData) -> Result<(), DeskError>;
+    fn handle_key_up(&mut self, event: &KeyboardEventData) -> Result<(), DeskError>;
 }

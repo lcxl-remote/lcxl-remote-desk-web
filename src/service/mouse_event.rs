@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use webrtc::data_channel::RTCDataChannel;
 
 use crate::{
@@ -47,7 +47,7 @@ pub async fn handle_mouse_event(
             .desktop_coordinates;
         (desktop_coordinates.width(), desktop_coordinates.height())
     };
-    let handler = Arc::new(create_mouse_event_handler(width, height)?);
+    let handler = Arc::new(Mutex::new(create_mouse_event_handler(width, height)?));
     data_channel.on_message(Box::new(move |msg| {
         let signaling_state = signaling_state.clone();
         let handler = handler.clone();
@@ -61,7 +61,7 @@ pub async fn handle_mouse_event(
             }
             match serde_json::from_str::<MouseEventData>(&msg_str) {
                 Ok(event) => {
-                    if let Err(e) = handler.handle_mouse_event(&event) {
+                    if let Err(e) = handler.lock().await.handle_mouse_event(&event) {
                         log::error!("Failed to handle mouse event: {}", e);
                     }
                 }
