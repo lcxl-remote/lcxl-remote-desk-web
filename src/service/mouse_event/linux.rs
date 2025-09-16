@@ -1,6 +1,6 @@
 use evdev::{
-    AbsInfo, AbsoluteAxisCode, AttributeSet, AttributeSetRef, EventType, InputEvent, KeyCode,
-    KeyEvent, UinputAbsSetup, uinput::VirtualDevice,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, KeyEvent,
+    UinputAbsSetup, uinput::VirtualDevice,
 };
 
 use crate::{
