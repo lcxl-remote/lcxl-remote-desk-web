@@ -13,7 +13,7 @@ use crate::{
 pub struct WindowsKeyboardEventHandler {}
 
 impl KeyboardEventHandler for WindowsKeyboardEventHandler {
-    fn handle_key_down(&self, event: &KeyboardEventData) -> Result<(), DeskError> {
+    fn handle_key_down(&mut self, event: &KeyboardEventData) -> Result<(), DeskError> {
         let mut input = INPUT::default();
         input.r#type = INPUT_KEYBOARD;
         input.Anonymous.ki.wVk = VIRTUAL_KEY(event.key_code as u16);
@@ -33,7 +33,7 @@ impl KeyboardEventHandler for WindowsKeyboardEventHandler {
         Ok(())
     }
 
-    fn handle_key_up(&self, event: &KeyboardEventData) -> Result<(), DeskError> {
+    fn handle_key_up(&mut self, event: &KeyboardEventData) -> Result<(), DeskError> {
         let mut input = INPUT::default();
         input.r#type = INPUT_KEYBOARD;
         // see https://learn.microsoft.com/zh-cn/windows/win32/inputdev/virtual-key-codes

@@ -29,7 +29,7 @@ impl WindowsMouseEventHandler {
 }
 
 impl MouseEventHandler for WindowsMouseEventHandler {
-    fn handle_mouse_move(&self, event: &MouseEventData) -> Result<(), DeskError> {
+    fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         let x = (event.x * self.width as f64) as i32;
         let y = (event.y * self.height as f64) as i32;
         let result = unsafe { SetCursorPos(x, y) };
@@ -45,7 +45,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
     }
 
     fn handle_mouse_down(
-        &self,
+        &mut self,
         event: &MouseEventData,
     ) -> Result<(), crate::desk_error::DeskError> {
         let mut mouse_event_flags = MOUSE_EVENT_FLAGS(0);
@@ -76,7 +76,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         Ok(())
     }
 
-    fn handle_mouse_up(&self, event: &MouseEventData) -> Result<(), DeskError> {
+    fn handle_mouse_up(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         let mut mouse_event_flags = MOUSE_EVENT_FLAGS(0);
         match event.button {
             0 => mouse_event_flags |= MOUSEEVENTF_LEFTUP,
@@ -105,7 +105,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         Ok(())
     }
 
-    fn handle_mouse_wheel(&self, event: &MouseEventData) -> Result<(), DeskError> {
+    fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         let mut mouse_event_flags = MOUSE_EVENT_FLAGS(0);
         mouse_event_flags |= MOUSEEVENTF_WHEEL;
         let wheel_delta = (event.delta_y * 120.0) as i32;
