@@ -79,6 +79,21 @@ impl DisplayRect {
     }
 }
 
+/// Resolution Struct
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, Default)]
+pub struct Resolution {
+    /// Width of the resolution in pixels
+    pub width: u32,
+    /// Height of the resolution in pixels
+    pub height: u32,
+}
+
+impl Resolution {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
+
 /// Display Info
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct DisplayInfo {
@@ -89,7 +104,7 @@ pub struct DisplayInfo {
     /// Display device rect coordinates on the desktop
     pub desktop_coordinates: DisplayRect,
     /// Supported display resolutions (width, height)
-    pub resolutions: Vec<(u32, u32)>,
+    pub resolutions: Vec<Resolution>,
     /// Is the display attached to the desktop
     pub attached_to_desktop: bool,
     /// Display rotation angle in degrees, e.g. 0, 90, 180, 270

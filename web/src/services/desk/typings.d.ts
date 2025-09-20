@@ -79,6 +79,8 @@ declare namespace API {
     device_name: string;
     /** Display device friendly name, e.g. "Generic PnP Monitor" */
     display_device_name?: any;
+    /** Supported display resolutions (width, height) */
+    resolutions: Resolution[];
     /** Display rotation angle in degrees, e.g. 0, 90, 180, 270 */
     rotation: number;
   };
@@ -138,7 +140,10 @@ declare namespace API {
   };
 
   type H264EncoderSettings = {
+    /** Bitrate in bps (bits per second), default is 10,000,000 bps (10 Mbps) */
     bps?: number;
+    /** Group of Pictures, default is 0, which means the encoder will decide the value. */
+    gop?: number;
   };
 
   type InitSignalingData = {
@@ -292,6 +297,11 @@ declare namespace API {
     password: string;
     /** Old username */
     username: string;
+  };
+
+  type Resolution = {
+    height: number;
+    width: number;
   };
 
   type RestResponseSystemSettings = {

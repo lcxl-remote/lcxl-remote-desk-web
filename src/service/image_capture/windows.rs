@@ -1,9 +1,9 @@
 use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsW};
 use windows_core::HSTRING;
 
-use crate::desk_error::DeskError;
+use crate::{desk_error::DeskError, model::image_capture::Resolution};
 
-pub fn enum_display_resolutions(device_name: &str) -> Result<Vec<(u32, u32)>, DeskError> {
+pub fn enum_display_resolutions(device_name: &str) -> Result<Vec<Resolution>, DeskError> {
     let mut resolutions = vec![];
     let device_name_hstr = HSTRING::from(device_name);
     let mut imodenum = 0;
@@ -27,7 +27,7 @@ pub fn enum_display_resolutions(device_name: &str) -> Result<Vec<(u32, u32)>, De
             devmode.dmBitsPerPel,
             devmode.dmDisplayFrequency
         );
-        resolutions.push((devmode.dmPelsWidth, devmode.dmPelsHeight));
+        resolutions.push(Resolution::new(devmode.dmPelsWidth, devmode.dmPelsHeight));
         imodenum += 1;
     }
 
