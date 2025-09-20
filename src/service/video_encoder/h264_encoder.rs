@@ -85,7 +85,7 @@ pub fn duration_to_seconds(d: Duration) -> f64 {
 impl H264Encoder {
     pub fn new(setting: H264EncoderSettings) -> Self {
         let config = openh264::encoder::EncoderConfig::new()
-            .intra_frame_period(IntraFramePeriod::from_num_frames(30))
+            .intra_frame_period(IntraFramePeriod::from_num_frames(setting.gop))
             .bitrate(BitRate::from_bps(setting.bps));
         let api = OpenH264API::from_source();
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();

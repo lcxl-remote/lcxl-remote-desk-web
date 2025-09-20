@@ -91,12 +91,18 @@ pub struct ListSettings {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct H264EncoderSettings {
+    /// Bitrate in bps (bits per second), default is 10,000,000 bps (10 Mbps)
     pub bps: u32,
+    /// Group of Pictures, default is 0, which means the encoder will decide the value.
+    pub gop: u32,
 }
 
 impl Default for H264EncoderSettings {
     fn default() -> Self {
-        Self { bps: 10_000_000 }
+        Self {
+            bps: 10_000_000,
+            gop: 0,
+        }
     }
 }
 
