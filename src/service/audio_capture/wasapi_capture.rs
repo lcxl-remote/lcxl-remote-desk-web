@@ -487,7 +487,7 @@ mod tests {
     pub fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            init_logs(LevelFilter::Debug).unwrap();
+            let _ = init_logs(LevelFilter::Debug);
             init_thread().unwrap();
         });
     }

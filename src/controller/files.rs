@@ -237,12 +237,15 @@ pub async fn delete_file(
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::logs::init_logs;
+
     use super::*;
     use actix_web::{App, test};
 
     #[actix_web::test]
     async fn it_works() {
-        env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
+        let _ = init_logs(log::LevelFilter::Debug);
+        //env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
         let app = test::init_service(App::new().service(list_files)).await;
         #[cfg(not(target_os = "windows"))]
         let uri_path = "/file/list?path=/sys&page_no=1&page_count=200";

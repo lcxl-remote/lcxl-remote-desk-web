@@ -1434,7 +1434,7 @@ mod tests {
     pub fn initialize() {
         INIT.call_once(|| {
             // initialization code here
-            init_logs(LevelFilter::Debug).unwrap();
+            let _ = init_logs(LevelFilter::Debug);
             let result = ScreenRecordManager::set_thread_input_desktop();
             log::info!("set thread desktop result: {:?}", result);
         });
