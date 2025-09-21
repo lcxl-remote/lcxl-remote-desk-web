@@ -66,11 +66,23 @@ pub fn create_image_capture(
 pub fn image_capture_list() -> BTreeMap<String, Vec<DisplayInfo>> {
     ImageCaptureType::iter()
         .map(|x| {
+            //output_list_result =  get_image_output_list(x);
             (
                 Into::<&'static str>::into(x).to_string(),
-                get_image_output_list(x).unwrap(),
+                get_image_output_list(x),
             )
         })
+        .filter(|item| {
+            if let Err(e) = &item.1 {
+                log::error!(
+                    "Failed to get image output list for type: {}, error: {}",
+                    item.0,
+                    e
+                );
+            }
+            item.1.is_ok()
+        })
+        .map(|item| (item.0, item.1.unwrap()))
         .collect()
 }
 

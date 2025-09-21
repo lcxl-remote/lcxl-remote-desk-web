@@ -87,7 +87,26 @@ impl X11ImageOutputEnumerator {
 
 impl ImageOutputEnumerator for X11ImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
-        todo!()
+        let mut display_list = vec![];
+        let (connection, screen) = x11rb::connect(None)?;
+        let (primary_display_index, displays) = get_displays(&connection, screen)?;
+        for d in &displays {
+            log::info!("{:?}", d);
+            display_list.push(DisplayInfo {
+                device_name: "X11 Display".to_string(),
+                display_device_name: None,
+                desktop_coordinates: DisplayRect {
+                    left: d.left as i32,
+                    top: d.top as i32,
+                    right: (d.left + d.width as i16) as i32,
+                    bottom: (d.top + d.height as i16) as i32,
+                },
+                attached_to_desktop: true,
+                rotation: 0,
+                resolutions: vec![],
+            });
+        }
+        Ok(display_list)
     }
 }
 
