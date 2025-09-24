@@ -42,10 +42,11 @@ impl AudioDeviceEnumerator for PipewireAudioDeviceEnumerator {
 struct UserData {
     format: pipewire::spa::param::audio::AudioInfoRaw,
     cursor_move: bool,
+    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
 }
 
 fn pw_thread(
-    main_sender: std::sync::mpsc::Sender<String>,
+    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
 ) {
     let result = inner_pw_thread(main_sender, pw_receiver);
@@ -56,7 +57,7 @@ fn pw_thread(
     }
 }
 fn inner_pw_thread(
-    main_sender: std::sync::mpsc::Sender<String>,
+    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
 ) -> Result<(), DeskError> {
     pipewire::init();
@@ -68,6 +69,7 @@ fn inner_pw_thread(
     let data = UserData {
         format: Default::default(),
         cursor_move: false,
+        main_sender,
     };
 
     /* Create a simple stream, the simple stream manages the core and remote
@@ -149,6 +151,10 @@ fn inner_pw_thread(
                 let n_samples = data.chunk().size() / (mem::size_of::<f32>() as u32);
 
                 if let Some(samples) = data.data() {
+                    user_data
+                        .main_sender
+                        .send(PipewireCallback::Stream(samples.to_vec()))
+                        .expect("Failed to send audio samples to main thread");
                     if user_data.cursor_move {
                         print!("\x1B[{}A", n_channels + 1);
                     }
@@ -230,7 +236,7 @@ fn inner_pw_thread(
 }
 
 pub struct PipewireLoop {
-    pub main_sender: std::sync::mpsc::Sender<String>,
+    pub main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     /// send terminate command to PipewireLoop when dropping
     pub pw_sender: pipewire::channel::Sender<PipewireCommand>,
 
@@ -242,11 +248,16 @@ pub enum PipewireCommand {
     Terminate,
 }
 
+#[derive(Debug, Clone)]
+pub enum PipewireCallback {
+    Stream(Vec<u8>),
+}
+
 impl PipewireLoop {
     // https://gitlab.freedesktop.org/pipewire/pipewire-rs/-/blob/main/pipewire/examples/audio-capture.rs?ref_type=heads
     pub fn new(
         desk_settings: &DeskSettings,
-        main_sender: std::sync::mpsc::Sender<String>,
+        main_sender: std::sync::mpsc::Sender<PipewireCallback>,
         pw_sender: pipewire::channel::Sender<PipewireCommand>,
         pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
     ) -> Result<Self, DeskError> {
@@ -278,7 +289,7 @@ impl Drop for PipewireLoop {
 
 pub struct PipewireAudioCapture {
     pub pipewire_loop: PipewireLoop,
-    pub main_receiver: std::sync::mpsc::Receiver<String>,
+    pub main_receiver: std::sync::mpsc::Receiver<PipewireCallback>,
     pub pw_sender: pipewire::channel::Sender<PipewireCommand>,
 }
 
@@ -342,8 +353,19 @@ mod tests {
 
         let pipewire_loop =
             PipewireLoop::new(&desk_settings, main_sender, pw_sender_clone, pw_receiver)?;
+        for _ in 0..200 {
+            match main_receiver.recv_timeout(Duration::from_secs(1)) {
+                Ok(callback) => match callback {
+                    PipewireCallback::Stream(data) => {
+                        log::info!("Received {} bytes of audio data", data.len());
+                    }
+                },
+                Err(e) => {
+                    log::warn!("No audio data received: {:?}", e);
+                }
+            }
+        }
 
-        thread::sleep(Duration::from_secs(20));
         Ok(())
     }
 }
