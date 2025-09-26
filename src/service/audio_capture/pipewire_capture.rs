@@ -1,4 +1,4 @@
-use std::{mem, thread::JoinHandle};
+use std::{ffi::CStr, mem, thread::JoinHandle};
 
 use pipewire::{
     context::Context,
@@ -99,7 +99,15 @@ fn inner_pw_thread(
             log::info!("Stream state changed from {:?} to {:?}", old, new);
         })
         .control_info(|_, user_data, id: u32, control| {
-            log::info!("Stream control info, id: {}, control: {:?}", id, control);
+            if let Some(control) = unsafe { control.as_ref() } {
+                log::info!("Stream control info, id: {}, control: {:?}", id, control);
+                let cstr = unsafe { CStr::from_ptr(control.name) };
+                if let Ok(name) = cstr.to_str() {
+                    log::info!("Stream control name: {}", name);
+                }
+            } else {
+                log::info!("Stream control info, id: {}, control is NULL", id);
+            }
         })
         .param_changed(|_, user_data, id: u32, param| {
             // NULL means to clear the format
@@ -328,7 +336,7 @@ impl PipewireAudioCapture {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Once, thread, time::Duration};
+    use std::{sync::Once, time::Duration};
 
     use log::LevelFilter;
 
@@ -353,7 +361,7 @@ mod tests {
 
         let pipewire_loop =
             PipewireLoop::new(&desk_settings, main_sender, pw_sender_clone, pw_receiver)?;
-        for _ in 0..200 {
+        for _ in 0..100 {
             match main_receiver.recv_timeout(Duration::from_secs(1)) {
                 Ok(callback) => match callback {
                     PipewireCallback::Stream(data) => {
