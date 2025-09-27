@@ -72,6 +72,25 @@ fn inner_pw_thread(
         main_sender,
     };
 
+    let registry = core.get_registry()?;
+    let _listener_reg = registry
+        .add_listener_local()
+        .global(|global| {
+            log::info!(
+                "object: id:{} type:{}/{}, props: {:?}",
+                global.id,
+                global.type_,
+                global.version,
+                global.props
+            );
+            if let Some(props) = global.props {
+                if props.get("media.class") == Some("Audio/Device") {
+                    log::info!("Found audio device: {:?}", props.get("device.name"));
+                }
+            }
+        })
+        .register();
+
     /* Create a simple stream, the simple stream manages the core and remote
      * objects for you if you don't need to deal with them.
      *
