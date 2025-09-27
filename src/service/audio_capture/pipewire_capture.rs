@@ -6,11 +6,13 @@ use pipewire::{
     properties::properties,
     spa::{
         param::{
+            audio::AudioInfoRaw,
             format::{MediaSubtype, MediaType},
             format_utils,
         },
         pod::Pod,
     },
+    types::ObjectType,
 };
 
 use crate::{
@@ -83,6 +85,22 @@ fn inner_pw_thread(
                 global.version,
                 global.props
             );
+            match global.type_ {
+                ObjectType::Node => {
+                    log::info!("Found node: id: {}, version: {}", global.id, global.version);
+                }
+                ObjectType::Port => {
+                    log::info!("Found port: id: {}, version: {}", global.id, global.version);
+                }
+                ObjectType::Client => {
+                    log::info!(
+                        "Found client: id: {}, version: {}",
+                        global.id,
+                        global.version
+                    );
+                }
+                _ => {}
+            }
             if let Some(props) = global.props {
                 if props.get("media.class") == Some("Audio/Device") {
                     log::info!("Found audio device: {:?}", props.get("device.name"));
@@ -144,29 +162,34 @@ fn inner_pw_thread(
                 media_type,
                 media_subtype
             );
-            if id != pipewire::spa::param::ParamType::Format.as_raw() {
-                return;
+            match id {
+                x if x == pipewire::spa::param::ParamType::Format.as_raw() => {
+                    // only accept raw audio
+                    if media_type != MediaType::Audio || media_subtype != MediaSubtype::Raw {
+                        return;
+                    }
+
+                    // call a helper function to parse the format for us.
+                    user_data
+                        .format
+                        .parse(param)
+                        .expect("Failed to parse param changed to AudioInfoRaw");
+                    user_data
+                        .main_sender
+                        .send(PipewireCallback::Format(user_data.format.clone()))
+                        .expect("Failed to send audio format to main thread");
+
+                    log::info!(
+                        "capturing rate:{} channels:{}",
+                        user_data.format.rate(),
+                        user_data.format.channels()
+                    );
+                }
+                _ => return,
             }
-
-            // only accept raw audio
-            if media_type != MediaType::Audio || media_subtype != MediaSubtype::Raw {
-                return;
-            }
-
-            // call a helper function to parse the format for us.
-            user_data
-                .format
-                .parse(param)
-                .expect("Failed to parse param changed to AudioInfoRaw");
-
-            println!(
-                "capturing rate:{} channels:{}",
-                user_data.format.rate(),
-                user_data.format.channels()
-            );
         })
         .process(|stream, user_data| match stream.dequeue_buffer() {
-            None => println!("out of buffers"),
+            None => log::error!("out of buffers"),
             Some(mut buffer) => {
                 let datas = buffer.datas_mut();
                 if datas.is_empty() {
@@ -278,6 +301,7 @@ pub enum PipewireCommand {
 #[derive(Debug, Clone)]
 pub enum PipewireCallback {
     Stream(Vec<u8>),
+    Format(AudioInfoRaw),
 }
 
 impl PipewireLoop {
@@ -384,7 +408,10 @@ mod tests {
             match main_receiver.recv_timeout(Duration::from_secs(1)) {
                 Ok(callback) => match callback {
                     PipewireCallback::Stream(data) => {
-                        log::info!("Received {} bytes of audio data", data.len());
+                        log::trace!("Received {} bytes of audio data", data.len());
+                    }
+                    PipewireCallback::Format(format) => {
+                        log::info!("Received audio format: {:?}", format);
                     }
                 },
                 Err(e) => {
