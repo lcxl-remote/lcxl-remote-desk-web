@@ -1,4 +1,4 @@
-use std::{ffi::CStr, mem, thread::JoinHandle};
+use std::{ffi::CStr, mem, thread::JoinHandle, time::Duration, u16};
 
 use pipewire::{
     context::Context,
@@ -21,9 +21,26 @@ use crate::{
         audio_capture::{
             AudioBuffer, AudioCapture, AudioDevice, AudioDeviceEnumerator, WaveFormat,
         },
+        common::ErrorCode,
         settings::DeskSettings,
     },
 };
+
+#[derive(Debug)]
+pub struct PipewireAudioBuffer {
+    pub buffer: Vec<u8>,   // Raw audio data
+    pub num_frames: usize, // Number of frames
+}
+
+impl AudioBuffer for PipewireAudioBuffer {
+    fn get_buffer_slice(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    fn get_num_frames(&self) -> usize {
+        self.num_frames
+    }
+}
 
 pub struct PipewireAudioDeviceEnumerator {}
 
@@ -44,6 +61,7 @@ impl AudioDeviceEnumerator for PipewireAudioDeviceEnumerator {
 struct UserData {
     format: pipewire::spa::param::audio::AudioInfoRaw,
     cursor_move: bool,
+    captured_count: u64,
     main_sender: std::sync::mpsc::Sender<PipewireCallback>,
 }
 
@@ -72,6 +90,7 @@ fn inner_pw_thread(
         format: Default::default(),
         cursor_move: false,
         main_sender,
+        captured_count: 0,
     };
 
     let registry = core.get_registry()?;
@@ -201,14 +220,21 @@ fn inner_pw_thread(
                 let n_samples = data.chunk().size() / (mem::size_of::<f32>() as u32);
 
                 if let Some(samples) = data.data() {
+                    let end_index = n_samples as usize * mem::size_of::<f32>();
                     user_data
                         .main_sender
-                        .send(PipewireCallback::Stream(samples.to_vec()))
+                        .send(PipewireCallback::Stream(samples[0..end_index].to_vec()))
                         .expect("Failed to send audio samples to main thread");
                     if user_data.cursor_move {
+                        user_data.captured_count = 0;
                         print!("\x1B[{}A", n_channels + 1);
                     }
-                    println!("captured {} samples", n_samples / n_channels);
+                    user_data.captured_count += 1;
+                    println!(
+                        "captured {} samples, total count: {}",
+                        n_samples / n_channels,
+                        user_data.captured_count
+                    );
                     for c in 0..n_channels {
                         let mut max: f32 = 0.0;
                         for n in (c..n_samples).step_by(n_channels as usize) {
@@ -286,11 +312,11 @@ fn inner_pw_thread(
 }
 
 pub struct PipewireLoop {
-    pub main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+    main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     /// send terminate command to PipewireLoop when dropping
-    pub pw_sender: pipewire::channel::Sender<PipewireCommand>,
-
-    pub pw_thread: Option<JoinHandle<()>>,
+    pw_sender: pipewire::channel::Sender<PipewireCommand>,
+    /// pipewire thread handle
+    pw_thread: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -312,8 +338,6 @@ impl PipewireLoop {
         pw_sender: pipewire::channel::Sender<PipewireCommand>,
         pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
     ) -> Result<Self, DeskError> {
-        pipewire::init();
-
         let main_sender_for_pw = main_sender.clone();
         let pw_thread = Some(std::thread::spawn(move || {
             pw_thread(main_sender_for_pw, pw_receiver)
@@ -339,40 +363,121 @@ impl Drop for PipewireLoop {
 }
 
 pub struct PipewireAudioCapture {
-    pub pipewire_loop: PipewireLoop,
-    pub main_receiver: std::sync::mpsc::Receiver<PipewireCallback>,
-    pub pw_sender: pipewire::channel::Sender<PipewireCommand>,
+    pub desk_settings: DeskSettings,
+    pub pipewire_loop: Option<PipewireLoop>,
+    pub main_receiver: Option<std::sync::mpsc::Receiver<PipewireCallback>>,
+    pub pw_sender: Option<pipewire::channel::Sender<PipewireCommand>>,
+    pub format: Option<AudioInfoRaw>,
 }
 
 impl AudioCapture for PipewireAudioCapture {
     fn start(&mut self) -> Result<WaveFormat, DeskError> {
-        let wave_format = WaveFormat::default();
+        if self.pipewire_loop.is_some() {
+            return DeskError::custom_error(
+                ErrorCode::INVALID_STATE,
+                "PipewireAudioCapture already started".to_string(),
+            );
+        }
+        let (main_sender, main_receiver) = std::sync::mpsc::channel();
+        let (pw_sender, pw_receiver) = pipewire::channel::channel();
+
+        let pw_sender_clone = pw_sender.clone();
+
+        let pipewire_loop = PipewireLoop::new(
+            &self.desk_settings,
+            main_sender,
+            pw_sender_clone,
+            pw_receiver,
+        )?;
+
+        let pipewire_callback = main_receiver.recv_timeout(Duration::from_secs(30))?;
+        let audio_format;
+        match pipewire_callback {
+            PipewireCallback::Format(format) => {
+                log::info!("Received audio format: {:?}", format);
+                audio_format = format;
+            }
+            _ => {
+                log::error!("Expected format callback, got {:?}", pipewire_callback);
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    "Failed to get audio format".to_string(),
+                );
+            }
+        }
+        let mut wave_format = WaveFormat::default();
+        wave_format.channels = audio_format.channels() as u16;
+        wave_format.samples_per_sec = audio_format.rate();
+        wave_format.bits_per_sample = match audio_format.format() {
+            pipewire::spa::param::audio::AudioFormat::F32LE => 32,
+            pipewire::spa::param::audio::AudioFormat::S16LE => 16,
+            pipewire::spa::param::audio::AudioFormat::S32LE => 32,
+            pipewire::spa::param::audio::AudioFormat::U16LE => 16,
+            pipewire::spa::param::audio::AudioFormat::U32LE => 32,
+            _ => {
+                log::error!("Unsupported audio format: {:?}", audio_format.format());
+                u16::MAX
+            }
+        };
+        if wave_format.bits_per_sample == u16::MAX {
+            return DeskError::custom_error(
+                ErrorCode::SYSTEM_ERROR,
+                "Unsupported audio format".to_string(),
+            );
+        }
+        wave_format.block_align = (wave_format.channels * wave_format.bits_per_sample / 8) as u16;
+        wave_format.avg_bytes_per_sec =
+            wave_format.samples_per_sec * wave_format.block_align as u32;
+        wave_format.format_tag = 1; // PCM
+
+        self.format = Some(audio_format);
+        self.pipewire_loop = Some(pipewire_loop);
+        self.main_receiver = Some(main_receiver);
+        self.pw_sender = Some(pw_sender);
+
         Ok(wave_format)
     }
 
     fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError> {
-        todo!()
+        let receiver = self.main_receiver.as_ref().unwrap();
+        let mut pipewire_audio_buffer = PipewireAudioBuffer {
+            buffer: vec![],
+            num_frames: 0,
+        };
+        let format = self.format.as_ref().unwrap();
+        for item in receiver.try_iter() {
+            match item {
+                PipewireCallback::Stream(data) => {
+                    // FIXME wrong number of frames
+                    pipewire_audio_buffer.num_frames +=
+                        data.len() / ((4 * format.channels()) as usize);
+                    pipewire_audio_buffer.buffer.extend(data);
+                }
+                _ => {
+                    log::warn!("Unexpected callback: {:?}", item);
+                }
+            }
+        }
+        return Ok(Box::new(pipewire_audio_buffer));
     }
 
     fn stop(&mut self) -> Result<(), DeskError> {
+        self.pipewire_loop = None;
+        self.format = None;
+        self.main_receiver = None;
+        self.pw_sender = None;
         Ok(())
     }
 }
 
 impl PipewireAudioCapture {
     pub fn new(desk_settings: &DeskSettings) -> Result<Self, DeskError> {
-        let (main_sender, main_receiver) = std::sync::mpsc::channel();
-        let (pw_sender, pw_receiver) = pipewire::channel::channel();
-
-        let pw_sender_clone = pw_sender.clone();
-
-        let pipewire_loop =
-            PipewireLoop::new(desk_settings, main_sender, pw_sender_clone, pw_receiver)?;
-
         Ok(Self {
-            pipewire_loop,
-            main_receiver,
-            pw_sender,
+            desk_settings: desk_settings.clone(),
+            pipewire_loop: None,
+            main_receiver: None,
+            pw_sender: None,
+            format: None,
         })
     }
 }
@@ -420,6 +525,31 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_pipewire_capture() -> Result<(), DeskError> {
+        initialize();
+        let desk_settings = DeskSettings::default();
+        let mut pipewire_capture = PipewireAudioCapture::new(&desk_settings)?;
+        let wave_format = pipewire_capture.start()?;
+        log::info!(
+            "Started pipewire audio capture with format: {:?}",
+            wave_format
+        );
+        for _ in 0..10 {
+            let audio_buffer = pipewire_capture.get_buffer()?;
+            log::info!(
+                "Captured {} frames of audio data",
+                audio_buffer.get_num_frames()
+            );
+            if audio_buffer.get_num_frames() == 0 {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        pipewire_capture.stop()?;
+        log::info!("Stopped pipewire audio capture");
         Ok(())
     }
 }

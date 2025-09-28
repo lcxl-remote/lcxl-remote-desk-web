@@ -16,6 +16,7 @@ pub struct ErrorCode(pub i32);
 impl ErrorCode {
     pub const SUCCESS: ErrorCode = ErrorCode(0);
     pub const SYSTEM_ERROR: ErrorCode = ErrorCode(1);
+    pub const INVALID_STATE: ErrorCode = ErrorCode(2);
     pub const FILE_PATH_NOT_FOUND: ErrorCode = ErrorCode(11);
     pub const NOT_ALLOW_DELETE_FILE: ErrorCode = ErrorCode(21);
     pub const FILE_CHANGED: ErrorCode = ErrorCode(22);

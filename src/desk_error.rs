@@ -97,6 +97,8 @@ pub enum DeskError {
     RegexError(regex::Error),
     /// A log set logger error occurred.
     SetLoggerError(log::SetLoggerError),
+    /// A mpsc recv timeout error occurred.
+    RecvTimeoutError(std::sync::mpsc::RecvTimeoutError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -169,6 +171,7 @@ impl Display for DeskError {
             DeskError::SetLoggerError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
             DeskError::PipewireError(error) => error.fmt(f),
+            DeskError::RecvTimeoutError(error) => error.fmt(f),
         };
         if let Err(error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -347,6 +350,12 @@ impl From<regex::Error> for DeskError {
 impl From<log::SetLoggerError> for DeskError {
     fn from(err: log::SetLoggerError) -> Self {
         DeskError::SetLoggerError(err)
+    }
+}
+
+impl From<std::sync::mpsc::RecvTimeoutError> for DeskError {
+    fn from(err: std::sync::mpsc::RecvTimeoutError) -> Self {
+        DeskError::RecvTimeoutError(err)
     }
 }
 
