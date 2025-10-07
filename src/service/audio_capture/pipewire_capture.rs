@@ -19,7 +19,8 @@ use crate::{
     desk_error::DeskError,
     model::{
         audio_capture::{
-            AudioBuffer, AudioCapture, AudioDevice, AudioDeviceEnumerator, WaveFormat,
+            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
+            WaveFormat,
         },
         common::ErrorCode,
         settings::DeskSettings,
@@ -52,7 +53,14 @@ impl PipewireAudioDeviceEnumerator {
 
 impl AudioDeviceEnumerator for PipewireAudioDeviceEnumerator {
     fn get_device_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
-        let mut audio_device_list = vec![];
+        // FIXME list all audio devices
+        let audio_device = AudioDevice {
+            id: "pipewire-audio-default".to_string(),
+            firendly_name: "pipewire-audio-default".to_string(),
+            data_flow: AudioDataFlow::Capture,
+            default: true,
+        };
+        let mut audio_device_list = vec![audio_device];
 
         Ok(audio_device_list)
     }
