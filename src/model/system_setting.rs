@@ -3,14 +3,23 @@ use utoipa::ToSchema;
 
 use crate::desk_error::DeskError;
 
+/// Display settings structure
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, Default)]
 pub struct DisplaySettings {
+    /// Device name
     pub device_name: String,
+    /// Width in pixels
     pub width: Option<u32>,
+    /// Height in pixels
     pub height: Option<u32>,
+    /// Refresh frequency in Hz
     pub frequency: Option<u32>,
+    /// Scaling factor for high DPI displays (e.g., 1.0, 1.25, 1.5, 2.0)
+    /// see https://github.com/imniko/SetDPI
+    pub scaling_factor: Option<f64>, // Add
 }
 
 pub trait SystemSettingHelper {
+    /// Change display settings
     fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), DeskError>;
 }
