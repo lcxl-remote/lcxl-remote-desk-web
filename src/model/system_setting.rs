@@ -8,6 +8,7 @@ pub struct DisplaySettings {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub frequency: Option<u32>,
+    pub device_name: Option<String>,
 }
 
 pub trait SystemSettingHelper {
