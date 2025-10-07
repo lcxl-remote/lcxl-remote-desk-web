@@ -20,13 +20,9 @@ impl WindowsSystemSettingHelper {
 impl SystemSettingHelper for WindowsSystemSettingHelper {
     fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), DeskError> {
         // Implement Windows-specific system setting application logic here
-        let device_name = if let Some(name) = &display_settings.device_name {
-            Some(HSTRING::from(name))
-        } else {
-            None
-        };
-        let lpszdevicename = device_name.map(|s| s.as_ptr());
-        unsafe { ChangeDisplaySettingsExW(lpszdevicename, lpdevmode, hwnd, dwflags, lparam) };
+        let device_name = HSTRING::from(display_settings.device_name);
+        
+        unsafe { ChangeDisplaySettingsExW(&device_name, lpdevmode, None, dwflags, lparam) };
         Ok(())
     }
 }

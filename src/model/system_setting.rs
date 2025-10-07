@@ -5,10 +5,10 @@ use crate::desk_error::DeskError;
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, Default)]
 pub struct DisplaySettings {
+    pub device_name: String,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub frequency: Option<u32>,
-    pub device_name: Option<String>,
 }
 
 pub trait SystemSettingHelper {
