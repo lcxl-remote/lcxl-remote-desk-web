@@ -142,3 +142,8 @@ pacman -S glib2-devel \
 主要注意这一点：**对于库的每个实例，任何静态变量或全局状态都将被复制，如果没有一些特殊方法，它们就无法通信。**
 
 这个导致turn-serve库和app之间的prometheus的metrics无法一起使用，因为它们各自维护了一个独立的prometheus全局实例。
+
+
+### VP8,VP9安装须知
+
+参考：https://crates.io/crates/env-libvpx-sys/5.1.3， 默认情况下vpx-encode会使用系统自带的libvpx库，这会因为编译平台不一致而导致编码失败。因此需要指定环境变量VPX_LIB_DIR 来设置vpx的库路径。并且设置 VPX_STATIC 来强制静态链接vpx库。

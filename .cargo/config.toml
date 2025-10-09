@@ -1,5 +1,9 @@
+# see https://doc.rust-lang.org/stable/cargo/reference/config.html#configuration-format
 [target.x86_64-pc-windows-gnu]
 # rustflags = ["-Cdlltool=C:\\Program Files\\LLVM\\bin\\llvm-dlltool.exe"]
 [http]
 # spurious network error (3 tries remaining): [35] SSL connect error (schannel: next InitializeSecurityContext failed: CRYPT_E_REVOCATION_OFFLINE (0x80092013))
 check-revoke = false
+
+[env]
+# Set ENV_VAR_NAME=value for any process run by Cargo
