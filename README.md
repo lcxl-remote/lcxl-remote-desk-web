@@ -146,4 +146,8 @@ pacman -S glib2-devel \
 
 ### VP8,VP9安装须知
 
-参考：https://crates.io/crates/env-libvpx-sys/5.1.3， 默认情况下vpx-encode会使用系统自带的libvpx库，这会因为编译平台不一致而导致编码失败。因此需要指定环境变量VPX_LIB_DIR 来设置vpx的库路径。并且设置 VPX_STATIC 来强制静态链接vpx库。
+参考：https://crates.io/crates/env-libvpx-sys/5.1.3， 为了简化编译，此项目直接集成了env-libvpx-sys代码库并进行了更改，在windows场景下默认直接下载libvpx相关的文件，而不是通过pkg-config来查找。其他平台默认情况下使用pkg-config来查找libvpx。因此其他平台请先执行以下命令：
+```bash
+sudo apt-get install libvpx-dev
+```
+
