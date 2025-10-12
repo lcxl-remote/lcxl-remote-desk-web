@@ -468,11 +468,13 @@ const Desk: React.FC = () => {
   }, new Map<string, string>);
 
   const videoEncodeTypeSelectMap = {
-    "h264": "H.264",
+    "H264": "H.264",
+    "VP8": "VP8",
+    "VP9": "VP9"
   };
 
   const audioEncodeTypeSelectMap = {
-    "opus": "Opus",
+    "OPUS": "Opus",
   };
 
   return (

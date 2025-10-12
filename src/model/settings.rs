@@ -87,7 +87,7 @@ pub struct ListSettings {
     pub filter_dup_file_by_dir_path: Option<bool>,
 }
 
-/// Desk settings
+/// H264 encoder settings
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct H264EncoderSettings {
@@ -106,6 +106,21 @@ impl Default for H264EncoderSettings {
     }
 }
 
+/// VPX encoder settings
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[serde(default)]
+pub struct VpxEncoderSettings {
+    /// Bitrate in bps (bits per second), default is 5,000,000 bps (5 Mbps)
+    pub bps: u32,
+}
+
+impl Default for VpxEncoderSettings {
+    fn default() -> Self {
+        Self { bps: 5_000_000 }
+    }
+}
+
+/// Opus encoder settings
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct OpusEncoderSettings {
@@ -154,6 +169,10 @@ pub struct DeskSettings {
     pub audio_encoder: Option<String>,
     /// h264 encoder settings
     pub h264_encoder: Option<H264EncoderSettings>,
+    /// VP8 encoder settings
+    pub vp8_encoder: Option<VpxEncoderSettings>,
+    /// VP9 encoder settings
+    pub vp9_encoder: Option<VpxEncoderSettings>,
     /// opus encoder settings
     pub opus_encoder: Option<OpusEncoderSettings>,
 }
@@ -184,6 +203,8 @@ impl Default for DeskSettings {
             audio_device: None,
             audio_encoder: None,
             h264_encoder: None,
+            vp8_encoder: None,
+            vp9_encoder: None,
             opus_encoder: None,
         }
     }

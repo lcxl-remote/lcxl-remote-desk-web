@@ -251,6 +251,7 @@ pub async fn handle_terminal(
     Ok(())
 }
 
+#[cfg(test)]
 mod tests {
 
     use crate::model::settings::Settings;

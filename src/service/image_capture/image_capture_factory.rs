@@ -26,8 +26,8 @@ impl ImageCaptureTypeHelper for DeskSettings {
     fn get_image_capture_type(&self) -> Result<ImageCaptureType, DeskError> {
         if let Some(ref image_capture) = self.image_capture {
             let result = ImageCaptureType::from_str(image_capture);
-            if result.is_ok() {
-                return Ok(result.unwrap());
+            if let Ok(image_capture_type) = result {
+                return Ok(image_capture_type);
             } else {
                 log::error!(
                     "Failed to parse image capture type: {}, use default setting, error: {}",
@@ -63,13 +63,13 @@ pub fn create_image_capture(
     Ok(capture)
 }
 
-pub fn image_capture_list() -> BTreeMap<String, Vec<DisplayInfo>> {
+pub fn list_image_capture() -> BTreeMap<String, Vec<DisplayInfo>> {
     ImageCaptureType::iter()
         .map(|x| {
             //output_list_result =  get_image_output_list(x);
             (
                 Into::<&'static str>::into(x).to_string(),
-                get_image_output_list(x),
+                list_image_output(x),
             )
         })
         .filter(|item| {
@@ -86,7 +86,7 @@ pub fn image_capture_list() -> BTreeMap<String, Vec<DisplayInfo>> {
         .collect()
 }
 
-pub fn get_image_output_list(
+pub fn list_image_output(
     image_capture_type: ImageCaptureType,
 ) -> Result<Vec<DisplayInfo>, DeskError> {
     let capture: Box<dyn ImageOutputEnumerator + Send> = match image_capture_type {

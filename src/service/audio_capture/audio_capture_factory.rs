@@ -44,8 +44,8 @@ impl AudioCaptureTypeHelper for DeskSettings {
 /// Create a video encoder based on the settings.
 pub fn create_audio_capture(
     desk_settings: &DeskSettings,
-) -> Result<Box<dyn AudioCapture + Send>, DeskError> {
-    let capture: Box<dyn AudioCapture + Send> = match desk_settings.get_audio_capture_type()? {
+) -> Result<Box<dyn AudioCapture>, DeskError> {
+    let capture: Box<dyn AudioCapture> = match desk_settings.get_audio_capture_type()? {
         #[cfg(target_os = "windows")]
         AudioCaptureType::WASAPI => Box::new(WasapiAudioCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
@@ -54,18 +54,18 @@ pub fn create_audio_capture(
     Ok(capture)
 }
 
-pub fn audio_capture_list() -> BTreeMap<String, Vec<AudioDevice>> {
+pub fn list_audio_capture() -> BTreeMap<String, Vec<AudioDevice>> {
     AudioCaptureType::iter()
         .map(|x| {
             (
                 Into::<&'static str>::into(x).to_string(),
-                get_audio_device_list(x).unwrap(),
+                list_audio_device(x).unwrap(),
             )
         })
         .collect()
 }
 
-pub fn get_audio_device_list(
+pub fn list_audio_device(
     audio_capture_type: AudioCaptureType,
 ) -> Result<Vec<AudioDevice>, DeskError> {
     let capture: Box<dyn AudioDeviceEnumerator + Send> = match audio_capture_type {

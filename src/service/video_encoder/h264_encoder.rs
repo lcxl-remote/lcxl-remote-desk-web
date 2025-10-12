@@ -1,24 +1,21 @@
-use std::{
-    sync::LazyLock,
-    time::{Duration, Instant},
-};
+use std::{sync::LazyLock, time::Instant};
 
 use openh264::{
     OpenH264API,
     encoder::{BitRate, IntraFramePeriod},
 };
-use prometheus::{Histogram, HistogramVec, register_histogram, register_histogram_vec};
-use yuv::{
-    YuvChromaSubsampling, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix,
-    bgra_to_yuv420, rgb_to_yuv420,
-};
+use prometheus::{HistogramVec, register_histogram_vec};
+use yuv::YuvPlanarImageMut;
 
 use crate::{
     desk_error::DeskError,
     model::{
-        image_capture::{ImageInfo, ImageType},
+        image_capture::ImageInfo,
         settings::H264EncoderSettings,
         video_encoder::{NalInfo, VideoEncoder},
+    },
+    service::video_encoder::{
+        encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420,
     },
 };
 use std::fmt::Debug;
@@ -70,17 +67,9 @@ pub struct H264Encoder {
     pub encoder: openh264::encoder::Encoder,
 }
 
-pub static CONVERT_TO_YUV_HISTOGRAM: LazyLock<Histogram> =
-    LazyLock::new(|| register_histogram!("convert_to_yuv_histogram", "help").unwrap());
 pub static ENCODE_TO_H264_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("encode_to_h264_histogram", "help", &["frame_type"]).unwrap()
 });
-
-#[inline]
-pub fn duration_to_seconds(d: Duration) -> f64 {
-    let nanos = f64::from(d.subsec_nanos()) / 1e9;
-    d.as_secs() as f64 + nanos
-}
 
 impl H264Encoder {
     pub fn new(setting: H264EncoderSettings) -> Self {
@@ -94,39 +83,8 @@ impl H264Encoder {
 }
 
 impl VideoEncoder for H264Encoder {
-    fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<NalInfo, DeskError> {
-        let convert_to_yuv_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
-
-        let width = image_info.get_width();
-        let height = image_info.get_height();
-
-        let src_stride = width * 4;
-        let mut planar_image = YuvPlanarImageMut::<u8>::alloc(
-            width as u32,
-            height as u32,
-            YuvChromaSubsampling::Yuv420,
-        );
-        match image_info.get_type() {
-            ImageType::BGRA => bgra_to_yuv420(
-                &mut planar_image,
-                image_info.get_data(),
-                src_stride,
-                YuvRange::Limited,
-                YuvStandardMatrix::Bt601,
-                YuvConversionMode::Balanced,
-            )?,
-            ImageType::RGB => rgb_to_yuv420(
-                &mut planar_image,
-                image_info.get_data(),
-                src_stride,
-                YuvRange::Limited,
-                YuvStandardMatrix::Bt601,
-                YuvConversionMode::Balanced,
-            )?,
-        };
-
-        log::trace!("Converted to YUV420 format");
-        convert_to_yuv_timer.stop_and_record();
+    fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, DeskError> {
+        let planar_image = convert_image_to_yuv420(image_info)?;
 
         let encode_to_h264_timer = Instant::now();
         let yuv_source = YuvPlanarImageWrapper::<u8>::new(planar_image);
@@ -152,8 +110,8 @@ impl VideoEncoder for H264Encoder {
             .observe(duration_to_seconds(
                 Instant::now().saturating_duration_since(encode_to_h264_timer),
             ));
-        Ok(NalInfo {
+        Ok(vec![NalInfo {
             nal_bytes: encoded_bit_bytes,
-        })
+        }])
     }
 }

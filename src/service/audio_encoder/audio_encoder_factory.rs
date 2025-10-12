@@ -35,15 +35,14 @@ impl AudioEncoderTypeHelper for DeskSettings {
 pub fn create_audio_encoder(
     desk_settings: &DeskSettings,
     wave_format: WaveFormat,
-) -> Result<Box<dyn AudioEncoder + Send + Sync>, DeskError> {
-    let capture: Box<dyn AudioEncoder + Send + Sync> =
-        match desk_settings.get_audio_encoder_type()? {
-            AudioEncoderType::OPUS => Box::new(OpusAudioEncoder::new(desk_settings, wave_format)?),
-        };
+) -> Result<Box<dyn AudioEncoder>, DeskError> {
+    let capture: Box<dyn AudioEncoder> = match desk_settings.get_audio_encoder_type()? {
+        AudioEncoderType::OPUS => Box::new(OpusAudioEncoder::new(desk_settings, wave_format)?),
+    };
     Ok(capture)
 }
 
-pub fn audio_encoder_list() -> Vec<String> {
+pub fn list_audio_encoder() -> Vec<String> {
     AudioEncoderType::iter()
         .map(|x| Into::<&'static str>::into(x).to_string())
         .collect()

@@ -359,6 +359,7 @@ fn u16array_to_string(u16array: &[u16]) -> String {
     String::from_utf16_lossy(&u16array[..null_char_index])
 }
 
+#[cfg(test)]
 mod tests {
     use std::{path::PathBuf, sync::Once};
 

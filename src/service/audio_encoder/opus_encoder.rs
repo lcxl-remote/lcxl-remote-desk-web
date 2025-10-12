@@ -17,12 +17,6 @@ pub struct OpusAudioEncoder {
     pub wave_format: WaveFormat,
 }
 
-/// Workaround for Arc not being Send + Sync
-/// This is only works in single thread, so it is safe to use in this case.
-unsafe impl Send for OpusAudioEncoder {}
-
-unsafe impl Sync for OpusAudioEncoder {}
-
 impl OpusAudioEncoder {
     pub fn new(settings: &DeskSettings, wave_format: WaveFormat) -> Result<Self, DeskError> {
         let opus_settings = settings.opus_encoder.clone().unwrap_or_default();

@@ -68,6 +68,8 @@ declare namespace API {
     video_fps?: number;
     /** Video zoom ratio (e.g., 50 for 50% zoom) */
     video_zoom_ratio?: number;
+    vp8_encoder?: null | VpxEncoderSettings;
+    vp9_encoder?: null | VpxEncoderSettings;
   };
 
   type DisplayInfo = {
@@ -149,6 +151,8 @@ declare namespace API {
   type InitSignalingData = {
     /** Audio device list */
     audio_device_list: Record<string, any>;
+    /** Audio encoder list */
+    audio_encoder_list: string[];
     /** Current desk settings */
     desk_settings: DeskSettings;
     /** ICE servers to use for signaling. */
@@ -157,6 +161,8 @@ declare namespace API {
     user_name: string;
     /** Video device list */
     video_device_list: Record<string, any>;
+    /** Video encoder list */
+    video_encoder_list: string[];
   };
 
   type KeyboardEventData = {
@@ -300,7 +306,9 @@ declare namespace API {
   };
 
   type Resolution = {
+    /** Height of the resolution in pixels */
     height: number;
+    /** Width of the resolution in pixels */
     width: number;
   };
 
@@ -440,5 +448,10 @@ address and service listening port. */
     errorCode: number;
     errorMessage: string;
     success: boolean;
+  };
+
+  type VpxEncoderSettings = {
+    /** Bitrate in bps (bits per second), default is 5,000,000 bps (5 Mbps) */
+    bps?: number;
   };
 }

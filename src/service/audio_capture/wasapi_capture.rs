@@ -56,12 +56,6 @@ pub struct WasapiAudioCapture {
     pub started: bool,
 }
 
-/// FIXME Workaround for Box not being Send + Sync
-/// This is only works in single thread, so it is safe to use in this case.
-unsafe impl Send for WasapiAudioCapture {}
-
-unsafe impl Sync for WasapiAudioCapture {}
-
 #[derive(Debug)]
 pub struct WasapiAudioBuffer {
     pub buffer: Vec<u8>,   // Raw audio data

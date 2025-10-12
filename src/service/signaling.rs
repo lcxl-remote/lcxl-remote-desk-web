@@ -8,10 +8,11 @@ use bytestring::ByteString;
 use futures_util::StreamExt;
 use log::{error, info, warn};
 use prometheus::{HistogramVec, register_histogram_vec};
+use tokio::task::LocalSet;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use turn_server::config::Transport;
-use webrtc::api::media_engine::MIME_TYPE_OPUS;
+use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::{
     api::{
@@ -38,15 +39,20 @@ use crate::model::signaling::{
     SIGNALING_TYPE_CODE_CLOSE_CONTROL, SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
     SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState, WebRTConnectionState,
 };
+use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
-    audio_capture_list, create_audio_capture,
+    create_audio_capture, list_audio_capture,
 };
-use crate::service::audio_encoder::audio_encoder_factory::create_audio_encoder;
+use crate::service::audio_encoder::audio_encoder_factory::{
+    create_audio_encoder, list_audio_encoder,
+};
 use crate::service::data_channel::handle_data_channel_event;
 use crate::service::image_capture::image_capture_factory::{
-    create_image_capture, image_capture_list,
+    create_image_capture, list_image_capture,
 };
-use crate::service::video_encoder::video_encoder_factory::create_video_encoder;
+use crate::service::video_encoder::video_encoder_factory::{
+    create_video_encoder, list_video_encoder,
+};
 use crate::{
     desk_error::DeskError,
     model::{
@@ -125,10 +131,11 @@ pub struct SignalingContext {
     pub user: CurrentUser,
     /// RTC peer connection
     pub rtc_peer_connection: Arc<RTCPeerConnection>,
-    /// Capture screen task runtime
-    pub capture_screen_runtime: tokio::runtime::Runtime,
-    /// Capture audio task runtime
-    pub capture_audio_runtime: tokio::runtime::Runtime,
+    /// Capture screen thread handle
+    pub capture_screen_thread: Option<std::thread::JoinHandle<()>>,
+    /// Capture audio thread handle
+    pub capture_audio_thread: Option<std::thread::JoinHandle<()>>,
+
     /// Signaling state
     pub signaling_state: Arc<tokio::sync::RwLock<SignalingState>>,
     /// Tokio watch sender for WebRTConnectionState updates
@@ -195,26 +202,13 @@ impl SignalingContext {
         // Create a new RTCPeerConnection
         let rtc_peer_connection = Arc::new(api.new_peer_connection(config).await?);
 
-        let capture_screen_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("capture_screen_task")
-            .build()?;
-
-        let capture_audio_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("capture_audio_task")
-            .build()?;
-
         // get audio device
-        let spawn_handle = capture_audio_runtime.spawn(async move { audio_capture_list() });
-        let audio_device_list = spawn_handle.await?;
-
+        let audio_device_list = list_audio_capture();
+        let audio_encoder_list = list_audio_encoder();
         // get video device
+        let video_device_list = list_image_capture();
 
-        let spawn_handle = capture_screen_runtime.spawn(async move { image_capture_list() });
-        let video_device_list = spawn_handle.await?;
+        let video_encoder_list = list_video_encoder();
 
         let init_signaling_data = InitSignalingData {
             ice_servers: vec![
@@ -223,7 +217,9 @@ impl SignalingContext {
             ],
             user_name: user.name.clone(),
             audio_device_list,
+            audio_encoder_list,
             video_device_list,
+            video_encoder_list,
             desk_settings: local_settings.desk,
         };
 
@@ -238,8 +234,8 @@ impl SignalingContext {
             session,
             user,
             rtc_peer_connection,
-            capture_screen_runtime,
-            capture_audio_runtime,
+            capture_screen_thread: None,
+            capture_audio_thread: None,
             signaling_state: Arc::new(tokio::sync::RwLock::new(SignalingState::default())),
             update_setting_sender: None,
         })
@@ -253,10 +249,14 @@ impl SignalingContext {
         let update_setting_sender = ice_state_change_sender.clone();
         let video_state_receiver = ice_connection_state_rx.clone();
         let audio_state_receiver = ice_connection_state_rx.clone();
-
+        let video_mime_type = match offer_model.desk_settings.get_video_encoder_type()? {
+            VideoEncoderType::H264 => MIME_TYPE_H264,
+            VideoEncoderType::VP8 => MIME_TYPE_VP8,
+            VideoEncoderType::VP9 => MIME_TYPE_VP9,
+        };
         let video_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_H264.to_owned(),
+                mime_type: video_mime_type.to_owned(),
                 ..Default::default()
             },
             "video".to_owned(),
@@ -312,46 +312,26 @@ impl SignalingContext {
         // Spawn a blocking task to capture screen and send video
         let desk_settings = offer_model.desk_settings.clone();
         let signaling_state_for_screen = self.signaling_state.clone();
-        self.capture_screen_runtime.spawn(async move {
-            let result = SignalingContext::capture_screen_task(
-                signaling_state_for_screen,
-                desk_settings,
-                video_state_receiver,
-                video_track,
-            )
-            .await;
 
-            if let Err(error) = result {
-                log::error!("Capture screen task failed, error: {:?}", error);
-                session_for_video
-                    .close(Some(CloseReason::from((
-                        CloseCode::Abnormal,
-                        error.to_string(),
-                    ))))
-                    .await?;
-                return Err(error);
-            }
-            log::info!("Capture screen task completed successfully");
-            return result;
-        });
+        let capture_screen_thread = std::thread::spawn(move || {
+            let local = LocalSet::new();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
 
-        let session_for_audio = self.session.clone();
-
-        let audio_settings = local_settings.clone();
-        let audio_device = offer_model.desk_settings.audio_device.clone();
-        if let Some(audio_device) = audio_device {
-            log::info!("Start to capture audio with device: {:?}", audio_device);
-            self.capture_audio_runtime.spawn(async move {
-                let result = SignalingContext::capture_audio_task(
-                    audio_settings.desk,
-                    audio_state_receiver,
-                    audio_track,
+            local.spawn_local(async move {
+                let result = SignalingContext::capture_screen_task(
+                    signaling_state_for_screen,
+                    desk_settings,
+                    video_state_receiver,
+                    video_track,
                 )
                 .await;
 
                 if let Err(error) = result {
-                    log::error!("Capture audio task failed, error: {:?}", error);
-                    session_for_audio
+                    log::error!("Capture screen task failed, error: {:?}", error);
+                    session_for_video
                         .close(Some(CloseReason::from((
                             CloseCode::Abnormal,
                             error.to_string(),
@@ -359,9 +339,58 @@ impl SignalingContext {
                         .await?;
                     return Err(error);
                 }
-                log::info!("Capture audio task completed");
+                log::info!("Capture screen task completed successfully");
                 return result;
             });
+
+            // This will return once all senders are dropped and all
+            // spawned tasks have returned.
+            rt.block_on(local);
+        });
+        self.capture_screen_thread = Some(capture_screen_thread);
+
+        let session_for_audio = self.session.clone();
+
+        let audio_settings = local_settings.clone();
+        let audio_device = offer_model.desk_settings.audio_device.clone();
+        if let Some(audio_device) = audio_device {
+            log::info!("Start to capture audio with device: {:?}", audio_device);
+
+            let capture_audio_thread = std::thread::spawn(move || {
+                let local = LocalSet::new();
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                local.spawn_local(async move {
+                    let result = SignalingContext::capture_audio_task(
+                        audio_settings.desk,
+                        audio_state_receiver,
+                        audio_track,
+                    )
+                    .await;
+
+                    if let Err(error) = result {
+                        log::error!("Capture audio task failed, error: {:?}", error);
+                        session_for_audio
+                            .close(Some(CloseReason::from((
+                                CloseCode::Abnormal,
+                                error.to_string(),
+                            ))))
+                            .await?;
+                        return Err(error);
+                    }
+                    log::info!("Capture audio task completed");
+                    return result;
+                });
+
+                // This will return once all senders are dropped and all
+                // spawned tasks have returned.
+                rt.block_on(local);
+            });
+
+            self.capture_audio_thread = Some(capture_audio_thread);
         } else {
             log::info!("Will not capture audio because no device is selected");
         }
@@ -423,16 +452,17 @@ impl SignalingContext {
     pub async fn shutdown(self) -> Result<(), DeskError> {
         let result = self.rtc_peer_connection.close().await;
         info!("Signaling session ended, result={:?}", result);
-        // shutdown tokio runtime need in a sync context, so we use spawn_blocking to do it
-        tokio::task::spawn_blocking(move || {
-            info!("Begin to shutdown capture screen&audio runtime");
-            self.capture_screen_runtime
-                .shutdown_timeout(Duration::from_secs(100000));
-            self.capture_audio_runtime
-                .shutdown_timeout(Duration::from_secs(100000));
-            info!("End to shutdown capture screen&audio runtime");
-        })
-        .await?;
+
+        info!("Begin to shutdown capture screen&audio runtime");
+        if let Some(capture_screen_thread) = self.capture_screen_thread {
+            capture_screen_thread.join().unwrap();
+        }
+        if let Some(capture_audio_thread) = self.capture_audio_thread {
+            capture_audio_thread.join().unwrap();
+        }
+
+        info!("End to shutdown capture screen&audio runtime");
+
         Ok(())
     }
 
@@ -449,18 +479,19 @@ impl SignalingContext {
             desk_settings
         );
         let mut capture = create_image_capture(&desk_settings)?;
-        let mut encoder = create_video_encoder(&desk_settings)?;
         let mut image_capture_type = capture.get_capture_type().into();
         //TODO
         let display_info = capture.get_current_output()?;
         {
             let mut signaling_state = signaling_state.write().await;
-            signaling_state.display_info = display_info;
+            signaling_state.display_info = display_info.clone();
             log::info!(
                 "Set initial display info: {:?}",
                 signaling_state.display_info
             );
         }
+
+        let mut encoder = create_video_encoder(&desk_settings, &display_info)?;
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
             let state = connection_state_rx.borrow_and_update().clone();
@@ -540,18 +571,20 @@ impl SignalingContext {
             }
             timer.stop_and_record();
             let image_info = image_info_result.unwrap();
-            let nal_info = encoder.encode(image_info.as_ref())?;
-            let timer = WEBRTC_WRITE_SAMPLE_HISTOGRAM
-                .with_label_values(&["video"])
-                .start_timer();
-            video_track
-                .write_sample(&Sample {
-                    data: nal_info.nal_bytes,
-                    duration: Duration::from_secs(1),
-                    ..Default::default()
-                })
-                .await?;
-            timer.stop_and_record();
+            let nal_info_vec = encoder.encode(image_info.as_ref())?;
+            for nal_info in nal_info_vec {
+                let timer = WEBRTC_WRITE_SAMPLE_HISTOGRAM
+                    .with_label_values(&["video"])
+                    .start_timer();
+                video_track
+                    .write_sample(&Sample {
+                        data: nal_info.nal_bytes,
+                        duration: Duration::from_secs(1),
+                        ..Default::default()
+                    })
+                    .await?;
+                timer.stop_and_record();
+            }
         }
         Result::<(), DeskError>::Ok(())
     }

@@ -84,6 +84,8 @@ pub enum DeskError {
     YuvError(yuv::YuvError),
     /// A openh264 error occurred.
     Openh264Error(openh264::Error),
+    /// A vpx encode error occurred.
+    VpxEncodeError(vpx_encode::Error),
     /// A opus error occurred.
     OpusError(Backtrace, opus::Error),
     //OpusError(Backtrace, opusic_c::ErrorCode),
@@ -153,6 +155,7 @@ impl Display for DeskError {
             DeskError::RtpError(error) => error.fmt(f),
             DeskError::YuvError(error) => error.fmt(f),
             DeskError::Openh264Error(error) => error.fmt(f),
+            DeskError::VpxEncodeError(error) => error.fmt(f),
             DeskError::OpusError(backtrace, error) => {
                 _backtrace = backtrace;
                 f.write_fmt(format_args!("{:?}", error))
@@ -308,6 +311,12 @@ impl From<yuv::YuvError> for DeskError {
 impl From<openh264::Error> for DeskError {
     fn from(err: openh264::Error) -> Self {
         DeskError::Openh264Error(err)
+    }
+}
+
+impl From<vpx_encode::Error> for DeskError {
+    fn from(err: vpx_encode::Error) -> Self {
+        DeskError::VpxEncodeError(err)
     }
 }
 /*

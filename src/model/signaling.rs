@@ -198,8 +198,12 @@ pub struct InitSignalingData {
     pub user_name: String,
     /// Audio device list
     pub audio_device_list: BTreeMap<String, Vec<AudioDevice>>,
+    /// Audio encoder list
+    pub audio_encoder_list: Vec<String>,
     /// Video device list
     pub video_device_list: BTreeMap<String, Vec<DisplayInfo>>,
+    /// Video encoder list
+    pub video_encoder_list: Vec<String>,
     /// Current desk settings
     pub desk_settings: DeskSettings,
 }
