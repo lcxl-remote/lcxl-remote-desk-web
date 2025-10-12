@@ -147,7 +147,40 @@ pacman -S glib2-devel \
 ### VP8,VP9安装须知
 
 参考：https://crates.io/crates/env-libvpx-sys/5.1.3， 为了简化编译，此项目直接集成了env-libvpx-sys代码库并进行了更改，在windows场景下默认直接下载libvpx相关的文件，而不是通过pkg-config来查找。其他平台默认情况下使用pkg-config来查找libvpx。因此其他平台请先执行以下命令：
+
+ubuntu: 
 ```bash
+# 1.14版本
 sudo apt-get install libvpx-dev
 ```
 
+macos:
+```
+brew install pkgconf
+# 1.15.2版本
+brew install libvpx
+```
+
+### opus依赖
+
+opus依赖cmake，因此需要安装cmake，需要注意的是opus的crate包不支持4.0及以上版本的cmake。cmake安装命令如下：
+
+windows:
+```bash
+# 下载cmake 3.x版本
+wget https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-windows-x86_64.msi
+# 然后进行安装
+```
+
+ubuntu:
+```bash
+# 默认已安装？
+apt install cmake
+```
+
+macos:
+```bash
+# 下载3.x版本
+curl -O -L https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-macos-universal.dmg
+curl -O -L https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-macos-universal.tar.gz
+```
