@@ -1,6 +1,9 @@
-use windows::Win32::Graphics::Gdi::{
-    CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW,
-    DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH,
+use windows::Win32::{
+    Graphics::Gdi::{
+        CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
+        DM_PELSWIDTH,
+    },
+    UI::Input::KeyboardAndMouse::BlockInput,
 };
 use windows_core::HSTRING;
 
@@ -54,6 +57,10 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
         }
         Ok(())
     }
+
+    fn block_input(&self, block: bool) -> Result<(), DeskError> {
+        unsafe { Ok(BlockInput(block)?) }
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +80,10 @@ mod tests {
             scaling_factor: None,
         };
         let result = helper.change_display_settings(&display_settings);
-        assert!(result.is_ok(), "failed to change display settings: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "failed to change display settings: {:?}",
+            result
+        );
     }
 }
