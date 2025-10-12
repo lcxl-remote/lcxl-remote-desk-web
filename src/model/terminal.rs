@@ -12,4 +12,7 @@ pub struct StartTerminalSession {
 pub struct TerminalList {
     /// terminal command list
     pub commands: Vec<Vec<String>>,
+
+    /// current terminal index
+    pub current: usize,
 }

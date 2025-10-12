@@ -66,6 +66,17 @@ pub async fn open_terminal_session(
     let terminal_command = query_list.command.clone();
     // split the terminal command into a list of arguments
     let terminal_command_list: Vec<&str> = terminal_command.split(",").collect();
+
+    {
+        // save current terminal command to settings
+        settings.blocking_write().terminal.current_terminal = Some(
+            terminal_command_list
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+    }
+
     let execute_file_path = terminal_command_list[0];
 
     let args_list = &terminal_command_list[1..];

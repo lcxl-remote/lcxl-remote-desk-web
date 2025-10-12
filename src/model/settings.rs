@@ -210,6 +210,21 @@ impl Default for DeskSettings {
     }
 }
 
+/// Terminal settings
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TerminalSettings {
+    pub current_terminal: Option<Vec<String>>,
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        Self {
+            current_terminal: None,
+        }
+    }
+}
+
 /// Turn Server Settings
 /// See also `turn_server::config::Config`
 
@@ -264,6 +279,9 @@ pub struct Settings {
 
     /// Desk settings
     pub desk: DeskSettings,
+
+    /// Terminal settings
+    pub terminal: TerminalSettings,
 }
 
 impl Default for SystemSettings {
