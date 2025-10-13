@@ -54,4 +54,9 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         }
         Ok(())
     }
+    
+    fn block_input(&self, block: bool) -> Result<(), DeskError> {
+        // FIXME
+        todo!()
+    }
 }
