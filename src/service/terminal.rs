@@ -85,7 +85,7 @@ pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<Termin
     inner_fetch_terminal_list(settings, &shell_list, &shell_regexe_list)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "windows"))]
 pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<TerminalList, DeskError> {
     let shell_list = ["bash", "csh", "fish", "ksh", "sh", "zsh"];
     let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?"];
@@ -166,7 +166,7 @@ pub async fn handle_terminal(
         log::info!("OEM Code Page: {}", oemcp);
         codepage::to_encoding(oemcp as u16).unwrap()
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "windows"))]
     let encoding = encoding_rs::UTF_8;
     let mut decoder = encoding.new_decoder();
     let mut encoder = encoding.new_encoder();
