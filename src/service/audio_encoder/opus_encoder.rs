@@ -9,9 +9,8 @@ use crate::{
 };
 const SIZE_20MS: usize = 48000 * 2 / 1000 * 20;
 pub struct OpusAudioEncoder {
-    //pub encoder: opusic_c::Encoder,
-    pub encoder: opus::Encoder,
-
+    pub encoder: opusic_c::Encoder,
+    //pub encoder: opus::Encoder,
     pub buffer: Vec<u8>,
     /// Wave format
     pub wave_format: WaveFormat,
@@ -20,6 +19,34 @@ pub struct OpusAudioEncoder {
 impl OpusAudioEncoder {
     pub fn new(settings: &DeskSettings, wave_format: WaveFormat) -> Result<Self, DeskError> {
         let opus_settings = settings.opus_encoder.clone().unwrap_or_default();
+        let channels = match opus_settings.channels {
+            1 => opusic_c::Channels::Mono,
+            2 => opusic_c::Channels::Stereo,
+            _ => {
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!("Unsupported number of channels: {}", opus_settings.channels),
+                );
+            }
+        };
+
+        let application = match opus_settings.application.as_str() {
+            "Audio" => opusic_c::Application::Audio,
+            "Voip" => opusic_c::Application::Voip,
+            "LowDelay" => opusic_c::Application::LowDelay,
+            _ => {
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!(
+                        "Unsupported Opus application: {}",
+                        opus_settings.application
+                    ),
+                );
+            }
+        };
+
+        let encoder = opusic_c::Encoder::new(channels, opusic_c::SampleRate::Hz48000, application)?;
+        /*
         let channels = match opus_settings.channels {
             1 => opus::Channels::Mono,
             2 => opus::Channels::Stereo,
@@ -45,6 +72,7 @@ impl OpusAudioEncoder {
             }
         };
         let encoder = opus::Encoder::new(opus_settings.sample_rate, channels, application)?;
+         */
         Ok(Self {
             encoder,
             buffer: vec![],
@@ -79,17 +107,26 @@ impl AudioEncoder for OpusAudioEncoder {
 
             let mut output = [0; 4000];
 
-            let len = self.encoder.encode_float(input_buffer, &mut output)?;
+            // let len = self.encoder.encode_float(input_buffer, &mut output)?;
+            let len = self
+                .encoder
+                .encode_float_to_slice(input_buffer, &mut output)?;
             log::trace!("encode_float_to_slice len={}", len);
             output[..len].to_vec()
         } else if self.wave_format.bits_per_sample == 16 {
+            /*
             let input_buffer = unsafe {
                 core::slice::from_raw_parts(self.buffer.as_ptr() as *const i16, SIZE_20MS)
             };
+            */
+            let input_buffer = unsafe {
+                core::slice::from_raw_parts(self.buffer.as_ptr() as *const u16, SIZE_20MS)
+            };
 
             let mut output = [0; 4000];
-            //let len = self.encoder.encode_to_vec(input_buffer, &mut output)?;
-            let len = self.encoder.encode(input_buffer, &mut output)?;
+
+            // let len = self.encoder.encode(input_buffer, &mut output)?;
+            let len = self.encoder.encode_to_slice(input_buffer, &mut output)?;
             log::trace!("encode_to_vec len={}", len);
 
             output[..len].to_vec()

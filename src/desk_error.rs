@@ -87,8 +87,8 @@ pub enum DeskError {
     /// A vpx encode error occurred.
     VpxEncodeError(vpx_encode::Error),
     /// A opus error occurred.
-    OpusError(Backtrace, opus::Error),
-    //OpusError(Backtrace, opusic_c::ErrorCode),
+    //OpusError(Backtrace, opus::Error),
+    OpusError(Backtrace, opusic_c::ErrorCode),
     /// A log parse level error occurred.
     ParseLevelError(log::ParseLevelError),
     /// A from utf16 error occurred.
@@ -319,19 +319,19 @@ impl From<vpx_encode::Error> for DeskError {
         DeskError::VpxEncodeError(err)
     }
 }
-/*
+
 impl From<opusic_c::ErrorCode> for DeskError {
     fn from(err: opusic_c::ErrorCode) -> Self {
         DeskError::OpusError(backtrace::Backtrace::capture(), err)
     }
 }
- */
+/*
 impl From<opus::Error> for DeskError {
     fn from(err: opus::Error) -> Self {
         DeskError::OpusError(backtrace::Backtrace::capture(), err)
     }
 }
-
+ */
 impl From<log::ParseLevelError> for DeskError {
     fn from(err: log::ParseLevelError) -> Self {
         DeskError::ParseLevelError(err)
