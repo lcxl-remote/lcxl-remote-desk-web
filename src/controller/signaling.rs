@@ -50,7 +50,7 @@ pub async fn open_signaling_handle(
         // receive messages from websocket
         let result = handle_signaling(settings, stream, session, user).await;
         if let Err(e) = result {
-            error!("Error handling signaling: {}", e);
+            error!("Error handling signaling: {:?}", e);
         } else {
             info!("Signaling handled successfully");
         }

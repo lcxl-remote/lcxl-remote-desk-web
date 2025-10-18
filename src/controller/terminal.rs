@@ -100,7 +100,7 @@ pub async fn open_terminal_session(
         // receive messages from websocket
         let result = handle_terminal(settings, stream, session, user, child).await;
         if let Err(e) = result {
-            error!("Error handling terminal: {}", e);
+            error!("Error handling terminal: {:?}", e);
         } else {
             info!("Closed terminal session successfully");
         }

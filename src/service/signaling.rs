@@ -334,7 +334,7 @@ impl SignalingContext {
                     session_for_video
                         .close(Some(CloseReason::from((
                             CloseCode::Abnormal,
-                            error.to_string(),
+                            format!("{:?}", error),
                         ))))
                         .await?;
                     return Err(error);
@@ -376,7 +376,7 @@ impl SignalingContext {
                         session_for_audio
                             .close(Some(CloseReason::from((
                                 CloseCode::Abnormal,
-                                error.to_string(),
+                                format!("{:?}", error),
                             ))))
                             .await?;
                         return Err(error);
@@ -440,7 +440,7 @@ impl SignalingContext {
                 Box::pin(async move {
                     let result = handle_data_channel_event(signaling_state, d.clone()).await;
                     if let Err(error) = result {
-                        log::error!("Failed to handle data channel event: {}", error);
+                        log::error!("Failed to handle data channel event: {:?}", error);
                     }
                 })
             }));
@@ -564,7 +564,7 @@ impl SignalingContext {
                     continue;
                 }
                 log::error!(
-                    "Failed to get nal info, error={}",
+                    "Failed to get nal info, error={:?}",
                     image_info_result.err().unwrap()
                 );
                 continue;

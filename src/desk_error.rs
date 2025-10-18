@@ -128,12 +128,8 @@ impl DeskError {
 
 impl Display for DeskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut _backtrace = &Backtrace::disabled();
         let err_fmt_result = match self {
-            DeskError::IoError(backtrace, error) => {
-                _backtrace = backtrace;
-                error.fmt(f)
-            }
+            DeskError::IoError(_backtrace, error) => error.fmt(f),
             DeskError::JsonError(error) => error.fmt(f),
             DeskError::ConfigError(error) => error.fmt(f),
             DeskError::TomlEditError(error) => error.fmt(f),
@@ -143,23 +139,14 @@ impl Display for DeskError {
             DeskError::TokioTaskJoinError(error) => error.fmt(f),
             DeskError::ActixWsClosed(closed) => closed.fmt(f),
             #[cfg(target_os = "windows")]
-            DeskError::WindowsResultError(backtrace, error) => {
-                _backtrace = backtrace;
-                error.fmt(f)
-            }
-            DeskError::WebrtcError(backtrace, error) => {
-                _backtrace = backtrace;
-                error.fmt(f)
-            }
+            DeskError::WindowsResultError(_backtrace, error) => error.fmt(f),
+            DeskError::WebrtcError(_backtrace, error) => error.fmt(f),
             DeskError::WebrtcMediaError(error) => error.fmt(f),
             DeskError::RtpError(error) => error.fmt(f),
             DeskError::YuvError(error) => error.fmt(f),
             DeskError::Openh264Error(error) => error.fmt(f),
             DeskError::VpxEncodeError(error) => error.fmt(f),
-            DeskError::OpusError(backtrace, error) => {
-                _backtrace = backtrace;
-                f.write_fmt(format_args!("{:?}", error))
-            }
+            DeskError::OpusError(_backtrace, error) => f.write_fmt(format_args!("{:?}", error)),
             DeskError::ParseLevelError(error) => error.fmt(f),
             DeskError::FromUtf16Error(error) => error.fmt(f),
             DeskError::RegexError(error) => error.fmt(f),
@@ -176,10 +163,10 @@ impl Display for DeskError {
             DeskError::PipewireError(error) => error.fmt(f),
             DeskError::RecvTimeoutError(error) => error.fmt(f),
         };
-        if let Err(error) = err_fmt_result {
+        if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
         }
-        _backtrace.fmt(f)
+        err_fmt_result
     }
 }
 
@@ -379,7 +366,7 @@ impl ResponseError for DeskError {
             _ => ErrorCode::SYSTEM_ERROR,
         };
         // write as json
-        let rest = RestResponse::failed(error_code, format!("{}", self));
+        let rest = RestResponse::failed(error_code, self.to_string());
         actix_web::HttpResponse::Ok()
             .status(self.status_code())
             .json(rest)

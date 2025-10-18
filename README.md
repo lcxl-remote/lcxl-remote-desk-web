@@ -163,11 +163,11 @@ brew install libvpx
 
 ### opus依赖
 
-opus依赖cmake，因此需要安装cmake，需要注意的是opus的crate包不支持4.0及以上版本的cmake。cmake安装命令如下：
+opus依赖cmake，因此需要安装cmake
 
 windows:
 ```bash
-# 下载cmake 3.x版本
+# 下载cmake 4.x, 3.x版本都可以
 wget https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-windows-x86_64.msi
 # 然后进行安装
 ```
@@ -180,7 +180,5 @@ apt install cmake
 
 macos:
 ```bash
-# 下载3.x版本
-curl -O -L https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-macos-universal.dmg
-curl -O -L https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-macos-universal.tar.gz
+brew install cmake
 ```

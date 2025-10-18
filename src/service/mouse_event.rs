@@ -62,7 +62,7 @@ pub async fn handle_mouse_event(
             match serde_json::from_str::<MouseEventData>(&msg_str) {
                 Ok(event) => {
                     if let Err(e) = handler.lock().await.handle_mouse_event(&event) {
-                        log::error!("Failed to handle mouse event: {}", e);
+                        log::error!("Failed to handle mouse event: {:?}", e);
                     }
                 }
                 Err(e) => {

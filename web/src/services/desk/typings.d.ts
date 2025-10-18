@@ -379,6 +379,8 @@ declare namespace API {
   type TerminalList = {
     /** terminal command list */
     commands: string[][];
+    /** current terminal index */
+    current: number;
   };
 
   type TurnInfo = {
