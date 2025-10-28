@@ -25,4 +25,7 @@ pub trait SystemSettingHelper {
 
     /// Block or unblock user input (keyboard and mouse)
     fn block_input(&self, block: bool) -> Result<(), DeskError>;
+
+    /// Enable or disable private screen mode
+    fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError>;
 }
