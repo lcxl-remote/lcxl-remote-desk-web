@@ -4,16 +4,13 @@ use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     Graphics::Gdi::{
         CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
-        DM_PELSWIDTH, ValidateRect,
+        DM_PELSWIDTH, UpdateWindow, ValidateRect,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::BlockInput,
         WindowsAndMessaging::{
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-            DispatchMessageW, IDC_ARROW, LoadCursorW, MSG, PM_REMOVE, PeekMessageW,
-            PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, ShowWindow, TranslateMessage,
-            WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, IDC_ARROW, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE
         },
     },
 };
@@ -92,7 +89,7 @@ fn private_screen_window_thread(
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).into() {
                 let result = TranslateMessage(&message);
                 if !result.as_bool() {
-                    log::error!(
+                    log::trace!(
                         "TranslateMessage failed: {:?}",
                         windows_core::Error::from_win32()
                     );
@@ -112,11 +109,16 @@ fn private_screen_window_thread(
                 match command {
                     PrivateScreenCommand::Show => {
                         let show_result = ShowWindow(hwnd, SW_SHOW);
+                        if show_result.as_bool() {
+                            let update_result = UpdateWindow(hwnd);
+                            log::info!("UpdateWindow result: {:?}", update_result);
+                        }
+
                         log::info!("ShowWindow result: {:?}", show_result);
                     }
                     PrivateScreenCommand::Hide => {
                         let show_result = ShowWindow(hwnd, SW_HIDE);
-                        log::info!("ShowWindow result: {:?}", show_result);
+                        log::info!("ShowWindow(to hide) result: {:?}", show_result);
                     }
                     PrivateScreenCommand::Quit => {
                         log::warn!("Private screen window thread quitting");
@@ -125,7 +127,7 @@ fn private_screen_window_thread(
                 }
             }
         }
-
+        DestroyWindow(hwnd)?;
         Ok(())
     }
 }
