@@ -93,7 +93,7 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
             None => {
                 #[cfg(target_os = "windows")]
                 {
-                    use chrono::Local;
+                    use chrono::{Local, TimeZone};
                     let fake_root_dir = FileInfo {
                         name: "..".to_string(),
                         path: "".to_string(),
