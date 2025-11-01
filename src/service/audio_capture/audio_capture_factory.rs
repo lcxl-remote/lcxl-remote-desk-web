@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, str::FromStr};
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "linux")]
-use crate::service::audio_capture::alsa_capture::{AlsaAudioCapture, AlsaAudioDeviceEnumerator};
+use crate::service::audio_capture::pipewire_capture::{
+    PipewireAudioCapture, PipewireAudioDeviceEnumerator,
+};
 use crate::{
     desk_error::DeskError,
     model::{
@@ -11,7 +13,6 @@ use crate::{
             AudioCapture, AudioCaptureType, AudioCaptureTypeHelper, AudioDevice,
             AudioDeviceEnumerator,
         },
-        common::ErrorCode,
         settings::DeskSettings,
     },
 };
@@ -49,7 +50,7 @@ pub fn create_audio_capture(
         #[cfg(target_os = "windows")]
         AudioCaptureType::WASAPI => Box::new(WasapiAudioCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
-        AudioCaptureType::ALSA => Box::new(AlsaAudioCapture::new(desk_settings)?),
+        AudioCaptureType::PIPEWIRE => Box::new(PipewireAudioCapture::new(desk_settings)?),
     };
     Ok(capture)
 }
@@ -72,13 +73,7 @@ pub fn list_audio_device(
         #[cfg(target_os = "windows")]
         AudioCaptureType::WASAPI => Box::new(WasapiAudioDeviceEnumerator::new()),
         #[cfg(target_os = "linux")]
-        AudioCaptureType::ALSA => Box::new(AlsaAudioDeviceEnumerator::new()),
-        _ => {
-            return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
-                format!("Unsupported capture type:{:?}", audio_capture_type),
-            );
-        }
+        AudioCaptureType::PIPEWIRE => Box::new(PipewireAudioDeviceEnumerator::new()),
     };
     let output_list = capture.get_device_list()?;
 

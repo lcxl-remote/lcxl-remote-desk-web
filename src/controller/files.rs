@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use actix_web::{HttpResponse, delete, get, web};
-use chrono::{Local, TimeZone};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use tokio::fs;
 
 use crate::{
@@ -94,6 +93,7 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
             None => {
                 #[cfg(target_os = "windows")]
                 {
+                    use chrono::Local;
                     let fake_root_dir = FileInfo {
                         name: "..".to_string(),
                         path: "".to_string(),
@@ -170,6 +170,7 @@ pub async fn delete_file(
         info!("Move file {} to trash dir", delete_file_request.file_path);
         #[cfg(target_os = "windows")]
         {
+            use log::error;
             use std::ffi::c_void;
             use windows::Win32::Foundation::HWND;
             use windows::Win32::UI::Shell::{

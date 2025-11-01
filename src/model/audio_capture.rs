@@ -94,7 +94,7 @@ pub enum AudioCaptureType {
     #[cfg(target_os = "windows")]
     WASAPI,
     #[cfg(target_os = "linux")]
-    ALSA,
+    PIPEWIRE,
 }
 
 impl Default for AudioCaptureType {
@@ -102,7 +102,7 @@ impl Default for AudioCaptureType {
         #[cfg(target_os = "windows")]
         return AudioCaptureType::WASAPI;
         #[cfg(target_os = "linux")]
-        return AudioCaptureType::ALSA;
+        return AudioCaptureType::PIPEWIRE;
     }
 }
 

@@ -60,7 +60,7 @@ impl AudioDeviceEnumerator for PipewireAudioDeviceEnumerator {
             data_flow: AudioDataFlow::Capture,
             default: true,
         };
-        let mut audio_device_list = vec![audio_device];
+        let audio_device_list = vec![audio_device];
 
         Ok(audio_device_list)
     }
@@ -159,10 +159,10 @@ fn inner_pw_thread(
 
     let _listener = stream
         .add_local_listener_with_user_data(data)
-        .state_changed(|_, user_data, old, new| {
+        .state_changed(|_, _user_data, old, new| {
             log::info!("Stream state changed from {:?} to {:?}", old, new);
         })
-        .control_info(|_, user_data, id: u32, control| {
+        .control_info(|_, _user_data, id: u32, control| {
             if let Some(control) = unsafe { control.as_ref() } {
                 log::info!("Stream control info, id: {}, control: {:?}", id, control);
                 let cstr = unsafe { CStr::from_ptr(control.name) };
