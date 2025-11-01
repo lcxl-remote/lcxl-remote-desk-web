@@ -11,14 +11,22 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::BlockInput,
         WindowsAndMessaging::{
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDesktopWindow, GetSystemMetrics, GetWindowRect, HWND_TOPMOST, IDC_ARROW, LoadCursorW, MSG, MoveWindow, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
+            DispatchMessageW, GetDesktopWindow, GetSystemMetrics, GetWindowRect, HWND_TOPMOST,
+            IDC_ARROW, LoadCursorW, MSG, MoveWindow, PM_REMOVE, PeekMessageW, PostQuitMessage,
+            RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos,
+            ShowWindow, TranslateMessage, UnregisterClassW, WDA_EXCLUDEFROMCAPTURE,
+            WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+            WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
         },
     },
 };
 use windows_core::{HSTRING, w};
 
 use crate::{
-    desk_error::DeskError,
+    desk_error::{CustomDeskError, DeskError},
     model::{
         common::ErrorCode,
         system_setting::{DisplaySettings, SystemSettingHelper},
@@ -54,10 +62,16 @@ pub enum PrivateScreenCommand {
     Hide,
     Quit,
 }
+
+pub enum PrivateScreenWindowState {
+    WindowHandle(HWND),
+}
+
 /// Thread function to create and manage the private screen window,
 /// see https://bbs.kanxue.com/thread-279475.htm
 fn private_screen_window_thread(
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
+    //sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -81,7 +95,7 @@ fn private_screen_window_thread(
             WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
             window_class,
             w!("This is a sample window"),
-            WS_OVERLAPPEDWINDOW|WS_VISIBLE,
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -93,9 +107,25 @@ fn private_screen_window_thread(
         )?;
         // Set the window to be excluded from screen capture
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
+        /*
+        sender
+            .send(PrivateScreenWindowState::WindowHandle(hwnd))
+            .map_err(|e| {
+                DeskError::CustomError(CustomDeskError::new(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!("Failed to send window handle: {}", e),
+                ))
+            })?;
+            */
         let mut message = MSG::default();
         loop {
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).into() {
+                //see https://learn.microsoft.com/zh-cn/windows/win32/winmsg/about-messages-and-message-queues#message-handling
+                if message.message == WM_QUIT {
+                    log::warn!("Private screen window thread received WM_QUIT");
+                    break;
+                }
+
                 let result = TranslateMessage(&message);
                 if !result.as_bool() {
                     log::trace!(
@@ -117,20 +147,28 @@ fn private_screen_window_thread(
             } else if let Ok(command) = result {
                 match command {
                     PrivateScreenCommand::Show => {
-                        /* 
+                        /*
                         let show_result = ShowWindow(hwnd, SW_SHOW);
                         log::info!("ShowWindow result: {:?}", show_result);
 
                         let update_result = UpdateWindow(hwnd);
                         log::info!("UpdateWindow result: {:?}", update_result);
                         */
-                        
-                        let desktop_hwnd = GetDesktopWindow(); 
+
+                        let desktop_hwnd = GetDesktopWindow();
                         let mut desktop_rect = RECT::default();
-                        GetWindowRect(desktop_hwnd, &mut desktop_rect)?; 
+                        GetWindowRect(desktop_hwnd, &mut desktop_rect)?;
                         log::info!("Desktop rect: {:?}", desktop_rect);
 
-                        SetWindowPos(hwnd, Some(HWND_TOPMOST), desktop_rect.left, desktop_rect.top, desktop_rect.right-desktop_rect.left, desktop_rect.bottom-desktop_rect.top, SWP_SHOWWINDOW)?;
+                        SetWindowPos(
+                            hwnd,
+                            Some(HWND_TOPMOST),
+                            desktop_rect.left,
+                            desktop_rect.top,
+                            desktop_rect.right - desktop_rect.left,
+                            desktop_rect.bottom - desktop_rect.top,
+                            SWP_SHOWWINDOW,
+                        )?;
                     }
                     PrivateScreenCommand::Hide => {
                         let show_result = ShowWindow(hwnd, SW_SHOW);
@@ -144,6 +182,8 @@ fn private_screen_window_thread(
             }
         }
         DestroyWindow(hwnd)?;
+        UnregisterClassW(window_class, Some(instance.into()))?;
+
         Ok(())
     }
 }
@@ -158,6 +198,7 @@ impl WindowsSystemSettingHelper {
         _desk_setting: &crate::model::settings::DeskSettings,
     ) -> Result<Self, crate::desk_error::DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
+        //let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
 
         let thread_handle = std::thread::spawn(move || {
             let result = private_screen_window_thread(window_receiver);
