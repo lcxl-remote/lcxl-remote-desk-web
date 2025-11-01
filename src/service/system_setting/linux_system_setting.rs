@@ -54,9 +54,13 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         }
         Ok(())
     }
-    
+
     fn block_input(&self, block: bool) -> Result<(), DeskError> {
         // FIXME
-        todo!()
+        DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+    }
+
+    fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError> {
+        DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
 }
