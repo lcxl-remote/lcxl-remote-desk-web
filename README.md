@@ -182,3 +182,9 @@ macos:
 ```bash
 brew install cmake
 ```
+
+## 市面上的远程桌面：
+
+* https://github.com/galaxy-s10/billd-desk
+* https://github.com/rustdesk/rustdesk
+* 
