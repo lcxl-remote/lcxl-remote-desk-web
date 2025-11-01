@@ -1,16 +1,17 @@
 use std::time::Duration;
 
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{
-        CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
-        DM_PELSWIDTH, UpdateWindow, ValidateRect,
+        BeginPaint, CDS_TYPE, COLOR_WINDOW, ChangeDisplaySettingsExW, DEVMODEW,
+        DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH, EndPaint, FillRect, HBRUSH,
+        PAINTSTRUCT, UpdateWindow, ValidateRect,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::BlockInput,
         WindowsAndMessaging::{
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, IDC_ARROW, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDesktopWindow, GetSystemMetrics, GetWindowRect, HWND_TOPMOST, IDC_ARROW, LoadCursorW, MSG, MoveWindow, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE
         },
     },
 };
@@ -28,8 +29,14 @@ extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: L
     unsafe {
         match message {
             WM_PAINT => {
-                log::debug!("WM_PAINT");
-                _ = ValidateRect(Some(window), None);
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(window, &mut ps);
+
+                // All painting occurs here, between BeginPaint and EndPaint.
+                log::debug!("WM_PAINT: ps = {:?}", ps);
+                FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
+
+                let _ = EndPaint(window, &ps);
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -54,7 +61,7 @@ fn private_screen_window_thread(
 ) -> Result<(), DeskError> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
-        let window_class = w!("window");
+        let window_class = w!("lcxl-web-private-screen-window-class");
 
         let wc = WNDCLASSW {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
@@ -70,10 +77,11 @@ fn private_screen_window_thread(
         debug_assert!(atom != 0);
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            //WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
             window_class,
             w!("This is a sample window"),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            WS_OVERLAPPEDWINDOW|WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -83,7 +91,8 @@ fn private_screen_window_thread(
             None,
             None,
         )?;
-
+        // Set the window to be excluded from screen capture
+        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
         let mut message = MSG::default();
         loop {
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).into() {
@@ -108,16 +117,23 @@ fn private_screen_window_thread(
             } else if let Ok(command) = result {
                 match command {
                     PrivateScreenCommand::Show => {
+                        /* 
                         let show_result = ShowWindow(hwnd, SW_SHOW);
-                        if show_result.as_bool() {
-                            let update_result = UpdateWindow(hwnd);
-                            log::info!("UpdateWindow result: {:?}", update_result);
-                        }
-
                         log::info!("ShowWindow result: {:?}", show_result);
+
+                        let update_result = UpdateWindow(hwnd);
+                        log::info!("UpdateWindow result: {:?}", update_result);
+                        */
+                        
+                        let desktop_hwnd = GetDesktopWindow(); 
+                        let mut desktop_rect = RECT::default();
+                        GetWindowRect(desktop_hwnd, &mut desktop_rect)?; 
+                        log::info!("Desktop rect: {:?}", desktop_rect);
+
+                        SetWindowPos(hwnd, Some(HWND_TOPMOST), desktop_rect.left, desktop_rect.top, desktop_rect.right-desktop_rect.left, desktop_rect.bottom-desktop_rect.top, SWP_SHOWWINDOW)?;
                     }
                     PrivateScreenCommand::Hide => {
-                        let show_result = ShowWindow(hwnd, SW_HIDE);
+                        let show_result = ShowWindow(hwnd, SW_SHOW);
                         log::info!("ShowWindow(to hide) result: {:?}", show_result);
                     }
                     PrivateScreenCommand::Quit => {
@@ -280,7 +296,7 @@ mod tests {
             "failed to enable private screen: {:?}",
             result
         );
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(600));
         let result = helper.enable_private_screen(false);
         assert!(
             result.is_ok(),
