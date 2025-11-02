@@ -57,7 +57,7 @@ pub enum DeskError {
     /// A join error occurred.
     TokioTaskJoinError(tokio::task::JoinError),
     /// A tokio send error occurred.
-    TokioSendError(tokio::sync::watch::error::SendError<WebRTConnectionState>),
+    TokioWebrtcSendError(tokio::sync::watch::error::SendError<WebRTConnectionState>),
     /// An actix ws closed error occurred.
     ActixWsClosed(actix_ws::Closed),
     /// A Windows result error occurred.
@@ -100,7 +100,9 @@ pub enum DeskError {
     /// A log set logger error occurred.
     SetLoggerError(log::SetLoggerError),
     /// A mpsc recv timeout error occurred.
-    RecvTimeoutError(std::sync::mpsc::RecvTimeoutError),
+    MpscRecvTimeoutError(std::sync::mpsc::RecvTimeoutError),
+    /// A mpsc recv error occurred.
+    MpscRecvError(std::sync::mpsc::RecvError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -151,7 +153,7 @@ impl Display for DeskError {
             DeskError::FromUtf16Error(error) => error.fmt(f),
             DeskError::RegexError(error) => error.fmt(f),
             DeskError::WhichError(error) => error.fmt(f),
-            DeskError::TokioSendError(error) => error.fmt(f),
+            DeskError::TokioWebrtcSendError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
             DeskError::X11ConnectError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
@@ -161,7 +163,8 @@ impl Display for DeskError {
             DeskError::SetLoggerError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
             DeskError::PipewireError(error) => error.fmt(f),
-            DeskError::RecvTimeoutError(error) => error.fmt(f),
+            DeskError::MpscRecvTimeoutError(error) => error.fmt(f),
+            DeskError::MpscRecvError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -226,7 +229,7 @@ impl From<tokio::task::JoinError> for DeskError {
 
 impl From<tokio::sync::watch::error::SendError<WebRTConnectionState>> for DeskError {
     fn from(err: tokio::sync::watch::error::SendError<WebRTConnectionState>) -> Self {
-        DeskError::TokioSendError(err)
+        DeskError::TokioWebrtcSendError(err)
     }
 }
 
@@ -351,7 +354,13 @@ impl From<log::SetLoggerError> for DeskError {
 
 impl From<std::sync::mpsc::RecvTimeoutError> for DeskError {
     fn from(err: std::sync::mpsc::RecvTimeoutError) -> Self {
-        DeskError::RecvTimeoutError(err)
+        DeskError::MpscRecvTimeoutError(err)
+    }
+}
+
+impl From<std::sync::mpsc::RecvError> for DeskError {
+    fn from(err: std::sync::mpsc::RecvError) -> Self {
+        DeskError::MpscRecvError(err)
     }
 }
 

@@ -15,8 +15,8 @@ use windows::Win32::{
             DispatchMessageW, GetDesktopWindow, GetSystemMetrics, GetWindowRect, HWND_TOPMOST,
             IDC_ARROW, LoadCursorW, MSG, MoveWindow, PM_REMOVE, PeekMessageW, PostQuitMessage,
             RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
-            SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowDisplayAffinity, SetWindowPos,
-            ShowWindow, TranslateMessage, UnregisterClassW, WDA_EXCLUDEFROMCAPTURE,
+            SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowDisplayAffinity,
+            SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW, WDA_EXCLUDEFROMCAPTURE,
             WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
             WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
@@ -57,6 +57,41 @@ extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: L
     }
 }
 
+pub fn show_window(hwnd: HWND) -> Result<(), DeskError> {
+    unsafe {
+        let desktop_hwnd = GetDesktopWindow();
+        let mut desktop_rect = RECT::default();
+        GetWindowRect(desktop_hwnd, &mut desktop_rect)?;
+        log::info!("Desktop rect: {:?}", desktop_rect);
+
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            desktop_rect.left,
+            desktop_rect.top,
+            desktop_rect.right - desktop_rect.left,
+            desktop_rect.bottom - desktop_rect.top,
+            SWP_SHOWWINDOW,
+        )?;
+        Ok(())
+    }
+}
+
+pub fn hide_window(hwnd: HWND) -> Result<(), DeskError> {
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW,
+        )?;
+        Ok(())
+    }
+}
+
 pub enum PrivateScreenCommand {
     Show,
     Hide,
@@ -66,12 +101,14 @@ pub enum PrivateScreenCommand {
 pub enum PrivateScreenWindowState {
     WindowHandle(HWND),
 }
+/// Safety: HWND is Send
+unsafe impl Send for PrivateScreenWindowState {}
 
 /// Thread function to create and manage the private screen window,
 /// see https://bbs.kanxue.com/thread-279475.htm
 fn private_screen_window_thread(
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
-    //sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
+    sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
     unsafe {
         let instance = GetModuleHandleW(None)?;
@@ -91,11 +128,12 @@ fn private_screen_window_thread(
         debug_assert!(atom != 0);
 
         let hwnd = CreateWindowExW(
-            //WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+            //WINDOW_EX_STYLE::default(),
+            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            //WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED/* | WS_EX_TOOLWINDOW */,
             window_class,
             w!("This is a sample window"),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            WS_OVERLAPPED,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -107,7 +145,7 @@ fn private_screen_window_thread(
         )?;
         // Set the window to be excluded from screen capture
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
-        /*
+
         sender
             .send(PrivateScreenWindowState::WindowHandle(hwnd))
             .map_err(|e| {
@@ -116,7 +154,7 @@ fn private_screen_window_thread(
                     format!("Failed to send window handle: {}", e),
                 ))
             })?;
-            */
+
         let mut message = MSG::default();
         loop {
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).into() {
@@ -146,34 +184,8 @@ fn private_screen_window_thread(
                 };
             } else if let Ok(command) = result {
                 match command {
-                    PrivateScreenCommand::Show => {
-                        /*
-                        let show_result = ShowWindow(hwnd, SW_SHOW);
-                        log::info!("ShowWindow result: {:?}", show_result);
-
-                        let update_result = UpdateWindow(hwnd);
-                        log::info!("UpdateWindow result: {:?}", update_result);
-                        */
-
-                        let desktop_hwnd = GetDesktopWindow();
-                        let mut desktop_rect = RECT::default();
-                        GetWindowRect(desktop_hwnd, &mut desktop_rect)?;
-                        log::info!("Desktop rect: {:?}", desktop_rect);
-
-                        SetWindowPos(
-                            hwnd,
-                            Some(HWND_TOPMOST),
-                            desktop_rect.left,
-                            desktop_rect.top,
-                            desktop_rect.right - desktop_rect.left,
-                            desktop_rect.bottom - desktop_rect.top,
-                            SWP_SHOWWINDOW,
-                        )?;
-                    }
-                    PrivateScreenCommand::Hide => {
-                        let show_result = ShowWindow(hwnd, SW_SHOW);
-                        log::info!("ShowWindow(to hide) result: {:?}", show_result);
-                    }
+                    PrivateScreenCommand::Show => show_window(hwnd)?,
+                    PrivateScreenCommand::Hide => hide_window(hwnd)?,
                     PrivateScreenCommand::Quit => {
                         log::warn!("Private screen window thread quitting");
                         break;
@@ -191,17 +203,22 @@ fn private_screen_window_thread(
 pub struct WindowsSystemSettingHelper {
     main_sender: std::sync::mpsc::Sender<PrivateScreenCommand>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// Handle to the private screen window. This is used to manage the window's visibility.
+    hwnd: HWND,
 }
+/// Safety: WindowsSystemSettingHelper is Send + Sync
+unsafe impl Send for WindowsSystemSettingHelper {}
+unsafe impl Sync for WindowsSystemSettingHelper {}
 
 impl WindowsSystemSettingHelper {
     pub fn new(
         _desk_setting: &crate::model::settings::DeskSettings,
     ) -> Result<Self, crate::desk_error::DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
-        //let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
+        let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
 
         let thread_handle = std::thread::spawn(move || {
-            let result = private_screen_window_thread(window_receiver);
+            let result = private_screen_window_thread(window_receiver, window_sender);
             if result.is_err() {
                 log::error!(
                     "Private screen window thread exited with error: {:?}",
@@ -211,10 +228,28 @@ impl WindowsSystemSettingHelper {
                 log::warn!("Private screen window thread exited normally");
             }
         });
+        let window_state = main_receiver.recv()?;
+        let hwnd = if let PrivateScreenWindowState::WindowHandle(hwnd) = window_state {
+            log::info!("Private screen window handle received: {:?}", hwnd);
+            hwnd
+        } else {
+            return DeskError::custom_error(
+                ErrorCode::SYSTEM_ERROR,
+                "Failed to receive private screen window handle".to_string(),
+            );
+        };
         Ok(Self {
             main_sender,
             thread_handle: Some(thread_handle),
+            hwnd,
         })
+    }
+
+    pub fn show_window(&self) -> Result<(), DeskError> {
+        show_window(self.hwnd)
+    }
+    pub fn hide_window(&self) -> Result<(), DeskError> {
+        hide_window(self.hwnd)
     }
 }
 
@@ -270,18 +305,10 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
     }
 
     fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError> {
-        let result;
         if enable {
-            result = self.main_sender.send(PrivateScreenCommand::Show);
+            self.show_window()?;
         } else {
-            result = self.main_sender.send(PrivateScreenCommand::Hide);
-        }
-
-        if let Err(e) = result {
-            return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
-                format!("Failed to send private screen command: {}", e),
-            );
+            self.hide_window()?;
         }
         Ok(())
     }
