@@ -1,25 +1,15 @@
 use std::time::Duration;
 
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::Gdi::{
-        BeginPaint, CDS_TYPE, COLOR_WINDOW, ChangeDisplaySettingsExW, DEVMODEW,
-        DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH, EndPaint, FillRect, HBRUSH,
-        PAINTSTRUCT, UpdateWindow, ValidateRect,
-    },
+    Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Graphics::{Gdi::{
+        BeginPaint, CDS_TYPE, COLOR_WINDOW, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH, EndPaint, FillRect, HBRUSH, HDC, PAINTSTRUCT
+    }, GdiPlus::GdipCreateFromHDC},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::BlockInput,
         WindowsAndMessaging::{
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-            DispatchMessageW, GetDesktopWindow, GetSystemMetrics, GetWindowRect, HWND_TOPMOST,
-            IDC_ARROW, LoadCursorW, MSG, MoveWindow, PM_REMOVE, PeekMessageW, PostQuitMessage,
-            RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWMAXIMIZED,
-            SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowDisplayAffinity,
-            SetWindowPos, ShowWindow, TranslateMessage, UnregisterClassW, WDA_EXCLUDEFROMCAPTURE,
-            WINDOW_EX_STYLE, WM_DESTROY, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
-            WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDesktopWindow, GetWindowRect, HWND_TOPMOST, IDC_ARROW, LWA_COLORKEY, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, TranslateMessage, UnregisterClassW, WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED
         },
     },
 };
@@ -32,6 +22,21 @@ use crate::{
         system_setting::{DisplaySettings, SystemSettingHelper},
     },
 };
+
+fn draw_image( hdc: HDC)->Result<(), DeskError>
+{
+    unsafe {
+        let mut gp_graphics;
+
+        let status = GdipCreateFromHDC(hdc, &mut gp_graphics);
+       
+        //Gdiplus::Image image(L"path/to/your/image.png"); // Load image from file
+
+        // Draw the image at a specific location
+        graphics.DrawImage(&image, 0, 0); 
+     }
+}
+
 // Windows message handler for private screen window
 extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
@@ -64,13 +69,17 @@ pub fn show_window(hwnd: HWND) -> Result<(), DeskError> {
         GetWindowRect(desktop_hwnd, &mut desktop_rect)?;
         log::info!("Desktop rect: {:?}", desktop_rect);
 
+        let window_width = (desktop_rect.right - desktop_rect.left) / 2;
+        let window_height = (desktop_rect.bottom - desktop_rect.top) / 2;
+        let window_left = desktop_rect.left + (desktop_rect.right - desktop_rect.left - window_width) / 2;
+        let window_top = desktop_rect.top + (desktop_rect.bottom - desktop_rect.top - window_height) / 2;
         SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
-            desktop_rect.left,
-            desktop_rect.top,
-            desktop_rect.right - desktop_rect.left,
-            desktop_rect.bottom - desktop_rect.top,
+            window_left,
+            window_top,
+            window_width,
+            window_height,
             SWP_SHOWWINDOW,
         )?;
         Ok(())
@@ -129,7 +138,7 @@ fn private_screen_window_thread(
 
         let hwnd = CreateWindowExW(
             //WINDOW_EX_STYLE::default(),
-            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE| WS_EX_LAYERED ,
             //WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED/* | WS_EX_TOOLWINDOW */,
             window_class,
             w!("This is a sample window"),
@@ -145,6 +154,8 @@ fn private_screen_window_thread(
         )?;
         // Set the window to be excluded from screen capture
         SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
+        let crkey = COLORREF(0x00FF00); // Green color key RGB(0,255,0)
+        SetLayeredWindowAttributes(hwnd,crkey,255,LWA_COLORKEY)?;
 
         sender
             .send(PrivateScreenWindowState::WindowHandle(hwnd))
