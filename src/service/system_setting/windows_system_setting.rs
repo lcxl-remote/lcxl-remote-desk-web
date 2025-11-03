@@ -30,7 +30,9 @@ use crate::{
         system_setting::{DisplaySettings, SystemSettingHelper},
     },
 };
+
 // see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
+// https://learn.microsoft.com/zh-cn/windows/win32/learnwin32/managing-application-state-
 fn draw_image(hdc: HDC) -> Result<(), DeskError> {
     Ok(())
 }
