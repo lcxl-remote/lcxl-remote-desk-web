@@ -12,7 +12,6 @@ use crate::service::image_capture::{
 use crate::{
     desk_error::DeskError,
     model::{
-        common::ErrorCode,
         image_capture::{
             DisplayInfo, ImageCapture, ImageCaptureType, ImageCaptureTypeHelper,
             ImageOutputEnumerator,
@@ -53,12 +52,6 @@ pub fn create_image_capture(
         ImageCaptureType::DGI => Box::new(GdiImageCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageCapture::new(desk_settings)?),
-        _ => {
-            return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
-                format!("Unsupported capture type:{:?}", image_capture_type),
-            );
-        }
     };
     Ok(capture)
 }
@@ -96,12 +89,6 @@ pub fn list_image_output(
         ImageCaptureType::DGI => Box::new(GdiImageOutputEnumerator::new()),
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageOutputEnumerator::new()),
-        _ => {
-            return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
-                format!("Unsupported capture type:{:?}", image_capture_type),
-            );
-        }
     };
     let output_list = capture.get_output_list()?;
 

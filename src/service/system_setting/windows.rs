@@ -1,27 +1,32 @@
 use std::time::Duration;
 
 use windows::Win32::{
-    Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, WPARAM},
+    Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::{
         Direct2D::{
             D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory,
             ID2D1Factory1,
         },
         Dxgi::{CreateDXGIFactory1, IDXGIFactory2},
-        Gdi::{BeginPaint, EndPaint, PAINTSTRUCT},
+        Gdi::{BeginPaint, COLOR_WINDOW, EndPaint, FillRect, HBRUSH, PAINTSTRUCT},
     },
     System::{
         Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
         LibraryLoader::GetModuleHandleW,
     },
-    UI::WindowsAndMessaging::{
-        CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-        DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetWindowLongPtrW, IDC_ARROW, LWA_COLORKEY,
-        LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW,
-        SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW, TranslateMessage,
-        UnregisterClassW, WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_DISPLAYCHANGE, WM_NCCREATE,
-        WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+    UI::{
+        Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, RegisterHotKey, UnregisterHotKey},
+        WindowsAndMessaging::{
+            CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
+            DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetDesktopWindow, GetWindowLongPtrW,
+            GetWindowRect, HWND_TOPMOST, IDC_ARROW, LWA_COLORKEY, LoadCursorW, MSG, PM_REMOVE,
+            PeekMessageW, PostQuitMessage, RegisterClassW, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
+            SetWindowLongPtrW, SetWindowPos, TranslateMessage, UnregisterClassW,
+            WDA_EXCLUDEFROMCAPTURE, WM_CREATE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY,
+            WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+        },
     },
 };
 use windows_core::{PCWSTR, w};
@@ -36,10 +41,18 @@ pub fn HIWORD(l: isize) -> isize {
     (l >> 16) & 0xffff
 }
 
+#[derive(Debug)]
 pub enum PrivateScreenCommand {
     Quit,
+    ShowWindow,
+    HideWindow,
 }
 
+const EXIT_PRIVATE_SCREEN_HOTKEY_ID: usize = 2222;
+
+/// Private screen window struct
+///
+/// see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
 pub struct PrivateScreenWindow {
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
@@ -63,7 +76,7 @@ impl PrivateScreenWindow {
                 let cs = lparam.0 as *const CREATESTRUCTW;
                 let this = (*cs).lpCreateParams as *mut Self;
                 (*this).handle = window;
-
+                log::debug!("Storing pointer to PrivateScreenWindow: {:?}", this);
                 SetWindowLongPtrW(window, GWLP_USERDATA, this as _);
             } else {
                 let this = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Self;
@@ -136,18 +149,64 @@ impl PrivateScreenWindow {
                         }
                     };
                 } else if let Ok(command) = result {
+                    log::info!("Private screen window thread received command: {:?}", command);
                     match command {
                         PrivateScreenCommand::Quit => {
                             log::warn!("Private screen window thread quitting");
                             break;
                         }
+                        PrivateScreenCommand::ShowWindow => Self::show_window(self.handle)?,
+                        PrivateScreenCommand::HideWindow => Self::hide_window(self.handle)?,
                     }
+                } else {
+                    log::error!("Private screen window thread unknown recv result");
                 }
             }
             Ok(())
         }
     }
 
+    pub fn show_window(hwnd: HWND) -> Result<(), DeskError> {
+        unsafe {
+            let desktop_hwnd = GetDesktopWindow();
+            let mut desktop_rect = RECT::default();
+            GetWindowRect(desktop_hwnd, &mut desktop_rect)?;
+            log::info!("Desktop rect: {:?}", desktop_rect);
+
+            let window_width = (desktop_rect.right - desktop_rect.left) / 2;
+            let window_height = (desktop_rect.bottom - desktop_rect.top) / 2;
+            let window_left =
+                desktop_rect.left + (desktop_rect.right - desktop_rect.left - window_width) / 2;
+            let window_top =
+                desktop_rect.top + (desktop_rect.bottom - desktop_rect.top - window_height) / 2;
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                window_left,
+                window_top,
+                window_width,
+                window_height,
+                SWP_SHOWWINDOW,
+            )?;
+            Ok(())
+        }
+    }
+
+    pub fn hide_window(hwnd: HWND) -> Result<(), DeskError> {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW,
+            )?;
+            UnregisterHotKey(Some(hwnd), EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32)?;
+            Ok(())
+        }
+    }
     fn create_window(&mut self) -> Result<(), DeskError> {
         unsafe {
             let instance = GetModuleHandleW(None)?;
@@ -210,13 +269,29 @@ impl PrivateScreenWindow {
     ) -> Result<LRESULT, DeskError> {
         let result = unsafe {
             match message {
+                /*
+                WM_CREATE => {
+                    log::info!("WM_CREATE");
+                   
+                    RegisterHotKey(
+                        Some(self.handle),
+                        EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32,
+                        MOD_ALT | MOD_CONTROL,
+                        'L' as u32,
+                    )?;
+                    
+                    log::info!("Hotkey registered for private screen exit: Ctrl + Alt + L");
+                    
+                    LRESULT(0)
+                }
+                 */
                 WM_PAINT => {
                     let mut ps = PAINTSTRUCT::default();
                     let hdc = BeginPaint(self.handle, &mut ps);
 
                     // All painting occurs here, between BeginPaint and EndPaint.
                     log::debug!("WM_PAINT: ps = {:?}, hdc = {:?}", ps, hdc);
-                    //FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
+                    FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
                     self.render()?;
                     let _ = EndPaint(self.handle, &ps);
                     LRESULT(0)
@@ -224,11 +299,22 @@ impl PrivateScreenWindow {
                 WM_SIZE => {
                     self.width = LOWORD(lparam.0);
                     self.height = HIWORD(lparam.0);
-                    log::warn!("WM_SIZE: width = {}, height = {}", self.width, self.height);
+                    log::info!("WM_SIZE: width = {}, height = {}", self.width, self.height);
                     LRESULT(0)
                 }
                 WM_DISPLAYCHANGE => {
+                    log::info!("WM_DISPLAYCHANGE");
                     self.render()?;
+                    LRESULT(0)
+                }
+                WM_HOTKEY => {
+                    let hotkey_id = wparam.0;
+                    if hotkey_id == EXIT_PRIVATE_SCREEN_HOTKEY_ID {
+                        log::warn!("Exit private screen hotkey pressed");
+                        // Handle exit private screen hotkey
+                        // For example, hide the window
+                        Self::hide_window(self.handle)?;
+                    }
                     LRESULT(0)
                 }
                 WM_DESTROY => {

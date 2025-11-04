@@ -1,27 +1,15 @@
-use std::time::Duration;
-
 use windows::Win32::{
-    Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Foundation::{HWND, LPARAM, WPARAM},
     Graphics::Gdi::{
-        BeginPaint, CDS_TYPE, COLOR_WINDOW, ChangeDisplaySettingsExW, DEVMODEW,
-        DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT, DM_PELSWIDTH, EndPaint, FillRect, HBRUSH, HDC,
-        PAINTSTRUCT,
+        CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
+        DM_PELSWIDTH,
     },
-    System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::BlockInput,
-        WindowsAndMessaging::{
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
-            DispatchMessageW, GetDesktopWindow, GetWindowRect, HWND_TOPMOST, IDC_ARROW,
-            LWA_COLORKEY, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, PostQuitMessage,
-            RegisterClassW, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-            SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, TranslateMessage,
-            UnregisterClassW, WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_PAINT, WM_QUIT, WNDCLASSW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
-        },
+        WindowsAndMessaging::{HWND_BROADCAST, SC_MONITORPOWER, SendMessageW, WM_SYSCOMMAND},
     },
 };
-use windows_core::{HSTRING, w};
+use windows_core::HSTRING;
 
 use crate::{
     desk_error::{CustomDeskError, DeskError},
@@ -29,85 +17,8 @@ use crate::{
         common::ErrorCode,
         system_setting::{DisplaySettings, SystemSettingHelper},
     },
+    service::system_setting::windows::{PrivateScreenCommand, PrivateScreenWindow},
 };
-
-// see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
-// https://learn.microsoft.com/zh-cn/windows/win32/learnwin32/managing-application-state-
-fn draw_image(hdc: HDC) -> Result<(), DeskError> {
-    Ok(())
-}
-
-// Windows message handler for private screen window
-extern "system" fn wndproc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
-        match message {
-            WM_PAINT => {
-                let mut ps = PAINTSTRUCT::default();
-                let hdc = BeginPaint(window, &mut ps);
-
-                // All painting occurs here, between BeginPaint and EndPaint.
-                log::debug!("WM_PAINT: ps = {:?}", ps);
-                FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
-
-                let _ = EndPaint(window, &ps);
-                LRESULT(0)
-            }
-            WM_DESTROY => {
-                log::warn!("WM_DESTROY");
-                PostQuitMessage(0);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(window, message, wparam, lparam),
-        }
-    }
-}
-
-pub fn show_window(hwnd: HWND) -> Result<(), DeskError> {
-    unsafe {
-        let desktop_hwnd = GetDesktopWindow();
-        let mut desktop_rect = RECT::default();
-        GetWindowRect(desktop_hwnd, &mut desktop_rect)?;
-        log::info!("Desktop rect: {:?}", desktop_rect);
-
-        let window_width = (desktop_rect.right - desktop_rect.left) / 2;
-        let window_height = (desktop_rect.bottom - desktop_rect.top) / 2;
-        let window_left =
-            desktop_rect.left + (desktop_rect.right - desktop_rect.left - window_width) / 2;
-        let window_top =
-            desktop_rect.top + (desktop_rect.bottom - desktop_rect.top - window_height) / 2;
-        SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            window_left,
-            window_top,
-            window_width,
-            window_height,
-            SWP_SHOWWINDOW,
-        )?;
-        Ok(())
-    }
-}
-
-pub fn hide_window(hwnd: HWND) -> Result<(), DeskError> {
-    unsafe {
-        SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW,
-        )?;
-        Ok(())
-    }
-}
-
-pub enum PrivateScreenCommand {
-    Show,
-    Hide,
-    Quit,
-}
 
 pub enum PrivateScreenWindowState {
     WindowHandle(HWND),
@@ -121,96 +32,19 @@ fn private_screen_window_thread(
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
-    unsafe {
-        let instance = GetModuleHandleW(None)?;
-        let window_class = w!("lcxl-web-private-screen-window-class");
+    let window = PrivateScreenWindow::new(receiver)?;
 
-        let wc = WNDCLASSW {
-            hCursor: LoadCursorW(None, IDC_ARROW)?,
-            hInstance: instance.into(),
-            lpszClassName: window_class,
+    sender
+        .send(PrivateScreenWindowState::WindowHandle(window.handle))
+        .map_err(|e| {
+            DeskError::CustomError(CustomDeskError::new(
+                ErrorCode::SYSTEM_ERROR,
+                format!("Failed to send window handle: {}", e),
+            ))
+        })?;
 
-            style: CS_HREDRAW | CS_VREDRAW,
-            lpfnWndProc: Some(wndproc),
-            ..Default::default()
-        };
-
-        let atom = RegisterClassW(&wc);
-        debug_assert!(atom != 0);
-
-        let hwnd = CreateWindowExW(
-            //WINDOW_EX_STYLE::default(),
-            WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-            //WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED/* | WS_EX_TOOLWINDOW */,
-            window_class,
-            w!("This is a sample window"),
-            WS_OVERLAPPED,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            None,
-            None,
-            None,
-            None,
-        )?;
-        // Set the window to be excluded from screen capture
-        SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
-        let crkey = COLORREF(0x00FF00); // Green color key RGB(0,255,0)
-        SetLayeredWindowAttributes(hwnd, crkey, 255, LWA_COLORKEY)?;
-
-        sender
-            .send(PrivateScreenWindowState::WindowHandle(hwnd))
-            .map_err(|e| {
-                DeskError::CustomError(CustomDeskError::new(
-                    ErrorCode::SYSTEM_ERROR,
-                    format!("Failed to send window handle: {}", e),
-                ))
-            })?;
-
-        let mut message = MSG::default();
-        loop {
-            while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).into() {
-                //see https://learn.microsoft.com/zh-cn/windows/win32/winmsg/about-messages-and-message-queues#message-handling
-                if message.message == WM_QUIT {
-                    log::warn!("Private screen window thread received WM_QUIT");
-                    break;
-                }
-
-                let result = TranslateMessage(&message);
-                if !result.as_bool() {
-                    log::trace!(
-                        "TranslateMessage failed: {:?}",
-                        windows_core::Error::from_win32()
-                    );
-                }
-                DispatchMessageW(&message);
-            }
-            let result = receiver.recv_timeout(Duration::from_millis(10));
-            if let Err(e) = result {
-                match e {
-                    std::sync::mpsc::RecvTimeoutError::Timeout => continue,
-                    _ => {
-                        log::error!("Private screen window thread recv error: {}", e);
-                        break;
-                    }
-                };
-            } else if let Ok(command) = result {
-                match command {
-                    PrivateScreenCommand::Show => show_window(hwnd)?,
-                    PrivateScreenCommand::Hide => hide_window(hwnd)?,
-                    PrivateScreenCommand::Quit => {
-                        log::warn!("Private screen window thread quitting");
-                        break;
-                    }
-                }
-            }
-        }
-        DestroyWindow(hwnd)?;
-        UnregisterClassW(window_class, Some(instance.into()))?;
-
-        Ok(())
-    }
+    window.run()?;
+    Ok(())
 }
 
 pub struct WindowsSystemSettingHelper {
@@ -259,10 +93,26 @@ impl WindowsSystemSettingHelper {
     }
 
     pub fn show_window(&self) -> Result<(), DeskError> {
-        show_window(self.hwnd)
+        //PrivateScreenWindow::show_window(self.hwnd)
+        self.main_sender
+            .send(PrivateScreenCommand::ShowWindow)
+            .map_err(|e| {
+                DeskError::CustomError(CustomDeskError::new(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!("Failed to send ShowWindow command: {}", e),
+                ))
+            })
     }
     pub fn hide_window(&self) -> Result<(), DeskError> {
-        hide_window(self.hwnd)
+        //PrivateScreenWindow::hide_window(self.hwnd)
+        self.main_sender
+            .send(PrivateScreenCommand::HideWindow)
+            .map_err(|e| {
+                DeskError::CustomError(CustomDeskError::new(
+                    ErrorCode::SYSTEM_ERROR,
+                    format!("Failed to send ShowWindow command: {}", e),
+                ))
+            })
     }
 }
 
@@ -324,6 +174,27 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
             self.hide_window()?;
         }
         Ok(())
+    }
+
+    fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError> {
+        unsafe {
+            if turn_off {
+                SendMessageW(
+                    HWND_BROADCAST,
+                    WM_SYSCOMMAND,
+                    Some(WPARAM(SC_MONITORPOWER as usize)),
+                    Some(LPARAM(2)),
+                );
+            } else {
+                SendMessageW(
+                    HWND_BROADCAST,
+                    WM_SYSCOMMAND,
+                    Some(WPARAM(SC_MONITORPOWER as usize)),
+                    Some(LPARAM(-1)),
+                );
+            }
+            Ok(())
+        }
     }
 }
 
