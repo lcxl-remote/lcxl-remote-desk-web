@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{marker::PhantomPinned, time::Duration};
 
 use windows::Win32::{
     Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
@@ -53,6 +53,7 @@ const EXIT_PRIVATE_SCREEN_HOTKEY_ID: usize = 2222;
 /// Private screen window struct
 ///
 /// see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
+#[derive(Debug)]
 pub struct PrivateScreenWindow {
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
@@ -62,11 +63,13 @@ pub struct PrivateScreenWindow {
     pub dxfactory: IDXGIFactory2,
     pub height: isize,
     pub width: isize,
+    /// This marker ensures that the struct is !Unpin
+    _marker: PhantomPinned,
 }
 
 impl PrivateScreenWindow {
     extern "system" fn wndproc(
-        window: HWND,
+        hwnd: HWND,
         message: u32,
         wparam: WPARAM,
         lparam: LPARAM,
@@ -75,18 +78,21 @@ impl PrivateScreenWindow {
             if message == WM_NCCREATE {
                 let cs = lparam.0 as *const CREATESTRUCTW;
                 let this = (*cs).lpCreateParams as *mut Self;
-                (*this).handle = window;
-                log::debug!("Storing pointer to PrivateScreenWindow: {:?}", this);
-                SetWindowLongPtrW(window, GWLP_USERDATA, this as _);
+                log::debug!(
+                    "Storing pointer to PrivateScreenWindow: {:?}, {:?}",
+                    this,
+                    *this
+                );
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, this as _);
             } else {
-                let this = GetWindowLongPtrW(window, GWLP_USERDATA) as *mut Self;
-
+                let this = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Self;
                 if !this.is_null() {
-                    return (*this).message_handler(message, wparam, lparam);
+                    log::info!("Get PrivateScreenWindow address: {:?}", this);
+                    return (*this).message_handler(hwnd, message, wparam, lparam);
                 }
             }
 
-            DefWindowProcW(window, message, wparam, lparam)
+            DefWindowProcW(hwnd, message, wparam, lparam)
         }
     }
 
@@ -113,6 +119,7 @@ impl PrivateScreenWindow {
                 dxfactory,
                 height: 0,
                 width: 0,
+                _marker: PhantomPinned,
             };
             instance.create_window()?;
             Ok(instance)
@@ -149,7 +156,10 @@ impl PrivateScreenWindow {
                         }
                     };
                 } else if let Ok(command) = result {
-                    log::info!("Private screen window thread received command: {:?}", command);
+                    log::info!(
+                        "Private screen window thread received command: {:?}",
+                        command
+                    );
                     match command {
                         PrivateScreenCommand::Quit => {
                             log::warn!("Private screen window thread quitting");
@@ -167,6 +177,7 @@ impl PrivateScreenWindow {
     }
 
     pub fn show_window(hwnd: HWND) -> Result<(), DeskError> {
+        log::info!("Showing private screen window: {:?}", hwnd);
         unsafe {
             let desktop_hwnd = GetDesktopWindow();
             let mut desktop_rect = RECT::default();
@@ -188,11 +199,21 @@ impl PrivateScreenWindow {
                 window_height,
                 SWP_SHOWWINDOW,
             )?;
+
+            RegisterHotKey(
+                Some(hwnd),
+                EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32,
+                MOD_ALT | MOD_CONTROL,
+                'L' as u32,
+            )?;
+
+            log::info!("Hotkey registered for private screen exit: Ctrl + Alt + L");
             Ok(())
         }
     }
 
     pub fn hide_window(hwnd: HWND) -> Result<(), DeskError> {
+        log::info!("Hiding private screen window: {:?}", hwnd);
         unsafe {
             SetWindowPos(
                 hwnd,
@@ -223,7 +244,7 @@ impl PrivateScreenWindow {
 
             let atom = RegisterClassW(&wc);
             debug_assert!(atom != 0);
-
+            log::info!("Creating window with self address: {:p}", self);
             let hwnd = CreateWindowExW(
                 WS_EX_TOPMOST
                     | WS_EX_TRANSPARENT
@@ -253,8 +274,14 @@ impl PrivateScreenWindow {
         }
     }
 
-    fn message_handler(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        self.inner_message_handler(message, wparam, lparam)
+    fn message_handler(
+        &mut self,
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        self.inner_message_handler(hwnd, message, wparam, lparam)
             .unwrap_or_else(|err| {
                 log::error!("message_handler error: {:?}", err);
                 LRESULT(-1)
@@ -263,37 +290,39 @@ impl PrivateScreenWindow {
 
     fn inner_message_handler(
         &mut self,
+        hwnd: HWND,
         message: u32,
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> Result<LRESULT, DeskError> {
         let result = unsafe {
+            if self.handle != hwnd {
+                log::warn!(
+                    "Received message for unknown hwnd: {:?}, expected: {:?}, message: {}",
+                    hwnd,
+                    self.handle,
+                    message
+                );
+            }
             match message {
-                /*
                 WM_CREATE => {
-                    log::info!("WM_CREATE");
-                   
-                    RegisterHotKey(
-                        Some(self.handle),
-                        EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32,
-                        MOD_ALT | MOD_CONTROL,
-                        'L' as u32,
-                    )?;
-                    
-                    log::info!("Hotkey registered for private screen exit: Ctrl + Alt + L");
-                    
+                    log::info!("WM_CREATE: hwnd = {:?}", hwnd);
                     LRESULT(0)
                 }
-                 */
+
                 WM_PAINT => {
                     let mut ps = PAINTSTRUCT::default();
-                    let hdc = BeginPaint(self.handle, &mut ps);
+                    let hdc = BeginPaint(hwnd, &mut ps);
+                    if hdc.is_invalid() {
+                        log::error!("BeginPaint failed: {:?}", windows_core::Error::from_win32());
+                    } else {
+                        // All painting occurs here, between BeginPaint and EndPaint.
+                        log::debug!("WM_PAINT: hwnd = {:?} ps = {:?}, hdc = {:?}", hwnd, ps, hdc);
+                        FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
+                        self.render()?;
+                        let _ = EndPaint(hwnd, &ps);
+                    }
 
-                    // All painting occurs here, between BeginPaint and EndPaint.
-                    log::debug!("WM_PAINT: ps = {:?}, hdc = {:?}", ps, hdc);
-                    FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
-                    self.render()?;
-                    let _ = EndPaint(self.handle, &ps);
                     LRESULT(0)
                 }
                 WM_SIZE => {
@@ -310,7 +339,11 @@ impl PrivateScreenWindow {
                 WM_HOTKEY => {
                     let hotkey_id = wparam.0;
                     if hotkey_id == EXIT_PRIVATE_SCREEN_HOTKEY_ID {
-                        log::warn!("Exit private screen hotkey pressed");
+                        log::warn!(
+                            "Exit private screen hotkey pressed: hwnd = {:?}, self.handle = {:?}",
+                            hwnd,
+                            self.handle
+                        );
                         // Handle exit private screen hotkey
                         // For example, hide the window
                         Self::hide_window(self.handle)?;
@@ -322,7 +355,7 @@ impl PrivateScreenWindow {
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
-                _ => DefWindowProcW(self.handle, message, wparam, lparam),
+                _ => DefWindowProcW(hwnd, message, wparam, lparam),
             }
         };
         Ok(result)

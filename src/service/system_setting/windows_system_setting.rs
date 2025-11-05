@@ -248,7 +248,7 @@ mod tests {
             "failed to enable private screen: {:?}",
             result
         );
-        std::thread::sleep(std::time::Duration::from_secs(600));
+        std::thread::sleep(std::time::Duration::from_secs(6));
         let result = helper.enable_private_screen(false);
         assert!(
             result.is_ok(),
