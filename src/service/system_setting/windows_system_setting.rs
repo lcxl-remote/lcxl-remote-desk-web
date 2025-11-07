@@ -33,6 +33,10 @@ fn private_screen_window_thread(
     sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
     let window = PrivateScreenWindow::new(receiver)?;
+    log::info!(
+        "private_screen_window_thread created PrivateScreenWindow: {:p}",
+        &window
+    );
 
     sender
         .send(PrivateScreenWindowState::WindowHandle(window.handle))
@@ -50,8 +54,6 @@ fn private_screen_window_thread(
 pub struct WindowsSystemSettingHelper {
     main_sender: std::sync::mpsc::Sender<PrivateScreenCommand>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
-    /// Handle to the private screen window. This is used to manage the window's visibility.
-    hwnd: HWND,
 }
 /// Safety: WindowsSystemSettingHelper is Send + Sync
 unsafe impl Send for WindowsSystemSettingHelper {}
@@ -76,7 +78,7 @@ impl WindowsSystemSettingHelper {
             }
         });
         let window_state = main_receiver.recv()?;
-        let hwnd = if let PrivateScreenWindowState::WindowHandle(hwnd) = window_state {
+        let _hwnd = if let PrivateScreenWindowState::WindowHandle(hwnd) = window_state {
             log::info!("Private screen window handle received: {:?}", hwnd);
             hwnd
         } else {
@@ -88,7 +90,6 @@ impl WindowsSystemSettingHelper {
         Ok(Self {
             main_sender,
             thread_handle: Some(thread_handle),
-            hwnd,
         })
     }
 
