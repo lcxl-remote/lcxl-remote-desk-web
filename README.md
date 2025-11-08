@@ -86,6 +86,8 @@ sudo security authorizationdb write system.privilege.taskport.debug allow
 X11:相关包：xcap, x11rb
 wayload相关包: Smithay
 
+使用pipewire来捕获屏幕的github项目：https://github.com/Adonca2203/waycap-rs
+
 ## 其他
 
 ### GStreamer实现的基于webrtc的远程桌面控制

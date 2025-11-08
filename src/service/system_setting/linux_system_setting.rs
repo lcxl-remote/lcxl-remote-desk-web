@@ -63,4 +63,8 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
     fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError> {
         DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
+    
+    fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError> {
+        DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+    }
 }
