@@ -16,7 +16,7 @@ pub static CONVERT_TO_YUV_HISTOGRAM: LazyLock<Histogram> =
 
 pub fn convert_image_to_yuv420(
     image_info: &dyn ImageInfo,
-) -> Result<YuvPlanarImageMut<u8>, DeskError> {
+) -> Result<YuvPlanarImageMut<'_, u8>, DeskError> {
     let convert_to_yuv_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
 
     let width = image_info.get_width();

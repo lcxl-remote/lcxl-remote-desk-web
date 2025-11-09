@@ -11,12 +11,27 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::{desk_error::DeskError, model::audio_capture::SelectedAudioDevice};
 
+#[derive(clap::ValueEnum, Clone, Default, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StartupMode {
+    /// Default mode, includes both signaling server and desk server
+    #[default]
+    Default,
+    /// Signaling mode, include signaling server and turn server
+    Signaling,
+    /// Desk Server only
+    DeskServer,
+}
+
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Args {
     /// Name of the person to greet
-    #[arg(short, long, default_value = "conf/config")]
+    #[clap(short, long, default_value = "conf/config")]
     config_file_path: String,
+
+    #[clap(short, long, default_value_t, value_enum)]
+    startup_mode: StartupMode,
 }
 /// System settings for the application. This struct is used to load and save settings from a configuration file.
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]

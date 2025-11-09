@@ -1,4 +1,4 @@
-use std::{mem, ptr};
+use std::ptr;
 
 use libc::{IPC_CREAT, IPC_PRIVATE, IPC_RMID, SHM_RDONLY, shmat, shmctl, shmdt, shmget};
 use x11rb::{
@@ -113,7 +113,10 @@ impl ImageOutputEnumerator for X11ImageOutputEnumerator {
 /// X11 capture implementation for Linux systems.
 /// see https://github.com/klarity-app/captis/blob/master/src/linux.rs
 impl ImageCapture for X11ImageCapture {
-    fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+    fn capture(
+        &mut self,
+        _show_mouse: bool,
+    ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         let image_info = match self.seg {
             Some(_) => self.capture_shm(self.index)?,
             None => self.capture_standard(self.index)?,
