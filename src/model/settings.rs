@@ -11,7 +11,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::{desk_error::DeskError, model::audio_capture::SelectedAudioDevice};
 
-#[derive(clap::ValueEnum, Clone, Default, Debug, Serialize)]
+#[derive(clap::ValueEnum, Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum StartupMode {
     /// Default mode, includes both signaling server and desk server
@@ -23,7 +23,7 @@ enum StartupMode {
     DeskServer,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone, Default, Serialize, Deserialize)]
 #[command(version, about, long_about = None)]
 pub struct Args {
     /// Name of the person to greet
@@ -37,8 +37,6 @@ pub struct Args {
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct SystemSettings {
-    /// Path to the configuration file. If not specified, a new one will be created in the "conf" directory.
-    pub config_file_path: String,
     /// Enable IPv6 support
     pub enable_ipv6: bool,
     /// port number for the server to bind to
@@ -300,14 +298,13 @@ pub struct Settings {
     /// Terminal settings
     pub terminal: TerminalSettings,
 
-    // Command line arguments
-    // pub args: Args,
+    /// Command line arguments
+    pub args: Args,
 }
 
 impl Default for SystemSettings {
     fn default() -> Self {
         Self {
-            config_file_path: "conf/config".to_string(),
             enable_ipv6: true,
             port: 8081,
             listen_addr_ipv4: "0.0.0.0".to_string(),
@@ -391,12 +388,12 @@ impl Settings {
             .add_source(Environment::with_prefix("DESK"))
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
-        settings.system.config_file_path = args.config_file_path.clone();
+        settings.args = args.clone();
         Ok(settings)
     }
 
     pub fn save(&self) -> Result<(), DeskError> {
-        let mut config_file_path = PathBuf::from(self.system.config_file_path.as_str());
+        let mut config_file_path = PathBuf::from(self.args.config_file_path.as_str());
         config_file_path.set_extension("toml");
         // Save settings to config file
         let toml_str = toml::to_string(self)?;
