@@ -43,12 +43,16 @@ impl SignalingType {
     /// Init message
     pub const INIT: SignalingType = SignalingType(SIGNALING_TYPE_CODE_INIT);
 
+    /// offer message
     pub const OFFER: SignalingType = SignalingType(SIGNALING_TYPE_CODE_OFFER);
+
+    /// answer message
     pub const ANSWER: SignalingType = SignalingType(SIGNALING_TYPE_CODE_ANSWER);
 
+    /// candidate message
     pub const CANID: SignalingType = SignalingType(SIGNALING_TYPE_CODE_CANID);
 
-    // error
+    // error message
     pub const ERROR: SignalingType = SignalingType(SIGNALING_TYPE_CODE_ERROR);
     // unknown signaling type
     pub const UNKNOWN_TYPE: SignalingType = SignalingType(SIGNALING_TYPE_CODE_UNKNOWN_TYPE);

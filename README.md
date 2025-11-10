@@ -50,6 +50,7 @@ LCXL Web Remote Desk 提供了以下功能：
 在 Windows 上进行 Rust 开发和调试，推荐使用 Visual Studio Code (VSCode) 和 LLDB 调试器。不过 Rust 在 Windows 平台默认的工具链是 MSVC 工具链，而 LLDB 针对 MSVC 工具链支持不太好，可以查看以下 issue： <https://github.com/vadimcn/codelldb/wiki/Windows#debugging-rust-on-windows>
 
 因此如果需要在 VSCode 中使用 LLDB 调试 Rust 项目，~~建议安装 MSYS2(切到gnu版本会导致gstreamer编译失败)~~ 。具体步骤如下：
+
 - ~~参考 [MSYS2 官方文档](https://www.msys2.org/) 进行安装和配置。~~
 - ~~安装 GCC 工具链（`pacman -S mingw-w64-ucrt-x86_64-gcc`）。~~
   - ~~如果需要ffmpeg的支持，则需要执行以下命令：`pacman -S mingw-w64-ucrt-x86_64-ffmpeg`~~
@@ -86,7 +87,7 @@ sudo security authorizationdb write system.privilege.taskport.debug allow
 X11:相关包：xcap, x11rb
 wayload相关包: Smithay
 
-使用pipewire来捕获屏幕的github项目：https://github.com/Adonca2203/waycap-rs
+使用pipewire来捕获屏幕的github项目：<https://github.com/Adonca2203/waycap-rs>
 
 ## 其他
 

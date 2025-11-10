@@ -188,7 +188,7 @@ impl Encoder {
         })
     }
 
-    pub fn encode(&mut self, pts: i64, data: &[u8]) -> Result<Packets> {
+    pub fn encode(&mut self, pts: i64, data: &[u8]) -> Result<Packets<'_>> {
         assert!(2 * data.len() >= 3 * self.width * self.height);
 
         let image = MaybeUninit::zeroed();
@@ -304,7 +304,7 @@ pub struct Finish {
 }
 
 impl Finish {
-    pub fn next(&mut self) -> Result<Option<Frame>> {
+    pub fn next(&mut self) -> Result<Option<Frame<'_>>> {
         let mut tmp = Packets {
             ctx: &mut self.enc.ctx,
             iter: self.iter,

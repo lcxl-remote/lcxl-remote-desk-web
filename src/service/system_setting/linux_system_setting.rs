@@ -12,7 +12,7 @@ use crate::{
 pub struct LinuxSystemSettingHelper {}
 
 impl LinuxSystemSettingHelper {
-    pub fn new(desk_setting: &DeskSettings) -> Self {
+    pub fn new(_desk_setting: &DeskSettings) -> Self {
         Self {}
     }
 }
@@ -55,16 +55,16 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         Ok(())
     }
 
-    fn block_input(&self, block: bool) -> Result<(), DeskError> {
+    fn block_input(&self, _block: bool) -> Result<(), DeskError> {
         // FIXME
         DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
 
-    fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError> {
+    fn enable_private_screen(&self, _enable: bool) -> Result<(), DeskError> {
         DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
-    
-    fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError> {
+
+    fn control_monitor_power(&self, _turn_off: bool) -> Result<(), DeskError> {
         DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
 }

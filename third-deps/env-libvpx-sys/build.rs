@@ -10,6 +10,7 @@ pub fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     #[allow(unused_assignments)]
+    #[allow(unused_mut)]
     let mut requested_version = env::var("VPX_VERSION").ok();
 
     let src_dir = env::var_os("CARGO_MANIFEST_DIR").unwrap();
@@ -23,6 +24,7 @@ pub fn main() {
     };
 
     #[allow(unused_assignments)]
+    #[allow(unused_mut)]
     let mut vpx_lib_dir = env::var_os("VPX_LIB_DIR");
     #[cfg(target_os = "windows")]
     {
