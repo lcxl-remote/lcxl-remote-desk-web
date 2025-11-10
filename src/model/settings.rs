@@ -34,6 +34,8 @@ pub struct SystemSettings {
     pub listen_addr_ipv6: String,
     /// access logs are printed with the INFO level so ensure it is enabled by default
     pub log_level: String,
+    /// Enable Rust backtrace for errors
+    pub traceback: bool,
 }
 
 /// User settings
@@ -282,6 +284,9 @@ pub struct Settings {
 
     /// Terminal settings
     pub terminal: TerminalSettings,
+
+    // Command line arguments
+    // pub args: Args,
 }
 
 impl Default for SystemSettings {
@@ -293,6 +298,7 @@ impl Default for SystemSettings {
             listen_addr_ipv4: "0.0.0.0".to_string(),
             listen_addr_ipv6: "::".to_string(),
             log_level: "info".to_string(),
+            traceback: true,
         }
     }
 }

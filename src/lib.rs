@@ -47,8 +47,10 @@ use crate::{controller::terminal::{list_terminal, open_terminal_session}, utils:
 pub async fn run() -> Result<Server, DeskError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
-    // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
-    unsafe { env::set_var("RUST_BACKTRACE", "1") };
+    if settings.system.traceback {
+        // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
+        unsafe { env::set_var("RUST_BACKTRACE", "1") };
+    }
     // Initialize logging
     init_logs_by_str(settings.system.log_level.as_str())?;
     info!("Server args: {:?}", args);
