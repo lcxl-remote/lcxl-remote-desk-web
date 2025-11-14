@@ -190,6 +190,9 @@ pub struct DeskSettings {
     pub vp9_encoder: Option<VpxEncoderSettings>,
     /// opus encoder settings
     pub opus_encoder: Option<OpusEncoderSettings>,
+
+    /// Private screen image path
+    pub private_screen_image_path: Option<String>,
 }
 
 impl DeskSettings {
@@ -221,6 +224,7 @@ impl Default for DeskSettings {
             vp8_encoder: None,
             vp9_encoder: None,
             opus_encoder: None,
+            private_screen_image_path: None,
         }
     }
 }

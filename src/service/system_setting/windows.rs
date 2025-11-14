@@ -6,9 +6,7 @@ use windows::Win32::{
         Direct2D::{
             D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory,
             ID2D1Factory1,
-        },
-        Dxgi::{CreateDXGIFactory1, IDXGIFactory2},
-        Gdi::{BeginPaint, COLOR_WINDOW, EndPaint, FillRect, HBRUSH, PAINTSTRUCT},
+        }, DirectWrite::{DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWriteCreateFactory, IDWriteFactory2, IDWriteTextFormat}, Dxgi::{CreateDXGIFactory1, IDXGIFactory2}, Gdi::{BeginPaint, COLOR_WINDOW, EndPaint, FillRect, HBRUSH, PAINTSTRUCT}
     },
     System::{
         Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
@@ -50,6 +48,14 @@ pub enum PrivateScreenCommand {
 
 const EXIT_PRIVATE_SCREEN_HOTKEY_ID: usize = 2222;
 
+const CARD_ROWS: usize = 3;
+const CARD_COLUMNS: usize = 6;
+const CARD_MARGIN: f32 = 15.0;
+const CARD_WIDTH: f32 = 150.0;
+const CARD_HEIGHT: f32 = 210.0;
+const WINDOW_WIDTH: f32 = CARD_COLUMNS as f32 * (CARD_WIDTH + CARD_MARGIN) + CARD_MARGIN;
+const WINDOW_HEIGHT: f32 = CARD_ROWS as f32 * (CARD_HEIGHT + CARD_MARGIN) + CARD_MARGIN;
+
 /// Private screen window struct
 ///
 /// see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
@@ -63,6 +69,7 @@ pub struct PrivateScreenWindow {
     pub dxfactory: IDXGIFactory2,
     pub height: isize,
     pub width: isize,
+    pub format: IDWriteTextFormat,
     /// This marker ensures that the struct is !Unpin
     _marker: PhantomPinned,
 }
@@ -119,6 +126,7 @@ impl PrivateScreenWindow {
                 instance: HMODULE::default(),
                 factory,
                 dxfactory,
+                format: Self::create_text_format()?,
                 height: 0,
                 width: 0,
                 _marker: PhantomPinned,
@@ -356,8 +364,31 @@ impl PrivateScreenWindow {
     /// Render the window content using Direct2D
     fn render(&mut self) -> Result<LRESULT, DeskError> {
         //TODO: implement render logic here
+       
         Ok(LRESULT(0))
     }
+
+    /// Create text format for drawing text
+    /// see https://github.com/microsoft/windows-rs/blob/3a454d71bc091c20181415bdcf21371bd15ff74d/crates/samples/windows/dcomp/src/main.rs
+    fn create_text_format() -> Result<IDWriteTextFormat, DeskError> {
+    unsafe {
+        let factory: IDWriteFactory2 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+
+        let format = factory.CreateTextFormat(
+            w!("Candara"),
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            CARD_HEIGHT / 2.0,
+            w!("en"),
+        )?;
+
+        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        Ok(format)
+    }
+}
 }
 
 impl Drop for PrivateScreenWindow {
