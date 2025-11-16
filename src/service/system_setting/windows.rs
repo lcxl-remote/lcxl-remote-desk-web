@@ -4,9 +4,25 @@ use windows::Win32::{
     Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::{
         Direct2D::{
-            D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory,
-            ID2D1Factory1,
-        }, DirectWrite::{DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWriteCreateFactory, IDWriteFactory2, IDWriteTextFormat}, Dxgi::{CreateDXGIFactory1, IDXGIFactory2}, Gdi::{BeginPaint, COLOR_WINDOW, EndPaint, FillRect, HBRUSH, PAINTSTRUCT}
+            Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_COLOR_F},
+            D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS,
+            D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
+            D2D1_RENDER_TARGET_PROPERTIES, D2D1CreateDevice, D2D1CreateFactory, ID2D1Factory1,
+            ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+        },
+        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+        Direct3D11::{
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+        },
+        DirectComposition::{DCompositionCreateDevice2, IDCompositionDesktopDevice},
+        DirectWrite::{
+            DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWriteCreateFactory,
+            IDWriteFactory2, IDWriteTextFormat,
+        },
+        Dxgi::{CreateDXGIFactory1, IDXGIDevice3, IDXGIFactory2},
+        Gdi::{BeginPaint, COLOR_WINDOW, EndPaint, FillRect, HBRUSH, PAINTSTRUCT},
     },
     System::{
         Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
@@ -21,15 +37,16 @@ use windows::Win32::{
             PeekMessageW, PostQuitMessage, RegisterClassW, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE,
             SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
             SetWindowLongPtrW, SetWindowPos, TranslateMessage, UnregisterClassW,
-            WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY,
-            WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+            WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY, WM_NCCREATE, WM_PAINT,
+            WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
         },
     },
 };
-use windows_core::{PCWSTR, w};
+use windows_core::{Interface, PCWSTR, w};
+use windows_numerics::Matrix3x2;
 
-use crate::desk_error::DeskError;
+use crate::{desk_error::DeskError, model::common::ErrorCode};
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff
@@ -70,6 +87,8 @@ pub struct PrivateScreenWindow {
     pub height: isize,
     pub width: isize,
     pub format: IDWriteTextFormat,
+    pub hwnd_render_target: Option<ID2D1HwndRenderTarget>,
+    pub brush: ID2D1SolidColorBrush,
     /// This marker ensures that the struct is !Unpin
     _marker: PhantomPinned,
 }
@@ -118,6 +137,21 @@ impl PrivateScreenWindow {
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))?;
             let dxfactory: IDXGIFactory2 = CreateDXGIFactory1()?;
 
+            let device_3d = Self::create_device_3d()?;
+            let dxgi: IDXGIDevice3 = device_3d.cast()?;
+            let device_2d = D2D1CreateDevice(&dxgi, None)?;
+            let desktop: IDCompositionDesktopDevice = DCompositionCreateDevice2(&device_2d)?;
+            let dc = device_2d.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            let brush = dc.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
+
             // Create window
             let instance = Self {
                 handle: HWND::default(),
@@ -129,6 +163,8 @@ impl PrivateScreenWindow {
                 format: Self::create_text_format()?,
                 height: 0,
                 width: 0,
+                hwnd_render_target: None,
+                brush,
                 _marker: PhantomPinned,
             };
             // !!! Note that you must use `Box::new` to allocate memory here;
@@ -286,6 +322,7 @@ impl PrivateScreenWindow {
 
             assert_eq!(self.handle, hwnd);
             self.instance = instance;
+
             Ok(())
         }
     }
@@ -364,31 +401,102 @@ impl PrivateScreenWindow {
     /// Render the window content using Direct2D
     fn render(&mut self) -> Result<LRESULT, DeskError> {
         //TODO: implement render logic here
-       
+        if self.width == 0 || self.height == 0 {
+            log::warn!("Window size is zero, skipping render");
+            return Ok(LRESULT(0));
+        }
+
+        let rendertargetproperties = D2D1_RENDER_TARGET_PROPERTIES::default();
+        let hwndrendertargetproperties = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+            hwnd: self.handle,
+            pixelSize: D2D_SIZE_U {
+                width: WINDOW_WIDTH as _,
+                height: WINDOW_HEIGHT as _,
+            },
+            presentOptions: windows::Win32::Graphics::Direct2D::D2D1_PRESENT_OPTIONS_NONE,
+        };
+        unsafe {
+            if self.hwnd_render_target.is_none() {
+                let hwnd_render_target = self
+                    .factory
+                    .CreateHwndRenderTarget(&rendertargetproperties, &hwndrendertargetproperties)?;
+                self.hwnd_render_target = Some(hwnd_render_target);
+            }
+            let target = self.hwnd_render_target.as_ref().unwrap();
+            target.BeginDraw();
+            target.SetTransform(&Matrix3x2::identity());
+
+            target.Clear(Some(&D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }));
+
+            target.DrawText(
+                w!("Hello, Private Screen!").as_wide(),
+                &self.format,
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: self.width as f32,
+                    bottom: self.height as f32,
+                },
+                &self.brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            target.EndDraw(None, None)?;
+        }
         Ok(LRESULT(0))
     }
 
     /// Create text format for drawing text
     /// see https://github.com/microsoft/windows-rs/blob/3a454d71bc091c20181415bdcf21371bd15ff74d/crates/samples/windows/dcomp/src/main.rs
     fn create_text_format() -> Result<IDWriteTextFormat, DeskError> {
-    unsafe {
-        let factory: IDWriteFactory2 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        unsafe {
+            let factory: IDWriteFactory2 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
 
-        let format = factory.CreateTextFormat(
-            w!("Candara"),
-            None,
-            DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            CARD_HEIGHT / 2.0,
-            w!("en"),
-        )?;
+            let format = factory.CreateTextFormat(
+                w!("Candara"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                CARD_HEIGHT / 2.0,
+                w!("en"),
+            )?;
 
-        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-        Ok(format)
+            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            Ok(format)
+        }
     }
-}
+
+    fn create_device_3d() -> Result<ID3D11Device, DeskError> {
+        let mut device = None;
+
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )?;
+            device.ok_or_else(|| {
+                DeskError::CustomError(crate::desk_error::CustomDeskError {
+                    error_code: ErrorCode::SYSTEM_ERROR,
+                    message: "Failed to create D3D11 device".to_owned(),
+                })
+            })
+        }
+    }
 }
 
 impl Drop for PrivateScreenWindow {
