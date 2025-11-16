@@ -5,23 +5,18 @@ use windows::Win32::{
     Graphics::{
         Direct2D::{
             Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_COLOR_F},
-            D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS,
-            D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
-            D2D1_RENDER_TARGET_PROPERTIES, D2D1CreateDevice, D2D1CreateFactory, ID2D1Factory1,
-            ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+            D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
+            D2D1_RENDER_TARGET_PROPERTIES, D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget,
+            ID2D1SolidColorBrush,
         },
-        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-        Direct3D11::{
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-        },
-        DirectComposition::{DCompositionCreateDevice2, IDCompositionDesktopDevice},
         DirectWrite::{
             DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
             DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWriteCreateFactory,
             IDWriteFactory2, IDWriteTextFormat,
         },
-        Dxgi::{CreateDXGIFactory1, IDXGIDevice3, IDXGIFactory2},
+        Dxgi::{CreateDXGIFactory1, IDXGIFactory2},
         Gdi::{BeginPaint, COLOR_WINDOW, EndPaint, FillRect, HBRUSH, PAINTSTRUCT},
     },
     System::{
@@ -43,10 +38,10 @@ use windows::Win32::{
         },
     },
 };
-use windows_core::{Interface, PCWSTR, w};
+use windows_core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
-use crate::{desk_error::DeskError, model::common::ErrorCode};
+use crate::desk_error::DeskError;
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff
@@ -65,20 +60,14 @@ pub enum PrivateScreenCommand {
 
 const EXIT_PRIVATE_SCREEN_HOTKEY_ID: usize = 2222;
 
-const CARD_ROWS: usize = 3;
-const CARD_COLUMNS: usize = 6;
-const CARD_MARGIN: f32 = 15.0;
-const CARD_WIDTH: f32 = 150.0;
 const CARD_HEIGHT: f32 = 210.0;
-const WINDOW_WIDTH: f32 = CARD_COLUMNS as f32 * (CARD_WIDTH + CARD_MARGIN) + CARD_MARGIN;
-const WINDOW_HEIGHT: f32 = CARD_ROWS as f32 * (CARD_HEIGHT + CARD_MARGIN) + CARD_MARGIN;
 
 /// Private screen window struct
 ///
 /// see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
 #[derive(Debug)]
 pub struct PrivateScreenWindow {
-    pub handle: HWND,
+    pub hwnd: HWND,
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
     pub instance: HMODULE,
@@ -88,7 +77,7 @@ pub struct PrivateScreenWindow {
     pub width: isize,
     pub format: IDWriteTextFormat,
     pub hwnd_render_target: Option<ID2D1HwndRenderTarget>,
-    pub brush: ID2D1SolidColorBrush,
+    pub black_brush: Option<ID2D1SolidColorBrush>,
     /// This marker ensures that the struct is !Unpin
     _marker: PhantomPinned,
 }
@@ -104,7 +93,7 @@ impl PrivateScreenWindow {
             if message == WM_NCCREATE {
                 let cs = lparam.0 as *const CREATESTRUCTW;
                 let this = (*cs).lpCreateParams as *mut Self;
-                (*this).handle = hwnd;
+                (*this).hwnd = hwnd;
                 log::debug!(
                     "Storing pointer to PrivateScreenWindow: {:?}, {:?}",
                     this,
@@ -115,7 +104,7 @@ impl PrivateScreenWindow {
                 let this = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Self;
                 if !this.is_null() {
                     log::info!("Get PrivateScreenWindow address: {:?}", this);
-                    assert_eq!((*this).handle, hwnd);
+                    assert_eq!((*this).hwnd, hwnd);
                     return (*this).message_handler(message, wparam, lparam);
                 }
             }
@@ -137,24 +126,9 @@ impl PrivateScreenWindow {
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, Some(&options))?;
             let dxfactory: IDXGIFactory2 = CreateDXGIFactory1()?;
 
-            let device_3d = Self::create_device_3d()?;
-            let dxgi: IDXGIDevice3 = device_3d.cast()?;
-            let device_2d = D2D1CreateDevice(&dxgi, None)?;
-            let desktop: IDCompositionDesktopDevice = DCompositionCreateDevice2(&device_2d)?;
-            let dc = device_2d.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-            let brush = dc.CreateSolidColorBrush(
-                &D2D1_COLOR_F {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 1.0,
-                },
-                None,
-            )?;
-
             // Create window
             let instance = Self {
-                handle: HWND::default(),
+                hwnd: HWND::default(),
                 receiver,
                 window_class: w!("lcxl-web-private-screen-window-class"),
                 instance: HMODULE::default(),
@@ -164,7 +138,7 @@ impl PrivateScreenWindow {
                 height: 0,
                 width: 0,
                 hwnd_render_target: None,
-                brush,
+                black_brush: None,
                 _marker: PhantomPinned,
             };
             // !!! Note that you must use `Box::new` to allocate memory here;
@@ -217,8 +191,8 @@ impl PrivateScreenWindow {
                             log::warn!("Private screen window thread quitting");
                             break;
                         }
-                        PrivateScreenCommand::ShowWindow => Self::show_window(self.handle)?,
-                        PrivateScreenCommand::HideWindow => Self::hide_window(self.handle)?,
+                        PrivateScreenCommand::ShowWindow => Self::show_window(self.hwnd)?,
+                        PrivateScreenCommand::HideWindow => Self::hide_window(self.hwnd)?,
                     }
                 } else {
                     log::error!("Private screen window thread unknown recv result");
@@ -320,7 +294,7 @@ impl PrivateScreenWindow {
             let crkey = COLORREF(0x00FF00); // Green color key RGB(0,255,0)
             SetLayeredWindowAttributes(hwnd, crkey, 255, LWA_COLORKEY)?;
 
-            assert_eq!(self.handle, hwnd);
+            assert_eq!(self.hwnd, hwnd);
             self.instance = instance;
 
             Ok(())
@@ -345,20 +319,20 @@ impl PrivateScreenWindow {
             match message {
                 WM_PAINT => {
                     let mut ps = PAINTSTRUCT::default();
-                    let hdc = BeginPaint(self.handle, &mut ps);
+                    let hdc = BeginPaint(self.hwnd, &mut ps);
                     if hdc.is_invalid() {
                         log::error!("BeginPaint failed: {:?}", windows_core::Error::from_win32());
                     } else {
                         // All painting occurs here, between BeginPaint and EndPaint.
                         log::debug!(
                             "WM_PAINT: hwnd = {:?} ps = {:?}, hdc = {:?}",
-                            self.handle,
+                            self.hwnd,
                             ps,
                             hdc
                         );
                         FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
                         self.render()?;
-                        let _ = EndPaint(self.handle, &ps);
+                        let _ = EndPaint(self.hwnd, &ps);
                     }
 
                     LRESULT(0)
@@ -377,13 +351,10 @@ impl PrivateScreenWindow {
                 WM_HOTKEY => {
                     let hotkey_id = wparam.0;
                     if hotkey_id == EXIT_PRIVATE_SCREEN_HOTKEY_ID {
-                        log::warn!(
-                            "Exit private screen hotkey pressed: hwnd = {:?}",
-                            self.handle
-                        );
+                        log::warn!("Exit private screen hotkey pressed: hwnd = {:?}", self.hwnd);
                         // Handle exit private screen hotkey
                         // For example, hide the window
-                        Self::hide_window(self.handle)?;
+                        Self::hide_window(self.hwnd)?;
                     }
                     LRESULT(0)
                 }
@@ -392,7 +363,7 @@ impl PrivateScreenWindow {
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
-                _ => DefWindowProcW(self.handle, message, wparam, lparam),
+                _ => DefWindowProcW(self.hwnd, message, wparam, lparam),
             }
         };
         Ok(result)
@@ -400,7 +371,6 @@ impl PrivateScreenWindow {
 
     /// Render the window content using Direct2D
     fn render(&mut self) -> Result<LRESULT, DeskError> {
-        //TODO: implement render logic here
         if self.width == 0 || self.height == 0 {
             log::warn!("Window size is zero, skipping render");
             return Ok(LRESULT(0));
@@ -408,21 +378,34 @@ impl PrivateScreenWindow {
 
         let rendertargetproperties = D2D1_RENDER_TARGET_PROPERTIES::default();
         let hwndrendertargetproperties = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd: self.handle,
+            hwnd: self.hwnd,
             pixelSize: D2D_SIZE_U {
                 width: self.width as _,
                 height: self.height as _,
             },
-            presentOptions: windows::Win32::Graphics::Direct2D::D2D1_PRESENT_OPTIONS_NONE,
+            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
         };
         unsafe {
             if self.hwnd_render_target.is_none() {
                 let hwnd_render_target = self
                     .factory
                     .CreateHwndRenderTarget(&rendertargetproperties, &hwndrendertargetproperties)?;
+
+                let black_brush = hwnd_render_target.CreateSolidColorBrush(
+                    &D2D1_COLOR_F {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    None,
+                )?;
+
                 self.hwnd_render_target = Some(hwnd_render_target);
+                self.black_brush = Some(black_brush);
             }
             let target = self.hwnd_render_target.as_ref().unwrap();
+            let black_brush = self.black_brush.as_ref().unwrap();
             target.BeginDraw();
             target.SetTransform(&Matrix3x2::identity());
 
@@ -442,7 +425,7 @@ impl PrivateScreenWindow {
                     right: self.width as f32,
                     bottom: self.height as f32,
                 },
-                &self.brush,
+                black_brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
                 DWRITE_MEASURING_MODE_NATURAL,
             );
@@ -473,30 +456,6 @@ impl PrivateScreenWindow {
             Ok(format)
         }
     }
-
-    fn create_device_3d() -> Result<ID3D11Device, DeskError> {
-        let mut device = None;
-
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )?;
-            device.ok_or_else(|| {
-                DeskError::CustomError(crate::desk_error::CustomDeskError {
-                    error_code: ErrorCode::SYSTEM_ERROR,
-                    message: "Failed to create D3D11 device".to_owned(),
-                })
-            })
-        }
-    }
 }
 
 impl Drop for PrivateScreenWindow {
@@ -504,13 +463,13 @@ impl Drop for PrivateScreenWindow {
         unsafe {
             log::info!("Dropping PrivateScreenWindow: {:p}, {:?}", self, self);
             // Clean up resources
-            if !self.handle.is_invalid() {
+            if !self.hwnd.is_invalid() {
                 // Destroy the window
-                let result = DestroyWindow(self.handle);
+                let result = DestroyWindow(self.hwnd);
                 if let Err(err) = result {
                     log::error!("DestroyWindow error: {:?}", err);
                 }
-                self.handle = HWND::default();
+                self.hwnd = HWND::default();
             }
             if !self.instance.is_invalid() {
                 // Unregister the window class

@@ -39,7 +39,7 @@ fn private_screen_window_thread(
     );
 
     sender
-        .send(PrivateScreenWindowState::WindowHandle(window.handle))
+        .send(PrivateScreenWindowState::WindowHandle(window.hwnd))
         .map_err(|e| {
             DeskError::CustomError(CustomDeskError::new(
                 ErrorCode::SYSTEM_ERROR,
@@ -205,7 +205,7 @@ mod tests {
 
     use log::LevelFilter;
 
-    use crate::utils::logs::init_logs;
+    use crate::{model::settings::DeskSettings, utils::logs::init_logs};
 
     use super::*;
     static INIT: Once = Once::new();
@@ -240,9 +240,7 @@ mod tests {
     #[test]
     fn test_private_screen() {
         initialize();
-        let helper =
-            WindowsSystemSettingHelper::new(&crate::model::settings::DeskSettings::default())
-                .unwrap();
+        let helper = WindowsSystemSettingHelper::new(&DeskSettings::default()).unwrap();
         let result = helper.enable_private_screen(true);
         assert!(
             result.is_ok(),
