@@ -410,8 +410,8 @@ impl PrivateScreenWindow {
         let hwndrendertargetproperties = D2D1_HWND_RENDER_TARGET_PROPERTIES {
             hwnd: self.handle,
             pixelSize: D2D_SIZE_U {
-                width: WINDOW_WIDTH as _,
-                height: WINDOW_HEIGHT as _,
+                width: self.width as _,
+                height: self.height as _,
             },
             presentOptions: windows::Win32::Graphics::Direct2D::D2D1_PRESENT_OPTIONS_NONE,
         };
