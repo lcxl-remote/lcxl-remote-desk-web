@@ -14,14 +14,14 @@ use windows_core::HSTRING;
 use crate::{
     desk_error::{CustomDeskError, DeskError},
     model::{
-        common::ErrorCode,
-        system_setting::{DisplaySettings, SystemSettingHelper},
+        common::ErrorCode, settings::DeskSettings, system_setting::{DisplaySettings, SystemSettingHelper}
     },
     service::system_setting::windows::{PrivateScreenCommand, PrivateScreenWindow},
 };
 
 pub enum PrivateScreenWindowState {
     WindowHandle(HWND),
+    ExitPrivateScreen,
 }
 /// Safety: HWND is Send
 unsafe impl Send for PrivateScreenWindowState {}
@@ -61,8 +61,8 @@ unsafe impl Sync for WindowsSystemSettingHelper {}
 
 impl WindowsSystemSettingHelper {
     pub fn new(
-        _desk_setting: &crate::model::settings::DeskSettings,
-    ) -> Result<Self, crate::desk_error::DeskError> {
+        _desk_setting: &DeskSettings,
+    ) -> Result<Self, DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
         let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
 
@@ -247,7 +247,7 @@ mod tests {
             "failed to enable private screen: {:?}",
             result
         );
-        std::thread::sleep(std::time::Duration::from_secs(6));
+        std::thread::sleep(std::time::Duration::from_secs(30));
         let result = helper.enable_private_screen(false);
         assert!(
             result.is_ok(),

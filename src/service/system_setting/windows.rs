@@ -250,7 +250,21 @@ impl PrivateScreenWindow {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW,
             )?;
-            UnregisterHotKey(Some(hwnd), EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32)?;
+            let result = UnregisterHotKey(Some(hwnd), EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32);
+            if let Err(ref e) = result {
+                if e.code().0 != 0x8007058Bu32 as i32 {
+                    // ERROR_HOTKEY_NOT_REGISTERED
+                    log::error!(
+                        "Failed to unregister hotkey for private screen exit: {:?}",
+                        e
+                    );
+                    result?;
+                } else {
+                    log::warn!(
+                        "Hotkey for private screen exit was not registered, cannot unregister"
+                    );
+                }
+            }
             Ok(())
         }
     }
@@ -370,6 +384,7 @@ impl PrivateScreenWindow {
     }
 
     /// Render the window content using Direct2D
+    /// see https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Win7Samples/multimedia/Direct2D/SimpleDirect2DApplication/SimpleDirect2dApplication.cpp
     fn render(&mut self) -> Result<LRESULT, DeskError> {
         if self.width == 0 || self.height == 0 {
             log::warn!("Window size is zero, skipping render");
