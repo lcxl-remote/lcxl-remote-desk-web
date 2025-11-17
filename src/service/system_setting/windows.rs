@@ -103,7 +103,6 @@ impl PrivateScreenWindow {
             } else {
                 let this = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Self;
                 if !this.is_null() {
-                    log::info!("Get PrivateScreenWindow address: {:?}", this);
                     assert_eq!((*this).hwnd, hwnd);
                     return (*this).message_handler(message, wparam, lparam);
                 }
@@ -432,7 +431,7 @@ impl PrivateScreenWindow {
             }));
 
             target.DrawText(
-                w!("Hello, Private Screen!").as_wide(),
+                w!("隐私屏已启用，按Ctrl+Alt+L退出").as_wide(),
                 &self.format,
                 &D2D_RECT_F {
                     left: 0.0,
