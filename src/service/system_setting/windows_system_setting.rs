@@ -14,7 +14,9 @@ use windows_core::HSTRING;
 use crate::{
     desk_error::{CustomDeskError, DeskError},
     model::{
-        common::ErrorCode, settings::DeskSettings, system_setting::{DisplaySettings, SystemSettingHelper}
+        common::ErrorCode,
+        settings::{DeskSettings, PrivateScreenSettings},
+        system_setting::{DisplaySettings, SystemSettingHelper},
     },
     service::system_setting::windows::{PrivateScreenCommand, PrivateScreenWindow},
 };
@@ -29,10 +31,11 @@ unsafe impl Send for PrivateScreenWindowState {}
 /// Thread function to create and manage the private screen window,
 /// see https://bbs.kanxue.com/thread-279475.htm
 fn private_screen_window_thread(
+    private_screen_settings: PrivateScreenSettings,
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
-    let window = PrivateScreenWindow::new(receiver)?;
+    let window = PrivateScreenWindow::new(private_screen_settings, receiver)?;
     log::info!(
         "private_screen_window_thread created PrivateScreenWindow: {:p}",
         &window
@@ -60,14 +63,16 @@ unsafe impl Send for WindowsSystemSettingHelper {}
 unsafe impl Sync for WindowsSystemSettingHelper {}
 
 impl WindowsSystemSettingHelper {
-    pub fn new(
-        _desk_setting: &DeskSettings,
-    ) -> Result<Self, DeskError> {
+    pub fn new(desk_setting: &DeskSettings) -> Result<Self, DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
         let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
-
+        let private_screen_settings = desk_setting.private_screen.clone();
         let thread_handle = std::thread::spawn(move || {
-            let result = private_screen_window_thread(window_receiver, window_sender);
+            let result = private_screen_window_thread(
+                private_screen_settings,
+                window_receiver,
+                window_sender,
+            );
             if result.is_err() {
                 log::error!(
                     "Private screen window thread exited with error: {:?}",
@@ -204,6 +209,9 @@ mod tests {
     use std::sync::Once;
 
     use log::LevelFilter;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WS_EX_OVERLAPPEDWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
+    };
 
     use crate::{model::settings::DeskSettings, utils::logs::init_logs};
 
@@ -240,7 +248,11 @@ mod tests {
     #[test]
     fn test_private_screen() {
         initialize();
-        let helper = WindowsSystemSettingHelper::new(&DeskSettings::default()).unwrap();
+        let mut desk_settings = DeskSettings::default();
+        desk_settings.private_screen.window_style = Some(WS_OVERLAPPEDWINDOW.0);
+        desk_settings.private_screen.window_ex_style =
+            Some(WS_EX_TOPMOST.0 | WS_EX_OVERLAPPEDWINDOW.0);
+        let helper = WindowsSystemSettingHelper::new(&desk_settings).unwrap();
         let result = helper.enable_private_screen(true);
         assert!(
             result.is_ok(),

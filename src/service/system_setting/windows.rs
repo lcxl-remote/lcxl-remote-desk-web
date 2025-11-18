@@ -32,16 +32,16 @@ use windows::Win32::{
             PeekMessageW, PostQuitMessage, RegisterClassW, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE,
             SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
             SetWindowLongPtrW, SetWindowPos, TranslateMessage, UnregisterClassW,
-            WDA_EXCLUDEFROMCAPTURE, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY, WM_NCCREATE, WM_PAINT,
-            WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+            WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_DISPLAYCHANGE,
+            WM_HOTKEY, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
         },
     },
 };
 use windows_core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
-use crate::desk_error::DeskError;
+use crate::{desk_error::DeskError, model::settings::PrivateScreenSettings};
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff
@@ -67,6 +67,7 @@ const CARD_HEIGHT: f32 = 210.0;
 /// see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
 #[derive(Debug)]
 pub struct PrivateScreenWindow {
+    pub settings: PrivateScreenSettings,
     pub hwnd: HWND,
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
@@ -113,6 +114,7 @@ impl PrivateScreenWindow {
     }
 
     pub fn new(
+        settings: PrivateScreenSettings,
         receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     ) -> Result<Box<Self>, DeskError> {
         unsafe {
@@ -127,6 +129,7 @@ impl PrivateScreenWindow {
 
             // Create window
             let instance = Self {
+                settings,
                 hwnd: HWND::default(),
                 receiver,
                 window_class: w!("lcxl-web-private-screen-window-class"),
@@ -284,15 +287,27 @@ impl PrivateScreenWindow {
             let atom = RegisterClassW(&wc);
             debug_assert!(atom != 0);
             log::info!("Creating window with self address: {:p}", self);
-            let hwnd = CreateWindowExW(
+
+            let dwstyle = if let Some(style) = self.settings.window_style {
+                WINDOW_STYLE(style)
+            } else {
+                WS_OVERLAPPED
+            };
+
+            let dwexstyle = if let Some(style) = self.settings.window_ex_style {
+                WINDOW_EX_STYLE(style)
+            } else {
                 WS_EX_TOPMOST
                     | WS_EX_TRANSPARENT
                     | WS_EX_NOACTIVATE
                     | WS_EX_LAYERED
-                    | WS_EX_TOOLWINDOW,
+                    | WS_EX_TOOLWINDOW
+            };
+            let hwnd = CreateWindowExW(
+                dwexstyle,
                 self.window_class,
                 w!("This is a sample window"),
-                WS_OVERLAPPED,
+                dwstyle,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -304,8 +319,12 @@ impl PrivateScreenWindow {
             )?;
             // Set the window to be excluded from screen capture
             SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)?;
+
             let crkey = COLORREF(0x00FF00); // Green color key RGB(0,255,0)
-            SetLayeredWindowAttributes(hwnd, crkey, 255, LWA_COLORKEY)?;
+            if WS_EX_LAYERED.0 & dwexstyle.0 != 0 {
+                log::info!("Setting layered window attributes for hwnd: {:?}", hwnd);
+                SetLayeredWindowAttributes(hwnd, crkey, 255, LWA_COLORKEY)?;
+            }
 
             assert_eq!(self.hwnd, hwnd);
             self.instance = instance;
@@ -383,6 +402,7 @@ impl PrivateScreenWindow {
     }
 
     /// Render the window content using Direct2D
+    /// see https://learn.microsoft.com/zh-cn/windows/win32/direct2d/how-to--draw-text
     /// see https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Win7Samples/multimedia/Direct2D/SimpleDirect2DApplication/SimpleDirect2dApplication.cpp
     fn render(&mut self) -> Result<LRESULT, DeskError> {
         if self.width == 0 || self.height == 0 {

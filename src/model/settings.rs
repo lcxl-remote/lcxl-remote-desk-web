@@ -1,10 +1,10 @@
 use std::{collections::HashMap, fs, ops::Deref, path::PathBuf, time::Duration};
 
-use ::serde::{Deserialize, Serialize};
 use chrono::{DateTime, Local};
 use clap::Parser;
 use config::{Config, Environment, File};
 use log::{debug, info};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use turn_server::config::Interface;
 use utoipa::{IntoParams, ToSchema};
@@ -153,6 +153,27 @@ impl Default for OpusEncoderSettings {
         }
     }
 }
+/// Private screen settings
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
+#[serde(default)]
+pub struct PrivateScreenSettings {
+    /// Optional image path for the private screen background
+    pub image_path: Option<String>,
+    /// Optional window style for the private screen window
+    pub window_style: Option<u32>,
+    /// Optional window extended style for the private screen window
+    pub window_ex_style: Option<u32>,
+}
+
+impl Default for PrivateScreenSettings {
+    fn default() -> Self {
+        Self {
+            image_path: None,
+            window_style: None,
+            window_ex_style: None,
+        }
+    }
+}
 
 /// Desk settings
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
@@ -191,8 +212,8 @@ pub struct DeskSettings {
     /// opus encoder settings
     pub opus_encoder: Option<OpusEncoderSettings>,
 
-    /// Private screen image path
-    pub private_screen_image_path: Option<String>,
+    /// Private screen settings
+    pub private_screen: PrivateScreenSettings,
 }
 
 impl DeskSettings {
@@ -224,7 +245,7 @@ impl Default for DeskSettings {
             vp8_encoder: None,
             vp9_encoder: None,
             opus_encoder: None,
-            private_screen_image_path: None,
+            private_screen: PrivateScreenSettings::default(),
         }
     }
 }
