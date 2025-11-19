@@ -153,6 +153,25 @@ impl Default for OpusEncoderSettings {
         }
     }
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
+#[serde(default)]
+pub struct HotkeySettings {
+    /// HOT_KEY_MODIFIERS
+    pub fsmodifiers: u32,
+    pub vk: u32,
+}
+
+impl Default for HotkeySettings {
+    fn default() -> Self {
+        Self {
+            // ALT + CTRL
+            fsmodifiers: 3,
+            vk: 'L' as u32,
+        }
+    }
+}
+
 /// Private screen settings
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
 #[serde(default)]
@@ -163,6 +182,8 @@ pub struct PrivateScreenSettings {
     pub window_style: Option<u32>,
     /// Optional window extended style for the private screen window
     pub window_ex_style: Option<u32>,
+    /// Optional hotkey settings for toggling the private screen
+    pub hotkey: Option<HotkeySettings>,
 }
 
 impl Default for PrivateScreenSettings {
@@ -171,6 +192,7 @@ impl Default for PrivateScreenSettings {
             image_path: None,
             window_style: None,
             window_ex_style: None,
+            hotkey: None,
         }
     }
 }

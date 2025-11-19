@@ -17,7 +17,7 @@ use windows::Win32::{
             IDWriteFactory2, IDWriteTextFormat,
         },
         Dxgi::{CreateDXGIFactory1, IDXGIFactory2},
-        Gdi::{BeginPaint, COLOR_WINDOW, EndPaint, FillRect, HBRUSH, PAINTSTRUCT},
+        Gdi::ValidateRect,
     },
     System::{
         Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
@@ -161,8 +161,8 @@ impl PrivateScreenWindow {
                 while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).into() {
                     //see https://learn.microsoft.com/zh-cn/windows/win32/winmsg/about-messages-and-message-queues#message-handling
                     if message.message == WM_QUIT {
-                        log::warn!("Private screen window thread received WM_QUIT");
-                        break;
+                        log::warn!("Private screen window thread received WM_QUIT, exiting");
+                        return Ok(());
                     }
 
                     let result = TranslateMessage(&message);
@@ -189,10 +189,7 @@ impl PrivateScreenWindow {
                         command
                     );
                     match command {
-                        PrivateScreenCommand::Quit => {
-                            log::warn!("Private screen window thread quitting");
-                            break;
-                        }
+                        PrivateScreenCommand::Quit => PostQuitMessage(0),
                         PrivateScreenCommand::ShowWindow => Self::show_window(self.hwnd)?,
                         PrivateScreenCommand::HideWindow => Self::hide_window(self.hwnd)?,
                     }
@@ -350,23 +347,8 @@ impl PrivateScreenWindow {
         let result = unsafe {
             match message {
                 WM_PAINT => {
-                    let mut ps = PAINTSTRUCT::default();
-                    let hdc = BeginPaint(self.hwnd, &mut ps);
-                    if hdc.is_invalid() {
-                        log::error!("BeginPaint failed: {:?}", windows_core::Error::from_win32());
-                    } else {
-                        // All painting occurs here, between BeginPaint and EndPaint.
-                        log::debug!(
-                            "WM_PAINT: hwnd = {:?} ps = {:?}, hdc = {:?}",
-                            self.hwnd,
-                            ps,
-                            hdc
-                        );
-                        FillRect(hdc, &ps.rcPaint, HBRUSH((COLOR_WINDOW.0 + 1) as _));
-                        self.render()?;
-                        let _ = EndPaint(self.hwnd, &ps);
-                    }
-
+                    self.render()?;
+                    ValidateRect(Some(self.hwnd), None).ok()?;
                     LRESULT(0)
                 }
                 WM_SIZE => {
@@ -440,6 +422,21 @@ impl PrivateScreenWindow {
             }
             let target = self.hwnd_render_target.as_ref().unwrap();
             let black_brush = self.black_brush.as_ref().unwrap();
+            let render_target_size = target.GetSize();
+            if render_target_size.width as isize != self.width
+                || render_target_size.height as isize != self.height
+            {
+                log::info!(
+                    "Resizing render target to width = {}, height = {}",
+                    self.width,
+                    self.height
+                );
+                target.Resize(&D2D_SIZE_U {
+                    width: self.width as _,
+                    height: self.height as _,
+                })?;
+            }
+
             target.BeginDraw();
             target.SetTransform(&Matrix3x2::identity());
 
@@ -456,8 +453,8 @@ impl PrivateScreenWindow {
                 &D2D_RECT_F {
                     left: 0.0,
                     top: 0.0,
-                    right: self.width as f32,
-                    bottom: self.height as f32,
+                    right: render_target_size.width,
+                    bottom: render_target_size.height,
                 },
                 black_brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
