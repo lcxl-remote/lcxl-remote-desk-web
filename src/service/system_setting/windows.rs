@@ -1,5 +1,6 @@
 use std::{marker::PhantomPinned, time::Duration};
 
+use rust_i18n::t;
 use windows::Win32::{
     Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::{
@@ -60,7 +61,7 @@ pub enum PrivateScreenCommand {
 
 const EXIT_PRIVATE_SCREEN_HOTKEY_ID: usize = 2222;
 
-const CARD_HEIGHT: f32 = 210.0;
+const CARD_HEIGHT: f32 = 150.0;
 
 /// Private screen window struct
 ///
@@ -446,9 +447,14 @@ impl PrivateScreenWindow {
                 b: 1.0,
                 a: 1.0,
             }));
+            let hotkey_display = "Ctrl+Alt+L";
+            let content = t!("private_screen_tip_content", hotkey = hotkey_display);
+            let content_str = format!("{}\0", content.to_string())
+                .encode_utf16()
+                .collect::<Vec<u16>>();
 
             target.DrawText(
-                w!("隐私屏已启用，按Ctrl+Alt+L退出").as_wide(),
+                content_str.as_slice(),
                 &self.format,
                 &D2D_RECT_F {
                     left: 0.0,

@@ -49,6 +49,9 @@ pub struct SystemSettings {
     pub log_level: String,
     /// Enable Rust backtrace for errors
     pub traceback: bool,
+
+    /// Optional locale setting (e.g., "en", "zh-CN")
+    pub locale: Option<String>,
 }
 
 /// User settings
@@ -358,6 +361,7 @@ impl Default for SystemSettings {
             listen_addr_ipv6: "::".to_string(),
             log_level: "info".to_string(),
             traceback: true,
+            locale: None,
         }
     }
 }
@@ -436,6 +440,10 @@ impl Settings {
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
+        if let Some(ref locale) = settings.system.locale {
+            rust_i18n::set_locale(locale);
+            info!("Locale set to: {}", locale);
+        }
         Ok(settings)
     }
 
@@ -457,6 +465,10 @@ impl Settings {
             config_file_path.display(),
             toml_str
         );
+        if let Some(ref locale) = self.system.locale {
+            rust_i18n::set_locale(locale);
+            info!("Locale set to: {}", locale);
+        }
         fs::write(&config_file_path, toml_str)?;
         Ok(())
     }

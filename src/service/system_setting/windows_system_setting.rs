@@ -222,6 +222,8 @@ mod tests {
         INIT.call_once(|| {
             // initialization code here
             let _ = init_logs(LevelFilter::Debug);
+
+            rust_i18n::set_locale("zh-CN");
         });
     }
     #[test]
@@ -248,6 +250,7 @@ mod tests {
     #[test]
     fn test_private_screen() {
         initialize();
+
         let mut desk_settings = DeskSettings::default();
         desk_settings.private_screen.window_style = Some(WS_OVERLAPPEDWINDOW.0);
         desk_settings.private_screen.window_ex_style =

@@ -1,0 +1,4 @@
+_version: 2
+private_screen_tip_content:
+  zh-CN: "隐私屏已启用，先按 CTRL+ALT+DEL，点击取消按钮之后再按 %{hotkey} 退出远程控制"
+  en: "Privacy screen is enabled. Please press CTRL+ALT+DEL, click Cancel button, then press %{hotkey} to exit remote control"

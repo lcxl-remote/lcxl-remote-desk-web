@@ -42,7 +42,12 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
-use crate::{controller::terminal::{list_terminal, open_terminal_session}, utils::logs::init_logs_by_str};
+use crate::{
+    controller::terminal::{list_terminal, open_terminal_session},
+    utils::logs::init_logs_by_str,
+};
+
+rust_i18n::i18n!("locales");
 
 pub async fn run() -> Result<Server, DeskError> {
     let args = Args::parse();
