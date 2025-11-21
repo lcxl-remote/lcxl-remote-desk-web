@@ -42,7 +42,10 @@ use windows::Win32::{
 use windows_core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
-use crate::{desk_error::DeskError, model::settings::PrivateScreenSettings};
+use crate::{
+    desk_error::DeskError, model::settings::PrivateScreenSettings,
+    service::system_setting::windows_system_setting::PrivateScreenWindowState,
+};
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff
@@ -70,6 +73,7 @@ const CARD_HEIGHT: f32 = 150.0;
 pub struct PrivateScreenWindow {
     pub settings: PrivateScreenSettings,
     pub hwnd: HWND,
+    pub sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
     pub instance: HMODULE,
@@ -116,6 +120,7 @@ impl PrivateScreenWindow {
 
     pub fn new(
         settings: PrivateScreenSettings,
+        sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
         receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     ) -> Result<Box<Self>, DeskError> {
         unsafe {
@@ -132,6 +137,7 @@ impl PrivateScreenWindow {
             let instance = Self {
                 settings,
                 hwnd: HWND::default(),
+                sender,
                 receiver,
                 window_class: w!("lcxl-web-private-screen-window-class"),
                 instance: HMODULE::default(),

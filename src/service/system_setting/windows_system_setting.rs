@@ -35,13 +35,14 @@ fn private_screen_window_thread(
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
-    let window = PrivateScreenWindow::new(private_screen_settings, receiver)?;
+    let window = PrivateScreenWindow::new(private_screen_settings, sender, receiver)?;
     log::info!(
         "private_screen_window_thread created PrivateScreenWindow: {:p}",
         &window
     );
 
-    sender
+    window
+        .sender
         .send(PrivateScreenWindowState::WindowHandle(window.hwnd))
         .map_err(|e| {
             DeskError::CustomError(CustomDeskError::new(
