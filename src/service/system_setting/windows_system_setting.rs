@@ -1,12 +1,12 @@
 use windows::Win32::{
-    Foundation::{HWND, LPARAM, WPARAM},
+    Foundation::{LPARAM, WPARAM},
     Graphics::Gdi::{
-        CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
+        ChangeDisplaySettingsExW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
         DM_PELSWIDTH,
     },
     UI::{
         Input::KeyboardAndMouse::BlockInput,
-        WindowsAndMessaging::{HWND_BROADCAST, SC_MONITORPOWER, SendMessageW, WM_SYSCOMMAND},
+        WindowsAndMessaging::{SendMessageW, HWND_BROADCAST, SC_MONITORPOWER, WM_SYSCOMMAND},
     },
 };
 use windows_core::HSTRING;
@@ -18,15 +18,10 @@ use crate::{
         settings::{DeskSettings, PrivateScreenSettings},
         system_setting::{DisplaySettings, SystemSettingHelper},
     },
-    service::system_setting::windows::{PrivateScreenCommand, PrivateScreenWindow},
+    service::system_setting::windows::{
+        PrivateScreenCommand, PrivateScreenWindow, PrivateScreenWindowState,
+    },
 };
-
-pub enum PrivateScreenWindowState {
-    WindowHandle(HWND),
-    ExitPrivateScreen,
-}
-/// Safety: HWND is Send
-unsafe impl Send for PrivateScreenWindowState {}
 
 /// Thread function to create and manage the private screen window,
 /// see https://bbs.kanxue.com/thread-279475.htm
@@ -41,15 +36,12 @@ fn private_screen_window_thread(
         &window
     );
 
-    window
-        .sender
-        .send(PrivateScreenWindowState::WindowHandle(window.hwnd))
-        .map_err(|e| {
-            DeskError::CustomError(CustomDeskError::new(
-                ErrorCode::SYSTEM_ERROR,
-                format!("Failed to send window handle: {}", e),
-            ))
-        })?;
+    window.sender.send(window.state.clone()).map_err(|e| {
+        DeskError::CustomError(CustomDeskError::new(
+            ErrorCode::SYSTEM_ERROR,
+            format!("Failed to send window handle: {}", e),
+        ))
+    })?;
 
     window.run()?;
     Ok(())
@@ -66,7 +58,8 @@ unsafe impl Sync for WindowsSystemSettingHelper {}
 impl WindowsSystemSettingHelper {
     pub fn new(desk_setting: &DeskSettings) -> Result<Self, DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
-        let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
+        let (window_sender, _main_receiver) =
+            std::sync::mpsc::channel::<PrivateScreenWindowState>();
         let private_screen_settings = desk_setting.private_screen.clone();
         let thread_handle = std::thread::spawn(move || {
             let result = private_screen_window_thread(
@@ -83,16 +76,7 @@ impl WindowsSystemSettingHelper {
                 log::warn!("Private screen window thread exited normally");
             }
         });
-        let window_state = main_receiver.recv()?;
-        let _hwnd = if let PrivateScreenWindowState::WindowHandle(hwnd) = window_state {
-            log::info!("Private screen window handle received: {:?}", hwnd);
-            hwnd
-        } else {
-            return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
-                "Failed to receive private screen window handle".to_string(),
-            );
-        };
+
         Ok(Self {
             main_sender,
             thread_handle: Some(thread_handle),

@@ -5,47 +5,44 @@ use windows::Win32::{
     Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::{
         Direct2D::{
-            Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_COLOR_F},
+            Common::{D2D1_COLOR_F, D2D_RECT_F, D2D_SIZE_U},
+            D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
             D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
             D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
-            D2D1_RENDER_TARGET_PROPERTIES, D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget,
-            ID2D1SolidColorBrush,
+            D2D1_RENDER_TARGET_PROPERTIES,
         },
         DirectWrite::{
-            DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWriteCreateFactory,
-            IDWriteFactory2, IDWriteTextFormat,
+            DWriteCreateFactory, IDWriteFactory2, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+            DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
         },
         Dxgi::{CreateDXGIFactory1, IDXGIFactory2},
         Gdi::ValidateRect,
     },
     System::{
-        Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
+        Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
         LibraryLoader::GetModuleHandleW,
     },
     UI::{
-        Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, RegisterHotKey, UnregisterHotKey},
+        Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL},
         WindowsAndMessaging::{
-            CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-            DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetDesktopWindow, GetWindowLongPtrW,
-            GetWindowRect, HWND_TOPMOST, IDC_ARROW, LWA_COLORKEY, LoadCursorW, MSG, PM_REMOVE,
-            PeekMessageW, PostQuitMessage, RegisterClassW, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE,
-            SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
-            SetWindowLongPtrW, SetWindowPos, TranslateMessage, UnregisterClassW,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDesktopWindow,
+            GetWindowLongPtrW, GetWindowRect, LoadCursorW, PeekMessageW, PostQuitMessage,
+            RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
+            SetWindowLongPtrW, SetWindowPos, TranslateMessage, UnregisterClassW, CREATESTRUCTW,
+            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW,
+            LWA_COLORKEY, MSG, PM_REMOVE, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
             WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_DISPLAYCHANGE,
             WM_HOTKEY, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
         },
     },
 };
-use windows_core::{PCWSTR, w};
+use windows_core::{w, PCWSTR};
 use windows_numerics::Matrix3x2;
 
-use crate::{
-    desk_error::DeskError, model::settings::PrivateScreenSettings,
-    service::system_setting::windows_system_setting::PrivateScreenWindowState,
-};
+use crate::{desk_error::DeskError, model::settings::PrivateScreenSettings};
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff
@@ -66,13 +63,30 @@ const EXIT_PRIVATE_SCREEN_HOTKEY_ID: usize = 2222;
 
 const CARD_HEIGHT: f32 = 150.0;
 
+#[derive(Debug, Clone)]
+pub struct PrivateScreenWindowState {
+    pub hwnd: HWND,
+    pub hotkey_clicked: bool,
+}
+
+impl Default for PrivateScreenWindowState {
+    fn default() -> Self {
+        Self {
+            hwnd: HWND::default(),
+            hotkey_clicked: false,
+        }
+    }
+}
+/// Safety: HWND is Send
+unsafe impl Send for PrivateScreenWindowState {}
+
 /// Private screen window struct
 ///
 /// see https://github.com/microsoft/windows-rs/blob/master/crates/samples/windows/direct2d/src/main.rs
 #[derive(Debug)]
 pub struct PrivateScreenWindow {
     pub settings: PrivateScreenSettings,
-    pub hwnd: HWND,
+    pub state: PrivateScreenWindowState,
     pub sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
@@ -99,7 +113,7 @@ impl PrivateScreenWindow {
             if message == WM_NCCREATE {
                 let cs = lparam.0 as *const CREATESTRUCTW;
                 let this = (*cs).lpCreateParams as *mut Self;
-                (*this).hwnd = hwnd;
+                (*this).state.hwnd = hwnd;
                 log::debug!(
                     "Storing pointer to PrivateScreenWindow: {:?}, {:?}",
                     this,
@@ -109,7 +123,7 @@ impl PrivateScreenWindow {
             } else {
                 let this = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Self;
                 if !this.is_null() {
-                    assert_eq!((*this).hwnd, hwnd);
+                    assert_eq!((*this).state.hwnd, hwnd);
                     return (*this).message_handler(message, wparam, lparam);
                 }
             }
@@ -136,7 +150,7 @@ impl PrivateScreenWindow {
             // Create window
             let instance = Self {
                 settings,
-                hwnd: HWND::default(),
+                state: PrivateScreenWindowState::default(),
                 sender,
                 receiver,
                 window_class: w!("lcxl-web-private-screen-window-class"),
@@ -197,8 +211,8 @@ impl PrivateScreenWindow {
                     );
                     match command {
                         PrivateScreenCommand::Quit => PostQuitMessage(0),
-                        PrivateScreenCommand::ShowWindow => Self::show_window(self.hwnd)?,
-                        PrivateScreenCommand::HideWindow => Self::hide_window(self.hwnd)?,
+                        PrivateScreenCommand::ShowWindow => Self::show_window(self.state.hwnd)?,
+                        PrivateScreenCommand::HideWindow => Self::hide_window(self.state.hwnd)?,
                     }
                 } else {
                     log::error!("Private screen window thread unknown recv result");
@@ -330,7 +344,7 @@ impl PrivateScreenWindow {
                 SetLayeredWindowAttributes(hwnd, crkey, 255, LWA_COLORKEY)?;
             }
 
-            assert_eq!(self.hwnd, hwnd);
+            assert_eq!(self.state.hwnd, hwnd);
             self.instance = instance;
 
             Ok(())
@@ -355,7 +369,7 @@ impl PrivateScreenWindow {
             match message {
                 WM_PAINT => {
                     self.render()?;
-                    ValidateRect(Some(self.hwnd), None).ok()?;
+                    ValidateRect(Some(self.state.hwnd), None).ok()?;
                     LRESULT(0)
                 }
                 WM_SIZE => {
@@ -372,10 +386,13 @@ impl PrivateScreenWindow {
                 WM_HOTKEY => {
                     let hotkey_id = wparam.0;
                     if hotkey_id == EXIT_PRIVATE_SCREEN_HOTKEY_ID {
-                        log::warn!("Exit private screen hotkey pressed: hwnd = {:?}", self.hwnd);
+                        log::warn!(
+                            "Exit private screen hotkey pressed: hwnd = {:?}",
+                            self.state.hwnd
+                        );
                         // Handle exit private screen hotkey
                         // For example, hide the window
-                        Self::hide_window(self.hwnd)?;
+                        Self::hide_window(self.state.hwnd)?;
                     }
                     LRESULT(0)
                 }
@@ -384,7 +401,7 @@ impl PrivateScreenWindow {
                     PostQuitMessage(0);
                     LRESULT(0)
                 }
-                _ => DefWindowProcW(self.hwnd, message, wparam, lparam),
+                _ => DefWindowProcW(self.state.hwnd, message, wparam, lparam),
             }
         };
         Ok(result)
@@ -401,7 +418,7 @@ impl PrivateScreenWindow {
 
         let rendertargetproperties = D2D1_RENDER_TARGET_PROPERTIES::default();
         let hwndrendertargetproperties = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd: self.hwnd,
+            hwnd: self.state.hwnd,
             pixelSize: D2D_SIZE_U {
                 width: self.width as _,
                 height: self.height as _,
@@ -506,13 +523,13 @@ impl Drop for PrivateScreenWindow {
         unsafe {
             log::info!("Dropping PrivateScreenWindow: {:p}, {:?}", self, self);
             // Clean up resources
-            if !self.hwnd.is_invalid() {
+            if !self.state.hwnd.is_invalid() {
                 // Destroy the window
-                let result = DestroyWindow(self.hwnd);
+                let result = DestroyWindow(self.state.hwnd);
                 if let Err(err) = result {
                     log::error!("DestroyWindow error: {:?}", err);
                 }
-                self.hwnd = HWND::default();
+                self.state.hwnd = HWND::default();
             }
             if !self.instance.is_invalid() {
                 // Unregister the window class
