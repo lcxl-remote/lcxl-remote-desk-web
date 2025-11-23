@@ -30,7 +30,7 @@ fn private_screen_window_thread(
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
-    let window = PrivateScreenWindow::new(private_screen_settings, sender, receiver)?;
+    let mut window = PrivateScreenWindow::new(private_screen_settings, sender, receiver)?;
     log::info!("Private screen window created: {:?}", window);
     window.sender.send(window.state.clone()).map_err(|e| {
         DeskError::CustomError(CustomDeskError::new(
@@ -46,6 +46,7 @@ fn private_screen_window_thread(
 
 pub struct WindowsSystemSettingHelper {
     main_sender: std::sync::mpsc::Sender<PrivateScreenCommand>,
+    main_receiver: std::sync::mpsc::Receiver<PrivateScreenWindowState>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 /// Safety: WindowsSystemSettingHelper is Send + Sync
@@ -55,7 +56,7 @@ unsafe impl Sync for WindowsSystemSettingHelper {}
 impl WindowsSystemSettingHelper {
     pub fn new(desk_setting: &DeskSettings) -> Result<Self, DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
-        let (window_sender, _main_receiver) =
+        let (window_sender, main_receiver) =
             std::sync::mpsc::channel::<PrivateScreenWindowState>();
         let private_screen_settings = desk_setting.private_screen.clone();
         let thread_handle = std::thread::spawn(move || {
@@ -76,6 +77,7 @@ impl WindowsSystemSettingHelper {
 
         Ok(Self {
             main_sender,
+            main_receiver,
             thread_handle: Some(thread_handle),
         })
     }

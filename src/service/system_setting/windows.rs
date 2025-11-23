@@ -36,6 +36,7 @@ use windows::Win32::{
             WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_DISPLAYCHANGE,
             WM_HOTKEY, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
+            WS_VISIBLE,
         },
     },
 };
@@ -67,6 +68,7 @@ const CARD_HEIGHT: f32 = 150.0;
 pub struct PrivateScreenWindowState {
     pub hwnd: HWND,
     pub hotkey_clicked: bool,
+    pub visible: bool,
 }
 
 impl Default for PrivateScreenWindowState {
@@ -74,6 +76,7 @@ impl Default for PrivateScreenWindowState {
         Self {
             hwnd: HWND::default(),
             hotkey_clicked: false,
+            visible: false,
         }
     }
 }
@@ -174,7 +177,7 @@ impl PrivateScreenWindow {
         }
     }
 
-    pub fn run(&self) -> Result<(), DeskError> {
+    pub fn run(&mut self) -> Result<(), DeskError> {
         unsafe {
             let mut message = MSG::default();
             loop {
@@ -210,8 +213,8 @@ impl PrivateScreenWindow {
                     );
                     match command {
                         PrivateScreenCommand::Quit => PostQuitMessage(0),
-                        PrivateScreenCommand::ShowWindow => Self::show_window(self.state.hwnd)?,
-                        PrivateScreenCommand::HideWindow => Self::hide_window(self.state.hwnd)?,
+                        PrivateScreenCommand::ShowWindow => self.show_window()?,
+                        PrivateScreenCommand::HideWindow => self.hide_window()?,
                     }
                 } else {
                     log::error!("Private screen window thread unknown recv result");
@@ -221,8 +224,8 @@ impl PrivateScreenWindow {
         }
     }
 
-    pub fn show_window(hwnd: HWND) -> Result<(), DeskError> {
-        log::info!("Showing private screen window: {:?}", hwnd);
+    pub fn show_window(&mut self) -> Result<(), DeskError> {
+        log::info!("Showing private screen window: {:?}", self.state.hwnd);
         unsafe {
             let desktop_hwnd = GetDesktopWindow();
             let mut desktop_rect = RECT::default();
@@ -236,7 +239,7 @@ impl PrivateScreenWindow {
             let window_top =
                 desktop_rect.top + (desktop_rect.bottom - desktop_rect.top - window_height) / 2;
             SetWindowPos(
-                hwnd,
+                self.state.hwnd,
                 Some(HWND_TOPMOST),
                 window_left,
                 window_top,
@@ -246,22 +249,23 @@ impl PrivateScreenWindow {
             )?;
 
             RegisterHotKey(
-                Some(hwnd),
+                Some(self.state.hwnd),
                 EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32,
                 MOD_ALT | MOD_CONTROL,
                 'L' as u32,
             )?;
 
+            self.state.visible = true;
             log::info!("Hotkey registered for private screen exit: Ctrl + Alt + L");
             Ok(())
         }
     }
 
-    pub fn hide_window(hwnd: HWND) -> Result<(), DeskError> {
-        log::info!("Hiding private screen window: {:?}", hwnd);
+    pub fn hide_window(&mut self) -> Result<(), DeskError> {
+        log::info!("Hiding private screen window: {:?}", self.state.hwnd);
         unsafe {
             SetWindowPos(
-                hwnd,
+                self.state.hwnd,
                 Some(HWND_TOPMOST),
                 0,
                 0,
@@ -269,7 +273,8 @@ impl PrivateScreenWindow {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW,
             )?;
-            let result = UnregisterHotKey(Some(hwnd), EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32);
+            let result =
+                UnregisterHotKey(Some(self.state.hwnd), EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32);
             if let Err(ref e) = result {
                 if e.code().0 != 0x8007058Bu32 as i32 {
                     // ERROR_HOTKEY_NOT_REGISTERED
@@ -284,6 +289,7 @@ impl PrivateScreenWindow {
                     );
                 }
             }
+            self.state.visible = false;
             Ok(())
         }
     }
@@ -311,6 +317,9 @@ impl PrivateScreenWindow {
                 WS_OVERLAPPED
             };
 
+            if dwstyle.0 & WS_VISIBLE.0 != 0 {
+                self.state.visible = true;
+            }
             let dwexstyle = if let Some(style) = self.settings.window_ex_style {
                 WINDOW_EX_STYLE(style)
             } else {
@@ -391,7 +400,7 @@ impl PrivateScreenWindow {
                         );
                         // Handle exit private screen hotkey
                         // For example, hide the window
-                        Self::hide_window(self.state.hwnd)?;
+                        self.hide_window()?;
                     }
                     LRESULT(0)
                 }
