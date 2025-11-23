@@ -5,41 +5,41 @@ use windows::Win32::{
     Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::{
         Direct2D::{
-            Common::{D2D1_COLOR_F, D2D_RECT_F, D2D_SIZE_U},
-            D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
+            Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_COLOR_F},
             D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_OPTIONS, D2D1_FACTORY_TYPE_SINGLE_THREADED,
             D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE,
-            D2D1_RENDER_TARGET_PROPERTIES,
+            D2D1_RENDER_TARGET_PROPERTIES, D2D1CreateFactory, ID2D1Factory1, ID2D1HwndRenderTarget,
+            ID2D1SolidColorBrush,
         },
         DirectWrite::{
-            DWriteCreateFactory, IDWriteFactory2, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
-            DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-            DWRITE_TEXT_ALIGNMENT_CENTER,
+            DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWriteCreateFactory,
+            IDWriteFactory2, IDWriteTextFormat,
         },
         Dxgi::{CreateDXGIFactory1, IDXGIFactory2},
         Gdi::ValidateRect,
     },
     System::{
-        Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
+        Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
         LibraryLoader::GetModuleHandleW,
     },
     UI::{
-        Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL},
+        Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, RegisterHotKey, UnregisterHotKey},
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDesktopWindow,
-            GetWindowLongPtrW, GetWindowRect, LoadCursorW, PeekMessageW, PostQuitMessage,
-            RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
-            SetWindowLongPtrW, SetWindowPos, TranslateMessage, UnregisterClassW, CREATESTRUCTW,
-            CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW,
-            LWA_COLORKEY, MSG, PM_REMOVE, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+            CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
+            DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetDesktopWindow, GetWindowLongPtrW,
+            GetWindowRect, HWND_TOPMOST, IDC_ARROW, LWA_COLORKEY, LoadCursorW, MSG, PM_REMOVE,
+            PeekMessageW, PostQuitMessage, RegisterClassW, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
+            SetWindowLongPtrW, SetWindowPos, TranslateMessage, UnregisterClassW,
             WDA_EXCLUDEFROMCAPTURE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_DESTROY, WM_DISPLAYCHANGE,
             WM_HOTKEY, WM_NCCREATE, WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW, WS_EX_LAYERED,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_OVERLAPPED,
         },
     },
 };
-use windows_core::{w, PCWSTR};
+use windows_core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
 use crate::{desk_error::DeskError, model::settings::PrivateScreenSettings};
@@ -170,7 +170,6 @@ impl PrivateScreenWindow {
 
             instance.create_window()?;
 
-            log::info!("PrivateScreenWindow created: {:p}", &instance);
             Ok(instance)
         }
     }
@@ -521,7 +520,7 @@ impl PrivateScreenWindow {
 impl Drop for PrivateScreenWindow {
     fn drop(&mut self) {
         unsafe {
-            log::info!("Dropping PrivateScreenWindow: {:p}, {:?}", self, self);
+            log::info!("Dropping PrivateScreenWindow: {:?}", self);
             // Clean up resources
             if !self.state.hwnd.is_invalid() {
                 // Destroy the window

@@ -1,12 +1,12 @@
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     Graphics::Gdi::{
-        ChangeDisplaySettingsExW, CDS_TYPE, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
+        CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_PELSHEIGHT,
         DM_PELSWIDTH,
     },
     UI::{
         Input::KeyboardAndMouse::BlockInput,
-        WindowsAndMessaging::{SendMessageW, HWND_BROADCAST, SC_MONITORPOWER, WM_SYSCOMMAND},
+        WindowsAndMessaging::{HWND_BROADCAST, SC_MONITORPOWER, SendMessageW, WM_SYSCOMMAND},
     },
 };
 use windows_core::HSTRING;
@@ -31,11 +31,7 @@ fn private_screen_window_thread(
     sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
 ) -> Result<(), DeskError> {
     let window = PrivateScreenWindow::new(private_screen_settings, sender, receiver)?;
-    log::info!(
-        "private_screen_window_thread created PrivateScreenWindow: {:p}",
-        &window
-    );
-
+    log::info!("Private screen window created: {:?}", window);
     window.sender.send(window.state.clone()).map_err(|e| {
         DeskError::CustomError(CustomDeskError::new(
             ErrorCode::SYSTEM_ERROR,
@@ -43,6 +39,7 @@ fn private_screen_window_thread(
         ))
     })?;
 
+    log::info!("Entering private screen window message loop");
     window.run()?;
     Ok(())
 }
