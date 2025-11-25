@@ -6,4 +6,4 @@ pub mod system_setting_factory;
 pub mod windows_system_setting;
 
 #[cfg(target_os = "windows")]
-pub mod windows;
+pub mod direct2d_private_screen;

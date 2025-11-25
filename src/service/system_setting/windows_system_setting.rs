@@ -18,7 +18,7 @@ use crate::{
         settings::{DeskSettings, PrivateScreenSettings},
         system_setting::{DisplaySettings, SystemSettingHelper},
     },
-    service::system_setting::windows::{
+    service::system_setting::direct2d_private_screen::{
         PrivateScreenCommand, PrivateScreenWindow, PrivateScreenWindowState,
     },
 };
