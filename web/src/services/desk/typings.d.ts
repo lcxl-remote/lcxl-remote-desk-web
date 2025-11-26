@@ -56,6 +56,7 @@ declare namespace API {
     /** Selected image capture device */
     image_capture?: any;
     opus_encoder?: null | OpusEncoderSettings;
+    private_screen?: PrivateScreenSettings;
     /** Enable mouse display on the screen */
     show_mouse?: boolean;
     /** Video device index */
@@ -146,6 +147,12 @@ declare namespace API {
     bps?: number;
     /** Group of Pictures, default is 0, which means the encoder will decide the value. */
     gop?: number;
+  };
+
+  type HotkeySettings = {
+    /** HOT_KEY_MODIFIERS */
+    fsmodifiers?: number;
+    vk?: number;
   };
 
   type InitSignalingData = {
@@ -305,6 +312,16 @@ declare namespace API {
     username: string;
   };
 
+  type PrivateScreenSettings = {
+    hotkey?: null | HotkeySettings;
+    /** Optional image path for the private screen background */
+    image_path?: any;
+    /** Optional window extended style for the private screen window */
+    window_ex_style?: number;
+    /** Optional window style for the private screen window */
+    window_style?: number;
+  };
+
   type Resolution = {
     /** Height of the resolution in pixels */
     height: number;
@@ -316,12 +333,14 @@ declare namespace API {
     code: number;
     /** System settings for the application. This struct is used to load and save settings from a configuration file. */
     data?: {
-      config_file_path?: string;
       enable_ipv6?: boolean;
       listen_addr_ipv4?: string;
       listen_addr_ipv6?: string;
+      locale?: any;
       log_level?: string;
+      open_browser_on_start?: boolean;
       port?: number;
+      traceback?: boolean;
     };
     message?: any;
     success: boolean;
@@ -362,18 +381,22 @@ declare namespace API {
   };
 
   type SystemSettings = {
-    /** Path to the configuration file. If not specified, a new one will be created in the "conf" directory. */
-    config_file_path?: string;
     /** Enable IPv6 support */
     enable_ipv6?: boolean;
     /** listen ipv4 address for the server to bind to */
     listen_addr_ipv4?: string;
     /** listen ipv6 address for the server to bind to */
     listen_addr_ipv6?: string;
+    /** Optional locale setting (e.g., "en", "zh-CN") */
+    locale?: any;
     /** access logs are printed with the INFO level so ensure it is enabled by default */
     log_level?: string;
+    /** Whether to open the browser automatically on server start */
+    open_browser_on_start?: boolean;
     /** port number for the server to bind to */
     port?: number;
+    /** Enable Rust backtrace for errors */
+    traceback?: boolean;
   };
 
   type TerminalList = {
