@@ -52,8 +52,8 @@ pub struct SystemSettings {
 
     /// Optional locale setting (e.g., "en", "zh-CN")
     pub locale: Option<String>,
-    /// Whether to open the browser automatically on server start
-    pub open_browser_on_start: bool,
+    /// Whether to open the browser automatically on server startup
+    pub open_browser_on_startup: bool,
 }
 
 /// User settings
@@ -364,7 +364,7 @@ impl Default for SystemSettings {
             log_level: "info".to_string(),
             traceback: true,
             locale: None,
-            open_browser_on_start: true,
+            open_browser_on_startup: true,
         }
     }
 }

@@ -179,5 +179,16 @@ pub async fn run() -> Result<Server, DeskError> {
             settings.system.listen_addr_ipv4, settings.system.port
         );
     }
-    Ok(http_server.run())
+    let server = http_server.run();
+    if settings.system.open_browser_on_startup {
+        log::debug!("Trying to open web browser...");
+        let open_result = webbrowser::open(&format!(
+            "http://localhost:{}/#/settings/system",
+            settings.system.port
+        ));
+        if let Err(e) = open_result {
+            warn!("Failed to open web browser: {:?}", e);
+        }
+    }
+    Ok(server)
 }
