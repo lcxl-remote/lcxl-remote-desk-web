@@ -7,10 +7,12 @@ pub mod utils;
 use std::{env, fs::File};
 
 use actix_server::Server;
+use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
 use actix_web::{
     App, HttpResponse, HttpServer,
     cookie::Key,
+    dev::{ServiceRequest, ServiceResponse},
     error::InternalError,
     middleware::{Logger, from_fn},
     web::{self},
@@ -97,6 +99,8 @@ pub async fn run() -> Result<Server, DeskError> {
 
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
+        let default_static_file_path = static_file_path.clone();
+
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
@@ -159,7 +163,18 @@ pub async fn run() -> Result<Server, DeskError> {
                     .build(),
             )
             .service(
-                actix_files::Files::new("/", static_file_path.clone()).index_file("index.html"),
+                actix_files::Files::new("/", static_file_path.clone())
+                    .index_file("index.html")
+                    .default_handler(fn_service(move |req: ServiceRequest| {
+                        // support html5 history mode
+                        let (http_req, _payload) = req.into_parts();
+                        let path = default_static_file_path.clone().join("index.html");
+                        async {
+                            let response =
+                                actix_files::NamedFile::open(path)?.into_response(&http_req);
+                            Ok(ServiceResponse::new(http_req, response))
+                        }
+                    })),
             )
     });
     if settings.system.enable_ipv6 && check_ipv6_available() {
