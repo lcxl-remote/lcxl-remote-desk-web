@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Inner function to fetch terminal list based on provided shell names and regex patterns
-pub fn inner_fetch_terminal_list(
+pub async fn inner_fetch_terminal_list(
     settings: web::Data<SharedSettings>,
     shell_list: &[&str],
     shell_regexe_list: &[&str],
@@ -42,7 +42,7 @@ pub fn inner_fetch_terminal_list(
     }
 
     let mut current = 0;
-    let settings = &settings.blocking_read().terminal;
+    let settings = &settings.read().await.terminal;
     if let Some(ref current_terminal) = settings.current_terminal {
         log::info!(
             "Default terminal command from settings: {:?}",
@@ -71,7 +71,9 @@ pub fn inner_fetch_terminal_list(
 /// Fetches the list of available terminals on a Windows
 /// see alse: https://github.com/microsoft/vscode/blob/main/src/vs/platform/terminal/node/windowsShellHelper.ts
 #[cfg(target_os = "windows")]
-pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<TerminalList, DeskError> {
+pub async fn fetch_terminal_list(
+    settings: web::Data<SharedSettings>,
+) -> Result<TerminalList, DeskError> {
     let shell_list = [
         "cmd",
         "powershell",
@@ -82,14 +84,16 @@ pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<Termin
         "julia",
     ];
     let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?\.exe"];
-    inner_fetch_terminal_list(settings, &shell_list, &shell_regexe_list)
+    inner_fetch_terminal_list(settings, &shell_list, &shell_regexe_list).await
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn fetch_terminal_list(settings: web::Data<SharedSettings>) -> Result<TerminalList, DeskError> {
+pub async fn fetch_terminal_list(
+    settings: web::Data<SharedSettings>,
+) -> Result<TerminalList, DeskError> {
     let shell_list = ["bash", "csh", "fish", "ksh", "sh", "zsh"];
     let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?"];
-    inner_fetch_terminal_list(settings, &shell_list, &shell_regexe_list)
+    inner_fetch_terminal_list(settings, &shell_list, &shell_regexe_list).await
 }
 
 pub fn convert_to_utf8_str(decoder: &mut Decoder, stdout_buf_vec: &mut Vec<u8>) -> String {
@@ -272,10 +276,10 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_fetch_terminal_list() -> Result<(), DeskError> {
+    #[tokio::test]
+    async fn test_fetch_terminal_list() -> Result<(), DeskError> {
         let settings = web::Data::new(SharedSettings::from(Settings::default()));
-        let result = fetch_terminal_list(settings)?;
+        let result = fetch_terminal_list(settings).await?;
         println!("Terminal list: {:?}", result);
         assert!(!result.commands.is_empty()); // Ensure that the terminal list is not empty
         Ok(())

@@ -27,7 +27,7 @@ use crate::{
 )]
 #[get("/terminals")]
 pub async fn list_terminal(settings: web::Data<SharedSettings>) -> Result<HttpResponse, DeskError> {
-    let result = fetch_terminal_list(settings)?;
+    let result = fetch_terminal_list(settings).await?;
     return Ok(HttpResponse::Ok().json(result));
 }
 
