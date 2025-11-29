@@ -22,7 +22,7 @@ export const Question = () => {
         height: 26,
       }}
       onClick={() => {
-        window.open('https://github.com/lcxl/dup-file-remover#readme');
+        window.open('https://github.com/lcxl/lcxl-web-remote-desk#readme');
       }}
     >
       <QuestionCircleOutlined />
