@@ -69,7 +69,7 @@ pub async fn open_terminal_session(
 
     {
         // save current terminal command to settings
-        settings.blocking_write().terminal.current_terminal = Some(
+        settings.write().await.terminal.current_terminal = Some(
             terminal_command_list
                 .iter()
                 .map(|s| s.to_string())
