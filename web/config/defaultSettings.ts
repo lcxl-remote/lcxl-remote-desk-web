@@ -15,7 +15,7 @@ const Settings: ProLayoutProps & {
   fixedHeader: false,
   fixSiderbar: true,
   colorWeak: false,
-  title: 'Lcxl Web Remote Desk',
+  title: 'LCXL Web Remote Desk',
   pwa: true,
   logo: '/logo.svg',
   iconfontUrl: '',
