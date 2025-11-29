@@ -19,6 +19,7 @@ import * as logoutAccount from './logoutAccount';
 import * as openSignalingHandle from './openSignalingHandle';
 import * as openTerminalSession from './openTerminalSession';
 import * as querySettings from './querySettings';
+import * as querySysinfo from './querySysinfo';
 import * as updateSettings from './updateSettings';
 export default {
   getCurrentUser,
@@ -28,6 +29,7 @@ export default {
   querySettings,
   updateSettings,
   openSignalingHandle,
+  querySysinfo,
   openTerminalSession,
   listTerminal,
   loginAccount,

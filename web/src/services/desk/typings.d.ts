@@ -12,6 +12,19 @@ declare namespace API {
     id: string;
   };
 
+  type CpuInfo = {
+    /** CPU brand */
+    brand: string;
+    /** CPU frequency in MHz */
+    frequency: number;
+    /** CPU name */
+    name: string;
+    /** CPU usage percentage */
+    usage: number;
+    /** CPU vendor ID */
+    vendor_id: string;
+  };
+
   type CurrentUser = {
     access?: any;
     address?: any;
@@ -329,6 +342,24 @@ declare namespace API {
     width: number;
   };
 
+  type RestResponseSystemInfo = {
+    code: number;
+    /** System information */
+    data?: {
+      cpus: CpuInfo[];
+      host_name?: any;
+      kernel_version?: any;
+      name?: any;
+      os_version?: any;
+      total_memory: number;
+      total_swap: number;
+      used_memory: number;
+      used_swap: number;
+    };
+    message?: any;
+    success: boolean;
+  };
+
   type RestResponseSystemSettings = {
     code: number;
     /** System settings for the application. This struct is used to load and save settings from a configuration file. */
@@ -338,7 +369,7 @@ declare namespace API {
       listen_addr_ipv6?: string;
       locale?: any;
       log_level?: string;
-      open_browser_on_start?: boolean;
+      open_browser_on_startup?: boolean;
       port?: number;
       traceback?: boolean;
     };
@@ -380,6 +411,27 @@ declare namespace API {
     accept_file_transfer?: boolean;
   };
 
+  type SystemInfo = {
+    /** List of CPU information */
+    cpus: CpuInfo[];
+    /** Host name */
+    host_name?: any;
+    /** System kernel version */
+    kernel_version?: any;
+    /** System name */
+    name?: any;
+    /** Operating system version */
+    os_version?: any;
+    /** Total memory in bytes */
+    total_memory: number;
+    /** Total swap in bytes */
+    total_swap: number;
+    /** Used memory in bytes */
+    used_memory: number;
+    /** Used swap in bytes */
+    used_swap: number;
+  };
+
   type SystemSettings = {
     /** Enable IPv6 support */
     enable_ipv6?: boolean;
@@ -391,8 +443,8 @@ declare namespace API {
     locale?: any;
     /** access logs are printed with the INFO level so ensure it is enabled by default */
     log_level?: string;
-    /** Whether to open the browser automatically on server start */
-    open_browser_on_start?: boolean;
+    /** Whether to open the browser automatically on server startup */
+    open_browser_on_startup?: boolean;
     /** port number for the server to bind to */
     port?: number;
     /** Enable Rust backtrace for errors */
