@@ -143,7 +143,8 @@ impl PrivateScreenWindow {
         unsafe {
             // Initialize COM library
             CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
-
+            // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is available on Windows 10 version 1703 and later, this application need to run on Windows 8, so do not use it.
+            // SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?;
             // Create Direct2D factory
             let options = D2D1_FACTORY_OPTIONS::default();
             let factory: ID2D1Factory1 =
