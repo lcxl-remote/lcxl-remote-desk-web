@@ -4,6 +4,7 @@ pub mod common;
 pub mod data_channel;
 pub mod files;
 pub mod image_capture;
+pub mod info;
 pub mod login;
 pub mod settings;
 pub mod signaling;

@@ -45,7 +45,10 @@ use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
 use crate::{
-    controller::terminal::{list_terminal, open_terminal_session},
+    controller::{
+        info::query_sysinfo,
+        terminal::{list_terminal, open_terminal_session},
+    },
     utils::logs::init_logs_by_str,
 };
 
@@ -141,7 +144,8 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(list_files)
                             .service(open_signaling_handle)
                             .service(list_terminal)
-                            .service(open_terminal_session),
+                            .service(open_terminal_session)
+                            .service(query_sysinfo),
                     )
                     .service(
                         utoipa_actix_web::scope("/turn")
@@ -198,7 +202,7 @@ pub async fn run() -> Result<Server, DeskError> {
     if settings.system.open_browser_on_startup {
         log::debug!("Trying to open web browser...");
         let open_result = webbrowser::open(&format!(
-            "http://localhost:{}/#/settings/system",
+            "http://localhost:{}/settings/system",
             settings.system.port
         ));
         if let Err(e) = open_result {

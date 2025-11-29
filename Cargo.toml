@@ -62,6 +62,7 @@ strum_macros = "0.27"
 vpx-encode = { path = "third-deps/vpx-encode", features = ["vp9"] }
 rust-i18n = "3.1"
 webbrowser = "1"
+sysinfo = "0.37"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
