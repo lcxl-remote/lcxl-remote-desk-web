@@ -15,7 +15,7 @@ const Settings: ProLayoutProps & {
   fixedHeader: false,
   fixSiderbar: true,
   colorWeak: false,
-  title: 'Dup File Remover',
+  title: 'Lcxl Web Remote Desk',
   pwa: true,
   logo: '/logo.svg',
   iconfontUrl: '',
