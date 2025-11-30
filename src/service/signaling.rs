@@ -167,8 +167,8 @@ impl SignalingContext {
         }
         let ice_stun_server = RTCIceServer {
             urls: stun_urls.clone(),
-            username: "".to_string(),
-            credential: "".to_string(),
+            username:  local_settings.user.login_user_name.clone(),
+            credential: local_settings.user.login_password.clone(),
         };
         let ice_turn_server = RTCIceServer {
             urls: turn_urls,
