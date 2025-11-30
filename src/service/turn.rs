@@ -41,11 +41,12 @@ impl Observer for TurnObserver {
         // Spawn a local task to get user settings from shared settings.
         log::info!("get_password: username={}", username);
         let new_settings = self.settings.clone();
+
         let handle = Handle::current();
         let user_settings = futures::executor::block_on(async move {
             handle
-                .spawn(async move {
-                    let settings = new_settings.read().await;
+                .spawn_blocking(move || {
+                    let settings = new_settings.blocking_read();
                     settings.user.clone()
                 })
                 .await
