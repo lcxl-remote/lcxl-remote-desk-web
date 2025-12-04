@@ -500,7 +500,7 @@ impl SignalingContext {
                     log::info!("current state is {}, keep wait", state);
                 }
                 WebRTConnectionState::Connected => {
-                    log::info!("RTC is connected");
+                    log::info!("capture_screen_task: RTC is connected");
                     break;
                 }
                 _ => {
@@ -531,7 +531,7 @@ impl SignalingContext {
                         log::warn!("current state is {}, it should be happened?", state);
                     },
                     WebRTConnectionState::Connected => {
-                        log::warn!("RTC is connected");
+                        log::warn!("capture_screen_task: RTC is connected again?");
 
                     },
                     WebRTConnectionState::UpdateSettings(new_desk_setting)=> {
@@ -611,7 +611,7 @@ impl SignalingContext {
                     log::info!("current state is {}, keep wait", state);
                 }
                 WebRTConnectionState::Connected => {
-                    log::info!("RTC is connected");
+                    log::info!("capture_audio_task: RTC is connected");
                     break;
                 }
                 _ => {
@@ -645,7 +645,7 @@ impl SignalingContext {
                         log::warn!("current state is {}, it should be happened?", state);
                     },
                     WebRTConnectionState::Connected => {
-                        log::warn!("RTC is connected");
+                        log::warn!("capture_audio_task: RTC is connected again?");
                     },
                     WebRTConnectionState::UpdateSettings(desk_setting)=> {
                         log::info!("update settings {:?}", desk_setting);
