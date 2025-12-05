@@ -9,3 +9,6 @@ check-revoke = false
 # Set ENV_VAR_NAME=value for any process run by Cargo
 # for env-libvpx-sys
 VPX_STATIC="true"
+
+[build]
+rustflags = ["--cfg", "tokio_unstable"]

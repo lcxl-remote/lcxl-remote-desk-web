@@ -55,6 +55,8 @@ use crate::{
 rust_i18n::i18n!("locales");
 
 pub async fn run() -> Result<Server, DeskError> {
+    #[cfg(tokio_unstable)]
+    console_subscriber::init();
     let args = Args::parse();
     let settings = Settings::new(&args)?;
     if settings.system.traceback {

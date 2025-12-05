@@ -10,7 +10,7 @@ rust-version = "1.89"
 actix-files = "0.6"
 actix-server = "2.6"
 actix-web = "4.11"
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.47", features = ["full", "tracing"] }
 utoipa = { version = "5", features = ["actix_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 utoipa-actix-web = "0.1"
@@ -63,6 +63,9 @@ vpx-encode = { path = "third-deps/vpx-encode", features = ["vp9"] }
 rust-i18n = "3.1"
 webbrowser = "1"
 sysinfo = "0.37"
+
+[target."cfg(tokio_unstable)".dependencies]
+console-subscriber = "0.5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
@@ -119,3 +122,6 @@ which = { version = "8.0", features = ["regex"] }
 [dev-dependencies]
 image = "0.25"
 hound = "3.5"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
