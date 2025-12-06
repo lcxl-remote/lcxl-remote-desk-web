@@ -196,7 +196,7 @@ pub async fn handle_terminal(
                     log::warn!("Process exited with status: {:?}", status);
                     break;
                 }
-                stdout_buf_vec.extend_from_slice(&stdout_buf[..result.unwrap()]); // Extend the vector
+                stdout_buf_vec.extend_from_slice(&stdout_buf[..result?]); // Extend the vector
 
                 log::debug!("Received stdout content: {:?}", stdout_buf_vec);
                 let utf8_buffer = convert_to_utf8_str(&mut decoder, &mut stdout_buf_vec);
@@ -212,7 +212,7 @@ pub async fn handle_terminal(
                     log::warn!("Process exited with status: {:?}", status);
                     break;
                 }
-                stderr_buf_vec.extend_from_slice(&stderr_buf[..result.unwrap()]); // Extend the vector
+                stderr_buf_vec.extend_from_slice(&stderr_buf[..result?]); // Extend the vector
 
                 log::debug!("Received stderr content: {:?}", stderr_buf_vec);
 
