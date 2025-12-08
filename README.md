@@ -87,7 +87,9 @@ sudo security authorizationdb write system.privilege.taskport.debug allow
 X11:相关包：xcap, x11rb
 wayload相关包: Smithay
 
-使用pipewire来捕获屏幕的github项目：<https://github.com/Adonca2203/waycap-rs>
+使用pipewire来捕获屏幕的github项目：
+* <https://github.com/Adonca2203/waycap-rs>
+* https://github.com/nashaofu/xcap/blob/master/src/linux/wayland_video_recorder.rs
 
 ## 其他
 

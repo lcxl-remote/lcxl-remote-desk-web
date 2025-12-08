@@ -2,9 +2,10 @@
 name = "lcxl-web-remote-desk"
 version = "0.1.0"
 edition = "2024"
-# need file lock feature
+# need file lock feature 1.89.0
 # see https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.try_lock
-rust-version = "1.89" 
+# need 1.90.0 for rust-analyzer
+rust-version = "1.90" 
 
 [dependencies]
 actix-files = "0.6"

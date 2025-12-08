@@ -1,4 +1,4 @@
-use std::{ffi::CStr, mem, thread::JoinHandle, time::Duration, u16};
+use std::{ffi::CStr, thread::JoinHandle, time::Duration};
 
 use pipewire::{
     context::Context,
@@ -6,11 +6,13 @@ use pipewire::{
     properties::properties,
     spa::{
         param::{
-            audio::AudioInfoRaw,
-            format::{MediaSubtype, MediaType},
+            ParamType,
+            format::{FormatProperties, MediaSubtype, MediaType},
             format_utils,
+            video::{VideoFormat, VideoInfoRaw},
         },
-        pod::Pod,
+        pod::{self, Pod},
+        utils::{Fraction, Rectangle, SpaTypes},
     },
     types::ObjectType,
 };
@@ -18,59 +20,125 @@ use pipewire::{
 use crate::{
     desk_error::DeskError,
     model::{
-        audio_capture::{
-            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
-            WaveFormat,
-        },
         common::ErrorCode,
+        image_capture::{DisplayInfo, ImageCapture, ImageInfo, ImageOutputEnumerator, ImageType},
         settings::DeskSettings,
     },
 };
 
 #[derive(Debug)]
 pub struct PipewireAudioBuffer {
-    pub buffer: Vec<u8>,   // Raw audio data
+    pub buffer: Vec<u8>,   // Raw image data
     pub num_frames: usize, // Number of frames
 }
 
-impl AudioBuffer for PipewireAudioBuffer {
-    fn get_buffer_slice(&self) -> &[u8] {
-        &self.buffer
-    }
+pub struct PipewireImageOutputEnumerator {}
 
-    fn get_num_frames(&self) -> usize {
-        self.num_frames
-    }
-}
-
-pub struct PipewireAudioDeviceEnumerator {}
-
-impl PipewireAudioDeviceEnumerator {
+impl PipewireImageOutputEnumerator {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl AudioDeviceEnumerator for PipewireAudioDeviceEnumerator {
-    fn get_device_list(&self) -> Result<Vec<AudioDevice>, DeskError> {
-        // FIXME list all audio devices
-        let audio_device = AudioDevice {
-            id: "pipewire-audio-default".to_string(),
-            firendly_name: "pipewire-audio-default".to_string(),
-            data_flow: AudioDataFlow::Capture,
-            default: true,
+impl ImageOutputEnumerator for PipewireImageOutputEnumerator {
+    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
+        // FIXME: implement real Pipewire display enumeration
+        let display_info = DisplayInfo {
+            device_name: "pipewire-display-default".to_string(),
+            display_device_name: Some("pipewire-display-default".to_string()),
+            desktop_coordinates: Default::default(),
+            resolutions: vec![],
+            attached_to_desktop: true,
+            rotation: 0,
         };
-        let audio_device_list = vec![audio_device];
-
-        Ok(audio_device_list)
+        let display_info_list = vec![display_info];
+        Ok(display_info_list)
     }
 }
 
 struct UserData {
-    format: AudioInfoRaw,
+    format: VideoInfoRaw,
     cursor_move: bool,
     captured_count: u64,
     main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PipewireImageInfo {
+    pub image_type: ImageType,
+    pub data: Vec<u8>,
+    pub height: u32,
+    pub width: u32,
+}
+
+impl ImageInfo for PipewireImageInfo {
+    fn get_type(&self) -> ImageType {
+        self.image_type
+    }
+    fn get_data(&self) -> &[u8] {
+        self.data.as_slice()
+    }
+
+    fn get_width(&self) -> u32 {
+        self.width
+    }
+
+    fn get_height(&self) -> u32 {
+        self.height
+    }
+}
+
+fn get_spa_definition() -> Result<pipewire::spa::pod::Object, DeskError> {
+    let pod = pod::object!(
+        SpaTypes::ObjectParamFormat,
+        ParamType::EnumFormat,
+        pod::property!(FormatProperties::MediaType, Id, MediaType::Video),
+        pod::property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
+        pod::property!(
+            FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            VideoFormat::RGB,
+            VideoFormat::RGBA,
+            VideoFormat::RGBx,
+            VideoFormat::BGRx,
+            VideoFormat::BGRA,
+            // VideoFormat::YUY2,
+            // VideoFormat::I420,
+        ),
+        pod::property!(
+            FormatProperties::VideoSize,
+            Choice,
+            Range,
+            Rectangle,
+            Rectangle {
+                width: 128,
+                height: 128
+            },
+            Rectangle {
+                width: 1,
+                height: 1
+            },
+            Rectangle {
+                width: 4096,
+                height: 4096
+            }
+        ),
+        pod::property!(
+            FormatProperties::VideoFramerate,
+            Choice,
+            Range,
+            Fraction,
+            Fraction { num: 24, denom: 1 },
+            Fraction { num: 0, denom: 1 },
+            Fraction {
+                num: 1000,
+                denom: 1
+            }
+        ),
+    );
+    return Ok(pod);
 }
 
 fn pw_thread(
@@ -84,6 +152,7 @@ fn pw_thread(
         log::info!("Pipewire thread exited normally");
     }
 }
+
 fn inner_pw_thread(
     main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
@@ -101,6 +170,12 @@ fn inner_pw_thread(
         captured_count: 0,
     };
 
+    let _listener = core
+        .add_listener_local()
+        .info(|i| log::debug!("VIDEO CORE:\n{i:#?}"))
+        .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
+        .done(|d, _| log::debug!("DONE: {d}"))
+        .register();
     let registry = core.get_registry()?;
     let _listener_reg = registry
         .add_listener_local()
@@ -129,8 +204,8 @@ fn inner_pw_thread(
                 _ => {}
             }
             if let Some(props) = global.props {
-                if props.get("media.class") == Some("Audio/Device") {
-                    log::info!("Found audio device: {:?}", props.get("device.name"));
+                if props.get("media.class") == Some("Video/Sink") {
+                    log::info!("Found image device: {:?}", props.get("device.name"));
                 }
             }
         })
@@ -148,14 +223,12 @@ fn inner_pw_thread(
      * the data.
      */
     let mut props = properties! {
-        *pipewire::keys::MEDIA_TYPE => "Audio",
+        *pipewire::keys::MEDIA_TYPE => "Video",
         *pipewire::keys::MEDIA_CATEGORY => "Capture",
-        *pipewire::keys::MEDIA_ROLE => "Music",
+        *pipewire::keys::MEDIA_ROLE => "Screen",
     };
-    //if you want to capture from the sink monitor ports
-    props.insert(*pipewire::keys::STREAM_CAPTURE_SINK, "true");
 
-    let stream = pipewire::stream::Stream::new(&core, "audio-capture", props)?;
+    let stream = pipewire::stream::Stream::new(&core, "video-capture", props)?;
 
     let _listener = stream
         .add_local_listener_with_user_data(data)
@@ -191,8 +264,8 @@ fn inner_pw_thread(
             );
             match id {
                 x if x == pipewire::spa::param::ParamType::Format.as_raw() => {
-                    // only accept raw audio
-                    if media_type != MediaType::Audio || media_subtype != MediaSubtype::Raw {
+                    // only accept raw image
+                    if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
                         return;
                     }
 
@@ -204,12 +277,12 @@ fn inner_pw_thread(
                     user_data
                         .main_sender
                         .send(PipewireCallback::Format(user_data.format.clone()))
-                        .expect("Failed to send audio format to main thread");
+                        .expect("Failed to send image format to main thread");
 
                     log::info!(
-                        "capturing rate:{} channels:{}",
-                        user_data.format.rate(),
-                        user_data.format.channels()
+                        "capturing video size :{:?} frame rate:{:?}",
+                        user_data.format.size(),
+                        user_data.format.framerate(),
                     );
                 }
                 _ => return,
@@ -224,73 +297,46 @@ fn inner_pw_thread(
                 }
 
                 let data = &mut datas[0];
-                let n_channels = user_data.format.channels();
-                let n_samples = data.chunk().size() / (mem::size_of::<f32>() as u32);
 
-                if let Some(samples) = data.data() {
-                    let end_index = n_samples as usize * mem::size_of::<f32>();
+                let size = user_data.format.size();
+                if let Some(frame_data) = data.data() {
+                    let pipewire_image_info = PipewireImageInfo {
+                        image_type: match user_data.format.format() {
+                            VideoFormat::RGB | VideoFormat::RGBx => ImageType::RGB,
+                            VideoFormat::BGRA | VideoFormat::BGRx => ImageType::BGRA,
+                            _ => {
+                                log::error!("Unsupported format: {:?}", user_data.format.format());
+                                return;
+                            }
+                        },
+                        data: frame_data.to_vec(),
+                        width: size.width,
+                        height: size.height,
+                    };
+
                     user_data
                         .main_sender
-                        .send(PipewireCallback::Stream(samples[0..end_index].to_vec()))
-                        .expect("Failed to send audio samples to main thread");
-                    if user_data.cursor_move {
-                        user_data.captured_count = 0;
-                        print!("\x1B[{}A", n_channels + 1);
-                    }
-                    user_data.captured_count += 1;
-                    println!(
-                        "captured {} samples, total count: {}",
-                        n_samples / n_channels,
-                        user_data.captured_count
-                    );
-                    for c in 0..n_channels {
-                        let mut max: f32 = 0.0;
-                        for n in (c..n_samples).step_by(n_channels as usize) {
-                            let start = n as usize * mem::size_of::<f32>();
-                            let end = start + mem::size_of::<f32>();
-                            let chan = &samples[start..end];
-                            let f = f32::from_le_bytes(chan.try_into().unwrap());
-                            max = max.max(f.abs());
-                        }
-
-                        let peak = ((max * 30.0) as usize).clamp(0, 39);
-
-                        println!(
-                            "channel {}: |{:>w1$}{:w2$}| peak:{}",
-                            c,
-                            "*",
-                            "",
-                            max,
-                            w1 = peak + 1,
-                            w2 = 40 - peak
-                        );
-                    }
-                    user_data.cursor_move = true;
+                        .send(PipewireCallback::ImageInfo(pipewire_image_info))
+                        .expect("Failed to send video samples to main thread");
                 }
             }
         })
         .register()?;
 
+    let pw_obj = get_spa_definition()?;
     /* Make one parameter with the supported formats. The SPA_PARAM_EnumFormat
      * id means that this is a format enumeration (of 1 value).
      * We leave the channels and rate empty to accept the native graph
      * rate and channels. */
-    let mut audio_info = AudioInfoRaw::new();
-    audio_info.set_format(pipewire::spa::param::audio::AudioFormat::F32LE);
-    let obj = pipewire::spa::pod::Object {
-        type_: pipewire::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
-        id: pipewire::spa::param::ParamType::EnumFormat.as_raw(),
-        properties: audio_info.into(),
-    };
-    let values: Vec<u8> = pipewire::spa::pod::serialize::PodSerializer::serialize(
+    let video_spa_values: Vec<u8> = pipewire::spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
-        &pipewire::spa::pod::Value::Object(obj),
+        &pipewire::spa::pod::Value::Object(pw_obj),
     )
     .unwrap()
     .0
     .into_inner();
 
-    let mut params = [Pod::from_bytes(&values).unwrap()];
+    let mut video_params = [Pod::from_bytes(&video_spa_values).unwrap()];
 
     /* Now connect this stream. We ask that our process function is
      * called in a realtime thread. */
@@ -300,7 +346,7 @@ fn inner_pw_thread(
         pipewire::stream::StreamFlags::AUTOCONNECT
             | pipewire::stream::StreamFlags::MAP_BUFFERS
             | pipewire::stream::StreamFlags::RT_PROCESS,
-        &mut params,
+        &mut video_params,
     )?;
 
     // When we receive a `Terminate` message, quit the main loop.
@@ -334,12 +380,12 @@ pub enum PipewireCommand {
 
 #[derive(Debug, Clone)]
 pub enum PipewireCallback {
-    Stream(Vec<u8>),
-    Format(AudioInfoRaw),
+    ImageInfo(PipewireImageInfo),
+    Format(VideoInfoRaw),
 }
 
 impl PipewireLoop {
-    // https://gitlab.freedesktop.org/pipewire/pipewire-rs/-/blob/main/pipewire/examples/audio-capture.rs?ref_type=heads
+    // https://gitlab.freedesktop.org/pipewire/pipewire-rs/-/blob/main/pipewire/examples/image-capture.rs?ref_type=heads
     pub fn new(
         desk_settings: &DeskSettings,
         main_sender: std::sync::mpsc::Sender<PipewireCallback>,
@@ -370,122 +416,80 @@ impl Drop for PipewireLoop {
     }
 }
 
-pub struct PipewireAudioCapture {
+pub struct PipewireImageCapture {
     pub desk_settings: DeskSettings,
     pub pipewire_loop: Option<PipewireLoop>,
     pub main_receiver: Option<std::sync::mpsc::Receiver<PipewireCallback>>,
     pub pw_sender: Option<pipewire::channel::Sender<PipewireCommand>>,
-    pub format: Option<AudioInfoRaw>,
+    pub format: Option<VideoInfoRaw>,
 }
 
-impl AudioCapture for PipewireAudioCapture {
-    fn start(&mut self) -> Result<WaveFormat, DeskError> {
-        if self.pipewire_loop.is_some() {
-            return DeskError::custom_error(
-                ErrorCode::INVALID_STATE,
-                "PipewireAudioCapture already started".to_string(),
-            );
-        }
-        let (main_sender, main_receiver) = std::sync::mpsc::channel();
-        let (pw_sender, pw_receiver) = pipewire::channel::channel();
-
-        let pw_sender_clone = pw_sender.clone();
-
-        let pipewire_loop = PipewireLoop::new(
-            &self.desk_settings,
-            main_sender,
-            pw_sender_clone,
-            pw_receiver,
-        )?;
-
-        let pipewire_callback = main_receiver.recv_timeout(Duration::from_secs(30))?;
-        let audio_format;
-        match pipewire_callback {
-            PipewireCallback::Format(format) => {
-                log::info!("Received audio format: {:?}", format);
-                audio_format = format;
-            }
-            _ => {
-                log::error!("Expected format callback, got {:?}", pipewire_callback);
-                return DeskError::custom_error(
-                    ErrorCode::SYSTEM_ERROR,
-                    "Failed to get audio format".to_string(),
-                );
-            }
-        }
-        let mut wave_format = WaveFormat::default();
-        wave_format.channels = audio_format.channels() as u16;
-        wave_format.samples_per_sec = audio_format.rate();
-        wave_format.bits_per_sample = match audio_format.format() {
-            pipewire::spa::param::audio::AudioFormat::F32LE => 32,
-            pipewire::spa::param::audio::AudioFormat::S16LE => 16,
-            pipewire::spa::param::audio::AudioFormat::S32LE => 32,
-            pipewire::spa::param::audio::AudioFormat::U16LE => 16,
-            pipewire::spa::param::audio::AudioFormat::U32LE => 32,
-            _ => {
-                log::error!("Unsupported audio format: {:?}", audio_format.format());
-                u16::MAX
-            }
-        };
-        if wave_format.bits_per_sample == u16::MAX {
-            return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
-                "Unsupported audio format".to_string(),
-            );
-        }
-        wave_format.block_align = (wave_format.channels * wave_format.bits_per_sample / 8) as u16;
-        wave_format.avg_bytes_per_sec =
-            wave_format.samples_per_sec * wave_format.block_align as u32;
-        wave_format.format_tag = 1; // PCM
-
-        self.format = Some(audio_format);
-        self.pipewire_loop = Some(pipewire_loop);
-        self.main_receiver = Some(main_receiver);
-        self.pw_sender = Some(pw_sender);
-
-        Ok(wave_format)
-    }
-
-    fn get_buffer(&self) -> Result<Box<dyn AudioBuffer + Send + Sync>, DeskError> {
+impl ImageCapture for PipewireImageCapture {
+    fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         let receiver = self.main_receiver.as_ref().unwrap();
-        let mut pipewire_audio_buffer = PipewireAudioBuffer {
-            buffer: vec![],
-            num_frames: 0,
-        };
-        let format = self.format.as_ref().unwrap();
+        let mut last_frame = None;
         for item in receiver.try_iter() {
             match item {
-                PipewireCallback::Stream(data) => {
-                    // FIXME wrong number of frames
-                    pipewire_audio_buffer.num_frames +=
-                        data.len() / ((4 * format.channels()) as usize);
-                    pipewire_audio_buffer.buffer.extend(data);
+                PipewireCallback::ImageInfo(image_info) => {
+                    log::info!("Captured image info: {:?}", image_info);
+                    last_frame = Some(image_info);
                 }
                 _ => {
                     log::warn!("Unexpected callback: {:?}", item);
                 }
             }
         }
-        return Ok(Box::new(pipewire_audio_buffer));
+        if let Some(image_info) = last_frame {
+            return Ok(Box::new(image_info));
+        } else {
+            return DeskError::custom_error(
+                ErrorCode::ACTION_NEED_RETRY,
+                "No image frame captured".to_string(),
+            );
+        }
     }
 
-    fn stop(&mut self) -> Result<(), DeskError> {
-        self.pipewire_loop = None;
-        self.format = None;
-        self.main_receiver = None;
-        self.pw_sender = None;
-        Ok(())
+    fn get_capture_type(&self) -> crate::model::image_capture::ImageCaptureType {
+        todo!()
+    }
+
+    fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
+        todo!()
     }
 }
 
-impl PipewireAudioCapture {
+impl PipewireImageCapture {
     pub fn new(desk_settings: &DeskSettings) -> Result<Self, DeskError> {
+        let (main_sender, main_receiver) = std::sync::mpsc::channel();
+        let (pw_sender, pw_receiver) = pipewire::channel::channel();
+
+        let pw_sender_clone = pw_sender.clone();
+
+        let pipewire_loop =
+            PipewireLoop::new(desk_settings, main_sender, pw_sender_clone, pw_receiver)?;
+
+        let pipewire_callback = main_receiver.recv_timeout(Duration::from_secs(30))?;
+        let audio_format;
+        match pipewire_callback {
+            PipewireCallback::Format(format) => {
+                log::info!("Received image format: {:?}", format);
+                audio_format = format;
+            }
+            _ => {
+                log::error!("Expected format callback, got {:?}", pipewire_callback);
+                return DeskError::custom_error(
+                    ErrorCode::SYSTEM_ERROR,
+                    "Failed to get image format".to_string(),
+                );
+            }
+        }
+
         Ok(Self {
             desk_settings: desk_settings.clone(),
-            pipewire_loop: None,
-            main_receiver: None,
-            pw_sender: None,
-            format: None,
+            pipewire_loop: Some(pipewire_loop),
+            main_receiver: Some(main_receiver),
+            pw_sender: Some(pw_sender),
+            format: Some(audio_format),
         })
     }
 }
@@ -520,15 +524,15 @@ mod tests {
         for _ in 0..100 {
             match main_receiver.recv_timeout(Duration::from_secs(1)) {
                 Ok(callback) => match callback {
-                    PipewireCallback::Stream(data) => {
-                        log::trace!("Received {} bytes of audio data", data.len());
+                    PipewireCallback::ImageInfo(data) => {
+                        log::trace!("Received {:?} bytes of image data", data);
                     }
                     PipewireCallback::Format(format) => {
-                        log::info!("Received audio format: {:?}", format);
+                        log::info!("Received image format: {:?}", format);
                     }
                 },
                 Err(e) => {
-                    log::warn!("No audio data received: {:?}", e);
+                    log::warn!("No image data received: {:?}", e);
                 }
             }
         }
@@ -540,24 +544,13 @@ mod tests {
     fn test_pipewire_capture() -> Result<(), DeskError> {
         initialize();
         let desk_settings = DeskSettings::default();
-        let mut pipewire_capture = PipewireAudioCapture::new(&desk_settings)?;
-        let wave_format = pipewire_capture.start()?;
-        log::info!(
-            "Started pipewire audio capture with format: {:?}",
-            wave_format
-        );
+        let mut pipewire_capture = PipewireImageCapture::new(&desk_settings)?;
+
         for _ in 0..10 {
-            let audio_buffer = pipewire_capture.get_buffer()?;
-            log::info!(
-                "Captured {} frames of audio data",
-                audio_buffer.get_num_frames()
-            );
-            if audio_buffer.get_num_frames() == 0 {
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            let image_info = pipewire_capture.capture(true)?;
+            log::info!("Captured {:?} frames of image data", image_info.get_data());
         }
-        pipewire_capture.stop()?;
-        log::info!("Stopped pipewire audio capture");
+        log::info!("Stopped pipewire image capture");
         Ok(())
     }
 }

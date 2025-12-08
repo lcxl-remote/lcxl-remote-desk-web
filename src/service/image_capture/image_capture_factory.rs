@@ -2,12 +2,15 @@ use std::{collections::BTreeMap, str::FromStr};
 
 use strum::IntoEnumIterator;
 
-#[cfg(target_os = "linux")]
-use crate::service::image_capture::x11_capture::{X11ImageCapture, X11ImageOutputEnumerator};
 #[cfg(target_os = "windows")]
 use crate::service::image_capture::{
     dxgi_capture::{DigxImageCapture, DigxImageOutputEnumerator},
     gdi_capture::{GdiImageCapture, GdiImageOutputEnumerator},
+};
+#[cfg(target_os = "linux")]
+use crate::service::image_capture::{
+    pipewire_capture::{PipewireImageCapture, PipewireImageOutputEnumerator},
+    x11_capture::{X11ImageCapture, X11ImageOutputEnumerator},
 };
 use crate::{
     desk_error::DeskError,
@@ -52,6 +55,8 @@ pub fn create_image_capture(
         ImageCaptureType::DGI => Box::new(GdiImageCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageCapture::new(desk_settings)?),
+        #[cfg(target_os = "linux")]
+        ImageCaptureType::PIPEWIRE => Box::new(PipewireImageCapture::new(desk_settings)?),
     };
     Ok(capture)
 }
@@ -89,6 +94,8 @@ pub fn list_image_output(
         ImageCaptureType::DGI => Box::new(GdiImageOutputEnumerator::new()),
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageOutputEnumerator::new()),
+        #[cfg(target_os = "linux")]
+        ImageCaptureType::PIPEWIRE => Box::new(PipewireImageOutputEnumerator::new()),
     };
     let output_list = capture.get_output_list()?;
 

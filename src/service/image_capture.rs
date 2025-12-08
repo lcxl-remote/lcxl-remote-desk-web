@@ -7,3 +7,6 @@ pub mod image_capture_factory;
 pub mod windows;
 #[cfg(target_os = "linux")]
 pub mod x11_capture;
+
+#[cfg(target_os = "linux")]
+pub mod pipewire_capture;

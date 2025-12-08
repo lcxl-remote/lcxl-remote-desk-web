@@ -1,4 +1,4 @@
-use actix_web::{Error, HttpResponse, get, web};
+use actix_web::{HttpResponse, get, web};
 use sysinfo::System;
 
 use crate::{

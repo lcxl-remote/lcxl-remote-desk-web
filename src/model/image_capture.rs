@@ -4,6 +4,7 @@ use utoipa::ToSchema;
 
 use crate::desk_error::DeskError;
 
+#[derive(Debug, Clone, Copy)]
 pub enum ImageType {
     BGRA,
     RGB,
@@ -39,6 +40,9 @@ pub enum ImageCaptureType {
     /// Capture image from X11 device
     #[cfg(target_os = "linux")]
     X11,
+     /// Capture image from PipeWire device
+    #[cfg(target_os = "linux")]
+    PIPEWIRE,
 }
 
 impl Default for ImageCaptureType {
