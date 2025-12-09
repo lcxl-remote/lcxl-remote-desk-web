@@ -115,6 +115,9 @@ alsa = "0.9"
 # need install libpipewire-0.3-dev
 pipewire = "0.8"
 evdev = { version = "0.13", features = ["stream-trait"] }
+xcb = { version = "1.5", features = ["randr"] }
+zbus = "5.6"
+rand = "0.9"
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 which = { version = "8.0", features = ["regex"] }

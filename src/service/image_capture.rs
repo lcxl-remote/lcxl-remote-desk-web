@@ -10,3 +10,5 @@ pub mod x11_capture;
 
 #[cfg(target_os = "linux")]
 pub mod pipewire_capture;
+#[cfg(target_os = "linux")]
+pub mod pipewire_utils;

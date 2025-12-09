@@ -74,6 +74,10 @@ pub enum DeskError {
     AlsaError(alsa::Error),
     #[cfg(target_os = "linux")]
     PipewireError(pipewire::Error),
+    #[cfg(target_os = "linux")]
+    ZbusError(zbus::Error),
+    #[cfg(target_os = "linux")]
+    ZbusZvariantError(zbus::zvariant::Error),
     /// A webrtc error occurred.
     WebrtcError(Backtrace, webrtc::Error),
     /// A webrtc media error occurred.
@@ -165,6 +169,10 @@ impl Display for DeskError {
             DeskError::SetLoggerError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
             DeskError::PipewireError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            DeskError::ZbusError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            DeskError::ZbusZvariantError(error) => error.fmt(f),
             DeskError::MpscRecvTimeoutError(error) => error.fmt(f),
             DeskError::MpscRecvError(error) => error.fmt(f),
             DeskError::TryLockError(error) => error.fmt(f),
@@ -274,6 +282,20 @@ impl From<alsa::Error> for DeskError {
 impl From<pipewire::Error> for DeskError {
     fn from(err: pipewire::Error) -> Self {
         DeskError::PipewireError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<zbus::Error> for DeskError {
+    fn from(err: zbus::Error) -> Self {
+        DeskError::ZbusError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<zbus::zvariant::Error> for DeskError {
+    fn from(err: zbus::zvariant::Error) -> Self {
+        DeskError::ZbusZvariantError(err)
     }
 }
 

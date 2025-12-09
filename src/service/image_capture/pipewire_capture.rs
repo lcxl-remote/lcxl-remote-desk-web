@@ -1,4 +1,4 @@
-use std::{ffi::CStr, thread::JoinHandle, time::Duration};
+use std::{collections::HashMap, ffi::CStr, thread::JoinHandle, time::Duration};
 
 use pipewire::{
     context::Context,
@@ -11,10 +11,15 @@ use pipewire::{
             format_utils,
             video::{VideoFormat, VideoInfoRaw},
         },
-        pod::{self, Pod},
+        pod::{self, Pod, serialize::PodSerializer},
         utils::{Fraction, Rectangle, SpaTypes},
     },
     types::ObjectType,
+};
+use serde::Deserialize;
+use zbus::{
+    blocking::Proxy,
+    zvariant::{DeserializeDict, OwnedFd, OwnedObjectPath, Type},
 };
 
 use crate::{
@@ -24,7 +29,138 @@ use crate::{
         image_capture::{DisplayInfo, ImageCapture, ImageInfo, ImageOutputEnumerator, ImageType},
         settings::DeskSettings,
     },
+    service::image_capture::pipewire_utils::{
+        get_zbus_connection, get_zbus_portal_request, wait_zbus_response,
+    },
 };
+
+#[allow(dead_code)]
+#[derive(DeserializeDict, Type, Debug)]
+#[zvariant(signature = "dict")]
+pub struct ScreenCastCreateSessionResponse {
+    session_handle: String,
+}
+
+#[allow(dead_code)]
+#[derive(DeserializeDict, Type, Debug)]
+#[zvariant(signature = "dict")]
+pub struct ScreenCastStartStream {
+    pub id: Option<String>,
+    pub position: Option<(i32, i32)>,
+    pub size: Option<(i32, i32)>,
+    pub source_type: Option<u32>,
+    pub mapping_id: Option<String>,
+}
+
+#[derive(DeserializeDict, Type, Debug)]
+#[zvariant(signature = "dict")]
+pub struct ScreenCastStartResponse {
+    pub streams: Option<Vec<(u32, ScreenCastStartStream)>>,
+    #[allow(dead_code)]
+    pub restore_token: Option<String>,
+}
+
+/// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html
+pub struct ScreenCast<'a> {
+    proxy: Proxy<'a>,
+}
+
+impl ScreenCast<'_> {
+    pub fn new() -> Result<Self, DeskError> {
+        let conn = get_zbus_connection()?;
+        let proxy = Proxy::new(
+            conn,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.ScreenCast",
+        )?;
+
+        Ok(ScreenCast { proxy })
+    }
+
+    pub fn create_session(&self) -> Result<OwnedObjectPath, DeskError> {
+        let conn = get_zbus_connection()?;
+
+        let mut options = HashMap::new();
+
+        let handle_token = rand::random::<u32>().to_string();
+        let portal_request = get_zbus_portal_request(conn, &handle_token)?;
+
+        options.insert("handle_token", zbus::zvariant::Value::from(&handle_token));
+
+        let session_handle_token = rand::random::<u32>().to_string();
+        options.insert(
+            "session_handle_token",
+            zbus::zvariant::Value::from(&session_handle_token),
+        );
+
+        self.proxy.call_method("CreateSession", &(options))?;
+
+        let response: ScreenCastCreateSessionResponse = wait_zbus_response(&portal_request)?;
+
+        let unique_name = conn
+            .unique_name()
+            .ok_or(DeskError::ZbusError(zbus::Error::Failure(
+                "Failed to get unique name".to_owned(),
+            )))?;
+        let unique_identifier = unique_name.trim_start_matches(':').replace('.', "_");
+
+        let session = OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/portal/desktop/session/{unique_identifier}/{session_handle_token}"
+        ))?;
+
+        if session.as_str() != response.session_handle {
+            return Err(DeskError::ZbusError(zbus::Error::Failure(
+                "Session handle mismatch".to_owned(),
+            )));
+        }
+
+        Ok(session)
+    }
+
+    pub fn select_sources(&self, session: &OwnedObjectPath) -> Result<(), DeskError> {
+        let conn = get_zbus_connection()?;
+
+        let mut options = HashMap::new();
+
+        let handle_token = rand::random::<u32>().to_string();
+        let portal_request = get_zbus_portal_request(conn, &handle_token)?;
+
+        options.insert("handle_token", zbus::zvariant::Value::from(handle_token));
+        options.insert("types", zbus::zvariant::Value::from(1_u32));
+        options.insert("multiple", zbus::zvariant::Value::from(false));
+
+        self.proxy
+            .call_method("SelectSources", &(session, options))?;
+
+        portal_request.receive_signal("Response")?;
+
+        Ok(())
+    }
+
+    pub fn start(&self, session: &OwnedObjectPath) -> Result<ScreenCastStartResponse, DeskError> {
+        let conn = get_zbus_connection()?;
+
+        let mut options = HashMap::new();
+
+        let handle_token = rand::random::<u32>().to_string();
+        let portal_request = get_zbus_portal_request(conn, &handle_token)?;
+
+        options.insert("handle_token", zbus::zvariant::Value::from(&handle_token));
+
+        self.proxy.call_method("Start", &(session, "", options))?;
+
+        wait_zbus_response(&portal_request)
+    }
+
+    #[allow(dead_code)]
+    pub fn open_pipe_wire_remote(&self, session: &OwnedObjectPath) -> Result<OwnedFd, DeskError> {
+        let options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+        let fd: OwnedFd = self.proxy.call("OpenPipeWireRemote", &(session, options))?;
+
+        Ok(fd)
+    }
+}
 
 #[derive(Debug)]
 pub struct PipewireAudioBuffer {
@@ -273,7 +409,7 @@ fn inner_pw_thread(
                     user_data
                         .format
                         .parse(param)
-                        .expect("Failed to parse param changed to AudioInfoRaw");
+                        .expect("Failed to parse param changed to VideoInfoRaw");
                     user_data
                         .main_sender
                         .send(PipewireCallback::Format(user_data.format.clone()))
@@ -328,7 +464,7 @@ fn inner_pw_thread(
      * id means that this is a format enumeration (of 1 value).
      * We leave the channels and rate empty to accept the native graph
      * rate and channels. */
-    let video_spa_values: Vec<u8> = pipewire::spa::pod::serialize::PodSerializer::serialize(
+    let video_spa_values: Vec<u8> = PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &pipewire::spa::pod::Value::Object(pw_obj),
     )
