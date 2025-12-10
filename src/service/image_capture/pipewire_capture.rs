@@ -293,6 +293,22 @@ fn inner_pw_thread(
     main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
 ) -> Result<(), DeskError> {
+    let screen_cast = ScreenCast::new()?;
+    let session = screen_cast.create_session()?;
+    screen_cast.select_sources(&session)?;
+    let response = screen_cast.start(&session)?;
+    // 获取流节点ID
+    let stream_id = response
+        .streams
+        .ok_or(DeskError::ZbusError(zbus::Error::Failure(
+            "Stream ID not found".to_owned(),
+        )))?
+        .first()
+        .ok_or(DeskError::ZbusError(zbus::Error::Failure(
+            "Stream ID not found".to_owned(),
+        )))?
+        .0;
+
     pipewire::init();
 
     let main_loop = MainLoop::new(None)?;
@@ -478,7 +494,7 @@ fn inner_pw_thread(
      * called in a realtime thread. */
     stream.connect(
         pipewire::spa::utils::Direction::Input,
-        None,
+        Some(stream_id),
         pipewire::stream::StreamFlags::AUTOCONNECT
             | pipewire::stream::StreamFlags::MAP_BUFFERS
             | pipewire::stream::StreamFlags::RT_PROCESS,
@@ -683,8 +699,10 @@ mod tests {
         let mut pipewire_capture = PipewireImageCapture::new(&desk_settings)?;
 
         for _ in 0..10 {
-            let image_info = pipewire_capture.capture(true)?;
-            log::info!("Captured {:?} frames of image data", image_info.get_data());
+            match pipewire_capture.capture(true) {
+                Ok(image_info) => log::info!("Captured {:?} frames of image data", image_info.get_data()),
+                Err(error) => log::error!("Failed to capture image: {:?}", error),
+            }
         }
         log::info!("Stopped pipewire image capture");
         Ok(())
