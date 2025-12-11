@@ -91,6 +91,12 @@ wayload相关包: Smithay
 * <https://github.com/Adonca2203/waycap-rs>
 * https://github.com/nashaofu/xcap/blob/master/src/linux/wayland_video_recorder.rs
 
+这些都是需要访问d-bus来实现，有一个可以自动生成d-bus调用代码的项目：
+
+* https://github.com/diwic/dbus-rs
+
+d-bus中远程桌面的定义：https://github.com/flatpak/xdg-desktop-portal/blob/main/data/org.freedesktop.portal.RemoteDesktop.xml
+
 ## 其他
 
 ### GStreamer实现的基于webrtc的远程桌面控制
