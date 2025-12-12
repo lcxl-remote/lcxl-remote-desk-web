@@ -333,7 +333,7 @@ impl PrivateScreenWindow {
             let hwnd = CreateWindowExW(
                 dwexstyle,
                 self.window_class,
-                w!("This is a sample window"),
+                w!("LCXL Web Private Screen"),
                 dwstyle,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
