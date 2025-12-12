@@ -5,7 +5,7 @@ edition = "2024"
 # need file lock feature 1.89.0
 # see https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.try_lock
 # need 1.90.0 for rust-analyzer
-rust-version = "1.90" 
+rust-version = "1.90"
 
 [dependencies]
 actix-files = "0.6"
@@ -118,6 +118,10 @@ evdev = { version = "0.13", features = ["stream-trait"] }
 xcb = { version = "1.5", features = ["randr"] }
 zbus = "5.6"
 rand = "0.9"
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = "3.6"
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 which = { version = "8.0", features = ["regex"] }

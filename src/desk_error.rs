@@ -109,6 +109,8 @@ pub enum DeskError {
     MpscRecvError(std::sync::mpsc::RecvError),
     /// A std fs try lock error occurred.
     TryLockError(std::fs::TryLockError),
+    /// An arboard clipboard error
+    ArboardError(arboard::Error),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -176,6 +178,7 @@ impl Display for DeskError {
             DeskError::MpscRecvTimeoutError(error) => error.fmt(f),
             DeskError::MpscRecvError(error) => error.fmt(f),
             DeskError::TryLockError(error) => error.fmt(f),
+            DeskError::ArboardError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -392,6 +395,12 @@ impl From<std::sync::mpsc::RecvError> for DeskError {
 impl From<std::fs::TryLockError> for DeskError {
     fn from(err: std::fs::TryLockError) -> Self {
         DeskError::TryLockError(err)
+    }
+}
+
+impl From<arboard::Error> for DeskError {
+    fn from(err: arboard::Error) -> Self {
+        DeskError::ArboardError(err)
     }
 }
 

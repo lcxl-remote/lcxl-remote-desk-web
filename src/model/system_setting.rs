@@ -31,4 +31,6 @@ pub trait SystemSettingHelper {
 
     /// Control monitor power (turn on/off)
     fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError>;
+
+    fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError>;
 }

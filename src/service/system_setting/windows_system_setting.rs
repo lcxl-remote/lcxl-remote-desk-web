@@ -1,3 +1,4 @@
+use arboard::Clipboard;
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     Graphics::Gdi::{
@@ -48,6 +49,7 @@ pub struct WindowsSystemSettingHelper {
     main_sender: std::sync::mpsc::Sender<PrivateScreenCommand>,
     main_receiver: std::sync::mpsc::Receiver<PrivateScreenWindowState>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
+    clipboard: Clipboard,
 }
 /// Safety: WindowsSystemSettingHelper is Send + Sync
 unsafe impl Send for WindowsSystemSettingHelper {}
@@ -56,8 +58,7 @@ unsafe impl Sync for WindowsSystemSettingHelper {}
 impl WindowsSystemSettingHelper {
     pub fn new(desk_setting: &DeskSettings) -> Result<Self, DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
-        let (window_sender, main_receiver) =
-            std::sync::mpsc::channel::<PrivateScreenWindowState>();
+        let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
         let private_screen_settings = desk_setting.private_screen.clone();
         let thread_handle = std::thread::spawn(move || {
             let result = private_screen_window_thread(
@@ -75,10 +76,12 @@ impl WindowsSystemSettingHelper {
             }
         });
 
+        let clipboard = Clipboard::new().unwrap();
         Ok(Self {
             main_sender,
             main_receiver,
             thread_handle: Some(thread_handle),
+            clipboard,
         })
     }
 
@@ -185,6 +188,12 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
             }
             Ok(())
         }
+    }
+
+    fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError> {
+        self.clipboard.set_text(text)?;
+        //self.clipboard.get()
+        Ok(())
     }
 }
 
