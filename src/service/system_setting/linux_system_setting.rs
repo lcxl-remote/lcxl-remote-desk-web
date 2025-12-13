@@ -1,5 +1,7 @@
 use std::{env, process::Command};
 
+use arboard::Clipboard;
+
 use crate::{
     desk_error::DeskError,
     model::{
@@ -9,11 +11,15 @@ use crate::{
     },
 };
 
-pub struct LinuxSystemSettingHelper {}
+pub struct LinuxSystemSettingHelper {
+    clipboard: Clipboard,
+}
 
 impl LinuxSystemSettingHelper {
-    pub fn new(_desk_setting: &DeskSettings) -> Self {
-        Self {}
+    pub fn new(_desk_setting: &DeskSettings) -> Result<Self, DeskError> {
+        Ok(Self {
+            clipboard: Clipboard::new()?, // Assuming clipboard
+        })
     }
 }
 
@@ -66,5 +72,10 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
 
     fn control_monitor_power(&self, _turn_off: bool) -> Result<(), DeskError> {
         DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+    }
+
+    fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError> {
+        self.clipboard.set_text(text)?;
+        Ok(())
     }
 }

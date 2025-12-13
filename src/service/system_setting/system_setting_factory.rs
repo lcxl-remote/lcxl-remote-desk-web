@@ -19,7 +19,7 @@ pub fn create_system_setting_helper(
     }
     #[cfg(target_os = "linux")]
     {
-        let helper = LinuxSystemSettingHelper::new(desk_setting);
+        let helper = LinuxSystemSettingHelper::new(desk_setting)?;
         Ok(Box::new(helper))
     }
 }
