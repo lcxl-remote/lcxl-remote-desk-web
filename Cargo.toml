@@ -132,4 +132,5 @@ image = "0.25"
 hound = "3.5"
 
 [lints.rust]
+# ignore tokio_unstable lint
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
