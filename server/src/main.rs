@@ -3,7 +3,7 @@ use log::{error, info};
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Start the Actix web server here
-    let run_result = lcxl_web_remote_desk::run().await;
+    let run_result = lcxl_remote_desk_server::run().await;
     match run_result {
         Ok(server) => {
             info!("Server started successfully");

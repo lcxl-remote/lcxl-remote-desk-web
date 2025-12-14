@@ -1,0 +1,136 @@
+[package]
+name = "lcxl-remote-desk-server"
+version = "0.1.0"
+edition = "2024"
+# need file lock feature 1.89.0
+# see https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.try_lock
+# need 1.90.0 for rust-analyzer
+rust-version = "1.90"
+
+[dependencies]
+actix-files = "0.6"
+actix-server = "2.6"
+actix-web = "4.11"
+tokio = { version = "1.47", features = ["full", "tracing"] }
+utoipa = { version = "5", features = ["actix_extras", "chrono"] }
+utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
+utoipa-actix-web = "0.1"
+utoipa-redoc = { version = "6", features = ["actix-web"] }
+utoipa-rapidoc = { version = "6", features = ["actix-web"] }
+utoipa-scalar = { version = "0.3", features = ["actix-web"] }
+actix-ws = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml_edit = { version = "0.23", features = ["serde"] }
+toml = "0.9"
+config = { version = "0.15", features = ["toml"] }
+clap = { version = "4.5", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+env_logger = "0.11"
+log = "0.4"
+actix-session = { version = "0.10", features = ["cookie-session"] }
+uuid = "1.17"
+actix-http = "3.11"
+actix-service = "2.0"
+turn-server = { version = "3.4", features = [
+    "udp",
+    "tcp",
+    "api",
+    "prometheus",
+] }
+anyhow = "1.0"
+mime = "0.3"
+futures-util = "0.3"
+bytestring = "1.4"
+webrtc = "0.13"
+bytes = "1.10"
+yuv = "0.8"
+openh264 = "0.8"
+futures = "0.3"
+webrtc-ice = "0.13"
+# opus = "0.3"
+opusic-c = "1.5"
+rtp = "0.13"
+webrtc-media = "0.10"
+codepage = "0.1"
+encoding_rs = "0.8"
+regex = "1.11"
+# turn-server dependencies prometheus 0.13.4, if use 0.14, promethueus global variable will not be shared between app with turn-server lib
+prometheus = "0.13.4"
+
+strum = "0.27"
+strum_macros = "0.27"
+vpx-encode = { path = "../third-deps/vpx-encode", features = ["vp9"] }
+rust-i18n = "3.1"
+webbrowser = "1"
+sysinfo = "0.37"
+
+[target."cfg(tokio_unstable)".dependencies]
+console-subscriber = "0.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Animation",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Globalization",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Hlsl",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_System_Variant",
+    "Win32_System_Threading",
+    "Win32_System_Performance",
+] }
+windows-result = "0.3"
+windows-core = "0.61"
+windows-numerics = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["all-extensions"] }
+libc = "0.2"
+alsa = "0.9"
+# need install libpipewire-0.3-dev
+pipewire = "0.8"
+evdev = { version = "0.13", features = ["stream-trait"] }
+xcb = { version = "1.5", features = ["randr"] }
+zbus = "5.6"
+rand = "0.9"
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = "3.6"
+
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+which = { version = "8.0", features = ["regex"] }
+
+
+[dev-dependencies]
+image = "0.25"
+hound = "3.5"
+
+[lints.rust]
+# ignore tokio_unstable lint
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
