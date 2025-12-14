@@ -2,7 +2,6 @@ pub mod controller;
 pub mod desk_error;
 pub mod model;
 pub mod service;
-pub mod utils;
 
 use std::{env, fs::File};
 
@@ -30,13 +29,13 @@ use controller::{
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
 use desk_error::DeskError;
+use desk_utils::{logs::init_logs_by_str, network::check_ipv6_available};
 use log::{info, warn};
 use model::{
     common::{ErrorCode, RestResponse},
     settings::{Args, Settings, SharedSettings, UserSettings},
 };
 use service::turn::startup_turn_server;
-use utils::network::check_ipv6_available;
 use utoipa_actix_web::AppExt;
 use utoipa_rapidoc::RapiDoc;
 use utoipa_redoc::{Redoc, Servable as _};
@@ -44,12 +43,9 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
-use crate::{
-    controller::{
-        info::query_sysinfo,
-        terminal::{list_terminal, open_terminal_session},
-    },
-    utils::logs::init_logs_by_str,
+use crate::controller::{
+    info::query_sysinfo,
+    terminal::{list_terminal, open_terminal_session},
 };
 
 rust_i18n::i18n!("locales");

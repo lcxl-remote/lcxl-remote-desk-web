@@ -1664,6 +1664,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-facade"
+version = "0.1.0"
+
+[[package]]
+name = "desk-utils"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2954,10 +2966,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
-name = "lcxl-remote-desk-facade"
-version = "0.1.0"
-
-[[package]]
 name = "lcxl-remote-desk-server"
 version = "0.1.0"
 dependencies = [
@@ -2978,6 +2986,7 @@ dependencies = [
  "codepage",
  "config",
  "console-subscriber",
+ "desk-utils",
  "encoding_rs",
  "env_logger",
  "evdev",

@@ -201,12 +201,13 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
 mod tests {
     use std::sync::Once;
 
+    use desk_utils::logs::init_logs;
     use log::LevelFilter;
     use windows::Win32::UI::WindowsAndMessaging::{
         WS_EX_OVERLAPPEDWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
     };
 
-    use crate::{model::settings::DeskSettings, utils::logs::init_logs};
+    use crate::{model::settings::DeskSettings};
 
     use super::*;
     static INIT: Once = Once::new();

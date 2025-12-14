@@ -1411,6 +1411,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::thread;
 
+    use desk_utils::logs::init_logs;
     use log::LevelFilter;
     use std::sync::{Barrier, Once};
     use windows::Win32::Foundation::LPARAM;
@@ -1425,7 +1426,6 @@ mod tests {
     use windows_core::w;
     use yuv::bgra_to_rgba;
 
-    use crate::utils::logs::init_logs;
 
     use super::*;
 

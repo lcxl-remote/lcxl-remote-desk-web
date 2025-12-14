@@ -111,6 +111,8 @@ pub enum DeskError {
     TryLockError(std::fs::TryLockError),
     /// An arboard clipboard error
     ArboardError(arboard::Error),
+    /// Desk utils error
+    DeskUtilsError(desk_utils::error::DeskUtilsError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -179,6 +181,7 @@ impl Display for DeskError {
             DeskError::MpscRecvError(error) => error.fmt(f),
             DeskError::TryLockError(error) => error.fmt(f),
             DeskError::ArboardError(error) => error.fmt(f),
+            DeskError::DeskUtilsError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -401,6 +404,12 @@ impl From<std::fs::TryLockError> for DeskError {
 impl From<arboard::Error> for DeskError {
     fn from(err: arboard::Error) -> Self {
         DeskError::ArboardError(err)
+    }
+}
+
+impl From<desk_utils::error::DeskUtilsError> for DeskError {
+    fn from(err: desk_utils::error::DeskUtilsError) -> Self {
+        DeskError::DeskUtilsError(err)
     }
 }
 

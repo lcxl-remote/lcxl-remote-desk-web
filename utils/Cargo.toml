@@ -1,8 +1,11 @@
 [package]
-name = "desk-facade"
+name = "desk-utils"
 description.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+
+log = {workspace = true}
+env_logger = {workspace = true}

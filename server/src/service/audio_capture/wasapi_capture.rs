@@ -471,9 +471,8 @@ impl WasapiAudioCapture {
 mod tests {
     use std::{sync::Once, thread::sleep, time};
 
+    use desk_utils::logs::init_logs;
     use log::LevelFilter;
-
-    use crate::utils::logs::init_logs;
 
     use super::*;
 

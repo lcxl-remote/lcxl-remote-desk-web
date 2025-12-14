@@ -363,10 +363,9 @@ fn u16array_to_string(u16array: &[u16]) -> String {
 mod tests {
     use std::{path::PathBuf, sync::Once};
 
+    use desk_utils::logs::init_logs;
     use log::LevelFilter;
     use yuv::bgra_to_rgba;
-
-    use crate::utils::logs::init_logs;
 
     use super::*;
     static INIT: Once = Once::new();

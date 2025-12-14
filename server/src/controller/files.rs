@@ -238,10 +238,10 @@ pub async fn delete_file(
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::logs::init_logs;
 
     use super::*;
     use actix_web::{App, test};
+    use desk_utils::logs::init_logs;
 
     #[actix_web::test]
     async fn it_works() {

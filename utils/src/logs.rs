@@ -2,9 +2,9 @@ use std::str::FromStr;
 
 use log::LevelFilter;
 
-use crate::desk_error::DeskError;
+use crate::error::DeskUtilsError;
 
-pub fn init_logs(log_level: LevelFilter) -> Result<(), DeskError> {
+pub fn init_logs(log_level: LevelFilter) -> Result<(), DeskUtilsError> {
     let result = env_logger::builder()
         .format_timestamp_micros()
         .filter_level(log_level)
@@ -15,11 +15,11 @@ pub fn init_logs(log_level: LevelFilter) -> Result<(), DeskError> {
             error
         );
 
-        return Err(DeskError::from(error));
+        return Err(DeskUtilsError::from(error));
     }
     Ok(())
 }
 
-pub fn init_logs_by_str(log_level: &str) -> Result<(), DeskError> {
+pub fn init_logs_by_str(log_level: &str) -> Result<(), DeskUtilsError> {
     init_logs(LevelFilter::from_str(log_level)?)
 }
