@@ -1,5 +1,5 @@
 [workspace]
-members = ["server"]
+members = ["facade","server"]
 exclude = ["web", "third-deps"]
 resolver = "3"
 

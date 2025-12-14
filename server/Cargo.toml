@@ -1,11 +1,9 @@
 [package]
 name = "lcxl-remote-desk-server"
-version = "0.1.0"
-edition = "2024"
-# need file lock feature 1.89.0
-# see https://doc.rust-lang.org/stable/std/fs/struct.File.html#method.try_lock
-# need 1.90.0 for rust-analyzer
-rust-version = "1.90"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 actix-files = "0.6"
