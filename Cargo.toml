@@ -1,5 +1,5 @@
 [workspace]
-members = ["facade", "server", "utils"]
+members = ["facade", "server", "turn", "utils"]
 exclude = ["web", "third-deps"]
 resolver = "3"
 
@@ -16,3 +16,12 @@ rust-version = "1.90"
 [workspace.dependencies]
 log = "0.4"
 env_logger = "0.11"
+utoipa = { version = "5", features = ["actix_extras", "chrono"] }
+serde = { version = "1.0", features = ["derive"] }
+turn-server = { version = "3.4", features = [
+    "udp",
+    "tcp",
+    "api",
+    "prometheus",
+] }
+futures = "0.3"

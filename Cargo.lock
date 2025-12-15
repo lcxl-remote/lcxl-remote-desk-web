@@ -1668,6 +1668,17 @@ name = "desk-facade"
 version = "0.1.0"
 
 [[package]]
+name = "desk-turn"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "log",
+ "serde",
+ "turn-server",
+ "utoipa",
+]
+
+[[package]]
 name = "desk-utils"
 version = "0.1.0"
 dependencies = [
@@ -2986,6 +2997,7 @@ dependencies = [
  "codepage",
  "config",
  "console-subscriber",
+ "desk-turn",
  "desk-utils",
  "encoding_rs",
  "env_logger",

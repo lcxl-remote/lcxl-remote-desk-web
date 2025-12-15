@@ -1,0 +1,13 @@
+[package]
+name = "desk-turn"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+utoipa = { workspace = true }
+serde = { workspace = true }
+turn-server = { workspace = true }
+log = { workspace = true }
+futures = { workspace = true }
