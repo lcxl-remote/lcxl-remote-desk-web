@@ -12,3 +12,4 @@ turn-server = { workspace = true }
 log = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
+actix-web = { workspace = true }

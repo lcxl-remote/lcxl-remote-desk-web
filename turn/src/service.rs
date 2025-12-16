@@ -6,13 +6,13 @@ use turn_server::{
     turn::{Observer, Service},
 };
 
-use crate::model::{SOFTWARE, TurnApiState};
+use crate::{error::DeskTurnError, model::{SOFTWARE, TurnApiState}};
 
 /// Starts the TURN server with the provided config and observer.
 pub async fn startup_turn_server<T>(
     config: Arc<Config>,
     observer: T,
-) -> anyhow::Result<TurnApiState<T>>
+) -> Result<TurnApiState<T>, DeskTurnError>
 where
     T: Clone + Observer + 'static,
 {
