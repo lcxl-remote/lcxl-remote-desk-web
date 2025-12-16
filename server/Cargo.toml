@@ -11,10 +11,11 @@ desk-turn = { path = "../turn" }
 env_logger = { workspace = true }
 log = { workspace = true }
 
-tokio = { version = "1.47", features = ["full", "tracing"] }
-utoipa = { version = "5", features = ["actix_extras", "chrono"] }
-serde = { version = "1.0", features = ["derive"] }
-futures = "0.3"
+tokio = { workspace = true }
+utoipa = { workspace = true }
+serde = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
 
 actix-files = "0.6"
 actix-server = "2.6"
@@ -44,7 +45,7 @@ turn-server = { version = "3.4", features = [
     "api",
     "prometheus",
 ] }
-anyhow = "1.0"
+
 mime = "0.3"
 futures-util = "0.3"
 bytestring = "1.4"
