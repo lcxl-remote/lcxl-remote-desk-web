@@ -3,7 +3,7 @@ pub mod desk_error;
 pub mod model;
 pub mod service;
 
-use std::{env, fs::File};
+use std::{env, fs::File, sync::Arc};
 
 use actix_server::Server;
 use actix_service::fn_service;
@@ -29,13 +29,14 @@ use controller::{
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
 use desk_error::DeskError;
+use desk_turn::service::startup_turn_server;
 use desk_utils::{logs::init_logs_by_str, network::check_ipv6_available};
 use log::{info, warn};
 use model::{
     common::{ErrorCode, RestResponse},
     settings::{Args, Settings, SharedSettings, UserSettings},
 };
-use service::turn::startup_turn_server;
+use turn_server::statistics::Statistics;
 use utoipa_actix_web::AppExt;
 use utoipa_rapidoc::RapiDoc;
 use utoipa_redoc::{Redoc, Servable as _};
@@ -43,9 +44,12 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
-use crate::controller::{
-    info::query_sysinfo,
-    terminal::{list_terminal, open_terminal_session},
+use crate::{
+    controller::{
+        info::query_sysinfo,
+        terminal::{list_terminal, open_terminal_session},
+    },
+    model::turn::TurnObserver,
 };
 
 rust_i18n::i18n!("locales");
@@ -95,8 +99,15 @@ pub async fn run() -> Result<Server, DeskError> {
         settings.save()?;
     }
 
+    let config = {
+        let settings = shared_settings.read().await;
+        Arc::new(settings.to_turn_server_config()?)
+    };
+    log::info!("Starting turn server with config {:?}", config);
+
+    let observer = TurnObserver::new(shared_settings.clone(), Statistics::default());
     //start turn server
-    let turn_api_state = web::Data::new(startup_turn_server(shared_settings.clone()).await?);
+    let turn_api_state = web::Data::new(startup_turn_server(config, observer).await?);
 
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {

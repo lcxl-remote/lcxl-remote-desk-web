@@ -1673,6 +1673,7 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "anyhow",
+ "desk-utils",
  "futures",
  "log",
  "serde",
@@ -1686,6 +1687,8 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "log",
+ "serde",
+ "utoipa",
 ]
 
 [[package]]

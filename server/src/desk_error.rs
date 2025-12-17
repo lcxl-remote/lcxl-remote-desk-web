@@ -113,6 +113,8 @@ pub enum DeskError {
     ArboardError(arboard::Error),
     /// Desk utils error
     DeskUtilsError(desk_utils::error::DeskUtilsError),
+    /// Desk turn error
+    DeskTurnError(desk_turn::error::DeskTurnError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -182,6 +184,7 @@ impl Display for DeskError {
             DeskError::TryLockError(error) => error.fmt(f),
             DeskError::ArboardError(error) => error.fmt(f),
             DeskError::DeskUtilsError(error) => error.fmt(f),
+            DeskError::DeskTurnError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -410,6 +413,12 @@ impl From<arboard::Error> for DeskError {
 impl From<desk_utils::error::DeskUtilsError> for DeskError {
     fn from(err: desk_utils::error::DeskUtilsError) -> Self {
         DeskError::DeskUtilsError(err)
+    }
+}
+
+impl From<desk_turn::error::DeskTurnError> for DeskError {
+    fn from(err: desk_turn::error::DeskTurnError) -> Self {
+        DeskError::DeskTurnError(err)
     }
 }
 

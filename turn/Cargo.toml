@@ -6,6 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+desk-utils = { path = "../utils" }
+
 utoipa = { workspace = true }
 serde = { workspace = true }
 turn-server = { workspace = true }

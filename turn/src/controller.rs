@@ -1,7 +1,4 @@
-
 use actix_web::HttpResponse;
-use actix_web::delete;
-use actix_web::get;
 use actix_web::mime;
 use actix_web::web;
 use turn_server::statistics::prometheus::generate_metrics;
@@ -19,16 +16,13 @@ use crate::model::TurnQueryParams;
 use crate::model::TurnSession;
 use crate::model::TurnSessionStatistics;
 
+// can't use get macro due to issue described here:
 // https://github.com/actix/actix-web/issues/2866
-#[utoipa::path(
-    summary = "Get turn server info",
-    responses(
-        (status = 200, description = "Turn server info", body = TurnInfo),
-    ),
-)]
-#[get("/info")]
-pub async fn get_turn_info<T>(api_state: web::Data<TurnApiState<T>>) -> Result<HttpResponse, DeskTurnError> 
-where 
+//#[get("/info")]
+pub async fn get_turn_info<T>(
+    api_state: web::Data<TurnApiState<T>>,
+) -> Result<HttpResponse, DeskTurnError>
+where
     T: Clone + Observer + 'static,
 {
     let sessions = api_state.service.get_sessions();
@@ -56,19 +50,11 @@ where
     return Ok(HttpResponse::Ok().json(turn_info));
 }
 
-#[utoipa::path(
-    summary = "Get turn server session",
-    params(TurnQueryParams),
-    responses(
-        (status = 200, description = "Turn server session", body = TurnSession),
-    ),
-)]
-#[get("/session")]
 pub async fn get_turn_session<T>(
     api_state: web::Data<TurnApiState<T>>,
     query: web::Query<TurnQueryParams>,
-) -> Result<HttpResponse, DeskTurnError> 
-where 
+) -> Result<HttpResponse, DeskTurnError>
+where
     T: Clone + Observer + 'static,
 {
     if let Some(session) = api_state
@@ -90,20 +76,11 @@ where
     }
 }
 
-#[utoipa::path(
-    summary = "Get turn server session statistics",
-    params(TurnQueryParams),
-    responses(
-        (status = 200, description = "Turn server session statistics", body = TurnSessionStatistics),
-        (status = 404, description = "Turn server session not found"),
-    ),
-)]
-#[get("/session/statistics")]
 pub async fn get_turn_session_statistics<T>(
     api_state: web::Data<TurnApiState<T>>,
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskTurnError>
-where 
+where
     T: Clone + Observer + 'static,
 {
     let addr: SessionAddr = query.into_inner().into();
@@ -121,20 +98,11 @@ where
     }
 }
 
-#[utoipa::path(
-    summary = "Delete turn server session",
-    params(TurnQueryParams),
-    responses(
-        (status = 200, description = "Deleted turn server session"),
-        (status = 417, description = "Expectation failed"),
-    ),
-)]
-#[delete("/session")]
 pub async fn delete_turn_session<T>(
     api_state: web::Data<TurnApiState<T>>,
     query: web::Query<TurnQueryParams>,
-) -> Result<HttpResponse, DeskTurnError> 
-where 
+) -> Result<HttpResponse, DeskTurnError>
+where
     T: Clone + Observer + 'static,
 {
     if api_state
@@ -148,14 +116,6 @@ where
     }
 }
 
-#[utoipa::path(
-    summary = "Turn server metrics",
-    responses(
-        (status = 200, description = "turn server metrics", body = String),
-        (status = 417, description = "Expectation failed"),
-    ),
-)]
-#[get("/metrics")]
 pub async fn get_turn_metrics() -> Result<HttpResponse, DeskTurnError> {
     let mut metrics_bytes = Vec::with_capacity(4096);
     if generate_metrics(&mut metrics_bytes).is_err() {

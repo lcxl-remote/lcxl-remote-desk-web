@@ -1,122 +1,174 @@
-use std::{str::FromStr, sync::Arc, time::Instant};
-
-use serde::{Deserialize, Serialize};
+use actix_web::web;
+use serde_json::json;
+use tokio::runtime::Handle;
 use turn_server::{
-    config::{Config, Interface, Transport},
     statistics::Statistics,
-    turn::{Service, SessionAddr},
-};
-use utoipa::{IntoParams, ToSchema};
-
-use crate::{
-    desk_error::{CustomDeskError, DeskError},
-    service::turn::TurnObserver,
+    turn::{Observer, SessionAddr},
 };
 
-use super::common::ErrorCode;
+use crate::model::settings::SharedSettings;
 
-pub struct TurnApiState {
-    pub config: Arc<Config>,
-    pub service: Service<TurnObserver>,
+#[derive(Clone)]
+pub struct TurnObserver {
+    pub settings: web::Data<SharedSettings>,
     pub statistics: Statistics,
-    pub uptime: Instant,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
-#[serde(rename_all = "lowercase")]
-pub enum TurnTransport {
-    TCP = 0,
-    UDP = 1,
-}
-
-impl FromStr for TurnTransport {
-    type Err = DeskError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Ok(match value {
-            "udp" => Self::UDP,
-            "tcp" => Self::TCP,
-            _ => {
-                return Err(DeskError::CustomError(CustomDeskError::new(
-                    ErrorCode::SYSTEM_ERROR,
-                    format!("unknown transport: {value}"),
-                )));
-            }
-        })
-    }
-}
-
-impl From<Transport> for TurnTransport {
-    fn from(value: Transport) -> Self {
-        match value {
-            Transport::UDP => TurnTransport::UDP,
-            Transport::TCP => TurnTransport::TCP,
+impl TurnObserver {
+    pub fn new(settings: web::Data<SharedSettings>, statistics: Statistics) -> Self {
+        Self {
+            settings,
+            statistics,
         }
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, ToSchema)]
-pub struct TurnInterface {
-    pub transport: TurnTransport,
-    /// turn server listen address
-    pub bind: String,
-    /// external address
-    ///
-    /// specify the node external address and port.
-    /// for the case of exposing the service to the outside,
-    /// you need to manually specify the server external IP
-    /// address and service listening port.
-    pub external: String,
-}
+impl Observer for TurnObserver {
+    fn get_password(&self, username: &str) -> Option<String> {
+        // Match the static authentication information first.
 
-impl From<Interface> for TurnInterface {
-    fn from(value: Interface) -> Self {
-        TurnInterface {
-            transport: value.transport.into(),
-            bind: value.bind.to_string(),
-            external: value.external.to_string(),
+        // Spawn a local task to get user settings from shared settings.
+        log::info!("get_password: username={}", username);
+        let new_settings = self.settings.clone();
+
+        let handle = Handle::current();
+        let user_settings = futures::executor::block_on(async move {
+            handle
+                .spawn_blocking(move || {
+                    let settings = new_settings.blocking_read();
+                    settings.user.clone()
+                })
+                .await
+                .unwrap()
+        });
+
+        if user_settings.login_user_name == username {
+            log::info!("found user by username={}", username);
+            return Some(user_settings.login_password.clone());
+        }
+        log::info!("not found user by username={}", username);
+        None
+    }
+
+    #[allow(clippy::let_underscore_future)]
+    fn allocated(&self, addr: &SessionAddr, name: &str, port: u16) {
+        log::info!(
+            "allocate: address={:?}, interface={:?}, username={:?}, port={}",
+            addr.address,
+            addr.interface,
+            name,
+            port
+        );
+
+        {
+            self.statistics.register(*addr);
+
+            turn_server::api::events::send_with_stream("allocated", || {
+                json!({
+                    "session": {
+                        "address": addr.address,
+                        "interface": addr.interface,
+                    },
+                    "username": name,
+                    "port": port,
+                })
+            });
         }
     }
-}
 
-#[derive(Serialize, ToSchema)]
-pub struct TurnInfo {
-    pub software: String,
-    pub uptime: u64,
-    pub interfaces: Vec<TurnInterface>,
-    pub port_capacity: usize,
-    pub port_allocated: usize,
-}
+    #[allow(clippy::let_underscore_future)]
+    fn channel_bind(&self, addr: &SessionAddr, name: &str, channel: u16) {
+        log::info!(
+            "channel bind: address={:?}, interface={:?}, username={:?}, channel={}",
+            addr.address,
+            addr.interface,
+            name,
+            channel
+        );
 
-#[derive(Deserialize, IntoParams)]
-pub struct TurnQueryParams {
-    pub address: String,
-    pub interface: String,
-}
-
-impl Into<SessionAddr> for TurnQueryParams {
-    fn into(self) -> SessionAddr {
-        SessionAddr {
-            address: self.address.parse().unwrap(),
-            interface: self.interface.parse().unwrap(),
+        {
+            turn_server::api::events::send_with_stream("channel_bind", || {
+                json!({
+                    "session": {
+                        "address": addr.address,
+                        "interface": addr.interface,
+                    },
+                    "username": name,
+                    "channel": channel,
+                })
+            });
         }
     }
-}
 
-#[derive(Serialize, ToSchema)]
-pub struct TurnSession {
-    pub username: String,
-    pub permissions: Vec<u16>,
-    pub channels: Vec<u16>,
-    pub port: Option<u16>,
-    pub expires: u64,
-}
+    #[allow(clippy::let_underscore_future)]
+    fn create_permission(&self, addr: &SessionAddr, name: &str, ports: &[u16]) {
+        log::info!(
+            "create permission: address={:?}, interface={:?}, username={:?}, ports={:?}",
+            addr.address,
+            addr.interface,
+            name,
+            ports
+        );
 
-#[derive(Serialize, ToSchema)]
-pub struct TurnSessionStatistics {
-    pub received_bytes: usize,
-    pub send_bytes: usize,
-    pub received_pkts: usize,
-    pub send_pkts: usize,
-    pub error_pkts: usize,
+        {
+            turn_server::api::events::send_with_stream("create_permission", || {
+                json!({
+                    "session": {
+                        "address": addr.address,
+                        "interface": addr.interface,
+                    },
+                    "username": name,
+                    "ports": ports,
+                })
+            });
+        }
+    }
+
+    #[allow(clippy::let_underscore_future)]
+    fn refresh(&self, addr: &SessionAddr, name: &str, lifetime: u32) {
+        log::info!(
+            "refresh: address={:?}, interface={:?}, username={:?}, lifetime={}",
+            addr.address,
+            addr.interface,
+            name,
+            lifetime
+        );
+
+        {
+            turn_server::api::events::send_with_stream("refresh", || {
+                json!({
+                    "session": {
+                        "address": addr.address,
+                        "interface": addr.interface,
+                    },
+                    "username": name,
+                    "lifetime": lifetime,
+                })
+            });
+        }
+    }
+
+    #[allow(clippy::let_underscore_future)]
+    fn closed(&self, addr: &SessionAddr, name: &str) {
+        log::info!(
+            "closed: address={:?}, interface={:?}, username={:?}",
+            addr.address,
+            addr.interface,
+            name
+        );
+
+        {
+            self.statistics.unregister(&addr);
+
+            turn_server::api::events::send_with_stream("closed", || {
+                json!({
+                    "session": {
+                        "address": addr.address,
+                        "interface": addr.interface,
+                    },
+                    "username": name,
+                })
+            });
+        }
+    }
 }

@@ -27,7 +27,6 @@ where
     pub uptime: Instant,
 }
 
-
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnTransport {
@@ -42,12 +41,7 @@ impl FromStr for TurnTransport {
         Ok(match value {
             "udp" => Self::UDP,
             "tcp" => Self::TCP,
-            _ => {
-                return Err(DeskTurnError::CustomError(CustomDeskError::new(
-                    ErrorCode::SYSTEM_ERROR,
-                    format!("unknown transport: {value}"),
-                )));
-            }
+            _ => return Err(DeskTurnError::IllegalTransport(value.to_string())),
         })
     }
 }
