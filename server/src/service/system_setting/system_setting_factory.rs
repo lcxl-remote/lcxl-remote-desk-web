@@ -1,5 +1,5 @@
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{settings::DeskSettings, system_setting::SystemSettingHelper},
 };
 

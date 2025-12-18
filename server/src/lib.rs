@@ -1,5 +1,5 @@
 pub mod controller;
-pub mod desk_error;
+pub mod error;
 pub mod model;
 pub mod service;
 
@@ -28,7 +28,7 @@ use controller::{
     },
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
-use desk_error::DeskError;
+use error::DeskError;
 use desk_turn::service::startup_turn_server;
 use desk_utils::{logs::init_logs_by_str, network::check_ipv6_available};
 use log::{info, warn};

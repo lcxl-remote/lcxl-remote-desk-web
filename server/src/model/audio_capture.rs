@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 use utoipa::ToSchema;
 
-use crate::desk_error::DeskError;
+use crate::error::DeskError;
 
 /// Audio Data Flow Enum
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

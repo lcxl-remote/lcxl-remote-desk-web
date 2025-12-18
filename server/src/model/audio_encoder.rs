@@ -1,6 +1,6 @@
 use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 
-use crate::{desk_error::DeskError, model::audio_capture::AudioBuffer};
+use crate::{error::DeskError, model::audio_capture::AudioBuffer};
 
 pub struct EncodedAudioBuffer {
     pub data: Vec<u8>,            // Raw audio data

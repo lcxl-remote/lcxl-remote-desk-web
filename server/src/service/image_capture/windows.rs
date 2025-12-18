@@ -1,7 +1,7 @@
 use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsW};
 use windows_core::HSTRING;
 
-use crate::{desk_error::DeskError, model::image_capture::Resolution};
+use crate::{error::DeskError, model::image_capture::Resolution};
 
 pub fn enum_display_resolutions(device_name: &str) -> Result<Vec<Resolution>, DeskError> {
     let mut resolutions = vec![];

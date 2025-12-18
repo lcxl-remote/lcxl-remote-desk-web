@@ -1,7 +1,7 @@
 use std::ptr::null_mut;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         audio_capture::{
             AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,

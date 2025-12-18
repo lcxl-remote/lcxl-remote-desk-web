@@ -3,7 +3,7 @@ use desk_turn::model::{
     TurnApiState, TurnInfo, TurnQueryParams, TurnSession, TurnSessionStatistics,
 };
 
-use crate::{desk_error::DeskError, model::turn::TurnObserver};
+use crate::{error::DeskError, model::turn::TurnObserver};
 
 #[utoipa::path(
     summary = "Get turn server info",

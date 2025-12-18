@@ -1,6 +1,6 @@
 use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 
-use crate::{desk_error::DeskError, model::image_capture::ImageInfo};
+use crate::{error::DeskError, model::image_capture::ImageInfo};
 
 pub struct NalInfo {
     pub nal_bytes: bytes::Bytes,

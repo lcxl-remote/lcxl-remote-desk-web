@@ -4,7 +4,7 @@ use prometheus::{HistogramVec, register_histogram_vec};
 use vpx_encode::VideoCodecId;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         image_capture::{DisplayInfo, ImageInfo},
         settings::VpxEncoderSettings,

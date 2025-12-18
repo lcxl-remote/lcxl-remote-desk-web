@@ -1,5 +1,5 @@
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         audio_capture::{AudioBuffer, WaveFormat},
         audio_encoder::{AudioEncoder, EncodedAudioBuffer},

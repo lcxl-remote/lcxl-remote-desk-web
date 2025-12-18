@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use turn_server::config::Interface;
 use utoipa::{IntoParams, ToSchema};
 
-use crate::{desk_error::DeskError, model::audio_capture::SelectedAudioDevice};
+use crate::{error::DeskError, model::audio_capture::SelectedAudioDevice};
 
 #[derive(clap::ValueEnum, Clone, Default, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

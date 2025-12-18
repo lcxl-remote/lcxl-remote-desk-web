@@ -3,7 +3,7 @@ use std::str::FromStr;
 use strum::IntoEnumIterator;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         image_capture::DisplayInfo,
         settings::DeskSettings,

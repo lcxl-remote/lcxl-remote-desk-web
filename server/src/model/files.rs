@@ -4,7 +4,7 @@ use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::desk_error::DeskError;
+use crate::error::DeskError;
 
 #[derive(Deserialize, ToSchema, IntoParams)]
 pub struct FileListParams {

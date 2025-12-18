@@ -7,7 +7,7 @@ use webrtc::{
 };
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         data_channel::{DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT},
         signaling::SignalingState,

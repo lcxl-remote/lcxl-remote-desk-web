@@ -43,7 +43,7 @@ use windows::Win32::{
 use windows_core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
-use crate::{desk_error::DeskError, model::settings::PrivateScreenSettings};
+use crate::{error::DeskError, model::settings::PrivateScreenSettings};
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff

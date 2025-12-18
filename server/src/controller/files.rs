@@ -5,7 +5,7 @@ use log::{debug, info, warn};
 use tokio::fs;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         common::{ErrorCode, RestResponse},
         files::{DeleteFileRequest, FileInfo, FileListParams, FileListResponse},

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 use utoipa::ToSchema;
 
-use crate::desk_error::DeskError;
+use crate::error::DeskError;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ImageType {

@@ -15,7 +15,7 @@ use windows::Win32::Globalization::GetOEMCP;
 
 use crate::model::terminal::TerminalList;
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{settings::SharedSettings, user::CurrentUser},
 };
 

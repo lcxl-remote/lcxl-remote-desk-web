@@ -54,7 +54,7 @@ use crate::service::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         settings::SharedSettings,
         signaling::{

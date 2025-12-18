@@ -7,7 +7,7 @@ use crate::service::audio_capture::pipewire_capture::{
     PipewireAudioCapture, PipewireAudioDeviceEnumerator,
 };
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         audio_capture::{
             AudioCapture, AudioCaptureType, AudioCaptureTypeHelper, AudioDevice,

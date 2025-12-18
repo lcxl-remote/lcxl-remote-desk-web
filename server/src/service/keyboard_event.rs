@@ -4,7 +4,7 @@ use tokio::sync::{Mutex, RwLock};
 use webrtc::data_channel::RTCDataChannel;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         data_channel::{KeyboardEventData, KeyboardEventHandler},
         signaling::SignalingState,

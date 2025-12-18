@@ -8,7 +8,7 @@ use prometheus::{HistogramVec, register_histogram_vec};
 use yuv::YuvPlanarImageMut;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         image_capture::ImageInfo,
         settings::H264EncoderSettings,

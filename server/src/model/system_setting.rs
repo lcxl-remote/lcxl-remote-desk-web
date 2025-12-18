@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::desk_error::DeskError;
+use crate::error::DeskError;
 
 /// Display settings structure
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, Default)]

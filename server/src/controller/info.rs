@@ -2,7 +2,7 @@ use actix_web::{HttpResponse, get, web};
 use sysinfo::System;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{common::RestResponse, info::SystemInfo, settings::SharedSettings},
 };
 

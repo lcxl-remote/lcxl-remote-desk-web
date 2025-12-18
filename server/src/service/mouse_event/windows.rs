@@ -11,7 +11,7 @@ use windows::Win32::{
 };
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::data_channel::{MouseEventData, MouseEventHandler},
 };
 
@@ -47,7 +47,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
     fn handle_mouse_down(
         &mut self,
         event: &MouseEventData,
-    ) -> Result<(), crate::desk_error::DeskError> {
+    ) -> Result<(), crate::error::DeskError> {
         let mut mouse_event_flags = MOUSE_EVENT_FLAGS(0);
         match event.button {
             0 => mouse_event_flags |= MOUSEEVENTF_LEFTDOWN,

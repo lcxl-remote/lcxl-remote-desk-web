@@ -3,7 +3,7 @@ use std::str::FromStr;
 use strum::IntoEnumIterator;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         audio_capture::WaveFormat,
         audio_encoder::{AudioEncoder, AudioEncoderType, AudioEncoderTypeHelper},

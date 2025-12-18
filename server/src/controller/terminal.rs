@@ -6,7 +6,7 @@ use log::{error, info};
 use tokio::process::Command;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         settings::SharedSettings,
         signaling::SignalingModel,

@@ -46,7 +46,7 @@ use windows::Win32::{
 use windows_core::{Interface, PCWSTR, s};
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         common::ErrorCode,
         image_capture::{

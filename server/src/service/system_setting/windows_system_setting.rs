@@ -13,7 +13,7 @@ use windows::Win32::{
 use windows_core::HSTRING;
 
 use crate::{
-    desk_error::{CustomDeskError, DeskError},
+    error::{CustomDeskError, DeskError},
     model::{
         common::ErrorCode,
         settings::{DeskSettings, PrivateScreenSettings},

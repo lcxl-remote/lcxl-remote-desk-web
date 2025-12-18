@@ -7,7 +7,7 @@ use yuv::{
 };
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::image_capture::{ImageInfo, ImageType},
 };
 

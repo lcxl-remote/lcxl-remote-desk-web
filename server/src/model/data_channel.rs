@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::desk_error::DeskError;
+use crate::error::DeskError;
 
 pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
 pub const DATA_CHANNEL_LABEL_KEYBOARD_EVENT: &str = "keyboard_event";

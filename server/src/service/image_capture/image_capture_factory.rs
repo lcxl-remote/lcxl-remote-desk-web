@@ -13,7 +13,7 @@ use crate::service::image_capture::{
     x11_capture::{X11ImageCapture, X11ImageOutputEnumerator},
 };
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         image_capture::{
             DisplayInfo, ImageCapture, ImageCaptureType, ImageCaptureTypeHelper,
