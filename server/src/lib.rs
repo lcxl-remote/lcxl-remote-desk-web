@@ -72,7 +72,7 @@ pub async fn run() -> Result<Server, DeskError> {
     info!("Server execution file path: {:?}", exec_file_path);
 
     // Create a lock file to prevent multiple instances of the server from running simultaneously.
-    let lock_file_path = env::temp_dir().join("lcxl_web_remote_desk.lock");
+    let lock_file_path = env::temp_dir().join("lcxl_remote_desk_server.lock");
     let lock_file = File::create(lock_file_path)?;
     lock_file.try_lock()?;
     // Create a path to the static files directory, which is assumed to be in the same directory as the executable.
