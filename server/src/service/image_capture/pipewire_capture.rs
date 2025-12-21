@@ -23,7 +23,7 @@ use zbus::{
 };
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         common::ErrorCode,
         image_capture::{DisplayInfo, ImageCapture, ImageInfo, ImageOutputEnumerator, ImageType},
@@ -650,10 +650,10 @@ impl PipewireImageCapture {
 mod tests {
     use std::{sync::Once, time::Duration};
 
+    use desk_utils::logs::init_logs;
     use log::LevelFilter;
 
     use super::*;
-    use crate::utils::logs::init_logs;
     static INIT: Once = Once::new();
     pub fn initialize() {
         INIT.call_once(|| {
@@ -700,7 +700,9 @@ mod tests {
 
         for _ in 0..10 {
             match pipewire_capture.capture(true) {
-                Ok(image_info) => log::info!("Captured {:?} frames of image data", image_info.get_data()),
+                Ok(image_info) => {
+                    log::info!("Captured {:?} frames of image data", image_info.get_data())
+                }
                 Err(error) => log::error!("Failed to capture image: {:?}", error),
             }
         }

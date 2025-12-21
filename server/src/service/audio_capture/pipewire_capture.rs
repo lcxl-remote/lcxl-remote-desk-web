@@ -16,7 +16,7 @@ use pipewire::{
 };
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         audio_capture::{
             AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
@@ -494,10 +494,10 @@ impl PipewireAudioCapture {
 mod tests {
     use std::{sync::Once, time::Duration};
 
+    use desk_utils::logs::init_logs;
     use log::LevelFilter;
 
     use super::*;
-    use crate::utils::logs::init_logs;
     static INIT: Once = Once::new();
     pub fn initialize() {
         INIT.call_once(|| {

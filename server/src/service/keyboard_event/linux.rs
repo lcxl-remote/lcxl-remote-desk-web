@@ -1,7 +1,7 @@
 use evdev::{KeyCode, KeyEvent, uinput::VirtualDevice};
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::data_channel::{KeyboardEventData, KeyboardEventHandler},
 };
 

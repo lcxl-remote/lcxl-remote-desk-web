@@ -13,7 +13,7 @@ use x11rb::{
 };
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         image_capture::{
             DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,

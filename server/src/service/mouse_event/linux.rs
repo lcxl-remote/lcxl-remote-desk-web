@@ -4,7 +4,7 @@ use evdev::{
 };
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::data_channel::{MouseEventData, MouseEventHandler},
 };
 

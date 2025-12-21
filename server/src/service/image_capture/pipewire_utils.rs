@@ -6,7 +6,7 @@ use zbus::Result as ZBusResult;
 use zbus::blocking::{Connection as ZBusConnection, Proxy};
 use zbus::zvariant::Type;
 
-use crate::desk_error::DeskError;
+use crate::error::DeskError;
 
 pub static XCB_CONNECTION_AND_INDEX: LazyLock<ConnResult<(XcbConnection, i32)>> =
     LazyLock::new(|| {

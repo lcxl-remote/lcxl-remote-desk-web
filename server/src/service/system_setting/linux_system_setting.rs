@@ -3,7 +3,7 @@ use std::{env, process::Command};
 use arboard::Clipboard;
 
 use crate::{
-    desk_error::DeskError,
+    error::DeskError,
     model::{
         common::ErrorCode,
         settings::DeskSettings,
