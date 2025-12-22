@@ -14,6 +14,9 @@ rust-version = "1.90"
 
 
 [workspace.dependencies]
+desk-utils = { path = "utils" }
+desk-turn = { path = "turn" }
+
 log = "0.4"
 env_logger = "0.11"
 utoipa = { version = "5", features = ["actix_extras", "chrono"] }
