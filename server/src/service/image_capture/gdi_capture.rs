@@ -1,3 +1,4 @@
+use desk_utils::error::DeskErrorCode;
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
@@ -16,7 +17,6 @@ use windows_core::PCWSTR;
 use crate::{
     error::DeskError,
     model::{
-        common::ErrorCode,
         image_capture::{
             DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
             ImageOutputEnumerator, ImageType,
@@ -344,7 +344,7 @@ impl ImageCapture for GdiImageCapture {
             Ok(display_info)
         } else {
             DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 format!("Cannot get current output by index {}", self.idevnum),
             )
         }

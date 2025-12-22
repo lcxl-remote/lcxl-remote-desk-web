@@ -1,10 +1,8 @@
 use actix_web::{Error as AWError, HttpResponse, get, post, web};
+use desk_utils::rest::RestResponse;
 use log::info;
 
-use crate::model::{
-    common::RestResponse,
-    settings::{SharedSettings, SystemSettings},
-};
+use crate::model::settings::{SharedSettings, SystemSettings};
 
 #[utoipa::path(
     summary = "Query settings",

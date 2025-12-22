@@ -1,4 +1,5 @@
 use arboard::Clipboard;
+use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
     Graphics::Gdi::{
@@ -13,9 +14,8 @@ use windows::Win32::{
 use windows_core::HSTRING;
 
 use crate::{
-    error::{CustomDeskError, DeskError},
+    error::DeskError,
     model::{
-        common::ErrorCode,
         settings::{DeskSettings, PrivateScreenSettings},
         system_setting::{DisplaySettings, SystemSettingHelper},
     },
@@ -35,7 +35,7 @@ fn private_screen_window_thread(
     log::info!("Private screen window created: {:?}", window);
     window.sender.send(window.state.clone()).map_err(|e| {
         DeskError::CustomError(CustomDeskError::new(
-            ErrorCode::SYSTEM_ERROR,
+            DeskErrorCode::SYSTEM_ERROR,
             format!("Failed to send window handle: {}", e),
         ))
     })?;
@@ -91,7 +91,7 @@ impl WindowsSystemSettingHelper {
             .send(PrivateScreenCommand::ShowWindow)
             .map_err(|e| {
                 DeskError::CustomError(CustomDeskError::new(
-                    ErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     format!("Failed to send ShowWindow command: {}", e),
                 ))
             })
@@ -102,7 +102,7 @@ impl WindowsSystemSettingHelper {
             .send(PrivateScreenCommand::HideWindow)
             .map_err(|e| {
                 DeskError::CustomError(CustomDeskError::new(
-                    ErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     format!("Failed to send ShowWindow command: {}", e),
                 ))
             })
@@ -149,7 +149,7 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
         };
         if result != DISP_CHANGE_SUCCESSFUL {
             return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 format!("Failed to change display settings, code: {}", result.0),
             );
         }
@@ -207,7 +207,7 @@ mod tests {
         WS_EX_OVERLAPPEDWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
     };
 
-    use crate::{model::settings::DeskSettings};
+    use crate::model::settings::DeskSettings;
 
     use super::*;
     static INIT: Once = Once::new();

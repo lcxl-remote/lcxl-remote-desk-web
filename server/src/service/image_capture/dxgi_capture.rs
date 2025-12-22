@@ -1,5 +1,6 @@
 use std::{backtrace::Backtrace, sync::Arc};
 
+use desk_utils::error::DeskErrorCode;
 use windows::Win32::{
     Foundation::{GENERIC_ALL, HMODULE, RECT},
     Graphics::{
@@ -48,7 +49,6 @@ use windows_core::{Interface, PCWSTR, s};
 use crate::{
     error::DeskError,
     model::{
-        common::ErrorCode,
         image_capture::{
             DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
             ImageOutputEnumerator, ImageType,
@@ -1365,7 +1365,7 @@ impl ImageCapture for DigxImageCapture {
                     log::warn!("capture frame timeout, will retry, error={:?}", err);
 
                     return DeskError::custom_error(
-                        ErrorCode::ACTION_NEED_RETRY,
+                        DeskErrorCode::ACTION_NEED_RETRY,
                         format!("capture frame timeout, will retry, error={:?}", err),
                     );
                 } else if err.code() == DXGI_ERROR_ACCESS_LOST
@@ -1374,7 +1374,7 @@ impl ImageCapture for DigxImageCapture {
                     self.screen_output = None;
 
                     return DeskError::custom_error(
-                        ErrorCode::ACTION_NEED_RETRY,
+                        DeskErrorCode::ACTION_NEED_RETRY,
                         format!("capture frame is lost, will retry, error={:?}", err),
                     );
                 } else {
@@ -1425,7 +1425,6 @@ mod tests {
     use windows::Win32::UI::WindowsAndMessaging::{MB_OK, MessageBoxW};
     use windows_core::w;
     use yuv::bgra_to_rgba;
-
 
     use super::*;
 

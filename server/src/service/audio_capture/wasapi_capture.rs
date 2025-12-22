@@ -7,10 +7,10 @@ use crate::{
             AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
             SelectedAudioDevice, WaveFormat,
         },
-        common::ErrorCode,
         settings::DeskSettings,
     },
 };
+use desk_utils::error::DeskErrorCode;
 use windows::Win32::{
     Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
     Media::{
@@ -226,7 +226,7 @@ impl AudioCapture for WasapiAudioCapture {
                     if windows_error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
                         log::warn!("audio device is invalidated");
                         return DeskError::custom_error(
-                            ErrorCode::ACTION_NEED_RETRY,
+                            DeskErrorCode::ACTION_NEED_RETRY,
                             "Audio device is invalidated, please retry".to_string(),
                         );
                     }
@@ -318,7 +318,7 @@ impl WasapiAudioCapture {
             AudioDataFlow::Capture => eCapture,
             _ => {
                 return DeskError::custom_error(
-                    ErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     format!(
                         "Unknown audio data flow: {:?}",
                         audio_device.audio_data_flow

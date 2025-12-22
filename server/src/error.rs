@@ -4,36 +4,14 @@ use std::{
 };
 
 use actix_web::ResponseError;
-
-use crate::model::{
-    common::{ErrorCode, RestResponse},
-    signaling::WebRTConnectionState,
+use desk_utils::{
+    error::{CustomDeskError, DeskErrorCode},
+    rest::RestResponse,
 };
 
-#[derive(Debug)]
-pub struct CustomDeskError {
-    pub error_code: ErrorCode,
-    pub message: String,
-}
+use crate::model::signaling::WebRTConnectionState;
 
-impl fmt::Display for CustomDeskError {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.write_str("Custom desk error")?;
-
-        write!(fmt, "({}): {}", self.error_code, self.message)?;
-
-        Ok(())
-    }
-}
-
-impl CustomDeskError {
-    pub fn new(error_code: ErrorCode, message: String) -> CustomDeskError {
-        CustomDeskError {
-            error_code,
-            message,
-        }
-    }
-}
+pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(1000);
 
 /// Custom error type for the application.
 #[derive(Debug)]
@@ -120,7 +98,7 @@ pub enum DeskError {
 }
 
 impl DeskError {
-    pub fn custom_error<T>(error_code: ErrorCode, message: String) -> Result<T, DeskError> {
+    pub fn custom_error<T>(error_code: DeskErrorCode, message: String) -> Result<T, DeskError> {
         Err(DeskError::CustomError(CustomDeskError::new(
             error_code, message,
         )))
@@ -133,7 +111,7 @@ impl DeskError {
             let last_error = GetLastError();
             //TODO use FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM)
             return DeskError::custom_error(
-                ErrorCode::WINDOWS_ERROR,
+                WINDOWS_ERROR,
                 format!("windows error code: {:?}", last_error),
             );
         }
@@ -430,7 +408,7 @@ impl ResponseError for DeskError {
     fn error_response(&self) -> actix_web::HttpResponse<actix_web::body::BoxBody> {
         let error_code = match self {
             DeskError::CustomError(error) => error.error_code,
-            _ => ErrorCode::SYSTEM_ERROR,
+            _ => DeskErrorCode::SYSTEM_ERROR,
         };
         // write as json
         let rest = RestResponse::failed(error_code, self.to_string());

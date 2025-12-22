@@ -1,15 +1,13 @@
 use std::path::PathBuf;
 
 use actix_web::{HttpResponse, delete, get, web};
+use desk_utils::rest::RestResponse;
 use log::{debug, info, warn};
 use tokio::fs;
 
 use crate::{
     error::DeskError,
-    model::{
-        common::{ErrorCode, RestResponse},
-        files::{DeleteFileRequest, FileInfo, FileListParams, FileListResponse},
-    },
+    model::files::{DeleteFileRequest, FileInfo, FileListParams, FileListResponse},
 };
 
 #[cfg(target_os = "windows")]
@@ -194,12 +192,14 @@ pub async fn delete_file(
             // invoke SHFileOperationW to move file to trash
             let opr_code = unsafe { SHFileOperationW(&mut fileop) };
             if opr_code != 0 {
+                use crate::error::WINDOWS_ERROR;
+
                 error!(
                     "Failed to delete file: {}, code: {}",
                     delete_file_request.file_path, opr_code
                 );
                 return Ok(HttpResponse::Ok().json(RestResponse::failed(
-                    ErrorCode::WINDOWS_ERROR,
+                    WINDOWS_ERROR,
                     format!(
                         "Failed to delete file: {}, code: {}",
                         delete_file_request.file_path, opr_code
@@ -217,7 +217,7 @@ pub async fn delete_file(
         {
             // Linux specific code to move file to trash
             return Ok(HttpResponse::Ok().json(RestResponse::failed(
-                ErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 "Need implementation".to_string(),
             )));
         }
@@ -226,7 +226,7 @@ pub async fn delete_file(
         {
             // Linux specific code to move file to trash
             return Ok(HttpResponse::Ok().json(RestResponse::failed(
-                ErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 "Need implementation".to_string(),
             )));
         }

@@ -5,6 +5,7 @@ use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use actix_ws::{CloseCode, CloseReason};
 use bytes::Bytes;
 use bytestring::ByteString;
+use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
 use log::{error, info, warn};
 use prometheus::{HistogramVec, register_histogram_vec};
@@ -31,7 +32,6 @@ use webrtc::{
     track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
 };
 
-use crate::model::common::ErrorCode;
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::settings::DeskSettings;
 use crate::model::signaling::{
@@ -167,7 +167,7 @@ impl SignalingContext {
         }
         let ice_stun_server = RTCIceServer {
             urls: stun_urls.clone(),
-            username:  local_settings.user.login_user_name.clone(),
+            username: local_settings.user.login_user_name.clone(),
             credential: local_settings.user.login_password.clone(),
         };
         let ice_turn_server = RTCIceServer {
@@ -506,7 +506,7 @@ impl SignalingContext {
                 _ => {
                     log::error!("Unexcepted state {}, exit to capture screen", state);
                     return DeskError::custom_error(
-                        ErrorCode::SYSTEM_ERROR,
+                        DeskErrorCode::SYSTEM_ERROR,
                         format!("Unexcepted state {}", state),
                     );
                 }
@@ -556,7 +556,7 @@ impl SignalingContext {
             let image_info_result = capture.capture(desk_settings.show_mouse);
             if image_info_result.is_err() {
                 if let Err(DeskError::CustomError(err)) = image_info_result {
-                    if err.error_code == ErrorCode::ACTION_NEED_RETRY {
+                    if err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
                         timer.stop_and_discard();
                         continue;
                     }
@@ -617,7 +617,7 @@ impl SignalingContext {
                 _ => {
                     log::error!("Unexcepted state {}, exit to capture audio", state);
                     return DeskError::custom_error(
-                        ErrorCode::SYSTEM_ERROR,
+                        DeskErrorCode::SYSTEM_ERROR,
                         format!("Unexcepted state {}", state),
                     );
                 }
@@ -664,7 +664,7 @@ impl SignalingContext {
                 let result = capture.get_buffer();
                 if result.is_err() {
                     if let Err(DeskError::CustomError(ref err)) = result {
-                        if err.error_code == ErrorCode::ACTION_NEED_RETRY {
+                        if err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
                             // recreate audio capture
                             log::warn!("Failed to get audio buffer, recreate audio capture");
                             capture = create_audio_capture(&desk_settings)?;
@@ -715,7 +715,7 @@ impl SignalingContext {
             self.session
                 .send_signaling(&SignalingModel::error(
                     signaling_model.signaling_type.into(),
-                    ErrorCode::BLANK_SIGNALING_DATA,
+                    DeskErrorCode::BLANK_SIGNALING_DATA,
                     "No signaling data provided",
                 )?)
                 .await?;
@@ -796,7 +796,7 @@ impl SignalingContext {
             self.session
                 .send_signaling(&SignalingModel::error(
                     signaling_model.signaling_type.into(),
-                    ErrorCode::GENERATE_LOCAL_DESCRIPTION_FAILED,
+                    DeskErrorCode::GENERATE_LOCAL_DESCRIPTION_FAILED,
                     "generate local_description failed!",
                 )?)
                 .await?;

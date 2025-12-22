@@ -28,14 +28,13 @@ use controller::{
     },
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
-use error::DeskError;
 use desk_turn::service::startup_turn_server;
-use desk_utils::{logs::init_logs_by_str, network::check_ipv6_available};
-use log::{info, warn};
-use model::{
-    common::{ErrorCode, RestResponse},
-    settings::{Args, Settings, SharedSettings, UserSettings},
+use desk_utils::{
+    error::DeskErrorCode, logs::init_logs_by_str, network::check_ipv6_available, rest::RestResponse,
 };
+use error::DeskError;
+use log::{info, warn};
+use model::settings::{Args, Settings, SharedSettings, UserSettings};
 use turn_server::statistics::Statistics;
 use utoipa_actix_web::AppExt;
 use utoipa_rapidoc::RapiDoc;
@@ -127,8 +126,10 @@ pub async fn run() -> Result<Server, DeskError> {
                         let err_message = err.to_string();
                         return InternalError::from_response(
                             err,
-                            HttpResponse::BadRequest()
-                                .json(RestResponse::failed(ErrorCode::SYSTEM_ERROR, err_message)),
+                            HttpResponse::BadRequest().json(RestResponse::failed(
+                                DeskErrorCode::SYSTEM_ERROR,
+                                err_message,
+                            )),
                         )
                         .into();
                     }),

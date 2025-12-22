@@ -1,9 +1,10 @@
+use desk_utils::error::DeskErrorCode;
+
 use crate::{
     error::DeskError,
     model::{
         audio_capture::{AudioBuffer, WaveFormat},
         audio_encoder::{AudioEncoder, EncodedAudioBuffer},
-        common::ErrorCode,
         settings::DeskSettings,
     },
 };
@@ -23,7 +24,7 @@ impl OpusAudioEncoder {
             2 => opusic_c::Channels::Stereo,
             _ => {
                 return DeskError::custom_error(
-                    ErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     format!("Unsupported number of channels: {}", opus_settings.channels),
                 );
             }
@@ -35,7 +36,7 @@ impl OpusAudioEncoder {
             "LowDelay" => opusic_c::Application::LowDelay,
             _ => {
                 return DeskError::custom_error(
-                    ErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     format!(
                         "Unsupported Opus application: {}",
                         opus_settings.application
@@ -98,7 +99,7 @@ impl AudioEncoder for OpusAudioEncoder {
             output[..len].to_vec()
         } else {
             return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 format!(
                     "Unsupport bit per sample: {}",
                     self.wave_format.bits_per_sample

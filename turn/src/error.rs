@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use actix_web::ResponseError;
-use desk_utils::rest::{ErrorCode, RestResponse};
+use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 
 #[derive(Debug)]
 pub enum DeskTurnError {
@@ -33,7 +33,7 @@ impl ResponseError for DeskTurnError {
     }
 
     fn error_response(&self) -> actix_web::HttpResponse<actix_web::body::BoxBody> {
-        let error_code = ErrorCode::SYSTEM_ERROR;
+        let error_code = DeskErrorCode::SYSTEM_ERROR;
 
         // write as json
         let rest = RestResponse::failed(error_code, self.to_string());

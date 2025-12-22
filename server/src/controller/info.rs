@@ -1,9 +1,10 @@
 use actix_web::{HttpResponse, get, web};
+use desk_utils::rest::RestResponse;
 use sysinfo::System;
 
 use crate::{
     error::DeskError,
-    model::{common::RestResponse, info::SystemInfo, settings::SharedSettings},
+    model::{info::SystemInfo, settings::SharedSettings},
 };
 
 #[utoipa::path(

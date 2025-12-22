@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use actix_ws::Session;
+use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use webrtc::{
@@ -12,11 +13,8 @@ use webrtc::{
 };
 
 use crate::{
-    error::{CustomDeskError, DeskError},
-    model::{
-        audio_capture::AudioDevice, common::ErrorCode, image_capture::DisplayInfo,
-        settings::DeskSettings,
-    },
+    error::DeskError,
+    model::{audio_capture::AudioDevice, image_capture::DisplayInfo, settings::DeskSettings},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -113,7 +111,7 @@ impl SignalingModel {
 
     pub fn error(
         signaling_type: SignalingType,
-        error_code: ErrorCode,
+        error_code: DeskErrorCode,
         message: &str,
     ) -> Result<Self, DeskError> {
         let error_data = SignalingErrorData {
