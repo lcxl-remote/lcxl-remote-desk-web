@@ -1,14 +1,12 @@
 use std::{env, process::Command};
 
 use arboard::Clipboard;
+use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_utils::error::DeskErrorCode;
 
 use crate::{
     error::DeskError,
-    model::{
-        common::ErrorCode,
-        settings::DeskSettings,
-        system_setting::{DisplaySettings, SystemSettingHelper},
-    },
+    model::system_setting::{DisplaySettings, SystemSettingHelper},
 };
 
 pub struct LinuxSystemSettingHelper {
@@ -54,7 +52,7 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         } else {
             log::warn!("No display environment variable found");
             return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 "No display environment variable found".to_owned(),
             );
         }
@@ -63,15 +61,15 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
 
     fn block_input(&self, _block: bool) -> Result<(), DeskError> {
         // FIXME
-        DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
 
     fn enable_private_screen(&self, _enable: bool) -> Result<(), DeskError> {
-        DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
 
     fn control_monitor_power(&self, _turn_off: bool) -> Result<(), DeskError> {
-        DeskError::custom_error(ErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
     }
 
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError> {

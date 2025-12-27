@@ -1,5 +1,9 @@
 use std::ptr;
 
+use desk_signal_facade::model::{
+    desk_settings::DeskSettings,
+    image_capture::{DisplayInfo, DisplayRect},
+};
 use libc::{IPC_CREAT, IPC_PRIVATE, IPC_RMID, SHM_RDONLY, shmat, shmctl, shmdt, shmget};
 use x11rb::{
     connection::{Connection, RequestConnection},
@@ -14,12 +18,8 @@ use x11rb::{
 
 use crate::{
     error::DeskError,
-    model::{
-        image_capture::{
-            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
-            ImageOutputEnumerator, ImageType,
-        },
-        settings::DeskSettings,
+    model::image_capture::{
+        ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator, ImageType,
     },
 };
 

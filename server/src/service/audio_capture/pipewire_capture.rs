@@ -1,5 +1,10 @@
 use std::{ffi::CStr, mem, thread::JoinHandle, time::Duration, u16};
 
+use desk_signal_facade::model::{
+    audio_capture::{AudioDataFlow, AudioDevice},
+    desk_settings::DeskSettings,
+};
+use desk_utils::error::DeskErrorCode;
 use pipewire::{
     context::Context,
     main_loop::MainLoop,
@@ -17,14 +22,7 @@ use pipewire::{
 
 use crate::{
     error::DeskError,
-    model::{
-        audio_capture::{
-            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
-            WaveFormat,
-        },
-        common::ErrorCode,
-        settings::DeskSettings,
-    },
+    model::audio_capture::{AudioBuffer, AudioCapture, AudioDeviceEnumerator, WaveFormat},
 };
 
 #[derive(Debug)]
@@ -382,7 +380,7 @@ impl AudioCapture for PipewireAudioCapture {
     fn start(&mut self) -> Result<WaveFormat, DeskError> {
         if self.pipewire_loop.is_some() {
             return DeskError::custom_error(
-                ErrorCode::INVALID_STATE,
+                DeskErrorCode::INVALID_STATE,
                 "PipewireAudioCapture already started".to_string(),
             );
         }
@@ -408,7 +406,7 @@ impl AudioCapture for PipewireAudioCapture {
             _ => {
                 log::error!("Expected format callback, got {:?}", pipewire_callback);
                 return DeskError::custom_error(
-                    ErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     "Failed to get audio format".to_string(),
                 );
             }
@@ -429,7 +427,7 @@ impl AudioCapture for PipewireAudioCapture {
         };
         if wave_format.bits_per_sample == u16::MAX {
             return DeskError::custom_error(
-                ErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 "Unsupported audio format".to_string(),
             );
         }

@@ -216,6 +216,8 @@ pub async fn delete_file(
         #[cfg(target_os = "linux")]
         {
             // Linux specific code to move file to trash
+
+            use desk_utils::error::DeskErrorCode;
             return Ok(HttpResponse::Ok().json(RestResponse::failed(
                 DeskErrorCode::SYSTEM_ERROR,
                 "Need implementation".to_string(),
@@ -225,6 +227,7 @@ pub async fn delete_file(
         #[cfg(target_os = "macos")]
         {
             // Linux specific code to move file to trash
+            use desk_utils::error::DeskErrorCode;
             return Ok(HttpResponse::Ok().json(RestResponse::failed(
                 DeskErrorCode::SYSTEM_ERROR,
                 "Need implementation".to_string(),

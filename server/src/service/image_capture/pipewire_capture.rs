@@ -1,5 +1,7 @@
 use std::{collections::HashMap, ffi::CStr, thread::JoinHandle, time::Duration};
 
+use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
+use desk_utils::error::DeskErrorCode;
 use pipewire::{
     context::Context,
     main_loop::MainLoop,
@@ -24,11 +26,7 @@ use zbus::{
 
 use crate::{
     error::DeskError,
-    model::{
-        common::ErrorCode,
-        image_capture::{DisplayInfo, ImageCapture, ImageInfo, ImageOutputEnumerator, ImageType},
-        settings::DeskSettings,
-    },
+    model::image_capture::{ImageCapture, ImageInfo, ImageOutputEnumerator, ImageType},
     service::image_capture::pipewire_utils::{
         get_zbus_connection, get_zbus_portal_request, wait_zbus_response,
     },
@@ -595,7 +593,7 @@ impl ImageCapture for PipewireImageCapture {
             return Ok(Box::new(image_info));
         } else {
             return DeskError::custom_error(
-                ErrorCode::ACTION_NEED_RETRY,
+                DeskErrorCode::ACTION_NEED_RETRY,
                 "No image frame captured".to_string(),
             );
         }
@@ -630,7 +628,7 @@ impl PipewireImageCapture {
             _ => {
                 log::error!("Expected format callback, got {:?}", pipewire_callback);
                 return DeskError::custom_error(
-                    ErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     "Failed to get image format".to_string(),
                 );
             }

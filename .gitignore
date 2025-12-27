@@ -29,3 +29,4 @@ target/
 .vscode/
 conf/
 sample/
+node_modules/
