@@ -1,3 +1,7 @@
+use desk_signal_facade::model::{
+    desk_settings::DeskSettings,
+    image_capture::{DisplayInfo, DisplayRect},
+};
 use desk_utils::error::DeskErrorCode;
 use windows::Win32::{
     Foundation::HWND,
@@ -16,12 +20,8 @@ use windows_core::PCWSTR;
 
 use crate::{
     error::DeskError,
-    model::{
-        image_capture::{
-            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
-            ImageOutputEnumerator, ImageType,
-        },
-        settings::DeskSettings,
+    model::image_capture::{
+        ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator, ImageType,
     },
     service::image_capture::windows::enum_display_resolutions,
 };

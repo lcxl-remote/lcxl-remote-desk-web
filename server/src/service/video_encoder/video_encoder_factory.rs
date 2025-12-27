@@ -1,14 +1,11 @@
 use std::str::FromStr;
 
+use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
 use strum::IntoEnumIterator;
 
 use crate::{
     error::DeskError,
-    model::{
-        image_capture::DisplayInfo,
-        settings::DeskSettings,
-        video_encoder::{VideoEncoder, VideoEncoderType, VideoEncoderTypeHelper},
-    },
+    model::video_encoder::{VideoEncoder, VideoEncoderType, VideoEncoderTypeHelper},
     service::video_encoder::{h264_encoder::H264Encoder, vpx_encoder::VpxEncoder},
 };
 

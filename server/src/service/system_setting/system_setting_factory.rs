@@ -1,7 +1,6 @@
-use crate::{
-    error::DeskError,
-    model::{settings::DeskSettings, system_setting::SystemSettingHelper},
-};
+use desk_signal_facade::model::desk_settings::DeskSettings;
+
+use crate::{error::DeskError, model::system_setting::SystemSettingHelper};
 
 #[cfg(target_os = "linux")]
 use crate::service::system_setting::linux_system_setting::LinuxSystemSettingHelper;

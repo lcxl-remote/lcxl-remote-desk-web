@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
+use desk_signal_facade::model::signal::SignalingState;
 use tokio::sync::{Mutex, RwLock};
 use webrtc::data_channel::RTCDataChannel;
 
 use crate::{
     error::DeskError,
-    model::{
-        data_channel::{MouseEventData, MouseEventHandler},
-        signaling::SignalingState,
-    },
+    model::data_channel::{MouseEventData, MouseEventHandler},
 };
 
 #[cfg(target_os = "windows")]

@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use desk_signal_facade::model::signal::SignalingState;
 use tokio::sync::RwLock;
 use webrtc::{
     data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage},
@@ -8,10 +9,7 @@ use webrtc::{
 
 use crate::{
     error::DeskError,
-    model::{
-        data_channel::{DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT},
-        signaling::SignalingState,
-    },
+    model::data_channel::{DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT},
     service::{keyboard_event::handle_keyboard_event, mouse_event::handle_mouse_event},
 };
 

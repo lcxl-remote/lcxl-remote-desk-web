@@ -1664,8 +1664,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "desk-facade"
+name = "desk-signal-facade"
 version = "0.1.0"
+dependencies = [
+ "actix-ws",
+ "desk-utils",
+ "serde",
+ "serde_json",
+ "utoipa",
+ "webrtc",
+]
 
 [[package]]
 name = "desk-turn"
@@ -3002,6 +3010,7 @@ dependencies = [
  "codepage",
  "config",
  "console-subscriber",
+ "desk-signal-facade",
  "desk-turn",
  "desk-utils",
  "encoding_rs",

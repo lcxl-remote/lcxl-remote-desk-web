@@ -1,13 +1,13 @@
 use std::{sync::LazyLock, time::Instant};
 
+use desk_signal_facade::model::{desk_settings::VpxEncoderSettings, image_capture::DisplayInfo};
 use prometheus::{HistogramVec, register_histogram_vec};
 use vpx_encode::VideoCodecId;
 
 use crate::{
     error::DeskError,
     model::{
-        image_capture::{DisplayInfo, ImageInfo},
-        settings::VpxEncoderSettings,
+        image_capture::ImageInfo,
         video_encoder::{NalInfo, VideoEncoder},
     },
     service::video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::argb_to_i420},

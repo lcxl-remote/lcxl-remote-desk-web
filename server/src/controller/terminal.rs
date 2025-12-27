@@ -2,6 +2,7 @@ use std::process::Stdio;
 
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
+use desk_signal_facade::model::signal::SignalingModel;
 use log::{error, info};
 use tokio::process::Command;
 
@@ -9,7 +10,6 @@ use crate::{
     error::DeskError,
     model::{
         settings::SharedSettings,
-        signaling::SignalingModel,
         terminal::{StartTerminalSession, TerminalList},
     },
     service::{

@@ -8,28 +8,31 @@ rust-version.workspace = true
 [dependencies]
 desk-utils = { workspace = true }
 desk-turn = { workspace = true }
+desk-signal-facade = { workspace = true }
 
+actix-web =  { workspace = true }
+actix-ws = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
 utoipa = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
 turn-server = { workspace = true }
+webrtc = { workspace = true }
 
 actix-files = "0.6"
 actix-server = "2.6"
-actix-web = "4.11"
+
 
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 utoipa-actix-web = "0.1"
 utoipa-redoc = { version = "6", features = ["actix-web"] }
 utoipa-rapidoc = { version = "6", features = ["actix-web"] }
 utoipa-scalar = { version = "0.3", features = ["actix-web"] }
-actix-ws = "0.3"
 
-serde_json = "1.0"
 toml_edit = { version = "0.23", features = ["serde"] }
 toml = "0.9"
 config = { version = "0.15", features = ["toml"] }
@@ -44,7 +47,7 @@ actix-service = "2.0"
 mime = "0.3"
 futures-util = "0.3"
 bytestring = "1.4"
-webrtc = "0.13"
+
 bytes = "1.10"
 yuv = "0.8"
 openh264 = "0.8"

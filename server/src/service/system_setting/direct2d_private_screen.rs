@@ -1,5 +1,6 @@
 use std::{marker::PhantomPinned, time::Duration};
 
+use desk_signal_facade::model::desk_settings::PrivateScreenSettings;
 use rust_i18n::t;
 use windows::Win32::{
     Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
@@ -43,7 +44,7 @@ use windows::Win32::{
 use windows_core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
-use crate::{error::DeskError, model::settings::PrivateScreenSettings};
+use crate::error::DeskError;
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff

@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, str::FromStr};
 
+use desk_signal_facade::model::{audio_capture::AudioDevice, desk_settings::DeskSettings};
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "linux")]
@@ -8,12 +9,8 @@ use crate::service::audio_capture::pipewire_capture::{
 };
 use crate::{
     error::DeskError,
-    model::{
-        audio_capture::{
-            AudioCapture, AudioCaptureType, AudioCaptureTypeHelper, AudioDevice,
-            AudioDeviceEnumerator,
-        },
-        settings::DeskSettings,
+    model::audio_capture::{
+        AudioCapture, AudioCaptureType, AudioCaptureTypeHelper, AudioDeviceEnumerator,
     },
 };
 

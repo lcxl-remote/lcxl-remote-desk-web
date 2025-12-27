@@ -1,3 +1,4 @@
+use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_utils::error::DeskErrorCode;
 
 use crate::{
@@ -5,7 +6,6 @@ use crate::{
     model::{
         audio_capture::{AudioBuffer, WaveFormat},
         audio_encoder::{AudioEncoder, EncodedAudioBuffer},
-        settings::DeskSettings,
     },
 };
 const SIZE_20MS: usize = 48000 * 2 / 1000 * 20;

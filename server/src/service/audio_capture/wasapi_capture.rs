@@ -2,13 +2,11 @@ use std::ptr::null_mut;
 
 use crate::{
     error::DeskError,
-    model::{
-        audio_capture::{
-            AudioBuffer, AudioCapture, AudioDataFlow, AudioDevice, AudioDeviceEnumerator,
-            SelectedAudioDevice, WaveFormat,
-        },
-        settings::DeskSettings,
-    },
+    model::audio_capture::{AudioBuffer, AudioCapture, AudioDeviceEnumerator, WaveFormat},
+};
+use desk_signal_facade::model::{
+    audio_capture::{AudioDataFlow, AudioDevice, SelectedAudioDevice},
+    desk_settings::DeskSettings,
 };
 use desk_utils::error::DeskErrorCode;
 use windows::Win32::{

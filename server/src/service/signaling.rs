@@ -5,6 +5,14 @@ use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use actix_ws::{CloseCode, CloseReason};
 use bytes::Bytes;
 use bytestring::ByteString;
+use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::signal::{
+    InitSignalingData, LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_ACCEPT_CONTROL,
+    SIGNALING_TYPE_CODE_ANSWER, SIGNALING_TYPE_CODE_CANID, SIGNALING_TYPE_CODE_CLOSE_CONTROL,
+    SIGNALING_TYPE_CODE_INIT, SIGNALING_TYPE_CODE_OFFER, SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
+    SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingModel, SignalingSessionExt, SignalingState,
+    SignalingType, WebRTConnectionState,
+};
 use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
 use log::{error, info, warn};
@@ -33,12 +41,6 @@ use webrtc::{
 };
 
 use crate::model::data_channel::SignalRequestControlData;
-use crate::model::settings::DeskSettings;
-use crate::model::signaling::{
-    LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_ACCEPT_CONTROL,
-    SIGNALING_TYPE_CODE_CLOSE_CONTROL, SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
-    SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingState, WebRTConnectionState,
-};
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -55,15 +57,7 @@ use crate::service::video_encoder::video_encoder_factory::{
 };
 use crate::{
     error::DeskError,
-    model::{
-        settings::SharedSettings,
-        signaling::{
-            InitSignalingData, SIGNALING_TYPE_CODE_ANSWER, SIGNALING_TYPE_CODE_CANID,
-            SIGNALING_TYPE_CODE_INIT, SIGNALING_TYPE_CODE_OFFER, SignalingModel,
-            SignalingSessionExt, SignalingType,
-        },
-        user::CurrentUser,
-    },
+    model::{settings::SharedSettings, user::CurrentUser},
 };
 
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {

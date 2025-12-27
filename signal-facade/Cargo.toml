@@ -1,0 +1,15 @@
+[package]
+name = "desk-signal-facade"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+desk-utils = { workspace = true }
+
+actix-ws = { workspace = true }
+utoipa = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+webrtc = { workspace = true }

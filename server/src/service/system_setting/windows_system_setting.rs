@@ -1,4 +1,5 @@
 use arboard::Clipboard;
+use desk_signal_facade::model::desk_settings::{DeskSettings, PrivateScreenSettings};
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use windows::Win32::{
     Foundation::{LPARAM, WPARAM},
@@ -15,10 +16,7 @@ use windows_core::HSTRING;
 
 use crate::{
     error::DeskError,
-    model::{
-        settings::{DeskSettings, PrivateScreenSettings},
-        system_setting::{DisplaySettings, SystemSettingHelper},
-    },
+    model::system_setting::{DisplaySettings, SystemSettingHelper},
     service::system_setting::direct2d_private_screen::{
         PrivateScreenCommand, PrivateScreenWindow, PrivateScreenWindowState,
     },
@@ -207,8 +205,6 @@ mod tests {
         WS_EX_OVERLAPPEDWINDOW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
     };
 
-    use crate::model::settings::DeskSettings;
-
     use super::*;
     static INIT: Once = Once::new();
 
@@ -223,9 +219,7 @@ mod tests {
     #[test]
     fn test_change_display_settings() {
         initialize();
-        let helper =
-            WindowsSystemSettingHelper::new(&crate::model::settings::DeskSettings::default())
-                .unwrap();
+        let helper = WindowsSystemSettingHelper::new(&DeskSettings::default()).unwrap();
         let display_settings = DisplaySettings {
             device_name: String::from("\\\\.\\DISPLAY1"),
             width: Some(1080),

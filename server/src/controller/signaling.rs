@@ -1,12 +1,15 @@
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
+use desk_signal_facade::model::{
+    desk_settings::DeskSettings,
+    signal::{InitSignalingData, SignalingErrorData, SignalingModel},
+};
 use log::{error, info};
 
 use crate::{
     model::{
         data_channel::{KeyboardEventData, MouseEventData, SignalRequestControlData},
-        settings::{DeskSettings, SharedSettings},
-        signaling::{InitSignalingData, SignalingErrorData, SignalingModel},
+        settings::SharedSettings,
     },
     service::{signaling::handle_signaling, user::SessionExt},
 };

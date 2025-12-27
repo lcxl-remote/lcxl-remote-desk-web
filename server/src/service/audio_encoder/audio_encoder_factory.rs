@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use desk_signal_facade::model::desk_settings::DeskSettings;
 use strum::IntoEnumIterator;
 
 use crate::{
@@ -7,7 +8,6 @@ use crate::{
     model::{
         audio_capture::WaveFormat,
         audio_encoder::{AudioEncoder, AudioEncoderType, AudioEncoderTypeHelper},
-        settings::DeskSettings,
     },
     service::audio_encoder::opus_encoder::OpusAudioEncoder,
 };

@@ -4,12 +4,11 @@ use std::{
 };
 
 use actix_web::ResponseError;
+use desk_signal_facade::model::signal::WebRTConnectionState;
 use desk_utils::{
     error::{CustomDeskError, DeskErrorCode},
     rest::RestResponse,
 };
-
-use crate::model::signaling::WebRTConnectionState;
 
 pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(1000);
 
@@ -93,6 +92,8 @@ pub enum DeskError {
     DeskUtilsError(desk_utils::error::DeskUtilsError),
     /// Desk turn error
     DeskTurnError(desk_turn::error::DeskTurnError),
+    /// Desk Signal Facade error
+    DeskSignalFacadeError(desk_signal_facade::error::DeskSignalFacadeError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -163,6 +164,7 @@ impl Display for DeskError {
             DeskError::ArboardError(error) => error.fmt(f),
             DeskError::DeskUtilsError(error) => error.fmt(f),
             DeskError::DeskTurnError(error) => error.fmt(f),
+            DeskError::DeskSignalFacadeError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {:?}", error)
@@ -397,6 +399,11 @@ impl From<desk_utils::error::DeskUtilsError> for DeskError {
 impl From<desk_turn::error::DeskTurnError> for DeskError {
     fn from(err: desk_turn::error::DeskTurnError) -> Self {
         DeskError::DeskTurnError(err)
+    }
+}
+impl From<desk_signal_facade::error::DeskSignalFacadeError> for DeskError {
+    fn from(err: desk_signal_facade::error::DeskSignalFacadeError) -> Self {
+        DeskError::DeskSignalFacadeError(err)
     }
 }
 

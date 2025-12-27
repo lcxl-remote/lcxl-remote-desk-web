@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, str::FromStr};
 
+use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "windows")]
@@ -14,12 +15,8 @@ use crate::service::image_capture::{
 };
 use crate::{
     error::DeskError,
-    model::{
-        image_capture::{
-            DisplayInfo, ImageCapture, ImageCaptureType, ImageCaptureTypeHelper,
-            ImageOutputEnumerator,
-        },
-        settings::DeskSettings,
+    model::image_capture::{
+        ImageCapture, ImageCaptureType, ImageCaptureTypeHelper, ImageOutputEnumerator,
     },
 };
 

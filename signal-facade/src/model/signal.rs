@@ -13,8 +13,8 @@ use webrtc::{
 };
 
 use crate::{
-    error::DeskError,
-    model::{audio_capture::AudioDevice, image_capture::DisplayInfo, settings::DeskSettings},
+    error::DeskSignalFacadeError,
+    model::{audio_capture::AudioDevice, desk_settings::DeskSettings, image_capture::DisplayInfo},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +99,7 @@ impl SignalingModel {
     pub fn new_json_data<T>(
         signaling_type: SignalingType,
         signaling_data: &T,
-    ) -> Result<Self, DeskError>
+    ) -> Result<Self, DeskSignalFacadeError>
     where
         T: ?Sized + Serialize,
     {
@@ -113,7 +113,7 @@ impl SignalingModel {
         signaling_type: SignalingType,
         error_code: DeskErrorCode,
         message: &str,
-    ) -> Result<Self, DeskError> {
+    ) -> Result<Self, DeskSignalFacadeError> {
         let error_data = SignalingErrorData {
             signaling_type: signaling_type.0,
             error_code: error_code.0,
@@ -126,12 +126,12 @@ impl SignalingModel {
     pub fn custom_desk_error(
         signaling_type: SignalingType,
         error: CustomDeskError,
-    ) -> Result<Self, DeskError> {
+    ) -> Result<Self, DeskSignalFacadeError> {
         Self::error(signaling_type, error.error_code, &error.message)
     }
 
     /// Get data with type
-    pub fn get_data_with_type<T>(&self) -> Result<Option<T>, DeskError>
+    pub fn get_data_with_type<T>(&self) -> Result<Option<T>, DeskSignalFacadeError>
     where
         T: for<'a> Deserialize<'a>,
     {
@@ -143,7 +143,7 @@ impl SignalingModel {
     }
 
     /// Get data with type
-    pub fn get_data_with_default<T>(&self) -> Result<T, DeskError>
+    pub fn get_data_with_default<T>(&self) -> Result<T, DeskSignalFacadeError>
     where
         T: for<'a> Deserialize<'a> + Default,
     {
@@ -159,11 +159,14 @@ pub trait SignalingSessionExt {
     fn send_signaling(
         &mut self,
         signaling_model: &SignalingModel,
-    ) -> impl std::future::Future<Output = Result<(), DeskError>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send;
 }
 
 impl SignalingSessionExt for Session {
-    async fn send_signaling(&mut self, signaling_model: &SignalingModel) -> Result<(), DeskError> {
+    async fn send_signaling(
+        &mut self,
+        signaling_model: &SignalingModel,
+    ) -> Result<(), DeskSignalFacadeError> {
         self.text(serde_json::to_string(signaling_model)?).await?;
         Ok(())
     }

@@ -1,5 +1,6 @@
 use std::{sync::LazyLock, time::Instant};
 
+use desk_signal_facade::model::desk_settings::H264EncoderSettings;
 use openh264::{
     OpenH264API,
     encoder::{BitRate, IntraFramePeriod},
@@ -11,7 +12,6 @@ use crate::{
     error::DeskError,
     model::{
         image_capture::ImageInfo,
-        settings::H264EncoderSettings,
         video_encoder::{NalInfo, VideoEncoder},
     },
     service::video_encoder::{

@@ -1,5 +1,9 @@
 use std::{backtrace::Backtrace, sync::Arc};
 
+use desk_signal_facade::model::{
+    desk_settings::DeskSettings,
+    image_capture::{DisplayInfo, DisplayRect},
+};
 use desk_utils::error::DeskErrorCode;
 use windows::Win32::{
     Foundation::{GENERIC_ALL, HMODULE, RECT},
@@ -48,12 +52,8 @@ use windows_core::{Interface, PCWSTR, s};
 
 use crate::{
     error::DeskError,
-    model::{
-        image_capture::{
-            DisplayInfo, DisplayRect, ImageCapture, ImageCaptureType, ImageInfo,
-            ImageOutputEnumerator, ImageType,
-        },
-        settings::DeskSettings,
+    model::image_capture::{
+        ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator, ImageType,
     },
     service::image_capture::windows::enum_display_resolutions,
 };
@@ -131,95 +131,84 @@ pub const VERTICES: [VERTEX; 6] = [
 pub const NUMVERTICES: u32 = VERTICES.len() as u32;
 pub const BPP: i32 = 4;
 
-impl From<RECT> for DisplayRect {
-    fn from(value: RECT) -> Self {
-        DisplayRect {
-            left: value.left,
-            top: value.top,
-            right: value.right,
-            bottom: value.bottom,
-        }
+pub fn from_rect(rect: &RECT) -> DisplayRect {
+    DisplayRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
     }
 }
 
-impl DisplayInfo {
-    pub fn from_digx_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> Self {
-        log::debug!(
-            "Converting DXGI_OUTPUT_DESC to DisplayInfo, output_desc: {:?}",
-            output_desc
-        );
+pub fn from_digx_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
+    log::debug!(
+        "Converting DXGI_OUTPUT_DESC to DisplayInfo, output_desc: {:?}",
+        output_desc
+    );
 
-        let null_char_index = output_desc
-            .DeviceName
+    let null_char_index = output_desc
+        .DeviceName
+        .iter()
+        .position(|&item| item == 0u16)
+        .unwrap_or(output_desc.DeviceName.len());
+    let device_name: String = String::from_utf16_lossy(&output_desc.DeviceName[..null_char_index]);
+
+    let mut display_device = DISPLAY_DEVICEW {
+        cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+        DeviceName: [0u16; 32],
+        DeviceString: [0u16; 128],
+        StateFlags: DISPLAY_DEVICE_STATE_FLAGS(0),
+        DeviceID: [0u16; 128],
+        DeviceKey: [0u16; 128],
+    };
+    let succeed = unsafe {
+        EnumDisplayDevicesW(
+            PCWSTR::from_raw(output_desc.DeviceName.as_ptr()),
+            0,
+            &mut display_device,
+            0,
+        )
+    };
+    let display_device_name = if succeed.as_bool() {
+        log::info!(
+            "Successfully enumerated display device: {:?}",
+            display_device
+        );
+        let null_char_index = display_device
+            .DeviceString
             .iter()
             .position(|&item| item == 0u16)
             .unwrap_or(output_desc.DeviceName.len());
-        let device_name: String =
-            String::from_utf16_lossy(&output_desc.DeviceName[..null_char_index]);
+        let name: String =
+            String::from_utf16_lossy(&display_device.DeviceString[..null_char_index]);
 
-        let mut display_device = DISPLAY_DEVICEW {
-            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
-            DeviceName: [0u16; 32],
-            DeviceString: [0u16; 128],
-            StateFlags: DISPLAY_DEVICE_STATE_FLAGS(0),
-            DeviceID: [0u16; 128],
-            DeviceKey: [0u16; 128],
-        };
-        let succeed = unsafe {
-            EnumDisplayDevicesW(
-                PCWSTR::from_raw(output_desc.DeviceName.as_ptr()),
-                0,
-                &mut display_device,
-                0,
-            )
-        };
-        let display_device_name = if succeed.as_bool() {
-            log::info!(
-                "Successfully enumerated display device: {:?}",
-                display_device
-            );
-            let null_char_index = display_device
-                .DeviceString
-                .iter()
-                .position(|&item| item == 0u16)
-                .unwrap_or(output_desc.DeviceName.len());
-            let name: String =
-                String::from_utf16_lossy(&display_device.DeviceString[..null_char_index]);
+        log::debug!("Display device name: {}", name);
+        Some(name)
+    } else {
+        None
+    };
+    let desktop_coordinates = from_rect(&output_desc.DesktopCoordinates);
+    let attached_to_desktop = output_desc.AttachedToDesktop.as_bool();
+    let rotation = output_desc.Rotation.0;
 
-            log::debug!("Display device name: {}", name);
-            Some(name)
-        } else {
-            None
-        };
-        let desktop_coordinates = output_desc.DesktopCoordinates.into();
-        let attached_to_desktop = output_desc.AttachedToDesktop.as_bool();
-        let rotation = output_desc.Rotation.0;
+    log::info!(
+        "Found output, name={}, display_device_name={:?}, desktop_coordinates={:?}, attached_to_desktop={}, rotation={}",
+        device_name,
+        display_device_name,
+        desktop_coordinates,
+        attached_to_desktop,
+        rotation
+    );
 
-        log::info!(
-            "Found output, name={}, display_device_name={:?}, desktop_coordinates={:?}, attached_to_desktop={}, rotation={}",
-            device_name,
-            display_device_name,
-            desktop_coordinates,
-            attached_to_desktop,
-            rotation
-        );
+    let resolutions = enum_display_resolutions(&device_name).unwrap_or(vec![]);
 
-        let resolutions = enum_display_resolutions(&device_name).unwrap_or(vec![]);
-
-        DisplayInfo {
-            device_name,
-            display_device_name,
-            desktop_coordinates,
-            resolutions,
-            attached_to_desktop,
-            rotation,
-        }
-    }
-}
-
-impl From<DXGI_OUTPUT_DESC> for DisplayInfo {
-    fn from(output_desc: DXGI_OUTPUT_DESC) -> Self {
-        DisplayInfo::from_digx_output_desc(&output_desc)
+    DisplayInfo {
+        device_name,
+        display_device_name,
+        desktop_coordinates,
+        resolutions,
+        attached_to_desktop,
+        rotation,
     }
 }
 
@@ -1308,7 +1297,7 @@ impl ImageOutputEnumerator for DigxImageOutputEnumerator {
             if let Ok(output) = result {
                 let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
 
-                output_list.push(DisplayInfo::from(output_desc));
+                output_list.push(from_digx_output_desc(&output_desc));
             } else if let Err(error) = result {
                 if error.code() != DXGI_ERROR_NOT_FOUND {
                     log::error!(
@@ -1402,7 +1391,7 @@ impl ImageCapture for DigxImageCapture {
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
         let output = unsafe { self.manager.dxgi_adapter.EnumOutputs(self.output_index)? };
         let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
-        Ok(DisplayInfo::from(output_desc))
+        Ok(from_digx_output_desc(&output_desc))
     }
 }
 
