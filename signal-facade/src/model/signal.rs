@@ -267,3 +267,12 @@ pub struct OfferModel {
     pub offer: RTCSessionDescription,
     pub desk_settings: DeskSettings,
 }
+
+/// Remote Desk Type Enum
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub enum RemoteDeskTypeEnum {
+    /// Browser type
+    Browser,
+    /// Lcxl remote desktop server type
+    Server,
+}
