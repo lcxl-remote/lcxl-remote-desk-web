@@ -269,7 +269,7 @@ pub struct OfferModel {
 }
 
 /// Remote Desk Type Enum
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub enum RemoteDeskTypeEnum {
     /// Browser type
     Browser,
