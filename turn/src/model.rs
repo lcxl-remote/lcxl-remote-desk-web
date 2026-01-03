@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc, time::Instant};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
 
 use serde::{Deserialize, Serialize};
 use turn_server::{
@@ -119,4 +119,43 @@ pub struct TurnSessionStatistics {
     pub received_pkts: usize,
     pub send_pkts: usize,
     pub error_pkts: usize,
+}
+
+/// Turn Server Settings
+/// See also `turn_server::config::Config`
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TurnSettings {
+    /// turn server realm
+    pub realm: String,
+
+    /// turn server listen interfaces
+    pub interfaces: Vec<Interface>,
+
+    /// static user password
+    ///
+    /// This option can be used to specify the
+    /// static identity authentication information used by the turn server for
+    /// verification. Note: this is a high-priority authentication method, turn
+    /// The server will try to use static authentication first, and then use
+    /// external control service authentication.
+    pub static_credentials: HashMap<String, String>,
+    /// Static authentication key value (string) that applies only to the TURN
+    /// REST API.
+    ///
+    /// If set, the turn server will not request external services via the HTTP
+    /// Hooks API to obtain the key.
+    pub static_auth_secret: Option<String>,
+}
+
+impl Default for TurnSettings {
+    fn default() -> Self {
+        Self {
+            realm: "localhost".to_string(),
+            interfaces: vec![],
+            static_credentials: HashMap::new(),
+            static_auth_secret: None,
+        }
+    }
 }

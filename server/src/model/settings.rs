@@ -1,13 +1,13 @@
-use std::{collections::HashMap, fs, ops::Deref, path::PathBuf};
+use std::{fs, ops::Deref, path::PathBuf};
 
 use chrono::{DateTime, Local};
 use clap::Parser;
 use config::{Config, Environment, File};
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_turn::model::TurnSettings;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use turn_server::config::Interface;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskError;
@@ -119,45 +119,6 @@ impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
             current_terminal: None,
-        }
-    }
-}
-
-/// Turn Server Settings
-/// See also `turn_server::config::Config`
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct TurnSettings {
-    /// turn server realm
-    pub realm: String,
-
-    /// turn server listen interfaces
-    pub interfaces: Vec<Interface>,
-
-    /// static user password
-    ///
-    /// This option can be used to specify the
-    /// static identity authentication information used by the turn server for
-    /// verification. Note: this is a high-priority authentication method, turn
-    /// The server will try to use static authentication first, and then use
-    /// external control service authentication.
-    pub static_credentials: HashMap<String, String>,
-    /// Static authentication key value (string) that applies only to the TURN
-    /// REST API.
-    ///
-    /// If set, the turn server will not request external services via the HTTP
-    /// Hooks API to obtain the key.
-    pub static_auth_secret: Option<String>,
-}
-
-impl Default for TurnSettings {
-    fn default() -> Self {
-        Self {
-            realm: "localhost".to_string(),
-            interfaces: vec![],
-            static_credentials: HashMap::new(),
-            static_auth_secret: None,
         }
     }
 }
