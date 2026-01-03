@@ -1,0 +1,1 @@
+pub static SERVER_API_VERSION: i32 = 1;
