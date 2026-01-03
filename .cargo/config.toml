@@ -8,7 +8,9 @@ check-revoke = false
 [env]
 # Set ENV_VAR_NAME=value for any process run by Cargo
 # for env-libvpx-sys
-VPX_STATIC="true"
+VPX_STATIC = "true"
+# lcxl-remote-desk-server api version
+LCXL_REMOTE_DESK_SERVER_API_VERSION = "1"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

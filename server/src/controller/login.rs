@@ -44,7 +44,7 @@ pub async fn login_account(
     };
     let user_info = CurrentUser::new_admin(&params.username);
     // Store user information in session
-    session.set_current_user(&user_info).unwrap();
+    session.set_current_user(&user_info)?;
     info!("Login successful, username: {}", params.username);
     Ok(HttpResponse::Ok().json(result))
 }
