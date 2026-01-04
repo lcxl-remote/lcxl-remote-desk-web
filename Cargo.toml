@@ -1,5 +1,5 @@
 [workspace]
-members = ["signal-facade", "server", "turn", "utils"]
+members = ["signal-facade", "server", "turn", "utils", "server-version"]
 exclude = ["web", "third-deps"]
 resolver = "3"
 
@@ -17,6 +17,7 @@ rust-version = "1.90"
 desk-utils = { path = "utils" }
 desk-turn = { path = "turn" }
 desk-signal-facade = { path = "signal-facade" }
+desk-server-version = { path = "server-version" }
 
 log = "0.4"
 env_logger = "0.11"

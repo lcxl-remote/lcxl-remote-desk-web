@@ -1664,6 +1664,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-server-version"
+version = "0.1.0"
+
+[[package]]
 name = "desk-signal-facade"
 version = "0.1.0"
 dependencies = [
@@ -3010,6 +3014,7 @@ dependencies = [
  "codepage",
  "config",
  "console-subscriber",
+ "desk-server-version",
  "desk-signal-facade",
  "desk-turn",
  "desk-utils",
