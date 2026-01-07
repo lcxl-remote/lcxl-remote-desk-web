@@ -20,10 +20,16 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct SignalingType(i32);
 
-pub const SIGNALING_TYPE_CODE_INIT: i32 = 0;
-pub const SIGNALING_TYPE_CODE_OFFER: i32 = 100;
-pub const SIGNALING_TYPE_CODE_ANSWER: i32 = 101;
-pub const SIGNALING_TYPE_CODE_CANID: i32 = 102;
+// signaling common type codes
+
+/// version
+pub const SIGNALING_TYPE_CODE_VERSION: i32 = 11;
+
+// webrtc signaling type codes
+pub const SIGNALING_TYPE_CODE_INIT: i32 = 101;
+pub const SIGNALING_TYPE_CODE_OFFER: i32 = 102;
+pub const SIGNALING_TYPE_CODE_ANSWER: i32 = 103;
+pub const SIGNALING_TYPE_CODE_CANID: i32 = 104;
 
 pub const SIGNALING_TYPE_CODE_REQUIRE_CONTROL: i32 = 201;
 pub const SIGNALING_TYPE_CODE_ACCEPT_CONTROL: i32 = 202;
@@ -33,8 +39,18 @@ pub const SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS: i32 = 205;
 
 pub const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS: i32 = 301;
 
-pub const SIGNALING_TYPE_CODE_ERROR: i32 = 1000;
-pub const SIGNALING_TYPE_CODE_UNKNOWN_TYPE: i32 = 1001;
+// manager code
+/// file operate
+pub const SIGNALING_TYPE_CODE_MANAGER_FILE: i32 = 10001;
+/// 
+pub const SIGNALING_TYPE_CODE_MANAGER_TERMINAL: i32 = 10002;
+pub const SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO: i32 = 10003;
+pub const SIGNALING_TYPE_CODE_MANAGER_SYSTEM_STATUS: i32 = 10004;
+
+/// error code
+pub const SIGNALING_TYPE_CODE_ERROR: i32 = 10000000;
+/// unknown code
+pub const SIGNALING_TYPE_CODE_UNKNOWN_TYPE: i32 = 10000001;
 
 /// Signaling types.
 impl SignalingType {
@@ -54,6 +70,8 @@ impl SignalingType {
     pub const ERROR: SignalingType = SignalingType(SIGNALING_TYPE_CODE_ERROR);
     // unknown signaling type
     pub const UNKNOWN_TYPE: SignalingType = SignalingType(SIGNALING_TYPE_CODE_UNKNOWN_TYPE);
+
+
 
     fn new(code: i32) -> Self {
         SignalingType(code)
@@ -155,7 +173,9 @@ impl SignalingModel {
     }
 }
 
+/// Session extension trait for signaling
 pub trait SignalingSessionExt {
+    /// Send signaling message
     fn send_signaling(
         &mut self,
         signaling_model: &SignalingModel,
@@ -264,7 +284,9 @@ pub struct SignalingState {
 /// Offer Model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfferModel {
+    /// offer session description
     pub offer: RTCSessionDescription,
+    /// desk settings
     pub desk_settings: DeskSettings,
 }
 

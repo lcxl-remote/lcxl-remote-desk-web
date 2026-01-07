@@ -9,10 +9,10 @@ import styles from './index.less'; // 告诉 umi 编译这个 less
 import { CommentOutlined, CustomerServiceOutlined, FullscreenOutlined, SettingOutlined } from "@ant-design/icons";
 import e from "express";
 
-const SIGNALING_TYPE_CODE_INIT = 0;
-const SIGNALING_TYPE_CODE_OFFER = 100;
-const SIGNALING_TYPE_CODE_ANSWER = 101;
-const SIGNALING_TYPE_CODE_CANID = 102;
+const SIGNALING_TYPE_CODE_INIT = 101;
+const SIGNALING_TYPE_CODE_OFFER = 102;
+const SIGNALING_TYPE_CODE_ANSWER = 103;
+const SIGNALING_TYPE_CODE_CANID = 104;
 
 const SIGNALING_TYPE_CODE_REQUIRE_CONTROL = 201;
 const SIGNALING_TYPE_CODE_ACCEPT_CONTROL = 202;
@@ -21,8 +21,8 @@ const SIGNALING_TYPE_CODE_CLOSE_CONTROL = 204;
 
 const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS = 301;
 
-const SIGNALING_TYPE_CODE_ERROR = 1000;
-const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 1001;
+const SIGNALING_TYPE_CODE_ERROR = 10000000;
+const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 10000001;
 
 type OfferModel = {
   offer: RTCSessionDescription,
