@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use actix_ws::Session;
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
+use strum_macros::FromRepr;
 use utoipa::{IntoParams, ToSchema};
+use utoipa_repr::ToSchema_repr;
 use webrtc::{
     ice_transport::{ice_connection_state::RTCIceConnectionState, ice_server::RTCIceServer},
     peer_connection::{
@@ -17,78 +20,44 @@ use crate::{
     model::{audio_capture::AudioDevice, desk_settings::DeskSettings, image_capture::DisplayInfo},
 };
 
-#[derive(Debug, Clone, Copy)]
-pub struct SignalingType(i32);
+#[derive(Copy, Clone, Debug, FromRepr, ToSchema_repr, Serialize_repr, Deserialize_repr)]
+/// Signaling Type
+#[repr(i32)]
+pub enum SignalingType {
+    /// API version
+    Version = 11,
 
-// signaling common type codes
+    /// WebRTC init signaling type
+    Init = 101,
+    /// WebRTC offer signaling type
+    Offer = 102,
+    /// WebRTC answer signaling type
+    Answer = 103,
+    /// WebRTC CANID signaling type
+    Canid = 104,
 
-/// version
-pub const SIGNALING_TYPE_CODE_VERSION: i32 = 11;
+    RequireControl = 201,
+    AcceptControl = 202,
+    DenyControl = 203,
+    CloseControl = 204,
+    ChangeDisplaySettings = 205,
 
-// webrtc signaling type codes
-pub const SIGNALING_TYPE_CODE_INIT: i32 = 101;
-pub const SIGNALING_TYPE_CODE_OFFER: i32 = 102;
-pub const SIGNALING_TYPE_CODE_ANSWER: i32 = 103;
-pub const SIGNALING_TYPE_CODE_CANID: i32 = 104;
+    UpdateDeskSettings = 301,
 
-pub const SIGNALING_TYPE_CODE_REQUIRE_CONTROL: i32 = 201;
-pub const SIGNALING_TYPE_CODE_ACCEPT_CONTROL: i32 = 202;
-pub const SIGNALING_TYPE_CODE_DENY_CONTROL: i32 = 203;
-pub const SIGNALING_TYPE_CODE_CLOSE_CONTROL: i32 = 204;
-pub const SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS: i32 = 205;
+    ManagerFile = 10001,
+    ManagerTerminal = 10002,
+    ManagerSystemInfo = 10003,
+    ManagerSystemStatue = 10004,
 
-pub const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS: i32 = 301;
-
-// manager code
-/// file operate
-pub const SIGNALING_TYPE_CODE_MANAGER_FILE: i32 = 10001;
-/// 
-pub const SIGNALING_TYPE_CODE_MANAGER_TERMINAL: i32 = 10002;
-pub const SIGNALING_TYPE_CODE_MANAGER_SYSTEM_INFO: i32 = 10003;
-pub const SIGNALING_TYPE_CODE_MANAGER_SYSTEM_STATUS: i32 = 10004;
-
-/// error code
-pub const SIGNALING_TYPE_CODE_ERROR: i32 = 10000000;
-/// unknown code
-pub const SIGNALING_TYPE_CODE_UNKNOWN_TYPE: i32 = 10000001;
-
-/// Signaling types.
-impl SignalingType {
-    /// Init message
-    pub const INIT: SignalingType = SignalingType(SIGNALING_TYPE_CODE_INIT);
-
-    /// offer message
-    pub const OFFER: SignalingType = SignalingType(SIGNALING_TYPE_CODE_OFFER);
-
-    /// answer message
-    pub const ANSWER: SignalingType = SignalingType(SIGNALING_TYPE_CODE_ANSWER);
-
-    /// candidate message
-    pub const CANID: SignalingType = SignalingType(SIGNALING_TYPE_CODE_CANID);
-
-    // error message
-    pub const ERROR: SignalingType = SignalingType(SIGNALING_TYPE_CODE_ERROR);
-    // unknown signaling type
-    pub const UNKNOWN_TYPE: SignalingType = SignalingType(SIGNALING_TYPE_CODE_UNKNOWN_TYPE);
-
-
-
-    fn new(code: i32) -> Self {
-        SignalingType(code)
-    }
-}
-
-impl From<i32> for SignalingType {
-    fn from(code: i32) -> Self {
-        SignalingType::new(code)
-    }
+    Error = 10000000,
+    Unknown = 10000001,
 }
 
 /// Query parameters for listing files.
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct SignalingModel {
     /// signaling type
-    pub signaling_type: i32,
+    pub signaling_type: SignalingType,
     /// signaling data
     pub signaling_data: Option<String>,
 }
@@ -97,7 +66,7 @@ pub struct SignalingModel {
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct SignalingErrorData {
     /// signaling type which errors occurred.
-    pub signaling_type: i32,
+    pub signaling_type: SignalingType,
     /// error code
     pub error_code: i32,
     /// error message
@@ -109,7 +78,7 @@ pub struct SignalingErrorData {
 impl SignalingModel {
     pub fn new_str_data(signaling_type: SignalingType, signaling_data: &str) -> Self {
         Self {
-            signaling_type: signaling_type.0,
+            signaling_type: signaling_type,
             signaling_data: Some(signaling_data.to_string()),
         }
     }
@@ -122,7 +91,7 @@ impl SignalingModel {
         T: ?Sized + Serialize,
     {
         Ok(Self {
-            signaling_type: signaling_type.0,
+            signaling_type: signaling_type,
             signaling_data: Some(serde_json::to_string(signaling_data)?),
         })
     }
@@ -133,12 +102,12 @@ impl SignalingModel {
         message: &str,
     ) -> Result<Self, DeskSignalFacadeError> {
         let error_data = SignalingErrorData {
-            signaling_type: signaling_type.0,
+            signaling_type: signaling_type,
             error_code: error_code.0,
             message: message.to_string(),
             signaling_data: None,
         };
-        SignalingModel::new_json_data(SignalingType::ERROR, &error_data)
+        SignalingModel::new_json_data(SignalingType::Error, &error_data)
     }
 
     pub fn custom_desk_error(

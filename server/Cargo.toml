@@ -23,6 +23,8 @@ futures = { workspace = true }
 anyhow = { workspace = true }
 turn-server = { workspace = true }
 webrtc = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
 
 actix-files = "0.6"
 actix-server = "2.6"
@@ -64,8 +66,7 @@ regex = "1.11"
 # turn-server dependencies prometheus 0.13.4, if use 0.14, promethueus global variable will not be shared between app with turn-server lib
 prometheus = "0.13.4"
 
-strum = "0.27"
-strum_macros = "0.27"
+
 vpx-encode = { path = "../third-deps/vpx-encode", features = ["vp9"] }
 rust-i18n = "3.1"
 webbrowser = "1"

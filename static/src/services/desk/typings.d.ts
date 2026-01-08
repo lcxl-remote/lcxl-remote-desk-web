@@ -392,15 +392,17 @@ declare namespace API {
     /** signaling data */
     signaling_data?: any;
     /** signaling type which errors occurred. */
-    signaling_type: number;
+    signaling_type: SignalingType;
   };
 
   type SignalingModel = {
     /** signaling data */
     signaling_data?: any;
     /** signaling type */
-    signaling_type: number;
+    signaling_type: SignalingType;
   };
+
+  type SignalingType = integer;
 
   type SignalRequestControlData = {
     /** whether the control request is accepted */

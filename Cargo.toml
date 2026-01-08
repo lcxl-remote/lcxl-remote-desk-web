@@ -22,8 +22,10 @@ desk-server-version = { path = "server-version" }
 log = "0.4"
 env_logger = "0.11"
 utoipa = { version = "5", features = ["actix_extras", "chrono"] }
+utoipa_repr = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_repr = "0.1"
 turn-server = { version = "3.4", features = [
     "udp",
     "tcp",
@@ -36,3 +38,5 @@ tokio = { version = "1.47", features = ["full", "tracing"] }
 actix-web = "4.11"
 actix-ws = "0.3"
 webrtc = "0.13"
+strum = "0.27"
+strum_macros = "0.27"

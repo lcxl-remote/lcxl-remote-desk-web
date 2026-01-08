@@ -7,11 +7,8 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::signal::{
-    InitSignalingData, LcxlRTCIceServer, OfferModel, SIGNALING_TYPE_CODE_ACCEPT_CONTROL,
-    SIGNALING_TYPE_CODE_ANSWER, SIGNALING_TYPE_CODE_CANID, SIGNALING_TYPE_CODE_CLOSE_CONTROL,
-    SIGNALING_TYPE_CODE_INIT, SIGNALING_TYPE_CODE_OFFER, SIGNALING_TYPE_CODE_REQUIRE_CONTROL,
-    SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, SignalingModel, SignalingSessionExt, SignalingState,
-    SignalingType, WebRTConnectionState,
+    InitSignalingData, LcxlRTCIceServer, OfferModel, SignalingModel, SignalingSessionExt,
+    SignalingState, SignalingType, WebRTConnectionState,
 };
 use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
@@ -219,7 +216,7 @@ impl SignalingContext {
 
         info!("Sending init signaling");
         let hello_signaling_model =
-            SignalingModel::new_json_data(SignalingType::INIT, &init_signaling_data)?;
+            SignalingModel::new_json_data(SignalingType::Init, &init_signaling_data)?;
         session.send_signaling(&hello_signaling_model).await?;
         info!("Sent init signaling: {:?}", hello_signaling_model);
 
@@ -717,25 +714,28 @@ impl SignalingContext {
         }
 
         match signaling_model.signaling_type {
-            SIGNALING_TYPE_CODE_INIT => {} // handle_hello(session, user),
-            SIGNALING_TYPE_CODE_OFFER => {
+            SignalingType::Init => {} // handle_hello(session, user),
+            SignalingType::Offer => {
                 self.handle_offer(&signaling_model).await?;
             }
-            SIGNALING_TYPE_CODE_ANSWER => {}
-            SIGNALING_TYPE_CODE_CANID => {}
-            SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS => {
+            SignalingType::Answer => {}
+            SignalingType::Canid => {}
+            SignalingType::UpdateDeskSettings => {
                 self.handle_update_desk_settings(&signaling_model).await?;
             }
-            SIGNALING_TYPE_CODE_REQUIRE_CONTROL => {
+            SignalingType::RequireControl => {
                 // send back a message to client
                 self.handle_request_control(&signaling_model).await?;
             }
             _ => {
-                error!("Unknown signaling type: {}", signaling_model.signaling_type);
+                error!(
+                    "Unknown signaling type: {:?}",
+                    signaling_model.signaling_type
+                );
                 let error_signaling = SignalingModel::new_str_data(
-                    SignalingType::UNKNOWN_TYPE,
+                    SignalingType::Unknown,
                     &format!(
-                        "Failed to handle signaling type: {}",
+                        "Failed to handle signaling type: {:?}",
                         signaling_model.signaling_type
                     ),
                 );
@@ -802,7 +802,7 @@ impl SignalingContext {
 
         self.session
             .send_signaling(&SignalingModel::new_str_data(
-                SignalingType::ANSWER,
+                SignalingType::Answer,
                 &json_str,
             ))
             .await?;
@@ -841,15 +841,9 @@ impl SignalingContext {
         log::info!("Request control data: {:?}", request_control_data);
         self.signaling_state.write().await.accept_control = request_control_data.accept;
         let response = if request_control_data.accept {
-            SignalingModel::new_json_data(
-                SignalingType::from(SIGNALING_TYPE_CODE_ACCEPT_CONTROL),
-                &request_control_data,
-            )?
+            SignalingModel::new_json_data(SignalingType::AcceptControl, &request_control_data)?
         } else {
-            SignalingModel::new_json_data(
-                SignalingType::from(SIGNALING_TYPE_CODE_CLOSE_CONTROL),
-                &request_control_data,
-            )?
+            SignalingModel::new_json_data(SignalingType::CloseControl, &request_control_data)?
         };
         self.session.send_signaling(&response).await?;
         Ok(())
