@@ -92,12 +92,14 @@ pub async fn get_current_user(
 )]
 #[get("/api/notices")]
 pub async fn get_notices(session: Session) -> Result<HttpResponse, AWError> {
-    let user = session.get_current_user()?;
-    if user.is_none() {
-        return Ok(HttpResponse::Unauthorized().body("User is not logged in."));
-    }
-    let current_user = user.unwrap();
-    info!("Fetching notices for user: {}", current_user.name);
+    let user_opt = session.get_current_user()?;
+
+    let user = if let Some(user) = user_opt {
+        user
+    } else {
+        return Err(actix_web::error::ErrorUnauthorized("User not logged in"));
+    };
+    info!("Fetching notices for user: {}", user.name);
 
     // Simulate fetching notices for the user
     let notice_icon_list = NoticeIconList {

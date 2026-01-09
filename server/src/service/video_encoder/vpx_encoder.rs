@@ -28,7 +28,7 @@ impl VpxEncoder {
         codec: VideoCodecId,
         setting: VpxEncoderSettings,
         display_info: &DisplayInfo,
-    ) -> Self {
+    ) -> Result<Self, DeskError> {
         let config = vpx_encode::Config {
             width: display_info.desktop_coordinates.width() as u32,
             height: display_info.desktop_coordinates.height() as u32,
@@ -36,16 +36,17 @@ impl VpxEncoder {
             bitrate: setting.bps,
             codec,
         };
-        let encoder = vpx_encode::Encoder::new(config).unwrap();
+        let encoder = vpx_encode::Encoder::new(config)?;
         let codec = match codec {
             VideoCodecId::VP8 => "VP8",
             VideoCodecId::VP9 => "VP9",
         };
-        VpxEncoder {
+        let vpx_encoder = VpxEncoder {
             codec: codec.to_string(),
             encoder,
             start_time: Instant::now(),
-        }
+        };
+        Ok(vpx_encoder)
     }
 }
 

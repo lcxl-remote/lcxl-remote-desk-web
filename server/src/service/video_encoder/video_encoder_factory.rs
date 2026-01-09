@@ -42,12 +42,12 @@ pub fn create_video_encoder(
             vpx_encode::VideoCodecId::VP8,
             desk_setting.vp8_encoder.clone().unwrap_or_default(),
             display_info,
-        )),
+        )?),
         VideoEncoderType::VP9 => Box::new(VpxEncoder::new(
             vpx_encode::VideoCodecId::VP9,
             desk_setting.vp9_encoder.clone().unwrap_or_default(),
             display_info,
-        )),
+        )?),
     };
     Ok(encoder)
 }

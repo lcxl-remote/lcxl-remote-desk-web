@@ -3,6 +3,7 @@ use std::process::ExitStatus;
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytestring::ByteString;
+use desk_utils::error::DeskErrorCode;
 use encoding_rs::{Decoder, Encoder};
 use futures::StreamExt;
 use regex::Regex;
@@ -168,7 +169,14 @@ pub async fn handle_terminal(
     let encoding = {
         let oemcp = unsafe { GetOEMCP() };
         log::info!("OEM Code Page: {}", oemcp);
-        codepage::to_encoding(oemcp as u16).unwrap()
+        if let Some(encoding) = codepage::to_encoding(oemcp as u16) {
+            encoding
+        } else {
+            return DeskError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "Failed to get oem cp".to_owned(),
+            );
+        }
     };
     #[cfg(not(target_os = "windows"))]
     let encoding = encoding_rs::UTF_8;
@@ -221,15 +229,17 @@ pub async fn handle_terminal(
                 session.text(utf8_buffer).await?;
             },
             result = stream.next() => {
-                if result.is_none() {
-                    log::info!("Stream closed");
-                    break;
-                }
                 if let Some(status) = check_process_exit_status(&mut child) {
                     log::warn!("Process exited with status: {:?}", status);
                     break;
                 }
-                let msg = result.unwrap();
+                let msg = if let Some(msg) = result {
+                    msg
+                } else {
+                    log::info!("Stream closed");
+                    break;
+                };
+
                 match msg {
                     Ok(AggregatedMessage::Text(text)) => {
                         //stdin_buf_vec

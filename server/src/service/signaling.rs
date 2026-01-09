@@ -446,10 +446,10 @@ impl SignalingContext {
 
         info!("Begin to shutdown capture screen&audio runtime");
         if let Some(capture_screen_thread) = self.capture_screen_thread {
-            capture_screen_thread.join().unwrap();
+            capture_screen_thread.join()?;
         }
         if let Some(capture_audio_thread) = self.capture_audio_thread {
-            capture_audio_thread.join().unwrap();
+            capture_audio_thread.join()?;
         }
 
         info!("End to shutdown capture screen&audio runtime");
@@ -545,23 +545,26 @@ impl SignalingContext {
                 .with_label_values(&[image_capture_type])
                 .start_timer();
             let image_info_result = capture.capture(desk_settings.show_mouse);
-            if image_info_result.is_err() {
-                if let Err(DeskError::CustomError(err)) = image_info_result {
-                    if err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
-                        timer.stop_and_discard();
+
+            let image_info = match image_info_result {
+                Ok(image_info) => {
+                    timer.stop_and_record();
+                    image_info
+                }
+                Err(err) => {
+                    if let DeskError::CustomError(custom_error) = err {
+                        if custom_error.error_code == DeskErrorCode::ACTION_NEED_RETRY {
+                            timer.stop_and_discard();
+                            continue;
+                        }
+                        log::error!("Failed to get nal info, custom error={}", custom_error);
                         continue;
                     }
-                    log::error!("Failed to get nal info, custom error={}", err);
+                    log::error!("Failed to get nal info, error={:?}", err);
                     continue;
                 }
-                log::error!(
-                    "Failed to get nal info, error={:?}",
-                    image_info_result.err().unwrap()
-                );
-                continue;
-            }
-            timer.stop_and_record();
-            let image_info = image_info_result.unwrap();
+            };
+
             let nal_info_vec = encoder.encode(image_info.as_ref())?;
             for nal_info in nal_info_vec {
                 let timer = WEBRTC_WRITE_SAMPLE_HISTOGRAM
@@ -759,7 +762,14 @@ impl SignalingContext {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let signaling_data = signaling_model.signaling_data.clone().unwrap();
+        let signaling_data = if let Some(signaling_data) = signaling_model.signaling_data.clone() {
+            signaling_data
+        } else {
+            return DeskError::custom_error(
+                DeskErrorCode::INVALID_STATE,
+                "offer data is null".to_owned(),
+            );
+        };
         log::info!("Received offer: {}", signaling_data);
         let offer_model = serde_json::from_str::<OfferModel>(&signaling_data)?;
 
@@ -786,7 +796,9 @@ impl SignalingContext {
 
         // Output the answer in base64 so we can paste it in browser
         let option = self.rtc_peer_connection.local_description().await;
-        if option.is_none() {
+        let local_desc = if let Some(local_desc) = option {
+            local_desc
+        } else {
             self.session
                 .send_signaling(&SignalingModel::error(
                     signaling_model.signaling_type.into(),
@@ -795,8 +807,8 @@ impl SignalingContext {
                 )?)
                 .await?;
             return Ok(());
-        }
-        let local_desc = option.unwrap();
+        };
+
         let json_str = serde_json::to_string(&local_desc)?;
         log::info!("local description: {}", json_str);
 

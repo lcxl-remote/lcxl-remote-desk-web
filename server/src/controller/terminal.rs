@@ -48,12 +48,13 @@ pub async fn open_terminal_session(
     session: Session,
     stream: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let user = session.get_current_user()?;
+    let user_opt = session.get_current_user()?;
 
-    if user.is_none() {
+    let user = if let Some(user) = user_opt {
+        user
+    } else {
         return Err(actix_web::error::ErrorUnauthorized("User not logged in"));
-    }
-    let user = user.unwrap();
+    };
     if query_list.command.is_empty() {
         return Err(actix_web::error::ErrorBadRequest(
             "No terminal command provided",

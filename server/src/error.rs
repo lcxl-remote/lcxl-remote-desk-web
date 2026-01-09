@@ -86,8 +86,12 @@ pub enum DeskError {
     MpscRecvError(std::sync::mpsc::RecvError),
     /// A std fs try lock error occurred.
     TryLockError(std::fs::TryLockError),
-    /// An arboard clipboard error
+    /// An arboard clipboard error occurred.
     ArboardError(arboard::Error),
+    /// An address parse error occurred.
+    AddrParseError(std::net::AddrParseError),
+    // A thread error occurred.
+    ThreadError(Box<dyn std::any::Any + Send + 'static>),
     /// Desk utils error
     DeskUtilsError(desk_utils::error::DeskUtilsError),
     /// Desk turn error
@@ -162,6 +166,8 @@ impl Display for DeskError {
             DeskError::MpscRecvError(error) => error.fmt(f),
             DeskError::TryLockError(error) => error.fmt(f),
             DeskError::ArboardError(error) => error.fmt(f),
+            DeskError::AddrParseError(error) => error.fmt(f),
+            DeskError::ThreadError(any_error) => f.write_fmt(format_args!("{:?}", any_error)),
             DeskError::DeskUtilsError(error) => error.fmt(f),
             DeskError::DeskTurnError(error) => error.fmt(f),
             DeskError::DeskSignalFacadeError(error) => error.fmt(f),
@@ -387,6 +393,18 @@ impl From<std::fs::TryLockError> for DeskError {
 impl From<arboard::Error> for DeskError {
     fn from(err: arboard::Error) -> Self {
         DeskError::ArboardError(err)
+    }
+}
+
+impl From<std::net::AddrParseError> for DeskError {
+    fn from(err: std::net::AddrParseError) -> Self {
+        DeskError::AddrParseError(err)
+    }
+}
+
+impl From<Box<dyn std::any::Any + Send + 'static>> for DeskError {
+    fn from(err: Box<dyn std::any::Any + Send + 'static>) -> Self {
+        DeskError::ThreadError(err)
     }
 }
 

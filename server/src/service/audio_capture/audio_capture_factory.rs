@@ -68,7 +68,7 @@ pub fn list_audio_device(
 ) -> Result<Vec<AudioDevice>, DeskError> {
     let capture: Box<dyn AudioDeviceEnumerator + Send> = match audio_capture_type {
         #[cfg(target_os = "windows")]
-        AudioCaptureType::WASAPI => Box::new(WasapiAudioDeviceEnumerator::new()),
+        AudioCaptureType::WASAPI => Box::new(WasapiAudioDeviceEnumerator::new()?),
         #[cfg(target_os = "linux")]
         AudioCaptureType::PIPEWIRE => Box::new(PipewireAudioDeviceEnumerator::new()),
     };

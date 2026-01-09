@@ -1526,12 +1526,13 @@ mod tests {
                     GENERIC_ALL.0,
                 )
             };
-            if let Err(e) = hdesk_result {
-                log::error!("Failed to open desktop {}: {}", desktop_name, e);
-                continue;
-            }
-
-            let hdesk = hdesk_result.unwrap();
+            let hdesk = match hdesk_result {
+                Ok(hdesk) => hdesk,
+                Err(e) => {
+                    log::error!("Failed to open desktop {}: {}", desktop_name, e);
+                    continue;
+                }
+            };
             let result = unsafe { SetThreadDesktop(hdesk) };
 
             let _ = unsafe { CloseDesktop(hdesk) };

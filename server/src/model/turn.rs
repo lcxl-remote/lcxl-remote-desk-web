@@ -6,7 +6,7 @@ use turn_server::{
     turn::{Observer, SessionAddr},
 };
 
-use crate::model::settings::SharedSettings;
+use crate::model::settings::{SharedSettings, UserSettings};
 
 #[derive(Clone)]
 pub struct TurnObserver {
@@ -39,7 +39,10 @@ impl Observer for TurnObserver {
                     settings.user.clone()
                 })
                 .await
-                .unwrap()
+                .unwrap_or_else(|error| {
+                    log::error!("Failed to spawn_blocking, use default, error: {:?}", error);
+                    UserSettings::default()
+                })
         });
 
         if user_settings.login_user_name == username {

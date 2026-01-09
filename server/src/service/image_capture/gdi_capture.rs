@@ -159,10 +159,11 @@ impl ImageOutputEnumerator for GdiImageOutputEnumerator {
         let mut display_info_list = Vec::new();
         loop {
             let display_info_opt = GdiImageOutputEnumerator::get_output(dev_index)?;
-            if display_info_opt.is_none() {
+            let display_info = if let Some(display_info) = display_info_opt {
+                display_info
+            } else {
                 break;
-            }
-            let display_info = display_info_opt.unwrap();
+            };
 
             display_info_list.push(display_info);
             dev_index += 1;

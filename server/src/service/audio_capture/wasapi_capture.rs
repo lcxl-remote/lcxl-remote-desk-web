@@ -116,9 +116,10 @@ fn log_wave_format(format: &WAVEFORMATEXTENSIBLE) {
 pub struct WasapiAudioDeviceEnumerator {}
 
 impl WasapiAudioDeviceEnumerator {
-    pub fn new() -> Self {
-        init_thread().unwrap();
-        WasapiAudioDeviceEnumerator {}
+    pub fn new() -> Result<Self, DeskError> {
+        init_thread()?;
+        let enumerator = WasapiAudioDeviceEnumerator {};
+        Ok(enumerator)
     }
 }
 
@@ -486,7 +487,7 @@ mod tests {
     #[test]
     fn test_device_info() -> Result<(), DeskError> {
         initialize();
-        let capture = WasapiAudioDeviceEnumerator::new();
+        let capture = WasapiAudioDeviceEnumerator::new()?;
         let devices = capture.get_device_list()?;
         log::debug!("all devices: {:?}", devices);
         Ok(())

@@ -33,12 +33,14 @@ pub async fn open_signaling_handle(
     session: Session,
     stream: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let user = session.get_current_user()?;
+    let user_opt = session.get_current_user()?;
 
-    if user.is_none() {
+    let user = if let Some(user) = user_opt {
+        user
+    } else {
         return Err(actix_web::error::ErrorUnauthorized("User not logged in"));
-    }
-    let user = user.unwrap();
+    };
+
     info!("User {} is signaling", user.name);
 
     let (res, session, stream) = actix_ws::handle(&req, stream)?;

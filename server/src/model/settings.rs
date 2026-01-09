@@ -5,6 +5,7 @@ use clap::Parser;
 use config::{Config, Environment, File};
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_turn::model::TurnSettings;
+use desk_utils::error::DeskErrorCode;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -169,7 +170,7 @@ impl Settings {
                 interfaces: self.turn.interfaces.clone(),
             },
             api: turn_server::config::Api {
-                bind: "127.0.0.1:3000".parse().unwrap(),
+                bind: "127.0.0.1:3000".parse()?,
             },
             log: turn_server::config::Log {
                 level: self
@@ -247,12 +248,20 @@ impl Settings {
         config_file_path.set_extension("toml");
         // Save settings to config file
         let toml_str = toml::to_string(self)?;
-        if !config_file_path.parent().unwrap().exists() {
-            info!(
-                "Creating config directory: {}",
-                config_file_path.parent().unwrap().display()
+        let parent_path = if let Some(parent_path) = config_file_path.parent() {
+            parent_path
+        } else {
+            return DeskError::custom_error(
+                DeskErrorCode::FILE_PATH_NOT_FOUND,
+                format!(
+                    "the parent of path '{}' is not found",
+                    config_file_path.display()
+                ),
             );
-            fs::create_dir_all(config_file_path.parent().unwrap())?;
+        };
+        if !parent_path.exists() {
+            info!("Creating config directory: {}", parent_path.display());
+            fs::create_dir_all(parent_path)?;
         }
 
         debug!(
