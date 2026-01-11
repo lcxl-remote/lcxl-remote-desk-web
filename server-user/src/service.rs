@@ -1,6 +1,6 @@
 use actix_session::{Session, SessionGetError, SessionInsertError};
 
-use crate::model::user::CurrentUser;
+use crate::model::CurrentUser;
 
 pub const SESSION_KEY_USERNAME: &str = "username";
 

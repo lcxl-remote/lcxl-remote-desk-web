@@ -2,6 +2,7 @@ use std::process::Stdio;
 
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
+use desk_server_user::service::SessionExt;
 use desk_signal_facade::model::signal::SignalingModel;
 use log::{error, info};
 use tokio::process::Command;
@@ -12,10 +13,7 @@ use crate::{
         settings::SharedSettings,
         terminal::{StartTerminalSession, TerminalList},
     },
-    service::{
-        terminal::{fetch_terminal_list, handle_terminal},
-        user::SessionExt,
-    },
+    service::terminal::{fetch_terminal_list, handle_terminal},
 };
 
 #[utoipa::path(

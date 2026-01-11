@@ -1664,8 +1664,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-server-user"
+version = "0.1.0"
+dependencies = [
+ "actix-session",
+ "serde",
+ "utoipa",
+]
+
+[[package]]
 name = "desk-server-version"
 version = "0.1.0"
+
+[[package]]
+name = "desk-signal"
+version = "0.1.0"
+dependencies = [
+ "actix-session",
+ "actix-web",
+ "actix-ws",
+ "bytes",
+ "bytestring",
+ "desk-server-user",
+ "desk-server-version",
+ "desk-signal-facade",
+ "desk-utils",
+ "futures-util",
+ "log",
+ "serde_json",
+ "tokio",
+ "utoipa",
+]
 
 [[package]]
 name = "desk-signal-facade"
@@ -3018,6 +3047,7 @@ dependencies = [
  "codepage",
  "config",
  "console-subscriber",
+ "desk-server-user",
  "desk-server-version",
  "desk-signal-facade",
  "desk-turn",

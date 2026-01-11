@@ -9,5 +9,4 @@ pub mod settings;
 pub mod system_setting;
 pub mod terminal;
 pub mod turn;
-pub mod user;
 pub mod video_encoder;

@@ -1,0 +1,11 @@
+[package]
+name = "desk-server-user"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+utoipa = { workspace = true }
+actix-session = { workspace = true }

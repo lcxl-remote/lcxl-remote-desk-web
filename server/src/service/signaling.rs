@@ -5,6 +5,7 @@ use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use actix_ws::{CloseCode, CloseReason};
 use bytes::Bytes;
 use bytestring::ByteString;
+use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::signal::{
     InitSignalingData, LcxlRTCIceServer, OfferModel, SignalingModel, SignalingSessionExt,
@@ -52,10 +53,7 @@ use crate::service::image_capture::image_capture_factory::{
 use crate::service::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
-use crate::{
-    error::DeskError,
-    model::{settings::SharedSettings, user::CurrentUser},
-};
+use crate::{error::DeskError, model::settings::SharedSettings};
 
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("capture_screen_histogram", "help", &["type"]).unwrap()

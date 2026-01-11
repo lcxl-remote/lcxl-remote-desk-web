@@ -9,15 +9,13 @@ use actix_web::{
     middleware::Next,
     web,
 };
+use desk_server_user::{
+    model::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone},
+    service::SessionExt,
+};
 use log::{info, warn};
 
-use crate::{
-    model::{
-        settings::SharedSettings,
-        user::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone},
-    },
-    service::user::SessionExt,
-};
+use crate::model::settings::SharedSettings;
 
 #[utoipa::path(
     summary = "Get current user",

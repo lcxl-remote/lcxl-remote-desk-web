@@ -4,7 +4,7 @@ use actix_ws::Session;
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use strum_macros::FromRepr;
+use strum_macros::{Display, FromRepr};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_repr::ToSchema_repr;
 use webrtc::{
@@ -20,7 +20,9 @@ use crate::{
     model::{audio_capture::AudioDevice, desk_settings::DeskSettings, image_capture::DisplayInfo},
 };
 
-#[derive(Copy, Clone, Debug, FromRepr, ToSchema_repr, Serialize_repr, Deserialize_repr)]
+#[derive(
+    Copy, Clone, Debug, Display, FromRepr, ToSchema_repr, Serialize_repr, Deserialize_repr,
+)]
 /// Signaling Type
 #[repr(i32)]
 pub enum SignalingType {
@@ -122,8 +124,8 @@ impl SignalingModel {
     where
         T: for<'a> Deserialize<'a>,
     {
-        if let Some(data) = self.signaling_data.clone() {
-            Ok(Some(serde_json::from_str::<T>(&data)?))
+        if let Some(data) = &self.signaling_data {
+            Ok(Some(serde_json::from_str::<T>(data)?))
         } else {
             Ok(None)
         }
@@ -138,6 +140,22 @@ impl SignalingModel {
             Ok(serde_json::from_str::<T>(&data)?)
         } else {
             Ok(T::default())
+        }
+    }
+
+    /// Get data with type, if data is none, will throw error
+    pub fn get_data<T>(&self) -> Result<T, DeskSignalFacadeError>
+    where
+        T: for<'a> Deserialize<'a>,
+    {
+        let data_opt = self.get_data_with_type::<T>()?;
+        if let Some(data) = data_opt {
+            return Ok(data);
+        } else {
+            return DeskSignalFacadeError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "Data can't be none".to_string(),
+            );
         }
     }
 }

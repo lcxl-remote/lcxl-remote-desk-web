@@ -3,6 +3,7 @@ use std::process::ExitStatus;
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytestring::ByteString;
+use desk_server_user::model::CurrentUser;
 use desk_utils::error::DeskErrorCode;
 use encoding_rs::{Decoder, Encoder};
 use futures::StreamExt;
@@ -15,10 +16,7 @@ use tokio::{
 use windows::Win32::Globalization::GetOEMCP;
 
 use crate::model::terminal::TerminalList;
-use crate::{
-    error::DeskError,
-    model::{settings::SharedSettings, user::CurrentUser},
-};
+use crate::{error::DeskError, model::settings::SharedSettings};
 
 /// Inner function to fetch terminal list based on provided shell names and regex patterns
 pub async fn inner_fetch_terminal_list(

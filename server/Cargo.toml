@@ -10,9 +10,11 @@ desk-utils = { workspace = true }
 desk-turn = { workspace = true }
 desk-signal-facade = { workspace = true }
 desk-server-version = { workspace = true }
+desk-server-user = { workspace = true }
 
 actix-web = { workspace = true }
 actix-ws = { workspace = true }
+actix-session = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
@@ -20,11 +22,14 @@ utoipa = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
+futures-util = { workspace = true }
 anyhow = { workspace = true }
 turn-server = { workspace = true }
 webrtc = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
+bytes = { workspace = true }
+bytestring = { workspace = true }
 
 actix-files = "0.6"
 actix-server = "2.6"
@@ -42,16 +47,12 @@ config = { version = "0.15", features = ["toml"] }
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-actix-session = { version = "0.10", features = ["cookie-session"] }
 uuid = "1.17"
 actix-http = "3.11"
 actix-service = "2.0"
 
 mime = "0.3"
-futures-util = "0.3"
-bytestring = "1.4"
 
-bytes = "1.10"
 yuv = "0.8"
 openh264 = "0.8"
 

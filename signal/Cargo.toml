@@ -1,0 +1,23 @@
+[package]
+name = "desk-signal"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+desk-utils = { workspace = true }
+desk-signal-facade = { workspace = true }
+desk-server-version = { workspace = true }
+desk-server-user = { workspace = true }
+
+actix-session = { workspace = true }
+actix-web = { workspace = true }
+actix-ws = { workspace = true }
+utoipa = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+bytes = { workspace = true }
+bytestring = { workspace = true }
+serde_json = { workspace = true }
