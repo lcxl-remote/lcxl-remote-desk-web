@@ -1694,6 +1694,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]

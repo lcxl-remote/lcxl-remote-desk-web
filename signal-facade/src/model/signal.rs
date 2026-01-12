@@ -29,6 +29,12 @@ pub enum SignalingType {
     /// API version
     Version = 11,
 
+    /// Request list sessions
+    FetchSessions = 21,
+
+    /// Response session list
+    SessionList = 22,
+
     /// WebRTC init signaling type
     Init = 101,
     /// WebRTC offer signaling type

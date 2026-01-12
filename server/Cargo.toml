@@ -30,6 +30,7 @@ strum = { workspace = true }
 strum_macros = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
+uuid = { workspace = true }
 
 actix-files = "0.6"
 actix-server = "2.6"
@@ -47,7 +48,6 @@ config = { version = "0.15", features = ["toml"] }
 clap = { version = "4.5", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 
-uuid = "1.17"
 actix-http = "3.11"
 actix-service = "2.0"
 

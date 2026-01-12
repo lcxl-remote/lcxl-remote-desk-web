@@ -1,22 +1,32 @@
+use std::collections::BTreeMap;
+
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytes::Bytes;
 use bytestring::ByteString;
 use desk_server_user::model::CurrentUser;
 use desk_server_version::SERVER_API_VERSION;
-use desk_signal_facade::model::{signal::SignalingModel, version::VersionInfo};
-use desk_utils::error::DeskErrorCode;
+use desk_signal_facade::model::{
+    session::SessionList,
+    signal::{SignalingModel, SignalingSessionExt, SignalingType},
+    version::VersionInfo,
+};
 use futures_util::StreamExt;
+use uuid::Uuid;
 
 use crate::error::DeskSignalError;
 
 pub async fn handle_signaling(
+    client_version_info: VersionInfo,
     stream: AggregatedMessageStream,
     session: Session,
     user: CurrentUser,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
+    let random_uuid = Uuid::new_v4();
+    let session_id = String::from(random_uuid);
     // Handle signaling logic here
-    let mut signaling_context = SignalingContext::new(session, user);
+    let mut signaling_context =
+        SignalingContext::init(session_id, client_version_info, session, user).await?;
 
     let result = signaling_context.do_handle_signaling(stream).await;
     // Shutdown function must be invoked to clean up resources.
@@ -26,51 +36,77 @@ pub async fn handle_signaling(
 
 /// Signaling context for handling WebSocket messages.
 pub struct SignalingContext {
+    pub session_id: String,
     pub session: Session,
     pub user: CurrentUser,
-    pub signal_server_version: Option<VersionInfo>,
+    pub client_version_info: VersionInfo,
 }
 
 impl SignalingContext {
-    pub fn new(session: Session, user: CurrentUser) -> Self {
-        Self {
+    /// Initialize a new SignalingContext. This function sends the server's version information to the client.
+    pub async fn init(
+        session_id: String,
+        client_version_info: VersionInfo,
+        mut session: Session,
+        user: CurrentUser,
+    ) -> Result<Self, DeskSignalError> {
+        log::info!("Init new SignalingContext, session id: {}", session_id);
+        if client_version_info.api_version > SERVER_API_VERSION {
+            log::warn!(
+                "Client API version({}) is higher than server's({}). This may cause compatibility issues.",
+                client_version_info.api_version,
+                SERVER_API_VERSION
+            );
+        }
+        let server_version_info = VersionInfo::new(SERVER_API_VERSION, None);
+        session
+            .send_signaling(&SignalingModel::new_json_data(
+                SignalingType::Version,
+                &server_version_info,
+            )?)
+            .await?;
+        Ok(Self {
+            session_id,
+            client_version_info,
             session,
             user,
-            signal_server_version: None,
-        }
+        })
     }
     pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskSignalError> {
         log::debug!("Received text message: {}", text);
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         match signaling_model.signaling_type {
-            desk_signal_facade::model::signal::SignalingType::Version => {
-                let version_info: VersionInfo = signaling_model.get_data()?;
-                if version_info.api_version < SERVER_API_VERSION {
-                    return DeskSignalError::custom_error(
-                        DeskErrorCode::INVALID_STATE,
-                        format!("Unsupported api version: {}", version_info.api_version),
-                    );
-                }
-                self.signal_server_version = Some(version_info);
+            SignalingType::FetchSessions => {
+                let session_list = SessionList {
+                    current_session_id: self.session_id.clone(),
+                    session_map: BTreeMap::new(),
+                };
+                let model =
+                    SignalingModel::new_json_data(SignalingType::SessionList, &session_list)?;
+                log::info!("Sending session list to client: {:?}", model);
+                self.session.send_signaling(&model).await?;
             }
-            desk_signal_facade::model::signal::SignalingType::Init => todo!(),
-            desk_signal_facade::model::signal::SignalingType::Offer => todo!(),
-            desk_signal_facade::model::signal::SignalingType::Answer => todo!(),
-            desk_signal_facade::model::signal::SignalingType::Canid => todo!(),
-            desk_signal_facade::model::signal::SignalingType::RequireControl => todo!(),
-            desk_signal_facade::model::signal::SignalingType::AcceptControl => todo!(),
-            desk_signal_facade::model::signal::SignalingType::DenyControl => todo!(),
-            desk_signal_facade::model::signal::SignalingType::CloseControl => todo!(),
-            desk_signal_facade::model::signal::SignalingType::ChangeDisplaySettings => todo!(),
-            desk_signal_facade::model::signal::SignalingType::UpdateDeskSettings => todo!(),
-            desk_signal_facade::model::signal::SignalingType::ManagerFile => todo!(),
-            desk_signal_facade::model::signal::SignalingType::ManagerTerminal => todo!(),
-            desk_signal_facade::model::signal::SignalingType::ManagerSystemInfo => todo!(),
-            desk_signal_facade::model::signal::SignalingType::ManagerSystemStatue => todo!(),
-            desk_signal_facade::model::signal::SignalingType::Error => todo!(),
-            desk_signal_facade::model::signal::SignalingType::Unknown => todo!(),
+            SignalingType::Init => todo!(),
+            SignalingType::Offer => todo!(),
+            SignalingType::Answer => todo!(),
+            SignalingType::Canid => todo!(),
+            SignalingType::RequireControl => todo!(),
+            SignalingType::AcceptControl => todo!(),
+            SignalingType::DenyControl => todo!(),
+            SignalingType::CloseControl => todo!(),
+            SignalingType::ChangeDisplaySettings => todo!(),
+            SignalingType::UpdateDeskSettings => todo!(),
+            SignalingType::ManagerFile => todo!(),
+            SignalingType::ManagerTerminal => todo!(),
+            SignalingType::ManagerSystemInfo => todo!(),
+            SignalingType::ManagerSystemStatue => todo!(),
+            SignalingType::Error => todo!(),
+            SignalingType::Unknown => todo!(),
             _ => {
-                log::error!("Unknown signaling type: {}", signaling_model.signaling_type);
+                log::error!(
+                    "Unsupported signaling type: {}",
+                    signaling_model.signaling_type
+                );
             }
         }
         Ok(())
