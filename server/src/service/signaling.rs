@@ -212,11 +212,11 @@ impl SignalingContext {
             desk_settings: local_settings.desk,
         };
 
-        info!("Sending init signaling");
-        let hello_signaling_model =
-            SignalingModel::new_json_data(SignalingType::Init, &init_signaling_data)?;
-        session.send_signaling(&hello_signaling_model).await?;
-        info!("Sent init signaling: {:?}", hello_signaling_model);
+        info!("Sending init signaling: {:?}", init_signaling_data);
+        session
+            .send_signaling(SignalingType::Init, &init_signaling_data)
+            .await?;
+        info!("Sent init signaling");
 
         Ok(Self {
             settings,
@@ -705,11 +705,11 @@ impl SignalingContext {
 
         if signaling_model.signaling_data == None {
             self.session
-                .send_signaling(&SignalingModel::error(
+                .send_error(
                     signaling_model.signaling_type.into(),
                     DeskErrorCode::BLANK_SIGNALING_DATA,
                     "No signaling data provided",
-                )?)
+                )
                 .await?;
             return Ok(());
         }
@@ -733,15 +733,16 @@ impl SignalingContext {
                     "Unknown signaling type: {:?}",
                     signaling_model.signaling_type
                 );
-                let error_signaling = SignalingModel::new_str_data(
-                    SignalingType::Unknown,
-                    &format!(
-                        "Failed to handle signaling type: {:?}",
-                        signaling_model.signaling_type
-                    ),
-                );
 
-                self.session.send_signaling(&error_signaling).await?;
+                self.session
+                    .send_signaling(
+                        SignalingType::Unknown,
+                        &format!(
+                            "Failed to handle signaling type: {:?}",
+                            signaling_model.signaling_type
+                        ),
+                    )
+                    .await?;
             }
         }
         Ok(())
@@ -760,16 +761,7 @@ impl SignalingContext {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let signaling_data = if let Some(signaling_data) = signaling_model.signaling_data.clone() {
-            signaling_data
-        } else {
-            return DeskError::custom_error(
-                DeskErrorCode::INVALID_STATE,
-                "offer data is null".to_owned(),
-            );
-        };
-        log::info!("Received offer: {}", signaling_data);
-        let offer_model = serde_json::from_str::<OfferModel>(&signaling_data)?;
+        let offer_model = signaling_model.get_data::<OfferModel>()?;
 
         // start webrtc first
         self.start_webrtc(&offer_model).await?;
@@ -798,23 +790,19 @@ impl SignalingContext {
             local_desc
         } else {
             self.session
-                .send_signaling(&SignalingModel::error(
+                .send_error(
                     signaling_model.signaling_type.into(),
                     DeskErrorCode::GENERATE_LOCAL_DESCRIPTION_FAILED,
                     "generate local_description failed!",
-                )?)
+                )
                 .await?;
             return Ok(());
         };
 
-        let json_str = serde_json::to_string(&local_desc)?;
-        log::info!("local description: {}", json_str);
+        log::info!("local description: {:?}", local_desc);
 
         self.session
-            .send_signaling(&SignalingModel::new_str_data(
-                SignalingType::Answer,
-                &json_str,
-            ))
+            .send_signaling(SignalingType::Answer, &local_desc)
             .await?;
         // Save to config file
         {
@@ -850,12 +838,14 @@ impl SignalingContext {
             signaling_model.get_data_with_default::<SignalRequestControlData>()?;
         log::info!("Request control data: {:?}", request_control_data);
         self.signaling_state.write().await.accept_control = request_control_data.accept;
-        let response = if request_control_data.accept {
-            SignalingModel::new_json_data(SignalingType::AcceptControl, &request_control_data)?
+        let signal_type = if request_control_data.accept {
+            SignalingType::AcceptControl
         } else {
-            SignalingModel::new_json_data(SignalingType::CloseControl, &request_control_data)?
+            SignalingType::CloseControl
         };
-        self.session.send_signaling(&response).await?;
+        self.session
+            .send_signaling(signal_type, &request_control_data)
+            .await?;
         Ok(())
     }
 }

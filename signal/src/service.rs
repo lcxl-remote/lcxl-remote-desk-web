@@ -60,10 +60,7 @@ impl SignalingContext {
         }
         let server_version_info = VersionInfo::new(SERVER_API_VERSION, None);
         session
-            .send_signaling(&SignalingModel::new_json_data(
-                SignalingType::Version,
-                &server_version_info,
-            )?)
+            .send_signaling(SignalingType::Version, &server_version_info)
             .await?;
         Ok(Self {
             session_id,
@@ -72,19 +69,23 @@ impl SignalingContext {
             user,
         })
     }
+
+    /// Handle incoming signaling message
     pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskSignalError> {
         log::debug!("Received text message: {}", text);
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         match signaling_model.signaling_type {
             SignalingType::FetchSessions => {
+                // TODO Handle fetch sessions request
+
                 let session_list = SessionList {
                     current_session_id: self.session_id.clone(),
                     session_map: BTreeMap::new(),
                 };
-                let model =
-                    SignalingModel::new_json_data(SignalingType::SessionList, &session_list)?;
-                log::info!("Sending session list to client: {:?}", model);
-                self.session.send_signaling(&model).await?;
+                log::info!("Sending session list to client: {:?}", session_list);
+                self.session
+                    .send_signaling(SignalingType::SessionList, &session_list)
+                    .await?;
             }
             SignalingType::Init => todo!(),
             SignalingType::Offer => todo!(),

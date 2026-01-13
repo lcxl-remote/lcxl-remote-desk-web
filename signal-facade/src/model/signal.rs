@@ -61,37 +61,42 @@ pub enum SignalingType {
     Unknown = 10000001,
 }
 
-/// Query parameters for listing files.
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
-pub struct SignalingModel {
-    /// signaling type
-    pub signaling_type: SignalingType,
-    /// signaling data
-    pub signaling_data: Option<String>,
-}
-
-/// Query parameters for listing files.
-#[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
-pub struct SignalingErrorData {
-    /// signaling type which errors occurred.
-    pub signaling_type: SignalingType,
+pub struct SignalingResponseState {
     /// error code
+    ///
+    /// see alse: desk_utils::DeskErrorCode
     pub error_code: i32,
     /// error message
-    pub message: String,
-    /// signaling data
-    pub signaling_data: Option<String>,
+    pub message: Option<String>,
 }
 
-impl SignalingModel {
-    pub fn new_str_data(signaling_type: SignalingType, signaling_data: &str) -> Self {
+impl SignalingResponseState {
+    pub fn success() -> Self {
         Self {
-            signaling_type: signaling_type,
-            signaling_data: Some(signaling_data.to_string()),
+            error_code: DeskErrorCode::SUCCESS.0,
+            message: None,
         }
     }
 
-    pub fn new_json_data<T>(
+    pub fn is_success(&self) -> bool {
+        self.error_code == DeskErrorCode::SUCCESS.0
+    }
+}
+/// Signaling model
+#[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
+pub struct SignalingModel {
+    /// Signaling type
+    pub signaling_type: SignalingType,
+    /// Signaling data
+    pub signaling_data: Option<serde_json::Value>,
+    /// Signaling response state. Some means this is a response message.
+    pub response_state: Option<SignalingResponseState>,
+}
+
+impl SignalingModel {
+    /// New request signaling model
+    pub fn new_data<T>(
         signaling_type: SignalingType,
         signaling_data: &T,
     ) -> Result<Self, DeskSignalFacadeError>
@@ -99,23 +104,76 @@ impl SignalingModel {
         T: ?Sized + Serialize,
     {
         Ok(Self {
-            signaling_type: signaling_type,
-            signaling_data: Some(serde_json::to_string(signaling_data)?),
+            signaling_type,
+            signaling_data: Some(serde_json::to_value(signaling_data)?),
+            response_state: None,
         })
     }
 
+    /// New request signaling model with none data
+    pub fn new_none_data(signaling_type: SignalingType) -> Self {
+        Self {
+            signaling_type,
+            signaling_data: None,
+            response_state: None,
+        }
+    }
+    pub fn new_response_with_data<T>(
+        signaling_type: SignalingType,
+        response_state: SignalingResponseState,
+        signaling_data: &T,
+    ) -> Result<Self, DeskSignalFacadeError>
+    where
+        T: ?Sized + Serialize,
+    {
+        Ok(Self {
+            signaling_type,
+            signaling_data: Some(serde_json::to_value(signaling_data)?),
+            response_state: Some(response_state),
+        })
+    }
+
+    pub fn success_response_with_data<T>(
+        signaling_type: SignalingType,
+        signaling_data: &T,
+    ) -> Result<Self, DeskSignalFacadeError>
+    where
+        T: ?Sized + Serialize,
+    {
+        Self::new_response_with_data(
+            signaling_type,
+            SignalingResponseState::success(),
+            signaling_data,
+        )
+    }
+
+    pub fn new_response(
+        signaling_type: SignalingType,
+        response_state: SignalingResponseState,
+    ) -> Self {
+        let model = SignalingModel {
+            signaling_type,
+            signaling_data: None,
+            response_state: Some(response_state),
+        };
+        model
+    }
+
+    pub fn success_response(signaling_type: SignalingType) -> Self {
+        Self::new_response(signaling_type, SignalingResponseState::success())
+    }
+
+    /// New response signaling model with none data
     pub fn error(
         signaling_type: SignalingType,
         error_code: DeskErrorCode,
         message: &str,
     ) -> Result<Self, DeskSignalFacadeError> {
-        let error_data = SignalingErrorData {
-            signaling_type: signaling_type,
+        let error_data = SignalingResponseState {
             error_code: error_code.0,
-            message: message.to_string(),
-            signaling_data: None,
+            message: Some(message.to_string()),
         };
-        SignalingModel::new_json_data(SignalingType::Error, &error_data)
+        Ok(Self::new_response(signaling_type, error_data))
     }
 
     pub fn custom_desk_error(
@@ -130,11 +188,12 @@ impl SignalingModel {
     where
         T: for<'a> Deserialize<'a>,
     {
-        if let Some(data) = &self.signaling_data {
-            Ok(Some(serde_json::from_str::<T>(data)?))
+        let value = if let Some(data) = &self.signaling_data {
+            Some(serde_json::from_value(data.clone())?)
         } else {
-            Ok(None)
-        }
+            None
+        };
+        Ok(value)
     }
 
     /// Get data with type
@@ -142,11 +201,12 @@ impl SignalingModel {
     where
         T: for<'a> Deserialize<'a> + Default,
     {
-        if let Some(data) = self.signaling_data.clone() {
-            Ok(serde_json::from_str::<T>(&data)?)
+        let value = if let Some(data) = &self.signaling_data {
+            serde_json::from_value(data.clone())?
         } else {
-            Ok(T::default())
-        }
+            T::default()
+        };
+        Ok(value)
     }
 
     /// Get data with type, if data is none, will throw error
@@ -160,7 +220,7 @@ impl SignalingModel {
         } else {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Data can't be none".to_string(),
+                format!("Data can't be none, signal type: {:?}", self.signaling_type),
             );
         }
     }
@@ -169,18 +229,45 @@ impl SignalingModel {
 /// Session extension trait for signaling
 pub trait SignalingSessionExt {
     /// Send signaling message
-    fn send_signaling(
+    fn send_signaling<T>(
         &mut self,
-        signaling_model: &SignalingModel,
+        signaling_type: SignalingType,
+        signaling_data: &T,
+    ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send
+    where
+        T: ?Sized + Serialize + Sync;
+
+    fn send_error(
+        &mut self,
+        signaling_type: SignalingType,
+        error_code: DeskErrorCode,
+        error_message: &str,
     ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send;
 }
 
 impl SignalingSessionExt for Session {
-    async fn send_signaling(
+    async fn send_signaling<T>(
         &mut self,
-        signaling_model: &SignalingModel,
+        signaling_type: SignalingType,
+        signaling_data: &T,
+    ) -> Result<(), DeskSignalFacadeError>
+    where
+        T: ?Sized + Serialize + Sync,
+    {
+        let signaling_model =
+            SignalingModel::success_response_with_data(signaling_type, signaling_data)?;
+        self.text(serde_json::to_string(&signaling_model)?).await?;
+        Ok(())
+    }
+
+    async fn send_error(
+        &mut self,
+        signaling_type: SignalingType,
+        error_code: DeskErrorCode,
+        error_message: &str,
     ) -> Result<(), DeskSignalFacadeError> {
-        self.text(serde_json::to_string(signaling_model)?).await?;
+        let signaling_model = SignalingModel::error(signaling_type, error_code, error_message)?;
+        self.text(serde_json::to_string(&signaling_model)?).await?;
         Ok(())
     }
 }

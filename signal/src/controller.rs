@@ -3,7 +3,7 @@ use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::service::SessionExt;
 use desk_signal_facade::model::{
     desk_settings::DeskSettings,
-    signal::{InitSignalingData, SignalingErrorData, SignalingModel},
+    signal::{InitSignalingData, SignalingModel},
     version::VersionInfo,
 };
 use log::{error, info};
@@ -15,7 +15,6 @@ use crate::service::handle_signaling;
     params(VersionInfo),
     responses(
         (status = 200, description = "websocket signaling model", body = SignalingModel),
-        (status = 500, description = "websocket signaling error data", body = SignalingErrorData),
         (status = 201, description = "init signaling data", body = InitSignalingData),
         (status = 202, description = "desk config", body = DeskSettings),
     ),

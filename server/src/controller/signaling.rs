@@ -3,7 +3,7 @@ use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::service::SessionExt;
 use desk_signal_facade::model::{
     desk_settings::DeskSettings,
-    signal::{InitSignalingData, SignalingErrorData, SignalingModel},
+    signal::{InitSignalingData, SignalingModel},
 };
 use log::{error, info};
 
@@ -19,7 +19,6 @@ use crate::{
     summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
     responses(
         (status = 200, description = "websocket signaling model", body = SignalingModel),
-        (status = 500, description = "websocket signaling error data", body = SignalingErrorData),
         (status = 201, description = "init signaling data", body = InitSignalingData),
         (status = 202, description = "desk config", body = DeskSettings),
         (status = 203, description = "other response", body= SignalRequestControlData),
