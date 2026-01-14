@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytes::Bytes;
 use bytestring::ByteString;
@@ -11,13 +12,18 @@ use desk_signal_facade::model::{
     version::VersionInfo,
 };
 use futures_util::StreamExt;
+use tokio::runtime::Handle;
 use uuid::Uuid;
 
-use crate::error::DeskSignalError;
+use crate::{
+    error::DeskSignalError,
+    model::{SessionState, SharedSessionMap},
+};
 
 pub async fn handle_signaling(
     client_version_info: VersionInfo,
     stream: AggregatedMessageStream,
+    session_map: web::Data<SharedSessionMap>,
     session: Session,
     user: CurrentUser,
 ) -> Result<(), DeskSignalError> {
@@ -26,7 +32,7 @@ pub async fn handle_signaling(
     let session_id = String::from(random_uuid);
     // Handle signaling logic here
     let mut signaling_context =
-        SignalingContext::init(session_id, client_version_info, session, user).await?;
+        SignalingContext::init(session_id, client_version_info, session_map, session, user).await?;
 
     let result = signaling_context.do_handle_signaling(stream).await;
     // Shutdown function must be invoked to clean up resources.
@@ -37,9 +43,33 @@ pub async fn handle_signaling(
 /// Signaling context for handling WebSocket messages.
 pub struct SignalingContext {
     pub session_id: String,
+    pub session_map: web::Data<SharedSessionMap>,
     pub session: Session,
     pub user: CurrentUser,
     pub client_version_info: VersionInfo,
+}
+
+impl Drop for SignalingContext {
+    fn drop(&mut self) {
+        let handle = Handle::current();
+        let session_id = self.session_id.clone();
+        let session_map = self.session_map.clone();
+        let removed_value = futures::executor::block_on(async move {
+            handle
+                .spawn_blocking(move || session_map.blocking_write().remove(&session_id))
+                .await
+        });
+        match removed_value {
+            Ok(None) => log::error!(
+                "Failed to remove session from map: session {} not found",
+                self.session_id
+            ),
+            Ok(Some(session_state)) => {
+                log::info!("Removed session from map: {}", session_state.session_id)
+            }
+            Err(err) => log::error!("Failed to remove session from map: {:?}", err),
+        }
+    }
 }
 
 impl SignalingContext {
@@ -47,6 +77,7 @@ impl SignalingContext {
     pub async fn init(
         session_id: String,
         client_version_info: VersionInfo,
+        session_map: web::Data<SharedSessionMap>,
         mut session: Session,
         user: CurrentUser,
     ) -> Result<Self, DeskSignalError> {
@@ -62,9 +93,18 @@ impl SignalingContext {
         session
             .send_signaling(SignalingType::Version, &server_version_info)
             .await?;
+        let session_state = SessionState {
+            session_id: session_id.clone(),
+            session: session.clone(),
+        };
+        session_map
+            .write()
+            .await
+            .insert(session_id.clone(), session_state);
         Ok(Self {
             session_id,
             client_version_info,
+            session_map,
             session,
             user,
         })

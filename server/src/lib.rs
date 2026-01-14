@@ -3,7 +3,7 @@ pub mod error;
 pub mod model;
 pub mod service;
 
-use std::{env, fs::File, sync::Arc};
+use std::{collections::BTreeMap, env, fs::File, sync::Arc};
 
 use actix_server::Server;
 use actix_service::fn_service;
@@ -28,6 +28,7 @@ use controller::{
     },
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
+use desk_signal::model::SharedSessionMap;
 use desk_turn::service::startup_turn_server;
 use desk_utils::{
     error::DeskErrorCode, logs::init_logs_by_str, network::check_ipv6_available, rest::RestResponse,
@@ -107,7 +108,7 @@ pub async fn run() -> Result<Server, DeskError> {
     let observer = TurnObserver::new(shared_settings.clone(), Statistics::default());
     //start turn server
     let turn_api_state = web::Data::new(startup_turn_server(config, observer).await?);
-
+    let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
         let default_static_file_path = static_file_path.clone();
@@ -117,6 +118,7 @@ pub async fn run() -> Result<Server, DeskError> {
             .map(|app| app.wrap(Logger::default()))
             .app_data(shared_settings.clone())
             .app_data(turn_api_state.clone())
+            .app_data(session_map.clone())
             .app_data(
                 web::JsonConfig::default()
                     .limit(4096 * 1024 << 2)

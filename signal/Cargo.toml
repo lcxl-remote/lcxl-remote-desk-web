@@ -22,3 +22,4 @@ bytes = { workspace = true }
 bytestring = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+futures = { workspace = true }

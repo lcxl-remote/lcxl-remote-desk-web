@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
-use utoipa::IntoParams;
+use utoipa::{IntoParams, ToSchema};
 
 /// Version information for the API.
-#[derive(Serialize, Deserialize, Clone, Debug, IntoParams)]
+#[derive(Serialize, Deserialize, Clone, Debug, IntoParams, ToSchema)]
 pub struct VersionInfo {
     /// The version of the API. This is a simple integer that increments when API is changed.
     pub api_version: i32,

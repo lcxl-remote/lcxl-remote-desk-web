@@ -8,7 +8,7 @@ use desk_signal_facade::model::{
 };
 use log::{error, info};
 
-use crate::service::handle_signaling;
+use crate::{model::SharedSessionMap, service::handle_signaling};
 
 #[utoipa::path(
     summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
@@ -23,6 +23,7 @@ use crate::service::handle_signaling;
 pub async fn open_signaling_handle(
     req: HttpRequest,
     query: web::Query<VersionInfo>,
+    session_map: web::Data<SharedSessionMap>,
     session: Session,
     stream: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -47,7 +48,7 @@ pub async fn open_signaling_handle(
     // start task but don't wait for it
     rt::spawn(async move {
         // receive messages from websocket
-        let result = handle_signaling(version_info, stream, session, user).await;
+        let result = handle_signaling(version_info, stream, session_map, session, user).await;
         if let Err(e) = result {
             error!("Error handling signaling: {:?}", e);
         } else {
