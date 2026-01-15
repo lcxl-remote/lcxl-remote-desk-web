@@ -1,11 +1,12 @@
 use std::{collections::BTreeMap, ops::Deref};
 
 use actix_ws::Session;
+use desk_signal_facade::model::session::SessionModel;
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct SessionState {
-    pub session_id: String,
+    pub model: SessionModel,
     pub session: Session,
 }
 

@@ -7,7 +7,7 @@ use bytestring::ByteString;
 use desk_server_user::model::CurrentUser;
 use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::{
-    session::SessionList,
+    session::{SessionList, SessionModel},
     signal::{SignalingModel, SignalingSessionExt, SignalingType},
     version::VersionInfo,
 };
@@ -65,7 +65,7 @@ impl Drop for SignalingContext {
                 self.session_id
             ),
             Ok(Some(session_state)) => {
-                log::info!("Removed session from map: {}", session_state.session_id)
+                log::info!("Removed session from map: {:?}", session_state.model)
             }
             Err(err) => log::error!("Failed to remove session from map: {:?}", err),
         }
@@ -90,11 +90,15 @@ impl SignalingContext {
             );
         }
         let server_version_info = VersionInfo::new(SERVER_API_VERSION, None);
+        let session_model = SessionModel {
+            session_id: session_id.clone(),
+            version_info: client_version_info.clone(),
+        };
         session
             .send_signaling(SignalingType::Version, &server_version_info)
             .await?;
         let session_state = SessionState {
-            session_id: session_id.clone(),
+            model: session_model,
             session: session.clone(),
         };
         session_map
@@ -116,12 +120,18 @@ impl SignalingContext {
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         match signaling_model.signaling_type {
             SignalingType::FetchSessions => {
-                // TODO Handle fetch sessions request
-
+                let session_map = {
+                    let session_map = self.session_map.read().await;
+                    session_map
+                        .iter()
+                        .map(|item| (item.0.clone(), item.1.model.clone()))
+                        .collect()
+                };
                 let session_list = SessionList {
                     current_session_id: self.session_id.clone(),
-                    session_map: BTreeMap::new(),
+                    session_map,
                 };
+
                 log::info!("Sending session list to client: {:?}", session_list);
                 self.session
                     .send_signaling(SignalingType::SessionList, &session_list)
