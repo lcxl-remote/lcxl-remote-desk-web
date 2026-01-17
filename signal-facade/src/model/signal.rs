@@ -245,6 +245,17 @@ pub trait SignalingSessionExt {
         error_code: DeskErrorCode,
         error_message: &str,
     ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send;
+
+    /// Send to peer session
+    fn send_to_peer<T>(
+        &mut self,
+        signaling_type: SignalingType,
+        from_session_id: &str,
+        to_session_id: &str,
+        data: &T,
+    ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send
+    where
+        T: ?Sized + Serialize + Sync;
 }
 
 impl SignalingSessionExt for Session {
@@ -270,6 +281,24 @@ impl SignalingSessionExt for Session {
     ) -> Result<(), DeskSignalFacadeError> {
         let signaling_model = SignalingModel::error(signaling_type, error_code, error_message)?;
         self.text(serde_json::to_string(&signaling_model)?).await?;
+        Ok(())
+    }
+
+    async fn send_to_peer<T>(
+        &mut self,
+        signaling_type: SignalingType,
+        from_session_id: &str,
+        to_session_id: &str,
+        data: &T,
+    ) -> Result<(), DeskSignalFacadeError>
+    where
+        T: ?Sized + Serialize + Sync,
+    {
+        let peer_data = SignalingPeerData {
+            from_session_id: from_session_id.to_owned(),
+            to_session_id: to_session_id.to_owned(),
+            data: data.clone(),
+        };
         Ok(())
     }
 }
@@ -383,4 +412,18 @@ pub enum RemoteDeskTypeEnum {
     Signal,
     /// Lcxl remote desktop manager type
     Manager,
+}
+
+/// Request remote access model.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RequestRemote {
+    pub session_id: String,
+}
+
+/// Signing peer data model.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SignalingPeerData<T: ToSchema> {
+    pub from_session_id: String,
+    pub to_session_id: String,
+    pub data: T,
 }

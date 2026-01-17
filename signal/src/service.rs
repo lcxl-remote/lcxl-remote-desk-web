@@ -136,6 +136,7 @@ impl SignalingContext {
                     .send_signaling(SignalingType::SessionList, &session_list)
                     .await?;
             }
+            SignalingType::RequestRemote => {}
             SignalingType::Init => todo!(),
             SignalingType::Offer => todo!(),
             SignalingType::Answer => todo!(),
