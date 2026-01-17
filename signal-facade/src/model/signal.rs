@@ -35,6 +35,8 @@ pub enum SignalingType {
     /// Response session list
     SessionList = 22,
 
+    /// WebRTC request remote access
+    RequestRemote = 100,
     /// WebRTC init signaling type
     Init = 101,
     /// WebRTC offer signaling type
