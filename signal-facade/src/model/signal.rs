@@ -247,15 +247,15 @@ pub trait SignalingSessionExt {
     ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send;
 
     /// Send to peer session
-    fn send_to_peer<T>(
+    fn send_peer<T>(
         &mut self,
         signaling_type: SignalingType,
         from_session_id: &str,
         to_session_id: &str,
-        data: &T,
+        data: T,
     ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send
     where
-        T: ?Sized + Serialize + Sync;
+        T: Serialize + Sync + Send + ToSchema;
 }
 
 impl SignalingSessionExt for Session {
@@ -284,22 +284,22 @@ impl SignalingSessionExt for Session {
         Ok(())
     }
 
-    async fn send_to_peer<T>(
+    async fn send_peer<T>(
         &mut self,
         signaling_type: SignalingType,
         from_session_id: &str,
         to_session_id: &str,
-        data: &T,
+        data: T,
     ) -> Result<(), DeskSignalFacadeError>
     where
-        T: ?Sized + Serialize + Sync,
+        T: Serialize + Sync + Send + ToSchema,
     {
         let peer_data = SignalingPeerData {
             from_session_id: from_session_id.to_owned(),
             to_session_id: to_session_id.to_owned(),
-            data: data.clone(),
+            data,
         };
-        Ok(())
+        self.send_signaling(signaling_type, &peer_data).await
     }
 }
 
@@ -427,3 +427,6 @@ pub struct SignalingPeerData<T: ToSchema> {
     pub to_session_id: String,
     pub data: T,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RequestRemoteData {}

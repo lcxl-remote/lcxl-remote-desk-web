@@ -6,11 +6,17 @@ use desk_server_user::model::CurrentUser;
 use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::{
     session::{SessionList, SessionModel},
-    signal::{RemoteDeskTypeEnum, SignalingModel, SignalingSessionExt, SignalingType},
+    signal::{
+        RemoteDeskTypeEnum, RequestRemoteData, SignalingModel, SignalingPeerData,
+        SignalingSessionExt, SignalingType,
+    },
     version::VersionInfo,
 };
+use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
+use serde::Serialize;
 use tokio::runtime::Handle;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
@@ -113,6 +119,35 @@ impl SignalingContext {
         })
     }
 
+    /// Send data to target peer
+    pub async fn send_peer<T>(
+        &mut self,
+        signaling_type: SignalingType,
+        to_session_id: &str,
+        data: T,
+    ) -> Result<(), DeskSignalError>
+    where
+        T: Serialize + Sync + Send + ToSchema,
+    {
+        {
+            let mut session_map = self.session_map.write().await;
+            let session_state = if let Some(session_state) = session_map.get_mut(to_session_id) {
+                session_state
+            } else {
+                return DeskSignalError::custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "111".to_owned(),
+                );
+            };
+            session_state
+                .session
+                .send_peer(signaling_type, &self.session_id, to_session_id, data)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     /// Handle incoming signaling message
     pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskSignalError> {
         log::debug!("Received text message: {}", text);
@@ -136,7 +171,15 @@ impl SignalingContext {
                     .send_signaling(SignalingType::SessionList, &session_list)
                     .await?;
             }
-            SignalingType::RequestRemote => {}
+            SignalingType::RequestRemote => {
+                let data = signaling_model.get_data::<SignalingPeerData<RequestRemoteData>>()?;
+                self.send_peer(
+                    signaling_model.signaling_type,
+                    &data.to_session_id,
+                    data.data,
+                )
+                .await?;
+            }
             SignalingType::Init => todo!(),
             SignalingType::Offer => todo!(),
             SignalingType::Answer => todo!(),
