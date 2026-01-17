@@ -379,4 +379,8 @@ pub enum RemoteDeskTypeEnum {
     Browser,
     /// Lcxl remote desktop server type
     Server,
+    /// Lcxl remote desktop signal type
+    Signal,
+    /// Lcxl remote desktop manager type
+    Manager,
 }

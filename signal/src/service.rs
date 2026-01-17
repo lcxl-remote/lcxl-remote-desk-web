@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytes::Bytes;
@@ -8,7 +6,7 @@ use desk_server_user::model::CurrentUser;
 use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::{
     session::{SessionList, SessionModel},
-    signal::{SignalingModel, SignalingSessionExt, SignalingType},
+    signal::{RemoteDeskTypeEnum, SignalingModel, SignalingSessionExt, SignalingType},
     version::VersionInfo,
 };
 use futures_util::StreamExt;
@@ -89,7 +87,8 @@ impl SignalingContext {
                 SERVER_API_VERSION
             );
         }
-        let server_version_info = VersionInfo::new(SERVER_API_VERSION, None);
+        let server_version_info =
+            VersionInfo::new(SERVER_API_VERSION, None, RemoteDeskTypeEnum::Signal);
         let session_model = SessionModel {
             session_id: session_id.clone(),
             version_info: client_version_info.clone(),
