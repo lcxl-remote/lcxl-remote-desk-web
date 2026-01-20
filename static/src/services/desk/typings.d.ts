@@ -384,22 +384,21 @@ declare namespace API {
     audio_device_id?: any;
   };
 
-  type SignalingErrorData = {
-    /** error code */
-    error_code: number;
-    /** error message */
-    message: string;
-    /** signaling data */
+  type SignalingModel = {
+    response_state?: null | SignalingResponseState;
+    /** Signaling data */
     signaling_data?: any;
-    /** signaling type which errors occurred. */
+    /** Signaling type */
     signaling_type: SignalingType;
   };
 
-  type SignalingModel = {
-    /** signaling data */
-    signaling_data?: any;
-    /** signaling type */
-    signaling_type: SignalingType;
+  type SignalingResponseState = {
+    /** error code
+
+see alse: desk_utils::DeskErrorCode */
+    error_code: number;
+    /** error message */
+    message?: any;
   };
 
   type SignalingType = integer;
