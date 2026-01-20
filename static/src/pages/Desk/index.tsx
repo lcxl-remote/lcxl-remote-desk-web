@@ -2,11 +2,11 @@ import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
 import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormInstance, ProFormSelect, ProFormSlider, ProFormSwitch, ProFormText, ProFormTreeSelect, RequestOptionsType } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
-import { Alert, Button, Divider, Flex, FloatButton, message, Modal } from "antd";
+import { Alert, Button, Divider, Flex, FloatButton, message, Modal, Tooltip } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from './index.less'; // 告诉 umi 编译这个 less
-import { CommentOutlined, CustomerServiceOutlined, FullscreenOutlined, SettingOutlined } from "@ant-design/icons";
+import { CommentOutlined, CustomerServiceOutlined, FullscreenExitOutlined, FullscreenOutlined, SettingOutlined, StopOutlined } from "@ant-design/icons";
 import e from "express";
 
 const SIGNALING_TYPE_CODE_INIT = 101;
@@ -53,6 +53,8 @@ const Desk: React.FC = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [initSignalingData, setInitSignalingData] = useState<API.InitSignalingData>();
   const [acceptControl, setAcceptControl] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showControls, setShowControls] = useState(false);
 
   const formRef = useCallback(node => {
     const _formInstance = node as ProFormInstance<DeskFormValues>;
@@ -222,7 +224,7 @@ const Desk: React.FC = () => {
     const sock = socketRef.current!;
     let sginaling = {
       signaling_type: signalingType,
-      signaling_data: JSON.stringify(signalingData),
+      signaling_data: signalingData,
     } as API.SignalingModel;
     let signalingJson = JSON.stringify(sginaling);
 
@@ -239,13 +241,13 @@ const Desk: React.FC = () => {
     const signalingModel = JSON.parse(event.data) as API.SignalingModel;
     switch (signalingModel.signaling_type) {
       case SIGNALING_TYPE_CODE_INIT:
-        const initSignalingData = JSON.parse(signalingModel.signaling_data!) as API.InitSignalingData;
+        const initSignalingData = signalingModel.signaling_data as API.InitSignalingData;
         console.log('初始化信令数据:', initSignalingData);
         setInitSignalingData(initSignalingData);
         setIsModalOpen(true);
         break;
       case SIGNALING_TYPE_CODE_ANSWER:
-        const answerDescriptionJson = JSON.parse(signalingModel.signaling_data!) as RTCSessionDescriptionInit;
+        const answerDescriptionJson = signalingModel.signaling_data as RTCSessionDescriptionInit;
         console.info("set remote description answer_description_json=" + signalingModel.signaling_data);
         peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answerDescriptionJson));
         break;
@@ -303,12 +305,19 @@ const Desk: React.FC = () => {
 
     resizeObserver.observe(remoteVideo.current!);
 
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+
     return () => {
       console.log("关闭websocket", sock);
       sock.close();
       console.log("关闭webrtc peer connection", peerconnectionRef.current);
       peerconnectionRef.current?.close();
       resizeObserver.disconnect();
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
 
@@ -317,14 +326,24 @@ const Desk: React.FC = () => {
   };
 
   const handleFullScreen = () => {
-    const videoElement = remoteVideo.current;
-    if (videoElement) {
-      if (videoElement.requestFullscreen) {
-        videoElement.requestFullscreen();
-      } else if ((videoElement as any).webkitRequestFullscreen) { /* Safari */
-        (videoElement as any).webkitRequestFullscreen();
-      } else if ((videoElement as any).msRequestFullscreen) { /* IE11 */
-        (videoElement as any).msRequestFullscreen();
+    const videoWrapper = document.querySelector(`.${styles.videoWrapper}`) as HTMLElement;
+    if (videoWrapper) {
+      if (!isFullscreen) {
+        if (videoWrapper.requestFullscreen) {
+          videoWrapper.requestFullscreen();
+        } else if ((videoWrapper as any).webkitRequestFullscreen) { /* Safari */
+          (videoWrapper as any).webkitRequestFullscreen();
+        } else if ((videoWrapper as any).msRequestFullscreen) { /* IE11 */
+          (videoWrapper as any).msRequestFullscreen();
+        }
+      } else {
+        if (document.exitFullscreen) {
+          document.exitFullscreen();
+        } else if ((document as any).webkitExitFullscreen) { /* Safari */
+          (document as any).webkitExitFullscreen();
+        } else if ((document as any).msExitFullscreen) { /* IE11 */
+          (document as any).msExitFullscreen();
+        }
       }
     }
   };
@@ -479,7 +498,41 @@ const Desk: React.FC = () => {
 
   return (
     <PageContainer>
-      <video ref={remoteVideo} autoPlay muted className={styles.videoContainer} tabIndex={0} />
+      <div
+        className={styles.videoWrapper}
+        onMouseEnter={() => setShowControls(true)}
+        onMouseLeave={() => setShowControls(false)}
+      >
+        <video ref={remoteVideo} autoPlay muted className={styles.videoElement} tabIndex={0} />
+        <div className={styles.controlBar}>
+          <div className={styles.controlButtons}>
+            <Tooltip title={acceptControl ? "退出控制" : "请求控制"}>
+              <Button
+                type="text"
+                icon={acceptControl ? <StopOutlined /> : <CommentOutlined />}
+                onClick={handleRequestControl}
+                className={styles.controlButton}
+              />
+            </Tooltip>
+            <Tooltip title={isFullscreen ? "退出全屏" : "全屏"}>
+              <Button
+                type="text"
+                icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+                onClick={handleFullScreen}
+                className={styles.controlButton}
+              />
+            </Tooltip>
+            <Tooltip title="设置">
+              <Button
+                type="text"
+                icon={<SettingOutlined />}
+                onClick={showModal}
+                className={styles.controlButton}
+              />
+            </Tooltip>
+          </div>
+        </div>
+      </div>
       <audio ref={remoteAudio} autoPlay />
       <Divider />
 
