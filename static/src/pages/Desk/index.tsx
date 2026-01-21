@@ -2,11 +2,11 @@ import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
 import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormInstance, ProFormSelect, ProFormSlider, ProFormSwitch, ProFormText, ProFormTreeSelect, RequestOptionsType } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
-import { Alert, Button, Divider, Flex, FloatButton, message, Modal, Tooltip } from "antd";
+import { Alert, Button, Divider, Flex, FloatButton, message, Modal, Popover, Slider, Tooltip } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from './index.less'; // 告诉 umi 编译这个 less
-import { CommentOutlined, CustomerServiceOutlined, FullscreenExitOutlined, FullscreenOutlined, SettingOutlined, StopOutlined } from "@ant-design/icons";
+import { CommentOutlined, CustomerServiceOutlined, FullscreenExitOutlined, FullscreenOutlined, PauseCircleOutlined, PlayCircleOutlined, SettingOutlined, SoundOutlined, StopOutlined, MutedOutlined } from "@ant-design/icons";
 import e from "express";
 
 const SIGNALING_TYPE_CODE_INIT = 101;
@@ -55,6 +55,9 @@ const Desk: React.FC = () => {
   const [acceptControl, setAcceptControl] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(false);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(true);
+  const [audioVolume, setAudioVolume] = useState(100);
+  const [isMuted, setIsMuted] = useState(false);
 
   const formRef = useCallback(node => {
     const _formInstance = node as ProFormInstance<DeskFormValues>;
@@ -359,6 +362,34 @@ const Desk: React.FC = () => {
 
   }
 
+  const toggleAudioPlay = () => {
+    if (!remoteAudio.current) return;
+    if (isAudioPlaying) {
+      remoteAudio.current.pause();
+    } else {
+      remoteAudio.current.play();
+    }
+    setIsAudioPlaying(!isAudioPlaying);
+  };
+
+  const handleVolumeChange = (value: number) => {
+    if (!remoteAudio.current) return;
+    setAudioVolume(value);
+    remoteAudio.current.volume = value / 100;
+    if (value === 0) {
+      setIsMuted(true);
+    } else {
+      setIsMuted(false);
+    }
+  };
+
+  const toggleMute = () => {
+    if (!remoteAudio.current) return;
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    remoteAudio.current.muted = newMuted;
+  };
+
   const handleOk = async (formData: DeskFormValues) => {
     console.log(JSON.stringify(formData));
     if (!formData.enable_audio) {
@@ -530,10 +561,39 @@ const Desk: React.FC = () => {
                 className={styles.controlButton}
               />
             </Tooltip>
+            <Tooltip title={isAudioPlaying ? "暂停音频" : "播放音频"}>
+              <Button
+                type="text"
+                icon={isAudioPlaying ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+                onClick={toggleAudioPlay}
+                className={styles.controlButton}
+              />
+            </Tooltip>
+            <Popover
+              content={
+                <div style={{ height: 100 }}>
+                  <Slider
+                    vertical
+                    defaultValue={100}
+                    value={audioVolume}
+                    onChange={handleVolumeChange}
+                  />
+                </div>
+              }
+              trigger="hover"
+              overlayInnerStyle={{ padding: '12px 0' }}
+            >
+              <Button
+                type="text"
+                icon={isMuted || audioVolume === 0 ? <MutedOutlined /> : <SoundOutlined />}
+                onClick={toggleMute}
+                className={styles.controlButton}
+              />
+            </Popover>
           </div>
         </div>
       </div>
-      <audio ref={remoteAudio} autoPlay />
+      <audio ref={remoteAudio} autoPlay style={{ display: 'none' }} />
       <Divider />
 
       <FloatButton.Group
