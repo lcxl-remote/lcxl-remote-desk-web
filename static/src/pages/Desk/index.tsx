@@ -656,7 +656,10 @@ const Desk: React.FC = () => {
       >
         <video ref={remoteVideo} autoPlay muted className={styles.videoElement} tabIndex={0} onCanPlay={() => setIsVideoReady(true)} />
 
-        <div className={`${styles.videoPlaceholder} ${isVideoReady ? styles.hidden : ''}`}>
+        <div
+          className={`${styles.videoPlaceholder} ${isVideoReady ? styles.hidden : ''}`}
+          onContextMenu={(e) => { e.preventDefault(); }}
+        >
           <div className={styles.placeholderContent}>
             <span className={styles.artText}>LCXL Remote Desk</span>
           </div>
