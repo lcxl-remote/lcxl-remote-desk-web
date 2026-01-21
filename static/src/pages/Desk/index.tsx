@@ -432,6 +432,7 @@ const Desk: React.FC = () => {
     // Disable transition and remove transform during drag for better responsiveness
     controlBar.style.transition = 'none';
     controlBar.style.transform = 'none';
+    controlBar.style.bottom = 'auto'; // Unset CSS constraint to prevent stretching
 
     // Set initial pixel position from current computed style
     controlBar.style.left = `${controlBarRect.left - videoRect.left}px`;
