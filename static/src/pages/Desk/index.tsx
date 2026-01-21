@@ -37,6 +37,7 @@ const Desk: React.FC = () => {
   const intl = useIntl();
   const remoteVideo = useRef<HTMLVideoElement>(null);
   const remoteAudio = useRef<HTMLAudioElement>(null);
+  const controlBarRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
   const acceptControlRef = useRef(false);
@@ -58,6 +59,10 @@ const Desk: React.FC = () => {
   const [isAudioPlaying, setIsAudioPlaying] = useState(true);
   const [audioVolume, setAudioVolume] = useState(100);
   const [isMuted, setIsMuted] = useState(false);
+
+  // Drag state for control bar
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
   const formRef = useCallback(node => {
     const _formInstance = node as ProFormInstance<DeskFormValues>;
@@ -324,6 +329,22 @@ const Desk: React.FC = () => {
     };
   }, []);
 
+  // Drag effect: attach/remove global mouse events during drag
+  useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleDrag);
+      document.addEventListener('mouseup', handleDragEnd);
+    } else {
+      document.removeEventListener('mousemove', handleDrag);
+      document.removeEventListener('mouseup', handleDragEnd);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleDrag);
+      document.removeEventListener('mouseup', handleDragEnd);
+    };
+  }, [isDragging, dragOffset, handleDrag]);
+
   const showModal = () => {
     setIsModalOpen(true);
   };
@@ -388,6 +409,71 @@ const Desk: React.FC = () => {
     const newMuted = !isMuted;
     setIsMuted(newMuted);
     remoteAudio.current.muted = newMuted;
+  };
+
+  // Drag handlers for control bar
+  const handleDragStart = (e: React.MouseEvent) => {
+    if (!controlBarRef.current || !remoteVideo.current) return;
+
+    setIsDragging(true);
+    const controlBar = controlBarRef.current;
+    const videoRect = remoteVideo.current.getBoundingClientRect();
+
+    // Get the control bar's current computed position (pixels)
+    const controlBarRect = controlBar.getBoundingClientRect();
+
+    // Calculate offset from mouse to control bar's top-left corner (relative to video)
+    setDragOffset({
+      x: e.clientX - controlBarRect.left,
+      y: e.clientY - controlBarRect.top
+    });
+
+    // Disable transition and remove transform during drag for better responsiveness
+    controlBar.style.transition = 'none';
+    controlBar.style.transform = 'none';
+
+    // Set initial pixel position from current computed style
+    controlBar.style.left = `${controlBarRect.left - videoRect.left}px`;
+    controlBar.style.top = `${controlBarRect.top - videoRect.top}px`;
+  };
+
+  const handleDrag = (e: MouseEvent) => {
+    if (!isDragging || !controlBarRef.current || !remoteVideo.current) return;
+
+    e.preventDefault();
+
+    const controlBar = controlBarRef.current;
+    const videoRect = remoteVideo.current.getBoundingClientRect();
+
+    // Calculate screen position of control bar's top-left corner
+    const screenX = e.clientX - dragOffset.x;
+    const screenY = e.clientY - dragOffset.y;
+
+    // Convert to video container-relative coordinates
+    let newX = screenX - videoRect.left;
+    let newY = screenY - videoRect.top;
+
+    // Constrain within video bounds
+    const maxX = videoRect.width - controlBar.offsetWidth;
+    const maxY = videoRect.height - controlBar.offsetHeight;
+
+    newX = Math.max(0, Math.min(newX, maxX));
+    newY = Math.max(0, Math.min(newY, maxY));
+
+    // Apply new position (relative to video element's coordinate system)
+    controlBar.style.left = `${newX}px`;
+    controlBar.style.top = `${newY}px`;
+  };
+
+  const handleDragEnd = () => {
+    setIsDragging(false);
+
+    if (controlBarRef.current) {
+      // Restore transition for smooth show/hide animations
+      controlBarRef.current.style.transition = '';
+      // Keep transform as 'none' to prevent snapping from CSS centering
+      // Once manually positioned, we no longer use the CSS centering transform
+    }
   };
 
   const handleOk = async (formData: DeskFormValues) => {
@@ -535,7 +621,11 @@ const Desk: React.FC = () => {
         onMouseLeave={() => setShowControls(false)}
       >
         <video ref={remoteVideo} autoPlay muted className={styles.videoElement} tabIndex={0} />
-        <div className={styles.controlBar}>
+        <div
+          ref={controlBarRef}
+          className={styles.controlBar}
+          onMouseDown={handleDragStart}
+        >
           <div className={styles.controlButtons}>
             <Tooltip title={acceptControl ? "退出控制" : "请求控制"}>
               <Button

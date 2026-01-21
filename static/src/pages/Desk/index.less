@@ -27,20 +27,23 @@
   bottom: 16px;
   left: 50%;
   transform: translateX(-50%) translateY(0);
-  
+
+  /* 拖动时光标样式 */
+  cursor: move;
+
   /* 玻璃态效果 */
   background: rgba(0, 0, 0, 0.72);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  
+
   /* 边框和阴影 */
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 16px;
-  box-shadow: 
+  box-shadow:
     0 8px 32px rgba(0, 0, 0, 0.4),
     0 2px 8px rgba(0, 0, 0, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  
+
   /* 尺寸和布局 */
   padding: 10px 16px;
   display: flex;
@@ -48,18 +51,18 @@
   justify-content: center;
   gap: 12px;
   min-width: 180px;
-  
+
   /* 初始状态：隐藏 */
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  
-  /* 过渡动画 */
-  transition: 
+
+  /* 过渡动画 - 仅包含显示/隐藏相关的属性，不包括位置 */
+  transition:
     opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
     transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
     visibility 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  
+
   /* 稍微向下偏移，以便在显示时向上浮动 */
   transform: translateX(-50%) translateY(10px);
 }
