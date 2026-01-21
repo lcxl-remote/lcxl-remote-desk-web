@@ -59,6 +59,7 @@ const Desk: React.FC = () => {
   const [isAudioPlaying, setIsAudioPlaying] = useState(true);
   const [audioVolume, setAudioVolume] = useState(100);
   const [isMuted, setIsMuted] = useState(false);
+  const [isVideoReady, setIsVideoReady] = useState(false);
 
   // Drag state for control bar
   const [isDragging, setIsDragging] = useState(false);
@@ -620,7 +621,14 @@ const Desk: React.FC = () => {
         onMouseEnter={() => setShowControls(true)}
         onMouseLeave={() => setShowControls(false)}
       >
-        <video ref={remoteVideo} autoPlay muted className={styles.videoElement} tabIndex={0} />
+        <video ref={remoteVideo} autoPlay muted className={styles.videoElement} tabIndex={0} onCanPlay={() => setIsVideoReady(true)} />
+
+        <div className={`${styles.videoPlaceholder} ${isVideoReady ? styles.hidden : ''}`}>
+          <div className={styles.placeholderContent}>
+            <span className={styles.artText}>LCXL Remote Desk</span>
+          </div>
+        </div>
+
         <div
           ref={controlBarRef}
           className={styles.controlBar}

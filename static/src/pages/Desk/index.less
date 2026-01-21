@@ -21,6 +21,47 @@
   }
 }
 
+/* ==================== 视频占位符 ==================== */
+.videoPlaceholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+
+  /* 过渡动画 */
+  transition: opacity 0.5s ease, visibility 0.5s ease;
+
+  .placeholderContent {
+    .artText {
+      font-size: 3rem;
+      font-weight: 800;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+      /* 渐变文本效果 */
+      background: linear-gradient(135deg, #1890ff 0%, #722ed1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+
+      /* 细致的阴影 */
+      filter: drop-shadow(0 2px 4px rgba(24, 144, 255, 0.15));
+    }
+  }
+}
+
+/* 隐藏状态 */
+.videoPlaceholder.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 /* ==================== 悬浮控制栏 ==================== */
 .controlBar {
   position: absolute;
@@ -51,6 +92,9 @@
   justify-content: center;
   gap: 12px;
   min-width: 180px;
+
+  /* 确保 z-index 高于 placeholder */
+  z-index: 10;
 
   /* 初始状态：隐藏 */
   opacity: 0;
