@@ -38,6 +38,7 @@ const Desk: React.FC = () => {
   const remoteVideo = useRef<HTMLVideoElement>(null);
   const remoteAudio = useRef<HTMLAudioElement>(null);
   const controlBarRef = useRef<HTMLDivElement>(null);
+  const videoWrapperRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<WebSocket>();
   const peerconnectionRef = useRef<RTCPeerConnection>();
   const acceptControlRef = useRef(false);
@@ -314,6 +315,35 @@ const Desk: React.FC = () => {
 
     resizeObserver.observe(remoteVideo.current!);
 
+    // Clamp control bar position on wrapper resize
+    const controlBarResizeObserver = new ResizeObserver(entries => {
+      if (!controlBarRef.current || !videoWrapperRef.current) return;
+
+      const wrapperRect = videoWrapperRef.current.getBoundingClientRect();
+      const bar = controlBarRef.current;
+
+      // Only adjust if we have manual positioning (style.left/top are set)
+      if (bar.style.left && bar.style.left !== 'auto') {
+        const currentLeft = parseFloat(bar.style.left);
+        const maxLeft = wrapperRect.width - bar.offsetWidth;
+        if (currentLeft > maxLeft) {
+          bar.style.left = `${Math.max(0, maxLeft)}px`;
+        }
+      }
+
+      if (bar.style.top && bar.style.top !== 'auto') {
+        const currentTop = parseFloat(bar.style.top);
+        const maxTop = wrapperRect.height - bar.offsetHeight;
+        if (currentTop > maxTop) {
+          bar.style.top = `${Math.max(0, maxTop)}px`;
+        }
+      }
+    });
+
+    if (videoWrapperRef.current) {
+      controlBarResizeObserver.observe(videoWrapperRef.current);
+    }
+
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
     };
@@ -326,25 +356,10 @@ const Desk: React.FC = () => {
       console.log("关闭webrtc peer connection", peerconnectionRef.current);
       peerconnectionRef.current?.close();
       resizeObserver.disconnect();
+      controlBarResizeObserver.disconnect();
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
-
-  // Drag effect: attach/remove global mouse events during drag
-  useEffect(() => {
-    if (isDragging) {
-      document.addEventListener('mousemove', handleDrag);
-      document.addEventListener('mouseup', handleDragEnd);
-    } else {
-      document.removeEventListener('mousemove', handleDrag);
-      document.removeEventListener('mouseup', handleDragEnd);
-    }
-
-    return () => {
-      document.removeEventListener('mousemove', handleDrag);
-      document.removeEventListener('mouseup', handleDragEnd);
-    };
-  }, [isDragging, dragOffset, handleDrag]);
 
   const showModal = () => {
     setIsModalOpen(true);
@@ -414,16 +429,16 @@ const Desk: React.FC = () => {
 
   // Drag handlers for control bar
   const handleDragStart = (e: React.MouseEvent) => {
-    if (!controlBarRef.current || !remoteVideo.current) return;
+    if (!controlBarRef.current || !videoWrapperRef.current) return;
 
     setIsDragging(true);
     const controlBar = controlBarRef.current;
-    const videoRect = remoteVideo.current.getBoundingClientRect();
+    const wrapperRect = videoWrapperRef.current.getBoundingClientRect();
 
     // Get the control bar's current computed position (pixels)
     const controlBarRect = controlBar.getBoundingClientRect();
 
-    // Calculate offset from mouse to control bar's top-left corner (relative to video)
+    // Calculate offset from mouse to control bar's top-left corner (relative to wrapper)
     setDragOffset({
       x: e.clientX - controlBarRect.left,
       y: e.clientY - controlBarRect.top
@@ -435,34 +450,34 @@ const Desk: React.FC = () => {
     controlBar.style.bottom = 'auto'; // Unset CSS constraint to prevent stretching
 
     // Set initial pixel position from current computed style
-    controlBar.style.left = `${controlBarRect.left - videoRect.left}px`;
-    controlBar.style.top = `${controlBarRect.top - videoRect.top}px`;
+    controlBar.style.left = `${controlBarRect.left - wrapperRect.left}px`;
+    controlBar.style.top = `${controlBarRect.top - wrapperRect.top}px`;
   };
 
   const handleDrag = (e: MouseEvent) => {
-    if (!isDragging || !controlBarRef.current || !remoteVideo.current) return;
+    if (!isDragging || !controlBarRef.current || !videoWrapperRef.current) return;
 
     e.preventDefault();
 
     const controlBar = controlBarRef.current;
-    const videoRect = remoteVideo.current.getBoundingClientRect();
+    const wrapperRect = videoWrapperRef.current.getBoundingClientRect();
 
     // Calculate screen position of control bar's top-left corner
     const screenX = e.clientX - dragOffset.x;
     const screenY = e.clientY - dragOffset.y;
 
-    // Convert to video container-relative coordinates
-    let newX = screenX - videoRect.left;
-    let newY = screenY - videoRect.top;
+    // Convert to wrapper-relative coordinates
+    let newX = screenX - wrapperRect.left;
+    let newY = screenY - wrapperRect.top;
 
-    // Constrain within video bounds
-    const maxX = videoRect.width - controlBar.offsetWidth;
-    const maxY = videoRect.height - controlBar.offsetHeight;
+    // Constrain within wrapper bounds
+    const maxX = wrapperRect.width - controlBar.offsetWidth;
+    const maxY = wrapperRect.height - controlBar.offsetHeight;
 
     newX = Math.max(0, Math.min(newX, maxX));
     newY = Math.max(0, Math.min(newY, maxY));
 
-    // Apply new position (relative to video element's coordinate system)
+    // Apply new position (relative to wrapper's coordinate system)
     controlBar.style.left = `${newX}px`;
     controlBar.style.top = `${newY}px`;
   };
@@ -477,6 +492,22 @@ const Desk: React.FC = () => {
       // Once manually positioned, we no longer use the CSS centering transform
     }
   };
+
+  // Drag effect: attach/remove global mouse events during drag
+  useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleDrag);
+      document.addEventListener('mouseup', handleDragEnd);
+    } else {
+      document.removeEventListener('mousemove', handleDrag);
+      document.removeEventListener('mouseup', handleDragEnd);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleDrag);
+      document.removeEventListener('mouseup', handleDragEnd);
+    };
+  }, [isDragging, dragOffset, handleDrag]);
 
   const handleOk = async (formData: DeskFormValues) => {
     console.log(JSON.stringify(formData));
@@ -618,6 +649,7 @@ const Desk: React.FC = () => {
   return (
     <PageContainer>
       <div
+        ref={videoWrapperRef}
         className={styles.videoWrapper}
         onMouseEnter={() => setShowControls(true)}
         onMouseLeave={() => setShowControls(false)}
