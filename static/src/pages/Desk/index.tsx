@@ -806,32 +806,34 @@ const Desk: React.FC = () => {
                 className={styles.controlButton}
               />
             </Tooltip>
-            <Popover
-              content={
-                <div className={styles.shortcutMenu}>
-                  <Space direction="vertical" style={{ width: '100%' }}>
-                    <Button block onClick={() => handleShortcut('CtrlAltDel')}>Ctrl + Alt + Del</Button>
-                    <Button block onClick={() => handleShortcut('AltTab')}>Alt + Tab</Button>
-                    <Divider style={{ margin: '4px 0' }} />
-                    <Button block onClick={() => handleShortcut('Win')}><WindowsOutlined /> Win (Start)</Button>
-                    <Button block onClick={() => handleShortcut('WinD')}>Win + D (Desktop)</Button>
-                    <Button block onClick={() => handleShortcut('WinE')}>Win + E (Explorer)</Button>
-                    <Button block onClick={() => handleShortcut('WinR')}>Win + R (Run)</Button>
-                    <Button block onClick={() => handleShortcut('WinL')}>Win + L (Lock)</Button>
-                  </Space>
-                </div>
-              }
-              trigger="click"
-              overlayInnerStyle={{ padding: '12px' }}
-            >
-              <Tooltip title="快捷键">
-                <Button
-                  type="text"
-                  icon={<ThunderboltOutlined />}
-                  className={styles.controlButton}
-                />
-              </Tooltip>
-            </Popover>
+            {acceptControl && (
+              <Popover
+                content={
+                  <div className={styles.shortcutMenu}>
+                    <Space direction="vertical" style={{ width: '100%' }}>
+                      <Button block onClick={() => handleShortcut('CtrlAltDel')}>Ctrl + Alt + Del</Button>
+                      <Button block onClick={() => handleShortcut('AltTab')}>Alt + Tab</Button>
+                      <Divider style={{ margin: '4px 0' }} />
+                      <Button block onClick={() => handleShortcut('Win')}><WindowsOutlined /> Win (Start)</Button>
+                      <Button block onClick={() => handleShortcut('WinD')}>Win + D (Desktop)</Button>
+                      <Button block onClick={() => handleShortcut('WinE')}>Win + E (Explorer)</Button>
+                      <Button block onClick={() => handleShortcut('WinR')}>Win + R (Run)</Button>
+                      <Button block onClick={() => handleShortcut('WinL')}>Win + L (Lock)</Button>
+                    </Space>
+                  </div>
+                }
+                trigger="click"
+                overlayInnerStyle={{ padding: '12px' }}
+              >
+                <Tooltip title="快捷键">
+                  <Button
+                    type="text"
+                    icon={<ThunderboltOutlined />}
+                    className={styles.controlButton}
+                  />
+                </Tooltip>
+              </Popover>
+            )}
             <Popover
               content={
                 <div style={{ height: 100 }}>

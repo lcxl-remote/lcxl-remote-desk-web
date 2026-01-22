@@ -23,7 +23,7 @@
 - Node.js 12.0.0 或更高版本
 - npm 或 yarn 或 pnpm
 
-### Linux 系统依赖
+### Linux (包括WSL)系统依赖
 
 ```bash
 sudo apt install -y build-essential
