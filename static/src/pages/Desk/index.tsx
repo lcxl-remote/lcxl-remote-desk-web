@@ -154,29 +154,6 @@ const Desk: React.FC = () => {
 
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
     console.log("key down, event=", event);
-
-    // Handle F11 long press to exit fullscreen
-    if (event.code === 'F11' && !f11TimerRef.current) {
-      f11TimerRef.current = setTimeout(() => {
-        // Exit fullscreen after holding F11 for 1.5s
-        if (document.fullscreenElement) {
-          if (document.exitFullscreen) {
-            document.exitFullscreen();
-          } else if ((document as any).webkitExitFullscreen) { /* Safari */
-            (document as any).webkitExitFullscreen();
-          } else if ((document as any).msExitFullscreen) { /* IE11 */
-            (document as any).msExitFullscreen();
-          }
-          message.info("已退出全屏");
-        }
-        // Clear timer
-        if (f11TimerRef.current) {
-          clearTimeout(f11TimerRef.current);
-          f11TimerRef.current = undefined;
-        }
-      }, 1500);
-    }
-
     event.preventDefault();
     remoteVideo.current?.focus();
     handleKeyboardEvent("keydown", event);
@@ -184,15 +161,6 @@ const Desk: React.FC = () => {
 
   const handleRemoteVideoKeyUp = (event: KeyboardEvent) => {
     console.log("key up, event=", event);
-
-    // Clear F11 timer if user releases F11 before 1.5s
-    if (event.code === 'F11') {
-      if (f11TimerRef.current) {
-        clearTimeout(f11TimerRef.current);
-        f11TimerRef.current = undefined;
-      }
-    }
-
     event.preventDefault();
     remoteVideo.current?.focus();
     handleKeyboardEvent("keyup", event);
@@ -385,6 +353,52 @@ const Desk: React.FC = () => {
 
     document.addEventListener('fullscreenchange', handleFullscreenChange);
 
+    // Global F11 handler to prevent default browser fullscreen toggle
+    // and implement long-press to exit fullscreen
+    const handleGlobalF11KeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'F11' || e.key === 'F11') {
+        // Prevent default browser fullscreen toggle
+        e.preventDefault();
+        // Don't stopPropagation - let it bubble to video element so F11 is sent to remote
+
+        // Start long-press timer if not already running
+        if (!f11TimerRef.current && document.fullscreenElement) {
+          f11TimerRef.current = setTimeout(() => {
+            // Exit fullscreen after holding F11 for 1.5s
+            if (document.fullscreenElement) {
+              if (document.exitFullscreen) {
+                document.exitFullscreen();
+              } else if ((document as any).webkitExitFullscreen) { /* Safari */
+                (document as any).webkitExitFullscreen();
+              } else if ((document as any).msExitFullscreen) { /* IE11 */
+                (document as any).msExitFullscreen();
+              }
+              message.info("已退出全屏");
+            }
+            // Clear timer
+            if (f11TimerRef.current) {
+              clearTimeout(f11TimerRef.current);
+              f11TimerRef.current = undefined;
+            }
+          }, 1500);
+        }
+      }
+    };
+
+    const handleGlobalF11KeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'F11' || e.key === 'F11') {
+        // Clear F11 timer if user releases F11 before 1.5s
+        if (f11TimerRef.current) {
+          clearTimeout(f11TimerRef.current);
+          f11TimerRef.current = undefined;
+        }
+      }
+    };
+
+    // Add global F11 handlers with capture phase to intercept before browser
+    window.addEventListener('keydown', handleGlobalF11KeyDown, { capture: true });
+    window.addEventListener('keyup', handleGlobalF11KeyUp, { capture: true });
+
     return () => {
       console.log("关闭websocket", sock);
       sock.close();
@@ -393,6 +407,8 @@ const Desk: React.FC = () => {
       resizeObserver.disconnect();
       controlBarResizeObserver.disconnect();
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      window.removeEventListener('keydown', handleGlobalF11KeyDown, { capture: true });
+      window.removeEventListener('keyup', handleGlobalF11KeyUp, { capture: true });
     };
   }, []);
 
