@@ -49,6 +49,9 @@ const Desk: React.FC = () => {
   // const clipboardEventDataChannelRef = useRef<RTCDataChannel>();
   // const fileTransferEventDataChannelRef = useRef<RTCDataChannel>();
 
+  // F11 long press timer for exiting fullscreen
+  const f11TimerRef = useRef<NodeJS.Timeout>();
+
   // use state
   const [formInstance, setFormInstance] = useState<ProFormInstance<DeskFormValues>>();
 
@@ -151,6 +154,29 @@ const Desk: React.FC = () => {
 
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
     console.log("key down, event=", event);
+
+    // Handle F11 long press to exit fullscreen
+    if (event.code === 'F11' && !f11TimerRef.current) {
+      f11TimerRef.current = setTimeout(() => {
+        // Exit fullscreen after holding F11 for 1.5s
+        if (document.fullscreenElement) {
+          if (document.exitFullscreen) {
+            document.exitFullscreen();
+          } else if ((document as any).webkitExitFullscreen) { /* Safari */
+            (document as any).webkitExitFullscreen();
+          } else if ((document as any).msExitFullscreen) { /* IE11 */
+            (document as any).msExitFullscreen();
+          }
+          message.info("已退出全屏");
+        }
+        // Clear timer
+        if (f11TimerRef.current) {
+          clearTimeout(f11TimerRef.current);
+          f11TimerRef.current = undefined;
+        }
+      }, 1500);
+    }
+
     event.preventDefault();
     remoteVideo.current?.focus();
     handleKeyboardEvent("keydown", event);
@@ -158,6 +184,15 @@ const Desk: React.FC = () => {
 
   const handleRemoteVideoKeyUp = (event: KeyboardEvent) => {
     console.log("key up, event=", event);
+
+    // Clear F11 timer if user releases F11 before 1.5s
+    if (event.code === 'F11') {
+      if (f11TimerRef.current) {
+        clearTimeout(f11TimerRef.current);
+        f11TimerRef.current = undefined;
+      }
+    }
+
     event.preventDefault();
     remoteVideo.current?.focus();
     handleKeyboardEvent("keyup", event);
@@ -376,6 +411,15 @@ const Desk: React.FC = () => {
         } else if ((videoWrapper as any).msRequestFullscreen) { /* IE11 */
           (videoWrapper as any).msRequestFullscreen();
         }
+
+        // Lock ESC key to prevent it from exiting fullscreen
+        // Instead, it will be sent to the remote computer
+        try {
+          (navigator as any).keyboard?.lock(['Escape']);
+          console.log("Keyboard lock: ESC key captured");
+        } catch (error) {
+          console.warn("Failed to lock keyboard:", error);
+        }
       } else {
         if (document.exitFullscreen) {
           document.exitFullscreen();
@@ -383,6 +427,14 @@ const Desk: React.FC = () => {
           (document as any).webkitExitFullscreen();
         } else if ((document as any).msExitFullscreen) { /* IE11 */
           (document as any).msExitFullscreen();
+        }
+
+        // Unlock keyboard when exiting fullscreen
+        try {
+          (navigator as any).keyboard?.unlock();
+          console.log("Keyboard unlock: ESC key released");
+        } catch (error) {
+          console.warn("Failed to unlock keyboard:", error);
         }
       }
     }
