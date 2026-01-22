@@ -2,12 +2,11 @@ import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
 import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormInstance, ProFormSelect, ProFormSlider, ProFormSwitch, ProFormText, ProFormTreeSelect, RequestOptionsType } from "@ant-design/pro-components";
 import { useIntl, useModel } from "@umijs/max";
-import { Alert, Button, Divider, Flex, FloatButton, message, Modal, Popover, Slider, Tooltip } from "antd";
+import { Alert, Button, Divider, Flex, FloatButton, message, Modal, Popover, Slider, Tooltip, Space } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import styles from './index.less'; // 告诉 umi 编译这个 less
-import { CommentOutlined, CustomerServiceOutlined, FullscreenExitOutlined, FullscreenOutlined, PauseCircleOutlined, PlayCircleOutlined, SettingOutlined, SoundOutlined, StopOutlined, MutedOutlined } from "@ant-design/icons";
-import e from "express";
+import { CommentOutlined, CustomerServiceOutlined, FullscreenExitOutlined, FullscreenOutlined, PauseCircleOutlined, PlayCircleOutlined, SettingOutlined, SoundOutlined, StopOutlined, MutedOutlined, ThunderboltOutlined, WindowsOutlined } from "@ant-design/icons";
 
 const SIGNALING_TYPE_CODE_INIT = 101;
 const SIGNALING_TYPE_CODE_OFFER = 102;
@@ -148,6 +147,93 @@ const Desk: React.FC = () => {
     console.log("send keyboard event: ", keyboardEventJson);
     keyboardEventDataChannelRef.current.send(keyboardEventJson);
   }
+
+  // Helper function to send raw keyboard events
+  const sendRawKey = (eventType: 'keydown' | 'keyup', key: string, code: string, modifiers: Partial<Pick<API.KeyboardEventData, 'alt_key' | 'ctrl_key' | 'shift_key' | 'meta_key'>> = {}) => {
+    if (!acceptControlRef.current || !keyboardEventDataChannelRef.current || keyboardEventDataChannelRef.current.readyState !== "open") {
+      return;
+    }
+    const keyboardEvent = {
+      event: eventType,
+      key: key,
+      code: code,
+      key_code: 0,
+      alt_key: modifiers.alt_key || false,
+      ctrl_key: modifiers.ctrl_key || false,
+      shift_key: modifiers.shift_key || false,
+      meta_key: modifiers.meta_key || false,
+      repeat: false,
+      location: 0,
+      is_composing: false,
+    } as API.KeyboardEventData;
+    const keyboardEventJson = JSON.stringify(keyboardEvent);
+    console.log("send raw keyboard event: ", keyboardEventJson);
+    keyboardEventDataChannelRef.current.send(keyboardEventJson);
+  };
+
+  // Helper function to send a sequence of keys
+  const sendKeySequence = async (keyDefs: Array<{ key: string; code: string; modifiers?: Partial<Pick<API.KeyboardEventData, 'alt_key' | 'ctrl_key' | 'shift_key' | 'meta_key'>> }>) => {
+    // Send keydown for all keys
+    for (const keyDef of keyDefs) {
+      sendRawKey('keydown', keyDef.key, keyDef.code, keyDef.modifiers);
+      await new Promise(resolve => setTimeout(resolve, 10)); // Small delay between keys
+    }
+    // Send keyup in reverse order
+    for (let i = keyDefs.length - 1; i >= 0; i--) {
+      sendRawKey('keyup', keyDefs[i].key, keyDefs[i].code, keyDefs[i].modifiers);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  };
+
+  // Shortcut handlers
+  const handleShortcut = async (shortcutName: string) => {
+    switch (shortcutName) {
+      case 'CtrlAltDel':
+        await sendKeySequence([
+          { key: 'Control', code: 'ControlLeft' },
+          { key: 'Alt', code: 'AltLeft' },
+          { key: 'Delete', code: 'Delete' },
+        ]);
+        break;
+      case 'AltTab':
+        await sendKeySequence([
+          { key: 'Alt', code: 'AltLeft' },
+          { key: 'Tab', code: 'Tab' },
+        ]);
+        break;
+      case 'Win':
+        await sendKeySequence([
+          { key: 'Meta', code: 'MetaLeft' },
+        ]);
+        break;
+      case 'WinD':
+        await sendKeySequence([
+          { key: 'Meta', code: 'MetaLeft' },
+          { key: 'd', code: 'KeyD' },
+        ]);
+        break;
+      case 'WinE':
+        await sendKeySequence([
+          { key: 'Meta', code: 'MetaLeft' },
+          { key: 'e', code: 'KeyE' },
+        ]);
+        break;
+      case 'WinL':
+        await sendKeySequence([
+          { key: 'Meta', code: 'MetaLeft' },
+          { key: 'l', code: 'KeyL' },
+        ]);
+        break;
+      case 'WinR':
+        await sendKeySequence([
+          { key: 'Meta', code: 'MetaLeft' },
+          { key: 'r', code: 'KeyR' },
+        ]);
+        break;
+      default:
+        console.warn('Unknown shortcut:', shortcutName);
+    }
+  };
 
   const handleRemoteVideoKeyDown = (event: KeyboardEvent) => {
     console.log("key down, event=", event);
@@ -720,6 +806,32 @@ const Desk: React.FC = () => {
                 className={styles.controlButton}
               />
             </Tooltip>
+            <Popover
+              content={
+                <div className={styles.shortcutMenu}>
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Button block onClick={() => handleShortcut('CtrlAltDel')}>Ctrl + Alt + Del</Button>
+                    <Button block onClick={() => handleShortcut('AltTab')}>Alt + Tab</Button>
+                    <Divider style={{ margin: '4px 0' }} />
+                    <Button block onClick={() => handleShortcut('Win')}><WindowsOutlined /> Win (Start)</Button>
+                    <Button block onClick={() => handleShortcut('WinD')}>Win + D (Desktop)</Button>
+                    <Button block onClick={() => handleShortcut('WinE')}>Win + E (Explorer)</Button>
+                    <Button block onClick={() => handleShortcut('WinR')}>Win + R (Run)</Button>
+                    <Button block onClick={() => handleShortcut('WinL')}>Win + L (Lock)</Button>
+                  </Space>
+                </div>
+              }
+              trigger="click"
+              overlayInnerStyle={{ padding: '12px' }}
+            >
+              <Tooltip title="快捷键">
+                <Button
+                  type="text"
+                  icon={<ThunderboltOutlined />}
+                  className={styles.controlButton}
+                />
+              </Tooltip>
+            </Popover>
             <Popover
               content={
                 <div style={{ height: 100 }}>
