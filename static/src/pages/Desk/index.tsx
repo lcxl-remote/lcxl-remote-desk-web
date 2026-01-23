@@ -94,7 +94,7 @@ const Desk: React.FC = () => {
     }
     const dimensions = dimensionsRef.current;
     if (dimensions.width == 0 || dimensions.height == 0) {
-      message.warning("视频尺寸未初始化，无法发送鼠标事件");
+      message.warning(intl.formatMessage({ id: 'pages.desk.videoSizeNotInitialized' }));
       return;
     }
     const x_ratio = event.offsetX / dimensions.width;
@@ -348,21 +348,21 @@ const Desk: React.FC = () => {
         peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answerDescriptionJson));
         break;
       case SIGNALING_TYPE_CODE_ACCEPT_CONTROL:
-        message.success("控制请求被接受，准备初始化控制通道");
+        message.success(intl.formatMessage({ id: 'pages.desk.controlRequestAccepted' }));
         setAcceptControl(true);
         acceptControlRef.current = true;
         break;
       case SIGNALING_TYPE_CODE_DENY_CONTROL:
-        message.error("控制请求被拒绝");
+        message.error(intl.formatMessage({ id: 'pages.desk.controlRequestDenied' }));
         break;
       case SIGNALING_TYPE_CODE_CLOSE_CONTROL:
-        message.info("控制已被远程主机关闭");
+        message.info(intl.formatMessage({ id: 'pages.desk.controlClosedByRemote' }));
         setAcceptControl(false);
         acceptControlRef.current = false;
         break;
       case SIGNALING_TYPE_CODE_ERROR:
         const error_message = signalingModel.signaling_data;
-        message.error(`服务器错误: ${error_message}`);
+        message.error(intl.formatMessage({ id: 'pages.desk.serverError' }, { error_message }));
         break;
       default:
         console.error("未知的 signaling_type: ", signalingModel.signaling_type);
@@ -774,7 +774,7 @@ const Desk: React.FC = () => {
           onMouseDown={handleDragStart}
         >
           <div className={styles.controlButtons}>
-            <Tooltip title={acceptControl ? "退出控制" : "请求控制"}>
+            <Tooltip title={acceptControl ? intl.formatMessage({ id: 'pages.desk.exitControl' }) : intl.formatMessage({ id: 'pages.desk.requestControl' })}>
               <Button
                 type="text"
                 icon={acceptControl ? <StopOutlined /> : <CommentOutlined />}
@@ -782,7 +782,7 @@ const Desk: React.FC = () => {
                 className={styles.controlButton}
               />
             </Tooltip>
-            <Tooltip title={isFullscreen ? "退出全屏" : "全屏"}>
+            <Tooltip title={isFullscreen ? intl.formatMessage({ id: 'pages.desk.exitFullscreen' }) : intl.formatMessage({ id: 'pages.desk.fullscreen' })}>
               <Button
                 type="text"
                 icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
@@ -790,7 +790,7 @@ const Desk: React.FC = () => {
                 className={styles.controlButton}
               />
             </Tooltip>
-            <Tooltip title="设置">
+            <Tooltip title={intl.formatMessage({ id: 'pages.desk.settings' })}>
               <Button
                 type="text"
                 icon={<SettingOutlined />}
@@ -798,7 +798,7 @@ const Desk: React.FC = () => {
                 className={styles.controlButton}
               />
             </Tooltip>
-            <Tooltip title={isAudioPlaying ? "暂停音频" : "播放音频"}>
+            <Tooltip title={isAudioPlaying ? intl.formatMessage({ id: 'pages.desk.pauseAudio' }) : intl.formatMessage({ id: 'pages.desk.playAudio' })}>
               <Button
                 type="text"
                 icon={isAudioPlaying ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
@@ -825,7 +825,7 @@ const Desk: React.FC = () => {
                 trigger="click"
                 overlayInnerStyle={{ padding: '12px' }}
               >
-                <Tooltip title="快捷键">
+                <Tooltip title={intl.formatMessage({ id: 'pages.desk.shortcuts' })}>
                   <Button
                     type="text"
                     icon={<ThunderboltOutlined />}
@@ -868,13 +868,13 @@ const Desk: React.FC = () => {
         /*style={{ insetInlineEnd: 24 }}*/
         icon={<CustomerServiceOutlined />}
       >
-        <FloatButton tooltip={<div>全屏</div>} icon={<FullscreenOutlined />} onClick={handleFullScreen} />
+        <FloatButton tooltip={<div>{intl.formatMessage({ id: 'pages.desk.fullscreen' })}</div>} icon={<FullscreenOutlined />} onClick={handleFullScreen} />
         <FloatButton icon={<SettingOutlined />} onClick={showModal} />
-        <FloatButton icon={<CommentOutlined />} tooltip={acceptControl ? <div>退出控制</div> : <div>请求控制</div>} onClick={handleRequestControl} />
+        <FloatButton icon={<CommentOutlined />} tooltip={acceptControl ? <div>{intl.formatMessage({ id: 'pages.desk.exitControl' })}</div> : <div>{intl.formatMessage({ id: 'pages.desk.requestControl' })}</div>} onClick={handleRequestControl} />
       </FloatButton.Group>
 
       <Modal
-        title="桌面配置"
+        title={intl.formatMessage({ id: 'pages.desk.deskConfig' })}
         closable={{ 'aria-label': 'Custom Close Button' }}
         open={isModalOpen}
         footer={false}
@@ -888,7 +888,7 @@ const Desk: React.FC = () => {
               return <div><Divider /><Flex justify="flex-end" align="center" gap="small">
                 {doms}
                 <Button htmlType="button" onClick={handleCancel} key="close">
-                  关闭
+                  {intl.formatMessage({ id: 'pages.desk.close' })}
                 </Button>
               </Flex></div>;
             },
@@ -896,14 +896,14 @@ const Desk: React.FC = () => {
           onFinish={handleOk}
 
         >
-          <Divider plain>显示配置</Divider>
+          <Divider plain>{intl.formatMessage({ id: 'pages.desk.displayConfig' })}</Divider>
           <ProForm.Group>
             <ProFormSelect
               name="image_capture"
-              label="屏幕捕获模式"
+              label={intl.formatMessage({ id: 'pages.desk.screenCaptureMode' })}
               valueEnum={imageCaptureSelectMap}
-              placeholder="请选择一个屏幕捕获模式"
-              rules={[{ required: true, message: '请选择一个屏幕捕获模式!' }]}
+              placeholder={intl.formatMessage({ id: 'pages.desk.screenCaptureModePlaceholder' })}
+              rules={[{ required: true, message: intl.formatMessage({ id: 'pages.desk.screenCaptureModeRequired' }) }]}
 
             />
           </ProForm.Group>
@@ -919,10 +919,10 @@ const Desk: React.FC = () => {
                 return (
                   <ProFormSelect
                     name="video_device_index"
-                    label="显示设备"
+                    label={intl.formatMessage({ id: 'pages.desk.displayDevice' })}
                     valueEnum={videoDeviceSelectMap}
-                    placeholder="请选择一个显示设备"
-                    rules={[{ required: true, message: '请选择一个显示设备!' }]}
+                    placeholder={intl.formatMessage({ id: 'pages.desk.displayDevicePlaceholder' })}
+                    rules={[{ required: true, message: intl.formatMessage({ id: 'pages.desk.displayDeviceRequired' }) }]}
                     colProps={{
                       span: 16,
                     }}
@@ -930,20 +930,20 @@ const Desk: React.FC = () => {
                   />)
               }}</ProForm.Item>
 
-            <ProFormSwitch name="show_mouse" label="显示远程鼠标" colProps={{
+            <ProFormSwitch name="show_mouse" label={intl.formatMessage({ id: 'pages.desk.showRemoteMouse' })} colProps={{
               span: 8,
             }} />
           </ProForm.Group>
 
           <ProForm.Group>
-            <ProFormSwitch name="adaptive_web_page_resolution" label="自适应网页分辨率" colProps={{
+            <ProFormSwitch name="adaptive_web_page_resolution" label={intl.formatMessage({ id: 'pages.desk.adaptiveResolution' })} colProps={{
               span: 8,
             }} />
             <ProForm.Item noStyle shouldUpdate>
               {(form) => {
                 return (<ProFormSlider
                   name="video_zoom_ratio"
-                  label="远程分辨率缩放"
+                  label={intl.formatMessage({ id: 'pages.desk.remoteResolutionScale' })}
                   min={10}
                   marks={{
                     25: '25%',
@@ -960,10 +960,10 @@ const Desk: React.FC = () => {
             </ProForm.Item>
 
           </ProForm.Group>
-          <Divider plain>音频配置</Divider>
+          <Divider plain>{intl.formatMessage({ id: 'pages.desk.audioConfig' })}</Divider>
 
           <ProForm.Group>
-            <ProFormSwitch name="enable_audio" label="捕获音频" colProps={{
+            <ProFormSwitch name="enable_audio" label={intl.formatMessage({ id: 'pages.desk.captureAudio' })} colProps={{
               span: 4,
             }} />
             <ProForm.Item noStyle shouldUpdate>
@@ -974,10 +974,10 @@ const Desk: React.FC = () => {
                 return (
                   <ProFormSelect
                     name="audio_capture"
-                    label="音频捕获模式"
+                    label={intl.formatMessage({ id: 'pages.desk.audioCaptureMode' })}
                     valueEnum={audioCaptureSelectMap}
-                    placeholder="请选择一个音频捕获模式"
-                    rules={[{ required: form.getFieldValue("enable_audio"), message: '请选择一个音频捕获模式!' }]}
+                    placeholder={intl.formatMessage({ id: 'pages.desk.audioCaptureModePlaceholder' })}
+                    rules={[{ required: form.getFieldValue("enable_audio"), message: intl.formatMessage({ id: 'pages.desk.audioCaptureModeRequired' }) }]}
                     disabled={!form.getFieldValue("enable_audio")}
                     colProps={{
                       span: 20,
@@ -1014,10 +1014,10 @@ const Desk: React.FC = () => {
 
                 return (<ProFormSelect
                   name="audio_device"
-                  label="音频设备"
+                  label={intl.formatMessage({ id: 'pages.desk.audioDevice' })}
                   valueEnum={audioDeviceSelectMap}
-                  placeholder="请选择一个音频设备"
-                  rules={[{ required: form.getFieldValue("enable_audio"), message: '请选择一个音频设备!' }]}
+                  placeholder={intl.formatMessage({ id: 'pages.desk.audioDevicePlaceholder' })}
+                  rules={[{ required: form.getFieldValue("enable_audio"), message: intl.formatMessage({ id: 'pages.desk.audioDeviceRequired' }) }]}
 
                   disabled={!form.getFieldValue("enable_audio") || !audioDeviceSelectMap}
                   convertValue={(value, namePath) => {
@@ -1038,22 +1038,22 @@ const Desk: React.FC = () => {
               }}
             </ProForm.Item>
           </ProForm.Group>
-          <Divider plain>编码配置</Divider>
+          <Divider plain>{intl.formatMessage({ id: 'pages.desk.encodingConfig' })}</Divider>
           <ProForm.Group>
             <ProFormSelect
               name="video_encoder"
-              label="视频编码"
+              label={intl.formatMessage({ id: 'pages.desk.videoEncoder' })}
               valueEnum={videoEncodeTypeSelectMap}
-              placeholder="自动检测"
+              placeholder={intl.formatMessage({ id: 'pages.desk.autoDetect' })}
               colProps={{
                 span: 8,
               }}
             />
-            <ProFormSwitch name="switch" label="自适应码率" colProps={{
+            <ProFormSwitch name="switch" label={intl.formatMessage({ id: 'pages.desk.adaptiveBitrate' })} colProps={{
               span: 8,
             }} />
             <ProFormDigit
-              label="码率 bps"
+              label={intl.formatMessage({ id: 'pages.desk.bitrate' })}
               name="video_encode_bps"
               min={1000}
               max={1000_000_000_000}
@@ -1066,14 +1066,14 @@ const Desk: React.FC = () => {
           <ProForm.Group>
             <ProFormSelect
               name="audio_encoder"
-              label="音频编码"
+              label={intl.formatMessage({ id: 'pages.desk.audioEncoder' })}
               valueEnum={audioEncodeTypeSelectMap}
-              placeholder="自动检测"
+              placeholder={intl.formatMessage({ id: 'pages.desk.autoDetect' })}
             />
           </ProForm.Group>
-          <Divider plain>高级</Divider>
+          <Divider plain>{intl.formatMessage({ id: 'pages.desk.advanced' })}</Divider>
           <ProForm.Group>
-            <ProFormSwitch name="enable_d3d_debug" label="开启D3D调试" colProps={{
+            <ProFormSwitch name="enable_d3d_debug" label={intl.formatMessage({ id: 'pages.desk.enableD3DDebug' })} colProps={{
               span: 8,
             }} />
           </ProForm.Group>

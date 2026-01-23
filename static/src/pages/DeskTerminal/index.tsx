@@ -29,10 +29,98 @@ const DeskTerminal: React.FC = () => {
 
   const closeTerminal = () => {
     if (socketRef.current) {
-      console.log("关闭websocket", socketRef.current);
+      console.log(intl.formatMessage({ id: 'pages.deskTerminal.closeWebSocket' }), socketRef.current);
       socketRef.current.close();
       socketRef.current = undefined;
     }
+    if (terminal) {
+      console.log(intl.formatMessage({ id: 'pages.deskTerminal.closeXterm' }));
+      terminal?.dispose();
+      setTerminal(undefined);
+    }
+  }
+
+  const reloadTerminal = () => {
+    closeTerminal();
+
+    if (!selectedCommand) {
+
+      return;
+    }
+    const select_command: string[] = JSON.parse(selectedCommand);
+    const command = encodeURIComponent(select_command.join(","));
+    // create new websocket connection
+    const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
+    const wsUri = `${proto}://${location.host}/api/desk/terminal?command=${command}`;
+    const sock = new WebSocket(wsUri);
+
+    sock.onopen = (event) => {
+      console.log(intl.formatMessage({ id: 'pages.deskTerminal.connectSuccess' }), event);
+    };
+
+    socketRef.current = sock;
+
+    const new_terminal = new Terminal({ cursorBlink: true, windowsMode: false });
+
+    new_terminal.open(document.getElementById('terminal-container')!);
+
+    const fitAddon = new FitAddon();
+    // terminal 的尺寸与父元素匹配
+    new_terminal.loadAddon(fitAddon);
+    fitAddon.fit();
+
+    // add websocket addon to terminal
+    const attachAddon = new AttachAddon(sock);
+    new_terminal.loadAddon(attachAddon);
+
+    // add web links addon to terminal
+    new_terminal.loadAddon(new WebLinksAddon());
+
+    new_terminal.writeln(intl.formatMessage({ id: 'pages.deskTerminal.welcomeMessage' }));
+    setTerminal(new_terminal);
+  }
+
+  const handleReloadTerminal = (e: React.MouseEvent<HTMLButtonElement>) => {
+    reloadTerminal();
+
+
+  }
+
+  //let socket = null;
+  useEffect(() => {
+    (async () => {
+      const { location } = window;
+
+      const response = await listTerminal();
+      let select_options = response.commands.map((command: string[]) => {
+        let option: DefaultOptionType = {
+          label: command[0],
+          value: JSON.stringify(command),
+        };
+        return option;
+      });
+      setCommandSelectOptions(select_options);
+
+      return () => {
+        closeTerminal();
+      };
+    })();
+  }, []);
+
+  return (
+    <PageContainer>
+      <div>
+
+        <Space.Compact block>
+          <Select showSearch options={commandSelectOptions} style={{ width: '100%' }} value={selectedCommand} onChange={setSelectedCommand} />
+          <Button type="primary" icon={<ReloadOutlined />} onClick={handleReloadTerminal} disabled={!selectedCommand}>{intl.formatMessage({ id: 'pages.deskTerminal.reload' })}</Button>
+        </Space.Compact>
+
+      </div>
+      <div id="terminal-container" style={{ width: "100%", height: "100%" }}></div>
+    </PageContainer>
+  );
+}
     if (terminal) {
       console.log("关闭xterm");
       terminal?.dispose();

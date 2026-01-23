@@ -20,8 +20,8 @@ import React, { useRef, useState } from 'react';
  *
  * @param selectedRows
  */
-const handleRemove = async (selectedRows: API.FileInfo[]) => {
-  const hide = message.loading('正在删除');
+const handleRemove = async (selectedRows: API.FileInfo[], intl: any) => {
+  const hide = message.loading(intl.formatMessage({ id: 'pages.fileList.deleting' }));
   if (!selectedRows) return true;
   try {
     for (const index in selectedRows) {
@@ -32,11 +32,11 @@ const handleRemove = async (selectedRows: API.FileInfo[]) => {
       await deleteFile(request);
     }
     hide();
-    message.success('Deleted successfully and will refresh soon');
+    message.success(intl.formatMessage({ id: 'pages.fileList.deleteSuccess' }));
     return true;
   } catch (error) {
     hide();
-    message.error('Delete failed, please try again');
+    message.error(intl.formatMessage({ id: 'pages.fileList.deleteFailed' }));
     return false;
   }
 };
@@ -195,17 +195,17 @@ const TableList: React.FC = () => {
           description={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmDescription" })}
           onConfirm={
             async () => {
-              console.log("Begin to delete file: %s", record.path);
+              console.log(intl.formatMessage({ id: 'pages.fileList.startDeleteFile' }, { path: record.path }));
               try {
                 const response = await deleteFile({
                   file_path: record.path,
                   delete_permanently: false,
                 });
-                console.log("Deleted file: %s: %s", record.path, response);
+                console.log(intl.formatMessage({ id: 'pages.fileList.deletedFile' }, { path: record.path, response }));
                 setCurrentRow(undefined);
                 actionRef.current?.reloadAndRest?.();
               } catch (err) {
-                console.log("Request deleteFile error: " + err)
+                console.log(intl.formatMessage({ id: 'pages.fileList.requestDeleteFileError' }, { error: err }))
               }
             }
           }
@@ -308,7 +308,7 @@ const TableList: React.FC = () => {
             title={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmTitle" })}
             description={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmDescription" })}
             onConfirm={async () => {
-              await handleRemove(selectedRowsState);
+              await handleRemove(selectedRowsState, intl);
               setSelectedRows([]);
               actionRef.current?.reloadAndRest?.();
             }}
