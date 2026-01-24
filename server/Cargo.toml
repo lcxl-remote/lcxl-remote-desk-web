@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+portable-pty = "0.8"
 desk-utils = { workspace = true }
 desk-turn = { workspace = true }
 desk-signal-facade = { workspace = true }

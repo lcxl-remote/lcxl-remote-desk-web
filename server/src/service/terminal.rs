@@ -1,19 +1,13 @@
-use std::process::ExitStatus;
+use std::io::{Read, Write};
 
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
-use bytestring::ByteString;
 use desk_server_user::model::CurrentUser;
 use desk_utils::error::DeskErrorCode;
-use encoding_rs::{Decoder, Encoder};
 use futures::StreamExt;
+use portable_pty::{MasterPty, Child};
 use regex::Regex;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::Child,
-};
-#[cfg(target_os = "windows")]
-use windows::Win32::Globalization::GetOEMCP;
+use tokio::sync::mpsc;
 
 use crate::model::terminal::TerminalList;
 use crate::{error::DeskError, model::settings::SharedSettings};
@@ -95,185 +89,118 @@ pub async fn fetch_terminal_list(
     inner_fetch_terminal_list(settings, &shell_list, &shell_regexe_list).await
 }
 
-pub fn convert_to_utf8_str(decoder: &mut Decoder, stdout_buf_vec: &mut Vec<u8>) -> String {
-    let mut intermediate_buffer_bytes = [0u8; 4096];
-    // Is there a safe way to create a stack-allocated &mut str?
-    let intermediate_buffer: &mut str =
-        unsafe { std::mem::transmute(&mut intermediate_buffer_bytes[..]) };
-    let (_code_result, decoder_read, decoder_written, _) =
-        decoder.decode_to_str(&stdout_buf_vec, intermediate_buffer, false);
-
-    let removed: Vec<u8> = stdout_buf_vec.drain(0..decoder_read).collect();
-    log::trace!("removed {} bytes from buffer", removed.len());
-    let utf8_buffer = intermediate_buffer.as_bytes()[..decoder_written].to_vec();
-    let output = String::from_utf8_lossy(&utf8_buffer).to_string();
-    #[cfg(target_os = "linux")]
-    let output = output.replace("\n", "\r\n");
-    return output;
-}
-
-pub fn convert_str_to_encoding_bytes(encoder: &mut Encoder, utf8_byte_str: &ByteString) -> Vec<u8> {
-    let mut utf8_str_buffer = utf8_byte_str.to_string();
-
-    #[cfg(target_os = "windows")]
-    {
-        // replace \r with \r\n
-        utf8_str_buffer = utf8_str_buffer.replace("\r", "\r\n");
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // replace \r with \n
-        utf8_str_buffer = utf8_str_buffer.replace("\r", "\n");
-    }
-
-    let mut output_vec = Vec::<u8>::new();
-    loop {
-        let mut intermediate_buffer_bytes = [0u8; 4096];
-        let (_code_result, encoder_read, encoder_write, _) = encoder.encode_from_utf8(
-            &utf8_str_buffer,
-            intermediate_buffer_bytes.as_mut_slice(),
-            false,
-        );
-        output_vec.extend_from_slice(&intermediate_buffer_bytes[..encoder_write]);
-        let removed: Vec<char> = utf8_str_buffer.drain(0..encoder_read).collect();
-        log::trace!("removed {} bytes from buffer", removed.len());
-        if utf8_str_buffer.is_empty() {
-            break;
-        }
-    }
-    output_vec
-}
-
-pub fn check_process_exit_status(child: &mut Child) -> Option<ExitStatus> {
-    let wait_result = child.try_wait();
-    if let Ok(Some(status)) = wait_result {
-        Some(status)
-    } else {
-        None
-    }
-}
-
 pub async fn handle_terminal(
     _settings: web::Data<SharedSettings>,
     mut stream: AggregatedMessageStream,
     mut session: Session,
     _user: CurrentUser,
-    mut child: Child,
+    master_pty: Box<dyn MasterPty + Send>,
+    mut child: Box<dyn Child + Send + Sync>,
 ) -> Result<(), DeskError> {
     log::info!("Handling terminal session");
-    // get oem code page
-    #[cfg(target_os = "windows")]
-    let encoding = {
-        let oemcp = unsafe { GetOEMCP() };
-        log::info!("OEM Code Page: {}", oemcp);
-        if let Some(encoding) = codepage::to_encoding(oemcp as u16) {
-            encoding
-        } else {
-            return DeskError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Failed to get oem cp".to_owned(),
-            );
+
+    // Since portable-pty reads are blocking, we need to spawn a blocking task to read from pty
+    // and send to a channel that the main async loop can read from.
+    let mut reader = master_pty.try_clone_reader().map_err(|e| {
+        let err = DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, format!("Failed to clone pty reader: {}", e));
+        match err {
+            Err(e) => e,
+            Ok(_) => unreachable!(),
         }
-    };
-    #[cfg(not(target_os = "windows"))]
-    let encoding = encoding_rs::UTF_8;
-    let mut decoder = encoding.new_decoder();
-    let mut encoder = encoding.new_encoder();
+    })?;
+    
+    let mut writer = master_pty.take_writer().map_err(|e| {
+         let err = DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, format!("Failed to take pty writer: {}", e));
+         match err {
+             Err(e) => e,
+             Ok(_) => unreachable!(),
+         }
+    })?;
 
-    let mut stdin = child.stdin.take().expect("Failed to open stdin");
-    let mut stdout = child.stdout.take().expect("Failed to open stdout");
-    let mut stderr = child.stderr.take().expect("Failed to open stderr");
 
-    let stdout_buf = &mut [0; 1024];
-    let stderr_buf = &mut [0; 1024];
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(32);
 
-    let mut stdout_buf_vec = Vec::<u8>::with_capacity(1024);
-    let mut stderr_buf_vec = Vec::<u8>::with_capacity(1024);
+    // Spawn a blocking thread for reading from PTY
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(n) => {
+                    if n == 0 {
+                        break;
+                    }
+                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to read from pty: {}", e);
+                    break;
+                }
+            }
+        }
+    });
 
     loop {
         tokio::select! {
-            result = stdout.read(stdout_buf) => {
-                if let Err(e) = result {
-                    log::error!("Failed to read stdout: {}", e);
-                    return Err(e.into());
+            // Receive data from PTY (via channel) and send to WebSocket
+            Some(data) = rx.recv() => {
+                let text = String::from_utf8_lossy(&data);
+                // Convert Cow to String to satisfy Into<ByteString>
+                if let Err(e) = session.text(text.to_string()).await {
+                     log::error!("Failed to send to websocket: {}", e);
+                     break;
                 }
-                if let Some(status) = check_process_exit_status(&mut child) {
-                    log::warn!("Process exited with status: {:?}", status);
-                    break;
-                }
-                stdout_buf_vec.extend_from_slice(&stdout_buf[..result?]); // Extend the vector
-
-                log::debug!("Received stdout content: {:?}", stdout_buf_vec);
-                let utf8_buffer = convert_to_utf8_str(&mut decoder, &mut stdout_buf_vec);
-                log::debug!("Sending stdout content to client: {:?}", utf8_buffer);
-                session.text(utf8_buffer).await?;
             },
-            result = stderr.read(stderr_buf) => {
-                if let Err(e) = result {
-                    log::error!("Failed to read stderr: {}", e);
-                    return Err(e.into());
-                }
-                if let Some(status) = check_process_exit_status(&mut child) {
-                    log::warn!("Process exited with status: {:?}", status);
-                    break;
-                }
-                stderr_buf_vec.extend_from_slice(&stderr_buf[..result?]); // Extend the vector
-
-                log::debug!("Received stderr content: {:?}", stderr_buf_vec);
-
-                let utf8_buffer = convert_to_utf8_str(&mut decoder, &mut stderr_buf_vec);
-                log::debug!("Sending stderr content to client: {:?}", utf8_buffer);
-                session.text(utf8_buffer).await?;
-            },
+            
+            // Receive data from WebSocket and write to PTY
             result = stream.next() => {
-                if let Some(status) = check_process_exit_status(&mut child) {
-                    log::warn!("Process exited with status: {:?}", status);
-                    break;
-                }
-                let msg = if let Some(msg) = result {
-                    msg
-                } else {
-                    log::info!("Stream closed");
-                    break;
-                };
-
-                match msg {
-                    Ok(AggregatedMessage::Text(text)) => {
-                        //stdin_buf_vec
-                        log::debug!("Recevied text content from websocket and sending to stdin: {:?}", text);
-                        let encoding_buffer = convert_str_to_encoding_bytes(&mut encoder, &text);
-
-                        log::debug!("Write encoding buffer to stdin: {:?}", encoding_buffer);
-                        stdin.write_all(&encoding_buffer).await?;
-                        stdin.flush().await?;
-                    }
-
-                    Ok(AggregatedMessage::Binary(bin)) => {
-                        log::debug!("Recevied binary content from websocket and sending to stdin: {:?}", bin);
-                        stdin.write_all(&bin).await?;
-                        stdin.flush().await?;
-                    }
-
-                    Ok(AggregatedMessage::Ping(msg)) => {
-                        // respond to PING frame with PONG frame
-                        session.pong(&msg).await?;
-                    }
-                    Ok(AggregatedMessage::Pong(_)) => {
-                        // ignore PONG frames
-                    }
-                    Ok(AggregatedMessage::Close(close_reason)) => {
-                        log::warn!("WS close frame received: {:?}", close_reason);
-                        break;
-                    }
-                    Err(e) => {
+                let msg = match result {
+                    Some(Ok(msg)) => msg,
+                    Some(Err(e)) => {
                         log::error!("WS error: {}", e);
                         break;
                     }
+                    None => {
+                        log::info!("Stream closed");
+                        break;
+                    }
+                };
+
+                match msg {
+                    AggregatedMessage::Text(text) => {
+                        log::debug!("Received text content from websocket: {:?}", text);
+                        if let Err(e) = writer.write_all(text.as_bytes()) {
+                             log::error!("Failed to write to pty: {}", e);
+                             break;
+                        }
+                    }
+                    AggregatedMessage::Binary(bin) => {
+                        log::debug!("Received binary content from websocket: {:?}", bin);
+                         if let Err(e) = writer.write_all(&bin) {
+                             log::error!("Failed to write to pty: {}", e);
+                             break;
+                        }
+                    }
+                    AggregatedMessage::Ping(msg) => {
+                        if let Err(e) = session.pong(&msg).await {
+                             log::error!("Failed to send pong: {}", e);
+                             break;
+                        }
+                    }
+                    AggregatedMessage::Pong(_) => {}
+                    AggregatedMessage::Close(reason) => {
+                        log::warn!("WS close frame received: {:?}", reason);
+                        break;
+                    }
                 }
-            },
-        };
+            }
+        }
     }
+    
+    // cleanup
+    let _ = child.kill();
+    
     Ok(())
 }
 

@@ -1,11 +1,9 @@
-use std::process::Stdio;
-
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::service::SessionExt;
 use desk_signal_facade::model::signal::SignalingModel;
 use log::{error, info};
-use tokio::process::Command;
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use crate::{
     error::DeskError,
@@ -77,15 +75,37 @@ pub async fn open_terminal_session(
     }
 
     let execute_file_path = terminal_command_list[0];
-
     let args_list = &terminal_command_list[1..];
-    let child = Command::new(execute_file_path)
-        .args(args_list)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+
+    // Create a new PTY system
+    let pty_system = native_pty_system();
+
+    // Create a new PTY pair
+    let pair = pty_system.openpty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    }).map_err(|e| actix_web::error::ErrorInternalServerError(format!("Failed to open pty: {}", e)))?;
+
+    let mut cmd = CommandBuilder::new(execute_file_path);
+    cmd.args(args_list);
+    
+    // Check if we are in the source directory (development mode)
+    // If so, set the current directory to the parent of the server directory (project root)
+    // This is useful for development
+    if std::path::Path::new("Cargo.toml").exists() {
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(parent) = cwd.parent() {
+                 cmd.cwd(parent);
+            }
+        }
+    }
+    
+    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+         actix_web::error::ErrorInternalServerError(format!("Failed to spawn command in pty: {}", e))
+    })?;
+
 
     let (res, session, stream) = actix_ws::handle(&req, stream)?;
 
@@ -97,7 +117,7 @@ pub async fn open_terminal_session(
     // start task but don't wait for it
     rt::spawn(async move {
         // receive messages from websocket
-        let result = handle_terminal(settings, stream, session, user, child).await;
+        let result = handle_terminal(settings, stream, session, user, pair.master, child).await;
         if let Err(e) = result {
             error!("Error handling terminal: {:?}", e);
         } else {
