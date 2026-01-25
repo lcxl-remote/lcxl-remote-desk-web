@@ -23,6 +23,7 @@ const DeskTerminal: React.FC = () => {
 
   const [commandSelectOptions, setCommandSelectOptions] = useState<DefaultOptionType[] | undefined>();
   const [selectedCommand, setSelectedCommand] = useState<string | undefined>();
+  const fitAddonRef = useRef<FitAddon>();
 
 
   const [terminal, setTerminal] = useState<Terminal>();
@@ -70,16 +71,50 @@ const DeskTerminal: React.FC = () => {
     // terminal 的尺寸与父元素匹配
     new_terminal.loadAddon(fitAddon);
     fitAddon.fit();
-
-    // add websocket addon to terminal
-    const attachAddon = new AttachAddon(sock);
-    new_terminal.loadAddon(attachAddon);
+    fitAddonRef.current = fitAddon;
 
     // add web links addon to terminal
     new_terminal.loadAddon(new WebLinksAddon());
 
     new_terminal.writeln(intl.formatMessage({ id: 'pages.deskTerminal.welcomeMessage' }));
     setTerminal(new_terminal);
+
+    // Custom WebSocket handling for JSON protocol
+    sock.onmessage = (event) => {
+      if (typeof event.data === 'string') {
+        new_terminal.write(event.data);
+      } else {
+        // Handle binary data (Blob or ArrayBuffer)
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (reader.result instanceof ArrayBuffer) {
+            new_terminal.write(new Uint8Array(reader.result));
+          }
+        };
+        reader.readAsArrayBuffer(event.data);
+      }
+    };
+
+    new_terminal.onData((data) => {
+      if (sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'data', content: data }));
+      }
+    });
+
+    new_terminal.onResize((size) => {
+      if (sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ type: 'resize', rows: size.rows, cols: size.cols }));
+      }
+    });
+
+    // Send initial size
+    if (sock.readyState === WebSocket.OPEN) {
+      sock.send(JSON.stringify({ type: 'resize', rows: new_terminal.rows, cols: new_terminal.cols }));
+    } else {
+      sock.addEventListener('open', () => {
+        sock.send(JSON.stringify({ type: 'resize', rows: new_terminal.rows, cols: new_terminal.cols }));
+      });
+    }
   }
 
   const handleReloadTerminal = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -87,6 +122,21 @@ const DeskTerminal: React.FC = () => {
 
 
   }
+
+  useEffect(() => {
+    const container = document.getElementById('terminal-container');
+    if (!container) return;
+    
+    const resizeObserver = new ResizeObserver(() => {
+        if (fitAddonRef.current) {
+            fitAddonRef.current.fit();
+        }
+    });
+    
+    resizeObserver.observe(container);
+    
+    return () => resizeObserver.disconnect();
+  }, []);
 
   //let socket = null;
   useEffect(() => {

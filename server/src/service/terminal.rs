@@ -5,12 +5,20 @@ use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use desk_server_user::model::CurrentUser;
 use desk_utils::error::DeskErrorCode;
 use futures::StreamExt;
-use portable_pty::{MasterPty, Child};
+use portable_pty::{MasterPty, Child, PtySize};
 use regex::Regex;
 use tokio::sync::mpsc;
+use serde::Deserialize;
 
 use crate::model::terminal::TerminalList;
 use crate::{error::DeskError, model::settings::SharedSettings};
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum TerminalMessage {
+    Data { content: String },
+    Resize { rows: u16, cols: u16 },
+}
 
 /// Inner function to fetch terminal list based on provided shell names and regex patterns
 pub async fn inner_fetch_terminal_list(
@@ -170,9 +178,31 @@ pub async fn handle_terminal(
                 match msg {
                     AggregatedMessage::Text(text) => {
                         log::debug!("Received text content from websocket: {:?}", text);
-                        if let Err(e) = writer.write_all(text.as_bytes()) {
-                             log::error!("Failed to write to pty: {}", e);
-                             break;
+                        
+                        // Try to parse as JSON protocol
+                        match serde_json::from_str::<TerminalMessage>(&text) {
+                            Ok(TerminalMessage::Data { content }) => {
+                                if let Err(e) = writer.write_all(content.as_bytes()) {
+                                     log::error!("Failed to write to pty: {}", e);
+                                     break;
+                                }
+                            },
+                            Ok(TerminalMessage::Resize { rows, cols }) => {
+                                if let Err(e) = master_pty.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+                                    log::error!("Failed to resize pty: {}", e);
+                                    // Non-fatal error
+                                } else {
+                                    log::debug!("Resized pty to {}x{}", rows, cols);
+                                }
+                            },
+                            Err(_) => {
+                                // Fallback: Treat as raw input if not valid JSON (compatibility)
+                                log::warn!("Received non-JSON message, treating as raw input");
+                                if let Err(e) = writer.write_all(text.as_bytes()) {
+                                     log::error!("Failed to write to pty: {}", e);
+                                     break;
+                                }
+                            }
                         }
                     }
                     AggregatedMessage::Binary(bin) => {
