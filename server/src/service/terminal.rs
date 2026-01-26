@@ -195,13 +195,10 @@ pub async fn handle_terminal(
                                     log::debug!("Resized pty to {}x{}", rows, cols);
                                 }
                             },
-                            Err(_) => {
-                                // Fallback: Treat as raw input if not valid JSON (compatibility)
-                                log::warn!("Received non-JSON message, treating as raw input");
-                                if let Err(e) = writer.write_all(text.as_bytes()) {
-                                     log::error!("Failed to write to pty: {}", e);
-                                     break;
-                                }
+                            Err(e) => {
+                                // Protocol enforcement: Drop invalid JSON. 
+                                // Do NOT write raw text to PTY to prevent garbage injection.
+                                log::warn!("Received invalid JSON message: {}. Error: {}", text, e);
                             }
                         }
                     }

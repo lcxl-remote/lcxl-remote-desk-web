@@ -127,15 +127,22 @@ const DeskTerminal: React.FC = () => {
     const container = document.getElementById('terminal-container');
     if (!container) return;
     
+    let timeoutId: ReturnType<typeof setTimeout>;
     const resizeObserver = new ResizeObserver(() => {
-        if (fitAddonRef.current) {
-            fitAddonRef.current.fit();
-        }
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+            if (fitAddonRef.current) {
+                fitAddonRef.current.fit();
+            }
+        }, 100); // Debounce for 100ms
     });
     
     resizeObserver.observe(container);
     
-    return () => resizeObserver.disconnect();
+    return () => {
+        resizeObserver.disconnect();
+        clearTimeout(timeoutId);
+    };
   }, []);
 
   //let socket = null;
