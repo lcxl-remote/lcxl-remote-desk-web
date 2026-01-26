@@ -3,12 +3,11 @@ use std::io::{Read, Write};
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use desk_server_user::model::CurrentUser;
-use desk_utils::error::DeskErrorCode;
 use futures::StreamExt;
-use portable_pty::{MasterPty, Child, PtySize};
+use portable_pty::{Child, MasterPty, PtySize};
 use regex::Regex;
-use tokio::sync::mpsc;
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
 use crate::model::terminal::TerminalList;
 use crate::{error::DeskError, model::settings::SharedSettings};
@@ -109,22 +108,9 @@ pub async fn handle_terminal(
 
     // Since portable-pty reads are blocking, we need to spawn a blocking task to read from pty
     // and send to a channel that the main async loop can read from.
-    let mut reader = master_pty.try_clone_reader().map_err(|e| {
-        let err = DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, format!("Failed to clone pty reader: {}", e));
-        match err {
-            Err(e) => e,
-            Ok(_) => unreachable!(),
-        }
-    })?;
-    
-    let mut writer = master_pty.take_writer().map_err(|e| {
-         let err = DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, format!("Failed to take pty writer: {}", e));
-         match err {
-             Err(e) => e,
-             Ok(_) => unreachable!(),
-         }
-    })?;
+    let mut reader = master_pty.try_clone_reader()?;
 
+    let mut writer = master_pty.take_writer()?;
 
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(32);
 
@@ -152,15 +138,28 @@ pub async fn handle_terminal(
     loop {
         tokio::select! {
             // Receive data from PTY (via channel) and send to WebSocket
-            Some(data) = rx.recv() => {
-                let text = String::from_utf8_lossy(&data);
-                // Convert Cow to String to satisfy Into<ByteString>
-                if let Err(e) = session.text(text.to_string()).await {
-                     log::error!("Failed to send to websocket: {}", e);
-                     break;
+            data_opt = rx.recv() => {
+                match data_opt {
+                    Some(data) => {
+                        let text = String::from_utf8_lossy(&data);
+                        // Convert Cow to String to satisfy Into<ByteString>
+                        if let Err(e) = session.text(text.to_string()).await {
+                             log::error!("Failed to send to websocket: {}", e);
+                             break;
+                        }
+                    }
+                    None => {
+                        // FIXME not work
+                        log::info!("PTY stream closed, sending exit message to client");
+                        // Send exit message (yellow color)
+                        let _ = session.text("\r\n\x1b[33m[Process exited]\x1b[0m\r\n").await;
+                        // Close websocket session
+                        let _ = session.close(None).await;
+                        break;
+                    }
                 }
             },
-            
+
             // Receive data from WebSocket and write to PTY
             result = stream.next() => {
                 let msg = match result {
@@ -178,7 +177,7 @@ pub async fn handle_terminal(
                 match msg {
                     AggregatedMessage::Text(text) => {
                         log::debug!("Received text content from websocket: {:?}", text);
-                        
+
                         // Try to parse as JSON protocol
                         match serde_json::from_str::<TerminalMessage>(&text) {
                             Ok(TerminalMessage::Data { content }) => {
@@ -196,7 +195,7 @@ pub async fn handle_terminal(
                                 }
                             },
                             Err(e) => {
-                                // Protocol enforcement: Drop invalid JSON. 
+                                // Protocol enforcement: Drop invalid JSON.
                                 // Do NOT write raw text to PTY to prevent garbage injection.
                                 log::warn!("Received invalid JSON message: {}. Error: {}", text, e);
                             }
@@ -224,10 +223,10 @@ pub async fn handle_terminal(
             }
         }
     }
-    
+
     // cleanup
     let _ = child.kill();
-    
+
     Ok(())
 }
 

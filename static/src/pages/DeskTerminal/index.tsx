@@ -95,6 +95,12 @@ const DeskTerminal: React.FC = () => {
       }
     };
 
+    sock.onclose = () => {
+        console.log("WebSocket connection closed");
+        new_terminal.write('\r\n\x1b[2mConnection closed.\x1b[0m');
+        new_terminal.options.cursorBlink = false;
+    };
+
     new_terminal.onData((data) => {
       if (sock.readyState === WebSocket.OPEN) {
         sock.send(JSON.stringify({ type: 'data', content: data }));
