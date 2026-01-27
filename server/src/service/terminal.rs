@@ -135,8 +135,18 @@ pub async fn handle_terminal(
         }
     });
 
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(200));
+
     loop {
         tokio::select! {
+            _ = ticker.tick() => {
+                if let Ok(Some(_exit_status)) = child.try_wait() {
+                    log::info!("Child process exited with status: {:?}", _exit_status);
+                    let _ = session.text("\r\n\x1b[33m[Process exited]\x1b[0m\r\n").await;
+                    let _ = session.close(None).await;
+                    break;
+                }
+            }
             // Receive data from PTY (via channel) and send to WebSocket
             data_opt = rx.recv() => {
                 match data_opt {
