@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-portable-pty = "0.8"
+
 desk-utils = { workspace = true }
 desk-turn = { workspace = true }
 desk-signal-facade = { workspace = true }
@@ -33,6 +33,7 @@ strum_macros = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
 uuid = { workspace = true }
+portable-pty = { workspace = true }
 
 actix-files = "0.6"
 actix-server = "2.6"
