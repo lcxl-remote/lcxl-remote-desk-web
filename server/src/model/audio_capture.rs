@@ -54,6 +54,8 @@ pub enum AudioCaptureType {
     WASAPI,
     #[cfg(target_os = "linux")]
     PIPEWIRE,
+    #[cfg(target_os = "macos")]
+    SCKIT,
 }
 
 impl Default for AudioCaptureType {
@@ -62,6 +64,8 @@ impl Default for AudioCaptureType {
         return AudioCaptureType::WASAPI;
         #[cfg(target_os = "linux")]
         return AudioCaptureType::PIPEWIRE;
+        #[cfg(target_os = "macos")]
+        return AudioCaptureType::SCKIT;
     }
 }
 

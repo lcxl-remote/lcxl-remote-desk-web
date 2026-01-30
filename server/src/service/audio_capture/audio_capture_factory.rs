@@ -14,6 +14,10 @@ use crate::{
     },
 };
 
+#[cfg(target_os = "macos")]
+use crate::service::audio_capture::mac_screencapturekit::{
+    MacScreencaptureKitAudioCapture, MacScreencaptureKitAudioDeviceEnumerator,
+};
 #[cfg(target_os = "windows")]
 use crate::service::audio_capture::wasapi_capture::{
     WasapiAudioCapture, WasapiAudioDeviceEnumerator,
@@ -48,6 +52,8 @@ pub fn create_audio_capture(
         AudioCaptureType::WASAPI => Box::new(WasapiAudioCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
         AudioCaptureType::PIPEWIRE => Box::new(PipewireAudioCapture::new(desk_settings)?),
+        #[cfg(target_os = "macos")]
+        AudioCaptureType::SCKIT => Box::new(MacScreencaptureKitAudioCapture::new(desk_settings)?),
     };
     Ok(capture)
 }
@@ -71,6 +77,8 @@ pub fn list_audio_device(
         AudioCaptureType::WASAPI => Box::new(WasapiAudioDeviceEnumerator::new()?),
         #[cfg(target_os = "linux")]
         AudioCaptureType::PIPEWIRE => Box::new(PipewireAudioDeviceEnumerator::new()),
+        #[cfg(target_os = "macos")]
+        AudioCaptureType::SCKIT => Box::new(MacScreencaptureKitAudioDeviceEnumerator::new()),
     };
     let output_list = capture.get_device_list()?;
 

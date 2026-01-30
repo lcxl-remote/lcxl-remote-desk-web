@@ -37,11 +37,15 @@ pub enum ImageCaptureType {
     #[cfg(target_os = "windows")]
     DGI,
     /// Capture image from X11 device
+    /// Capture image from X11 device
     #[cfg(target_os = "linux")]
     X11,
     /// Capture image from PipeWire device
     #[cfg(target_os = "linux")]
     PIPEWIRE,
+    /// Capture image using ScreenCaptureKit
+    #[cfg(target_os = "macos")]
+    SCKIT,
 }
 
 impl Default for ImageCaptureType {
@@ -50,6 +54,8 @@ impl Default for ImageCaptureType {
         return ImageCaptureType::DIGX;
         #[cfg(target_os = "linux")]
         return ImageCaptureType::X11;
+        #[cfg(target_os = "macos")]
+        return ImageCaptureType::SCKIT;
     }
 }
 

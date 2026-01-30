@@ -14,6 +14,9 @@ pub mod linux;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(target_os = "macos")]
+pub mod mac;
+
 pub fn create_keyboard_event_handler()
 -> Result<Box<dyn KeyboardEventHandler + Send + Sync>, DeskError> {
     #[cfg(target_os = "windows")]
@@ -23,6 +26,10 @@ pub fn create_keyboard_event_handler()
     #[cfg(target_os = "linux")]
     {
         Ok(Box::new(linux::UinputKeyboardEventHandler::new()?))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(mac::MacKeyboardEventHandler {}))
     }
 }
 

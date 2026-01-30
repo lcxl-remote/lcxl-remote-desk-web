@@ -3,6 +3,10 @@ use std::{collections::BTreeMap, str::FromStr};
 use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
 use strum::IntoEnumIterator;
 
+#[cfg(target_os = "macos")]
+use crate::service::image_capture::mac_screencapturekit::{
+    MacScreencaptureKitImageCapture, MacScreencaptureKitImageOutputEnumerator,
+};
 #[cfg(target_os = "windows")]
 use crate::service::image_capture::{
     dxgi_capture::{DigxImageCapture, DigxImageOutputEnumerator},
@@ -54,6 +58,8 @@ pub fn create_image_capture(
         ImageCaptureType::X11 => Box::new(X11ImageCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
         ImageCaptureType::PIPEWIRE => Box::new(PipewireImageCapture::new(desk_settings)?),
+        #[cfg(target_os = "macos")]
+        ImageCaptureType::SCKIT => Box::new(MacScreencaptureKitImageCapture::new(desk_settings)?),
     };
     Ok(capture)
 }
@@ -93,6 +99,8 @@ pub fn list_image_output(
         ImageCaptureType::X11 => Box::new(X11ImageOutputEnumerator::new()),
         #[cfg(target_os = "linux")]
         ImageCaptureType::PIPEWIRE => Box::new(PipewireImageOutputEnumerator::new()),
+        #[cfg(target_os = "macos")]
+        ImageCaptureType::SCKIT => Box::new(MacScreencaptureKitImageOutputEnumerator::new()),
     };
     let output_list = capture.get_output_list()?;
 

@@ -3,3 +3,6 @@ pub mod audio_capture_factory;
 pub mod pipewire_capture;
 #[cfg(target_os = "windows")]
 pub mod wasapi_capture;
+
+#[cfg(target_os = "macos")]
+pub mod mac_screencapturekit;

@@ -8,6 +8,9 @@ use crate::service::system_setting::linux_system_setting::LinuxSystemSettingHelp
 #[cfg(target_os = "windows")]
 use crate::service::system_setting::windows_system_setting::WindowsSystemSettingHelper;
 
+#[cfg(target_os = "macos")]
+use crate::service::system_setting::mac_system_setting::MacSystemSettingHelper;
+
 pub fn create_system_setting_helper(
     desk_setting: &DeskSettings,
 ) -> Result<Box<dyn SystemSettingHelper + Send + Sync>, DeskError> {
@@ -19,6 +22,11 @@ pub fn create_system_setting_helper(
     #[cfg(target_os = "linux")]
     {
         let helper = LinuxSystemSettingHelper::new(desk_setting)?;
+        Ok(Box::new(helper))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let helper = MacSystemSettingHelper::new(desk_setting)?;
         Ok(Box::new(helper))
     }
 }

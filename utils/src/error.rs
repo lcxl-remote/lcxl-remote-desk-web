@@ -8,6 +8,7 @@ impl DeskErrorCode {
     pub const SYSTEM_ERROR: DeskErrorCode = DeskErrorCode(1);
     pub const INVALID_STATE: DeskErrorCode = DeskErrorCode(2);
     pub const NOT_IMPLEMENTED_YET: DeskErrorCode = DeskErrorCode(3);
+    pub const PERMISSION_ERROR: DeskErrorCode = DeskErrorCode(4);
 
     pub const FILE_PATH_NOT_FOUND: DeskErrorCode = DeskErrorCode(11);
     pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
