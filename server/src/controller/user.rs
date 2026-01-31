@@ -51,7 +51,7 @@ pub async fn get_current_user(
                 };
                 let user_info = CurrentUser::new_admin(&login_user_name);
 
-                session.set_current_user(&user_info).unwrap(); // Store user information in session
+                session.set_current_user(&user_info)?; // Store user information in session
             }
         } else {
             warn!("Failed to parse client IP: {}", client_ip_str);
