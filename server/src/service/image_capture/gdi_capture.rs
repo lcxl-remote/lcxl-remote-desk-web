@@ -12,8 +12,7 @@ use windows::Win32::{
         GetDC, GetDIBits, GetObjectW, HBITMAP, HDC, RGBQUAD, ReleaseDC, SRCCOPY, SelectObject,
     },
     UI::WindowsAndMessaging::{
-        CURSORINFO, DI_COMPAT, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, GetSystemMetrics,
-        ICONINFO, SM_CXSCREEN, SM_CYSCREEN,
+        CURSORINFO, DI_COMPAT, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, ICONINFO,
     },
 };
 use windows_core::PCWSTR;
@@ -141,10 +140,12 @@ impl GdiImageOutputEnumerator {
             device_name,
             display_device_name: Some(display_name),
             desktop_coordinates: DisplayRect {
-                left: 0,
-                top: 0,
-                right: dev_mode.dmPelsWidth as i32,
-                bottom: dev_mode.dmPelsHeight as i32,
+                left: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.x },
+                top: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.y },
+                right: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.x }
+                    + dev_mode.dmPelsWidth as i32,
+                bottom: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.y }
+                    + dev_mode.dmPelsHeight as i32,
             },
             resolutions,
             attached_to_desktop: true,
@@ -174,14 +175,27 @@ impl ImageOutputEnumerator for GdiImageOutputEnumerator {
 
 pub struct GdiImageCapture {
     pub idevnum: u32,
+    pub display_info: DisplayInfo,
 }
 
 impl GdiImageCapture {
     pub fn new(settings: &DeskSettings) -> Result<Self, DeskError> {
         log::debug!("Creating GDIImageCapture with settings: {:?}", settings);
-
+        let display_info_opt = GdiImageOutputEnumerator::get_output(settings.video_device_index)?;
+        let display_info = if let Some(display_info) = display_info_opt {
+            display_info
+        } else {
+            return DeskError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                format!(
+                    "Cannot get current output by index {}",
+                    settings.video_device_index
+                ),
+            );
+        };
         Ok(GdiImageCapture {
             idevnum: settings.video_device_index,
+            display_info,
         })
     }
 }
@@ -212,8 +226,11 @@ impl ImageInfo for GDIImageInfo {
 
 impl ImageCapture for GdiImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
-        let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-        let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
+        let display_info = &self.display_info;
+        let width = display_info.desktop_coordinates.width();
+        let height = display_info.desktop_coordinates.height();
+        let left = display_info.desktop_coordinates.left;
+        let top = display_info.desktop_coordinates.top;
 
         let screen_dc = GDIHDC::get_hdc(None);
 
@@ -231,8 +248,8 @@ impl ImageCapture for GdiImageCapture {
                 width,
                 height,
                 Some(screen_dc.hdc),
-                0,
-                0,
+                left,
+                top,
                 SRCCOPY,
             )?;
         }
@@ -272,8 +289,8 @@ impl ImageCapture for GdiImageCapture {
                 unsafe {
                     DrawIconEx(
                         mem_dc.hdc,
-                        cursor_pos.x,
-                        cursor_pos.y,
+                        cursor_pos.x - left,
+                        cursor_pos.y - top,
                         cursor_info.hCursor.into(),
                         0,
                         0,
@@ -340,15 +357,7 @@ impl ImageCapture for GdiImageCapture {
     }
 
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
-        let opt = GdiImageOutputEnumerator::get_output(self.idevnum)?;
-        if let Some(display_info) = opt {
-            Ok(display_info)
-        } else {
-            DeskError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                format!("Cannot get current output by index {}", self.idevnum),
-            )
-        }
+        Ok(self.display_info.clone())
     }
 }
 
@@ -380,10 +389,17 @@ mod tests {
     #[test]
     fn test_capture_image() -> Result<(), DeskError> {
         initialize();
-        let mut image_capture = GdiImageCapture { idevnum: 0 };
+        let display_info = GdiImageOutputEnumerator::get_output(0)?.unwrap();
+        let mut image_capture = GdiImageCapture {
+            idevnum: 0,
+            display_info,
+        };
         let image_info = image_capture.capture(true)?;
 
         let tmp_dir = PathBuf::from("sample");
+        if !tmp_dir.exists() {
+            std::fs::create_dir_all(&tmp_dir).unwrap();
+        }
         let bmp_path = tmp_dir.join(format!("screenshot_gdi.bmp"));
 
         let src_stride = image_info.get_width() * 4;
