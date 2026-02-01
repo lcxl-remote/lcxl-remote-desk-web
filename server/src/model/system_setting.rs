@@ -32,5 +32,24 @@ pub trait SystemSettingHelper {
     /// Control monitor power (turn on/off)
     fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError>;
 
+    /// Set text to clipboard
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError>;
 }
+
+#[derive(Debug, Clone)]
+pub struct PrivateScreenState {
+    pub hotkey_clicked: bool,
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum PrivateScreenEventType {
+    PrivateScreenInited(PrivateScreenState),
+    PrivateScreenVisibleChanged(bool),
+
+    PrivateScreenHotkeyRegisterError,
+    PrivateScreenUnknownError(String),
+    PrivateScreenClosed,
+}
+
+pub type PrivateScreenSubscriber = fn(event_type: PrivateScreenEventType) -> Result<(), DeskError>;

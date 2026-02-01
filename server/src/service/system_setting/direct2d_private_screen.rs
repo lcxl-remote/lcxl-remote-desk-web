@@ -3,7 +3,9 @@ use std::{marker::PhantomPinned, time::Duration};
 use desk_signal_facade::model::desk_settings::PrivateScreenSettings;
 use rust_i18n::t;
 use windows::Win32::{
-    Foundation::{COLORREF, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Foundation::{
+        COLORREF, ERROR_HOTKEY_ALREADY_REGISTERED, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    },
     Graphics::{
         Direct2D::{
             Common::{D2D_RECT_F, D2D_SIZE_U, D2D1_COLOR_F},
@@ -44,7 +46,10 @@ use windows::Win32::{
 use windows_core::{PCWSTR, w};
 use windows_numerics::Matrix3x2;
 
-use crate::error::DeskError;
+use crate::{
+    error::DeskError,
+    model::system_setting::{PrivateScreenEventType, PrivateScreenState, PrivateScreenSubscriber},
+};
 
 pub fn loword(l: isize) -> isize {
     l & 0xffff
@@ -81,6 +86,16 @@ impl Default for PrivateScreenWindowState {
         }
     }
 }
+
+impl From<&PrivateScreenWindowState> for PrivateScreenState {
+    fn from(state: &PrivateScreenWindowState) -> Self {
+        Self {
+            hotkey_clicked: state.hotkey_clicked,
+            visible: state.visible,
+        }
+    }
+}
+
 /// Safety: HWND is Send
 unsafe impl Send for PrivateScreenWindowState {}
 
@@ -91,7 +106,7 @@ unsafe impl Send for PrivateScreenWindowState {}
 pub struct PrivateScreenWindow {
     pub settings: PrivateScreenSettings,
     pub state: PrivateScreenWindowState,
-    pub sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
+    pub subscriber: PrivateScreenSubscriber,
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
     pub instance: HMODULE,
@@ -138,7 +153,7 @@ impl PrivateScreenWindow {
 
     pub fn new(
         settings: PrivateScreenSettings,
-        sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
+        subscriber: PrivateScreenSubscriber,
         receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     ) -> Result<Box<Self>, DeskError> {
         unsafe {
@@ -156,7 +171,7 @@ impl PrivateScreenWindow {
             let instance = Self {
                 settings,
                 state: PrivateScreenWindowState::default(),
-                sender,
+                subscriber,
                 receiver,
                 window_class: w!("lcxl-web-private-screen-window-class"),
                 instance: HMODULE::default(),
@@ -215,8 +230,8 @@ impl PrivateScreenWindow {
                     );
                     match command {
                         PrivateScreenCommand::Quit => PostQuitMessage(0),
-                        PrivateScreenCommand::ShowWindow => self.show_window()?,
-                        PrivateScreenCommand::HideWindow => self.hide_window()?,
+                        PrivateScreenCommand::ShowWindow => self.set_window_visible(true),
+                        PrivateScreenCommand::HideWindow => self.set_window_visible(false),
                     }
                 } else {
                     log::error!("Private screen window thread unknown recv result");
@@ -226,9 +241,41 @@ impl PrivateScreenWindow {
         }
     }
 
-    pub fn show_window(&mut self) -> Result<(), DeskError> {
+    pub fn set_window_visible(&mut self, visible: bool) {
+        let result = if visible {
+            self.show_window()
+        } else {
+            self.hide_window()
+        };
+        if let Err(e) = result {
+            log::error!("Private screen window thread recv error: {}", e);
+            if let DeskError::WindowsResultError(_, e) = &e {
+                if e.code() == ERROR_HOTKEY_ALREADY_REGISTERED.into() {
+                    let _ =
+                        (self.subscriber)(PrivateScreenEventType::PrivateScreenHotkeyRegisterError);
+                    return;
+                }
+            }
+            let _ = (self.subscriber)(PrivateScreenEventType::PrivateScreenUnknownError(
+                e.to_string(),
+            ));
+            return;
+        }
+        let _ = (self.subscriber)(PrivateScreenEventType::PrivateScreenVisibleChanged(visible));
+    }
+
+    fn show_window(&mut self) -> Result<(), DeskError> {
         log::info!("Showing private screen window: {:?}", self.state.hwnd);
         unsafe {
+            // register hotkey first
+            RegisterHotKey(
+                Some(self.state.hwnd),
+                EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32,
+                MOD_ALT | MOD_CONTROL,
+                'L' as u32,
+            )?;
+            log::info!("Hotkey registered for private screen exit: Ctrl + Alt + L");
+
             let desktop_hwnd = GetDesktopWindow();
             let mut desktop_rect = RECT::default();
             GetWindowRect(desktop_hwnd, &mut desktop_rect)?;
@@ -250,20 +297,13 @@ impl PrivateScreenWindow {
                 SWP_SHOWWINDOW,
             )?;
 
-            RegisterHotKey(
-                Some(self.state.hwnd),
-                EXIT_PRIVATE_SCREEN_HOTKEY_ID as i32,
-                MOD_ALT | MOD_CONTROL,
-                'L' as u32,
-            )?;
-
             self.state.visible = true;
-            log::info!("Hotkey registered for private screen exit: Ctrl + Alt + L");
+
             Ok(())
         }
     }
 
-    pub fn hide_window(&mut self) -> Result<(), DeskError> {
+    fn hide_window(&mut self) -> Result<(), DeskError> {
         log::info!("Hiding private screen window: {:?}", self.state.hwnd);
         unsafe {
             SetWindowPos(
@@ -402,7 +442,7 @@ impl PrivateScreenWindow {
                         );
                         // Handle exit private screen hotkey
                         // For example, hide the window
-                        self.hide_window()?;
+                        self.set_window_visible(false);
                     }
                     LRESULT(0)
                 }
@@ -550,7 +590,7 @@ impl Drop for PrivateScreenWindow {
                 }
                 self.instance = HMODULE::default();
             }
-
+            let _ = (self.subscriber)(PrivateScreenEventType::PrivateScreenClosed);
             // Uninitialize COM library
             CoUninitialize();
         }
