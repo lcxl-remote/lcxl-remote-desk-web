@@ -16,10 +16,11 @@ use windows_core::HSTRING;
 
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, SystemSettingHelper},
-    service::system_setting::direct2d_private_screen::{
-        PrivateScreenCommand, PrivateScreenWindow, PrivateScreenWindowState,
+    model::system_setting::{
+        DisplaySettings, PrivateScreenEventType, PrivateScreenState, PrivateScreenSubscriber,
+        SystemSettingHelper,
     },
+    service::system_setting::direct2d_private_screen::{PrivateScreenCommand, PrivateScreenWindow},
 };
 
 /// Thread function to create and manage the private screen window,
@@ -27,14 +28,38 @@ use crate::{
 fn private_screen_window_thread(
     private_screen_settings: PrivateScreenSettings,
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
-    sender: std::sync::mpsc::Sender<PrivateScreenWindowState>,
+    subscriber: PrivateScreenSubscriber,
+    inited_tx: std::sync::mpsc::Sender<Result<(), DeskError>>,
 ) -> Result<(), DeskError> {
-    let mut window = PrivateScreenWindow::new(private_screen_settings, sender, receiver)?;
+    let mut window = match PrivateScreenWindow::new(private_screen_settings, subscriber, receiver) {
+        Ok(window) => window,
+        Err(e) => {
+            inited_tx.send(Err(e)).map_err(|_| {
+                DeskError::CustomError(CustomDeskError::new(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "Failed to send private screen inited event".to_owned(),
+                ))
+            })?;
+            return Ok(());
+        }
+    };
     log::info!("Private screen window created: {:?}", window);
-    window.sender.send(window.state.clone()).map_err(|e| {
+    let init_result = (window.subscriber)(PrivateScreenEventType::PrivateScreenInited(
+        PrivateScreenState::from(&window.state),
+    ));
+    if let Err(e) = init_result {
+        inited_tx.send(Err(e)).map_err(|_| {
+            DeskError::CustomError(CustomDeskError::new(
+                DeskErrorCode::SYSTEM_ERROR,
+                "Failed to send private screen inited event".to_owned(),
+            ))
+        })?;
+        return Ok(());
+    }
+    inited_tx.send(Ok(())).map_err(|_| {
         DeskError::CustomError(CustomDeskError::new(
             DeskErrorCode::SYSTEM_ERROR,
-            format!("Failed to send window handle: {}", e),
+            "Failed to send private screen inited event".to_owned(),
         ))
     })?;
 
@@ -45,7 +70,6 @@ fn private_screen_window_thread(
 
 pub struct WindowsSystemSettingHelper {
     main_sender: std::sync::mpsc::Sender<PrivateScreenCommand>,
-    main_receiver: std::sync::mpsc::Receiver<PrivateScreenWindowState>,
     thread_handle: Option<std::thread::JoinHandle<()>>,
     clipboard: Clipboard,
 }
@@ -54,15 +78,20 @@ unsafe impl Send for WindowsSystemSettingHelper {}
 unsafe impl Sync for WindowsSystemSettingHelper {}
 
 impl WindowsSystemSettingHelper {
-    pub fn new(desk_setting: &DeskSettings) -> Result<Self, DeskError> {
+    pub fn new(
+        desk_setting: &DeskSettings,
+        subscriber: PrivateScreenSubscriber,
+    ) -> Result<Self, DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
-        let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
+        let (inited_tx, inited_rx) = std::sync::mpsc::channel::<Result<(), DeskError>>();
+        // let (window_sender, main_receiver) = std::sync::mpsc::channel::<PrivateScreenWindowState>();
         let private_screen_settings = desk_setting.private_screen.clone();
         let thread_handle = std::thread::spawn(move || {
             let result = private_screen_window_thread(
                 private_screen_settings,
                 window_receiver,
-                window_sender,
+                subscriber,
+                inited_tx,
             );
             if result.is_err() {
                 log::error!(
@@ -73,11 +102,14 @@ impl WindowsSystemSettingHelper {
                 log::warn!("Private screen window thread exited normally");
             }
         });
-
+        let init_result = inited_rx.recv()?;
+        if let Err(e) = init_result {
+            log::error!("Private screen window thread exited with error: {:?}", e);
+            return Err(e);
+        }
         let clipboard = Clipboard::new().unwrap();
         Ok(Self {
             main_sender,
-            main_receiver,
             thread_handle: Some(thread_handle),
             clipboard,
         })
@@ -94,6 +126,7 @@ impl WindowsSystemSettingHelper {
                 ))
             })
     }
+
     pub fn hide_window(&self) -> Result<(), DeskError> {
         //PrivateScreenWindow::hide_window(self.hwnd)
         self.main_sender
@@ -219,7 +252,14 @@ mod tests {
     #[test]
     fn test_change_display_settings() {
         initialize();
-        let helper = WindowsSystemSettingHelper::new(&DeskSettings::default()).unwrap();
+        let helper = WindowsSystemSettingHelper::new(
+            &DeskSettings::default(),
+            |event_type: PrivateScreenEventType| -> Result<(), DeskError> {
+                log::info!("Event type: {:?}", event_type);
+                Ok(())
+            },
+        )
+        .unwrap();
         let display_settings = DisplaySettings {
             device_name: String::from("\\\\.\\DISPLAY1"),
             width: Some(1080),
@@ -243,7 +283,14 @@ mod tests {
         desk_settings.private_screen.window_style = Some(WS_OVERLAPPEDWINDOW.0);
         desk_settings.private_screen.window_ex_style =
             Some(WS_EX_TOPMOST.0 | WS_EX_OVERLAPPEDWINDOW.0);
-        let helper = WindowsSystemSettingHelper::new(&desk_settings).unwrap();
+        let helper = WindowsSystemSettingHelper::new(
+            &desk_settings,
+            |event_type: PrivateScreenEventType| -> Result<(), DeskError> {
+                log::info!("Event type: {:?}", event_type);
+                Ok(())
+            },
+        )
+        .unwrap();
         let result = helper.enable_private_screen(true);
         assert!(
             result.is_ok(),
