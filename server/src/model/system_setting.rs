@@ -43,7 +43,7 @@ pub struct PrivateScreenState {
 }
 
 #[derive(Debug, Clone)]
-pub enum PrivateScreenEventType {
+pub enum SystemSettingEventType {
     PrivateScreenInited(PrivateScreenState),
     PrivateScreenVisibleChanged(bool),
 
@@ -52,4 +52,4 @@ pub enum PrivateScreenEventType {
     PrivateScreenClosed,
 }
 
-pub type PrivateScreenSubscriber = fn(event_type: PrivateScreenEventType) -> Result<(), DeskError>;
+pub type SystemSettingSubscriber = fn(event_type: SystemSettingEventType) -> Result<(), DeskError>;

@@ -2,7 +2,7 @@ use desk_signal_facade::model::desk_settings::DeskSettings;
 
 use crate::{
     error::DeskError,
-    model::system_setting::{PrivateScreenSubscriber, SystemSettingHelper},
+    model::system_setting::{SystemSettingHelper, SystemSettingSubscriber},
 };
 
 #[cfg(target_os = "linux")]
@@ -16,7 +16,7 @@ use crate::service::system_setting::mac_system_setting::MacSystemSettingHelper;
 
 pub fn create_system_setting_helper(
     desk_setting: &DeskSettings,
-    subscriber: PrivateScreenSubscriber,
+    subscriber: SystemSettingSubscriber,
 ) -> Result<Box<dyn SystemSettingHelper + Send + Sync>, DeskError> {
     #[cfg(target_os = "windows")]
     {

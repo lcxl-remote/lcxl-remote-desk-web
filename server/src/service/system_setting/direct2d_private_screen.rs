@@ -48,7 +48,7 @@ use windows_numerics::Matrix3x2;
 
 use crate::{
     error::DeskError,
-    model::system_setting::{PrivateScreenEventType, PrivateScreenState, PrivateScreenSubscriber},
+    model::system_setting::{PrivateScreenState, SystemSettingEventType, SystemSettingSubscriber},
 };
 
 pub fn loword(l: isize) -> isize {
@@ -106,7 +106,7 @@ unsafe impl Send for PrivateScreenWindowState {}
 pub struct PrivateScreenWindow {
     pub settings: PrivateScreenSettings,
     pub state: PrivateScreenWindowState,
-    pub subscriber: PrivateScreenSubscriber,
+    pub subscriber: SystemSettingSubscriber,
     pub receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     pub window_class: PCWSTR,
     pub instance: HMODULE,
@@ -153,7 +153,7 @@ impl PrivateScreenWindow {
 
     pub fn new(
         settings: PrivateScreenSettings,
-        subscriber: PrivateScreenSubscriber,
+        subscriber: SystemSettingSubscriber,
         receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
     ) -> Result<Box<Self>, DeskError> {
         unsafe {
@@ -252,16 +252,16 @@ impl PrivateScreenWindow {
             if let DeskError::WindowsResultError(_, e) = &e {
                 if e.code() == ERROR_HOTKEY_ALREADY_REGISTERED.into() {
                     let _ =
-                        (self.subscriber)(PrivateScreenEventType::PrivateScreenHotkeyRegisterError);
+                        (self.subscriber)(SystemSettingEventType::PrivateScreenHotkeyRegisterError);
                     return;
                 }
             }
-            let _ = (self.subscriber)(PrivateScreenEventType::PrivateScreenUnknownError(
+            let _ = (self.subscriber)(SystemSettingEventType::PrivateScreenUnknownError(
                 e.to_string(),
             ));
             return;
         }
-        let _ = (self.subscriber)(PrivateScreenEventType::PrivateScreenVisibleChanged(visible));
+        let _ = (self.subscriber)(SystemSettingEventType::PrivateScreenVisibleChanged(visible));
     }
 
     fn show_window(&mut self) -> Result<(), DeskError> {
@@ -590,7 +590,7 @@ impl Drop for PrivateScreenWindow {
                 }
                 self.instance = HMODULE::default();
             }
-            let _ = (self.subscriber)(PrivateScreenEventType::PrivateScreenClosed);
+            let _ = (self.subscriber)(SystemSettingEventType::PrivateScreenClosed);
             // Uninitialize COM library
             CoUninitialize();
         }

@@ -17,8 +17,8 @@ use windows_core::HSTRING;
 use crate::{
     error::DeskError,
     model::system_setting::{
-        DisplaySettings, PrivateScreenEventType, PrivateScreenState, PrivateScreenSubscriber,
-        SystemSettingHelper,
+        DisplaySettings, PrivateScreenState, SystemSettingEventType, SystemSettingHelper,
+        SystemSettingSubscriber,
     },
     service::system_setting::direct2d_private_screen::{PrivateScreenCommand, PrivateScreenWindow},
 };
@@ -28,7 +28,7 @@ use crate::{
 fn private_screen_window_thread(
     private_screen_settings: PrivateScreenSettings,
     receiver: std::sync::mpsc::Receiver<PrivateScreenCommand>,
-    subscriber: PrivateScreenSubscriber,
+    subscriber: SystemSettingSubscriber,
     inited_tx: std::sync::mpsc::Sender<Result<(), DeskError>>,
 ) -> Result<(), DeskError> {
     let mut window = match PrivateScreenWindow::new(private_screen_settings, subscriber, receiver) {
@@ -44,7 +44,7 @@ fn private_screen_window_thread(
         }
     };
     log::info!("Private screen window created: {:?}", window);
-    let init_result = (window.subscriber)(PrivateScreenEventType::PrivateScreenInited(
+    let init_result = (window.subscriber)(SystemSettingEventType::PrivateScreenInited(
         PrivateScreenState::from(&window.state),
     ));
     if let Err(e) = init_result {
@@ -80,7 +80,7 @@ unsafe impl Sync for WindowsSystemSettingHelper {}
 impl WindowsSystemSettingHelper {
     pub fn new(
         desk_setting: &DeskSettings,
-        subscriber: PrivateScreenSubscriber,
+        subscriber: SystemSettingSubscriber,
     ) -> Result<Self, DeskError> {
         let (main_sender, window_receiver) = std::sync::mpsc::channel::<PrivateScreenCommand>();
         let (inited_tx, inited_rx) = std::sync::mpsc::channel::<Result<(), DeskError>>();
@@ -254,7 +254,7 @@ mod tests {
         initialize();
         let helper = WindowsSystemSettingHelper::new(
             &DeskSettings::default(),
-            |event_type: PrivateScreenEventType| -> Result<(), DeskError> {
+            |event_type: SystemSettingEventType| -> Result<(), DeskError> {
                 log::info!("Event type: {:?}", event_type);
                 Ok(())
             },
@@ -285,7 +285,7 @@ mod tests {
             Some(WS_EX_TOPMOST.0 | WS_EX_OVERLAPPEDWINDOW.0);
         let helper = WindowsSystemSettingHelper::new(
             &desk_settings,
-            |event_type: PrivateScreenEventType| -> Result<(), DeskError> {
+            |event_type: SystemSettingEventType| -> Result<(), DeskError> {
                 log::info!("Event type: {:?}", event_type);
                 Ok(())
             },
