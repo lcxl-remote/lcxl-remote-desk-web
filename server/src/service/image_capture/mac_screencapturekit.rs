@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::{
     error::DeskError,
@@ -30,9 +30,14 @@ unsafe extern "C" {
     fn CVPixelBufferGetBytesPerRow(pixel_buffer: *const CVPixelBufferRef) -> usize;
 }
 
+struct CaptureState {
+    frame: Mutex<Option<SCImageInfo>>,
+    cond: Condvar,
+}
+
 pub struct MacScreencaptureKitImageCapture {
     stream: Option<SCStream>,
-    latest_frame: Arc<Mutex<Option<SCImageInfo>>>,
+    shared: Arc<CaptureState>,
     width: u32,
     height: u32,
     capture_type: ImageCaptureType,
@@ -40,7 +45,7 @@ pub struct MacScreencaptureKitImageCapture {
 }
 
 struct FrameReceiver {
-    latest_frame: Arc<Mutex<Option<SCImageInfo>>>,
+    shared: Arc<CaptureState>,
 }
 
 impl StreamOutput for FrameReceiver {
@@ -88,7 +93,9 @@ impl StreamOutput for FrameReceiver {
                                     height,
                                 };
 
-                                *self.latest_frame.lock().unwrap() = Some(info);
+                                let mut frame = self.shared.frame.lock().unwrap();
+                                *frame = Some(info);
+                                self.shared.cond.notify_one();
                             }
                         }
                         pixel_buffer.unlock();
@@ -141,7 +148,10 @@ impl MacScreencaptureKitImageCapture {
 
         Ok(Self {
             stream: None,
-            latest_frame: Arc::new(Mutex::new(None)),
+            shared: Arc::new(CaptureState {
+                frame: Mutex::new(None),
+                cond: Condvar::new(),
+            }),
             width,
             height,
             capture_type: ImageCaptureType::SCKIT,
@@ -178,7 +188,7 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
             // config.set_pixel_format(screencapturekit::sc_sys::os_types::geometry::kCVPixelFormatType_32BGRA); // If available
 
             let receiver = FrameReceiver {
-                latest_frame: self.latest_frame.clone(),
+                shared: self.shared.clone(),
             };
 
             let mut stream = SCStream::new(filter, config, ErrorHandler);
@@ -192,19 +202,34 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
             self.stream = Some(stream);
 
             // Wait a bit for first frame?
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // std::thread::sleep(std::time::Duration::from_millis(100)); // Logic handled by condvar now
         }
 
-        let frame_guard = self.latest_frame.lock().unwrap();
-        if let Some(info) = frame_guard.as_ref() {
-            Ok(Box::new(info.clone()))
+        let mut frame_guard = self.shared.frame.lock().unwrap();
+        if frame_guard.is_none() {
+            // Wait for up to 3 seconds
+            let (guard, result) = self
+                .shared
+                .cond
+                .wait_timeout(frame_guard, std::time::Duration::from_secs(3))
+                .unwrap();
+            frame_guard = guard;
+            if result.timed_out() {
+                return Err(DeskError::custom_error::<()>(
+                    DeskErrorCode::ACTION_NEED_RETRY,
+                    "No frame available (timeout)".to_string(),
+                )
+                .unwrap_err());
+            }
+        }
+
+        if let Some(info) = frame_guard.take() {
+            Ok(Box::new(info))
         } else {
-            // Return dummy or error?
-            // If capturing just started, we might not have a frame yet.
-            // Return error so client retries or waits.
+            // Spurious wakeup or empty after wait
             Err(DeskError::custom_error::<()>(
                 DeskErrorCode::ACTION_NEED_RETRY,
-                "No frame available yet".to_string(),
+                "No frame available".to_string(),
             )
             .unwrap_err())
         }
