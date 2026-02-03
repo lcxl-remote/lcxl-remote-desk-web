@@ -46,13 +46,23 @@ futures = "0.3"
 futures-util = "0.3"
 anyhow = "1.0"
 tokio = { version = "1.47", features = ["full", "tracing"] }
+
 actix-web = "4.11"
 actix-ws = "0.3"
-actix-session = { version = "0.10", features = ["cookie-session"] }
-webrtc = "0.13"
+actix-session = { version = "0.11", features = ["cookie-session"] }
+actix-files = "0.6"
+actix-server = "2.6"
+actix-http = "3.11"
+actix-service = "2.0"
+
+webrtc = "0.17"
+webrtc-media = "0.17"
+webrtc-ice = "0.17"
+rtp = "0.17"
+
 strum = "0.27"
 strum_macros = "0.27"
 bytes = "1.10"
 bytestring = "1.4"
-uuid = "1.17"
-portable-pty = "0.8"
+uuid = "1.20"
+portable-pty = "0.9"
