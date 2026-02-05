@@ -27,7 +27,10 @@ use webrtc::{
         interceptor_registry::register_default_interceptors,
         media_engine::{MIME_TYPE_H264, MediaEngine},
     },
-    ice_transport::{ice_connection_state::RTCIceConnectionState, ice_server::RTCIceServer},
+    ice_transport::{
+        ice_connection_state::RTCIceConnectionState, ice_gatherer_state::RTCIceGathererState,
+        ice_server::RTCIceServer,
+    },
     interceptor::registry::Registry,
     media::Sample,
     peer_connection::{
@@ -150,20 +153,37 @@ impl SignalingContext {
                     interface.external.to_string()
                 ));
             } else {
-                stun_urls.push(format!("stun:{}", interface.external.to_string()));
-                turn_urls.push(format!("turn:{}", interface.external.to_string()));
+                if local_settings.turn.enable_stun {
+                    stun_urls.push(format!("stun:{}", interface.external.to_string()));
+                }
+                if local_settings.turn.enable_turn {
+                    turn_urls.push(format!("turn:{}", interface.external.to_string()));
+                }
             }
         }
-        let ice_stun_server = RTCIceServer {
-            urls: stun_urls.clone(),
-            username: local_settings.user.login_user_name.clone(),
-            credential: local_settings.user.login_password.clone(),
-        };
-        let ice_turn_server = RTCIceServer {
-            urls: turn_urls,
-            username: local_settings.user.login_user_name.clone(),
-            credential: local_settings.user.login_password.clone(),
-        };
+        let mut ice_servers = Vec::new();
+        let mut client_ice_servers = Vec::new();
+
+        if !stun_urls.is_empty() {
+            let ice_stun_server = RTCIceServer {
+                urls: stun_urls,
+                ..Default::default()
+            };
+            ice_servers.push(ice_stun_server.clone());
+            client_ice_servers.push(ice_stun_server);
+        }
+
+        if !turn_urls.is_empty() {
+            let ice_turn_server = RTCIceServer {
+                urls: turn_urls,
+                username: local_settings.user.login_user_name.clone(),
+                credential: local_settings.user.login_password.clone(),
+            };
+            // Only add TURN server to client configuration, not server configuration
+            // forcing server to use Host candidates or STUN only.
+            // This avoids "Self-Reflective Relay" (Hairpinning) issues on local machine.
+            client_ice_servers.push(ice_turn_server);
+        }
 
         // new rtc_peer_connection
         // Create a MediaEngine object to configure the supported codec
@@ -182,9 +202,9 @@ impl SignalingContext {
             .with_interceptor_registry(registry)
             .build();
 
-        // Prepare the configuration
+        // Prepare the configuration for Server (use only STUN/Host)
         let config = RTCConfiguration {
-            ice_servers: vec![ice_stun_server.clone(), ice_turn_server.clone()],
+            ice_servers: ice_servers.clone(),
             ..Default::default()
         };
 
@@ -200,10 +220,10 @@ impl SignalingContext {
         let video_encoder_list = list_video_encoder();
 
         let init_signaling_data = InitSignalingData {
-            ice_servers: vec![
-                LcxlRTCIceServer::from(ice_stun_server.clone()),
-                LcxlRTCIceServer::from(ice_turn_server.clone()),
-            ],
+            ice_servers: client_ice_servers
+                .iter()
+                .map(|s| LcxlRTCIceServer::from(s.clone()))
+                .collect(),
             user_name: user.name.clone(),
             audio_device_list,
             audio_encoder_list,
@@ -413,6 +433,14 @@ impl SignalingContext {
                     }
                 }
 
+                Box::pin(async {})
+            }));
+
+        // Set the handler for ICE gathering state
+        // This will notify you when the ICE gathering state has changed
+        self.rtc_peer_connection
+            .on_ice_gathering_state_change(Box::new(move |s: RTCIceGathererState| {
+                info!("ICE gathering state has changed: {s}");
                 Box::pin(async {})
             }));
 

@@ -343,9 +343,9 @@ const Desk: React.FC = () => {
         setIsModalOpen(true);
         break;
       case SIGNALING_TYPE_CODE_ANSWER:
-        const answerDescriptionJson = signalingModel.signaling_data as RTCSessionDescriptionInit;
-        console.info("set remote description answer_description_json=" + signalingModel.signaling_data);
-        peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answerDescriptionJson));
+        const answerDescription = signalingModel.signaling_data as RTCSessionDescriptionInit;
+        console.info("set remote description answer_description:", answerDescription);
+        peerconnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answerDescription));
         break;
       case SIGNALING_TYPE_CODE_ACCEPT_CONTROL:
         message.success(intl.formatMessage({ id: 'pages.desk.controlRequestAccepted' }));
@@ -490,7 +490,7 @@ const Desk: React.FC = () => {
       }
     }
   };
-  
+
   const handleRequestControl = () => {
 
     const requestControlData = {
@@ -715,8 +715,7 @@ const Desk: React.FC = () => {
 
     pc.createOffer().then(d => {
       pc.setLocalDescription(d);
-      const localDescriptionJson = JSON.stringify(d);
-      console.info("create offer, local description=" + localDescriptionJson);
+      console.info("create offer, local description:", d);
     }).catch((reason) => { console.log("Create offer failed, reason=", reason) });
 
     return pc;

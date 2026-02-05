@@ -147,6 +147,12 @@ pub struct TurnSettings {
     /// If set, the turn server will not request external services via the HTTP
     /// Hooks API to obtain the key.
     pub static_auth_secret: Option<String>,
+
+    /// enable stun server
+    pub enable_stun: bool,
+
+    /// enable turn server
+    pub enable_turn: bool,
 }
 
 impl Default for TurnSettings {
@@ -156,6 +162,8 @@ impl Default for TurnSettings {
             interfaces: vec![],
             static_credentials: HashMap::new(),
             static_auth_secret: None,
+            enable_stun: true,
+            enable_turn: false,
         }
     }
 }
