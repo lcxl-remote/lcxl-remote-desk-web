@@ -410,7 +410,10 @@ pub enum RemoteDeskTypeEnum {
     Server,
     /// Lcxl remote desktop signal type
     Signal,
-    /// Lcxl remote desktop manager type
+    /// Lcxl remote desktop manager type,
+    /// used for manage multiple remote desktops,
+    /// this enum used by another project, not this project
+    /// so keep this enum but do not use it
     Manager,
 }
 
