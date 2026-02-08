@@ -26,6 +26,7 @@ export default [
     path: '/desk',
     name: 'desk',
     icon: 'message',
+    access: 'canDesk',
     routes: [
       {
         path: '/desk',

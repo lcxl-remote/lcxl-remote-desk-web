@@ -26,7 +26,11 @@ pub async fn query_sysinfo(settings: web::Data<SharedSettings>) -> Result<HttpRe
 
     let mut sys = System::new_all();
     sys.refresh_all();
-    let system_info = SystemInfo::from(&sys);
+    let mut system_info = SystemInfo::from(&sys);
+    system_info.startup_mode = {
+        let settings = settings.read().await;
+        format!("{:?}", settings.args.startup_mode)
+    };
     log::info!(
         "Get system information successfully, info: {:?}",
         system_info

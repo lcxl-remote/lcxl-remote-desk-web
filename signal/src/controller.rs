@@ -59,3 +59,7 @@ pub async fn open_signaling_handle(
     // respond immediately with response connected to WS session
     Ok(res)
 }
+
+pub fn config(cfg: &mut web::ServiceConfig) {
+    cfg.service(open_signaling_handle);
+}

@@ -1,22 +1,30 @@
+use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use actix_web::web;
-use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
-use actix_ws::{CloseCode, CloseReason};
+use awc::{Client, Connector};
 use bytes::Bytes;
 use bytestring::ByteString;
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::signal::{
-    InitSignalingData, LcxlRTCIceServer, OfferModel, SignalingModel, SignalingSessionExt,
-    SignalingState, SignalingType, WebRTConnectionState,
+    InitSignalingData, LcxlRTCIceServer, OfferModel, PeerSignalingSender, RemoteDeskTypeEnum,
+    SignalingModel, SignalingState, SignalingType, WebRTConnectionState,
 };
-use desk_utils::error::DeskErrorCode;
-use futures_util::StreamExt;
+use desk_signal_facade::{error::DeskSignalFacadeError, model::version::VersionInfo};
+use desk_utils::error::{CustomDeskError, DeskErrorCode};
+
+use futures_util::{SinkExt, StreamExt};
+
 use log::{error, info, warn};
 use prometheus::{HistogramVec, register_histogram_vec};
+use rustls::{ClientConfig, RootCertStore};
+use rustls_native_certs::load_native_certs;
+use serde::Serialize;
+use tokio::sync::mpsc;
 use tokio::task::LocalSet;
-use tokio::time::Duration;
 use tokio::time::Instant;
 use turn_server::config::Transport;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
@@ -42,6 +50,7 @@ use webrtc::{
 };
 
 use crate::model::data_channel::SignalRequestControlData;
+use crate::model::login::{LoginParams, LoginResult};
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -56,6 +65,7 @@ use crate::service::image_capture::image_capture_factory::{
 use crate::service::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
+use crate::version;
 use crate::{error::DeskError, model::settings::SharedSettings};
 
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
@@ -65,83 +75,389 @@ pub static WEBRTC_WRITE_SAMPLE_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new
     register_histogram_vec!("webrtc_write_sample_histogram", "help", &["type"]).unwrap()
 });
 
-pub async fn handle_signaling(
-    settings: web::Data<SharedSettings>,
-    stream: AggregatedMessageStream,
-    session: Session,
-    user: CurrentUser,
-) -> Result<(), DeskError> {
-    info!("Handling signaling");
-    // Handle signaling logic here
-    let mut signaling_context = SignalingContext::init_signaling(settings, session, user).await?;
-
-    let result = do_handle_signaling(&mut signaling_context, stream).await;
-    // Shutdown function must be invoked to clean up resources.
-    signaling_context.shutdown().await?;
-    result
+#[derive(Debug)]
+pub enum DeskSessionMessage {
+    Text(ByteString),
+    Binary(Bytes),
+    Ping(Bytes),
+    Pong(Bytes),
+    Close,
 }
 
-pub async fn do_handle_signaling(
-    signaling_context: &mut SignalingContext,
-    mut stream: AggregatedMessageStream,
-) -> Result<(), DeskError> {
-    while let Some(msg) = stream.next().await {
-        match msg {
-            Ok(AggregatedMessage::Text(text)) => {
-                // echo text message
-                signaling_context.handle_message(text).await?;
-            }
+#[derive(Clone)]
+pub struct DeskSessionSender {
+    sender: mpsc::UnboundedSender<DeskSessionMessage>,
+}
 
-            Ok(AggregatedMessage::Binary(bin)) => {
-                // echo binary message
-                signaling_context.binary(bin).await?;
-            }
+impl PeerSignalingSender for DeskSessionSender {
+    async fn send_signaling<T>(
+        &mut self,
+        signaling_type: SignalingType,
+        to_session_id: Option<String>,
+        signaling_data: &T,
+    ) -> Result<(), DeskSignalFacadeError>
+    where
+        T: ?Sized + Serialize + Sync,
+    {
+        let signaling_model =
+            SignalingModel::success_response(signaling_type, None, to_session_id, signaling_data)?;
+        let text = serde_json::to_string(&signaling_model)?;
+        self.sender
+            .send(DeskSessionMessage::Text(ByteString::from(text)))
+            .map_err(|e| {
+                DeskSignalFacadeError::CustomError(CustomDeskError::new(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    format!("Failed to send signaling message: {:?}", e),
+                ))
+            })?;
+        Ok(())
+    }
 
-            Ok(AggregatedMessage::Ping(msg)) => {
-                // respond to PING frame with PONG frame
-                signaling_context.ping(msg).await?;
-            }
-            Ok(AggregatedMessage::Pong(_)) => {
-                // ignore PONG frames
-            }
-            Ok(AggregatedMessage::Close(close_reason)) => {
-                warn!("WS close frame received: {:?}", close_reason);
-                break;
-            }
+    async fn send_error(
+        &mut self,
+        signaling_type: SignalingType,
+        to_session_id: Option<String>,
+        error_code: DeskErrorCode,
+        error_message: &str,
+    ) -> Result<(), DeskSignalFacadeError> {
+        let signaling_model = SignalingModel::error(
+            signaling_type,
+            None,
+            to_session_id,
+            error_code,
+            error_message,
+        )?;
+        let text = serde_json::to_string(&signaling_model)?;
+        self.sender
+            .send(DeskSessionMessage::Text(ByteString::from(text)))
+            .map_err(|e| {
+                DeskSignalFacadeError::CustomError(CustomDeskError::new(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    format!("Failed to send error message: {:?}", e),
+                ))
+            })?;
+        Ok(())
+    }
+
+    async fn send_to_peer<T>(
+        &mut self,
+        signaling_type: SignalingType,
+        to_session_id: &str,
+        data: T,
+    ) -> Result<(), DeskSignalFacadeError>
+    where
+        T: Serialize + Sync + Send,
+    {
+        self.send_signaling(signaling_type, Some(to_session_id.to_owned()), &data)
+            .await
+    }
+}
+
+pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(), DeskError> {
+    let signaling_url = {
+        let settings = settings.read().await;
+        if let Some(url) = &settings.system.signaling_url {
+            url.clone()
+        } else if settings.system.enable_ipv6 {
+            format!("ws://[::1]:{}/signaling", settings.system.port)
+        } else {
+            format!("ws://127.0.0.1:{}/signaling", settings.system.port)
+        }
+    };
+    // determine the root url from signaling url
+    let root_url = signaling_url.replace("/signaling", "");
+    let login_url = format!("{}/api/login/account", root_url);
+    // http => http, ws => http, wss => https
+    let login_url = if login_url.starts_with("ws://") {
+        login_url.replace("ws://", "http://")
+    } else if login_url.starts_with("wss://") {
+        login_url.replace("wss://", "https://")
+    } else {
+        login_url
+    };
+
+    let version_info = VersionInfo::new(
+        desk_server_version::SERVER_API_VERSION,
+        version::SERVER_BUILD_NUMBER,
+        version::SERVER_COMMIT_HASH.to_string(),
+        RemoteDeskTypeEnum::Server,
+    );
+    let version_query = serde_urlencoded::to_string(&version_info).unwrap();
+
+    loop {
+        // Create awc client
+        let mut root_store = RootCertStore::empty();
+        for cert in load_native_certs().expect("could not load platform certs") {
+            root_store.add(cert).unwrap();
+        }
+
+        let client = Client::builder()
+            .connector(
+                Connector::new()
+                    .timeout(Duration::from_secs(10))
+                    .rustls_0_23(Arc::new(
+                        ClientConfig::builder()
+                            .with_root_certificates(Arc::new(root_store))
+                            .with_no_client_auth(),
+                    )),
+            )
+            .finish();
+
+        info!("Connecting to signaling server: {}", signaling_url);
+        // Login first
+        let (username, password) = {
+            let settings = settings.read().await;
+            (
+                settings.user.login_user_name.clone(),
+                settings.user.login_password.clone(),
+            )
+        };
+
+        let login_params = LoginParams {
+            username: username.clone(),
+            password: password.clone(),
+            login_type: "account".to_string(), // TODO: use enum
+            auto_login: true,
+        };
+
+        let mut login_response = match client.post(&login_url).send_json(&login_params).await {
+            Ok(res) => res,
             Err(e) => {
-                error!("WS error: {}", e);
-                break;
+                error!("Failed to login: {:?}", e);
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        if !login_response.status().is_success() {
+            error!("Login failed: {:?}", login_response.status());
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+
+        let cookie = if let Some(cookie) = login_response.cookie("id") {
+            cookie
+        } else {
+            error!("Login failed: no cookie");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        };
+
+        let login_result = login_response.json::<LoginResult>().await?;
+        if login_result.status != "ok" {
+            // it should not happen, just for safety
+            error!("Login failed: {}", login_result.status);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        if login_result.api_version < desk_server_version::SERVER_API_VERSION {
+            error!(
+                "Login failed: api version of signaling/manage server is too old, please upgrade server"
+            );
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        // Connect to websocket
+        let connect_url = format!("{}?{}", signaling_url, version_query);
+        let (response, framed) = match client.ws(&connect_url).cookie(cookie).connect().await {
+            Ok(res) => res,
+            Err(e) => {
+                error!(
+                    "Failed to connect to signaling server: {:?}, url: {}",
+                    e, connect_url
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
+        info!("Connected to signaling server: {:?}", response);
+
+        let (mut sink, mut stream) = framed.split();
+        let (tx, mut rx) = mpsc::unbounded_channel::<DeskSessionMessage>();
+        let session_sender = DeskSessionSender { sender: tx.clone() };
+
+        let mut desk_session = match DeskSession::new(
+            settings.clone(),
+            session_sender,
+            CurrentUser::new_admin(&username),
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to init desk session: {:?}", e);
+                break Ok(());
+            }
+        };
+
+        // Main loop
+        loop {
+            tokio::select! {
+                msg = stream.next() => {
+                    match msg {
+                        Some(Ok(frame)) => {
+                            match frame {
+                                awc::ws::Frame::Text(text) => {
+                                    let text_str = match std::str::from_utf8(&text) {
+                                        Ok(s) => s,
+                                        Err(e) => {
+                                            error!("Invalid UTF-8 text: {:?}", e);
+                                            continue;
+                                        }
+                                    };
+                                    if let Err(e) = desk_session.handle_message(ByteString::from(text_str)).await {
+                                        error!("Error handling message: {:?}", e);
+                                    }
+                                }
+                                awc::ws::Frame::Binary(bin) => {
+                                    if let Err(e) = desk_session.binary(bin).await {
+                                        error!("Error handling binary: {:?}", e);
+                                    }
+                                }
+                                awc::ws::Frame::Ping(msg) => {
+                                    let _ = tx.send(DeskSessionMessage::Pong(msg));
+                                }
+                                awc::ws::Frame::Pong(_) => {}
+                                awc::ws::Frame::Close(reason) => {
+                                    warn!("WS close frame received: {:?}", reason);
+                                    break;
+                                }
+                                awc::ws::Frame::Continuation(_) => {}
+                            }
+                        }
+                        Some(Err(e)) => {
+                            error!("WS error: {:?}", e);
+                            break;
+                        }
+                        None => {
+                            warn!("WS stream closed");
+                            break;
+                        }
+                    }
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Some(DeskSessionMessage::Text(text)) => {
+                            if let Err(e) = sink.send(awc::ws::Message::Text(text)).await {
+                                error!("Failed to send text: {:?}", e);
+                                break;
+                            }
+                        }
+                        Some(DeskSessionMessage::Binary(bin)) => {
+                            if let Err(e) = sink.send(awc::ws::Message::Binary(bin)).await {
+                                error!("Failed to send binary: {:?}", e);
+                                break;
+                            }
+                        }
+                        Some(DeskSessionMessage::Ping(msg)) => {
+                            if let Err(e) = sink.send(awc::ws::Message::Ping(msg)).await {
+                                error!("Failed to send ping: {:?}", e);
+                                break;
+                            }
+                        }
+                        Some(DeskSessionMessage::Pong(msg)) => {
+                            if let Err(e) = sink.send(awc::ws::Message::Pong(msg)).await {
+                                error!("Failed to send pong: {:?}", e);
+                                break;
+                            }
+                        }
+                        Some(DeskSessionMessage::Close) => {
+                            let _ = sink.close().await;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
             }
         }
+
+        info!("Desk session ended, cleaning up...");
+
+        if let Err(e) = desk_session.shutdown().await {
+            error!("Error shutdown desk session: {:?}", e);
+        }
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        info!("Reconnecting...");
     }
-    Ok(())
 }
-/// Signaling context for handling WebSocket messages.
-pub struct SignalingContext {
-    pub settings: web::Data<SharedSettings>,
-    pub session: Session,
-    pub user: CurrentUser,
+/// Peer connection for handling WebRTC connections.
+pub struct PeerConnection {
     /// RTC peer connection
-    pub rtc_peer_connection: Arc<RTCPeerConnection>,
+    pub rtc_peer_connection: RTCPeerConnection,
     /// Capture screen thread handle
     pub capture_screen_thread: Option<std::thread::JoinHandle<()>>,
     /// Capture audio thread handle
     pub capture_audio_thread: Option<std::thread::JoinHandle<()>>,
-
     /// Signaling state
     pub signaling_state: Arc<tokio::sync::RwLock<SignalingState>>,
+}
+
+impl PeerConnection {
+    /// Shutdown the signaling context, including peer connection and capture tasks.
+    pub async fn shutdown(&self) -> Result<(), DeskError> {
+        let result = self.rtc_peer_connection.close().await;
+        info!("Signaling session ended, result={:?}", result);
+
+        Ok(())
+    }
+}
+
+impl Drop for PeerConnection {
+    fn drop(&mut self) {
+        info!("Begin to shutdown capture screen&audio runtime");
+        if let Some(capture_screen_thread) = self.capture_screen_thread.take() {
+            capture_screen_thread.join().unwrap();
+        }
+        if let Some(capture_audio_thread) = self.capture_audio_thread.take() {
+            capture_audio_thread.join().unwrap();
+        }
+
+        info!("End to shutdown capture screen&audio runtime");
+    }
+}
+
+/// Signaling context for handling WebSocket messages.
+pub struct DeskSession {
+    pub settings: web::Data<SharedSettings>,
+    pub session: DeskSessionSender,
+    pub user: CurrentUser,
+    /// RTC peer connection map, key is from_session_id
+    pub rtc_peer_connection_map: HashMap<String, Arc<tokio::sync::RwLock<PeerConnection>>>,
     /// Tokio watch sender for WebRTConnectionState updates
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
 }
 
-impl SignalingContext {
-    pub async fn init_signaling(
+impl DeskSession {
+    pub async fn new(
         settings: web::Data<SharedSettings>,
-        mut session: Session,
+        session: DeskSessionSender,
         user: CurrentUser,
     ) -> Result<Self, DeskError> {
+        Ok(Self {
+            settings,
+            session,
+            user,
+            rtc_peer_connection_map: HashMap::new(),
+            update_setting_sender: None,
+        })
+    }
+    pub async fn init_ptc_peer_connection(
+        &mut self,
+        signaling_model: &SignalingModel,
+    ) -> Result<(), DeskError> {
+        let from_session_id = signaling_model.check_and_get_from_session_id()?;
+
+        if self.rtc_peer_connection_map.contains_key(&from_session_id) {
+            return DeskError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "Peer connection already exists".to_string(),
+            );
+        }
+
         let local_settings = {
-            let shared_settings = settings.read().await;
+            let shared_settings = self.settings.read().await;
             shared_settings.clone()
         };
         let mut stun_urls = Vec::<String>::new();
@@ -209,7 +525,7 @@ impl SignalingContext {
         };
 
         // Create a new RTCPeerConnection
-        let rtc_peer_connection = Arc::new(api.new_peer_connection(config).await?);
+        let rtc_peer_connection = api.new_peer_connection(config).await?;
 
         // get audio device
         let audio_device_list = list_audio_capture();
@@ -224,7 +540,7 @@ impl SignalingContext {
                 .iter()
                 .map(|s| LcxlRTCIceServer::from(s.clone()))
                 .collect(),
-            user_name: user.name.clone(),
+            user_name: self.user.name.clone(),
             audio_device_list,
             audio_encoder_list,
             video_device_list,
@@ -233,25 +549,44 @@ impl SignalingContext {
         };
 
         info!("Sending init signaling: {:?}", init_signaling_data);
-        session
-            .send_signaling(SignalingType::Init, &init_signaling_data)
+        self.session
+            .send_to_peer(SignalingType::Init, &from_session_id, init_signaling_data)
             .await?;
         info!("Sent init signaling");
 
-        Ok(Self {
-            settings,
-            session,
-            user,
-            rtc_peer_connection,
-            capture_screen_thread: None,
-            capture_audio_thread: None,
-            signaling_state: Arc::new(tokio::sync::RwLock::new(SignalingState::default())),
-            update_setting_sender: None,
-        })
+        self.rtc_peer_connection_map.insert(
+            from_session_id,
+            Arc::new(tokio::sync::RwLock::new(PeerConnection {
+                rtc_peer_connection,
+                capture_screen_thread: None,
+                capture_audio_thread: None,
+                signaling_state: Arc::new(tokio::sync::RwLock::new(SignalingState::default())),
+            })),
+        );
+        Ok(())
+    }
+
+    /// Get the RTC peer connection, if not initialized, return error
+    pub fn get_rtc_peer_connection(
+        &self,
+        from_session_id: &str,
+    ) -> Result<Arc<tokio::sync::RwLock<PeerConnection>>, DeskError> {
+        if let Some(rtc_peer_connection) = self.rtc_peer_connection_map.get(from_session_id) {
+            Ok(rtc_peer_connection.clone())
+        } else {
+            DeskError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "RTC peer connection not initialized".to_string(),
+            )
+        }
     }
 
     /// Starts the WebRTC connection
-    pub async fn start_webrtc(&mut self, offer_model: &OfferModel) -> Result<(), DeskError> {
+    pub async fn start_webrtc(
+        &mut self,
+        offer_model: &OfferModel,
+        peer_connection: &mut PeerConnection,
+    ) -> Result<(), DeskError> {
         let (ice_state_change_sender, ice_connection_state_rx) =
             tokio::sync::watch::channel(WebRTConnectionState::Init);
         let peer_state_change_sender = ice_state_change_sender.clone();
@@ -272,7 +607,7 @@ impl SignalingContext {
             "webrtc-rs".to_owned(),
         ));
         // Add this newly created track to the PeerConnection
-        let rtp_sender = self
+        let rtp_sender = peer_connection
             .rtc_peer_connection
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
@@ -299,7 +634,7 @@ impl SignalingContext {
         ));
 
         // Add this newly created track to the PeerConnection
-        let rtp_sender = self
+        let rtp_sender = peer_connection
             .rtc_peer_connection
             .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
@@ -314,13 +649,13 @@ impl SignalingContext {
             Result::<(), DeskError>::Ok(())
         });
 
-        let session_for_video = self.session.clone();
+        let _session_for_video = self.session.clone();
 
         let local_settings = self.settings.read().await.clone();
 
         // Spawn a blocking task to capture screen and send video
         let desk_settings = offer_model.desk_settings.clone();
-        let signaling_state_for_screen = self.signaling_state.clone();
+        let signaling_state_for_screen = peer_connection.signaling_state.clone();
 
         let capture_screen_thread = std::thread::spawn(move || {
             let local = LocalSet::new();
@@ -330,7 +665,7 @@ impl SignalingContext {
                 .unwrap();
 
             local.spawn_local(async move {
-                let result = SignalingContext::capture_screen_task(
+                let result = DeskSession::capture_screen_task(
                     signaling_state_for_screen,
                     desk_settings,
                     video_state_receiver,
@@ -340,12 +675,7 @@ impl SignalingContext {
 
                 if let Err(error) = result {
                     log::error!("Capture screen task failed, error: {:?}", error);
-                    session_for_video
-                        .close(Some(CloseReason::from((
-                            CloseCode::Abnormal,
-                            format!("{:?}", error),
-                        ))))
-                        .await?;
+                    // session_for_video.close(); // TODO: Implement close
                     return Err(error);
                 }
                 log::info!("Capture screen task completed successfully");
@@ -356,9 +686,9 @@ impl SignalingContext {
             // spawned tasks have returned.
             rt.block_on(local);
         });
-        self.capture_screen_thread = Some(capture_screen_thread);
+        peer_connection.capture_screen_thread = Some(capture_screen_thread);
 
-        let session_for_audio = self.session.clone();
+        let _session_for_audio = self.session.clone();
 
         let audio_settings = local_settings.clone();
         let audio_device = offer_model.desk_settings.audio_device.clone();
@@ -373,7 +703,7 @@ impl SignalingContext {
                     .unwrap();
 
                 local.spawn_local(async move {
-                    let result = SignalingContext::capture_audio_task(
+                    let result = DeskSession::capture_audio_task(
                         audio_settings.desk,
                         audio_state_receiver,
                         audio_track,
@@ -382,12 +712,7 @@ impl SignalingContext {
 
                     if let Err(error) = result {
                         log::error!("Capture audio task failed, error: {:?}", error);
-                        session_for_audio
-                            .close(Some(CloseReason::from((
-                                CloseCode::Abnormal,
-                                format!("{:?}", error),
-                            ))))
-                            .await?;
+                        // session_for_audio.close(); // TODO: Implement close
                         return Err(error);
                     }
                     log::info!("Capture audio task completed");
@@ -399,14 +724,15 @@ impl SignalingContext {
                 rt.block_on(local);
             });
 
-            self.capture_audio_thread = Some(capture_audio_thread);
+            peer_connection.capture_audio_thread = Some(capture_audio_thread);
         } else {
             log::info!("Will not capture audio because no device is selected");
         }
 
         // Set the handler for ICE connection state
         // This will notify you when the peer has connected/disconnected
-        self.rtc_peer_connection
+        peer_connection
+            .rtc_peer_connection
             .on_ice_connection_state_change(Box::new(
                 move |connection_state: RTCIceConnectionState| {
                     log::info!("RTC ice connection state has changed {connection_state}");
@@ -423,7 +749,8 @@ impl SignalingContext {
 
         // Set the handler for Peer connection state
         // This will notify you when the peer has connected/disconnected
-        self.rtc_peer_connection
+        peer_connection
+            .rtc_peer_connection
             .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
                 log::info!("Peer connection state has changed: {s}");
                 let state = WebRTConnectionState::from(&s);
@@ -438,7 +765,8 @@ impl SignalingContext {
 
         // Set the handler for ICE gathering state
         // This will notify you when the ICE gathering state has changed
-        self.rtc_peer_connection
+        peer_connection
+            .rtc_peer_connection
             .on_ice_gathering_state_change(Box::new(move |s: RTCIceGathererState| {
                 info!("ICE gathering state has changed: {s}");
                 Box::pin(async {})
@@ -446,8 +774,9 @@ impl SignalingContext {
 
         // Register data channel creation handling
         // Used for mouse event, keyboard event, clipboard manage, file copy, etc.
-        let signaling_state_for_data_channel = self.signaling_state.clone();
-        self.rtc_peer_connection
+        let signaling_state_for_data_channel = peer_connection.signaling_state.clone();
+        peer_connection
+            .rtc_peer_connection
             .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
                 let d_label = d.label().to_owned();
                 let d_id = d.id();
@@ -467,19 +796,10 @@ impl SignalingContext {
 
     /// Shutdown the signaling context, including peer connection and capture tasks.
     pub async fn shutdown(self) -> Result<(), DeskError> {
-        let result = self.rtc_peer_connection.close().await;
-        info!("Signaling session ended, result={:?}", result);
-
-        info!("Begin to shutdown capture screen&audio runtime");
-        if let Some(capture_screen_thread) = self.capture_screen_thread {
-            capture_screen_thread.join()?;
+        for peer_connection in self.rtc_peer_connection_map.values() {
+            let result = peer_connection.write().await.shutdown().await;
+            info!("Signaling session ended, result={:?}", result);
         }
-        if let Some(capture_audio_thread) = self.capture_audio_thread {
-            capture_audio_thread.join()?;
-        }
-
-        info!("End to shutdown capture screen&audio runtime");
-
         Ok(())
     }
 
@@ -735,6 +1055,7 @@ impl SignalingContext {
             self.session
                 .send_error(
                     signaling_model.signaling_type.into(),
+                    signaling_model.from_session_id,
                     DeskErrorCode::BLANK_SIGNALING_DATA,
                     "No signaling data provided",
                 )
@@ -743,7 +1064,10 @@ impl SignalingContext {
         }
 
         match signaling_model.signaling_type {
-            SignalingType::Init => {} // handle_hello(session, user),
+            SignalingType::RequestRemote => {
+                // Init PTC peer connection
+                self.init_ptc_peer_connection(&signaling_model).await?;
+            }
             SignalingType::Offer => {
                 self.handle_offer(&signaling_model).await?;
             }
@@ -756,6 +1080,12 @@ impl SignalingContext {
                 // send back a message to client
                 self.handle_request_control(&signaling_model).await?;
             }
+            /*
+            SignalingType::Version => {
+                // send back a message to client
+                self.handle_version(&signaling_model).await?;
+            }
+             */
             _ => {
                 error!(
                     "Unknown signaling type: {:?}",
@@ -765,6 +1095,7 @@ impl SignalingContext {
                 self.session
                     .send_signaling(
                         SignalingType::Unknown,
+                        signaling_model.from_session_id,
                         &format!(
                             "Failed to handle signaling type: {:?}",
                             signaling_model.signaling_type
@@ -777,11 +1108,14 @@ impl SignalingContext {
     }
 
     pub async fn binary(&mut self, bin: Bytes) -> Result<(), DeskError> {
-        self.session.binary(bin).await?;
+        self.session
+            .sender
+            .send(DeskSessionMessage::Binary(bin))
+            .ok();
         Ok(())
     }
     pub async fn ping(&mut self, msg: Bytes) -> Result<(), DeskError> {
-        self.session.pong(&msg).await?;
+        self.session.sender.send(DeskSessionMessage::Pong(msg)).ok();
         Ok(())
     }
 
@@ -789,91 +1123,88 @@ impl SignalingContext {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
+        let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
         let offer_model = signaling_model.get_data::<OfferModel>()?;
 
         // start webrtc first
-        self.start_webrtc(&offer_model).await?;
+        let mut rwlock_peer_connection = rtc_peer_connection.write().await;
+        let peer_connection = rwlock_peer_connection.deref_mut();
+        self.start_webrtc(&offer_model, peer_connection).await?;
         // Set the remote SessionDescription
-        self.rtc_peer_connection
+        peer_connection
+            .rtc_peer_connection
             .set_remote_description(offer_model.offer)
             .await?;
-        let answer = self.rtc_peer_connection.create_answer(None).await?;
+        let answer = peer_connection
+            .rtc_peer_connection
+            .create_answer(None)
+            .await?;
+        let mut gather_complete = peer_connection
+            .rtc_peer_connection
+            .gathering_complete_promise()
+            .await;
 
-        // Create channel that is blocked until ICE Gathering is complete
-        let mut gather_complete = self.rtc_peer_connection.gathering_complete_promise().await;
-
-        // Sets the LocalDescription, and starts our UDP listeners
-        self.rtc_peer_connection
+        peer_connection
+            .rtc_peer_connection
             .set_local_description(answer)
             .await?;
 
-        // Block until ICE Gathering is complete, disabling trickle ICE
-        // we do this because we only can exchange one signaling message
-        // in a production application you should exchange ICE Candidates via OnICECandidate
+        // wait for ice gathering complete
         let _ = gather_complete.recv().await;
 
-        // Output the answer in base64 so we can paste it in browser
-        let option = self.rtc_peer_connection.local_description().await;
-        let local_desc = if let Some(local_desc) = option {
-            local_desc
-        } else {
-            self.session
-                .send_error(
-                    signaling_model.signaling_type.into(),
-                    DeskErrorCode::GENERATE_LOCAL_DESCRIPTION_FAILED,
-                    "generate local_description failed!",
-                )
-                .await?;
-            return Ok(());
-        };
-
-        log::info!("local description: {:?}", local_desc);
-
-        self.session
-            .send_signaling(SignalingType::Answer, &local_desc)
-            .await?;
-        // Save to config file
+        if let Some(local_desc) = peer_connection
+            .rtc_peer_connection
+            .local_description()
+            .await
         {
-            let mut settings = self.settings.write().await;
-            settings.desk = offer_model.desk_settings;
-            settings.save()?;
+            info!("Sending answer signaling, local_desc: {:?}", local_desc);
+            self.session
+                .send_to_peer(SignalingType::Answer, &from_session_id, local_desc)
+                .await?;
         }
 
         Ok(())
     }
 
-    /// Handle update desk settings signaling
     pub async fn handle_update_desk_settings(
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let desk_settings = signaling_model.get_data_with_default::<DeskSettings>()?;
-        if let Some(ref sender) = self.update_setting_sender {
-            log::info!("Sending update desk settings: {:?}", desk_settings);
-            sender.send(WebRTConnectionState::UpdateSettings(desk_settings))?;
-        } else {
-            log::error!("Update setting sender is not set");
+        let desk_settings = signaling_model.get_data::<DeskSettings>()?;
+        info!("Receive update desk settings: {:?}", desk_settings);
+
+        // notify the new desk settings to the capture screen task
+        if let Some(sender) = &self.update_setting_sender {
+            if let Err(e) = sender.send(WebRTConnectionState::UpdateSettings(desk_settings)) {
+                error!("Failed to send update settings: {:?}", e);
+            }
         }
+
         Ok(())
     }
-    /// Handle request control signaling
+
     pub async fn handle_request_control(
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        // TODO need implement more logic here
-        let request_control_data =
-            signaling_model.get_data_with_default::<SignalRequestControlData>()?;
-        log::info!("Request control data: {:?}", request_control_data);
-        self.signaling_state.write().await.accept_control = request_control_data.accept;
-        let signal_type = if request_control_data.accept {
-            SignalingType::AcceptControl
-        } else {
-            SignalingType::CloseControl
-        };
-        self.session
-            .send_signaling(signal_type, &request_control_data)
-            .await?;
+        let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
+
+        let _ = signaling_model.get_data::<SignalRequestControlData>()?;
+
+        // auto accept handle request control
+        let peer_connection = rtc_peer_connection.read().await;
+        let mut signaling_state = peer_connection.signaling_state.write().await;
+        signaling_state.accept_control = true;
+
         Ok(())
     }
+
+    /*
+    async fn handle_version(&self, signaling_model: &SignalingModel) -> Result<(), DeskError> {
+        let version_info = signaling_model.get_data::<VersionInfo>()?;
+        info!("Receive signal server version info: {:?}", version_info);
+        Ok(())
+    } */
 }

@@ -13,9 +13,9 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskError;
 
-#[derive(clap::ValueEnum, Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(clap::ValueEnum, Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-enum StartupMode {
+pub enum StartupMode {
     /// Default mode, includes both signaling server and desk server
     #[default]
     Default,
@@ -33,7 +33,7 @@ pub struct Args {
     config_file_path: String,
 
     #[clap(short, long, default_value_t, value_enum)]
-    startup_mode: StartupMode,
+    pub startup_mode: StartupMode,
 }
 /// System settings for the application. This struct is used to load and save settings from a configuration file.
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -56,6 +56,8 @@ pub struct SystemSettings {
     pub locale: Option<String>,
     /// Whether to open the browser automatically on server startup
     pub open_browser_on_startup: bool,
+    /// Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling"
+    pub signaling_url: Option<String>,
 }
 
 /// User settings
@@ -158,6 +160,7 @@ impl Default for SystemSettings {
             traceback: true,
             locale: None,
             open_browser_on_startup: true,
+            signaling_url: None,
         }
     }
 }

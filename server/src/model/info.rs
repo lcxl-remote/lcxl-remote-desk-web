@@ -37,6 +37,8 @@ pub struct SystemInfo {
     pub used_swap: u64,
     /// List of CPU information
     pub cpus: Vec<CpuInfo>,
+    /// Startup mode
+    pub startup_mode: String,
 }
 
 impl From<&sysinfo::System> for SystemInfo {
@@ -63,6 +65,7 @@ impl From<&sysinfo::System> for SystemInfo {
             total_swap: sys.total_swap(),
             used_swap: sys.used_swap(),
             cpus,
+            startup_mode: "Default".to_string(),
         }
     }
 }

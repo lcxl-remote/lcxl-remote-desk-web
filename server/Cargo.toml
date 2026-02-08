@@ -21,12 +21,20 @@ actix-files = { workspace = true }
 actix-server = { workspace = true }
 actix-http = { workspace = true }
 actix-service = { workspace = true }
+awc = { workspace = true }
+
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+
 env_logger = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
 utoipa = { workspace = true }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_urlencoded = { workspace = true }
+
 futures = { workspace = true }
 futures-util = { workspace = true }
 anyhow = { workspace = true }
@@ -56,7 +64,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 mime = "0.3"
 yuv = "0.8"
-openh264 = "0.8"
+openh264 = "0.9.3"
 
 # opus = "0.3"
 opusic-c = "1.5"
@@ -71,6 +79,7 @@ vpx-encode = { path = "../third-deps/vpx-encode", features = ["vp9"] }
 rust-i18n = "3.1"
 webbrowser = "1"
 sysinfo = "0.37"
+
 
 [target."cfg(tokio_unstable)".dependencies]
 console-subscriber = "0.5"

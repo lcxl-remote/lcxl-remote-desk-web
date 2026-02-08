@@ -254,6 +254,8 @@ declare namespace API {
   };
 
   type LoginResult = {
+    /** return api version of signal/desk/manage server */
+    api_version: number;
     currentAuthority: string;
     status: string;
     type: string;
@@ -301,6 +303,19 @@ declare namespace API {
     data?: any;
     success: boolean;
     total: number;
+  };
+
+  type openSignalingHandleParams = {
+    /** The version of the API. This is a simple integer that increments when API is changed. */
+    api_version: number;
+    /** The build number of the server. */
+    build_number: number;
+    /** The commit hash of the server. */
+    commit_hash: string;
+    /** Remote desk type associated with the version. */
+    remote_desk_type: RemoteDeskTypeEnum;
+    /** Operation system associated with the version. */
+    operation_system: OperationSystemEnum;
   };
 
   type openTerminalSessionParams = {
@@ -351,6 +366,7 @@ declare namespace API {
       kernel_version?: any;
       name?: any;
       os_version?: any;
+      startup_mode: string;
       total_memory: number;
       total_swap: number;
       used_memory: number;
@@ -371,6 +387,7 @@ declare namespace API {
       log_level?: string;
       open_browser_on_startup?: boolean;
       port?: number;
+      signaling_url?: any;
       traceback?: boolean;
     };
     message?: any;
@@ -385,11 +402,15 @@ declare namespace API {
   };
 
   type SignalingModel = {
+    /** From session id, if None, means from signal server */
+    from_session_id?: any;
     response_state?: null | SignalingResponseState;
     /** Signaling data */
     signaling_data?: any;
     /** Signaling type */
     signaling_type: SignalingType;
+    /** To session id, if None, means to signal server */
+    to_session_id?: any;
   };
 
   type SignalingResponseState = {
@@ -423,6 +444,8 @@ see alse: desk_utils::DeskErrorCode */
     name?: any;
     /** Operating system version */
     os_version?: any;
+    /** Startup mode */
+    startup_mode: string;
     /** Total memory in bytes */
     total_memory: number;
     /** Total swap in bytes */
@@ -448,6 +471,8 @@ see alse: desk_utils::DeskErrorCode */
     open_browser_on_startup?: boolean;
     /** port number for the server to bind to */
     port?: number;
+    /** Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling" */
+    signaling_url?: any;
     /** Enable Rust backtrace for errors */
     traceback?: boolean;
   };

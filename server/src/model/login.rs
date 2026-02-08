@@ -2,14 +2,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Login params
-#[derive(Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct LoginParams {
     pub username: String,
     pub password: String,
-    #[serde(rename(deserialize = "autoLogin"))]
+    #[serde(rename = "autoLogin")]
     #[schema(rename = "autoLogin")]
     pub auto_login: bool,
-    #[serde(rename(deserialize = "type"))]
+    #[serde(rename = "type")]
     #[schema(rename = "type")]
     pub login_type: String,
 }
@@ -26,16 +26,19 @@ pub struct FakeCaptcha {
 }
 
 /// Login result
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct LoginResult {
     pub status: String,
-    #[serde(rename(serialize = "type"))]
+    #[serde(rename = "type")]
     #[schema(rename = "type")]
     pub login_type: String,
-    #[serde(rename(serialize = "currentAuthority"))]
+    #[serde(rename = "currentAuthority")]
     #[schema(rename = "currentAuthority")]
     pub current_authority: String,
+    /// return api version of signal/desk/manage server
+    pub api_version: i32,
 }
+
 /// Password params
 #[derive(Deserialize, ToSchema)]
 pub struct PasswordParams {

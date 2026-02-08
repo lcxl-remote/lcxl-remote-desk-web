@@ -1,7 +1,9 @@
 pub mod controller;
 pub mod error;
 pub mod model;
+pub mod openapi;
 pub mod service;
+pub mod version;
 
 use std::{collections::BTreeMap, env, fs::File, sync::Arc};
 
@@ -21,7 +23,6 @@ use controller::{
     files::{delete_file, list_files},
     login::{change_password, get_captcha, login_account, logout_account},
     settings::{query_settings, update_settings},
-    signaling::open_signaling_handle,
     turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
         get_turn_session_statistics,
@@ -34,9 +35,12 @@ use desk_utils::{
     error::DeskErrorCode, logs::init_logs_by_str, network::check_ipv6_available, rest::RestResponse,
 };
 use error::DeskError;
-use log::{info, warn};
-use model::settings::{Args, Settings, SharedSettings, UserSettings};
+use log::{error, info, warn};
+use model::settings::{Args, Settings, SharedSettings, StartupMode, UserSettings};
+use service::signaling::start_desk_session;
 use turn_server::statistics::Statistics;
+
+use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
 use utoipa_rapidoc::RapiDoc;
 use utoipa_redoc::{Redoc, Servable as _};
@@ -55,6 +59,8 @@ use crate::{
 rust_i18n::i18n!("locales");
 
 pub async fn run() -> Result<Server, DeskError> {
+    // Install default crypto provider
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     #[cfg(tokio_unstable)]
     console_subscriber::init();
     let args = Args::parse();
@@ -103,22 +109,48 @@ pub async fn run() -> Result<Server, DeskError> {
         let settings = shared_settings.read().await;
         Arc::new(settings.to_turn_server_config()?)
     };
-    log::info!("Starting turn server with config {:?}", config);
 
-    let observer = TurnObserver::new(shared_settings.clone(), Statistics::default());
-    //start turn server
-    let turn_api_state = web::Data::new(startup_turn_server(config, observer).await?);
+    // determine startup mode
+    let startup_mode = settings.args.startup_mode.clone();
+
+    //start turn server if mode is Default or Signaling
+    let turn_api_state =
+        if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
+            log::info!("Starting turn server with config {:?}", config);
+            let observer = TurnObserver::new(shared_settings.clone(), Statistics::default());
+            Some(web::Data::new(startup_turn_server(config, observer).await?))
+        } else {
+            None
+        };
+
+    // start desk session if mode is Default or DeskServer
+    if startup_mode == StartupMode::Default || startup_mode == StartupMode::DeskServer {
+        info!("Starting desk session");
+        let settings_clone = shared_settings.clone();
+        actix_web::rt::spawn(async move {
+            if let Err(e) = start_desk_session(settings_clone).await {
+                error!("Desk session error: {:?}", e);
+            }
+        });
+    }
+
     let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
         let default_static_file_path = static_file_path.clone();
 
+        let turn_api_state = turn_api_state.clone();
+        let startup_mode = startup_mode.clone();
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
             .app_data(shared_settings.clone())
-            .app_data(turn_api_state.clone())
             .app_data(session_map.clone())
+            .configure(|cfg| {
+                if let Some(turn_api_state) = &turn_api_state {
+                    cfg.app_data(turn_api_state.clone());
+                }
+            })
             .app_data(
                 web::JsonConfig::default()
                     .limit(4096 * 1024 << 2)
@@ -142,6 +174,12 @@ pub async fn run() -> Result<Server, DeskError> {
             .service(get_current_user)
             .service(get_notices)
             .service(get_captcha)
+            .configure(move |cfg| {
+                if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
+                    log::info!("Registering signaling route at /signaling");
+                    cfg.service(desk_signal::controller::open_signaling_handle);
+                }
+            })
             // TODO need to login for these routes
             .service(
                 // need to login for these routes
@@ -154,21 +192,28 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(update_settings)
                             .service(delete_file)
                             .service(list_files)
-                            .service(open_signaling_handle)
+                            .service(list_files)
                             .service(list_terminal)
                             .service(open_terminal_session)
                             .service(query_sysinfo),
                     )
-                    .service(
-                        utoipa_actix_web::scope("/turn")
-                            .service(get_turn_info)
-                            .service(get_turn_session)
-                            .service(get_turn_session_statistics)
-                            .service(delete_turn_session)
-                            .service(get_turn_metrics),
-                    ),
+                    .configure(|cfg| {
+                        if let Some(_) = &turn_api_state {
+                            cfg.service(
+                                utoipa_actix_web::scope("/turn")
+                                    .service(get_turn_info)
+                                    .service(get_turn_session)
+                                    .service(get_turn_session_statistics)
+                                    .service(delete_turn_session)
+                                    .service(get_turn_metrics),
+                            );
+                        }
+                    }),
             )
-            .openapi_service(|api| SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api))
+            .openapi_service(|mut api| {
+                api.merge(openapi::ExtraSchemas::openapi());
+                SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api)
+            })
             .openapi_service(|api| Redoc::with_url("/redoc", api))
             .openapi_service(|api| RapiDoc::with_url("/rapidoc", "/openapi.json", api))
             .openapi_service(|api| Scalar::with_url("/scalar", api))

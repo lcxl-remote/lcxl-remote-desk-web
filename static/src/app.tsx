@@ -11,6 +11,8 @@ import React from 'react';
 const isDev = process.env.NODE_ENV === 'development';
 const loginPath = '/user/login';
 
+import { querySysinfo } from '@/services/desk/querySysinfo';
+
 /**
  * @see  https://umijs.org/zh-CN/plugins/plugin-initial-state
  * */
@@ -19,12 +21,8 @@ export async function getInitialState(): Promise<{
   currentUser?: API.CurrentUser;
   loading?: boolean;
   fetchUserInfo?: () => Promise<API.CurrentUser | undefined>;
+  startupMode?: string;
 }> {
-  /*
-  return {
-    settings: defaultSettings as Partial<LayoutSettings>,
-  };
-  */
   const fetchUserInfo = async () => {
     try {
       const msg = await getCurrentUser({
@@ -36,6 +34,20 @@ export async function getInitialState(): Promise<{
     }
     return undefined;
   };
+
+  const fetchStartupMode = async () => {
+    try {
+      const sysInfo = await querySysinfo();
+      if (sysInfo.data) {
+        return sysInfo.data.startup_mode;
+      }
+    } catch (error) {
+      console.error("Failed to fetch startup mode", error);
+    }
+    return 'default';
+  };
+  const startupMode = await fetchStartupMode();
+
   // 如果不是登录页面，执行
   const { location } = history;
   if (location.pathname !== loginPath) {
@@ -44,11 +56,13 @@ export async function getInitialState(): Promise<{
       fetchUserInfo,
       currentUser,
       settings: defaultSettings as Partial<LayoutSettings>,
+      startupMode,
     };
   }
   return {
     fetchUserInfo,
     settings: defaultSettings as Partial<LayoutSettings>,
+    startupMode,
   };
 }
 
@@ -97,11 +111,11 @@ export const layout: RunTimeLayoutConfig = ({ initialState, setInitialState }) =
     ],
     links: isDev
       ? [
-          <Link key="openapi" to="/umi/plugin/openapi" target="_blank">
-            <LinkOutlined />
-            <span>OpenAPI 文档</span>
-          </Link>,
-        ]
+        <Link key="openapi" to="/umi/plugin/openapi" target="_blank">
+          <LinkOutlined />
+          <span>OpenAPI 文档</span>
+        </Link>,
+      ]
       : [],
     menuHeaderRender: undefined,
     // 自定义 403 页面

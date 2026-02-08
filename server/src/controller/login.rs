@@ -1,6 +1,7 @@
 use actix_session::Session;
 use actix_web::{Error as AWError, HttpResponse, post, web};
 use desk_server_user::{model::CurrentUser, service::SessionExt};
+use desk_server_version::SERVER_API_VERSION;
 use log::{error, info};
 
 use crate::model::{
@@ -38,6 +39,7 @@ pub async fn login_account(
         status: String::from("ok"),
         login_type: params.login_type,
         current_authority: String::from("admin"),
+        api_version: SERVER_API_VERSION,
     };
     let user_info = CurrentUser::new_admin(&params.username);
     // Store user information in session

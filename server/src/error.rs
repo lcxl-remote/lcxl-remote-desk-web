@@ -37,6 +37,8 @@ pub enum DeskError {
     TokioWebrtcSendError(tokio::sync::watch::error::SendError<WebRTConnectionState>),
     /// An actix ws closed error occurred.
     ActixWsClosed(actix_ws::Closed),
+    /// A awc json payload error occurred.
+    AwcJsonPayloadError(awc::error::JsonPayloadError),
     /// A Windows result error occurred.
     #[cfg(target_os = "windows")]
     WindowsResultError(Backtrace, windows_result::Error),
@@ -135,6 +137,7 @@ impl Display for DeskError {
             DeskError::AnyhowError(error) => error.fmt(f),
             DeskError::TokioTaskJoinError(error) => error.fmt(f),
             DeskError::ActixWsClosed(closed) => closed.fmt(f),
+            DeskError::AwcJsonPayloadError(error) => error.fmt(f),
             #[cfg(target_os = "windows")]
             DeskError::WindowsResultError(_backtrace, error) => error.fmt(f),
             DeskError::WebrtcError(_backtrace, error) => error.fmt(f),
@@ -242,6 +245,12 @@ impl From<tokio::sync::watch::error::SendError<WebRTConnectionState>> for DeskEr
 impl From<actix_ws::Closed> for DeskError {
     fn from(closed: actix_ws::Closed) -> Self {
         DeskError::ActixWsClosed(closed)
+    }
+}
+
+impl From<awc::error::JsonPayloadError> for DeskError {
+    fn from(err: awc::error::JsonPayloadError) -> Self {
+        DeskError::AwcJsonPayloadError(err)
     }
 }
 

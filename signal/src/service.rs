@@ -4,19 +4,18 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use desk_server_user::model::CurrentUser;
 use desk_server_version::SERVER_API_VERSION;
-use desk_signal_facade::model::{
-    session::{SessionList, SessionModel},
-    signal::{
-        RemoteDeskTypeEnum, RequestRemoteData, SignalingModel, SignalingPeerData,
-        SignalingSessionExt, SignalingType,
+use desk_signal_facade::{
+    error::DeskSignalFacadeError,
+    model::{
+        session::{SessionList, SessionModel},
+        signal::{ForwardSignalingSender, SignalingModel, SignalingResponseState, SignalingType},
+        version::VersionInfo,
     },
-    version::VersionInfo,
 };
 use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::runtime::Handle;
-use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
@@ -46,17 +45,59 @@ pub async fn handle_signaling(
 
 /// Signaling context for handling WebSocket messages.
 pub struct SignalingContext {
-    pub session_id: String,
+    pub session_state: SessionState,
     pub session_map: web::Data<SharedSessionMap>,
-    pub session: Session,
     pub user: CurrentUser,
-    pub client_version_info: VersionInfo,
+}
+
+impl ForwardSignalingSender for SessionState {
+    async fn send_signaling<T>(
+        &mut self,
+        signaling_type: SignalingType,
+        from_session_id: Option<String>,
+        signaling_data: &T,
+    ) -> Result<(), DeskSignalFacadeError>
+    where
+        T: ?Sized + Serialize + Sync,
+    {
+        let signaling_model = SignalingModel::success_response(
+            signaling_type,
+            from_session_id,
+            Some(self.model.session_id.clone()),
+            signaling_data,
+        )?;
+        self.session
+            .text(serde_json::to_string(&signaling_model)?)
+            .await?;
+        Ok(())
+    }
+
+    async fn forward_to_peer(
+        &mut self,
+        signaling_type: SignalingType,
+        from_session_id: &str,
+        data: Option<serde_json::Value>,
+        response_state: Option<SignalingResponseState>,
+    ) -> Result<(), DeskSignalFacadeError> {
+        let signaling_model = SignalingModel::new(
+            signaling_type,
+            Some(from_session_id.to_owned()),
+            Some(self.model.session_id.clone()),
+            data,
+            response_state,
+        );
+        self.session
+            .text(serde_json::to_string(&signaling_model)?)
+            .await?;
+
+        Ok(())
+    }
 }
 
 impl Drop for SignalingContext {
     fn drop(&mut self) {
         let handle = Handle::current();
-        let session_id = self.session_id.clone();
+        let session_id = self.session_state.model.session_id.clone();
         let session_map = self.session_map.clone();
         let removed_value = futures::executor::block_on(async move {
             handle
@@ -66,7 +107,7 @@ impl Drop for SignalingContext {
         match removed_value {
             Ok(None) => log::error!(
                 "Failed to remove session from map: session {} not found",
-                self.session_id
+                self.session_state.model.session_id
             ),
             Ok(Some(session_state)) => {
                 log::info!("Removed session from map: {:?}", session_state.model)
@@ -82,7 +123,7 @@ impl SignalingContext {
         session_id: String,
         client_version_info: VersionInfo,
         session_map: web::Data<SharedSessionMap>,
-        mut session: Session,
+        session: Session,
         user: CurrentUser,
     ) -> Result<Self, DeskSignalError> {
         log::info!("Init new SignalingContext, session id: {}", session_id);
@@ -93,42 +134,50 @@ impl SignalingContext {
                 SERVER_API_VERSION
             );
         }
-        let server_version_info =
-            VersionInfo::new(SERVER_API_VERSION, None, RemoteDeskTypeEnum::Signal);
+
         let session_model = SessionModel {
             session_id: session_id.clone(),
             version_info: client_version_info.clone(),
         };
-        session
-            .send_signaling(SignalingType::Version, &server_version_info)
-            .await?;
+
         let session_state = SessionState {
             model: session_model,
             session: session.clone(),
         };
+        /*
+        let server_version_info = VersionInfo::new(
+            SERVER_API_VERSION,
+            version::SIGNAL_BUILD_NUMBER,
+            version::SIGNAL_COMMIT_HASH.to_string(),
+            RemoteDeskTypeEnum::Signal,
+        );
+        session_state
+            .send_signaling(
+                SignalingType::Version,
+                Some(session_id.clone()),
+                &server_version_info,
+            )
+            .await?;
+         */
         session_map
             .write()
             .await
-            .insert(session_id.clone(), session_state);
+            .insert(session_id.clone(), session_state.clone());
         Ok(Self {
-            session_id,
-            client_version_info,
+            session_state,
             session_map,
-            session,
             user,
         })
     }
 
     /// Send data to target peer
-    pub async fn send_peer<T>(
+    pub async fn send_peer(
         &mut self,
         signaling_type: SignalingType,
         to_session_id: &str,
-        data: T,
-    ) -> Result<(), DeskSignalError>
-    where
-        T: Serialize + Sync + Send + ToSchema,
-    {
+        data: Option<serde_json::Value>,
+        response_state: Option<SignalingResponseState>,
+    ) -> Result<(), DeskSignalError> {
         {
             let mut session_map = self.session_map.write().await;
             let session_state = if let Some(session_state) = session_map.get_mut(to_session_id) {
@@ -136,12 +185,16 @@ impl SignalingContext {
             } else {
                 return DeskSignalError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    "111".to_owned(),
+                    format!("Session {} not found", to_session_id),
                 );
             };
             session_state
-                .session
-                .send_peer(signaling_type, &self.session_id, to_session_id, data)
+                .forward_to_peer(
+                    signaling_type,
+                    &self.session_state.model.session_id,
+                    data,
+                    response_state,
+                )
                 .await?;
         }
 
@@ -162,40 +215,53 @@ impl SignalingContext {
                         .collect()
                 };
                 let session_list = SessionList {
-                    current_session_id: self.session_id.clone(),
+                    current_session_id: self.session_state.model.session_id.clone(),
                     session_map,
                 };
 
                 log::info!("Sending session list to client: {:?}", session_list);
-                self.session
-                    .send_signaling(SignalingType::SessionList, &session_list)
+                self.session_state
+                    .send_signaling(SignalingType::SessionList, None, &session_list)
                     .await?;
             }
-            SignalingType::RequestRemote => {
-                let data = signaling_model.get_data::<SignalingPeerData<RequestRemoteData>>()?;
+            // Forwarding types
+            SignalingType::RequestRemote
+            | SignalingType::Init
+            | SignalingType::Offer
+            | SignalingType::Answer
+            | SignalingType::Canid
+            | SignalingType::RequireControl
+            | SignalingType::AcceptControl
+            | SignalingType::DenyControl
+            | SignalingType::CloseControl
+            | SignalingType::ChangeDisplaySettings
+            | SignalingType::UpdateDeskSettings
+            | SignalingType::ManagerFile
+            | SignalingType::ManagerTerminal
+            | SignalingType::ManagerSystemInfo
+            | SignalingType::ManagerSystemStatue => {
+                // Generic forwarding
+                // We need to parse as generic serde_json::Value
+                // to forward without knowing the exact inner type.
+                let to_session_id = signaling_model.check_and_get_to_session_id()?;
+                let data = signaling_model.signaling_data;
+                let response_state = signaling_model.response_state;
+
                 self.send_peer(
                     signaling_model.signaling_type,
-                    &data.to_session_id,
-                    data.data,
+                    &to_session_id,
+                    data,
+                    response_state,
                 )
                 .await?;
             }
-            SignalingType::Init => todo!(),
-            SignalingType::Offer => todo!(),
-            SignalingType::Answer => todo!(),
-            SignalingType::Canid => todo!(),
-            SignalingType::RequireControl => todo!(),
-            SignalingType::AcceptControl => todo!(),
-            SignalingType::DenyControl => todo!(),
-            SignalingType::CloseControl => todo!(),
-            SignalingType::ChangeDisplaySettings => todo!(),
-            SignalingType::UpdateDeskSettings => todo!(),
-            SignalingType::ManagerFile => todo!(),
-            SignalingType::ManagerTerminal => todo!(),
-            SignalingType::ManagerSystemInfo => todo!(),
-            SignalingType::ManagerSystemStatue => todo!(),
-            SignalingType::Error => todo!(),
-            SignalingType::Unknown => todo!(),
+
+            SignalingType::Error => {
+                log::warn!("Received error from client: {:?}", signaling_model);
+            }
+            SignalingType::Unknown => {
+                log::warn!("Received unknown signaling type");
+            }
             _ => {
                 log::error!(
                     "Unsupported signaling type: {}",
@@ -212,7 +278,7 @@ impl SignalingContext {
     }
 
     pub async fn ping(&mut self, bin: Bytes) -> Result<(), DeskSignalError> {
-        self.session.pong(&bin).await?;
+        self.session_state.session.pong(&bin).await?;
         Ok(())
     }
 
