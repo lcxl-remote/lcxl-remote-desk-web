@@ -323,6 +323,8 @@ declare namespace API {
     command: string;
   };
 
+  type OperationSystemEnum = 'Windows' | 'Linux' | 'Mac' | 'Android' | 'Ios' | 'Web' | 'Other';
+
   type OpusEncoderSettings = {
     application?: string;
     channels?: number;
@@ -349,6 +351,8 @@ declare namespace API {
     /** Optional window style for the private screen window */
     window_style?: number;
   };
+
+  type RemoteDeskTypeEnum = 'Browser' | 'Server' | 'Signal' | 'Manager';
 
   type Resolution = {
     /** Height of the resolution in pixels */
@@ -399,6 +403,20 @@ declare namespace API {
     audio_data_flow: AudioDataFlow;
     /** Audio device id, None for default audio device */
     audio_device_id?: any;
+  };
+
+  type SessionList = {
+    /** Current session ID */
+    current_session_id: string;
+    /** Session map */
+    session_map: Record<string, any>;
+  };
+
+  type SessionModel = {
+    /** Session ID */
+    session_id: string;
+    /** Version info of the session */
+    version_info: VersionInfo;
   };
 
   type SignalingModel = {
@@ -551,6 +569,19 @@ address and service listening port. */
     errorCode: number;
     errorMessage: string;
     success: boolean;
+  };
+
+  type VersionInfo = {
+    /** The version of the API. This is a simple integer that increments when API is changed. */
+    api_version: number;
+    /** The build number of the server. */
+    build_number: number;
+    /** The commit hash of the server. */
+    commit_hash: string;
+    /** Operation system associated with the version. */
+    operation_system: OperationSystemEnum;
+    /** Remote desk type associated with the version. */
+    remote_desk_type: RemoteDeskTypeEnum;
   };
 
   type VpxEncoderSettings = {
