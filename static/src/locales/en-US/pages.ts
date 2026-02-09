@@ -175,4 +175,11 @@ export default {
   'pages.fileList.startDeleteFile': 'Begin to delete file: {path}',
   'pages.fileList.deletedFile': 'Deleted file: {path}: {response}',
   'pages.fileList.requestDeleteFileError': 'Request deleteFile error: {error}',
+  'pages.desk.sessionList': 'Available Devices',
+  'pages.desk.noDevices': 'No devices found',
+  'pages.desk.sessionId': 'ID',
+  'pages.desk.sessionIp': 'IP',
+  'pages.desk.sessionOs': 'OS',
+  'pages.desk.sessionType': 'Type',
+  'pages.desk.unknown': 'Unknown',
 };

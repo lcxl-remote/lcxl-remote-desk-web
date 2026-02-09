@@ -28,6 +28,7 @@ export default {
   listFiles,
   querySettings,
   updateSettings,
+  openSignalingHandle,
   querySysinfo,
   openTerminalSession,
   listTerminal,
@@ -40,5 +41,4 @@ export default {
   getTurnSession,
   deleteTurnSession,
   getTurnSessionStatistics,
-  openSignalingHandle,
 };

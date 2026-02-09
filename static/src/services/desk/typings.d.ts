@@ -63,6 +63,8 @@ declare namespace API {
     audio_device?: null | SelectedAudioDevice;
     /** Audio encoder name, None for auto detection */
     audio_encoder?: any;
+    /** Display name */
+    display_name?: any;
     /** Enable D3D debug mode */
     enable_d3d_debug?: boolean;
     h264_encoder?: null | H264EncoderSettings;
@@ -316,6 +318,8 @@ declare namespace API {
     remote_desk_type: RemoteDeskTypeEnum;
     /** Operation system associated with the version. */
     operation_system: OperationSystemEnum;
+    /** Display name of the remote desk. */
+    display_name?: any;
   };
 
   type openTerminalSessionParams = {
@@ -352,7 +356,7 @@ declare namespace API {
     window_style?: number;
   };
 
-  type RemoteDeskTypeEnum = 'Browser' | 'Server' | 'Signal' | 'Manager';
+  type RemoteDeskTypeEnum = 'browser' | 'server' | 'signal' | 'manager';
 
   type Resolution = {
     /** Height of the resolution in pixels */
@@ -413,6 +417,8 @@ declare namespace API {
   };
 
   type SessionModel = {
+    /** IP address of the session */
+    ip?: any;
     /** Session ID */
     session_id: string;
     /** Version info of the session */
@@ -578,6 +584,8 @@ address and service listening port. */
     build_number: number;
     /** The commit hash of the server. */
     commit_hash: string;
+    /** Display name of the remote desk. */
+    display_name?: any;
     /** Operation system associated with the version. */
     operation_system: OperationSystemEnum;
     /** Remote desk type associated with the version. */

@@ -29,7 +29,7 @@ pub async fn query_sysinfo(settings: web::Data<SharedSettings>) -> Result<HttpRe
     let mut system_info = SystemInfo::from(&sys);
     system_info.startup_mode = {
         let settings = settings.read().await;
-        format!("{:?}", settings.args.startup_mode)
+        settings.args.startup_mode.as_ref().to_string()
     };
     log::info!(
         "Get system information successfully, info: {:?}",

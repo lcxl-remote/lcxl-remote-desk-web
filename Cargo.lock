@@ -3340,6 +3340,7 @@ dependencies = [
  "toml 0.9.11+spec-1.1.0",
  "toml_edit 0.23.10+spec-1.0.0",
  "turn-server",
+ "url",
  "utoipa",
  "utoipa-actix-web",
  "utoipa-rapidoc",

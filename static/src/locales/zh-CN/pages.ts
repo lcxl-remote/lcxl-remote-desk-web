@@ -1,5 +1,5 @@
 export default {
-  'pages.layouts.userLayout.title': '清理大量重复文件的得力助手', 
+  'pages.layouts.userLayout.title': '清理大量重复文件的得力助手',
   'pages.login.accountLogin.tab': '账户密码登录',
   'pages.login.accountLogin.errorMessage': '错误的用户名和密码',
   'pages.login.failure': '登录失败，请重试！',
@@ -173,4 +173,11 @@ export default {
   'pages.fileList.startDeleteFile': '开始删除文件: {path}',
   'pages.fileList.deletedFile': '已删除文件: {path}: {response}',
   'pages.fileList.requestDeleteFileError': '请求删除文件错误: {error}',
+  'pages.desk.sessionList': '可用设备',
+  'pages.desk.noDevices': '未发现设备',
+  'pages.desk.sessionId': 'ID',
+  'pages.desk.sessionIp': 'IP',
+  'pages.desk.sessionOs': '操作系统',
+  'pages.desk.sessionType': '类型',
+  'pages.desk.unknown': '未知',
 };

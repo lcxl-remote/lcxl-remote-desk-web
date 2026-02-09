@@ -29,13 +29,21 @@ pub async fn handle_signaling(
     session_map: web::Data<SharedSessionMap>,
     session: Session,
     user: CurrentUser,
+    ip: Option<String>,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
     let random_uuid = Uuid::new_v4();
     let session_id = String::from(random_uuid);
     // Handle signaling logic here
-    let mut signaling_context =
-        SignalingContext::init(session_id, client_version_info, session_map, session, user).await?;
+    let mut signaling_context = SignalingContext::init(
+        session_id,
+        client_version_info,
+        session_map,
+        session,
+        user,
+        ip,
+    )
+    .await?;
 
     let result = signaling_context.do_handle_signaling(stream).await;
     // Shutdown function must be invoked to clean up resources.
@@ -125,6 +133,7 @@ impl SignalingContext {
         session_map: web::Data<SharedSessionMap>,
         session: Session,
         user: CurrentUser,
+        ip: Option<String>,
     ) -> Result<Self, DeskSignalError> {
         log::info!("Init new SignalingContext, session id: {}", session_id);
         if client_version_info.api_version > SERVER_API_VERSION {
@@ -138,6 +147,7 @@ impl SignalingContext {
         let session_model = SessionModel {
             session_id: session_id.clone(),
             version_info: client_version_info.clone(),
+            ip,
         };
 
         let session_state = SessionState {

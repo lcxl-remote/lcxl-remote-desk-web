@@ -39,16 +39,20 @@ futures = { workspace = true }
 futures-util = { workspace = true }
 anyhow = { workspace = true }
 turn-server = { workspace = true }
+
 webrtc = { workspace = true }
 webrtc-ice = { workspace = true }
 webrtc-media = { workspace = true }
 rtp = { workspace = true }
+
 strum = { workspace = true }
 strum_macros = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
 uuid = { workspace = true }
 portable-pty = { workspace = true }
+
+url = { workspace = true }
 
 utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
 utoipa-actix-web = "0.1"

@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio::time::Instant;
 use turn_server::config::Transport;
+use url::Url;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::{
@@ -159,13 +160,15 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         if let Some(url) = &settings.system.signaling_url {
             url.clone()
         } else if settings.system.enable_ipv6 {
-            format!("ws://[::1]:{}/signaling", settings.system.port)
+            format!("ws://[::1]:{}/api/desk/signaling", settings.system.port)
         } else {
-            format!("ws://127.0.0.1:{}/signaling", settings.system.port)
+            format!("ws://127.0.0.1:{}/api/desk/signaling", settings.system.port)
         }
     };
     // determine the root url from signaling url
-    let root_url = signaling_url.replace("/signaling", "");
+    let parsed_url = Url::parse(&signaling_url)?;
+    let root_url = parsed_url.origin().ascii_serialization();
+
     let login_url = format!("{}/api/login/account", root_url);
     // http => http, ws => http, wss => https
     let login_url = if login_url.starts_with("ws://") {
@@ -176,11 +179,23 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         login_url
     };
 
+    let display_name = {
+        let settings = settings.read().await;
+        settings.desk.display_name.clone()
+    };
+
+    let display_name = if display_name.is_some() {
+        display_name
+    } else {
+        sysinfo::System::host_name()
+    };
+
     let version_info = VersionInfo::new(
         desk_server_version::SERVER_API_VERSION,
         version::SERVER_BUILD_NUMBER,
         version::SERVER_COMMIT_HASH.to_string(),
         RemoteDeskTypeEnum::Server,
+        display_name,
     );
     let version_query = serde_urlencoded::to_string(&version_info).unwrap();
 
@@ -1079,6 +1094,23 @@ impl DeskSession {
             SignalingType::RequireControl => {
                 // send back a message to client
                 self.handle_request_control(&signaling_model).await?;
+            }
+            SignalingType::CloseControl => {
+                let from_session_id = signaling_model.check_and_get_from_session_id()?;
+                if let Some(peer_connection) = self.rtc_peer_connection_map.remove(&from_session_id)
+                {
+                    info!(
+                        "Received CloseControl from session {}, shutting down peer connection",
+                        from_session_id
+                    );
+                    let peer_connection = peer_connection.read().await;
+                    peer_connection.shutdown().await?;
+                } else {
+                    warn!(
+                        "Received CloseControl from session {} but no peer connection found",
+                        from_session_id
+                    );
+                }
             }
             /*
             SignalingType::Version => {

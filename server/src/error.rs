@@ -94,6 +94,8 @@ pub enum DeskError {
     AddrParseError(std::net::AddrParseError),
     // A thread error occurred.
     ThreadError(Box<dyn std::any::Any + Send + 'static>),
+    /// A url parse error occurred.
+    UrlParseError(url::ParseError),
     /// Desk utils error
     DeskUtilsError(desk_utils::error::DeskUtilsError),
     /// Desk turn error
@@ -171,6 +173,7 @@ impl Display for DeskError {
             DeskError::ArboardError(error) => error.fmt(f),
             DeskError::AddrParseError(error) => error.fmt(f),
             DeskError::ThreadError(any_error) => f.write_fmt(format_args!("{:?}", any_error)),
+            DeskError::UrlParseError(error) => error.fmt(f),
             DeskError::DeskUtilsError(error) => error.fmt(f),
             DeskError::DeskTurnError(error) => error.fmt(f),
             DeskError::DeskSignalFacadeError(error) => error.fmt(f),
@@ -414,6 +417,12 @@ impl From<std::net::AddrParseError> for DeskError {
 impl From<Box<dyn std::any::Any + Send + 'static>> for DeskError {
     fn from(err: Box<dyn std::any::Any + Send + 'static>) -> Self {
         DeskError::ThreadError(err)
+    }
+}
+
+impl From<url::ParseError> for DeskError {
+    fn from(err: url::ParseError) -> Self {
+        DeskError::UrlParseError(err)
     }
 }
 

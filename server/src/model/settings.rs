@@ -8,13 +8,17 @@ use desk_turn::model::TurnSettings;
 use desk_utils::error::DeskErrorCode;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
+use strum_macros::AsRefStr;
 use tokio::sync::RwLock;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskError;
 
-#[derive(clap::ValueEnum, Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    clap::ValueEnum, Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, AsRefStr,
+)]
 #[serde(rename_all = "kebab-case")]
+#[strum(serialize_all = "kebab-case")]
 pub enum StartupMode {
     /// Default mode, includes both signaling server and desk server
     #[default]

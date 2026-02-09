@@ -174,12 +174,6 @@ pub async fn run() -> Result<Server, DeskError> {
             .service(get_current_user)
             .service(get_notices)
             .service(get_captcha)
-            .configure(move |cfg| {
-                if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
-                    log::info!("Registering signaling route at /signaling");
-                    cfg.service(desk_signal::controller::open_signaling_handle);
-                }
-            })
             // TODO need to login for these routes
             .service(
                 // need to login for these routes
@@ -195,7 +189,15 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(list_files)
                             .service(list_terminal)
                             .service(open_terminal_session)
-                            .service(query_sysinfo),
+                            .service(query_sysinfo)
+                            .configure(move |cfg| {
+                                if startup_mode == StartupMode::Default
+                                    || startup_mode == StartupMode::Signaling
+                                {
+                                    log::info!("Registering signaling route at /signaling");
+                                    cfg.service(desk_signal::controller::open_signaling_handle);
+                                }
+                            }),
                     )
                     .configure(|cfg| {
                         if let Some(_) = &turn_api_state {

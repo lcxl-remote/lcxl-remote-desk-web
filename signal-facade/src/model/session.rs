@@ -10,6 +10,8 @@ use crate::model::version::VersionInfo;
 pub struct SessionModel {
     /// Session ID
     pub session_id: String,
+    /// IP address of the session
+    pub ip: Option<String>,
     /// Version info of the session
     pub version_info: VersionInfo,
 }

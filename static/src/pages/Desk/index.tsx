@@ -8,6 +8,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import styles from './index.less'; // 告诉 umi 编译这个 less
 import { CommentOutlined, CustomerServiceOutlined, FullscreenExitOutlined, FullscreenOutlined, PauseCircleOutlined, PlayCircleOutlined, SettingOutlined, SoundOutlined, StopOutlined, MutedOutlined, ThunderboltOutlined, WindowsOutlined } from "@ant-design/icons";
 
+const SIGNALING_TYPE_CODE_FETCH_SESSIONS = 21;
+const SIGNALING_TYPE_CODE_SESSION_LIST = 22;
+
+const SIGNALING_TYPE_CODE_REQUEST_REMOTE = 100;
 const SIGNALING_TYPE_CODE_INIT = 101;
 const SIGNALING_TYPE_CODE_OFFER = 102;
 const SIGNALING_TYPE_CODE_ANSWER = 103;
@@ -22,6 +26,13 @@ const SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS = 301;
 
 const SIGNALING_TYPE_CODE_ERROR = 10000000;
 const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 10000001;
+
+// const DeskTypeEnum = {
+//   Browser: 'Browser',
+//   Server: 'Server',
+//   Signal: 'Signal',
+//   Manager: 'Manager'
+// };
 
 type OfferModel = {
   offer: RTCSessionDescription,
@@ -60,6 +71,75 @@ const Desk: React.FC = () => {
   const [audioVolume, setAudioVolume] = useState(100);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoReady, setIsVideoReady] = useState(false);
+  const [sessionList, setSessionList] = useState<API.SessionModel[]>([]);
+  const [showSessionList, setShowSessionList] = useState(true);
+  const [targetSessionId, setTargetSessionId] = useState<string | null>(null);
+  const targetSessionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    // Only fetch if socket is open, otherwise onopen will handle it
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      let sginaling = {
+        signaling_type: SIGNALING_TYPE_CODE_FETCH_SESSIONS,
+        signaling_data: null,
+      } as API.SignalingModel;
+      socketRef.current.send(JSON.stringify(sginaling));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showSessionList) return;
+
+    const remoteVideoElement = remoteVideo.current;
+    if (!remoteVideoElement) return;
+
+    const resizeObserver = new ResizeObserver(entries => {
+      for (let entry of entries) {
+        // console.log("The size of video element changed: ", entry);
+        dimensionsRef.current = {
+          width: entry.contentRect.width,
+          height: entry.contentRect.height,
+        };
+      }
+    });
+
+    resizeObserver.observe(remoteVideoElement);
+
+    // Clamp control bar position on wrapper resize
+    const controlBarResizeObserver = new ResizeObserver(entries => {
+      if (!controlBarRef.current || !videoWrapperRef.current) return;
+
+      const wrapperRect = videoWrapperRef.current.getBoundingClientRect();
+      const bar = controlBarRef.current;
+
+      // Only adjust if we have manual positioning (style.left/top are set)
+      if (bar.style.left && bar.style.left !== 'auto') {
+        const currentLeft = parseFloat(bar.style.left);
+        const maxLeft = wrapperRect.width - bar.offsetWidth;
+        if (currentLeft > maxLeft) {
+          bar.style.left = `${Math.max(0, maxLeft)}px`;
+        }
+      }
+
+      if (bar.style.top && bar.style.top !== 'auto') {
+        const currentTop = parseFloat(bar.style.top);
+        const maxTop = wrapperRect.height - bar.offsetHeight;
+        if (currentTop > maxTop) {
+          bar.style.top = `${Math.max(0, maxTop)}px`;
+        }
+      }
+    });
+
+    if (videoWrapperRef.current) {
+      controlBarResizeObserver.observe(videoWrapperRef.current);
+    }
+
+    return () => {
+      resizeObserver.disconnect();
+      controlBarResizeObserver.disconnect();
+    };
+  }, [showSessionList]);
+
 
   // Drag state for control bar
   const [isDragging, setIsDragging] = useState(false);
@@ -316,11 +396,17 @@ const Desk: React.FC = () => {
     element.addEventListener("contextmenu", handleRemoteVideoContextmenu);
   };
 
-  const sendSignalingMessage = (signalingType: number, signalingData: any) => {
+  const sendSignalingMessage = (signalingType: number, signalingData: any, toSessionId?: string) => {
     const sock = socketRef.current!;
+    if (sock.readyState !== WebSocket.OPEN) {
+      console.warn("WebSocket is not open, cannot send message");
+      return;
+    }
+    const targetId = toSessionId || targetSessionIdRef.current;
     let sginaling = {
       signaling_type: signalingType,
       signaling_data: signalingData,
+      to_session_id: targetId,
     } as API.SignalingModel;
     let signalingJson = JSON.stringify(sginaling);
 
@@ -336,11 +422,28 @@ const Desk: React.FC = () => {
 
     const signalingModel = JSON.parse(event.data) as API.SignalingModel;
     switch (signalingModel.signaling_type) {
+      case SIGNALING_TYPE_CODE_SESSION_LIST:
+        const sessionList = signalingModel.signaling_data as API.SessionList;
+        console.log('Session list:', sessionList);
+        // Convert map to array
+        const sessions = Object.values(sessionList.session_map) as API.SessionModel[];
+        setSessionList(sessions);
+
+        // Auto connect if only one server
+        const servers = sessions.filter(s => s.version_info.remote_desk_type === 'server');
+        if (servers.length === 1 && targetSessionIdRef.current === null) {
+          handleSelectSession(servers[0].session_id);
+        } else {
+          setShowSessionList(true);
+        }
+        break;
       case SIGNALING_TYPE_CODE_INIT:
         const initSignalingData = signalingModel.signaling_data as API.InitSignalingData;
         console.log('初始化信令数据:', initSignalingData);
         setInitSignalingData(initSignalingData);
         setIsModalOpen(true);
+        // Hide session list when connected
+        setShowSessionList(false);
         break;
       case SIGNALING_TYPE_CODE_ANSWER:
         const answerDescription = signalingModel.signaling_data as RTCSessionDescriptionInit;
@@ -374,12 +477,23 @@ const Desk: React.FC = () => {
     const { location } = window;
 
     const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
-    const wsUri = `${proto}://${location.host}/api/desk/signaling`;
-    const sock = new WebSocket(wsUri);
+    const wsUrl = new URL(`${proto}://${location.host}/api/desk/signaling`);
+    wsUrl.searchParams.append("api_version", "1");
+    wsUrl.searchParams.append("build_number", "1");
+    wsUrl.searchParams.append("commit_hash", "1");
+    wsUrl.searchParams.append("operation_system", "wasm");
+    wsUrl.searchParams.append("remote_desk_type", "browser");
+    const sock = new WebSocket(wsUrl.toString());
     socketRef.current = sock;
 
     sock.onopen = (event) => {
       console.log('连接成功', event);
+      // Fetch session list on connect
+      let sginaling = {
+        signaling_type: SIGNALING_TYPE_CODE_FETCH_SESSIONS,
+        signaling_data: null,
+      } as API.SignalingModel;
+      sock.send(JSON.stringify(sginaling));
     };
     sock.onmessage = handleWebSocketMessage;
     sock.onerror = (event) => {
@@ -389,46 +503,6 @@ const Desk: React.FC = () => {
       console.log('连接关闭', event);
     };
 
-    const resizeObserver = new ResizeObserver(entries => {
-      for (let entry of entries) {
-        console.log("The size of video element changed: ", entry);
-        dimensionsRef.current = {
-          width: entry.contentRect.width,
-          height: entry.contentRect.height,
-        };
-      }
-    });
-
-    resizeObserver.observe(remoteVideo.current!);
-
-    // Clamp control bar position on wrapper resize
-    const controlBarResizeObserver = new ResizeObserver(entries => {
-      if (!controlBarRef.current || !videoWrapperRef.current) return;
-
-      const wrapperRect = videoWrapperRef.current.getBoundingClientRect();
-      const bar = controlBarRef.current;
-
-      // Only adjust if we have manual positioning (style.left/top are set)
-      if (bar.style.left && bar.style.left !== 'auto') {
-        const currentLeft = parseFloat(bar.style.left);
-        const maxLeft = wrapperRect.width - bar.offsetWidth;
-        if (currentLeft > maxLeft) {
-          bar.style.left = `${Math.max(0, maxLeft)}px`;
-        }
-      }
-
-      if (bar.style.top && bar.style.top !== 'auto') {
-        const currentTop = parseFloat(bar.style.top);
-        const maxTop = wrapperRect.height - bar.offsetHeight;
-        if (currentTop > maxTop) {
-          bar.style.top = `${Math.max(0, maxTop)}px`;
-        }
-      }
-    });
-
-    if (videoWrapperRef.current) {
-      controlBarResizeObserver.observe(videoWrapperRef.current);
-    }
 
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
@@ -438,14 +512,39 @@ const Desk: React.FC = () => {
 
     return () => {
       console.log("关闭websocket", sock);
+      // Send close control if connected
+      if (targetSessionIdRef.current) {
+        let sginaling = {
+          signaling_type: SIGNALING_TYPE_CODE_CLOSE_CONTROL,
+          signaling_data: null,
+          to_session_id: targetSessionIdRef.current,
+        } as API.SignalingModel;
+        if (sock.readyState === WebSocket.OPEN) {
+          sock.send(JSON.stringify(sginaling));
+        }
+      }
       sock.close();
       console.log("关闭webrtc peer connection", peerconnectionRef.current);
       peerconnectionRef.current?.close();
-      resizeObserver.disconnect();
-      controlBarResizeObserver.disconnect();
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
   }, []);
+
+  const handleSelectSession = (sessionId: string) => {
+    console.log("Selecting session:", sessionId);
+    setTargetSessionId(sessionId);
+    targetSessionIdRef.current = sessionId;
+
+    const requestRemoteData = {
+      session_id: sessionId
+    };
+
+    // Request remote access
+    // We need to use the newly selected session ID directly here
+    // because state update might be async
+    sendSignalingMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, requestRemoteData, sessionId);
+    setShowSessionList(false);
+  };
 
   const showModal = () => {
     setIsModalOpen(true);
@@ -723,7 +822,36 @@ const Desk: React.FC = () => {
 
   const handleCancel = () => {
     setIsModalOpen(false);
+    // If canceled during init, we should probably close/disconnect
+    // But for now just close the modal. 
+    // If user wants to disconnect, they should probably refresh or we add a disconnect button.
+    // Actually, let's send CloseControl if we are in connecting state?
+    // For now, let's keep it simple.
   };
+
+  const handleDisconnect = () => {
+    if (targetSessionId) {
+      sendSignalingMessage(SIGNALING_TYPE_CODE_CLOSE_CONTROL, null);
+    }
+    if (peerconnectionRef.current) {
+      peerconnectionRef.current.close();
+      peerconnectionRef.current = undefined;
+    }
+    setTargetSessionId(null);
+    targetSessionIdRef.current = null;
+    setInitSignalingData(undefined);
+    setShowSessionList(true);
+    setIsVideoReady(false);
+
+    // Re-fetch session list
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      let sginaling = {
+        signaling_type: SIGNALING_TYPE_CODE_FETCH_SESSIONS,
+        signaling_data: null,
+      } as API.SignalingModel;
+      socketRef.current.send(JSON.stringify(sginaling));
+    }
+  }
 
   const imageCaptureList = initSignalingData != null ? Object.keys(initSignalingData.video_device_list) : undefined;
   const imageCaptureSelectMap = imageCaptureList?.reduce((map, item) => {
@@ -750,334 +878,397 @@ const Desk: React.FC = () => {
 
   return (
     <PageContainer>
-      <div
-        ref={videoWrapperRef}
-        className={styles.videoWrapper}
-        onMouseEnter={() => setShowControls(true)}
-        onMouseLeave={() => setShowControls(false)}
-      >
-        <video ref={remoteVideo} autoPlay muted className={styles.videoElement} tabIndex={0} onCanPlay={() => setIsVideoReady(true)} />
-
-        <div
-          className={`${styles.videoPlaceholder} ${isVideoReady ? styles.hidden : ''}`}
-          onContextMenu={(e) => { e.preventDefault(); }}
-        >
-          <div className={styles.placeholderContent}>
-            <span className={styles.artText}>LCXL Remote Desk</span>
+      {showSessionList ? (
+        <div style={{ padding: '24px', maxWidth: '800px', margin: '0 auto' }}>
+          <h1>{intl.formatMessage({ id: 'pages.desk.sessionList', defaultMessage: 'Available Devices' })}</h1>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+            {sessionList.map(session => (
+              <div
+                key={session.session_id}
+                className={styles.sessionCard}
+                style={{
+                  border: '1px solid #d9d9d9',
+                  borderRadius: '8px',
+                  padding: '16px',
+                  backgroundColor: session.version_info.remote_desk_type === 'server' ? '#fff' : '#f5f5f5',
+                  cursor: session.version_info.remote_desk_type === 'server' ? 'pointer' : 'not-allowed',
+                  opacity: session.version_info.remote_desk_type === 'server' ? 1 : 0.7,
+                  transition: 'all 0.3s'
+                }}
+                onClick={() => {
+                  if (session.version_info.remote_desk_type === 'server') {
+                    handleSelectSession(session.session_id);
+                  }
+                }}
+                onMouseEnter={(e) => {
+                  if (session.version_info.remote_desk_type === 'server') {
+                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.1)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                  {session.version_info.remote_desk_type === 'server' ? <WindowsOutlined style={{ fontSize: '24px', marginRight: '12px', color: '#1890ff' }} /> : <CustomerServiceOutlined style={{ fontSize: '24px', marginRight: '12px' }} />}
+                  <span style={{ fontSize: '16px', fontWeight: 500 }}>
+                    {session.version_info.display_name || session.version_info.operation_system}
+                  </span>
+                </div>
+                <div style={{ color: '#666', fontSize: '12px' }}>
+                  <div>{intl.formatMessage({ id: 'pages.desk.sessionId' })}: {session.session_id.substring(0, 8)}...</div>
+                  <div>{intl.formatMessage({ id: 'pages.desk.sessionIp' })}: {session.ip || intl.formatMessage({ id: 'pages.desk.unknown' })}</div>
+                  <div>{intl.formatMessage({ id: 'pages.desk.sessionOs' })}: {session.version_info.operation_system}</div>
+                  <div>{intl.formatMessage({ id: 'pages.desk.sessionType' })}: {session.version_info.remote_desk_type}</div>
+                </div>
+              </div>
+            ))}
+            {sessionList.length === 0 && (
+              <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: '40px', color: '#999' }}>
+                {intl.formatMessage({ id: 'pages.desk.noDevices', defaultMessage: 'No devices found' })}
+              </div>
+            )}
           </div>
         </div>
-
+      ) : (<>
         <div
-          ref={controlBarRef}
-          className={styles.controlBar}
-          onMouseDown={handleDragStart}
+          ref={videoWrapperRef}
+          className={styles.videoWrapper}
+          onMouseEnter={() => setShowControls(true)}
+          onMouseLeave={() => setShowControls(false)}
         >
-          <div className={styles.controlButtons}>
-            <Tooltip title={acceptControl ? intl.formatMessage({ id: 'pages.desk.exitControl' }) : intl.formatMessage({ id: 'pages.desk.requestControl' })}>
-              <Button
-                type="text"
-                icon={acceptControl ? <StopOutlined /> : <CommentOutlined />}
-                onClick={handleRequestControl}
-                className={styles.controlButton}
-              />
-            </Tooltip>
-            <Tooltip title={isFullscreen ? intl.formatMessage({ id: 'pages.desk.exitFullscreen' }) : intl.formatMessage({ id: 'pages.desk.fullscreen' })}>
-              <Button
-                type="text"
-                icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
-                onClick={handleFullScreen}
-                className={styles.controlButton}
-              />
-            </Tooltip>
-            <Tooltip title={intl.formatMessage({ id: 'pages.desk.settings' })}>
-              <Button
-                type="text"
-                icon={<SettingOutlined />}
-                onClick={showModal}
-                className={styles.controlButton}
-              />
-            </Tooltip>
-            <Tooltip title={isAudioPlaying ? intl.formatMessage({ id: 'pages.desk.pauseAudio' }) : intl.formatMessage({ id: 'pages.desk.playAudio' })}>
-              <Button
-                type="text"
-                icon={isAudioPlaying ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-                onClick={toggleAudioPlay}
-                className={styles.controlButton}
-              />
-            </Tooltip>
-            {acceptControl && (
+          <video ref={remoteVideo} autoPlay muted className={styles.videoElement} tabIndex={0} onCanPlay={() => setIsVideoReady(true)} />
+
+          <div
+            className={`${styles.videoPlaceholder} ${isVideoReady ? styles.hidden : ''}`}
+            onContextMenu={(e) => { e.preventDefault(); }}
+          >
+            <div className={styles.placeholderContent}>
+              <span className={styles.artText}>LCXL Remote Desk</span>
+            </div>
+          </div>
+
+          <div
+            ref={controlBarRef}
+            className={styles.controlBar}
+            onMouseDown={handleDragStart}
+          >
+            <div className={styles.controlButtons}>
+              <Tooltip title={acceptControl ? intl.formatMessage({ id: 'pages.desk.exitControl' }) : intl.formatMessage({ id: 'pages.desk.requestControl' })}>
+                <Button
+                  type="text"
+                  icon={acceptControl ? <StopOutlined /> : <CommentOutlined />}
+                  onClick={handleRequestControl}
+                  className={styles.controlButton}
+                />
+              </Tooltip>
+              <Tooltip title={isFullscreen ? intl.formatMessage({ id: 'pages.desk.exitFullscreen' }) : intl.formatMessage({ id: 'pages.desk.fullscreen' })}>
+                <Button
+                  type="text"
+                  icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+                  onClick={handleFullScreen}
+                  className={styles.controlButton}
+                />
+              </Tooltip>
+              <Tooltip title={intl.formatMessage({ id: 'pages.desk.settings' })}>
+                <Button
+                  type="text"
+                  icon={<SettingOutlined />}
+                  onClick={showModal}
+                  className={styles.controlButton}
+                />
+              </Tooltip>
+              <Tooltip title={isAudioPlaying ? intl.formatMessage({ id: 'pages.desk.pauseAudio' }) : intl.formatMessage({ id: 'pages.desk.playAudio' })}>
+                <Button
+                  type="text"
+                  icon={isAudioPlaying ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+                  onClick={toggleAudioPlay}
+                  className={styles.controlButton}
+                />
+              </Tooltip>
+              <Tooltip title={intl.formatMessage({ id: 'pages.desk.disconnect', defaultMessage: 'Disconnect' })}>
+                <Button
+                  type="text"
+                  icon={<ThunderboltOutlined />}
+                  onClick={handleDisconnect}
+                  className={styles.controlButton}
+                  danger
+                />
+              </Tooltip>
+              {acceptControl && (
+                <Popover
+                  content={
+                    <div className={styles.shortcutMenu}>
+                      <Space direction="vertical" style={{ width: '100%' }}>
+                        <Button block onClick={() => handleShortcut('CtrlAltDel')}>Ctrl + Alt + Del</Button>
+                        <Button block onClick={() => handleShortcut('AltTab')}>Alt + Tab</Button>
+                        <Divider style={{ margin: '4px 0' }} />
+                        <Button block onClick={() => handleShortcut('Win')}><WindowsOutlined /> Win (Start)</Button>
+                        <Button block onClick={() => handleShortcut('WinD')}>Win + D (Desktop)</Button>
+                        <Button block onClick={() => handleShortcut('WinE')}>Win + E (Explorer)</Button>
+                        <Button block onClick={() => handleShortcut('WinR')}>Win + R (Run)</Button>
+                        <Button block onClick={() => handleShortcut('WinL')}>Win + L (Lock)</Button>
+                      </Space>
+                    </div>
+                  }
+                  trigger="click"
+                  overlayInnerStyle={{ padding: '12px' }}
+                >
+                  <Tooltip title={intl.formatMessage({ id: 'pages.desk.shortcuts' })}>
+                    <Button
+                      type="text"
+                      icon={<ThunderboltOutlined />}
+                      className={styles.controlButton}
+                    />
+                  </Tooltip>
+                </Popover>
+              )}
               <Popover
                 content={
-                  <div className={styles.shortcutMenu}>
-                    <Space direction="vertical" style={{ width: '100%' }}>
-                      <Button block onClick={() => handleShortcut('CtrlAltDel')}>Ctrl + Alt + Del</Button>
-                      <Button block onClick={() => handleShortcut('AltTab')}>Alt + Tab</Button>
-                      <Divider style={{ margin: '4px 0' }} />
-                      <Button block onClick={() => handleShortcut('Win')}><WindowsOutlined /> Win (Start)</Button>
-                      <Button block onClick={() => handleShortcut('WinD')}>Win + D (Desktop)</Button>
-                      <Button block onClick={() => handleShortcut('WinE')}>Win + E (Explorer)</Button>
-                      <Button block onClick={() => handleShortcut('WinR')}>Win + R (Run)</Button>
-                      <Button block onClick={() => handleShortcut('WinL')}>Win + L (Lock)</Button>
-                    </Space>
+                  <div style={{ height: 100 }}>
+                    <Slider
+                      vertical
+                      defaultValue={100}
+                      value={audioVolume}
+                      onChange={handleVolumeChange}
+                    />
                   </div>
                 }
-                trigger="click"
-                overlayInnerStyle={{ padding: '12px' }}
+                trigger="hover"
+                overlayInnerStyle={{ padding: '12px 0' }}
               >
-                <Tooltip title={intl.formatMessage({ id: 'pages.desk.shortcuts' })}>
-                  <Button
-                    type="text"
-                    icon={<ThunderboltOutlined />}
-                    className={styles.controlButton}
-                  />
-                </Tooltip>
+                <Button
+                  type="text"
+                  icon={isMuted || audioVolume === 0 ? <MutedOutlined /> : <SoundOutlined />}
+                  onClick={toggleMute}
+                  className={styles.controlButton}
+                />
               </Popover>
-            )}
-            <Popover
-              content={
-                <div style={{ height: 100 }}>
-                  <Slider
-                    vertical
-                    defaultValue={100}
-                    value={audioVolume}
-                    onChange={handleVolumeChange}
-                  />
-                </div>
-              }
-              trigger="hover"
-              overlayInnerStyle={{ padding: '12px 0' }}
-            >
-              <Button
-                type="text"
-                icon={isMuted || audioVolume === 0 ? <MutedOutlined /> : <SoundOutlined />}
-                onClick={toggleMute}
-                className={styles.controlButton}
-              />
-            </Popover>
+            </div>
           </div>
         </div>
-      </div>
-      <audio ref={remoteAudio} autoPlay style={{ display: 'none' }} />
-      <Divider />
+        <audio ref={remoteAudio} autoPlay style={{ display: 'none' }} />
+        <Divider />
 
-      <FloatButton.Group
-        /*open={true}*/
-        shape="square"
-        trigger="hover"
-        /*style={{ insetInlineEnd: 24 }}*/
-        icon={<CustomerServiceOutlined />}
-      >
-        <FloatButton tooltip={<div>{intl.formatMessage({ id: 'pages.desk.fullscreen' })}</div>} icon={<FullscreenOutlined />} onClick={handleFullScreen} />
-        <FloatButton icon={<SettingOutlined />} onClick={showModal} />
-        <FloatButton icon={<CommentOutlined />} tooltip={acceptControl ? <div>{intl.formatMessage({ id: 'pages.desk.exitControl' })}</div> : <div>{intl.formatMessage({ id: 'pages.desk.requestControl' })}</div>} onClick={handleRequestControl} />
-      </FloatButton.Group>
-
-      <Modal
-        title={intl.formatMessage({ id: 'pages.desk.deskConfig' })}
-        closable={{ 'aria-label': 'Custom Close Button' }}
-        open={isModalOpen}
-        footer={false}
-      >
-
-        <ProForm<DeskFormValues>
-          formRef={formRef}
-          grid={true}
-          submitter={{
-            render: (props, doms) => {
-              return <div><Divider /><Flex justify="flex-end" align="center" gap="small">
-                {doms}
-                <Button htmlType="button" onClick={handleCancel} key="close">
-                  {intl.formatMessage({ id: 'pages.desk.close' })}
-                </Button>
-              </Flex></div>;
-            },
-          }}
-          onFinish={handleOk}
-
+        <FloatButton.Group
+          /*open={true}*/
+          shape="square"
+          trigger="hover"
+          /*style={{ insetInlineEnd: 24 }}*/
+          icon={<CustomerServiceOutlined />}
         >
-          <Divider plain>{intl.formatMessage({ id: 'pages.desk.displayConfig' })}</Divider>
-          <ProForm.Group>
-            <ProFormSelect
-              name="image_capture"
-              label={intl.formatMessage({ id: 'pages.desk.screenCaptureMode' })}
-              valueEnum={imageCaptureSelectMap}
-              placeholder={intl.formatMessage({ id: 'pages.desk.screenCaptureModePlaceholder' })}
-              rules={[{ required: true, message: intl.formatMessage({ id: 'pages.desk.screenCaptureModeRequired' }) }]}
+          <FloatButton tooltip={<div>{intl.formatMessage({ id: 'pages.desk.fullscreen' })}</div>} icon={<FullscreenOutlined />} onClick={handleFullScreen} />
+          <FloatButton icon={<SettingOutlined />} onClick={showModal} />
+          <FloatButton icon={<CommentOutlined />} tooltip={acceptControl ? <div>{intl.formatMessage({ id: 'pages.desk.exitControl' })}</div> : <div>{intl.formatMessage({ id: 'pages.desk.requestControl' })}</div>} onClick={handleRequestControl} />
+        </FloatButton.Group>
 
-            />
-          </ProForm.Group>
-          <ProForm.Group>
-            <ProForm.Item noStyle shouldUpdate>
-              {(form) => {
-                const imageCapture = form.getFieldValue('image_capture');
+        <Modal
+          title={intl.formatMessage({ id: 'pages.desk.deskConfig' })}
+          closable={{ 'aria-label': 'Custom Close Button' }}
+          open={isModalOpen}
+          footer={false}
+        >
 
-                const videoDeviceSelectMap = initSignalingData?.video_device_list[imageCapture]?.reduce((map, item, currentIndex) => {
-                  map.set(currentIndex, `${item.display_device_name} (${item.desktop_coordinates.right}x${item.desktop_coordinates.bottom})`);
-                  return map;
-                }, new Map<number, string>);
-                return (
-                  <ProFormSelect
-                    name="video_device_index"
-                    label={intl.formatMessage({ id: 'pages.desk.displayDevice' })}
-                    valueEnum={videoDeviceSelectMap}
-                    placeholder={intl.formatMessage({ id: 'pages.desk.displayDevicePlaceholder' })}
-                    rules={[{ required: true, message: intl.formatMessage({ id: 'pages.desk.displayDeviceRequired' }) }]}
+          <ProForm<DeskFormValues>
+            formRef={formRef as any}
+            grid={true}
+            submitter={{
+              render: (props, doms) => {
+                return <div><Divider /><Flex justify="flex-end" align="center" gap="small">
+                  {doms}
+                  <Button htmlType="button" onClick={handleCancel} key="close">
+                    {intl.formatMessage({ id: 'pages.desk.close' })}
+                  </Button>
+                </Flex></div>;
+              },
+            }}
+            onFinish={handleOk}
+
+          >
+            <Divider plain>{intl.formatMessage({ id: 'pages.desk.displayConfig' })}</Divider>
+            <ProForm.Group>
+              <ProFormSelect
+                name="image_capture"
+                label={intl.formatMessage({ id: 'pages.desk.screenCaptureMode' })}
+                valueEnum={imageCaptureSelectMap}
+                placeholder={intl.formatMessage({ id: 'pages.desk.screenCaptureModePlaceholder' })}
+                rules={[{ required: true, message: intl.formatMessage({ id: 'pages.desk.screenCaptureModeRequired' }) }]}
+
+              />
+            </ProForm.Group>
+            <ProForm.Group>
+              <ProForm.Item noStyle shouldUpdate>
+                {(form) => {
+                  const imageCapture = form.getFieldValue('image_capture');
+
+                  const videoDeviceSelectMap = initSignalingData?.video_device_list[imageCapture]?.reduce((map, item, currentIndex) => {
+                    map.set(currentIndex, `${item.display_device_name} (${item.desktop_coordinates.right}x${item.desktop_coordinates.bottom})`);
+                    return map;
+                  }, new Map<number, string>);
+                  return (
+                    <ProFormSelect
+                      name="video_device_index"
+                      label={intl.formatMessage({ id: 'pages.desk.displayDevice' })}
+                      valueEnum={videoDeviceSelectMap}
+                      placeholder={intl.formatMessage({ id: 'pages.desk.displayDevicePlaceholder' })}
+                      rules={[{ required: true, message: intl.formatMessage({ id: 'pages.desk.displayDeviceRequired' }) }]}
+                      colProps={{
+                        span: 16,
+                      }}
+                      disabled={!imageCapture}
+                    />)
+                }}</ProForm.Item>
+
+              <ProFormSwitch name="show_mouse" label={intl.formatMessage({ id: 'pages.desk.showRemoteMouse' })} colProps={{
+                span: 8,
+              }} />
+            </ProForm.Group>
+
+            <ProForm.Group>
+              <ProFormSwitch name="adaptive_web_page_resolution" label={intl.formatMessage({ id: 'pages.desk.adaptiveResolution' })} colProps={{
+                span: 8,
+              }} />
+              <ProForm.Item noStyle shouldUpdate>
+                {(form) => {
+                  return (<ProFormSlider
+                    name="video_zoom_ratio"
+                    label={intl.formatMessage({ id: 'pages.desk.remoteResolutionScale' })}
+                    min={10}
+                    marks={{
+                      25: '25%',
+                      50: '50%',
+                      75: '75%',
+                      100: '100%',
+                    }}
                     colProps={{
                       span: 16,
                     }}
-                    disabled={!imageCapture}
+                    disabled={form.getFieldValue("adaptive_web_page_resolution")}
                   />)
-              }}</ProForm.Item>
+                }}
+              </ProForm.Item>
 
-            <ProFormSwitch name="show_mouse" label={intl.formatMessage({ id: 'pages.desk.showRemoteMouse' })} colProps={{
-              span: 8,
-            }} />
-          </ProForm.Group>
+            </ProForm.Group>
+            <Divider plain>{intl.formatMessage({ id: 'pages.desk.audioConfig' })}</Divider>
 
-          <ProForm.Group>
-            <ProFormSwitch name="adaptive_web_page_resolution" label={intl.formatMessage({ id: 'pages.desk.adaptiveResolution' })} colProps={{
-              span: 8,
-            }} />
-            <ProForm.Item noStyle shouldUpdate>
-              {(form) => {
-                return (<ProFormSlider
-                  name="video_zoom_ratio"
-                  label={intl.formatMessage({ id: 'pages.desk.remoteResolutionScale' })}
-                  min={10}
-                  marks={{
-                    25: '25%',
-                    50: '50%',
-                    75: '75%',
-                    100: '100%',
-                  }}
-                  colProps={{
-                    span: 16,
-                  }}
-                  disabled={form.getFieldValue("adaptive_web_page_resolution")}
-                />)
-              }}
-            </ProForm.Item>
-
-          </ProForm.Group>
-          <Divider plain>{intl.formatMessage({ id: 'pages.desk.audioConfig' })}</Divider>
-
-          <ProForm.Group>
-            <ProFormSwitch name="enable_audio" label={intl.formatMessage({ id: 'pages.desk.captureAudio' })} colProps={{
-              span: 4,
-            }} />
-            <ProForm.Item noStyle shouldUpdate>
-              {(form) => {
+            <ProForm.Group>
+              <ProFormSwitch name="enable_audio" label={intl.formatMessage({ id: 'pages.desk.captureAudio' })} colProps={{
+                span: 4,
+              }} />
+              <ProForm.Item noStyle shouldUpdate>
+                {(form) => {
 
 
 
-                return (
-                  <ProFormSelect
-                    name="audio_capture"
-                    label={intl.formatMessage({ id: 'pages.desk.audioCaptureMode' })}
-                    valueEnum={audioCaptureSelectMap}
-                    placeholder={intl.formatMessage({ id: 'pages.desk.audioCaptureModePlaceholder' })}
-                    rules={[{ required: form.getFieldValue("enable_audio"), message: intl.formatMessage({ id: 'pages.desk.audioCaptureModeRequired' }) }]}
-                    disabled={!form.getFieldValue("enable_audio")}
-                    colProps={{
-                      span: 20,
+                  return (
+                    <ProFormSelect
+                      name="audio_capture"
+                      label={intl.formatMessage({ id: 'pages.desk.audioCaptureMode' })}
+                      valueEnum={audioCaptureSelectMap}
+                      placeholder={intl.formatMessage({ id: 'pages.desk.audioCaptureModePlaceholder' })}
+                      rules={[{ required: form.getFieldValue("enable_audio"), message: intl.formatMessage({ id: 'pages.desk.audioCaptureModeRequired' }) }]}
+                      disabled={!form.getFieldValue("enable_audio")}
+                      colProps={{
+                        span: 20,
+                      }}
+                    />);
+                }
+                }</ProForm.Item>
+            </ProForm.Group>
+
+            <ProForm.Group>
+
+              {/* noStyle shouldUpdate 是必选的，写了 name 就会失效 */}
+              <ProForm.Item noStyle shouldUpdate>
+                {(form) => {
+
+                  const audioCapture = form.getFieldValue('audio_capture');
+                  const audioDeviceSelectMap = initSignalingData?.audio_device_list[audioCapture]?.reduce((map, item) => {
+                    const defaultAudioDevice = {
+                      audio_data_flow: item.data_flow,
+                      audio_device_id: null,
+                    } as API.SelectedAudioDevice;
+                    const defaultAudioDeviceJsonStr = JSON.stringify(defaultAudioDevice);
+                    let found_value = map.get(defaultAudioDeviceJsonStr);
+                    if (!found_value) {
+                      map.set(defaultAudioDeviceJsonStr, `[${item.data_flow}]默认设备`);
+                    }
+                    const audioDevice = {
+                      audio_data_flow: item.data_flow,
+                      audio_device_id: item.id,
+                    } as API.SelectedAudioDevice;
+                    map.set(JSON.stringify(audioDevice), `[${item.data_flow}]${item.firendly_name}${item.default ? "(当前默认)" : ""}`);
+                    return map;
+                  }, new Map<string, string>);
+
+                  return (<ProFormSelect
+                    name="audio_device"
+                    label={intl.formatMessage({ id: 'pages.desk.audioDevice' })}
+                    valueEnum={audioDeviceSelectMap}
+                    placeholder={intl.formatMessage({ id: 'pages.desk.audioDevicePlaceholder' })}
+                    rules={[{ required: form.getFieldValue("enable_audio"), message: intl.formatMessage({ id: 'pages.desk.audioDeviceRequired' }) }]}
+
+                    disabled={!form.getFieldValue("enable_audio") || !audioDeviceSelectMap}
+                    convertValue={(value, namePath) => {
+                      let result = value;
+                      if (typeof value != "string") {
+                        result = JSON.stringify(value)
+                      }
+                      return result;
                     }}
-                  />);
-              }
-              }</ProForm.Item>
-          </ProForm.Group>
-
-          <ProForm.Group>
-
-            {/* noStyle shouldUpdate 是必选的，写了 name 就会失效 */}
-            <ProForm.Item noStyle shouldUpdate>
-              {(form) => {
-
-                const audioCapture = form.getFieldValue('audio_capture');
-                const audioDeviceSelectMap = initSignalingData?.audio_device_list[audioCapture]?.reduce((map, item) => {
-                  const defaultAudioDevice = {
-                    audio_data_flow: item.data_flow,
-                    audio_device_id: null,
-                  } as API.SelectedAudioDevice;
-                  const defaultAudioDeviceJsonStr = JSON.stringify(defaultAudioDevice);
-                  let found_value = map.get(defaultAudioDeviceJsonStr);
-                  if (!found_value) {
-                    map.set(defaultAudioDeviceJsonStr, `[${item.data_flow}]默认设备`);
-                  }
-                  const audioDevice = {
-                    audio_data_flow: item.data_flow,
-                    audio_device_id: item.id,
-                  } as API.SelectedAudioDevice;
-                  map.set(JSON.stringify(audioDevice), `[${item.data_flow}]${item.firendly_name}${item.default ? "(当前默认)" : ""}`);
-                  return map;
-                }, new Map<string, string>);
-
-                return (<ProFormSelect
-                  name="audio_device"
-                  label={intl.formatMessage({ id: 'pages.desk.audioDevice' })}
-                  valueEnum={audioDeviceSelectMap}
-                  placeholder={intl.formatMessage({ id: 'pages.desk.audioDevicePlaceholder' })}
-                  rules={[{ required: form.getFieldValue("enable_audio"), message: intl.formatMessage({ id: 'pages.desk.audioDeviceRequired' }) }]}
-
-                  disabled={!form.getFieldValue("enable_audio") || !audioDeviceSelectMap}
-                  convertValue={(value, namePath) => {
-                    let result = value;
-                    if (typeof value != "string") {
-                      result = JSON.stringify(value)
-                    }
-                    return result;
-                  }}
-                  transform={(value, namePath, allValues) => {
-                    let result = value;
-                    if (typeof value == "string") {
-                      result = JSON.parse(value);
-                    }
-                    return { audio_device: result };
-                  }}
-                />)
-              }}
-            </ProForm.Item>
-          </ProForm.Group>
-          <Divider plain>{intl.formatMessage({ id: 'pages.desk.encodingConfig' })}</Divider>
-          <ProForm.Group>
-            <ProFormSelect
-              name="video_encoder"
-              label={intl.formatMessage({ id: 'pages.desk.videoEncoder' })}
-              valueEnum={videoEncodeTypeSelectMap}
-              placeholder={intl.formatMessage({ id: 'pages.desk.autoDetect' })}
-              colProps={{
+                    transform={(value, namePath, allValues) => {
+                      let result = value;
+                      if (typeof value == "string") {
+                        result = JSON.parse(value);
+                      }
+                      return { audio_device: result };
+                    }}
+                  />)
+                }}
+              </ProForm.Item>
+            </ProForm.Group>
+            <Divider plain>{intl.formatMessage({ id: 'pages.desk.encodingConfig' })}</Divider>
+            <ProForm.Group>
+              <ProFormSelect
+                name="video_encoder"
+                label={intl.formatMessage({ id: 'pages.desk.videoEncoder' })}
+                valueEnum={videoEncodeTypeSelectMap}
+                placeholder={intl.formatMessage({ id: 'pages.desk.autoDetect' })}
+                colProps={{
+                  span: 8,
+                }}
+              />
+              <ProFormSwitch name="switch" label={intl.formatMessage({ id: 'pages.desk.adaptiveBitrate' })} colProps={{
                 span: 8,
-              }}
-            />
-            <ProFormSwitch name="switch" label={intl.formatMessage({ id: 'pages.desk.adaptiveBitrate' })} colProps={{
-              span: 8,
-            }} />
-            <ProFormDigit
-              label={intl.formatMessage({ id: 'pages.desk.bitrate' })}
-              name="video_encode_bps"
-              min={1000}
-              max={1000_000_000_000}
-              fieldProps={{ precision: 0 }}
-              colProps={{
+              }} />
+              <ProFormDigit
+                label={intl.formatMessage({ id: 'pages.desk.bitrate' })}
+                name="video_encode_bps"
+                min={1000}
+                max={1000_000_000_000}
+                fieldProps={{ precision: 0 }}
+                colProps={{
+                  span: 8,
+                }}
+              />
+            </ProForm.Group>
+            <ProForm.Group>
+              <ProFormSelect
+                name="audio_encoder"
+                label={intl.formatMessage({ id: 'pages.desk.audioEncoder' })}
+                valueEnum={audioEncodeTypeSelectMap}
+                placeholder={intl.formatMessage({ id: 'pages.desk.autoDetect' })}
+              />
+            </ProForm.Group>
+            <Divider plain>{intl.formatMessage({ id: 'pages.desk.advanced' })}</Divider>
+            <ProForm.Group>
+              <ProFormSwitch name="enable_d3d_debug" label={intl.formatMessage({ id: 'pages.desk.enableD3DDebug' })} colProps={{
                 span: 8,
-              }}
-            />
-          </ProForm.Group>
-          <ProForm.Group>
-            <ProFormSelect
-              name="audio_encoder"
-              label={intl.formatMessage({ id: 'pages.desk.audioEncoder' })}
-              valueEnum={audioEncodeTypeSelectMap}
-              placeholder={intl.formatMessage({ id: 'pages.desk.autoDetect' })}
-            />
-          </ProForm.Group>
-          <Divider plain>{intl.formatMessage({ id: 'pages.desk.advanced' })}</Divider>
-          <ProForm.Group>
-            <ProFormSwitch name="enable_d3d_debug" label={intl.formatMessage({ id: 'pages.desk.enableD3DDebug' })} colProps={{
-              span: 8,
-            }} />
-          </ProForm.Group>
-        </ProForm>
-      </Modal>
+              }} />
+            </ProForm.Group>
+          </ProForm>
+        </Modal>
+      </>)}
     </PageContainer>
 
   );

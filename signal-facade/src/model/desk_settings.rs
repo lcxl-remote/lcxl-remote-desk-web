@@ -139,6 +139,8 @@ pub struct DeskSettings {
 
     /// Private screen settings
     pub private_screen: PrivateScreenSettings,
+    /// Display name
+    pub display_name: Option<String>,
 }
 
 impl DeskSettings {
@@ -171,6 +173,7 @@ impl Default for DeskSettings {
             vp9_encoder: None,
             opus_encoder: None,
             private_screen: PrivateScreenSettings::default(),
+            display_name: None,
         }
     }
 }

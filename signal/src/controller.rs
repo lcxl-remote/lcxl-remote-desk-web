@@ -45,10 +45,15 @@ pub async fn open_signaling_handle(
         .max_continuation_size(2_usize.pow(20));
 
     let version_info = query.0.clone();
+    let ip = req
+        .connection_info()
+        .realip_remote_addr()
+        .map(|s| s.to_string());
+
     // start task but don't wait for it
     rt::spawn(async move {
         // receive messages from websocket
-        let result = handle_signaling(version_info, stream, session_map, session, user).await;
+        let result = handle_signaling(version_info, stream, session_map, session, user, ip).await;
         if let Err(e) = result {
             error!("Error handling signaling: {:?}", e);
         } else {
