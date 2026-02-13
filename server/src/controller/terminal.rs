@@ -1,16 +1,24 @@
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
+use actix_ws::{AggregatedMessage, AggregatedMessageStream};
 use desk_server_user::service::SessionExt;
-use desk_signal_facade::model::signal::SignalingModel;
-use log::{error, info};
+use desk_server_version::SERVER_API_VERSION;
+use desk_signal::service::{SignalingContext, handle_signaling};
+use desk_signal_facade::model::{
+    os::OperationSystemEnum,
+    signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
+    terminal::{StartTerminalSession, TerminalList},
+    version::VersionInfo,
+};
+use futures::StreamExt;
+use log::{error, info, warn};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+use uuid::Uuid;
 
 use crate::{
     error::DeskError,
-    model::{
-        settings::SharedSettings,
-        terminal::{StartTerminalSession, TerminalList},
-    },
+    model::settings::SharedSettings,
     service::terminal::{fetch_terminal_list, handle_terminal},
 };
 
@@ -30,10 +38,8 @@ pub async fn list_terminal(settings: web::Data<SharedSettings>) -> Result<HttpRe
 #[utoipa::path(
     summary = "Open terminal session",
     params(StartTerminalSession),
-
     responses(
-        (status = 200, description = "return websocket stream", body = SignalingModel),
-
+        (status = 200, description = "return websocket stream"),
     ),
 )]
 #[get("/terminal")]
@@ -41,6 +47,7 @@ pub async fn open_terminal_session(
     req: HttpRequest,
     query_list: web::Query<StartTerminalSession>,
     settings: web::Data<SharedSettings>,
+    session_map: web::Data<desk_signal::model::SharedSessionMap>,
     session: Session,
     stream: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -56,8 +63,91 @@ pub async fn open_terminal_session(
             "No terminal command provided",
         ));
     }
+
+    // Check if we are in proxy mode (desk_session_id provided)
+    if let Some(desk_session_id) = &query_list.session_id {
+        info!("Proxying terminal session to desk: {}", desk_session_id);
+        let (res, session, stream) = actix_ws::handle(&req, stream)?;
+        let stream = stream
+            .aggregate_continuations()
+            .max_continuation_size(2_usize.pow(20));
+
+        let start_terminal_session = query_list.clone().into_inner();
+
+        let session_map_clone = session_map.clone();
+        let desk_session_id = desk_session_id.clone();
+        let ip = req
+            .connection_info()
+            .realip_remote_addr()
+            .map(|s| s.to_string());
+
+        rt::spawn(async move {
+            // the web socket is from browser
+            let client_version_info = VersionInfo::new(
+                desk_server_version::SERVER_API_VERSION,
+                desk_signal::version::SIGNAL_BUILD_NUMBER,
+                desk_signal::version::SIGNAL_COMMIT_HASH.to_owned(),
+                RemoteDeskTypeEnum::Browser,
+                None,
+            );
+
+            log::info!("Handling terminal proxy signaling");
+            let random_uuid = Uuid::new_v4();
+            let session_id = String::from(random_uuid);
+            // Handle signaling logic here
+            let mut signaling_context = match SignalingContext::init(
+                session_id,
+                client_version_info,
+                session_map_clone,
+                session,
+                user,
+                ip,
+            )
+            .await
+            {
+                Ok(context) => context,
+                Err(e) => {
+                    error!("Error handling terminal proxy signaling: {:?}", e);
+                    return;
+                }
+            };
+
+            // send start terminal command
+            let start_terminal_command = match SignalingModel::new_request(
+                SignalingType::StartTerminal,
+                None,
+                Some(desk_session_id),
+                &start_terminal_session,
+            ) {
+                Ok(command) => command,
+                Err(e) => {
+                    error!("Error creating start terminal command: {:?}", e);
+                    return;
+                }
+            };
+            if let Err(e) = signaling_context
+                .send_request(&start_terminal_command)
+                .await
+            {
+                error!("Error sending start terminal command: {:?}", e);
+                return;
+            }
+
+            let result = signaling_context.do_handle_signaling(stream).await;
+            if let Err(e) = result {
+                error!("Error handling signaling: {:?}", e);
+            } else {
+                info!("Signaling handled successfully");
+            }
+            // TODO close terminal
+        });
+
+        return Ok(res);
+    }
+
+    // Local mode
     info!(
-        "User {} is starting terminal session, command: {:?}",
+        "User {} is starting local terminal session, command: {:?}",
         user.name, query_list.command
     );
     let terminal_command = query_list.command.clone();
@@ -81,37 +171,36 @@ pub async fn open_terminal_session(
     let pty_system = native_pty_system();
 
     // Create a new PTY pair
-    let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    }).map_err(|e| actix_web::error::ErrorInternalServerError(format!("Failed to open pty: {}", e)))?;
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| {
+            actix_web::error::ErrorInternalServerError(format!("Failed to open pty: {}", e))
+        })?;
 
     let mut cmd = CommandBuilder::new(execute_file_path);
     cmd.args(args_list);
-    
-    // Check if we are in the source directory (development mode)
-    // If so, set the current directory to the parent of the server directory (project root)
-    // This is useful for development
+
     if std::path::Path::new("Cargo.toml").exists() {
         if let Ok(cwd) = std::env::current_dir() {
             if let Some(parent) = cwd.parent() {
-                 cmd.cwd(parent);
+                cmd.cwd(parent);
             }
         }
     }
-    
-    let child = pair.slave.spawn_command(cmd).map_err(|e| {
-         actix_web::error::ErrorInternalServerError(format!("Failed to spawn command in pty: {}", e))
-    })?;
 
+    let child = pair.slave.spawn_command(cmd).map_err(|e| {
+        actix_web::error::ErrorInternalServerError(format!("Failed to spawn command in pty: {}", e))
+    })?;
 
     let (res, session, stream) = actix_ws::handle(&req, stream)?;
 
     let stream = stream
         .aggregate_continuations()
-        // aggregate continuation frames up to 1MiB
         .max_continuation_size(2_usize.pow(20));
 
     // start task but don't wait for it

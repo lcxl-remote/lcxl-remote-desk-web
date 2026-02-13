@@ -13,6 +13,7 @@ import * as getTurnMetrics from './getTurnMetrics';
 import * as getTurnSession from './getTurnSession';
 import * as getTurnSessionStatistics from './getTurnSessionStatistics';
 import * as listFiles from './listFiles';
+import * as listSessions from './listSessions';
 import * as listTerminal from './listTerminal';
 import * as loginAccount from './loginAccount';
 import * as logoutAccount from './logoutAccount';
@@ -26,6 +27,7 @@ export default {
   changePassword,
   deleteFile,
   listFiles,
+  listSessions,
   querySettings,
   updateSettings,
   openSignalingHandle,

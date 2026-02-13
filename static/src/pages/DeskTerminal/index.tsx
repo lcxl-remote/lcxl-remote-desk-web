@@ -1,7 +1,7 @@
 import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
 import { PageContainer, ProForm, ProFormDigit, ProFormSelect, ProFormSwitch, ProFormText } from "@ant-design/pro-components";
-import { useIntl, useModel } from "@umijs/max";
+import { useIntl, useModel, useParams } from "@umijs/max";
 import { Alert, Button, Divider, message, Select, Space } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { listTerminal } from "@/services/desk/listTerminal";
@@ -19,6 +19,7 @@ import { ReloadOutlined } from "@ant-design/icons";
 const DeskTerminal: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
+  const { deskId } = useParams<{ deskId: string }>();
   const socketRef = useRef<WebSocket>();
 
   const [commandSelectOptions, setCommandSelectOptions] = useState<DefaultOptionType[] | undefined>();
@@ -53,7 +54,10 @@ const DeskTerminal: React.FC = () => {
     const command = encodeURIComponent(select_command.join(","));
     // create new websocket connection
     const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
-    const wsUri = `${proto}://${location.host}/api/desk/terminal?command=${command}`;
+    let wsUri = `${proto}://${location.host}/api/desk/terminal?command=${command}`;
+    if (deskId) {
+      wsUri += `&session_id=${deskId}`;
+    }
     const sock = new WebSocket(wsUri);
 
     sock.onopen = (event) => {
@@ -82,7 +86,14 @@ const DeskTerminal: React.FC = () => {
     // Custom WebSocket handling for JSON protocol
     sock.onmessage = (event) => {
       if (typeof event.data === 'string') {
-        new_terminal.write(event.data);
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'data') {
+            new_terminal.write(msg.content);
+          }
+        } catch (e) {
+          new_terminal.write(event.data);
+        }
       } else {
         // Handle binary data (Blob or ArrayBuffer)
         const reader = new FileReader();
@@ -96,9 +107,9 @@ const DeskTerminal: React.FC = () => {
     };
 
     sock.onclose = () => {
-        console.log("WebSocket connection closed");
-        new_terminal.write('\r\n\x1b[2mConnection closed.\x1b[0m');
-        new_terminal.options.cursorBlink = false;
+      console.log("WebSocket connection closed");
+      new_terminal.write('\r\n\x1b[2mConnection closed.\x1b[0m');
+      new_terminal.options.cursorBlink = false;
     };
 
     new_terminal.onData((data) => {
@@ -132,22 +143,22 @@ const DeskTerminal: React.FC = () => {
   useEffect(() => {
     const container = document.getElementById('terminal-container');
     if (!container) return;
-    
+
     let timeoutId: ReturnType<typeof setTimeout>;
     const resizeObserver = new ResizeObserver(() => {
-        clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
-            if (fitAddonRef.current) {
-                fitAddonRef.current.fit();
-            }
-        }, 100); // Debounce for 100ms
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        if (fitAddonRef.current) {
+          fitAddonRef.current.fit();
+        }
+      }, 100); // Debounce for 100ms
     });
-    
+
     resizeObserver.observe(container);
-    
+
     return () => {
-        resizeObserver.disconnect();
-        clearTimeout(timeoutId);
+      resizeObserver.disconnect();
+      clearTimeout(timeoutId);
     };
   }, []);
 

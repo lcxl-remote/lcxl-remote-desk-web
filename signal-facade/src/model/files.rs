@@ -4,9 +4,10 @@ use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
-use crate::error::DeskError;
+use crate::error::DeskSignalFacadeError;
 
-#[derive(Deserialize, ToSchema, IntoParams)]
+
+#[derive(Deserialize, Serialize, ToSchema, IntoParams)]
 pub struct FileListParams {
     pub path: String,
     pub page_no: i64,
@@ -28,9 +29,11 @@ pub struct FileListParams {
     /// Optional time range filter for file modification.
     pub start_modified_time: Option<DateTime<Local>>,
     pub end_modified_time: Option<DateTime<Local>>,
+    /// Session ID for remote desk
+    pub session_id: Option<String>,
 }
 
-#[derive(Serialize, ToSchema, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Debug)]
 pub struct FileInfo {
     pub name: String,
     pub path: String,
@@ -73,7 +76,7 @@ impl FileInfo {
         }
     }
 
-    pub fn new(path: PathBuf) -> Result<Self, DeskError> {
+    pub fn new(path: PathBuf) -> Result<Self, DeskSignalFacadeError> {
         let file_name = if let Some(file_name) = path.file_name() {
             file_name.to_string_lossy().to_string()
         } else {
@@ -127,7 +130,7 @@ impl FileInfo {
     }
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct FileListResponse {
     pub file_info_list: Vec<FileInfo>,
     pub total_count: i64,
@@ -140,4 +143,5 @@ pub struct DeleteFileRequest {
     pub file_path: String,
     /// Whether to delete permanently or move to trash
     pub delete_permanently: Option<bool>,
+    pub session_id: Option<String>,
 }

@@ -1355,7 +1355,7 @@ impl ImageCapture for DigxImageCapture {
 
                     return DeskError::custom_error(
                         DeskErrorCode::ACTION_NEED_RETRY,
-                        format!("capture frame timeout, will retry, error={:?}", err),
+                        &format!("capture frame timeout, will retry, error={:?}", err),
                     );
                 } else if err.code() == DXGI_ERROR_ACCESS_LOST
                     || err.code() == DXGI_ERROR_INVALID_CALL
@@ -1364,7 +1364,7 @@ impl ImageCapture for DigxImageCapture {
 
                     return DeskError::custom_error(
                         DeskErrorCode::ACTION_NEED_RETRY,
-                        format!("capture frame is lost, will retry, error={:?}", err),
+                        &format!("capture frame is lost, will retry, error={:?}", err),
                     );
                 } else {
                     if err.code() == DXGI_ERROR_DEVICE_REMOVED {

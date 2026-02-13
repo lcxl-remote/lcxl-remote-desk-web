@@ -1,12 +1,10 @@
 pub mod audio_capture;
 pub mod audio_encoder;
 pub mod data_channel;
-pub mod files;
 pub mod image_capture;
 pub mod info;
 pub mod login;
 pub mod settings;
 pub mod system_setting;
-pub mod terminal;
 pub mod turn;
 pub mod video_encoder;

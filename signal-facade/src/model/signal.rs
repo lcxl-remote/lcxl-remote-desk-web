@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 use serde::{Deserialize, Serialize};
@@ -6,6 +6,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use strum_macros::{Display, FromRepr};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_repr::ToSchema_repr;
+use uuid::Uuid;
 use webrtc::{
     ice_transport::{ice_connection_state::RTCIceConnectionState, ice_server::RTCIceServer},
     peer_connection::{
@@ -52,10 +53,23 @@ pub enum SignalingType {
 
     UpdateDeskSettings = 301,
 
-    ManagerFile = 10001,
-    ManagerTerminal = 10002,
     ManagerSystemInfo = 10003,
     ManagerSystemStatue = 10004,
+
+    ManagerFileList = 10005,
+    ManagerFileDelete = 10006,
+    /// Start terminal
+    StartTerminal = 10007,
+    /// Send data to terminal
+    SendDataToTerminal = 10008,
+    /// Resize terminal
+    ResizeTerminal = 10009,
+    /// Close terminal
+    CloseTerminal = 10010,
+    /// Reply from terminal
+    ReplyFromTerminal = 10011,
+    /// List terminal
+    ListTerminal = 10012,
 
     Error = 10000000,
     Unknown = 10000001,
@@ -86,6 +100,8 @@ impl SignalingResponseState {
 /// Signaling model
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct SignalingModel {
+    /// Request id
+    pub request_id: String,
     /// Signaling type
     pub signaling_type: SignalingType,
     /// From session id, if None, means from signal server
@@ -100,6 +116,7 @@ pub struct SignalingModel {
 
 impl SignalingModel {
     pub fn new(
+        request_id: &str,
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
@@ -107,6 +124,7 @@ impl SignalingModel {
         response_state: Option<SignalingResponseState>,
     ) -> Self {
         Self {
+            request_id: request_id.to_string(),
             signaling_type,
             from_session_id,
             to_session_id,
@@ -126,6 +144,7 @@ impl SignalingModel {
         T: ?Sized + Serialize,
     {
         Ok(Self::new(
+            &Uuid::new_v4().to_string(),
             signaling_type,
             from_session_id,
             to_session_id,
@@ -135,10 +154,19 @@ impl SignalingModel {
     }
 
     /// New request signaling model with none data
-    pub fn new_none_data_request(signaling_type: SignalingType) -> Self {
-        Self::new(signaling_type, None, None, None, None)
+    pub fn new_none_data_request(signaling_type: SignalingType,
+    to_session_id: Option<String>,) -> Self {
+        Self::new(
+            &Uuid::new_v4().to_string(),
+            signaling_type,
+            None,
+            to_session_id,
+            None,
+            None,
+        )
     }
     pub fn new_response<T>(
+        request_id: &str,
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
@@ -149,6 +177,7 @@ impl SignalingModel {
         T: ?Sized + Serialize,
     {
         Ok(Self::new(
+            request_id,
             signaling_type,
             from_session_id,
             to_session_id,
@@ -158,6 +187,7 @@ impl SignalingModel {
     }
 
     pub fn success_response<T>(
+        request_id: &str,
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
@@ -167,6 +197,7 @@ impl SignalingModel {
         T: ?Sized + Serialize,
     {
         Self::new_response(
+            request_id,
             signaling_type,
             from_session_id,
             to_session_id,
@@ -176,12 +207,14 @@ impl SignalingModel {
     }
 
     pub fn new_none_data_response(
+        request_id: &str,
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
         response_state: SignalingResponseState,
     ) -> Self {
         Self::new(
+            request_id,
             signaling_type,
             from_session_id,
             to_session_id,
@@ -191,11 +224,13 @@ impl SignalingModel {
     }
 
     pub fn success_none_data_response(
+        request_id: &str,
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
     ) -> Self {
         Self::new_none_data_response(
+            request_id,
             signaling_type,
             from_session_id,
             to_session_id,
@@ -205,6 +240,7 @@ impl SignalingModel {
 
     /// New response signaling model with none data
     pub fn error(
+        request_id: &str,
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
@@ -216,6 +252,7 @@ impl SignalingModel {
             message: Some(message.to_string()),
         };
         Ok(Self::new_none_data_response(
+            request_id,
             signaling_type,
             from_session_id,
             to_session_id,
@@ -224,12 +261,14 @@ impl SignalingModel {
     }
 
     pub fn custom_desk_error(
+        request_id: &str,
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
         error: CustomDeskError,
     ) -> Result<Self, DeskSignalFacadeError> {
         Self::error(
+            request_id,
             signaling_type,
             from_session_id,
             to_session_id,
@@ -274,8 +313,8 @@ impl SignalingModel {
             return Ok(data);
         } else {
             return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                format!("Data can't be none, signal type: {:?}", self.signaling_type),
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("Data can't be none, signal type: {:?}", self.signaling_type),
             );
         }
     }
@@ -286,7 +325,7 @@ impl SignalingModel {
         } else {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                format!(
+                &format!(
                     "From session id can't be none, signal type: {:?}",
                     self.signaling_type
                 ),
@@ -300,20 +339,29 @@ impl SignalingModel {
         } else {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                format!(
+                &format!(
                     "To session id can't be none, signal type: {:?}",
                     self.signaling_type
                 ),
             );
         }
     }
+
+    pub fn is_request(&self) -> bool {
+        self.response_state.is_none()
+    }
+
+    pub fn is_response(&self) -> bool {
+        self.response_state.is_some()
+    }
 }
 
 /// Peer signaling sender trait
 pub trait PeerSignalingSender {
     /// Send signaling message
-    fn send_signaling<T>(
+    fn send_response<T>(
         &mut self,
+        request_id: &str,
         signaling_type: SignalingType,
         to_session_id: Option<String>,
         signaling_data: &T,
@@ -323,6 +371,7 @@ pub trait PeerSignalingSender {
 
     fn send_error(
         &mut self,
+        request_id: &str,
         signaling_type: SignalingType,
         to_session_id: Option<String>,
         error_code: DeskErrorCode,
@@ -332,6 +381,7 @@ pub trait PeerSignalingSender {
     /// Send to peer session
     fn send_to_peer<T>(
         &mut self,
+        request_id: &str,
         signaling_type: SignalingType,
         to_session_id: &str,
         data: T,
@@ -341,23 +391,30 @@ pub trait PeerSignalingSender {
 }
 
 pub trait ForwardSignalingSender {
-    fn send_signaling<T>(
-        &mut self,
-        signaling_type: SignalingType,
+    /// Send response signaling message
+    fn send_response(
+        &self,
         from_session_id: Option<String>,
-        signaling_data: &T,
-    ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send
-    where
-        T: ?Sized + Serialize + Sync;
+        signaling_model: &SignalingModel,
+    ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send;
 
     /// Forward to peer session
     fn forward_to_peer(
-        &mut self,
-        signaling_type: SignalingType,
+        &self,
         from_session_id: &str,
-        data: Option<serde_json::Value>,
-        response_state: Option<SignalingResponseState>,
+        signaling_model: &SignalingModel,
     ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send;
+
+    /// Send request signaling message with callback
+    /// There is no from_session_id in this function, because it is used by http api
+    fn request_peer_with_callback<T>(
+        &self,
+        signaling_type: SignalingType,
+        data: &T,
+        timeout: Option<Duration>,
+    ) -> impl std::future::Future<Output = Result<SignalingModel, DeskSignalFacadeError>> + Send
+    where
+        T: ?Sized + Serialize + Sync;
 }
 
 ///RTC IceServer
@@ -459,7 +516,7 @@ pub struct OfferModel {
 }
 
 /// Remote Desk Type Enum
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 #[schema(rename_all = "kebab-case")]
 pub enum RemoteDeskTypeEnum {

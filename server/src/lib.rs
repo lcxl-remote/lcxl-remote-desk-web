@@ -20,7 +20,6 @@ use actix_web::{
 };
 use clap::Parser as _;
 use controller::{
-    files::{delete_file, list_files},
     login::{change_password, get_captcha, login_account, logout_account},
     settings::{query_settings, update_settings},
     turn::{
@@ -29,7 +28,13 @@ use controller::{
     },
     user::{get_current_user, get_notices, reject_anonymous_users},
 };
-use desk_signal::model::SharedSessionMap;
+use desk_signal::{
+    controller::{
+        files::{delete_file, list_files},
+        session::list_sessions,
+    },
+    model::SharedSessionMap,
+};
 use desk_turn::service::startup_turn_server;
 use desk_utils::{
     error::DeskErrorCode, logs::init_logs_by_str, network::check_ipv6_available, rest::RestResponse,
@@ -135,6 +140,7 @@ pub async fn run() -> Result<Server, DeskError> {
     }
 
     let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
+
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
         let default_static_file_path = static_file_path.clone();
@@ -184,9 +190,7 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(change_password)
                             .service(query_settings)
                             .service(update_settings)
-                            .service(delete_file)
-                            .service(list_files)
-                            .service(list_files)
+                            .service(list_sessions)
                             .service(list_terminal)
                             .service(open_terminal_session)
                             .service(query_sysinfo)
@@ -195,7 +199,11 @@ pub async fn run() -> Result<Server, DeskError> {
                                     || startup_mode == StartupMode::Signaling
                                 {
                                     log::info!("Registering signaling route at /signaling");
-                                    cfg.service(desk_signal::controller::open_signaling_handle);
+                                    cfg.service(
+                                        desk_signal::controller::signaling::open_signaling_handle,
+                                    )
+                                    .service(delete_file)
+                                    .service(list_files);
                                 }
                             }),
                     )

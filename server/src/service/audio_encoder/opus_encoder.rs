@@ -25,7 +25,7 @@ impl OpusAudioEncoder {
             _ => {
                 return DeskError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!("Unsupported number of channels: {}", opus_settings.channels),
+                    &format!("Unsupported number of channels: {}", opus_settings.channels),
                 );
             }
         };
@@ -37,7 +37,7 @@ impl OpusAudioEncoder {
             _ => {
                 return DeskError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!(
+                    &format!(
                         "Unsupported Opus application: {}",
                         opus_settings.application
                     ),
@@ -100,7 +100,7 @@ impl AudioEncoder for OpusAudioEncoder {
         } else {
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                format!(
+                &format!(
                     "Unsupport bit per sample: {}",
                     self.wave_format.bits_per_sample
                 ),

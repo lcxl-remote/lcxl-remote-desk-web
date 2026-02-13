@@ -1,6 +1,7 @@
 use std::fmt::{Display, Formatter};
 
-use desk_utils::error::{CustomDeskError, DeskErrorCode};
+use actix_web::ResponseError;
+use desk_utils::{error::{CustomDeskError, DeskErrorCode}, rest::RestResponse};
 
 #[derive(Debug)]
 pub enum DeskSignalError {
@@ -18,11 +19,13 @@ pub enum DeskSignalError {
 impl DeskSignalError {
     pub fn custom_error<T>(
         error_code: DeskErrorCode,
-        message: String,
+        message: &str,
     ) -> Result<T, DeskSignalError> {
-        Err(DeskSignalError::CustomError(CustomDeskError::new(
-            error_code, message,
-        )))
+        Err(Self::new_custom_error(error_code, message))
+    }
+
+    pub fn new_custom_error(error_code: DeskErrorCode, message: &str) -> DeskSignalError {
+        DeskSignalError::CustomError(CustomDeskError::new(error_code, message))
     }
 }
 
@@ -51,5 +54,24 @@ impl From<actix_ws::Closed> for DeskSignalError {
 impl From<desk_signal_facade::error::DeskSignalFacadeError> for DeskSignalError {
     fn from(err: desk_signal_facade::error::DeskSignalFacadeError) -> Self {
         DeskSignalError::DeskSignalFacadeError(err)
+    }
+}
+
+
+impl ResponseError for DeskSignalError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        actix_web::http::StatusCode::OK
+    }
+
+    fn error_response(&self) -> actix_web::HttpResponse<actix_web::body::BoxBody> {
+        let error_code = match self {
+            DeskSignalError::CustomError(error) => error.error_code,
+            _ => DeskErrorCode::SYSTEM_ERROR,
+        };
+        // write as json
+        let rest = RestResponse::failed(error_code, self.to_string());
+        actix_web::HttpResponse::Ok()
+            .status(self.status_code())
+            .json(rest)
     }
 }

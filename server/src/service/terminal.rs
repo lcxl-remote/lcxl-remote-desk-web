@@ -3,13 +3,13 @@ use std::io::{Read, Write};
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use desk_server_user::model::CurrentUser;
+use desk_signal_facade::model::terminal::TerminalList;
 use futures::StreamExt;
 use portable_pty::{Child, MasterPty, PtySize};
 use regex::Regex;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use crate::model::terminal::TerminalList;
 use crate::{error::DeskError, model::settings::SharedSettings};
 
 #[derive(Deserialize)]

@@ -1,3 +1,9 @@
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
+
 use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytes::Bytes;
@@ -8,14 +14,14 @@ use desk_signal_facade::{
     error::DeskSignalFacadeError,
     model::{
         session::{SessionList, SessionModel},
-        signal::{ForwardSignalingSender, SignalingModel, SignalingResponseState, SignalingType},
+        signal::{ForwardSignalingSender, SignalingModel, SignalingType},
         version::VersionInfo,
     },
 };
 use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
 use serde::Serialize;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -59,46 +65,98 @@ pub struct SignalingContext {
 }
 
 impl ForwardSignalingSender for SessionState {
-    async fn send_signaling<T>(
-        &mut self,
-        signaling_type: SignalingType,
+    async fn send_response(
+        &self,
         from_session_id: Option<String>,
-        signaling_data: &T,
-    ) -> Result<(), DeskSignalFacadeError>
-    where
-        T: ?Sized + Serialize + Sync,
-    {
+        signaling_model: &SignalingModel,
+    ) -> Result<(), DeskSignalFacadeError> {
         let signaling_model = SignalingModel::success_response(
-            signaling_type,
+            &signaling_model.request_id,
+            signaling_model.signaling_type,
             from_session_id,
             Some(self.model.session_id.clone()),
-            signaling_data,
+            &signaling_model.signaling_data,
         )?;
         self.session
+            .write()
+            .await
             .text(serde_json::to_string(&signaling_model)?)
             .await?;
         Ok(())
     }
 
     async fn forward_to_peer(
-        &mut self,
-        signaling_type: SignalingType,
+        &self,
         from_session_id: &str,
-        data: Option<serde_json::Value>,
-        response_state: Option<SignalingResponseState>,
+        signaling_model: &SignalingModel,
     ) -> Result<(), DeskSignalFacadeError> {
         let signaling_model = SignalingModel::new(
-            signaling_type,
+            &signaling_model.request_id,
+            signaling_model.signaling_type,
             Some(from_session_id.to_owned()),
             Some(self.model.session_id.clone()),
-            data,
-            response_state,
+            signaling_model.signaling_data.clone(),
+            signaling_model.response_state.clone(),
         );
         self.session
+            .write()
+            .await
             .text(serde_json::to_string(&signaling_model)?)
             .await?;
 
         Ok(())
+    }
+
+    async fn request_peer_with_callback<T>(
+        &self,
+        signaling_type: SignalingType,
+        data: &T,
+        timeout: Option<Duration>,
+    ) -> Result<SignalingModel, DeskSignalFacadeError>
+    where
+        T: ?Sized + Serialize + Sync,
+    {
+        let signaling_model = SignalingModel::new_request(
+            signaling_type,
+            None,
+            Some(self.model.session_id.clone()),
+            data,
+        )?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.session
+            .write()
+            .await
+            .text(serde_json::to_string(&signaling_model)?)
+            .await?;
+        self.request_callback_map
+            .write()
+            .await
+            .insert(signaling_model.request_id.clone(), tx);
+
+        // TODO: timeout should be configured in the config file
+        let timeout = timeout.unwrap_or(Duration::from_secs(30));
+        let result = tokio::time::timeout(timeout, rx).await;
+        match result {
+            Ok(Ok(signaling_model)) => Ok(signaling_model),
+            Ok(Err(e)) => {
+                // try to remove the request callback map
+                let _ = self
+                    .request_callback_map
+                    .write()
+                    .await
+                    .remove(&signaling_model.request_id);
+                DeskSignalFacadeError::custom_error(DeskErrorCode::TIMEOUT, &e.to_string())
+            }
+            Err(e) => {
+                // try to remove the request callback map
+                let _ = self
+                    .request_callback_map
+                    .write()
+                    .await
+                    .remove(&signaling_model.request_id);
+                DeskSignalFacadeError::custom_error(DeskErrorCode::TIMEOUT, &e.to_string())
+            }
+        }
     }
 }
 
@@ -126,7 +184,7 @@ impl Drop for SignalingContext {
 }
 
 impl SignalingContext {
-    /// Initialize a new SignalingContext. This function sends the server's version information to the client.
+    /// Initialize a new SignalingContext.
     pub async fn init(
         session_id: String,
         client_version_info: VersionInfo,
@@ -152,23 +210,11 @@ impl SignalingContext {
 
         let session_state = SessionState {
             model: session_model,
-            session: session.clone(),
+            session: Arc::new(RwLock::new(session)),
+            terminal_session_ids: Arc::new(RwLock::new(HashSet::new())),
+            request_callback_map: Arc::new(RwLock::new(HashMap::new())),
         };
-        /*
-        let server_version_info = VersionInfo::new(
-            SERVER_API_VERSION,
-            version::SIGNAL_BUILD_NUMBER,
-            version::SIGNAL_COMMIT_HASH.to_string(),
-            RemoteDeskTypeEnum::Signal,
-        );
-        session_state
-            .send_signaling(
-                SignalingType::Version,
-                Some(session_id.clone()),
-                &server_version_info,
-            )
-            .await?;
-         */
+
         session_map
             .write()
             .await
@@ -180,33 +226,44 @@ impl SignalingContext {
         })
     }
 
+    pub async fn send_request(&self, signaling_model: &SignalingModel) -> Result<(), DeskSignalError> {
+        self.session_state.forward_to_peer(&self.session_state.model.session_id, signaling_model).await?;
+        Ok(())
+    }
+
     /// Send data to target peer
-    pub async fn send_peer(
-        &mut self,
-        signaling_type: SignalingType,
-        to_session_id: &str,
-        data: Option<serde_json::Value>,
-        response_state: Option<SignalingResponseState>,
+    pub async fn forward_to_peer(
+        &self,
+        signaling_model: &SignalingModel,
     ) -> Result<(), DeskSignalError> {
+        if let Some(tx) = self
+            .session_state
+            .request_callback_map
+            .write()
+            .await
+            .remove(&signaling_model.request_id)
         {
-            let mut session_map = self.session_map.write().await;
-            let session_state = if let Some(session_state) = session_map.get_mut(to_session_id) {
-                session_state
-            } else {
-                return DeskSignalError::custom_error(
+            tx.send(signaling_model.clone()).map_err(|_| {
+                DeskSignalError::new_custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!("Session {} not found", to_session_id),
-                );
-            };
-            session_state
-                .forward_to_peer(
-                    signaling_type,
-                    &self.session_state.model.session_id,
-                    data,
-                    response_state,
+                    "Failed to send response to peer",
                 )
-                .await?;
+            })?;
+            return Ok(());
         }
+        let to_session_id = signaling_model.check_and_get_to_session_id()?;
+        let session_map = self.session_map.read().await;
+        let to_session_state = if let Some(session_state) = session_map.get(&to_session_id) {
+            session_state
+        } else {
+            return DeskSignalError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                &format!("Session {} not found", to_session_id),
+            );
+        };
+        to_session_state
+            .forward_to_peer(&self.session_state.model.session_id, signaling_model)
+            .await?;
 
         Ok(())
     }
@@ -230,10 +287,57 @@ impl SignalingContext {
                 };
 
                 log::info!("Sending session list to client: {:?}", session_list);
-                self.session_state
-                    .send_signaling(SignalingType::SessionList, None, &session_list)
-                    .await?;
+                let response = SignalingModel::success_response(
+                    &signaling_model.request_id,
+                    SignalingType::SessionList,
+                    None,
+                    None,
+                    &session_list,
+                )?;
+                self.session_state.send_response(None, &response).await?;
             }
+            SignalingType::StartTerminal => {
+                let to_session_id = signaling_model.check_and_get_to_session_id()?;
+                self.forward_to_peer(&signaling_model).await?;
+                if signaling_model.is_request() {
+                    self.session_state
+                        .terminal_session_ids
+                        .write()
+                        .await
+                        .insert(to_session_id);
+                }
+            }
+            SignalingType::CloseTerminal => {
+                let to_session_id = signaling_model.check_and_get_to_session_id()?;
+                self.forward_to_peer(&signaling_model).await?;
+                if signaling_model.is_request() {
+                    self.session_state
+                        .terminal_session_ids
+                        .write()
+                        .await
+                        .remove(&to_session_id);
+                }
+            }
+
+            SignalingType::SendDataToTerminal => {
+                let to_session_id = signaling_model.check_and_get_to_session_id()?;
+                if signaling_model.is_request() {
+                    if !self
+                        .session_state
+                        .terminal_session_ids
+                        .read()
+                        .await
+                        .contains(&to_session_id)
+                    {
+                        return DeskSignalError::custom_error(
+                            DeskErrorCode::SYSTEM_ERROR,
+                            &format!("Session {} is not a terminal", to_session_id),
+                        );
+                    }
+                }
+                self.forward_to_peer(&signaling_model).await?;
+            }
+
             // Forwarding types
             SignalingType::RequestRemote
             | SignalingType::Init
@@ -246,24 +350,12 @@ impl SignalingContext {
             | SignalingType::CloseControl
             | SignalingType::ChangeDisplaySettings
             | SignalingType::UpdateDeskSettings
-            | SignalingType::ManagerFile
-            | SignalingType::ManagerTerminal
             | SignalingType::ManagerSystemInfo
-            | SignalingType::ManagerSystemStatue => {
+            | SignalingType::ManagerSystemStatue
+            | SignalingType::ListTerminal
+            | SignalingType::ReplyFromTerminal => {
                 // Generic forwarding
-                // We need to parse as generic serde_json::Value
-                // to forward without knowing the exact inner type.
-                let to_session_id = signaling_model.check_and_get_to_session_id()?;
-                let data = signaling_model.signaling_data;
-                let response_state = signaling_model.response_state;
-
-                self.send_peer(
-                    signaling_model.signaling_type,
-                    &to_session_id,
-                    data,
-                    response_state,
-                )
-                .await?;
+                self.forward_to_peer(&signaling_model).await?;
             }
 
             SignalingType::Error => {
@@ -288,7 +380,7 @@ impl SignalingContext {
     }
 
     pub async fn ping(&mut self, bin: Bytes) -> Result<(), DeskSignalError> {
-        self.session_state.session.pong(&bin).await?;
+        self.session_state.session.write().await.pong(&bin).await?;
         Ok(())
     }
 

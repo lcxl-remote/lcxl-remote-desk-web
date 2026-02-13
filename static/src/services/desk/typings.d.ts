@@ -48,6 +48,7 @@ declare namespace API {
     delete_permanently?: any;
     /** The path of file to be deleted */
     file_path: string;
+    session_id?: any;
   };
 
   type deleteTurnSessionParams = {
@@ -246,6 +247,8 @@ declare namespace API {
     /** Optional time range filter for file modification. */
     start_modified_time?: any;
     end_modified_time?: any;
+    /** Session ID for remote desk */
+    session_id?: any;
   };
 
   type LoginParams = {
@@ -325,6 +328,8 @@ declare namespace API {
   type openTerminalSessionParams = {
     /** The command to start the terminal session. with the format of "path/to/executable,arg1,arg2" */
     command: string;
+    /** Optional session ID to resume or identify a session. */
+    session_id?: any;
   };
 
   type OperationSystemEnum = 'Windows' | 'Linux' | 'Mac' | 'Android' | 'Ios' | 'Web' | 'Other';
@@ -428,6 +433,8 @@ declare namespace API {
   type SignalingModel = {
     /** From session id, if None, means from signal server */
     from_session_id?: any;
+    /** Request id */
+    request_id: string;
     response_state?: null | SignalingResponseState;
     /** Signaling data */
     signaling_data?: any;
@@ -501,11 +508,24 @@ see alse: desk_utils::DeskErrorCode */
     traceback?: boolean;
   };
 
+  type TerminalInputData = {
+    content: string;
+  };
+
   type TerminalList = {
     /** terminal command list */
     commands: string[][];
     /** current terminal index */
     current: number;
+  };
+
+  type TerminalOutputData = {
+    content: string;
+  };
+
+  type TerminalResizeData = {
+    cols: number;
+    rows: number;
   };
 
   type TurnInfo = {

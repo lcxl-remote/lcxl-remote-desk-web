@@ -8,7 +8,7 @@ export async function openSignalingHandle(
   params: API.openSignalingHandleParams,
   options?: { [key: string]: any },
 ) {
-  return request<API.SignalingModel>('/api/desk/signaling', {
+  return request<any>('/api/desk/signaling', {
     method: 'GET',
     params: {
       ...params,

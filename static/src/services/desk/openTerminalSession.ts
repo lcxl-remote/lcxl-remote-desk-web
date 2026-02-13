@@ -8,7 +8,7 @@ export async function openTerminalSession(
   params: API.openTerminalSessionParams,
   options?: { [key: string]: any },
 ) {
-  return request<API.SignalingModel>('/api/desk/terminal', {
+  return request<any>('/api/desk/terminal', {
     method: 'GET',
     params: {
       ...params,

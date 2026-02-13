@@ -187,7 +187,7 @@ impl GdiImageCapture {
         } else {
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                format!(
+                &format!(
                     "Cannot get current output by index {}",
                     settings.video_device_index
                 ),

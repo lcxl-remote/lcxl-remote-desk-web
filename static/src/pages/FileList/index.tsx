@@ -9,7 +9,7 @@ import {
   ProDescriptions,
   ProTable,
 } from '@ant-design/pro-components';
-import { FormattedMessage, useIntl, history } from '@umijs/max';
+import { FormattedMessage, useIntl, history, useParams } from '@umijs/max';
 import { Button, Drawer, Input, message, Popconfirm, Select, SelectProps } from 'antd';
 import React, { useRef, useState } from 'react';
 
@@ -20,7 +20,7 @@ import React, { useRef, useState } from 'react';
  *
  * @param selectedRows
  */
-const handleRemove = async (selectedRows: API.FileInfo[], intl: any) => {
+const handleRemove = async (selectedRows: API.FileInfo[], intl: any, deskId?: string) => {
   const hide = message.loading(intl.formatMessage({ id: 'pages.fileList.deleting' }));
   if (!selectedRows) return true;
   try {
@@ -28,6 +28,7 @@ const handleRemove = async (selectedRows: API.FileInfo[], intl: any) => {
       const request: API.DeleteFileRequest = {
         delete_permanently: false,
         file_path: selectedRows[index].path,
+        session_id: deskId,
       }
       await deleteFile(request);
     }
@@ -77,6 +78,7 @@ const TableList: React.FC = () => {
    * @zh-CN 国际化配置
    * */
   const intl = useIntl();
+  const { deskId } = useParams<{ deskId: string }>();
 
   const columns: ProColumns<API.FileInfo>[] = [
     {
@@ -181,15 +183,15 @@ const TableList: React.FC = () => {
       valueType: 'option',
       render: (_, record) => [
         <a
-            onClick={() => {
-              setCurrentRow(record);
-              setShowDetail(true);
-            }}
-          >
-           <FormattedMessage
+          onClick={() => {
+            setCurrentRow(record);
+            setShowDetail(true);
+          }}
+        >
+          <FormattedMessage
             id="pages.searchTable.detail"
           />
-          </a>,
+        </a>,
         <Popconfirm
           title={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmTitle" })}
           description={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmDescription" })}
@@ -200,8 +202,9 @@ const TableList: React.FC = () => {
                 const response = await deleteFile({
                   file_path: record.path,
                   delete_permanently: false,
+                  session_id: deskId,
                 });
-                console.log(intl.formatMessage({ id: 'pages.fileList.deletedFile' }, { path: record.path, response }));
+                console.log(intl.formatMessage({ id: 'pages.fileList.deletedFile' }, { path: record.path, response: JSON.stringify(response) }));
                 setCurrentRow(undefined);
                 actionRef.current?.reloadAndRest?.();
               } catch (err) {
@@ -270,9 +273,10 @@ const TableList: React.FC = () => {
           // 这里需要返回一个 Promise,在返回之前你可以进行数据转化
           // 如果需要转化参数可以在这里进行修改
           var list_param: API.listFilesParams = {
-            path: params.path?params.path:"",
+            path: params.path ? params.path : "",
             page_no: params.current!,
             page_count: params.pageSize!,
+            session_id: deskId,
           };
           console.info("sort", sort);
           console.info("filter", filter);
@@ -308,7 +312,7 @@ const TableList: React.FC = () => {
             title={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmTitle" })}
             description={intl.formatMessage({ id: "pages.searchTable.optionDeleteConfirmDescription" })}
             onConfirm={async () => {
-              await handleRemove(selectedRowsState, intl);
+              await handleRemove(selectedRowsState, intl, deskId);
               setSelectedRows([]);
               actionRef.current?.reloadAndRest?.();
             }}

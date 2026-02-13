@@ -3,7 +3,7 @@ use std::{fs, ops::Deref, path::PathBuf};
 use chrono::{DateTime, Local};
 use clap::Parser;
 use config::{Config, Environment, File};
-use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::{desk_settings::DeskSettings, terminal::TerminalSettings};
 use desk_turn::model::TurnSettings;
 use desk_utils::error::DeskErrorCode;
 use log::{debug, info};
@@ -115,20 +115,7 @@ pub struct ListSettings {
     pub filter_dup_file_by_dir_path: Option<bool>,
 }
 
-/// Terminal settings
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct TerminalSettings {
-    pub current_terminal: Option<Vec<String>>,
-}
 
-impl Default for TerminalSettings {
-    fn default() -> Self {
-        Self {
-            current_terminal: None,
-        }
-    }
-}
 
 /// Desk Settings
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -260,7 +247,7 @@ impl Settings {
         } else {
             return DeskError::custom_error(
                 DeskErrorCode::FILE_PATH_NOT_FOUND,
-                format!(
+                &format!(
                     "the parent of path '{}' is not found",
                     config_file_path.display()
                 ),

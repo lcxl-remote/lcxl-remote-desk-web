@@ -226,7 +226,7 @@ impl AudioCapture for WasapiAudioCapture {
                         log::warn!("audio device is invalidated");
                         return DeskError::custom_error(
                             DeskErrorCode::ACTION_NEED_RETRY,
-                            "Audio device is invalidated, please retry".to_string(),
+                            "Audio device is invalidated, please retry",
                         );
                     }
                 }
@@ -318,7 +318,7 @@ impl WasapiAudioCapture {
             _ => {
                 return DeskError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!(
+                    &format!(
                         "Unknown audio data flow: {:?}",
                         audio_device.audio_data_flow
                     ),

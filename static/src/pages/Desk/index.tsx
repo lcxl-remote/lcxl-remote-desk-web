@@ -1,7 +1,7 @@
 import { querySettings } from "@/services/desk/querySettings";
 import { updateSettings } from "@/services/desk/updateSettings";
 import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormDigit, ProFormInstance, ProFormSelect, ProFormSlider, ProFormSwitch, ProFormText, ProFormTreeSelect, RequestOptionsType } from "@ant-design/pro-components";
-import { useIntl, useModel } from "@umijs/max";
+import { useIntl, useModel, useParams } from "@umijs/max";
 import { Alert, Button, Divider, Flex, FloatButton, message, Modal, Popover, Slider, Tooltip, Space } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -71,10 +71,11 @@ const Desk: React.FC = () => {
   const [audioVolume, setAudioVolume] = useState(100);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoReady, setIsVideoReady] = useState(false);
+  const { deskId } = useParams<{ deskId: string }>();
   const [sessionList, setSessionList] = useState<API.SessionModel[]>([]);
-  const [showSessionList, setShowSessionList] = useState(true);
-  const [targetSessionId, setTargetSessionId] = useState<string | null>(null);
-  const targetSessionIdRef = useRef<string | null>(null);
+  const [showSessionList, setShowSessionList] = useState(!deskId);
+  const [targetSessionId, setTargetSessionId] = useState<string | null>(deskId || null);
+  const targetSessionIdRef = useRef<string | null>(deskId || null);
 
   useEffect(() => {
     // Only fetch if socket is open, otherwise onopen will handle it
@@ -488,12 +489,19 @@ const Desk: React.FC = () => {
 
     sock.onopen = (event) => {
       console.log('连接成功', event);
-      // Fetch session list on connect
-      let sginaling = {
-        signaling_type: SIGNALING_TYPE_CODE_FETCH_SESSIONS,
-        signaling_data: null,
-      } as API.SignalingModel;
-      sock.send(JSON.stringify(sginaling));
+      if (deskId) {
+        const requestRemoteData = {
+          session_id: deskId
+        };
+        sendSignalingMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, requestRemoteData, deskId);
+      } else {
+        // Fetch session list on connect
+        let sginaling = {
+          signaling_type: SIGNALING_TYPE_CODE_FETCH_SESSIONS,
+          signaling_data: null,
+        } as API.SignalingModel;
+        sock.send(JSON.stringify(sginaling));
+      }
     };
     sock.onmessage = handleWebSocketMessage;
     sock.onerror = (event) => {

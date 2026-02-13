@@ -5,10 +5,9 @@ use std::{
 
 use actix_web::ResponseError;
 use desk_signal_facade::model::signal::WebRTConnectionState;
-use desk_utils::{
-    error::{CustomDeskError, DeskErrorCode},
-    rest::RestResponse,
-};
+use desk_utils::{error::CustomDeskError, rest::RestResponse};
+
+pub use desk_utils::error::DeskErrorCode;
 
 pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(1000);
 
@@ -107,10 +106,15 @@ pub enum DeskError {
 }
 
 impl DeskError {
-    pub fn custom_error<T>(error_code: DeskErrorCode, message: String) -> Result<T, DeskError> {
+    pub fn custom_error<T>(error_code: DeskErrorCode, message: &str) -> Result<T, DeskError> {
         Err(DeskError::CustomError(CustomDeskError::new(
             error_code, message,
         )))
+    }
+
+    /// Create a new custom error
+    pub fn new_custom_error(error_code: DeskErrorCode, message: &str) -> DeskError {
+        DeskError::CustomError(CustomDeskError::new(error_code, message))
     }
 
     #[cfg(target_os = "windows")]
@@ -121,8 +125,15 @@ impl DeskError {
             //TODO use FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM)
             return DeskError::custom_error(
                 WINDOWS_ERROR,
-                format!("windows error code: {:?}", last_error),
+                &format!("windows error code: {:?}", last_error),
             );
+        }
+    }
+
+    pub fn to_error_code(&self) -> DeskErrorCode {
+        match self {
+            DeskError::CustomError(error) => error.error_code,
+            _ => DeskErrorCode::SYSTEM_ERROR,
         }
     }
 }

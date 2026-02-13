@@ -37,7 +37,7 @@ fn private_screen_window_thread(
             inited_tx.send(Err(e)).map_err(|_| {
                 DeskError::CustomError(CustomDeskError::new(
                     DeskErrorCode::SYSTEM_ERROR,
-                    "Failed to send private screen inited event".to_owned(),
+                    "Failed to send private screen inited event",
                 ))
             })?;
             return Ok(());
@@ -51,7 +51,7 @@ fn private_screen_window_thread(
         inited_tx.send(Err(e)).map_err(|_| {
             DeskError::CustomError(CustomDeskError::new(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Failed to send private screen inited event".to_owned(),
+                "Failed to send private screen inited event",
             ))
         })?;
         return Ok(());
@@ -59,7 +59,7 @@ fn private_screen_window_thread(
     inited_tx.send(Ok(())).map_err(|_| {
         DeskError::CustomError(CustomDeskError::new(
             DeskErrorCode::SYSTEM_ERROR,
-            "Failed to send private screen inited event".to_owned(),
+            "Failed to send private screen inited event",
         ))
     })?;
 
@@ -120,10 +120,10 @@ impl WindowsSystemSettingHelper {
         self.main_sender
             .send(PrivateScreenCommand::ShowWindow)
             .map_err(|e| {
-                DeskError::CustomError(CustomDeskError::new(
+                DeskError::new_custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!("Failed to send ShowWindow command: {}", e),
-                ))
+                    &format!("Failed to send ShowWindow command: {}", e),
+                )
             })
     }
 
@@ -132,10 +132,10 @@ impl WindowsSystemSettingHelper {
         self.main_sender
             .send(PrivateScreenCommand::HideWindow)
             .map_err(|e| {
-                DeskError::CustomError(CustomDeskError::new(
+                 DeskError::new_custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!("Failed to send ShowWindow command: {}", e),
-                ))
+                    &format!("Failed to send ShowWindow command: {}", e),
+                )
             })
     }
 }
@@ -181,7 +181,7 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
         if result != DISP_CHANGE_SUCCESSFUL {
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                format!("Failed to change display settings, code: {}", result.0),
+                &format!("Failed to change display settings, code: {}", result.0),
             );
         }
         Ok(())

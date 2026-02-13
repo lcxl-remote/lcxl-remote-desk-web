@@ -15,7 +15,7 @@ pub enum DeskSignalFacadeError {
 impl DeskSignalFacadeError {
     pub fn custom_error<T>(
         error_code: DeskErrorCode,
-        message: String,
+        message: &str,
     ) -> Result<T, DeskSignalFacadeError> {
         Err(DeskSignalFacadeError::CustomError(CustomDeskError::new(
             error_code, message,

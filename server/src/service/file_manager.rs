@@ -1,14 +1,11 @@
-use std::path::PathBuf;
-
-use actix_web::{HttpResponse, delete, get, web};
-use desk_utils::rest::RestResponse;
-use log::{debug, info, warn};
-use tokio::fs;
-
-use crate::{
-    error::DeskError,
-    model::files::{DeleteFileRequest, FileInfo, FileListParams, FileListResponse},
+use crate::error::DeskError;
+use desk_signal_facade::model::files::{
+    DeleteFileRequest, FileInfo, FileListParams, FileListResponse,
 };
+
+use log::{debug, info, warn};
+use std::path::PathBuf;
+use tokio::fs;
 
 #[cfg(target_os = "windows")]
 pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError> {
@@ -50,33 +47,25 @@ pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError> {
     Ok(file_info_list)
 }
 
-#[utoipa::path(
-    summary = "List files",
-    params(FileListParams),
-    responses(
-        (status = 200, description = "The list of file info", body=FileListResponse)
-    ),
-)]
-#[get("/file/list")]
-pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpResponse, DeskError> {
+pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, DeskError> {
     #[cfg(target_os = "windows")]
     if query_list.path.is_empty() {
         let file_info_list = get_logical_driver_list()?;
         let total_count = file_info_list.len() as i64;
-        return Ok(HttpResponse::Ok().json(FileListResponse {
+        return Ok(FileListResponse {
             file_info_list,
             total_count,
-        }));
+        });
     }
 
     // path_str need to be mut in linux/macos platform
     #[allow(unused_mut)]
-    let mut path_str = query_list.path.as_str();
+    let mut path_str = query_list.path.clone();
     #[cfg(not(target_os = "windows"))]
     if query_list.path.is_empty() {
-        path_str = "/";
+        path_str = "/".to_string();
     }
-    let path = PathBuf::from(path_str);
+    let path = PathBuf::from(&path_str);
 
     let mut file_info_list = vec![];
     if query_list.page_no == 1 {
@@ -125,37 +114,16 @@ pub async fn list_files(query_list: web::Query<FileListParams>) -> Result<HttpRe
         }
     }
     info!("List path: {}, total count: {}", path_str, total_count);
-    Ok(HttpResponse::Ok().json(FileListResponse {
+    Ok(FileListResponse {
         file_info_list,
         total_count,
-    }))
+    })
 }
 
-#[utoipa::path(
-    summary = "Delete a file",
-    request_body(content = DeleteFileRequest),
-    responses(
-        (status = 200, description = "Delete file successfully"),
-        (status = 400, description = "Bad request"),
-        (status = 501, description = "Not implemented"),
-    ),
-)]
-#[delete("/file")]
-pub async fn delete_file(
-    requst_json: web::Json<DeleteFileRequest>,
-) -> Result<HttpResponse, DeskError> {
-    let delete_file_request = requst_json.into_inner();
-
+pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), DeskError> {
     let file = PathBuf::from(delete_file_request.file_path.as_str());
     if !file.exists() {
-        // remove file from db
-
-        return Ok(
-            HttpResponse::Ok().json(RestResponse::succeed_with_message(format!(
-                "File {} is not exist",
-                file.display()
-            ))),
-        );
+        return Ok(());
     }
 
     // remove file
@@ -198,13 +166,13 @@ pub async fn delete_file(
                     "Failed to delete file: {}, code: {}",
                     delete_file_request.file_path, opr_code
                 );
-                return Ok(HttpResponse::Ok().json(RestResponse::failed(
+                return DeskError::custom_error(
                     WINDOWS_ERROR,
-                    format!(
+                    &format!(
                         "Failed to delete file: {}, code: {}",
                         delete_file_request.file_path, opr_code
                     ),
-                )));
+                );
             }
 
             info!(
@@ -218,59 +186,17 @@ pub async fn delete_file(
             // Linux specific code to move file to trash
 
             use desk_utils::error::DeskErrorCode;
-            return Ok(HttpResponse::Ok().json(RestResponse::failed(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Need implementation".to_string(),
-            )));
+            return DeskError::custom_error(DeskErrorCode::SYSTEM_ERROR, "Need implementation");
         }
 
         #[cfg(target_os = "macos")]
         {
-            // Linux specific code to move file to trash
+            // MacOS specific code to move file to trash
             use desk_utils::error::DeskErrorCode;
-            return Ok(HttpResponse::Ok().json(RestResponse::failed(
-                DeskErrorCode::SYSTEM_ERROR,
-                "Need implementation".to_string(),
-            )));
+            return DeskError::custom_error(DeskErrorCode::SYSTEM_ERROR, "Need implementation");
         }
     }
 
     info!("Delete file {} successfully", delete_file_request.file_path);
-    Ok(HttpResponse::Ok().finish())
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use actix_web::{App, test};
-    use desk_utils::logs::init_logs;
-
-    #[actix_web::test]
-    async fn it_works() {
-        let _ = init_logs(log::LevelFilter::Debug);
-        //env_logger::init_from_env(env_logger::Env::new().default_filter_or("DEBUG"));
-        let app = test::init_service(App::new().service(list_files)).await;
-        #[cfg(not(target_os = "windows"))]
-        let uri_path = "/file/list?path=/sys&page_no=1&page_count=200";
-        #[cfg(target_os = "windows")]
-        let uri_path = "/file/list?path=C:\\&page_no=1&page_count=200";
-
-        let req = test::TestRequest::get().uri(uri_path).to_request();
-        info!("req={:?}", req);
-        let resp = test::call_and_read_body(&app, req).await;
-        info!("resp={:?}", resp);
-
-        // blank path
-
-        #[cfg(not(target_os = "windows"))]
-        let uri_path = "/file/list?path=&page_no=1&page_count=200";
-        #[cfg(target_os = "windows")]
-        let uri_path = "/file/list?path=&page_no=1&page_count=200";
-
-        let req = test::TestRequest::get().uri(uri_path).to_request();
-        info!("req={:?}", req);
-        let resp = test::call_and_read_body(&app, req).await;
-        info!("resp={:?}", resp);
-    }
+    Ok(())
 }

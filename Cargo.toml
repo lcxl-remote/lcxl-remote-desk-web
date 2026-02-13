@@ -31,6 +31,7 @@ desk-server-user = { path = "server-user" }
 
 log = "0.4"
 env_logger = "0.11"
+chrono = { version = "0.4", features = ["serde"] }
 
 utoipa = { version = "5", features = ["actix_extras", "chrono"] }
 utoipa_repr = "0.1"

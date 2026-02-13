@@ -14,6 +14,11 @@ impl DeskErrorCode {
     pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
     pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
 
+    pub const INVALID_PARAMS: DeskErrorCode = DeskErrorCode(5);
+    pub const UNKNOWN_SIGNALING_TYPE: DeskErrorCode = DeskErrorCode(6);
+    pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
+    pub const TIMEOUT: DeskErrorCode = DeskErrorCode(10004);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const GENERATE_LOCAL_DESCRIPTION_FAILED: DeskErrorCode = DeskErrorCode(10001);
@@ -47,10 +52,10 @@ impl fmt::Display for CustomDeskError {
 }
 
 impl CustomDeskError {
-    pub fn new(error_code: DeskErrorCode, message: String) -> CustomDeskError {
+    pub fn new(error_code: DeskErrorCode, message: &str) -> CustomDeskError {
         CustomDeskError {
             error_code,
-            message,
+            message: message.to_string(),
         }
     }
 }

@@ -30,25 +30,36 @@ export default [
     routes: [
       {
         path: '/desk',
-        redirect: '/desk/filelist',
+        component: './DeskList',
       },
       {
-        name: 'file-list',
-        path: '/desk/filelist',
-        component: './FileList',
-      },
-      {
-        name: 'desk',
-        path: '/desk/desk',
-        component: './Desk',
-      },
-      {
-        name: 'terminal',
-        path: '/desk/terminal',
-        component: './DeskTerminal',
+        path: '/desk/:deskId',
+        component: './DeskDashboard',
+        routes: [
+          {
+            path: '/desk/:deskId',
+            redirect: '/desk/:deskId/filelist',
+          },
+          {
+            name: 'file-list',
+            path: '/desk/:deskId/filelist',
+            component: './FileList',
+          },
+          {
+            name: 'terminal',
+            path: '/desk/:deskId/terminal',
+            component: './DeskTerminal',
+          },
+          {
+            name: 'desktop',
+            path: '/desk/:deskId/desktop',
+            component: './Desk',
+          },
+        ]
       },
     ],
   },
+
   {
     path: '/settings',
     name: 'settings',
