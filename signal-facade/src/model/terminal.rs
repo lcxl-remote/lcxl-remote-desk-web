@@ -33,6 +33,13 @@ impl Default for TerminalSettings {
         }
     }
 }
+
+/// List terminal query path
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ListTerminalPath {
+    /// session id
+    pub session_id: String,
+}
 /// SignalingType::SendDataToTerminal
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TerminalInputData {

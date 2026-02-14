@@ -9,8 +9,6 @@ use desk_utils::{error::CustomDeskError, rest::RestResponse};
 
 pub use desk_utils::error::DeskErrorCode;
 
-pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(1000);
-
 /// Custom error type for the application.
 #[derive(Debug)]
 pub enum DeskError {
@@ -124,7 +122,7 @@ impl DeskError {
             let last_error = GetLastError();
             //TODO use FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM)
             return DeskError::custom_error(
-                WINDOWS_ERROR,
+                DeskErrorCode::WINDOWS_ERROR,
                 &format!("windows error code: {:?}", last_error),
             );
         }

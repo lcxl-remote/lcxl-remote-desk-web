@@ -48,7 +48,7 @@ pub async fn list_files(
     if let Some(ref response_state) = response.response_state {
         if response_state.error_code != 0 {
             return DeskSignalError::custom_error(
-                DeskErrorCode(response_state.error_code),
+                DeskErrorCode::new(response_state.error_code),
                 &response_state.message.clone().unwrap_or_default(),
             );
         }
@@ -103,7 +103,7 @@ pub async fn delete_file(
     if let Some(ref response_state) = response.response_state {
         if response_state.error_code != 0 {
             return DeskSignalError::custom_error(
-                DeskErrorCode(response_state.error_code),
+                DeskErrorCode::new(response_state.error_code),
                 &response_state.message.clone().unwrap_or_default(),
             );
         }

@@ -1355,7 +1355,6 @@ impl DeskSession {
                         let data = TerminalOutputData { content };
                         let model = SignalingModel::new_request(
                             SignalingType::ReplyFromTerminal,
-                            None,
                             Some(terminal_session_id.clone()),
                             &data,
                         );

@@ -116,12 +116,8 @@ impl ForwardSignalingSender for SessionState {
     where
         T: ?Sized + Serialize + Sync,
     {
-        let signaling_model = SignalingModel::new_request(
-            signaling_type,
-            None,
-            Some(self.model.session_id.clone()),
-            data,
-        )?;
+        let signaling_model =
+            SignalingModel::new_request(signaling_type, Some(self.model.session_id.clone()), data)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.session
             .write()
@@ -226,8 +222,13 @@ impl SignalingContext {
         })
     }
 
-    pub async fn send_request(&self, signaling_model: &SignalingModel) -> Result<(), DeskSignalError> {
-        self.session_state.forward_to_peer(&self.session_state.model.session_id, signaling_model).await?;
+    pub async fn send_request(
+        &self,
+        signaling_model: &SignalingModel,
+    ) -> Result<(), DeskSignalError> {
+        self.session_state
+            .forward_to_peer(&self.session_state.model.session_id, signaling_model)
+            .await?;
         Ok(())
     }
 

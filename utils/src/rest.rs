@@ -14,7 +14,7 @@ impl RestResponse<()> {
     pub fn succeed() -> Self {
         RestResponse {
             success: true,
-            code: DeskErrorCode::SUCCESS.0,
+            code: DeskErrorCode::SUCCESS.code(),
             message: None,
             data: None,
         }
@@ -23,7 +23,7 @@ impl RestResponse<()> {
     pub fn succeed_with_message(message: String) -> Self {
         RestResponse {
             success: true,
-            code: DeskErrorCode::SUCCESS.0,
+            code: DeskErrorCode::SUCCESS.code(),
             message: Some(message),
             data: None,
         }
@@ -32,7 +32,7 @@ impl RestResponse<()> {
     pub fn failed(error_code: DeskErrorCode, message: String) -> Self {
         RestResponse {
             success: false,
-            code: error_code.0,
+            code: error_code.code(),
             message: Some(message),
             data: None,
         }
@@ -43,7 +43,7 @@ impl<T: ToSchema> RestResponse<T> {
     pub fn succeed_with_data(data: T) -> Self {
         RestResponse {
             success: true,
-            code: DeskErrorCode::SUCCESS.0,
+            code: DeskErrorCode::SUCCESS.code(),
             message: None,
             data: Some(data),
         }
@@ -56,7 +56,7 @@ impl<T: ToSchema> RestResponse<T> {
     ) -> Self {
         RestResponse {
             success: false,
-            code: error_code.0,
+            code: error_code.code(),
             message,
             data,
         }

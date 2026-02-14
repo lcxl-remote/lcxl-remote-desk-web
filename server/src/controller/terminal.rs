@@ -1,17 +1,17 @@
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
-use actix_ws::{AggregatedMessage, AggregatedMessageStream};
 use desk_server_user::service::SessionExt;
-use desk_server_version::SERVER_API_VERSION;
-use desk_signal::service::{SignalingContext, handle_signaling};
+use desk_signal::{
+    model::SharedSessionMap,
+    service::SignalingContext,
+};
 use desk_signal_facade::model::{
-    os::OperationSystemEnum,
     signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
-    terminal::{StartTerminalSession, TerminalList},
+    terminal::{ListTerminalPath, StartTerminalSession, TerminalList},
     version::VersionInfo,
 };
-use futures::StreamExt;
-use log::{error, info, warn};
+use desk_utils::error::DeskErrorCode;
+use log::{error, info};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 use uuid::Uuid;
@@ -19,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     error::DeskError,
     model::settings::SharedSettings,
-    service::terminal::{fetch_terminal_list, handle_terminal},
+    service::terminal::handle_terminal,
 };
 
 #[utoipa::path(
@@ -29,10 +29,41 @@ use crate::{
 
     ),
 )]
-#[get("/terminals")]
-pub async fn list_terminal(settings: web::Data<SharedSettings>) -> Result<HttpResponse, DeskError> {
-    let result = fetch_terminal_list(settings).await?;
-    return Ok(HttpResponse::Ok().json(result));
+#[get("/terminals/{session_id}")]
+pub async fn list_terminal(
+    session_map: web::Data<SharedSessionMap>,
+    path: web::Path<ListTerminalPath>,
+) -> Result<HttpResponse, DeskError> {
+
+    let response = {
+        let session_map = session_map.read().await;
+        if let Some(session) = session_map.get(&path.session_id) {
+            session
+                .request_peer_with_callback(
+                    SignalingType::ListTerminal,
+                    &path.into_inner(),
+                    None,
+                )
+                .await?
+        } else {
+            return DeskError::custom_error(
+                DeskErrorCode::REMOTE_DESK_OFFLINE,
+                &format!("Session {} not found", path.session_id),
+            );
+        }
+    };
+
+    if let Some(ref response_state) = response.response_state {
+        if response_state.error_code != 0 {
+            return DeskError::custom_error(
+                DeskErrorCode::new(response_state.error_code),
+                &response_state.message.clone().unwrap_or_default(),
+            );
+        }
+    }
+
+    let terminal_list_response: TerminalList = response.get_data()?;
+    Ok(HttpResponse::Ok().json(terminal_list_response))
 }
 
 #[utoipa::path(
@@ -47,7 +78,7 @@ pub async fn open_terminal_session(
     req: HttpRequest,
     query_list: web::Query<StartTerminalSession>,
     settings: web::Data<SharedSettings>,
-    session_map: web::Data<desk_signal::model::SharedSessionMap>,
+    session_map: web::Data<SharedSessionMap>,
     session: Session,
     stream: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
@@ -115,7 +146,6 @@ pub async fn open_terminal_session(
             // send start terminal command
             let start_terminal_command = match SignalingModel::new_request(
                 SignalingType::StartTerminal,
-                None,
                 Some(desk_session_id),
                 &start_terminal_session,
             ) {

@@ -1,7 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DeskErrorCode(pub i32);
+pub struct DeskErrorCode(i32);
 
 impl DeskErrorCode {
     pub const SUCCESS: DeskErrorCode = DeskErrorCode(0);
@@ -19,12 +19,18 @@ impl DeskErrorCode {
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
     pub const TIMEOUT: DeskErrorCode = DeskErrorCode(10004);
 
+    pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(1000);
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const GENERATE_LOCAL_DESCRIPTION_FAILED: DeskErrorCode = DeskErrorCode(10001);
     pub const BLANK_SIGNALING_DATA: DeskErrorCode = DeskErrorCode(10002);
+
     pub fn new(code: i32) -> Self {
         DeskErrorCode(code)
+    }
+
+    pub fn code(&self) -> i32 {
+        self.0
     }
 }
 

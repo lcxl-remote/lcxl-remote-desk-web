@@ -88,13 +88,13 @@ pub struct SignalingResponseState {
 impl SignalingResponseState {
     pub fn success() -> Self {
         Self {
-            error_code: DeskErrorCode::SUCCESS.0,
+            error_code: DeskErrorCode::SUCCESS.code(),
             message: None,
         }
     }
 
     pub fn is_success(&self) -> bool {
-        self.error_code == DeskErrorCode::SUCCESS.0
+        self.error_code == DeskErrorCode::SUCCESS.code()
     }
 }
 /// Signaling model
@@ -136,7 +136,6 @@ impl SignalingModel {
     /// New request signaling model
     pub fn new_request<T>(
         signaling_type: SignalingType,
-        from_session_id: Option<String>,
         to_session_id: Option<String>,
         signaling_data: &T,
     ) -> Result<Self, DeskSignalFacadeError>
@@ -146,7 +145,7 @@ impl SignalingModel {
         Ok(Self::new(
             &Uuid::new_v4().to_string(),
             signaling_type,
-            from_session_id,
+            None,
             to_session_id,
             Some(serde_json::to_value(signaling_data)?),
             None,
@@ -154,8 +153,10 @@ impl SignalingModel {
     }
 
     /// New request signaling model with none data
-    pub fn new_none_data_request(signaling_type: SignalingType,
-    to_session_id: Option<String>,) -> Self {
+    pub fn new_none_data_request(
+        signaling_type: SignalingType,
+        to_session_id: Option<String>,
+    ) -> Self {
         Self::new(
             &Uuid::new_v4().to_string(),
             signaling_type,
@@ -248,7 +249,7 @@ impl SignalingModel {
         message: &str,
     ) -> Result<Self, DeskSignalFacadeError> {
         let error_data = SignalingResponseState {
-            error_code: error_code.0,
+            error_code: error_code.code(),
             message: Some(message.to_string()),
         };
         Ok(Self::new_none_data_response(

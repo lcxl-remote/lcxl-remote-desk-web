@@ -160,14 +160,14 @@ pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), D
             // invoke SHFileOperationW to move file to trash
             let opr_code = unsafe { SHFileOperationW(&mut fileop) };
             if opr_code != 0 {
-                use crate::error::WINDOWS_ERROR;
+                use desk_utils::error::DeskErrorCode;
 
                 error!(
                     "Failed to delete file: {}, code: {}",
                     delete_file_request.file_path, opr_code
                 );
                 return DeskError::custom_error(
-                    WINDOWS_ERROR,
+                    DeskErrorCode::WINDOWS_ERROR,
                     &format!(
                         "Failed to delete file: {}, code: {}",
                         delete_file_request.file_path, opr_code
