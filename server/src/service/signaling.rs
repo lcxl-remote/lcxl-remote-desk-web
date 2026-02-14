@@ -1372,17 +1372,20 @@ impl DeskSession {
                 }
             }
             // Send close?
-            let model = SignalingModel::new_none_data_request(
+            let model = SignalingModel::new_request::<()>(
                 SignalingType::CloseTerminal,
                 Some(terminal_session_id.clone()),
+                None,
             );
 
-            if let Ok(text) = serde_json::to_string(&model) {
-                let _ = session_sender.sender.send(
-                    crate::service::signaling::DeskSessionMessage::Text(
-                        bytestring::ByteString::from(text),
-                    ),
-                );
+            if let Ok(model) = model {
+                if let Ok(text) = serde_json::to_string(&model) {
+                    let _ = session_sender.sender.send(
+                        crate::service::signaling::DeskSessionMessage::Text(
+                            bytestring::ByteString::from(text),
+                        ),
+                    );
+                }
             }
         });
 

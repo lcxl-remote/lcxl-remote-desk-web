@@ -154,20 +154,6 @@ impl SignalingModel {
         ))
     }
 
-    /// New request signaling model with none data
-    pub fn new_none_data_request(
-        signaling_type: SignalingType,
-        to_session_id: Option<String>,
-    ) -> Self {
-        Self::new(
-            &Uuid::new_v4().to_string(),
-            signaling_type,
-            None,
-            to_session_id,
-            None,
-            None,
-        )
-    }
     pub fn new_response<T>(
         request_id: &str,
         signaling_type: SignalingType,
