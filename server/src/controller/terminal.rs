@@ -19,6 +19,7 @@ use crate::{
 
 #[utoipa::path(
     summary = "List terminal",
+    params(ListTerminalPath),
     responses(
         (status = 200, description = "return terminal command list", body = TerminalList),
 

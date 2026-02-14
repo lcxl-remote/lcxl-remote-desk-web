@@ -154,6 +154,7 @@ impl SignalingModel {
         ))
     }
 
+    /// New response signaling model
     pub fn new_response<T>(
         request_id: &str,
         signaling_type: SignalingType,
@@ -175,6 +176,7 @@ impl SignalingModel {
         ))
     }
 
+    /// New success response signaling model
     pub fn success_response<T>(
         request_id: &str,
         signaling_type: SignalingType,

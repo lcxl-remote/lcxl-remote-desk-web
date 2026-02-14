@@ -35,7 +35,7 @@ impl Default for TerminalSettings {
 }
 
 /// List terminal query path
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct ListTerminalPath {
     /// session id
     pub session_id: String,

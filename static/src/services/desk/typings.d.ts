@@ -251,6 +251,11 @@ declare namespace API {
     session_id?: any;
   };
 
+  type listTerminalParams = {
+    /** session id */
+    session_id: string;
+  };
+
   type LoginParams = {
     autoLogin: boolean;
     password: string;
