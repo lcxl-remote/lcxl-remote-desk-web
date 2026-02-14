@@ -16,14 +16,26 @@ impl DeskErrorCode {
 
     pub const INVALID_PARAMS: DeskErrorCode = DeskErrorCode(5);
     pub const UNKNOWN_SIGNALING_TYPE: DeskErrorCode = DeskErrorCode(6);
+
+    pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
+
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
     pub const TIMEOUT: DeskErrorCode = DeskErrorCode(10004);
 
-    pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(1000);
-    pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
-
     pub const GENERATE_LOCAL_DESCRIPTION_FAILED: DeskErrorCode = DeskErrorCode(10001);
     pub const BLANK_SIGNALING_DATA: DeskErrorCode = DeskErrorCode(10002);
+
+    // for windows platform
+    /// windows error code
+    pub const WINDOWS_ERROR: DeskErrorCode = DeskErrorCode(100001);
+
+    // for linux platform
+    /// linux error code
+    pub const LINUX_ERROR: DeskErrorCode = DeskErrorCode(200001);
+
+    // for mac platform
+    /// mac error code
+    pub const MAC_ERROR: DeskErrorCode = DeskErrorCode(300001);
 
     pub fn new(code: i32) -> Self {
         DeskErrorCode(code)
