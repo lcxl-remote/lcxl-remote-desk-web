@@ -1,10 +1,7 @@
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::service::SessionExt;
-use desk_signal::{
-    model::SharedSessionMap,
-    service::SignalingContext,
-};
+use desk_signal::{model::SharedSessionMap, service::SignalingContext};
 use desk_signal_facade::model::{
     signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
     terminal::{ListTerminalPath, StartTerminalSession, TerminalList},
@@ -17,9 +14,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use uuid::Uuid;
 
 use crate::{
-    error::DeskError,
-    model::settings::SharedSettings,
-    service::terminal::handle_terminal,
+    error::DeskError, model::settings::SharedSettings, service::terminal::handle_terminal,
 };
 
 #[utoipa::path(
@@ -34,16 +29,11 @@ pub async fn list_terminal(
     session_map: web::Data<SharedSessionMap>,
     path: web::Path<ListTerminalPath>,
 ) -> Result<HttpResponse, DeskError> {
-
     let response = {
         let session_map = session_map.read().await;
         if let Some(session) = session_map.get(&path.session_id) {
             session
-                .request_peer_with_callback(
-                    SignalingType::ListTerminal,
-                    &path.into_inner(),
-                    None,
-                )
+                .request_peer_with_callback::<()>(SignalingType::ListTerminal, None, None)
                 .await?
         } else {
             return DeskError::custom_error(
@@ -147,7 +137,7 @@ pub async fn open_terminal_session(
             let start_terminal_command = match SignalingModel::new_request(
                 SignalingType::StartTerminal,
                 Some(desk_session_id),
-                &start_terminal_session,
+                Some(&start_terminal_session),
             ) {
                 Ok(command) => command,
                 Err(e) => {

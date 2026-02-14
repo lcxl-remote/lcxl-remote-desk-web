@@ -1356,7 +1356,7 @@ impl DeskSession {
                         let model = SignalingModel::new_request(
                             SignalingType::ReplyFromTerminal,
                             Some(terminal_session_id.clone()),
-                            &data,
+                            Some(&data),
                         );
                         if let Ok(model) = model {
                             if let Ok(text) = serde_json::to_string(&model) {

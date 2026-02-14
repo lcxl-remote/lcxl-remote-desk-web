@@ -137,7 +137,7 @@ impl SignalingModel {
     pub fn new_request<T>(
         signaling_type: SignalingType,
         to_session_id: Option<String>,
-        signaling_data: &T,
+        signaling_data: Option<&T>,
     ) -> Result<Self, DeskSignalFacadeError>
     where
         T: ?Sized + Serialize,
@@ -147,7 +147,9 @@ impl SignalingModel {
             signaling_type,
             None,
             to_session_id,
-            Some(serde_json::to_value(signaling_data)?),
+            signaling_data
+                .map(|data| serde_json::to_value(data))
+                .transpose()?,
             None,
         ))
     }
@@ -411,7 +413,7 @@ pub trait ForwardSignalingSender {
     fn request_peer_with_callback<T>(
         &self,
         signaling_type: SignalingType,
-        data: &T,
+        data: Option<&T>,
         timeout: Option<Duration>,
     ) -> impl std::future::Future<Output = Result<SignalingModel, DeskSignalFacadeError>> + Send
     where

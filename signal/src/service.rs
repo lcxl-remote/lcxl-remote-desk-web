@@ -110,14 +110,17 @@ impl ForwardSignalingSender for SessionState {
     async fn request_peer_with_callback<T>(
         &self,
         signaling_type: SignalingType,
-        data: &T,
+        data: Option<&T>,
         timeout: Option<Duration>,
     ) -> Result<SignalingModel, DeskSignalFacadeError>
     where
         T: ?Sized + Serialize + Sync,
     {
-        let signaling_model =
-            SignalingModel::new_request(signaling_type, Some(self.model.session_id.clone()), data)?;
+        let signaling_model = SignalingModel::new_request(
+            signaling_type,
+            Some(self.model.session_id.clone()),
+            data,
+        )?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.session
             .write()

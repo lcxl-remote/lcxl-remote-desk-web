@@ -33,7 +33,7 @@ pub async fn list_files(
             session
                 .request_peer_with_callback(
                     SignalingType::ManagerFileList,
-                    &query_list.into_inner(),
+                    Some(&query_list.into_inner()),
                     None,
                 )
                 .await?
@@ -88,7 +88,7 @@ pub async fn delete_file(
             session
                 .request_peer_with_callback(
                     SignalingType::ManagerFileDelete,
-                    &delete_file_request,
+                    Some(&delete_file_request),
                     None,
                 )
                 .await?
