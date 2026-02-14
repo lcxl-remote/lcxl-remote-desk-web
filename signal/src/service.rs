@@ -116,11 +116,8 @@ impl ForwardSignalingSender for SessionState {
     where
         T: ?Sized + Serialize + Sync,
     {
-        let signaling_model = SignalingModel::new_request(
-            signaling_type,
-            Some(self.model.session_id.clone()),
-            data,
-        )?;
+        let signaling_model =
+            SignalingModel::new_request(signaling_type, Some(self.model.session_id.clone()), data)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.session
             .write()
@@ -161,7 +158,16 @@ impl ForwardSignalingSender for SessionState {
 
 impl Drop for SignalingContext {
     fn drop(&mut self) {
-        let handle = Handle::current();
+        let handle = match Handle::try_current() {
+            Ok(handle) => handle,
+            Err(e) => {
+                log::warn!(
+                    "Failed to get tokio handle in SignalingContext::drop: {}",
+                    e
+                );
+                return;
+            }
+        };
         let session_id = self.session_state.model.session_id.clone();
         let session_map = self.session_map.clone();
         let removed_value = futures::executor::block_on(async move {
