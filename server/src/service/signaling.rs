@@ -174,6 +174,101 @@ impl PeerSignalingSender for DeskSessionSender {
     }
 }
 
+async fn handle_incoming_ws_message(
+    msg: Option<Result<awc::ws::Frame, awc::error::WsProtocolError>>,
+    desk_session: &mut DeskSession,
+    tx: &mpsc::UnboundedSender<DeskSessionMessage>,
+) -> Result<bool, DeskError> {
+    match msg {
+        Some(Ok(frame)) => match frame {
+            awc::ws::Frame::Text(text) => {
+                let text_str = match std::str::from_utf8(&text) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Invalid UTF-8 text: {:?}", e);
+                        return Ok(false);
+                    }
+                };
+                let signaling_model = serde_json::from_str::<SignalingModel>(text_str)?;
+                if let Err(e) = desk_session.handle_message(&signaling_model).await {
+                    error!("Error handling message: {:?}", e);
+                    desk_session
+                        .session
+                        .send_error(
+                            &signaling_model.request_id,
+                            signaling_model.signaling_type.into(),
+                            signaling_model.from_session_id.clone(),
+                            DeskErrorCode::SYSTEM_ERROR,
+                            "Error handling message",
+                        )
+                        .await?;
+                }
+            }
+            awc::ws::Frame::Binary(bin) => {
+                if let Err(e) = desk_session.binary(bin).await {
+                    error!("Error handling binary: {:?}", e);
+                }
+            }
+            awc::ws::Frame::Ping(msg) => {
+                let _ = tx.send(DeskSessionMessage::Pong(msg));
+            }
+            awc::ws::Frame::Pong(_) => {}
+            awc::ws::Frame::Close(reason) => {
+                warn!("WS close frame received: {:?}", reason);
+                return Ok(true);
+            }
+            awc::ws::Frame::Continuation(_) => {}
+        },
+        Some(Err(e)) => {
+            error!("WS error: {:?}", e);
+            return Ok(true);
+        }
+        None => {
+            warn!("WS stream closed");
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn handle_outgoing_channel_message<S>(msg: Option<DeskSessionMessage>, sink: &mut S) -> bool
+where
+    S: SinkExt<awc::ws::Message, Error = awc::error::WsProtocolError> + Unpin,
+{
+    match msg {
+        Some(DeskSessionMessage::Text(text)) => {
+            if let Err(e) = sink.send(awc::ws::Message::Text(text)).await {
+                error!("Failed to send text: {:?}", e);
+                return true;
+            }
+        }
+        Some(DeskSessionMessage::Binary(bin)) => {
+            if let Err(e) = sink.send(awc::ws::Message::Binary(bin)).await {
+                error!("Failed to send binary: {:?}", e);
+                return true;
+            }
+        }
+        Some(DeskSessionMessage::Ping(msg)) => {
+            if let Err(e) = sink.send(awc::ws::Message::Ping(msg)).await {
+                error!("Failed to send ping: {:?}", e);
+                return true;
+            }
+        }
+        Some(DeskSessionMessage::Pong(msg)) => {
+            if let Err(e) = sink.send(awc::ws::Message::Pong(msg)).await {
+                error!("Failed to send pong: {:?}", e);
+                return true;
+            }
+        }
+        Some(DeskSessionMessage::Close) => {
+            let _ = sink.close().await;
+            return true;
+        }
+        None => return true,
+    }
+    false
+}
+
 pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(), DeskError> {
     let signaling_url = {
         let settings = settings.read().await;
@@ -330,88 +425,13 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         loop {
             tokio::select! {
                 msg = stream.next() => {
-                    match msg {
-                        Some(Ok(frame)) => {
-                            match frame {
-                                awc::ws::Frame::Text(text) => {
-                                    let text_str = match std::str::from_utf8(&text) {
-                                        Ok(s) => s,
-                                        Err(e) => {
-                                            error!("Invalid UTF-8 text: {:?}", e);
-                                            continue;
-                                        }
-                                    };
-                                    let signaling_model = serde_json::from_str::<SignalingModel>(text_str)?;
-                                    if let Err(e) = desk_session.handle_message(&signaling_model).await {
-                                        error!("Error handling message: {:?}", e);
-                                        desk_session.session
-                                            .send_error(
-                                                &signaling_model.request_id,
-                                                signaling_model.signaling_type.into(),
-                                                signaling_model.from_session_id.clone(),
-                                                DeskErrorCode::SYSTEM_ERROR,
-                                                "Error handling message",
-                                            )
-                                            .await?;
-                                    }
-                                }
-                                awc::ws::Frame::Binary(bin) => {
-                                    if let Err(e) = desk_session.binary(bin).await {
-                                        error!("Error handling binary: {:?}", e);
-                                    }
-                                }
-                                awc::ws::Frame::Ping(msg) => {
-                                    let _ = tx.send(DeskSessionMessage::Pong(msg));
-                                }
-                                awc::ws::Frame::Pong(_) => {}
-                                awc::ws::Frame::Close(reason) => {
-                                    warn!("WS close frame received: {:?}", reason);
-                                    break;
-                                }
-                                awc::ws::Frame::Continuation(_) => {}
-                            }
-                        }
-                        Some(Err(e)) => {
-                            error!("WS error: {:?}", e);
-                            break;
-                        }
-                        None => {
-                            warn!("WS stream closed");
-                            break;
-                        }
+                    if handle_incoming_ws_message(msg, &mut desk_session, &tx).await? {
+                        break;
                     }
                 }
                 msg = rx.recv() => {
-                    match msg {
-                        Some(DeskSessionMessage::Text(text)) => {
-                            if let Err(e) = sink.send(awc::ws::Message::Text(text)).await {
-                                error!("Failed to send text: {:?}", e);
-                                break;
-                            }
-                        }
-                        Some(DeskSessionMessage::Binary(bin)) => {
-                            if let Err(e) = sink.send(awc::ws::Message::Binary(bin)).await {
-                                error!("Failed to send binary: {:?}", e);
-                                break;
-                            }
-                        }
-                        Some(DeskSessionMessage::Ping(msg)) => {
-                            if let Err(e) = sink.send(awc::ws::Message::Ping(msg)).await {
-                                error!("Failed to send ping: {:?}", e);
-                                break;
-                            }
-                        }
-                        Some(DeskSessionMessage::Pong(msg)) => {
-                            if let Err(e) = sink.send(awc::ws::Message::Pong(msg)).await {
-                                error!("Failed to send pong: {:?}", e);
-                                break;
-                            }
-                        }
-                        Some(DeskSessionMessage::Close) => {
-                            let _ = sink.close().await;
-                            break;
-                        }
-                        None => break,
+                     if handle_outgoing_channel_message(msg, &mut sink).await {
+                        break;
                     }
                 }
             }
