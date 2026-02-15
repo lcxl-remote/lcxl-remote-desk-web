@@ -112,7 +112,7 @@ impl PeerSignalingSender for DeskSessionSender {
             signaling_type,
             None,
             to_session_id,
-            signaling_data,
+            Some(signaling_data),
         )?;
         let text = serde_json::to_string(&signaling_model)?;
         self.sender
@@ -174,6 +174,7 @@ impl PeerSignalingSender for DeskSessionSender {
     }
 }
 
+/// Handle incoming websocket message
 async fn handle_incoming_ws_message(
     msg: Option<Result<awc::ws::Frame, awc::error::WsProtocolError>>,
     desk_session: &mut DeskSession,
@@ -191,7 +192,15 @@ async fn handle_incoming_ws_message(
                 };
                 let signaling_model = serde_json::from_str::<SignalingModel>(text_str)?;
                 if let Err(e) = desk_session.handle_message(&signaling_model).await {
-                    error!("Error handling message: {:?}", e);
+                    log::warn!(
+                        "Error handling message, request_id: {}, signaling_type: {}, from_session_id: {:?}, to_session_id: {:?}, e: {:?}",
+                        signaling_model.request_id,
+                        signaling_model.signaling_type,
+                        signaling_model.from_session_id,
+                        signaling_model.to_session_id,
+                        e
+                    );
+
                     desk_session
                         .session
                         .send_error(
@@ -199,7 +208,7 @@ async fn handle_incoming_ws_message(
                             signaling_model.signaling_type.into(),
                             signaling_model.from_session_id.clone(),
                             DeskErrorCode::SYSTEM_ERROR,
-                            "Error handling message",
+                            &format!("Error handling message: {:?}", e),
                         )
                         .await?;
                 }
@@ -231,6 +240,7 @@ async fn handle_incoming_ws_message(
     Ok(false)
 }
 
+/// Handle outgoing websocket message
 async fn handle_outgoing_channel_message<S>(msg: Option<DeskSessionMessage>, sink: &mut S) -> bool
 where
     S: SinkExt<awc::ws::Message, Error = awc::error::WsProtocolError> + Unpin,
@@ -1132,26 +1142,6 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        if signaling_model.signaling_data == None {
-            log::warn!(
-                "No signaling data provided, request_id: {}, signaling_type: {}, from_session_id: {:?}, to_session_id: {:?}",
-                signaling_model.request_id,
-                signaling_model.signaling_type,
-                signaling_model.from_session_id,
-                signaling_model.to_session_id
-            );
-            self.session
-                .send_error(
-                    &signaling_model.request_id,
-                    signaling_model.signaling_type.into(),
-                    signaling_model.from_session_id.clone(),
-                    DeskErrorCode::BLANK_SIGNALING_DATA,
-                    "No signaling data provided",
-                )
-                .await?;
-            return Ok(());
-        }
-
         match signaling_model.signaling_type {
             SignalingType::RequestRemote => {
                 // Init PTC peer connection

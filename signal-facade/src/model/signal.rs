@@ -109,7 +109,7 @@ pub struct SignalingModel {
     /// To session id, if None, means to signal server
     pub to_session_id: Option<String>,
     /// Signaling data
-    pub signaling_data: Option<serde_json::Value>,
+    signaling_data: Option<serde_json::Value>,
     /// Signaling response state. Some means this is a response message.
     pub response_state: Option<SignalingResponseState>,
 }
@@ -160,7 +160,7 @@ impl SignalingModel {
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
-        signaling_data: &T,
+        signaling_data: Option<&T>,
         response_state: SignalingResponseState,
     ) -> Result<Self, DeskSignalFacadeError>
     where
@@ -171,7 +171,9 @@ impl SignalingModel {
             signaling_type,
             from_session_id,
             to_session_id,
-            Some(serde_json::to_value(signaling_data)?),
+            signaling_data
+                .map(|data| serde_json::to_value(data))
+                .transpose()?,
             Some(response_state),
         ))
     }
@@ -182,7 +184,7 @@ impl SignalingModel {
         signaling_type: SignalingType,
         from_session_id: Option<String>,
         to_session_id: Option<String>,
-        signaling_data: &T,
+        signaling_data: Option<&T>,
     ) -> Result<Self, DeskSignalFacadeError>
     where
         T: ?Sized + Serialize,
@@ -193,38 +195,6 @@ impl SignalingModel {
             from_session_id,
             to_session_id,
             signaling_data,
-            SignalingResponseState::success(),
-        )
-    }
-
-    pub fn new_none_data_response(
-        request_id: &str,
-        signaling_type: SignalingType,
-        from_session_id: Option<String>,
-        to_session_id: Option<String>,
-        response_state: SignalingResponseState,
-    ) -> Self {
-        Self::new(
-            request_id,
-            signaling_type,
-            from_session_id,
-            to_session_id,
-            None,
-            Some(response_state),
-        )
-    }
-
-    pub fn success_none_data_response(
-        request_id: &str,
-        signaling_type: SignalingType,
-        from_session_id: Option<String>,
-        to_session_id: Option<String>,
-    ) -> Self {
-        Self::new_none_data_response(
-            request_id,
-            signaling_type,
-            from_session_id,
-            to_session_id,
             SignalingResponseState::success(),
         )
     }
@@ -242,13 +212,14 @@ impl SignalingModel {
             error_code: error_code.code(),
             message: Some(message.to_string()),
         };
-        Ok(Self::new_none_data_response(
+        Ok(Self::new_response::<()>(
             request_id,
             signaling_type,
             from_session_id,
             to_session_id,
+            None,
             error_data,
-        ))
+        )?)
     }
 
     pub fn custom_desk_error(
@@ -304,10 +275,14 @@ impl SignalingModel {
             return Ok(data);
         } else {
             return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::INVALID_PARAMS,
+                DeskErrorCode::BLANK_SIGNALING_DATA,
                 &format!("Data can't be none, signal type: {:?}", self.signaling_type),
             );
         }
+    }
+
+    pub fn get_raw_data(&self) -> &Option<serde_json::Value> {
+        &self.signaling_data
     }
 
     pub fn check_and_get_from_session_id(&self) -> Result<String, DeskSignalFacadeError> {

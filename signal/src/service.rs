@@ -75,7 +75,7 @@ impl ForwardSignalingSender for SessionState {
             signaling_model.signaling_type,
             from_session_id,
             Some(self.model.session_id.clone()),
-            &signaling_model.signaling_data,
+            signaling_model.get_raw_data().as_ref(),
         )?;
         self.session
             .write()
@@ -95,7 +95,7 @@ impl ForwardSignalingSender for SessionState {
             signaling_model.signaling_type,
             Some(from_session_id.to_owned()),
             Some(self.model.session_id.clone()),
-            signaling_model.signaling_data.clone(),
+            signaling_model.get_raw_data().clone(),
             signaling_model.response_state.clone(),
         );
         self.session
@@ -302,7 +302,7 @@ impl SignalingContext {
                     SignalingType::SessionList,
                     None,
                     None,
-                    &session_list,
+                    Some(&session_list),
                 )?;
                 self.session_state.send_response(None, &response).await?;
             }
