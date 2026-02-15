@@ -53,7 +53,7 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
             log::warn!("No display environment variable found");
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "No display environment variable found".to_owned(),
+                "No display environment variable found",
             );
         }
         Ok(())
@@ -61,15 +61,15 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
 
     fn block_input(&self, _block: bool) -> Result<(), DeskError> {
         // FIXME
-        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
     }
 
     fn enable_private_screen(&self, _enable: bool) -> Result<(), DeskError> {
-        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
     }
 
     fn control_monitor_power(&self, _turn_off: bool) -> Result<(), DeskError> {
-        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "".to_owned())
+        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
     }
 
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError> {

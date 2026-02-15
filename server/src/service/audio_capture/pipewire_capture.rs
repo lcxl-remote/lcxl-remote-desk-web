@@ -381,7 +381,7 @@ impl AudioCapture for PipewireAudioCapture {
         if self.pipewire_loop.is_some() {
             return DeskError::custom_error(
                 DeskErrorCode::INVALID_STATE,
-                "PipewireAudioCapture already started".to_string(),
+                "PipewireAudioCapture already started",
             );
         }
         let (main_sender, main_receiver) = std::sync::mpsc::channel();
@@ -407,7 +407,7 @@ impl AudioCapture for PipewireAudioCapture {
                 log::error!("Expected format callback, got {:?}", pipewire_callback);
                 return DeskError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    "Failed to get audio format".to_string(),
+                    "Failed to get audio format",
                 );
             }
         }
@@ -428,7 +428,7 @@ impl AudioCapture for PipewireAudioCapture {
         if wave_format.bits_per_sample == u16::MAX {
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Unsupported audio format".to_string(),
+                "Unsupported audio format",
             );
         }
         wave_format.block_align = (wave_format.channels * wave_format.bits_per_sample / 8) as u16;

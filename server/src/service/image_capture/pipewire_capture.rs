@@ -594,7 +594,7 @@ impl ImageCapture for PipewireImageCapture {
         } else {
             return DeskError::custom_error(
                 DeskErrorCode::ACTION_NEED_RETRY,
-                "No image frame captured".to_string(),
+                "No image frame captured",
             );
         }
     }
@@ -629,7 +629,7 @@ impl PipewireImageCapture {
                 log::error!("Expected format callback, got {:?}", pipewire_callback);
                 return DeskError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    "Failed to get image format".to_string(),
+                    "Failed to get image format",
                 );
             }
         }
