@@ -347,6 +347,24 @@ impl SignalingContext {
                 }
                 self.forward_to_peer(&signaling_model).await?;
             }
+            SignalingType::ResizeTerminal => {
+                let to_session_id = signaling_model.check_and_get_to_session_id()?;
+                if signaling_model.is_request() {
+                    if !self
+                        .session_state
+                        .terminal_session_ids
+                        .read()
+                        .await
+                        .contains(&to_session_id)
+                    {
+                        return DeskSignalError::custom_error(
+                            DeskErrorCode::SYSTEM_ERROR,
+                            &format!("Session {} is not a terminal", to_session_id),
+                        );
+                    }
+                }
+                self.forward_to_peer(&signaling_model).await?;
+            }
 
             // Forwarding types
             SignalingType::RequestRemote
@@ -377,8 +395,12 @@ impl SignalingContext {
             }
             _ => {
                 log::error!(
-                    "Unsupported signaling type: {}",
-                    signaling_model.signaling_type
+                    "Unsupported signaling type: {}, request_id: {}, from_session_id: {:?}, to_session_id: {:?}, data: {:?}",
+                    signaling_model.signaling_type,
+                    signaling_model.request_id,
+                    signaling_model.from_session_id,
+                    signaling_model.to_session_id,
+                    signaling_model.get_raw_data(),
                 );
             }
         }
