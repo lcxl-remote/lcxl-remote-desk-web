@@ -1,16 +1,8 @@
 use actix_web::web;
 use desk_signal_facade::model::terminal::TerminalList;
 use regex::Regex;
-use serde::Deserialize;
 
 use crate::{error::DeskError, model::settings::SharedSettings};
-
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum TerminalMessage {
-    Data { content: String },
-    Resize { rows: u16, cols: u16 },
-}
 
 /// Inner function to fetch terminal list based on provided shell names and regex patterns
 pub async fn inner_fetch_terminal_list(
