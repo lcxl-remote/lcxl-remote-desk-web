@@ -1498,13 +1498,13 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        let from_session_id = signaling_model.from_session_id.clone();
         let terminals = fetch_terminal_list(self.settings.clone()).await?;
         self.session
             .send_response(
                 &signaling_model.request_id,
                 signaling_model.signaling_type.into(),
-                Some(from_session_id),
+                from_session_id,
                 &terminals,
             )
             .await?;
