@@ -19,7 +19,7 @@ import { ReloadOutlined } from "@ant-design/icons";
 const DeskTerminal: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
   const intl = useIntl();
-  const { deskId } = useParams<{ deskId: string }>();
+  const { deskId } = useParams<{ deskId: string }>() as { deskId: string };;
   const socketRef = useRef<WebSocket>();
 
   const [commandSelectOptions, setCommandSelectOptions] = useState<DefaultOptionType[] | undefined>();
@@ -166,8 +166,8 @@ const DeskTerminal: React.FC = () => {
   useEffect(() => {
     (async () => {
       const { location } = window;
-
-      const response = await listTerminal();
+      const params: API.listTerminalParams = { session_id: deskId };
+      const response = await listTerminal(params);
       let select_options = response.commands.map((command: string[]) => {
         let option: DefaultOptionType = {
           label: command[0],

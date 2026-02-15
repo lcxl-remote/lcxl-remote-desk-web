@@ -341,8 +341,18 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
                                             continue;
                                         }
                                     };
-                                    if let Err(e) = desk_session.handle_message(ByteString::from(text_str)).await {
+                                    let signaling_model = serde_json::from_str::<SignalingModel>(text_str)?;
+                                    if let Err(e) = desk_session.handle_message(&signaling_model).await {
                                         error!("Error handling message: {:?}", e);
+                                        desk_session.session
+                                            .send_error(
+                                                &signaling_model.request_id,
+                                                signaling_model.signaling_type.into(),
+                                                signaling_model.from_session_id.clone(),
+                                                DeskErrorCode::SYSTEM_ERROR,
+                                                "Error handling message",
+                                            )
+                                            .await?;
                                     }
                                 }
                                 awc::ws::Frame::Binary(bin) => {
@@ -1097,15 +1107,24 @@ impl DeskSession {
         Result::<(), DeskError>::Ok(())
     }
 
-    pub async fn handle_message(&mut self, text: ByteString) -> Result<(), DeskError> {
-        let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
-
+    /// Handle a signaling message
+    pub async fn handle_message(
+        &mut self,
+        signaling_model: &SignalingModel,
+    ) -> Result<(), DeskError> {
         if signaling_model.signaling_data == None {
+            log::warn!(
+                "No signaling data provided, request_id: {}, signaling_type: {}, from_session_id: {:?}, to_session_id: {:?}",
+                signaling_model.request_id,
+                signaling_model.signaling_type,
+                signaling_model.from_session_id,
+                signaling_model.to_session_id
+            );
             self.session
                 .send_error(
                     &signaling_model.request_id,
                     signaling_model.signaling_type.into(),
-                    signaling_model.from_session_id,
+                    signaling_model.from_session_id.clone(),
                     DeskErrorCode::BLANK_SIGNALING_DATA,
                     "No signaling data provided",
                 )
@@ -1148,26 +1167,25 @@ impl DeskSession {
                 }
             }
             SignalingType::ManagerFileList => {
-                self.handle_manager_file_list(&signaling_model).await?;
+                self.handle_manager_file_list(signaling_model).await?;
             }
             SignalingType::ManagerFileDelete => {
-                self.handle_manager_file_delete(&signaling_model).await?;
+                self.handle_manager_file_delete(signaling_model).await?;
             }
             SignalingType::StartTerminal => {
-                self.handle_manager_terminal_start(&signaling_model).await?;
+                self.handle_manager_terminal_start(signaling_model).await?;
             }
             SignalingType::SendDataToTerminal => {
-                self.handle_manager_terminal_data(&signaling_model).await?;
+                self.handle_manager_terminal_data(signaling_model).await?;
             }
             SignalingType::ResizeTerminal => {
-                self.handle_manager_terminal_resize(&signaling_model)
-                    .await?;
+                self.handle_manager_terminal_resize(signaling_model).await?;
             }
             SignalingType::CloseTerminal => {
-                self.handle_manager_terminal_close(&signaling_model).await?;
+                self.handle_manager_terminal_close(signaling_model).await?;
             }
             SignalingType::ListTerminal => {
-                self.handle_list_terminals(&signaling_model).await?;
+                self.handle_list_terminals(signaling_model).await?;
             }
             /*
             SignalingType::Version => {
@@ -1185,7 +1203,7 @@ impl DeskSession {
                     .send_error(
                         &signaling_model.request_id,
                         signaling_model.signaling_type.into(),
-                        signaling_model.from_session_id,
+                        signaling_model.from_session_id.clone(),
                         DeskErrorCode::UNKNOWN_SIGNALING_TYPE,
                         &format!(
                             "Failed to handle signaling type: {:?}",
