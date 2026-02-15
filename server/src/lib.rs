@@ -32,6 +32,7 @@ use desk_signal::{
     controller::{
         files::{delete_file, list_files},
         session::list_sessions,
+        terminal::{list_terminal, open_terminal_session},
     },
     model::SharedSessionMap,
 };
@@ -53,13 +54,7 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
-use crate::{
-    controller::{
-        info::query_sysinfo,
-        terminal::{list_terminal, open_terminal_session},
-    },
-    model::turn::TurnObserver,
-};
+use crate::{controller::info::query_sysinfo, model::turn::TurnObserver};
 
 rust_i18n::i18n!("locales");
 
