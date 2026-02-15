@@ -14,7 +14,11 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 
 import '@xterm/xterm/css/xterm.css'
 import { ReloadOutlined } from "@ant-design/icons";
+import { v4 } from "uuid";
 
+const SIGNALING_TYPE_CODE_REPLY = 10011
+const SIGNALING_TYPE_CODE_DATA = 10008
+const SIGNALING_TYPE_CODE_RESIZE = 10009;
 
 const DeskTerminal: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
@@ -87,11 +91,13 @@ const DeskTerminal: React.FC = () => {
     sock.onmessage = (event) => {
       if (typeof event.data === 'string') {
         try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'data') {
-            new_terminal.write(msg.content);
+          const msg = JSON.parse(event.data) as API.SignalingModel;
+          if (msg.signaling_type === SIGNALING_TYPE_CODE_REPLY) {
+            const reply_data: API.TerminalOutputData = msg.signaling_data as API.TerminalOutputData;
+            new_terminal.write(reply_data.content);
           }
         } catch (e) {
+          console.error('Error parsing JSON message:', e);
           new_terminal.write(event.data);
         }
       } else {
@@ -114,30 +120,47 @@ const DeskTerminal: React.FC = () => {
 
     new_terminal.onData((data) => {
       if (sock.readyState === WebSocket.OPEN) {
-        sock.send(JSON.stringify({ type: 'data', content: data }));
+        const output_data: API.TerminalOutputData = {
+          content: data,
+        };
+        const data_signal: API.SignalingModel = {
+          request_id: v4(),
+          signaling_type: SIGNALING_TYPE_CODE_DATA,
+          signaling_data: output_data,
+        };
+        sock.send(JSON.stringify(data_signal));
       }
     });
 
-    new_terminal.onResize((size) => {
+    const sendResize = (size: { cols: number, rows: number }) => {
       if (sock.readyState === WebSocket.OPEN) {
-        sock.send(JSON.stringify({ type: 'resize', rows: size.rows, cols: size.cols }));
+        const resize_data: API.TerminalResizeData = {
+          rows: size.rows,
+          cols: size.cols,
+        };
+        const resize_signal: API.SignalingModel = {
+          request_id: v4(),
+          signaling_type: SIGNALING_TYPE_CODE_RESIZE,
+          signaling_data: resize_data,
+        };
+        sock.send(JSON.stringify(resize_signal));
       }
-    });
+    };
+
+    new_terminal.onResize(sendResize);
 
     // Send initial size
     if (sock.readyState === WebSocket.OPEN) {
-      sock.send(JSON.stringify({ type: 'resize', rows: new_terminal.rows, cols: new_terminal.cols }));
+      sendResize({ rows: new_terminal.rows, cols: new_terminal.cols });
     } else {
       sock.addEventListener('open', () => {
-        sock.send(JSON.stringify({ type: 'resize', rows: new_terminal.rows, cols: new_terminal.cols }));
+        sendResize({ rows: new_terminal.rows, cols: new_terminal.cols });
       });
     }
   }
 
   const handleReloadTerminal = (e: React.MouseEvent<HTMLButtonElement>) => {
     reloadTerminal();
-
-
   }
 
   useEffect(() => {

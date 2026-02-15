@@ -4,6 +4,7 @@ import { FooterToolbar, PageContainer, ProForm, ProFormDateRangePicker, ProFormD
 import { useIntl, useModel, useParams } from "@umijs/max";
 import { Alert, Button, Divider, Flex, FloatButton, message, Modal, Popover, Slider, Tooltip, Space } from "antd";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { v4 as uuidv4 } from 'uuid';
 
 import styles from './index.less'; // 告诉 umi 编译这个 less
 import { CommentOutlined, CustomerServiceOutlined, FullscreenExitOutlined, FullscreenOutlined, PauseCircleOutlined, PlayCircleOutlined, SettingOutlined, SoundOutlined, StopOutlined, MutedOutlined, ThunderboltOutlined, WindowsOutlined } from "@ant-design/icons";
@@ -404,12 +405,13 @@ const Desk: React.FC = () => {
       return;
     }
     const targetId = toSessionId || targetSessionIdRef.current;
-    let sginaling = {
+    let signaling: API.SignalingModel = {
+      request_id: uuidv4(),
       signaling_type: signalingType,
       signaling_data: signalingData,
       to_session_id: targetId,
-    } as API.SignalingModel;
-    let signalingJson = JSON.stringify(sginaling);
+    };
+    let signalingJson = JSON.stringify(signaling);
 
     sock.send(signalingJson);
   }
@@ -496,10 +498,10 @@ const Desk: React.FC = () => {
         sendSignalingMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, requestRemoteData, deskId);
       } else {
         // Fetch session list on connect
-        let sginaling = {
+        let sginaling: API.SignalingModel = {
+          request_id: uuidv4(),
           signaling_type: SIGNALING_TYPE_CODE_FETCH_SESSIONS,
-          signaling_data: null,
-        } as API.SignalingModel;
+        };
         sock.send(JSON.stringify(sginaling));
       }
     };
@@ -522,11 +524,11 @@ const Desk: React.FC = () => {
       console.log("关闭websocket", sock);
       // Send close control if connected
       if (targetSessionIdRef.current) {
-        let sginaling = {
+        let sginaling: API.SignalingModel = {
+          request_id: uuidv4(),
           signaling_type: SIGNALING_TYPE_CODE_CLOSE_CONTROL,
-          signaling_data: null,
           to_session_id: targetSessionIdRef.current,
-        } as API.SignalingModel;
+        };
         if (sock.readyState === WebSocket.OPEN) {
           sock.send(JSON.stringify(sginaling));
         }
@@ -853,10 +855,10 @@ const Desk: React.FC = () => {
 
     // Re-fetch session list
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      let sginaling = {
+      let sginaling: API.SignalingModel = {
+        request_id: uuidv4(),
         signaling_type: SIGNALING_TYPE_CODE_FETCH_SESSIONS,
-        signaling_data: null,
-      } as API.SignalingModel;
+      };
       socketRef.current.send(JSON.stringify(sginaling));
     }
   }
