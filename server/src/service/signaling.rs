@@ -839,9 +839,15 @@ impl DeskSession {
 
     /// Shutdown the signaling context, including peer connection and capture tasks.
     pub async fn shutdown(self) -> Result<(), DeskError> {
+        // shutdown rtc peer connection
         for peer_connection in self.rtc_peer_connection_map.values() {
             let result = peer_connection.write().await.shutdown().await;
             info!("Signaling session ended, result={:?}", result);
+        }
+        // shutdown terminal
+        for mut terminal in self.terminal_map.into_values() {
+            let result = terminal.1.kill();
+            info!("Terminal session ended, result={:?}", result);
         }
         Ok(())
     }
@@ -1371,11 +1377,15 @@ impl DeskSession {
                     Err(_) => break,
                 }
             }
-            // Send close?
-            let model = SignalingModel::new_request::<()>(
-                SignalingType::CloseTerminal,
+            // Send close message
+            let data = TerminalOutputData {
+                content: "\r\n\x1b[33m[Process exited]\x1b[0m\r\n".to_string(),
+            };
+
+            let model = SignalingModel::new_request(
+                SignalingType::ReplyFromTerminal,
                 Some(terminal_session_id.clone()),
-                None,
+                Some(&data),
             );
 
             if let Ok(model) = model {
