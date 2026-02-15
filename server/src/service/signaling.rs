@@ -1487,7 +1487,8 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        // ManagerFileList is a request from the http api, so it may not have a from_session_id
+        let from_session_id = signaling_model.from_session_id.clone();
 
         let params = signaling_model.get_data::<FileListParams>()?;
         match crate::service::file_manager::list_files(params).await {
@@ -1496,7 +1497,7 @@ impl DeskSession {
                     .send_response(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileList,
-                        Some(from_session_id),
+                        from_session_id,
                         &response,
                     )
                     .await?;
@@ -1506,7 +1507,7 @@ impl DeskSession {
                     .send_error(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileList,
-                        Some(from_session_id),
+                        from_session_id,
                         e.to_error_code(),
                         &e.to_string(),
                     )

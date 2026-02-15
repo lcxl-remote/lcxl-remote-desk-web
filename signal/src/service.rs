@@ -360,6 +360,7 @@ impl SignalingContext {
             | SignalingType::CloseControl
             | SignalingType::ChangeDisplaySettings
             | SignalingType::UpdateDeskSettings
+            | SignalingType::ManagerFileList
             | SignalingType::ManagerSystemInfo
             | SignalingType::ManagerSystemStatue
             | SignalingType::ListTerminal
