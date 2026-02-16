@@ -1428,7 +1428,26 @@ impl DeskSession {
         });
 
         self.terminal_map
-            .insert(from_session_id, (pair.master, child));
+            .insert(from_session_id.clone(), (pair.master, child));
+
+        // send terminal started signal
+        let model = SignalingModel::success_response::<()>(
+            &signaling_model.request_id,
+            SignalingType::TerminalStarted,
+            None,
+            Some(from_session_id),
+            None,
+        );
+        if let Ok(model) = model {
+            if let Ok(text) = serde_json::to_string(&model) {
+                let _ =
+                    self.session
+                        .sender
+                        .send(crate::service::signaling::DeskSessionMessage::Text(
+                            bytestring::ByteString::from(text),
+                        ));
+            }
+        }
         Ok(())
     }
 

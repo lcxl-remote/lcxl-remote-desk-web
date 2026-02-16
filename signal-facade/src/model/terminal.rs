@@ -5,8 +5,6 @@ use utoipa::{IntoParams, ToSchema};
 pub struct StartTerminalSession {
     /// The command to start the terminal session. with the format of "path/to/executable,arg1,arg2"
     pub command: String,
-    /// Optional session ID to resume or identify a session.
-    pub session_id: Option<String>,
 }
 
 /// Terminal list
@@ -40,6 +38,14 @@ pub struct ListTerminalPath {
     /// session id
     pub session_id: String,
 }
+
+/// Start terminal query path
+#[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
+pub struct StartTerminalPath {
+    /// session id
+    pub session_id: String,
+}
+
 /// SignalingType::SendDataToTerminal
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TerminalInputData {

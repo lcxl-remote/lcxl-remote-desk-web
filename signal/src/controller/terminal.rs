@@ -4,7 +4,7 @@ use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::service::SessionExt;
 use desk_signal_facade::model::{
     signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
-    terminal::{ListTerminalPath, StartTerminalSession, TerminalList},
+    terminal::{ListTerminalPath, StartTerminalPath, StartTerminalSession, TerminalList},
     version::VersionInfo,
 };
 use desk_utils::error::DeskErrorCode;
@@ -54,14 +54,15 @@ pub async fn list_terminal(
 
 #[utoipa::path(
     summary = "Open terminal session",
-    params(StartTerminalSession),
+    params(StartTerminalSession, StartTerminalPath),
     responses(
         (status = 200, description = "return websocket stream"),
     ),
 )]
-#[get("/terminal")]
+#[get("/terminal/{session_id}")]
 pub async fn open_terminal_session(
     req: HttpRequest,
+    path: web::Path<StartTerminalPath>,
     query_list: web::Query<StartTerminalSession>,
     session_map: web::Data<SharedSessionMap>,
     session: Session,
@@ -80,15 +81,9 @@ pub async fn open_terminal_session(
         ));
     }
 
-    let desk_session_id = if let Some(desk_session_id) = &query_list.session_id {
-        desk_session_id.clone()
-    } else {
-        return Err(actix_web::error::ErrorBadRequest(
-            "No desk session id provided",
-        ));
-    };
+    let to_session_id = path.session_id.clone();
 
-    info!("Proxying terminal session to desk: {}", desk_session_id);
+    info!("Proxying terminal session to desk: {}", to_session_id);
     let (res, session, stream) = actix_ws::handle(&req, stream)?;
     let stream = stream
         .aggregate_continuations()
@@ -102,57 +97,50 @@ pub async fn open_terminal_session(
         .realip_remote_addr()
         .map(|s| s.to_string());
 
-    rt::spawn(async move {
-        // the web socket is from browser
-        let client_version_info = VersionInfo::new(
-            desk_server_version::SERVER_API_VERSION,
-            version::SIGNAL_BUILD_NUMBER,
-            version::SIGNAL_COMMIT_HASH.to_owned(),
-            RemoteDeskTypeEnum::Browser,
-            None,
-        );
+    // the web socket is from browser
+    let client_version_info = VersionInfo::new(
+        desk_server_version::SERVER_API_VERSION,
+        version::SIGNAL_BUILD_NUMBER,
+        version::SIGNAL_COMMIT_HASH.to_owned(),
+        RemoteDeskTypeEnum::Browser,
+        None,
+    );
 
-        log::info!("Handling terminal proxy signaling");
-        let random_uuid = Uuid::new_v4();
-        let session_id = String::from(random_uuid);
-        // Handle signaling logic here
-        let mut signaling_context = match SignalingContext::init(
-            session_id,
-            client_version_info,
-            session_map_clone,
-            session,
-            user,
-            ip,
-        )
+    let random_uuid = Uuid::new_v4();
+    let session_id = String::from(random_uuid);
+    // Handle signaling logic here
+    let mut signaling_context = SignalingContext::init(
+        session_id,
+        client_version_info,
+        session_map_clone,
+        session,
+        user,
+        ip,
+    )
+    .await?;
+
+    // send start terminal command
+    let start_terminal_command = SignalingModel::new_request(
+        SignalingType::StartTerminal,
+        Some(to_session_id.clone()),
+        Some(&start_terminal_session),
+    )?;
+    signaling_context
+        .forward_to_peer(&start_terminal_command)
+        .await?;
+    signaling_context
+        .session_state
+        .terminal_session_ids
+        .write()
         .await
-        {
-            Ok(context) => context,
-            Err(e) => {
-                error!("Error handling terminal proxy signaling: {:?}", e);
-                return;
-            }
-        };
+        .insert(signaling_context.session_state.model.session_id.clone());
 
-        // send start terminal command
-        let start_terminal_command = match SignalingModel::new_request(
-            SignalingType::StartTerminal,
-            Some(desk_session_id),
-            Some(&start_terminal_session),
-        ) {
-            Ok(command) => command,
-            Err(e) => {
-                error!("Error creating start terminal command: {:?}", e);
-                return;
-            }
-        };
-        if let Err(e) = signaling_context
-            .send_request(&start_terminal_command)
-            .await
-        {
-            error!("Error sending start terminal command: {:?}", e);
-            return;
-        }
-
+    log::info!(
+        "Sent start terminal command from {} to peer: {}",
+        signaling_context.session_state.model.session_id,
+        to_session_id
+    );
+    rt::spawn(async move {
         let result = signaling_context.do_handle_signaling(stream).await;
         if let Err(e) = result {
             error!("Error handling signaling: {:?}", e);

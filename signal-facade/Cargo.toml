@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 desk-utils = { workspace = true }
 
+actix-web = { workspace = true }
 actix-ws = { workspace = true }
 utoipa = { workspace = true }
 utoipa_repr = { workspace = true }

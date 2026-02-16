@@ -19,6 +19,7 @@ import { v4 } from "uuid";
 const SIGNALING_TYPE_CODE_REPLY = 10011
 const SIGNALING_TYPE_CODE_DATA = 10008
 const SIGNALING_TYPE_CODE_RESIZE = 10009;
+const SIGNALING_TYPE_CODE_TERMINAL_STARTED = 10013;
 
 const DeskTerminal: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
@@ -28,6 +29,7 @@ const DeskTerminal: React.FC = () => {
 
   const [commandSelectOptions, setCommandSelectOptions] = useState<DefaultOptionType[] | undefined>();
   const [selectedCommand, setSelectedCommand] = useState<string | undefined>();
+  const [terminalStarted, setTerminalStarted] = useState<boolean>(false);
   const fitAddonRef = useRef<FitAddon>();
 
 
@@ -58,10 +60,7 @@ const DeskTerminal: React.FC = () => {
     const command = encodeURIComponent(select_command.join(","));
     // create new websocket connection
     const proto = location.protocol.startsWith('https') ? 'wss' : 'ws';
-    let wsUri = `${proto}://${location.host}/api/desk/terminal?command=${command}`;
-    if (deskId) {
-      wsUri += `&session_id=${deskId}`;
-    }
+    let wsUri = `${proto}://${location.host}/api/desk/terminal/${deskId}?command=${command}`;
     const sock = new WebSocket(wsUri);
 
     sock.onopen = (event) => {
@@ -96,6 +95,10 @@ const DeskTerminal: React.FC = () => {
             const reply_data: API.TerminalOutputData = msg.signaling_data as API.TerminalOutputData;
             new_terminal.write(reply_data.content);
           }
+          if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
+            console.log("terminal started");
+            setTerminalStarted(true);
+          }
         } catch (e) {
           console.error('Error parsing JSON message:', e);
           new_terminal.write(event.data);
@@ -126,6 +129,7 @@ const DeskTerminal: React.FC = () => {
         const data_signal: API.SignalingModel = {
           request_id: v4(),
           signaling_type: SIGNALING_TYPE_CODE_DATA,
+          to_session_id: deskId,
           signaling_data: output_data,
         };
         sock.send(JSON.stringify(data_signal));
@@ -133,7 +137,7 @@ const DeskTerminal: React.FC = () => {
     });
 
     const sendResize = (size: { cols: number, rows: number }) => {
-      if (sock.readyState === WebSocket.OPEN) {
+      if (sock.readyState === WebSocket.OPEN && terminalStarted) {
         const resize_data: API.TerminalResizeData = {
           rows: size.rows,
           cols: size.cols,
@@ -141,6 +145,7 @@ const DeskTerminal: React.FC = () => {
         const resize_signal: API.SignalingModel = {
           request_id: v4(),
           signaling_type: SIGNALING_TYPE_CODE_RESIZE,
+          to_session_id: deskId,
           signaling_data: resize_data,
         };
         sock.send(JSON.stringify(resize_signal));
@@ -150,7 +155,7 @@ const DeskTerminal: React.FC = () => {
     new_terminal.onResize(sendResize);
 
     // Send initial size
-    if (sock.readyState === WebSocket.OPEN) {
+    if (sock.readyState === WebSocket.OPEN && terminalStarted) {
       sendResize({ rows: new_terminal.rows, cols: new_terminal.cols });
     } else {
       sock.addEventListener('open', () => {

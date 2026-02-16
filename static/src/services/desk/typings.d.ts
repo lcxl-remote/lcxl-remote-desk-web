@@ -333,8 +333,8 @@ declare namespace API {
   type openTerminalSessionParams = {
     /** The command to start the terminal session. with the format of "path/to/executable,arg1,arg2" */
     command: string;
-    /** Optional session ID to resume or identify a session. */
-    session_id?: any;
+    /** session id */
+    session_id: string;
   };
 
   type OperationSystemEnum = 'Windows' | 'Linux' | 'Mac' | 'Android' | 'Ios' | 'Web' | 'Other';

@@ -70,6 +70,8 @@ pub enum SignalingType {
     ReplyFromTerminal = 10011,
     /// List terminal
     ListTerminal = 10012,
+    /// Terminal started
+    TerminalStarted = 10013,
 
     Error = 10000000,
     Unknown = 10000001,
@@ -365,7 +367,7 @@ pub trait ForwardSignalingSender {
     ) -> impl std::future::Future<Output = Result<(), DeskSignalFacadeError>> + Send;
 
     /// Forward to peer session
-    fn forward_to_peer(
+    fn send_to_peer(
         &self,
         from_session_id: &str,
         signaling_model: &SignalingModel,

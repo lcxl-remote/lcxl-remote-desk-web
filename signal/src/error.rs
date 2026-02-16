@@ -1,7 +1,10 @@
 use std::fmt::{Display, Formatter};
 
 use actix_web::ResponseError;
-use desk_utils::{error::{CustomDeskError, DeskErrorCode}, rest::RestResponse};
+use desk_utils::{
+    error::{CustomDeskError, DeskErrorCode},
+    rest::RestResponse,
+};
 
 #[derive(Debug)]
 pub enum DeskSignalError {
@@ -17,10 +20,7 @@ pub enum DeskSignalError {
 }
 
 impl DeskSignalError {
-    pub fn custom_error<T>(
-        error_code: DeskErrorCode,
-        message: &str,
-    ) -> Result<T, DeskSignalError> {
+    pub fn custom_error<T>(error_code: DeskErrorCode, message: &str) -> Result<T, DeskSignalError> {
         Err(Self::new_custom_error(error_code, message))
     }
 
@@ -56,7 +56,6 @@ impl From<desk_signal_facade::error::DeskSignalFacadeError> for DeskSignalError 
         DeskSignalError::DeskSignalFacadeError(err)
     }
 }
-
 
 impl ResponseError for DeskSignalError {
     fn status_code(&self) -> actix_web::http::StatusCode {

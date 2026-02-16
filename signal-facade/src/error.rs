@@ -1,6 +1,10 @@
 use std::fmt::{Display, Formatter};
 
-use desk_utils::error::{CustomDeskError, DeskErrorCode};
+use actix_web::ResponseError;
+use desk_utils::{
+    error::{CustomDeskError, DeskErrorCode},
+    rest::RestResponse,
+};
 
 #[derive(Debug)]
 pub enum DeskSignalFacadeError {
@@ -41,5 +45,23 @@ impl From<serde_json::Error> for DeskSignalFacadeError {
 impl From<actix_ws::Closed> for DeskSignalFacadeError {
     fn from(code: actix_ws::Closed) -> Self {
         DeskSignalFacadeError::ActixWsClosed(code)
+    }
+}
+
+impl ResponseError for DeskSignalFacadeError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        actix_web::http::StatusCode::OK
+    }
+
+    fn error_response(&self) -> actix_web::HttpResponse<actix_web::body::BoxBody> {
+        let error_code = match self {
+            DeskSignalFacadeError::CustomError(error) => error.error_code,
+            _ => DeskErrorCode::SYSTEM_ERROR,
+        };
+        // write as json
+        let rest = RestResponse::failed(error_code, self.to_string());
+        actix_web::HttpResponse::Ok()
+            .status(self.status_code())
+            .json(rest)
     }
 }

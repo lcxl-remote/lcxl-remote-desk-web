@@ -1857,6 +1857,7 @@ dependencies = [
 name = "desk-signal-facade"
 version = "0.1.0"
 dependencies = [
+ "actix-web",
  "actix-ws",
  "chrono",
  "desk-utils",
