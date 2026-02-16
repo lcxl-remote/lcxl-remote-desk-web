@@ -1,7 +1,14 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
+
+pub struct RunningTerminal {
+    pub master: Box<dyn MasterPty + Send>,
+    pub child: Box<dyn Child + Send + Sync>,
+    pub writer: Box<dyn Write + Send>,
+}
 
 use actix_web::web;
 use awc::{Client, Connector};
@@ -502,8 +509,9 @@ pub struct DeskSession {
     pub rtc_peer_connection_map: HashMap<String, Arc<tokio::sync::RwLock<PeerConnection>>>,
     /// Tokio watch sender for WebRTConnectionState updates
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
-    /// Terminal map: from_session_id -> (MasterPty, Child)
-    pub terminal_map: HashMap<String, (Box<dyn MasterPty + Send>, Box<dyn Child + Send + Sync>)>,
+    /// Terminal map: from_session_id -> (MasterPty, Child, Writer)
+    /// Terminal map: from_session_id -> RunningTerminal
+    pub terminal_map: HashMap<String, RunningTerminal>,
 }
 
 impl DeskSession {
@@ -886,7 +894,7 @@ impl DeskSession {
         }
         // shutdown terminal
         for mut terminal in self.terminal_map.into_values() {
-            let result = terminal.1.kill();
+            let result = terminal.child.kill();
             info!("Terminal session ended, result={:?}", result);
         }
         Ok(())
@@ -1427,8 +1435,21 @@ impl DeskSession {
             }
         });
 
-        self.terminal_map
-            .insert(from_session_id.clone(), (pair.master, child));
+        let writer = pair.master.take_writer().map_err(|e| {
+            DeskError::new_custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                &format!("Failed to take writer: {}", e),
+            )
+        })?;
+
+        self.terminal_map.insert(
+            from_session_id.clone(),
+            RunningTerminal {
+                master: pair.master,
+                child,
+                writer,
+            },
+        );
 
         // send terminal started signal
         let model = SignalingModel::success_response::<()>(
@@ -1463,13 +1484,10 @@ impl DeskSession {
                 return Ok(()); // Ignore empty
             };
 
-        if let Some(pair) = self.terminal_map.get_mut(&from_session_id) {
-            if let Ok(mut writer) = pair.0.take_writer() {
-                if let Err(e) = writer.write_all(data_value.content.as_bytes()) {
-                    warn!("Failed to write to pty: {}", e);
-                }
-            } else {
-                warn!("Failed to get pty writer");
+        if let Some(terminal) = self.terminal_map.get_mut(&from_session_id) {
+            let writer = &mut terminal.writer;
+            if let Err(e) = writer.write_all(data_value.content.as_bytes()) {
+                warn!("Failed to write to pty: {}", e);
             }
         }
         Ok(())
@@ -1487,10 +1505,10 @@ impl DeskSession {
                 return Ok(());
             };
 
-        if let Some(pair) = self.terminal_map.get_mut(&from_session_id) {
+        if let Some(terminal) = self.terminal_map.get_mut(&from_session_id) {
             let rows = data_value.rows;
             let cols = data_value.cols;
-            if let Err(e) = pair.0.resize(PtySize {
+            if let Err(e) = terminal.master.resize(PtySize {
                 rows,
                 cols,
                 pixel_width: 0,
@@ -1507,8 +1525,8 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        if let Some(mut pair) = self.terminal_map.remove(&from_session_id) {
-            let _ = pair.1.kill();
+        if let Some(mut terminal) = self.terminal_map.remove(&from_session_id) {
+            let _ = terminal.child.kill();
         }
         Ok(())
     }
