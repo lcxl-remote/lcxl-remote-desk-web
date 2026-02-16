@@ -4,12 +4,6 @@ use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-pub struct RunningTerminal {
-    pub master: Box<dyn MasterPty + Send>,
-    pub child: Box<dyn Child + Send + Sync>,
-    pub writer: Box<dyn Write + Send>,
-}
-
 use actix_web::web;
 use awc::{Client, Connector};
 use bytes::Bytes;
@@ -88,6 +82,13 @@ pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
 pub static WEBRTC_WRITE_SAMPLE_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("webrtc_write_sample_histogram", "help", &["type"]).unwrap()
 });
+
+/// Running terminal model
+pub struct RunningTerminal {
+    pub master: Box<dyn MasterPty + Send>,
+    pub child: Box<dyn Child + Send + Sync>,
+    pub writer: Box<dyn Write + Send>,
+}
 
 #[derive(Debug)]
 pub enum DeskSessionMessage {
@@ -509,7 +510,6 @@ pub struct DeskSession {
     pub rtc_peer_connection_map: HashMap<String, Arc<tokio::sync::RwLock<PeerConnection>>>,
     /// Tokio watch sender for WebRTConnectionState updates
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
-    /// Terminal map: from_session_id -> (MasterPty, Child, Writer)
     /// Terminal map: from_session_id -> RunningTerminal
     pub terminal_map: HashMap<String, RunningTerminal>,
 }
@@ -1524,6 +1524,10 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
+        log::info!(
+            "handle_manager_terminal_close, signaling_model: {:?}",
+            signaling_model
+        );
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
         if let Some(mut terminal) = self.terminal_map.remove(&from_session_id) {
             let _ = terminal.child.kill();

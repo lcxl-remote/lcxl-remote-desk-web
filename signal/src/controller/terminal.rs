@@ -34,7 +34,7 @@ pub async fn list_terminal(
         } else {
             return DeskSignalError::custom_error(
                 DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Session {} not found", path.session_id),
+                &format!("Session {} is not found to list terminal", path.session_id),
             );
         }
     };
@@ -126,7 +126,7 @@ pub async fn open_terminal_session(
         Some(&start_terminal_session),
     )?;
     signaling_context
-        .forward_to_peer(&start_terminal_command)
+        .forward_to_peer(&start_terminal_command, false)
         .await?;
     signaling_context
         .session_state
@@ -143,11 +143,30 @@ pub async fn open_terminal_session(
     rt::spawn(async move {
         let result = signaling_context.do_handle_signaling(stream).await;
         if let Err(e) = result {
-            error!("Error handling signaling: {:?}", e);
+            error!("Error handling terminal signaling: {:?}", e);
         } else {
-            info!("Signaling handled successfully");
+            info!("Terminal signaling handle is finished");
         }
-        // TODO close terminal
+        // send close terminal command
+        let close_terminal_command = SignalingModel::new_request::<()>(
+            SignalingType::CloseTerminal,
+            Some(to_session_id.clone()),
+            None,
+        );
+
+        if let Ok(command) = close_terminal_command {
+            signaling_context
+                .session_state
+                .terminal_session_ids
+                .write()
+                .await
+                .remove(&signaling_context.session_state.model.session_id);
+            if let Err(e) = signaling_context.forward_to_peer(&command, false).await {
+                error!("Failed to send close terminal command: {:?}", e);
+            } else {
+                info!("Sent close terminal command to peer: {}", to_session_id);
+            }
+        }
     });
 
     return Ok(res);

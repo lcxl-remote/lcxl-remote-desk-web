@@ -29,11 +29,11 @@ const DeskTerminal: React.FC = () => {
 
   const [commandSelectOptions, setCommandSelectOptions] = useState<DefaultOptionType[] | undefined>();
   const [selectedCommand, setSelectedCommand] = useState<string | undefined>();
-  const [terminalStarted, setTerminalStarted] = useState<boolean>(false);
+  const terminalStarted = useRef<boolean>(false);
   const fitAddonRef = useRef<FitAddon>();
 
 
-  const [terminal, setTerminal] = useState<Terminal>();
+  const terminal = useRef<Terminal>();
 
   const closeTerminal = () => {
     if (socketRef.current) {
@@ -41,12 +41,13 @@ const DeskTerminal: React.FC = () => {
       socketRef.current.close();
       socketRef.current = undefined;
     }
-    if (terminal) {
+    if (terminal.current) {
       console.log("关闭xterm");
       message.info(intl.formatMessage({ id: 'pages.deskTerminal.closeXterm' }));
-      terminal?.dispose();
-      setTerminal(undefined);
+      terminal.current?.dispose();
+      terminal.current = undefined;
     }
+    terminalStarted.current = false;
   }
 
   const reloadTerminal = () => {
@@ -84,7 +85,7 @@ const DeskTerminal: React.FC = () => {
     new_terminal.loadAddon(new WebLinksAddon());
 
     new_terminal.writeln(intl.formatMessage({ id: 'pages.deskTerminal.welcomeMessage' }));
-    setTerminal(new_terminal);
+    terminal.current = new_terminal;
 
     // Custom WebSocket handling for JSON protocol
     sock.onmessage = (event) => {
@@ -97,7 +98,7 @@ const DeskTerminal: React.FC = () => {
           }
           if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
             console.log("terminal started");
-            setTerminalStarted(true);
+            terminalStarted.current = true;
           }
         } catch (e) {
           console.error('Error parsing JSON message:', e);
@@ -137,7 +138,7 @@ const DeskTerminal: React.FC = () => {
     });
 
     const sendResize = (size: { cols: number, rows: number }) => {
-      if (sock.readyState === WebSocket.OPEN && terminalStarted) {
+      if (sock.readyState === WebSocket.OPEN && terminalStarted.current) {
         const resize_data: API.TerminalResizeData = {
           rows: size.rows,
           cols: size.cols,
@@ -155,7 +156,7 @@ const DeskTerminal: React.FC = () => {
     new_terminal.onResize(sendResize);
 
     // Send initial size
-    if (sock.readyState === WebSocket.OPEN && terminalStarted) {
+    if (sock.readyState === WebSocket.OPEN && terminalStarted.current) {
       sendResize({ rows: new_terminal.rows, cols: new_terminal.cols });
     } else {
       sock.addEventListener('open', () => {

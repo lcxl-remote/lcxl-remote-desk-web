@@ -21,6 +21,7 @@ impl DeskErrorCode {
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
     pub const TIMEOUT: DeskErrorCode = DeskErrorCode(10004);
+    pub const SESSION_NOT_FOUND: DeskErrorCode = DeskErrorCode(10005);
 
     pub const GENERATE_LOCAL_DESCRIPTION_FAILED: DeskErrorCode = DeskErrorCode(10001);
     pub const BLANK_SIGNALING_DATA: DeskErrorCode = DeskErrorCode(10002);

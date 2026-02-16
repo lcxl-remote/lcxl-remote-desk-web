@@ -235,6 +235,7 @@ impl SignalingContext {
     pub async fn forward_to_peer(
         &self,
         signaling_model: &SignalingModel,
+        ignore_session_not_found: bool,
     ) -> Result<(), DeskSignalError> {
         if let Some(tx) = self
             .session_state
@@ -256,9 +257,20 @@ impl SignalingContext {
         let to_session_state = if let Some(session_state) = session_map.get(&to_session_id) {
             session_state
         } else {
+            if ignore_session_not_found {
+                log::warn!(
+                    "Session {} is not found to forward signaling, ignore it: {:?}",
+                    to_session_id,
+                    signaling_model
+                );
+                return Ok(());
+            }
             return DeskSignalError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                &format!("Session {} not found", to_session_id),
+                DeskErrorCode::SESSION_NOT_FOUND,
+                &format!(
+                    "Session {} is not found to forward signaling: {:?}",
+                    to_session_id, signaling_model
+                ),
             );
         };
         to_session_state
@@ -297,33 +309,33 @@ impl SignalingContext {
                 self.session_state.send_response(None, &response).await?;
             }
             /*
-            * This not send by client, it is send by signal server, so it is not need to handle
-            SignalingType::StartTerminal => {
-                let from_session_id = &self.session_state.model.session_id;
-                self.forward_to_peer(&signaling_model).await?;
-                if signaling_model.is_request() {
-                    log::info!("Adding terminal session id: {}", from_session_id);
-                    self.session_state
-                        .terminal_session_ids
-                        .write()
-                        .await
-                        .insert(from_session_id.clone());
-                }
-            }
-             */
-            SignalingType::CloseTerminal => {
-                let from_session_id = &self.session_state.model.session_id;
-                if signaling_model.is_request() {
-                    log::info!("Removing terminal session id: {}", from_session_id);
-                    self.session_state
-                        .terminal_session_ids
-                        .write()
-                        .await
-                        .remove(from_session_id);
-                }
-                self.forward_to_peer(&signaling_model).await?;
-            }
+                      * This not send by client, it is send by signal server, so it is not need to handle
+                      SignalingType::StartTerminal => {
+                          let from_session_id = &self.session_state.model.session_id;
+                          self.forward_to_peer(&signaling_model).await?;
+                          if signaling_model.is_request() {
+                              log::info!("Adding terminal session id: {}", from_session_id);
+                              self.session_state
+                                  .terminal_session_ids
+                                  .write()
+                                  .await
+                                  .insert(from_session_id.clone());
+                          }
+                      }
 
+                      SignalingType::CloseTerminal => {
+                          let from_session_id = &self.session_state.model.session_id;
+                          if signaling_model.is_request() {
+                              log::info!("Removing terminal session id: {}", from_session_id);
+                              self.session_state
+                                  .terminal_session_ids
+                                  .write()
+                                  .await
+                                  .remove(from_session_id);
+                          }
+                          self.forward_to_peer(&signaling_model, true).await?;
+                      }
+            */
             SignalingType::SendDataToTerminal => {
                 let from_session_id = &self.session_state.model.session_id;
                 if signaling_model.is_request() {
@@ -343,7 +355,7 @@ impl SignalingContext {
                         );
                     }
                 }
-                self.forward_to_peer(&signaling_model).await?;
+                self.forward_to_peer(&signaling_model, false).await?;
             }
             SignalingType::ResizeTerminal => {
                 let from_session_id = &self.session_state.model.session_id;
@@ -364,7 +376,11 @@ impl SignalingContext {
                         );
                     }
                 }
-                self.forward_to_peer(&signaling_model).await?;
+                self.forward_to_peer(&signaling_model, false).await?;
+            }
+
+            SignalingType::ReplyFromTerminal => {
+                self.forward_to_peer(&signaling_model, true).await?;
             }
 
             // Forwarding types
@@ -383,10 +399,9 @@ impl SignalingContext {
             | SignalingType::ManagerSystemInfo
             | SignalingType::ManagerSystemStatue
             | SignalingType::ListTerminal
-            | SignalingType::TerminalStarted
-            | SignalingType::ReplyFromTerminal => {
+            | SignalingType::TerminalStarted => {
                 // Generic forwarding
-                self.forward_to_peer(&signaling_model).await?;
+                self.forward_to_peer(&signaling_model, false).await?;
             }
 
             SignalingType::Error => {

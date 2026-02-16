@@ -15,8 +15,8 @@ pub struct SessionState {
     pub model: SessionModel,
     /// actix web socket session
     pub session: Arc<RwLock<Session>>,
-    /// terminal session id(to_session_id) set, when session is closed, terminal should send close message to close related terminal processes
-    pub terminal_session_ids: Arc<RwLock<HashSet<String /*to_session_id */>>>,
+    /// terminal session id(from_session_id) set, when from_session(browser) is closed, signal server should send close message to desk server to close related terminal processes
+    pub terminal_session_ids: Arc<RwLock<HashSet<String /*from_session_id */>>>,
     /// request_id -> oneshot::Sender<SignalingModel>
     pub request_callback_map:
         Arc<RwLock<HashMap<String /* request_id */, oneshot::Sender<SignalingModel>>>>,

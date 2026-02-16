@@ -63,6 +63,7 @@ impl ResponseError for DeskSignalError {
     }
 
     fn error_response(&self) -> actix_web::HttpResponse<actix_web::body::BoxBody> {
+        log::error!("DeskSignalError in error_response: {}", self);
         let error_code = match self {
             DeskSignalError::CustomError(error) => error.error_code,
             _ => DeskErrorCode::SYSTEM_ERROR,

@@ -1,4 +1,3 @@
-
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::service::SessionExt;
@@ -48,19 +47,11 @@ pub async fn open_signaling_handle(
     // start task but don't wait for it
     rt::spawn(async move {
         // receive messages from websocket
-        let result = handle_signaling(
-            version_info,
-            stream,
-            session_map,
-            session,
-            user,
-            ip,
-        )
-        .await;
+        let result = handle_signaling(version_info, stream, session_map, session, user, ip).await;
         if let Err(e) = result {
             error!("Error handling signaling: {:?}", e);
         } else {
-            info!("Signaling handled successfully");
+            info!("Signaling handle is finished");
         }
     });
 
