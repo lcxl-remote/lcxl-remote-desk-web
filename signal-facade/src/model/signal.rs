@@ -72,6 +72,8 @@ pub enum SignalingType {
     ListTerminal = 10012,
     /// Terminal started
     TerminalStarted = 10013,
+    /// Terminal closed
+    TerminalClosed = 10014,
 
     Error = 10000000,
     Unknown = 10000001,

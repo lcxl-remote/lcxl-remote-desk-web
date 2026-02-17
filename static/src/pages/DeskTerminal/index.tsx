@@ -20,6 +20,7 @@ const SIGNALING_TYPE_CODE_REPLY = 10011
 const SIGNALING_TYPE_CODE_DATA = 10008
 const SIGNALING_TYPE_CODE_RESIZE = 10009;
 const SIGNALING_TYPE_CODE_TERMINAL_STARTED = 10013;
+const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014;
 
 const DeskTerminal: React.FC = () => {
   const { initialState, setInitialState } = useModel('@@initialState');
@@ -99,6 +100,11 @@ const DeskTerminal: React.FC = () => {
           if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
             console.log("terminal started");
             terminalStarted.current = true;
+          }
+          if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_CLOSED) {
+            console.log("terminal closed");
+            closeTerminal();
+            message.info("Terminal connection closed");
           }
         } catch (e) {
           console.error('Error parsing JSON message:', e);

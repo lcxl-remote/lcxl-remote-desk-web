@@ -86,7 +86,7 @@ pub static WEBRTC_WRITE_SAMPLE_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new
 /// Running terminal model
 pub struct RunningTerminal {
     pub master: Box<dyn MasterPty + Send>,
-    pub child: Box<dyn Child + Send + Sync>,
+    pub child: Arc<std::sync::Mutex<Box<dyn Child + Send + Sync>>>,
     pub writer: Box<dyn Write + Send>,
 }
 
@@ -893,9 +893,12 @@ impl DeskSession {
             info!("Signaling session ended, result={:?}", result);
         }
         // shutdown terminal
-        for mut terminal in self.terminal_map.into_values() {
-            let result = terminal.child.kill();
-            info!("Terminal session ended, result={:?}", result);
+        // shutdown terminal
+        for terminal in self.terminal_map.into_values() {
+            if let Ok(mut child) = terminal.child.lock() {
+                let result = child.kill();
+                info!("Terminal session ended, result={:?}", result);
+            }
         }
         Ok(())
     }
@@ -1376,6 +1379,10 @@ impl DeskSession {
             DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &e.to_string())
         })?;
 
+        // Wrap child in Arc<Mutex> for shared access
+        let child = Arc::new(std::sync::Mutex::new(child));
+        let child_clone = child.clone();
+
         // Spawn reader
         let mut reader = pair.master.try_clone_reader().map_err(|e| {
             DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &e.to_string())
@@ -1384,6 +1391,57 @@ impl DeskSession {
         let terminal_session_id = from_session_id.clone();
         // We need to know who to send TO. The controller put desk_session_id as `to_session_id`.
         // When we reply, `to_session_id` should be `terminal_session_id` (so Signal server can route it).
+
+        // Monitor task for process exit (using tokio::spawn for coroutine)
+        let monitor_sender = self.session.clone();
+        let monitor_session_id = from_session_id.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let exited = {
+                    if let Ok(mut child) = child_clone.lock() {
+                        match child.try_wait() {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
+                            Err(e) => {
+                                log::warn!("Failed to wait child: {}", e);
+                                true // Assume exited on error
+                            }
+                        }
+                    } else {
+                        true // Poisioned mutex
+                    }
+                };
+
+                if exited {
+                    log::info!(
+                        "Process exited, sending TerminalClosed to {}",
+                        monitor_session_id
+                    );
+                    let model = SignalingModel::new_request::<()>(
+                        SignalingType::TerminalClosed,
+                        Some(monitor_session_id.clone()),
+                        None,
+                    );
+                    if let Ok(model) = model {
+                        if let Ok(text) = serde_json::to_string(&model) {
+                            if let Err(e) = monitor_sender.sender.send(
+                                crate::service::signaling::DeskSessionMessage::Text(
+                                    bytestring::ByteString::from(text),
+                                ),
+                            ) {
+                                log::warn!(
+                                    "Failed to send TerminalClosed to {}: {}",
+                                    monitor_session_id,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        });
 
         std::thread::spawn(move || {
             let mut buf = [0u8; 1024];
@@ -1410,7 +1468,14 @@ impl DeskSession {
                             }
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to read from terminal, session id: {}, error: {}",
+                            terminal_session_id,
+                            e
+                        );
+                        break;
+                    }
                 }
             }
             // Send close message
@@ -1530,7 +1595,9 @@ impl DeskSession {
         );
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
         if let Some(mut terminal) = self.terminal_map.remove(&from_session_id) {
-            let _ = terminal.child.kill();
+            if let Ok(mut child) = terminal.child.lock() {
+                let _ = child.kill();
+            }
         }
         Ok(())
     }

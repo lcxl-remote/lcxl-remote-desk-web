@@ -379,7 +379,7 @@ impl SignalingContext {
                 self.forward_to_peer(&signaling_model, false).await?;
             }
 
-            SignalingType::ReplyFromTerminal => {
+            SignalingType::ReplyFromTerminal | SignalingType::TerminalClosed => {
                 self.forward_to_peer(&signaling_model, true).await?;
             }
 
