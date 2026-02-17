@@ -10,7 +10,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libpipewire-0.3-dev pkg-config libclang-dev libasound2-dev libssl-dev libvpx-dev cmake
+          cat > ~/.cargo/config.toml << EOF
+          [source.crates-io]
+          replace-with = 'aliyun'
 
+          [source.ustc]
+          registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+          [source.aliyun]
+          registry = "sparse+https://mirrors.aliyun.com/crates.io-index/"
+          EOF
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
