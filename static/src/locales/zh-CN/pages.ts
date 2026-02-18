@@ -107,6 +107,8 @@ export default {
   'pages.system.settings.sqlitePathRequiredMessage': 'SQLite 文件路径必填！',
   'pages.system.settings.ipv4AddressRequiredMessage': 'IPv4 地址必填！',
   'pages.system.settings.logLevelRequiredMessage': '日志级别必填！',
+  'pages.system.settings.telemetry_consent': '遥测同意',
+  'pages.system.settings.telemetry_consent.tooltip': '发送匿名使用数据以帮助改进我们的产品。',
   'pages.system.settings.alert.message': '注意',
   'pages.system.settings.alert.description': '使用环境变量（DFR_开头）的设置项优先级最高，且无法通过此页面进行修改。',
   'pages.account.settings.originUsername': '原用户名：',

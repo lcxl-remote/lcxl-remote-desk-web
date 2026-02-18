@@ -109,6 +109,8 @@ export default {
   'pages.system.settings.sqlitePathRequiredMessage': 'Sqlite file path is required!',
   'pages.system.settings.ipv4AddressRequiredMessage': 'IPv4 address is required!',
   'pages.system.settings.logLevelRequiredMessage': 'Log level is required!',
+  'pages.system.settings.telemetry_consent': 'Telemetry Consent',
+  'pages.system.settings.telemetry_consent.tooltip': 'Help improve our product by sending anonymous usage data.',
   'pages.system.settings.alert.message': 'Warning',
   'pages.system.settings.alert.description': 'Use environment variables (DFR_ prefixed) for settings with the highest priority, and they cannot be modified through this page.',
   'pages.account.settings.originUsername': 'Origin username:',

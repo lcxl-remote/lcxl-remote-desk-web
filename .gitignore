@@ -30,3 +30,4 @@ target/
 conf/
 sample/
 node_modules/
+logs/

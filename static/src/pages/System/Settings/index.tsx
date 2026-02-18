@@ -53,6 +53,24 @@ const Settings: React.FC = () => {
                         id: "pages.system.settings.enableIpv6",
                     })}
                 />
+                <ProFormSwitch
+                    name="traceback"
+                    label={intl.formatMessage({
+                        id: 'pages.system.settings.traceback',
+                        defaultMessage: 'Enable Traceback',
+                    })}
+                />
+                <ProFormSwitch
+                    name="telemetry_consent"
+                    label={intl.formatMessage({
+                        id: 'pages.system.settings.telemetry_consent',
+                        defaultMessage: 'Telemetry Consent',
+                    })}
+                    tooltip={intl.formatMessage({
+                        id: 'pages.system.settings.telemetry_consent.tooltip',
+                        defaultMessage: 'Help improve our product by sending anonymous usage data.',
+                    })}
+                />
                 <ProFormText
                     name="listen_addr_ipv4"
                     label={intl.formatMessage({

@@ -2,4 +2,10 @@ export default {
   'component.tagSelect.expand': 'Expand',
   'component.tagSelect.collapse': 'Collapse',
   'component.tagSelect.all': 'All',
+  'component.welcomeModal.title': 'Welcome to Lcxl Remote Desk',
+  'component.welcomeModal.pbutton': 'Get Started',
+  'component.welcomeModal.welcome': 'Welcome!',
+  'component.welcomeModal.description': 'Thank you for using Lcxl Remote Desk. We are constantly improving our product.',
+  'component.welcomeModal.consent': 'Help improve our product by sending anonymous usage data.',
+  'component.welcomeModal.privacy': 'We only collect system information (OS, CPU, RAM) and application logs. No personal data is collected.',
 };

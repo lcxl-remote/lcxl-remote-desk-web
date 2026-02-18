@@ -398,6 +398,7 @@ declare namespace API {
     code: number;
     /** System settings for the application. This struct is used to load and save settings from a configuration file. */
     data?: {
+      client_id?: any;
       enable_ipv6?: boolean;
       listen_addr_ipv4?: string;
       listen_addr_ipv6?: string;
@@ -406,8 +407,16 @@ declare namespace API {
       open_browser_on_startup?: boolean;
       port?: number;
       signaling_url?: any;
+      telemetry_consent?: any;
       traceback?: boolean;
     };
+    message?: any;
+    success: boolean;
+  };
+
+  type RestResponseTelemetryStatus = {
+    code: number;
+    data?: { consented?: any; needed: boolean };
     message?: any;
     success: boolean;
   };
@@ -493,6 +502,8 @@ see alse: desk_utils::DeskErrorCode */
   };
 
   type SystemSettings = {
+    /** Client ID for telemetry */
+    client_id?: any;
     /** Enable IPv6 support */
     enable_ipv6?: boolean;
     /** listen ipv4 address for the server to bind to */
@@ -509,8 +520,19 @@ see alse: desk_utils::DeskErrorCode */
     port?: number;
     /** Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling" */
     signaling_url?: any;
+    /** Telemetry consent status */
+    telemetry_consent?: any;
     /** Enable Rust backtrace for errors */
     traceback?: boolean;
+  };
+
+  type TelemetryConsent = {
+    consent: boolean;
+  };
+
+  type TelemetryStatus = {
+    consented?: any;
+    needed: boolean;
   };
 
   type TerminalInputData = {

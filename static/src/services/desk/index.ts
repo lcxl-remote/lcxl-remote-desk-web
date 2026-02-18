@@ -21,7 +21,9 @@ import * as openSignalingHandle from './openSignalingHandle';
 import * as openTerminalSession from './openTerminalSession';
 import * as querySettings from './querySettings';
 import * as querySysinfo from './querySysinfo';
+import * as queryTelemetryStatus from './queryTelemetryStatus';
 import * as updateSettings from './updateSettings';
+import * as updateTelemetryConsent from './updateTelemetryConsent';
 export default {
   getCurrentUser,
   changePassword,
@@ -32,6 +34,8 @@ export default {
   updateSettings,
   openSignalingHandle,
   querySysinfo,
+  updateTelemetryConsent,
+  queryTelemetryStatus,
   openTerminalSession,
   listTerminal,
   loginAccount,

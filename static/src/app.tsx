@@ -12,6 +12,8 @@ const isDev = process.env.NODE_ENV === 'development';
 const loginPath = '/user/login';
 
 import { querySysinfo } from '@/services/desk/querySysinfo';
+import { queryTelemetryStatus } from '@/services/desk/queryTelemetryStatus';
+import WelcomeModal from '@/components/WelcomeModal';
 
 /**
  * @see  https://umijs.org/zh-CN/plugins/plugin-initial-state
@@ -22,6 +24,7 @@ export async function getInitialState(): Promise<{
   loading?: boolean;
   fetchUserInfo?: () => Promise<API.CurrentUser | undefined>;
   startupMode?: string;
+  telemetryNeeded?: boolean;
 }> {
   const fetchUserInfo = async () => {
     try {
@@ -46,7 +49,19 @@ export async function getInitialState(): Promise<{
     }
     return 'default';
   };
+
+  const fetchTelemetryStatus = async () => {
+    try {
+      const response = await queryTelemetryStatus();
+      return response.data?.needed;
+    } catch (error) {
+      console.error("Failed to fetch telemetry status", error);
+      return false;
+    }
+  }
+
   const startupMode = await fetchStartupMode();
+  const telemetryNeeded = await fetchTelemetryStatus();
 
   // 如果不是登录页面，执行
   const { location } = history;
@@ -57,12 +72,14 @@ export async function getInitialState(): Promise<{
       currentUser,
       settings: defaultSettings as Partial<LayoutSettings>,
       startupMode,
+      telemetryNeeded,
     };
   }
   return {
     fetchUserInfo,
     settings: defaultSettings as Partial<LayoutSettings>,
     startupMode,
+    telemetryNeeded,
   };
 }
 
@@ -139,6 +156,15 @@ export const layout: RunTimeLayoutConfig = ({ initialState, setInitialState }) =
               }}
             />
           )}
+          <WelcomeModal
+            open={initialState?.telemetryNeeded || false}
+            onClose={() => {
+              setInitialState((preInitialState) => ({
+                ...preInitialState,
+                telemetryNeeded: false,
+              }));
+            }}
+          />
         </>
       );
     },

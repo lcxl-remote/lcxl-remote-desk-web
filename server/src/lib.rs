@@ -3,6 +3,7 @@ pub mod error;
 pub mod model;
 pub mod openapi;
 pub mod service;
+pub mod telemetry;
 pub mod version;
 
 use std::{collections::BTreeMap, env, fs::File, sync::Arc};
@@ -21,7 +22,7 @@ use actix_web::{
 use clap::Parser as _;
 use controller::{
     login::{change_password, get_captcha, login_account, logout_account},
-    settings::{query_settings, update_settings},
+    settings::{query_settings, query_telemetry_status, update_settings, update_telemetry_consent},
     turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
         get_turn_session_statistics,
@@ -61,8 +62,7 @@ rust_i18n::i18n!("locales");
 pub async fn run() -> Result<Server, DeskError> {
     // Install default crypto provider
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    #[cfg(tokio_unstable)]
-    console_subscriber::init();
+
     let args = Args::parse();
     let settings = Settings::new(&args)?;
     if settings.system.traceback {
@@ -70,7 +70,8 @@ pub async fn run() -> Result<Server, DeskError> {
         unsafe { env::set_var("RUST_BACKTRACE", "1") };
     }
     // Initialize logging
-    init_logs_by_str(settings.system.log_level.as_str())?;
+    // init_logs_by_str(settings.system.log_level.as_str())?;
+    let _guard = telemetry::init_telemetry(&settings.system)?;
     info!("Server args: {:?}", args);
     info!("Server settings: {:?}", settings);
     // Get server execution file path
@@ -185,6 +186,8 @@ pub async fn run() -> Result<Server, DeskError> {
                             .service(change_password)
                             .service(query_settings)
                             .service(update_settings)
+                            .service(query_telemetry_status)
+                            .service(update_telemetry_consent)
                             .service(list_sessions)
                             .service(list_terminal)
                             .service(open_terminal_session)

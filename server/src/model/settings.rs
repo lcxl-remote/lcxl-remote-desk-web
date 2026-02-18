@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use strum_macros::AsRefStr;
 use tokio::sync::RwLock;
 use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
 
 use crate::error::DeskError;
 
@@ -62,6 +63,10 @@ pub struct SystemSettings {
     pub open_browser_on_startup: bool,
     /// Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling"
     pub signaling_url: Option<String>,
+    /// Client ID for telemetry
+    pub client_id: Option<String>,
+    /// Telemetry consent status
+    pub telemetry_consent: Option<bool>,
 }
 
 /// User settings
@@ -115,8 +120,6 @@ pub struct ListSettings {
     pub filter_dup_file_by_dir_path: Option<bool>,
 }
 
-
-
 /// Desk Settings
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(default)]
@@ -152,6 +155,8 @@ impl Default for SystemSettings {
             locale: None,
             open_browser_on_startup: true,
             signaling_url: None,
+            client_id: None,
+            telemetry_consent: None,
         }
     }
 }
@@ -230,6 +235,14 @@ impl Settings {
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
+
+        if settings.system.client_id.is_none() {
+            let new_id = Uuid::new_v4().to_string();
+            info!("Generated new client_id: {}", new_id);
+            settings.system.client_id = Some(new_id);
+            settings.save()?;
+        }
+
         if let Some(ref locale) = settings.system.locale {
             rust_i18n::set_locale(locale);
             info!("Locale set to: {}", locale);
