@@ -6,8 +6,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskSignalFacadeError;
 
-
-#[derive(Deserialize, Serialize, ToSchema, IntoParams)]
+#[derive(Deserialize, Serialize, ToSchema, IntoParams, Default)]
 pub struct FileListParams {
     pub path: String,
     pub page_no: i64,
@@ -137,7 +136,7 @@ pub struct FileListResponse {
 }
 
 /// Request body for deleting a file.
-#[derive(Deserialize, Serialize, ToSchema, Clone, Debug)]
+#[derive(Deserialize, Serialize, ToSchema, Clone, Debug, Default)]
 pub struct DeleteFileRequest {
     /// The path of file to be deleted
     pub file_path: String,

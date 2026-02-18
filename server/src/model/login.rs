@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Login params
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema, Default)]
 pub struct LoginParams {
     pub username: String,
     pub password: String,
@@ -14,7 +14,7 @@ pub struct LoginParams {
     pub login_type: String,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema, Default)]
 pub struct FakeCaptchaParams {
     pub phone: Option<String>,
 }
@@ -40,7 +40,7 @@ pub struct LoginResult {
 }
 
 /// Password params
-#[derive(Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema, Default)]
 pub struct PasswordParams {
     /// Old username
     pub username: String,

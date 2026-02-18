@@ -85,7 +85,11 @@ rust-i18n = "3.1"
 webbrowser = "1"
 sysinfo = "0.37"
 opentelemetry = { version = "0.31.0", features = ["metrics", "trace"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["metrics", "trace", "grpc-tonic"] }
+opentelemetry-otlp = { version = "0.31.0", features = [
+    "metrics",
+    "trace",
+    "grpc-tonic",
+] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.32.1"
 tracing-appender = "0.2.4"
@@ -166,6 +170,7 @@ which = { version = "8.0", features = ["regex"] }
 [dev-dependencies]
 image = "0.25"
 hound = "3.5"
+tempfile = "3"
 
 [lints.rust]
 # ignore tokio_unstable lint

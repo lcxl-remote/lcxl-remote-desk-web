@@ -144,12 +144,17 @@ pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), D
                 SHFILEOPSTRUCTW, SHFileOperationW,
             };
 
-            use windows::core::{BOOL, HSTRING, PCWSTR};
+            use windows::core::{BOOL, PCWSTR};
+
+            // SHFileOperationW requires pFrom to be double-null terminated
+            let mut path_utf16: Vec<u16> = delete_file_request.file_path.encode_utf16().collect();
+            path_utf16.push(0);
+            path_utf16.push(0);
 
             let mut fileop = SHFILEOPSTRUCTW {
                 hwnd: HWND::default(),
                 wFunc: FO_DELETE,
-                pFrom: PCWSTR(HSTRING::from(delete_file_request.file_path.as_str()).as_ptr()),
+                pFrom: PCWSTR(path_utf16.as_ptr()),
                 pTo: PCWSTR::null(),
                 fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
                 fAnyOperationsAborted: BOOL::from(false),
@@ -199,4 +204,53 @@ pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), D
 
     info!("Delete file {} successfully", delete_file_request.file_path);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_list_files() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test_file.txt");
+        File::create(&file_path).unwrap();
+
+        let params = FileListParams {
+            path: dir.path().to_string_lossy().to_string(),
+            page_no: 1,
+            page_count: 10,
+            ..Default::default()
+        };
+
+        let result = list_files(params).await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(!response.file_info_list.is_empty());
+        // Verify that the created file is in the list
+        let found = response
+            .file_info_list
+            .iter()
+            .any(|f| f.name == "test_file.txt");
+        assert!(found);
+    }
+
+    #[tokio::test]
+    async fn test_delete_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("file_to_delete.txt");
+        File::create(&file_path).unwrap();
+
+        let req = DeleteFileRequest {
+            file_path: file_path.to_string_lossy().to_string(),
+            delete_permanently: Some(true),
+            ..Default::default()
+        };
+
+        let result = delete_file(req).await;
+        assert!(result.is_ok());
+        assert!(!file_path.exists());
+    }
 }

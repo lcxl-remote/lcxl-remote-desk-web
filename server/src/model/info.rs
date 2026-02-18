@@ -1,8 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// CPU information
-#[derive(Serialize, Debug, Clone, ToSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct CpuInfo {
     /// CPU name
     pub name: String,
@@ -17,7 +17,7 @@ pub struct CpuInfo {
 }
 
 /// System information
-#[derive(Serialize, Debug, Clone, ToSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct SystemInfo {
     /// System name
     pub name: Option<String>,

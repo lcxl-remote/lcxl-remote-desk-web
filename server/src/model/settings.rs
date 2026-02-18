@@ -35,7 +35,7 @@ pub enum StartupMode {
 pub struct Args {
     /// Name of the person to greet
     #[clap(short, long, default_value = "conf/config")]
-    config_file_path: String,
+    pub config_file_path: String,
 
     #[clap(short, long, default_value_t, value_enum)]
     pub startup_mode: StartupMode,

@@ -143,3 +143,125 @@ pub async fn change_password(
     session.remove_current_user();
     Ok(HttpResponse::Ok().finish())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::settings::{Args, Settings, SharedSettings};
+    use actix_session::{SessionMiddleware, storage::CookieSessionStore};
+    use actix_web::{
+        App,
+        cookie::Key,
+        test::{self, TestRequest},
+        web,
+    };
+    use std::env;
+
+    fn create_test_settings() -> SharedSettings {
+        let mut settings = Settings::default();
+        settings.user.login_user_name = "admin".to_string();
+        settings.user.login_password = "password".to_string();
+
+        // Use a temp file for config to avoid overwriting real config
+        let mut temp_path = env::temp_dir();
+        temp_path.push(format!("desk_test_config_{}.toml", uuid::Uuid::new_v4()));
+        settings.args = Args {
+            config_file_path: temp_path.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+
+        SharedSettings::from(settings)
+    }
+
+    #[actix_web::test]
+    async fn test_login_success() {
+        let settings = create_test_settings();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(settings))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(login_account),
+        )
+        .await;
+
+        let params = LoginParams {
+            username: "admin".to_string(),
+            password: "password".to_string(),
+            login_type: "account".to_string(),
+            ..Default::default()
+        };
+
+        let req = TestRequest::post()
+            .uri("/api/login/account")
+            .set_json(&params)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert!(resp.status().is_success());
+        let body: LoginResult = test::read_body_json(resp).await;
+        assert_eq!(body.status, "ok");
+    }
+
+    #[actix_web::test]
+    async fn test_login_failure() {
+        let settings = create_test_settings();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(settings))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(login_account),
+        )
+        .await;
+
+        let params = LoginParams {
+            username: "admin".to_string(),
+            password: "wrong_password".to_string(),
+            login_type: "account".to_string(),
+            ..Default::default()
+        };
+
+        let req = TestRequest::post()
+            .uri("/api/login/account")
+            .set_json(&params)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), actix_web::http::StatusCode::FORBIDDEN);
+    }
+
+    #[actix_web::test]
+    async fn test_change_password_success() {
+        let settings = create_test_settings();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(settings))
+                .wrap(SessionMiddleware::new(
+                    CookieSessionStore::default(),
+                    Key::generate(),
+                ))
+                .service(change_password),
+        )
+        .await;
+
+        let params = PasswordParams {
+            username: "admin".to_string(),
+            password: "password".to_string(),
+            new_password: Some("new_password".to_string()),
+            new_username: None,
+        };
+
+        let req = TestRequest::post()
+            .uri("/api/login/password")
+            .set_json(&params)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert!(resp.status().is_success());
+    }
+}

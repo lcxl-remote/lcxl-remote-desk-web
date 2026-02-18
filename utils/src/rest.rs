@@ -1,14 +1,14 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::error::DeskErrorCode;
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema)]
 pub struct RestResponse<T: ToSchema> {
-    success: bool,
-    code: i32,
-    message: Option<String>,
-    data: Option<T>,
+    pub success: bool,
+    pub code: i32,
+    pub message: Option<String>,
+    pub data: Option<T>,
 }
 impl RestResponse<()> {
     pub fn succeed() -> Self {
