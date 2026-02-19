@@ -55,4 +55,7 @@ export default {
   'menu.desk.file-list': 'File List',
   'menu.desk.desk': "Desktop",
   'menu.desk.terminal': "Terminal",
+  'menu.desktop': "Remote Desktop",
+  'menu.file-list': "File List",
+  'menu.terminal': "Terminal",
 };

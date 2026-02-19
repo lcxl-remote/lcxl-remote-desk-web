@@ -1,11 +1,12 @@
 import { PageContainer } from "@ant-design/pro-components";
-import { history, Outlet, useLocation, useParams } from "@umijs/max";
+import { history, Outlet, useIntl, useLocation, useParams } from "@umijs/max";
 import { Button, Space, Tabs } from "antd";
 import { useEffect, useState } from "react";
 import { ArrowLeftOutlined } from "@ant-design/icons";
 
 const DeskDashboard: React.FC = () => {
     const { deskId } = useParams();
+    const intl = useIntl();
     const location = useLocation();
     const [activeTab, setActiveTab] = useState<string>('files');
 
@@ -38,9 +39,9 @@ const DeskDashboard: React.FC = () => {
             title={
                 <Space>
                     <Button icon={<ArrowLeftOutlined />} onClick={() => history.push('/desk')}>
-                        Back to List
+                        {intl.formatMessage({ id: 'pages.deskDashboard.backToList', defaultMessage: 'Back to List' })}
                     </Button>
-                    <span>Desk Management: {deskId}</span>
+                    <span>{intl.formatMessage({ id: 'pages.deskDashboard.deskManagement', defaultMessage: 'Desk Management: {deskId}' }, { deskId })}</span>
                 </Space>
             }
         >
@@ -49,15 +50,15 @@ const DeskDashboard: React.FC = () => {
                 onChange={handleTabChange}
                 items={[
                     {
-                        label: 'File Management',
+                        label: intl.formatMessage({ id: 'pages.deskDashboard.fileManagement', defaultMessage: 'File Management' }),
                         key: 'files',
                     },
                     {
-                        label: 'Terminal',
+                        label: intl.formatMessage({ id: 'pages.deskDashboard.terminal', defaultMessage: 'Terminal' }),
                         key: 'terminal',
                     },
                     {
-                        label: 'Remote Desktop',
+                        label: intl.formatMessage({ id: 'pages.deskDashboard.remoteDesktop', defaultMessage: 'Remote Desktop' }),
                         key: 'desktop',
                     },
                 ]}

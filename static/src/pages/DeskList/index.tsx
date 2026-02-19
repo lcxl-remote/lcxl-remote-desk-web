@@ -1,11 +1,12 @@
 import { listSessions } from "@/services/desk/listSessions";
 import { PageContainer, ProList } from "@ant-design/pro-components";
-import { history, useModel } from "@umijs/max";
+import { history, useIntl, useModel } from "@umijs/max";
 import { Avatar, Button, Card, Tag } from "antd";
 import { useEffect, useState } from "react";
 
 const DeskList: React.FC = () => {
     const [sessions, setSessions] = useState<API.SystemInfo[]>([]);
+    const intl = useIntl();
     const { initialState } = useModel('@@initialState');
 
     const refresh = async () => {
@@ -32,10 +33,18 @@ const DeskList: React.FC = () => {
     return (
         <PageContainer>
             <ProList<any>
+                onItem={(record: any) => {
+                    return {
+                        onClick: () => {
+                            handleEnterDesk(record.session_id);
+                        },
+                        style: { cursor: 'pointer' },
+                    };
+                }}
                 grid={{ gutter: 16, column: 3 }}
                 itemLayout="vertical"
                 rowKey="session_id"
-                headerTitle="Online Desk Servers"
+                headerTitle={intl.formatMessage({ id: 'pages.deskList.onlineDeskServers', defaultMessage: 'Online Desk Servers' })}
                 dataSource={sessions}
                 metas={{
                     title: {
@@ -57,16 +66,19 @@ const DeskList: React.FC = () => {
                         render: (_, entity) => {
                             return (
                                 <div>
-                                    <div>IP: {entity.ip}</div>
-                                    <div>Session ID: {entity.session_id}</div>
+                                    <div>{intl.formatMessage({ id: 'pages.deskList.ip', defaultMessage: 'IP' })}: {entity.ip}</div>
+                                    <div>{intl.formatMessage({ id: 'pages.deskList.sessionId', defaultMessage: 'Session ID' })}: {entity.session_id}</div>
                                 </div>
                             );
                         },
                     },
                     actions: {
                         render: (_, entity) => [
-                            <Button key="enter" type="primary" onClick={() => handleEnterDesk(entity.session_id)}>
-                                Enter Management
+                            <Button key="enter" type="primary" onClick={(e) => {
+                                e.stopPropagation();
+                                handleEnterDesk(entity.session_id);
+                            }}>
+                                {intl.formatMessage({ id: 'pages.deskList.enterManagement', defaultMessage: 'Enter Management' })}
                             </Button>,
                         ],
                     },

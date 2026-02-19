@@ -55,4 +55,7 @@ export default {
   'menu.desk.file-list': '文件列表',
   'menu.desk.desk': "桌面",
   'menu.desk.terminal': "终端",
+  'menu.desktop': "远程桌面",
+  'menu.file-list': "文件列表",
+  'menu.terminal': "终端",
 };
