@@ -31,21 +31,11 @@ const Settings: React.FC = () => {
                     message.success(intl.formatMessage({ id: "pages.system.settings.updateSucceedMessage" }));
                 }}
             >
-                <ProFormText
-                    name="config_file_path"
+                <ProFormSwitch
+                    name="open_browser_on_startup"
                     label={intl.formatMessage({
-                        id: "pages.system.settings.configFilePath",
+                        id: "pages.system.settings.openBrowserOnStartup",
                     })}
-                    disabled />
-                <ProFormText
-                    name="db_path"
-                    label={intl.formatMessage({
-                        id: "pages.system.settings.dbPath",
-                    })}
-                    rules={[
-                        { required: true, message: intl.formatMessage({ id: "pages.system.settings.sqlitePathRequiredMessage" }) },
-                    ]}
-                    hasFeedback
                 />
                 <ProFormSwitch
                     name="enable_ipv6"
@@ -57,7 +47,6 @@ const Settings: React.FC = () => {
                     name="traceback"
                     label={intl.formatMessage({
                         id: 'pages.system.settings.traceback',
-                        defaultMessage: 'Enable Traceback',
                     })}
                 />
                 <ProFormSwitch
@@ -86,6 +75,12 @@ const Settings: React.FC = () => {
                     label={intl.formatMessage({
                         id: "pages.system.settings.listenAddrIpv6",
                     })} />
+                <ProFormText
+                    name="signaling_url"
+                    label={intl.formatMessage({
+                        id: "pages.system.settings.signalingUrl",
+                    })}
+                />
                 <ProFormDigit
                     label={intl.formatMessage({
                         id: "pages.system.settings.port",
@@ -114,21 +109,7 @@ const Settings: React.FC = () => {
                     rules={[{ required: true, message: intl.formatMessage({ id: 'pages.system.settings.logLevelRequiredMessage' }) }]}
                 />
 
-                <ProFormDigit
-                    label={intl.formatMessage({
-                        id: "pages.system.settings.clearTrashIntervalS",
-                    })}
-                    name="clear_trash_interval_s"
-                    min={1}
-                    fieldProps={{ precision: 0 }}
-                />
 
-                <ProFormText
-                    name="trash_path"
-                    label={intl.formatMessage({
-                        id: "pages.system.settings.trashPath",
-                    })}
-                    disabled />
             </ProForm>
         </PageContainer>
 

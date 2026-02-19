@@ -166,8 +166,10 @@ const Desk: React.FC = () => {
   //const formRef = useRef<ProFormInstance>();
 
   const handleRemoteVideoResize = (event: UIEvent) => {
-    var videoRef = remoteVideo.current!;
-    console.log("video on resize, width=" + videoRef.clientWidth + ", height=" + videoRef.clientHeight + ", event=", event);
+    var videoRef = remoteVideo.current;
+    if (videoRef) {
+      console.log("video on resize, width=" + videoRef.clientWidth + ", height=" + videoRef.clientHeight + ", event=", event);
+    }
   };
 
   const handleMouseEvent = (eventType: string, event: MouseEvent) => {
