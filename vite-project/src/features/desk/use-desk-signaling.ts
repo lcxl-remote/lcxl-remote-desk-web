@@ -43,9 +43,7 @@ export function useDeskSignaling(deskId: string | null) {
                 }
             }
 
-            if (onConnect) {
-                onConnect();
-            }
+
         };
 
         ws.onclose = () => {

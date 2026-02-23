@@ -31,3 +31,4 @@ conf/
 sample/
 node_modules/
 logs/
+.idea/
