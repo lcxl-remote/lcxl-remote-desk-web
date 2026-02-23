@@ -41,7 +41,9 @@ impl Display for DeskSignalError {
             DeskSignalError::ActixWsClosed(err) => err.fmt(f),
             DeskSignalError::DeskSignalFacadeError(err) => err.fmt(f),
             DeskSignalError::CustomError(err) => err.fmt(f),
-            DeskSignalError::DbErr(backtrace, err) => err.fmt(f),
+            DeskSignalError::DbErr(backtrace, err) => {
+                desk_utils::error::format_backtrace(f, backtrace, err)
+            }
         }
     }
 }

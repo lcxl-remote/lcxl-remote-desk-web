@@ -1,10 +1,10 @@
 
 import { useEffect, useRef, useState, useCallback } from "react"
 import { useParams, useNavigate } from "react-router-dom"
-import { Terminal } from "xterm"
-import { FitAddon } from "xterm-addon-fit"
-import { WebLinksAddon } from "xterm-addon-web-links"
-import "xterm/css/xterm.css"
+import { Terminal } from "@xterm/xterm"
+import { FitAddon } from "@xterm/addon-fit"
+import { WebLinksAddon } from "@xterm/addon-web-links"
+import "@xterm/xterm/css/xterm.css"
 import { useTranslation } from "react-i18next"
 import { Loader2, TerminalSquare, ArrowLeft } from "lucide-react"
 import { useListTerminal } from "@/services/hooks/undefinedController/useListTerminal"
@@ -87,62 +87,62 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
                     ws = new WebSocket(url.toString());
                     socketRef.current = ws;
 
-            ws.onopen = () => {
-                console.log("Terminal WebSocket connected")
-                if (xtermRef.current) setIsConnected(true)
-                term.write('\r\n\x1b[32mConnected to remote terminal\x1b[0m\r\n')
-                safeFit()
+                    ws.onopen = () => {
+                        console.log("Terminal WebSocket connected")
+                        if (xtermRef.current) setIsConnected(true)
+                        term.write('\r\n\x1b[32mConnected to remote terminal\x1b[0m\r\n')
+                        safeFit()
 
-                // Send initial size
-                sendResize({ rows: term.rows, cols: term.cols })
-            }
-
-            ws.onmessage = (event) => {
-                if (typeof event.data === 'string') {
-                    try {
-                        const msg = JSON.parse(event.data)
-                        if (msg.signaling_type === SIGNALING_TYPE_CODE_REPLY) {
-                            term.write(msg.signaling_data.content)
-                        } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
-                            console.log("terminal started")
-                            terminalStarted.current = true
-                            // Send resize again after started to be safe
-                            sendResize({ rows: term.rows, cols: term.cols })
-                        } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_CLOSED) {
-                            console.log("terminal closed")
-                            term.write('\r\n\x1b[31mTerminal connection closed by server.\x1b[0m\r\n')
-                            ws?.close()
-                        }
-                    } catch (e) {
-                        console.error('Error parsing JSON message:', e)
-                        term.write(event.data)
+                        // Send initial size
+                        sendResize({ rows: term.rows, cols: term.cols })
                     }
-                } else {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                        if (reader.result instanceof ArrayBuffer) {
-                            term.write(new Uint8Array(reader.result))
-                        } else if (typeof reader.result === 'string') {
-                            term.write(reader.result)
+
+                    ws.onmessage = (event) => {
+                        if (typeof event.data === 'string') {
+                            try {
+                                const msg = JSON.parse(event.data)
+                                if (msg.signaling_type === SIGNALING_TYPE_CODE_REPLY) {
+                                    term.write(msg.signaling_data.content)
+                                } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
+                                    console.log("terminal started")
+                                    terminalStarted.current = true
+                                    // Send resize again after started to be safe
+                                    sendResize({ rows: term.rows, cols: term.cols })
+                                } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_CLOSED) {
+                                    console.log("terminal closed")
+                                    term.write('\r\n\x1b[31mTerminal connection closed by server.\x1b[0m\r\n')
+                                    ws?.close()
+                                }
+                            } catch (e) {
+                                console.error('Error parsing JSON message:', e)
+                                term.write(event.data)
+                            }
+                        } else {
+                            const reader = new FileReader();
+                            reader.onload = () => {
+                                if (reader.result instanceof ArrayBuffer) {
+                                    term.write(new Uint8Array(reader.result))
+                                } else if (typeof reader.result === 'string') {
+                                    term.write(reader.result)
+                                }
+                            };
+                            reader.readAsArrayBuffer(event.data);
                         }
-                    };
-                    reader.readAsArrayBuffer(event.data);
-                }
-            }
+                    }
 
-            ws.onclose = () => {
-                console.log("Terminal WebSocket disconnected")
-                if (xtermRef.current) {
-                    setIsConnected(false)
-                    term.write('\r\n\x1b[31mDisconnected. Returning to shell selection...\x1b[0m\r\n')
-                }
-                terminalStarted.current = false
+                    ws.onclose = () => {
+                        console.log("Terminal WebSocket disconnected")
+                        if (xtermRef.current) {
+                            setIsConnected(false)
+                            term.write('\r\n\x1b[31mDisconnected. Returning to shell selection...\x1b[0m\r\n')
+                        }
+                        terminalStarted.current = false
 
-                // Trigger onClose after a brief delay so the user sees the disconnect message
-                setTimeout(() => {
-                    onClose()
-                }, 1000)
-            }
+                        // Trigger onClose after a brief delay so the user sees the disconnect message
+                        setTimeout(() => {
+                            onClose()
+                        }, 1000)
+                    }
 
                     ws.onerror = (error) => {
                         console.error("Terminal WebSocket error", error)
