@@ -137,7 +137,9 @@ impl DeskError {
 impl Display for DeskError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let err_fmt_result = match self {
-            DeskError::IoError(_backtrace, error) => error.fmt(f),
+            DeskError::IoError(backtrace, error) => {
+                desk_utils::error::format_backtrace(f, backtrace, error)
+            }
             DeskError::JsonError(error) => error.fmt(f),
             DeskError::ConfigError(error) => error.fmt(f),
             DeskError::TomlError(error) => error.fmt(f),
@@ -147,14 +149,20 @@ impl Display for DeskError {
             DeskError::ActixWsClosed(closed) => closed.fmt(f),
             DeskError::AwcJsonPayloadError(error) => error.fmt(f),
             #[cfg(target_os = "windows")]
-            DeskError::WindowsResultError(_backtrace, error) => error.fmt(f),
-            DeskError::WebrtcError(_backtrace, error) => error.fmt(f),
+            DeskError::WindowsResultError(backtrace, error) => {
+                desk_utils::error::format_backtrace(f, backtrace, error)
+            }
+            DeskError::WebrtcError(backtrace, error) => {
+                desk_utils::error::format_backtrace(f, backtrace, error)
+            }
             DeskError::WebrtcMediaError(error) => error.fmt(f),
             DeskError::RtpError(error) => error.fmt(f),
             DeskError::YuvError(error) => error.fmt(f),
             DeskError::Openh264Error(error) => error.fmt(f),
             DeskError::VpxEncodeError(error) => error.fmt(f),
-            DeskError::OpusError(_backtrace, error) => f.write_fmt(format_args!("{:?}", error)),
+            DeskError::OpusError(backtrace, error) => {
+                desk_utils::error::format_debug_backtrace(f, backtrace, error)
+            }
             DeskError::ParseLevelError(error) => error.fmt(f),
             DeskError::FromUtf16Error(error) => error.fmt(f),
             DeskError::RegexError(error) => error.fmt(f),

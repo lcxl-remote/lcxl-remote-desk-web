@@ -37,23 +37,34 @@ export default function DeskSession() {
     // Control state
     const [hasControl, setHasControl] = useState(false);
     const [hasRequested, setHasRequested] = useState(false);
+    const hasRequestedRef = useRef(false);
+
+    const { isConnected, lastMessage, sendMessage } = useDeskSignaling(deskId || null)
 
     const handleConnect = useCallback(() => {
-        if (deskId) {
+        if (deskId && !hasRequestedRef.current) {
             console.log("WebSocket opened, requesting remote session directly:", deskId);
             sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, { session_id: deskId }, deskId);
+            hasRequestedRef.current = true;
             setHasRequested(true);
         }
-    }, [deskId]);
+    }, [deskId, sendMessage]);
 
-    const { isConnected, lastMessage, sendMessage } = useDeskSignaling(deskId || null, handleConnect)
+    useEffect(() => {
+        if (isConnected) {
+            handleConnect();
+        }
+    }, [isConnected, handleConnect]);
     const videoRef = useRef<HTMLVideoElement>(null)
     const videoWrapperRef = useRef<HTMLDivElement>(null)
     const controlBarRef = useRef<HTMLDivElement>(null)
 
     const [isConfigOpen, setIsConfigOpen] = useState(false);
     const [isVideoReady, setIsVideoReady] = useState(false);
-    const [isMuted, setIsMuted] = useState(false);
+    const [isMuted, setIsMuted] = useState(() => {
+        // Safari/iOS requires muted for autoPlay
+        return /Mobile|Android|iP(ad|hone)/.test(navigator.userAgent) ? true : false;
+    });
     const [audioVolume, setAudioVolume] = useState(100);
     const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -98,6 +109,7 @@ export default function DeskSession() {
     // Reset requested state if connection drops
     useEffect(() => {
         if (!isConnected) {
+            hasRequestedRef.current = false;
             setHasRequested(false);
         }
     }, [isConnected]);
@@ -112,10 +124,33 @@ export default function DeskSession() {
 
     // Attach remote stream to video element
     useEffect(() => {
-        if (videoRef.current && remoteStream) {
-            videoRef.current.srcObject = remoteStream;
+        if (videoRef.current && remoteStream && isRTCConnected) {
+            console.log("[Video] WebRTC is connected. Setting srcObject with remoteStream. Tracks:", remoteStream.getTracks().map(t => t.kind));
+
+            // Only assign if it hasn't been assigned yet, to avoid React infinite stream interruption
+            if (videoRef.current.srcObject !== remoteStream) {
+                videoRef.current.srcObject = remoteStream;
+            }
+
+            videoRef.current.play().then(() => {
+                console.log("[Video] Successfully started playing implicitly.");
+            }).catch(e => {
+                console.warn("[Video] Failed to implicitly play video stream on mount, user interaction might be required on this browser (Safari iOS): ", e);
+            });
         }
-    }, [remoteStream]);
+    }, [remoteStream, isRTCConnected]);
+
+    // Debugging video element state
+    useEffect(() => {
+        if (!isConnected || !videoRef.current) return;
+        const interval = setInterval(() => {
+            const v = videoRef.current;
+            if (v) {
+                console.log(`[Video State] readyState: ${v.readyState}, paused: ${v.paused}, muted: ${v.muted}, videoWidth: ${v.videoWidth}, videoHeight: ${v.videoHeight}, srcObject: ${!!v.srcObject}`);
+            }
+        }, 2000);
+        return () => clearInterval(interval);
+    }, [isConnected]);
 
     const handleConfigSubmit = (settings: DeskSettings) => {
         if (isRTCConnected && deskId) {

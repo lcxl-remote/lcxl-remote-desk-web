@@ -272,6 +272,8 @@ export function DeskConfigDialog({
                                             control={form.control}
                                             name="audio_device"
                                             render={({ field }) => {
+                                                // React Hook Form requires string values for selects, but the original structure used complex objects.
+                                                // We stringify the entire value object to store it in the Select component
                                                 const stringValue = field.value ? JSON.stringify(field.value) : "";
                                                 return (
                                                     <FormItem>
@@ -290,6 +292,7 @@ export function DeskConfigDialog({
                                                                 </SelectTrigger>
                                                             </FormControl>
                                                             <SelectContent>
+                                                                {/* First list "Default Device" options per data flow */}
                                                                 {Array.from(new Set(audioDeviceList.map(item => item.data_flow))).map(dataFlow => {
                                                                     const defaultDevice = { audio_data_flow: dataFlow, audio_device_id: null };
                                                                     const valStr = JSON.stringify(defaultDevice);
@@ -300,6 +303,7 @@ export function DeskConfigDialog({
                                                                     )
                                                                 })}
 
+                                                                {/* Then list all specific devices */}
                                                                 {audioDeviceList.map((device) => {
                                                                     const optValue = { audio_data_flow: device.data_flow, audio_device_id: device.id };
                                                                     const valStr = JSON.stringify(optValue);

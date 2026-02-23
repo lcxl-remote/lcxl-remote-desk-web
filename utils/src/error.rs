@@ -1,5 +1,35 @@
 use std::fmt::{self, Display, Formatter};
 
+pub fn format_backtrace<E: fmt::Display>(
+    f: &mut fmt::Formatter<'_>,
+    backtrace: &std::backtrace::Backtrace,
+    error: &E,
+) -> fmt::Result {
+    if matches!(
+        backtrace.status(),
+        std::backtrace::BacktraceStatus::Captured
+    ) {
+        write!(f, "{}\n{}", error, backtrace)
+    } else {
+        error.fmt(f)
+    }
+}
+
+pub fn format_debug_backtrace<E: fmt::Debug>(
+    f: &mut fmt::Formatter<'_>,
+    backtrace: &std::backtrace::Backtrace,
+    error: &E,
+) -> fmt::Result {
+    if matches!(
+        backtrace.status(),
+        std::backtrace::BacktraceStatus::Captured
+    ) {
+        write!(f, "{:?}\n{}", error, backtrace)
+    } else {
+        f.write_fmt(format_args!("{:?}", error))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DeskErrorCode(i32);
 
