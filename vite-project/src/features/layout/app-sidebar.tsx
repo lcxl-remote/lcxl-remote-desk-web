@@ -9,9 +9,14 @@ import {
     LogOut,
     ChevronRight,
     ChevronDown,
+    Key,
 } from "lucide-react"
-import { useLocation, Link } from "react-router-dom"
+import { useLocation, Link, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
+import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
+import { useGetCurrentUser } from "@/services/hooks/undefinedController/useGetCurrentUser"
+import { useLogoutAccount } from "@/services/hooks/undefinedController/useLogoutAccount"
+import { Badge } from "@/components/ui/badge"
 
 import {
     Sidebar,
@@ -42,29 +47,81 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 
-// Define menu structure
-const items = [
-    {
-        title: "menu.desk",
-        url: "/desk/list",
-        icon: Monitor,
-    },
-    {
-        title: "menu.settings",
-        icon: Settings,
-        items: [
-            {
-                title: "menu.settings.system",
-                url: "/system/settings",
-            },
-        ],
-    },
-]
-
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
     const { t } = useTranslation()
     const location = useLocation()
+    const navigate = useNavigate()
     const { state } = useSidebar()
+
+    const { data: serverInfoResp } = useQueryServerInfo()
+    const { data: userResp, refetch: refetchUser } = useGetCurrentUser()
+    const { mutateAsync: logout } = useLogoutAccount()
+
+    const serverInfo = serverInfoResp?.data
+    const user = userResp?.data
+
+    const handleLogout = () => {
+        logout().catch(console.error)
+        navigate("/user/login", { replace: true })
+    }
+
+    const navItems: any[] = React.useMemo(() => {
+        if (!user || !serverInfo) return [];
+
+        const isDeviceUser = user.access === "device_user";
+
+        let dynamicItems: any[] = [];
+
+        if (isDeviceUser) {
+            if (user.targetSessionId) {
+                dynamicItems.push({
+                    title: "menu.desk_control",
+                    url: `/desk/${user.targetSessionId}/control`,
+                    icon: Monitor,
+                });
+            }
+        } else {
+            if (serverInfo.startup_mode !== "desk_server") {
+                dynamicItems.push({
+                    title: "menu.desk",
+                    url: "/desk/list",
+                    icon: Monitor,
+                });
+            }
+
+            const settingsItems = [
+                {
+                    title: "menu.settings.system",
+                    url: "/system/settings",
+                }
+            ];
+
+            if (serverInfo.startup_mode !== "desk_server") {
+                settingsItems.push({
+                    title: "menu.settings.deviceCode",
+                    url: "/system/device-codes",
+                });
+            }
+
+            dynamicItems.push({
+                title: "menu.settings",
+                icon: Settings,
+                items: settingsItems,
+            });
+        }
+
+        return dynamicItems;
+
+    }, [user, serverInfo]);
+
+    const getModeLabel = () => {
+        switch (serverInfo?.startup_mode) {
+            case "signaling": return "Signaling";
+            case "desk_server": return "Desk Server";
+            case "default": return "Default";
+            default: return "";
+        }
+    };
 
     return (
         <Sidebar collapsible="icon" {...props}>
@@ -72,22 +129,29 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 <SidebarMenu>
                     <SidebarMenuItem>
                         <SidebarMenuButton size="lg" asChild>
-                            <a href="#">
+                            <Link to="/">
                                 <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-sidebar-primary text-sidebar-primary-foreground">
                                     <img src="/logo.svg" className="size-4" />
                                 </div>
                                 <div className="grid flex-1 text-left text-sm leading-tight">
-                                    <span className="truncate font-semibold">LCXL Remote</span>
+                                    <span className="truncate font-semibold flex items-center gap-2">
+                                        LCXL Remote
+                                        {serverInfo && (
+                                            <Badge variant="outline" className="text-[10px] px-1 py-0 h-4">
+                                                {getModeLabel()}
+                                            </Badge>
+                                        )}
+                                    </span>
                                     <span className="truncate text-xs">Web Console</span>
                                 </div>
-                            </a>
+                            </Link>
                         </SidebarMenuButton>
                     </SidebarMenuItem>
                 </SidebarMenu>
             </SidebarHeader>
             <SidebarContent>
                 <SidebarMenu>
-                    {items.map((item) => (
+                    {navItems.map((item: any) => (
                         <React.Fragment key={item.title}>
                             {item.items ? (
                                 <Collapsible
@@ -106,7 +170,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                         </CollapsibleTrigger>
                                         <CollapsibleContent>
                                             <SidebarMenuSub>
-                                                {item.items?.map((subItem) => (
+                                                {item.items?.map((subItem: any) => (
                                                     <SidebarMenuSubItem key={subItem.title}>
                                                         <SidebarMenuSubButton asChild isActive={location.pathname === subItem.url}>
                                                             <Link to={subItem.url}>
@@ -147,8 +211,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                         <AvatarFallback className="rounded-lg">CN</AvatarFallback>
                                     </Avatar>
                                     <div className="grid flex-1 text-left text-sm leading-tight">
-                                        <span className="truncate font-semibold">Admin</span>
-                                        <span className="truncate text-xs">admin@example.com</span>
+                                        <span className="truncate font-semibold">{user?.name || "User"}</span>
+                                        <span className="truncate text-xs">{user?.access === "admin" ? t('pages.appSidebar.role.admin', 'Administrator') : t('pages.appSidebar.role.deviceUser', 'Device User')}</span>
                                     </div>
                                     <ChevronDown className="ml-auto size-4" />
                                 </SidebarMenuButton>
@@ -166,19 +230,21 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                             <AvatarFallback className="rounded-lg">CN</AvatarFallback>
                                         </Avatar>
                                         <div className="grid flex-1 text-left text-sm leading-tight">
-                                            <span className="truncate font-semibold">Admin</span>
-                                            <span className="truncate text-xs">admin@example.com</span>
+                                            <span className="truncate font-semibold">{user?.name || "User"}</span>
+                                            <span className="truncate text-xs">{user?.access === "admin" ? t('pages.appSidebar.role.admin', 'Administrator') : t('pages.appSidebar.role.deviceUser', 'Device User')}</span>
                                         </div>
                                     </div>
                                 </DropdownMenuLabel>
                                 <DropdownMenuSeparator />
-                                <DropdownMenuItem asChild>
-                                    <Link to="/user/settings" className="w-full cursor-pointer">
-                                        <Settings className="mr-2 h-4 w-4" />
-                                        {t('menu.account.settings', 'Account Settings')}
-                                    </Link>
-                                </DropdownMenuItem>
-                                <DropdownMenuItem>
+                                {user?.access === "admin" && (
+                                    <DropdownMenuItem asChild>
+                                        <Link to="/user/settings" className="w-full cursor-pointer">
+                                            <Settings className="mr-2 h-4 w-4" />
+                                            {t('menu.account.settings', 'Account Settings')}
+                                        </Link>
+                                    </DropdownMenuItem>
+                                )}
+                                <DropdownMenuItem onClick={handleLogout} className="cursor-pointer">
                                     <LogOut className="mr-2 h-4 w-4" />
                                     {t('menu.account.logout', 'Log out')}
                                 </DropdownMenuItem>

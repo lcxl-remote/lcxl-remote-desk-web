@@ -55,7 +55,7 @@ export default function DeskDashboard() {
                             <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.deskDashboard.online', 'Online')}</Badge>
                         </div>
                         <p className="text-muted-foreground">
-                            {t('pages.deskDashboard.id', 'ID: ')}{session.session_id}
+                            {t('pages.deskDashboard.sessionId', 'Session ID: ')}{session.session_id}
                         </p>
                     </div>
                 </div>

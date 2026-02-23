@@ -14,7 +14,7 @@ use desk_signal_facade::{
     error::DeskSignalFacadeError,
     model::{
         session::{SessionList, SessionModel},
-        signal::{ForwardSignalingSender, SignalingModel, SignalingType},
+        signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
         version::VersionInfo,
     },
 };
@@ -213,11 +213,54 @@ impl SignalingContext {
             ip,
         };
 
+        let mut device_code = None;
+        if client_version_info.remote_desk_type == RemoteDeskTypeEnum::Server {
+            if let Some(client_id) = &client_version_info.client_id {
+                let db = crate::db::get_db();
+                use crate::entity::device_code;
+                use sea_orm::*;
+
+                let db_model_opt = device_code::Entity::find()
+                    .filter(device_code::Column::ClientId.eq(client_id.clone()))
+                    .one(db)
+                    .await?;
+
+                if let Some(db_model) = db_model_opt {
+                    device_code = Some(db_model.device_code);
+                } else {
+                    use rand::Rng;
+                    const CHARSET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+                    let mut rng = rand::thread_rng();
+                    let new_code: String = (0..6)
+                        .map(|_| {
+                            let idx = rng.gen_range(0..CHARSET.len());
+                            CHARSET[idx] as char
+                        })
+                        .collect();
+
+                    let new_model = device_code::ActiveModel {
+                        client_id: Set(client_id.clone()),
+                        device_code: Set(new_code.clone()),
+                        created_at: Set(chrono::Utc::now()),
+                        updated_at: Set(chrono::Utc::now()),
+                        ..Default::default()
+                    };
+
+                    if let Err(e) = new_model.insert(db).await {
+                        log::error!("Failed to generate device_code: {}", e);
+                    } else {
+                        device_code = Some(new_code);
+                    }
+                }
+            }
+        }
+
         let session_state = SessionState {
             model: session_model,
             session: Arc::new(RwLock::new(session)),
             terminal_session_ids: Arc::new(RwLock::new(HashSet::new())),
             request_callback_map: Arc::new(RwLock::new(HashMap::new())),
+            device_code,
         };
 
         session_map
@@ -237,6 +280,22 @@ impl SignalingContext {
         signaling_model: &SignalingModel,
         ignore_session_not_found: bool,
     ) -> Result<(), DeskSignalError> {
+        // Device user restriction logic
+        if self.user.access.as_deref() == Some("device_user") {
+            if let Some(target_session) = &self.user.target_session_id {
+                let to_session_id = signaling_model.check_and_get_to_session_id()?;
+                if to_session_id != *target_session {
+                    return DeskSignalError::custom_error(
+                        DeskErrorCode::SYSTEM_ERROR,
+                        &format!(
+                            "Permission denied: cannot send message to {}",
+                            to_session_id
+                        ),
+                    );
+                }
+            }
+        }
+
         if let Some(tx) = self
             .session_state
             .request_callback_map

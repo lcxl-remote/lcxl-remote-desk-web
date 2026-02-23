@@ -4,8 +4,8 @@
 */
 
 import fetch from "@kubb/plugin-client/clients/axios";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@kubb/plugin-client/clients/axios";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, GetNoticesQueryResponse, GetNotices401, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -40,6 +40,96 @@ export async function changePassword(data: ChangePasswordMutationRequest, config
   const requestData = data
 
   const res = await request<ChangePasswordMutationResponse, ResponseErrorConfig<ChangePassword403>, ChangePasswordMutationRequest>({ method : "POST", url : getChangePasswordUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getListDeviceCodesUrl() {
+  const res = { method: 'GET', url: `/api/desk/device_codes` as const }
+  return res
+}
+
+/**
+ * @summary List device codes
+ * {@link /api/desk/device_codes}
+ */
+export async function listDeviceCodes(params?: ListDeviceCodesQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<ListDeviceCodesQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListDeviceCodesUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getCreateDeviceCodeUrl() {
+  const res = { method: 'POST', url: `/api/desk/device_codes` as const }
+  return res
+}
+
+/**
+ * @summary Create device code
+ * {@link /api/desk/device_codes}
+ */
+export async function createDeviceCode(data: CreateDeviceCodeMutationRequest, config: Partial<RequestConfig<CreateDeviceCodeMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<CreateDeviceCodeMutationResponse, ResponseErrorConfig<Error>, CreateDeviceCodeMutationRequest>({ method : "POST", url : getCreateDeviceCodeUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getBatchDeleteDeviceCodesUrl() {
+  const res = { method: 'POST', url: `/api/desk/device_codes/batch_delete` as const }
+  return res
+}
+
+/**
+ * @summary Batch delete device codes
+ * {@link /api/desk/device_codes/batch_delete}
+ */
+export async function batchDeleteDeviceCodes(data: BatchDeleteDeviceCodesMutationRequest, config: Partial<RequestConfig<BatchDeleteDeviceCodesMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<BatchDeleteDeviceCodesMutationResponse, ResponseErrorConfig<Error>, BatchDeleteDeviceCodesMutationRequest>({ method : "POST", url : getBatchDeleteDeviceCodesUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getUpdateDeviceCodeUrl(id: UpdateDeviceCodePathParams["id"]) {
+  const res = { method: 'PUT', url: `/api/desk/device_codes/${id}` as const }
+  return res
+}
+
+/**
+ * @summary Update device code
+ * {@link /api/desk/device_codes/:id}
+ */
+export async function updateDeviceCode(id: UpdateDeviceCodePathParams["id"], data: UpdateDeviceCodeMutationRequest, config: Partial<RequestConfig<UpdateDeviceCodeMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateDeviceCodeMutationResponse, ResponseErrorConfig<Error>, UpdateDeviceCodeMutationRequest>({ method : "PUT", url : getUpdateDeviceCodeUrl(id).url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getDeleteDeviceCodeUrl(id: DeleteDeviceCodePathParams["id"]) {
+  const res = { method: 'DELETE', url: `/api/desk/device_codes/${id}` as const }
+  return res
+}
+
+/**
+ * @summary Delete device code
+ * {@link /api/desk/device_codes/:id}
+ */
+export async function deleteDeviceCode(id: DeleteDeviceCodePathParams["id"], config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<DeleteDeviceCodeMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "DELETE", url : getDeleteDeviceCodeUrl(id).url.toString(), ... requestConfig })
   return res.data
 }
 
@@ -241,6 +331,24 @@ export async function listTerminal(session_id: ListTerminalPathParams["session_i
   return res.data
 }
 
+function getInitSystemUrl() {
+  const res = { method: 'POST', url: `/api/init` as const }
+  return res
+}
+
+/**
+ * @summary Initialize system
+ * {@link /api/init}
+ */
+export async function initSystem(data: InitSystemMutationRequest, config: Partial<RequestConfig<InitSystemMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<InitSystemMutationResponse, ResponseErrorConfig<InitSystem403>, InitSystemMutationRequest>({ method : "POST", url : getInitSystemUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
 function getLoginAccountUrl() {
   const res = { method: 'POST', url: `/api/login/account` as const }
   return res
@@ -295,21 +403,21 @@ export async function logoutAccount(config: Partial<RequestConfig> & { client?: 
   return res.data
 }
 
-function getGetNoticesUrl() {
-  const res = { method: 'GET', url: `/api/notices` as const }
+function getQueryServerInfoUrl() {
+  const res = { method: 'GET', url: `/api/server_info` as const }
   return res
 }
 
 /**
- * @summary Get notices
- * {@link /api/notices}
+ * @summary Get server information
+ * {@link /api/server_info}
  */
-export async function getNotices(config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function queryServerInfo(config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<GetNoticesQueryResponse, ResponseErrorConfig<GetNotices401>, unknown>({ method : "GET", url : getGetNoticesUrl().url.toString(), ... requestConfig })
+  const res = await request<QueryServerInfoQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryServerInfoUrl().url.toString(), ... requestConfig })
   return res.data
 }
 

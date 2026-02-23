@@ -1,5 +1,8 @@
 pub mod controller;
+pub mod db;
+pub mod entity;
 pub mod error;
+pub mod migration;
 pub mod model;
 pub mod service;
 pub mod version;

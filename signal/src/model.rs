@@ -20,6 +20,8 @@ pub struct SessionState {
     /// request_id -> oneshot::Sender<SignalingModel>
     pub request_callback_map:
         Arc<RwLock<HashMap<String /* request_id */, oneshot::Sender<SignalingModel>>>>,
+    /// device code assigned to this session (if it's a Server session)
+    pub device_code: Option<String>,
 }
 
 pub struct SharedSessionMap(pub RwLock<BTreeMap<String /* session_id */, SessionState>>);

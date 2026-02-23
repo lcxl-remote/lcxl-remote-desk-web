@@ -8,6 +8,12 @@ pub mod version;
 
 use std::{collections::BTreeMap, env, fs::File, sync::Arc};
 
+use crate::controller::{
+    info::{query_server_info, query_sysinfo}, init::init_system, login::{change_password, get_captcha, login_account, logout_account}, settings::{query_settings, query_telemetry_status, update_settings, update_telemetry_consent}, turn::{
+        delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
+        get_turn_session_statistics,
+    }, user::{get_current_user, get_notices, reject_anonymous_users}
+};
 use actix_server::Server;
 use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
@@ -20,27 +26,21 @@ use actix_web::{
     web::{self},
 };
 use clap::Parser as _;
-use controller::{
-    login::{change_password, get_captcha, login_account, logout_account},
-    settings::{query_settings, query_telemetry_status, update_settings, update_telemetry_consent},
-    turn::{
-        delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
-        get_turn_session_statistics,
-    },
-    user::{get_current_user, get_notices, reject_anonymous_users},
-};
 use desk_signal::{
     controller::{
+        device_code::{
+            batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
+            update_device_code,
+        },
         files::{delete_file, list_files},
         session::list_sessions,
+        signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
     },
     model::SharedSessionMap,
 };
 use desk_turn::service::startup_turn_server;
-use desk_utils::{
-    error::DeskErrorCode, network::check_ipv6_available, rest::RestResponse,
-};
+use desk_utils::{error::DeskErrorCode, network::check_ipv6_available, rest::RestResponse};
 use error::DeskError;
 use log::{error, info, warn};
 use model::settings::{Args, Settings, SharedSettings, StartupMode, UserSettings};
@@ -55,7 +55,7 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
-use crate::{controller::info::query_sysinfo, model::turn::TurnObserver};
+use crate::model::turn::TurnObserver;
 
 rust_i18n::i18n!("locales");
 
@@ -90,22 +90,6 @@ pub async fn run() -> Result<Server, DeskError> {
     let secret_key = Key::generate();
     let shared_settings = web::Data::new(SharedSettings::from(settings.clone()));
 
-    // check user and passwd
-    let passwd = {
-        let settings = shared_settings.read().await;
-        settings.user.login_password.clone()
-    };
-    if passwd == UserSettings::default().login_password {
-        warn!("Password need to change");
-        let random_uuid = Uuid::new_v4();
-        let uuid_str = String::from(random_uuid);
-        let new_password = &uuid_str[..6];
-        let mut settings = shared_settings.write().await;
-        settings.user.login_password = String::from(new_password);
-        info!("New random password: {}", new_password);
-        settings.save()?;
-    }
-
     let config = {
         let settings = shared_settings.read().await;
         Arc::new(settings.to_turn_server_config()?)
@@ -136,6 +120,19 @@ pub async fn run() -> Result<Server, DeskError> {
     }
 
     let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
+
+    // init desk_signal db
+    if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
+        let settings_dir = std::path::Path::new(&settings.args.config_file_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_string_lossy()
+            .to_string();
+
+        if let Err(e) = desk_signal::db::init_db(&settings_dir).await {
+            error!("Failed to init desk_signal db: {}", e);
+        }
+    }
 
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {
@@ -174,8 +171,9 @@ pub async fn run() -> Result<Server, DeskError> {
             .service(login_account)
             .service(logout_account)
             .service(get_current_user)
-            .service(get_notices)
             .service(get_captcha)
+            .service(query_server_info)
+            .service(init_system)
             // TODO need to login for these routes
             .service(
                 // need to login for these routes
@@ -197,11 +195,14 @@ pub async fn run() -> Result<Server, DeskError> {
                                     || startup_mode == StartupMode::Signaling
                                 {
                                     log::info!("Registering signaling route at /signaling");
-                                    cfg.service(
-                                        desk_signal::controller::signaling::open_signaling_handle,
-                                    )
-                                    .service(delete_file)
-                                    .service(list_files);
+                                    cfg.service(open_signaling_handle)
+                                        .service(delete_file)
+                                        .service(list_files)
+                                        .service(create_device_code)
+                                        .service(list_device_codes)
+                                        .service(update_device_code)
+                                        .service(delete_device_code)
+                                        .service(batch_delete_device_codes);
                                 }
                             }),
                     )

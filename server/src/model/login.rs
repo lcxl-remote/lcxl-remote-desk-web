@@ -12,6 +12,9 @@ pub struct LoginParams {
     #[serde(rename = "type")]
     #[schema(rename = "type")]
     pub login_type: String,
+
+    // For device code login
+    pub device_code: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Default)]
@@ -37,6 +40,10 @@ pub struct LoginResult {
     pub current_authority: String,
     /// return api version of signal/desk/manage server
     pub api_version: i32,
+    #[serde(rename = "targetSessionId")]
+    #[schema(rename = "targetSessionId")]
+    pub target_session_id: Option<String>,
+    pub startup_mode: Option<String>,
 }
 
 /// Password params

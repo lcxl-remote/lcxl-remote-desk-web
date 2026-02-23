@@ -104,6 +104,7 @@ pub async fn open_terminal_session(
         version::SIGNAL_COMMIT_HASH.to_owned(),
         RemoteDeskTypeEnum::Browser,
         None,
+        None,
     );
 
     let random_uuid = Uuid::new_v4();

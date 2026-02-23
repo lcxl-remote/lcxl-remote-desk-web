@@ -1,3 +1,6 @@
+use desk_signal::controller::device_code::{
+    DeviceCodeBatchDeleteParams, DeviceCodeItem, DeviceCodeListResult,
+};
 use desk_signal_facade::model::{
     desk_settings::DeskSettings,
     session::SessionList,
@@ -25,5 +28,8 @@ use crate::model::{
     TerminalOutputData,
     TerminalResizeData,
     FileTransferMessage,
+    DeviceCodeItem,
+    DeviceCodeListResult,
+    DeviceCodeBatchDeleteParams,
 )))]
 pub struct ExtraSchemas;

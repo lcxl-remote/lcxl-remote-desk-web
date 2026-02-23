@@ -29,7 +29,14 @@ rustls-native-certs = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
+
 utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+utoipa-actix-web = { workspace = true }
+utoipa-redoc = { workspace = true }
+utoipa-rapidoc = { workspace = true }
+utoipa-scalar = { workspace = true }
+
 chrono = { workspace = true }
 
 serde = { workspace = true }
@@ -55,13 +62,6 @@ portable-pty = { workspace = true }
 
 url = { workspace = true }
 
-utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
-utoipa-actix-web = "0.1"
-utoipa-redoc = { version = "6", features = ["actix-web"] }
-utoipa-rapidoc = { version = "6", features = ["actix-web"] }
-utoipa-scalar = { version = "0.3", features = ["actix-web"] }
-
-toml_edit = { version = "0.23", features = ["serde"] }
 toml = "0.9"
 config = { version = "0.15", features = ["toml"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -71,7 +71,6 @@ mime = "0.3"
 yuv = "0.8"
 openh264 = "0.9.3"
 
-# opus = "0.3"
 opusic-c = "1.5"
 
 codepage = "0.1"
@@ -148,7 +147,7 @@ pipewire = "0.8"
 evdev = { version = "0.13", features = ["stream-trait"] }
 xcb = { version = "1.5", features = ["randr"] }
 zbus = "5.6"
-rand = "0.9"
+rand = { workspace = true }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

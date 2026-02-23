@@ -7,6 +7,7 @@ import { Loader2, Save } from "lucide-react"
 
 import { useQuerySettings } from "@/services/hooks/undefinedController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/undefinedController/useUpdateSettings"
+import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -37,6 +38,9 @@ export function SystemSettings() {
 
     const { data: settingsResponse, isLoading } = useQuerySettings()
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateSettings()
+    const { data: serverInfoResp } = useQueryServerInfo()
+
+    const serverInfo = serverInfoResp?.data
 
     const form = useForm<SystemSettingsFormValues>({
         resolver: zodResolver(systemSettingsSchema),
@@ -188,20 +192,22 @@ export function SystemSettings() {
                                     )}
                                 />
 
-                                <FormField
-                                    control={form.control}
-                                    name="signaling_url"
-                                    render={({ field }) => (
-                                        <FormItem className="md:col-span-2">
-                                            <FormLabel>{t("pages.system.settings.signalingUrl", "Signaling Server URL")}</FormLabel>
-                                            <FormControl>
-                                                <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://127.0.0.1:8081/signaling" />
-                                            </FormControl>
-                                            <FormDescription>{t("pages.system.settings.signalingUrl.description", "Leave blank to use the default internal signaling server.")}</FormDescription>
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
+                                {serverInfo?.startup_mode !== "signaling" && (
+                                    <FormField
+                                        control={form.control}
+                                        name="signaling_url"
+                                        render={({ field }) => (
+                                            <FormItem className="md:col-span-2">
+                                                <FormLabel>{t("pages.system.settings.signalingUrl", "Signaling Server URL")}</FormLabel>
+                                                <FormControl>
+                                                    <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://127.0.0.1:8081/signaling" />
+                                                </FormControl>
+                                                <FormDescription>{t("pages.system.settings.signalingUrl.description", "Leave blank to use the default internal signaling server.")}</FormDescription>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                )}
                             </div>
 
                             <div className="space-y-4 rounded-md border p-4">

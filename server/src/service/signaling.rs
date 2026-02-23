@@ -324,12 +324,18 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         sysinfo::System::host_name()
     };
 
+    let client_id = {
+        let settings = settings.read().await;
+        settings.system.client_id.clone()
+    };
+
     let version_info = VersionInfo::new(
         desk_server_version::SERVER_API_VERSION,
         version::SERVER_BUILD_NUMBER,
         version::SERVER_COMMIT_HASH.to_string(),
         RemoteDeskTypeEnum::Server,
         display_name,
+        client_id,
     );
     let version_query = serde_urlencoded::to_string(&version_info).unwrap();
 
@@ -367,6 +373,7 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
             password: password.clone(),
             login_type: "account".to_string(), // TODO: use enum
             auto_login: true,
+            ..Default::default()
         };
 
         let mut login_response = match client.post(&login_url).send_json(&login_params).await {

@@ -140,6 +140,10 @@ export type CurrentUser = {
     /**
      * @type string,null
     */
+    targetSessionId?: string | null;
+    /**
+     * @type string,null
+    */
     title?: string | null;
     /**
      * @minLength 0
@@ -386,6 +390,70 @@ export type DeskSettings = {
      * @default null
     */
     vp9_encoder?: (null | VpxEncoderSettings);
+};
+
+export type DeviceCodeBatchDeleteParams = {
+    /**
+     * @type array
+    */
+    ids: number[];
+};
+
+export type DeviceCodeCreateParams = {
+    /**
+     * @type string
+    */
+    client_id: string;
+    /**
+     * @type string,null
+    */
+    device_code?: string | null;
+};
+
+export type DeviceCodeItem = {
+    /**
+     * @type string
+    */
+    clientId: string;
+    /**
+     * @type string
+    */
+    createdAt: string;
+    /**
+     * @type string
+    */
+    deviceCode: string;
+    /**
+     * @type integer, int32
+    */
+    id: number;
+    /**
+     * @type boolean
+    */
+    isOnline: boolean;
+    /**
+     * @type string
+    */
+    updatedAt: string;
+};
+
+export type DeviceCodeListResult = {
+    /**
+     * @type array
+    */
+    items: DeviceCodeItem[];
+    /**
+     * @minLength 0
+     * @type integer, int64
+    */
+    total: number;
+};
+
+export type DeviceCodeUpdateParams = {
+    /**
+     * @type string
+    */
+    device_code: string;
 };
 
 /**
@@ -736,6 +804,17 @@ export type FileTransferMessage = ((DownloadRequest & {
     type: FileTransferMessageTypeEnum7Key;
 }));
 
+export type InitParams = {
+    /**
+     * @type string
+    */
+    password: string;
+    /**
+     * @type string
+    */
+    username: string;
+};
+
 /**
  * @description RTC IceServer
 */
@@ -873,6 +952,10 @@ export type LoginParams = {
     */
     autoLogin: boolean;
     /**
+     * @type string,null
+    */
+    device_code?: string | null;
+    /**
      * @type string
     */
     password: string;
@@ -900,9 +983,17 @@ export type LoginResult = {
     */
     currentAuthority: string;
     /**
+     * @type string,null
+    */
+    startup_mode?: string | null;
+    /**
      * @type string
     */
     status: string;
+    /**
+     * @type string,null
+    */
+    targetSessionId?: string | null;
     /**
      * @type string
     */
@@ -944,6 +1035,12 @@ export type MouseEventData = {
     */
     event: string;
     /**
+     * @description Sequence number to prevent unordered packets (UDP-like channel) from overwriting newer states.
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    sequence_number?: number | null;
+    /**
      * @description mouse x coordinate(relative to the viewport)
      * @type number, double
     */
@@ -960,72 +1057,6 @@ export type NoLogintUser = {
      * @type boolean
     */
     isLogin: boolean;
-};
-
-export const noticeIconItemTypeEnum = {
-    notification: "notification",
-    message: "message",
-    event: "event"
-} as const;
-
-export type NoticeIconItemTypeEnumKey = (typeof noticeIconItemTypeEnum)[keyof typeof noticeIconItemTypeEnum];
-
-export type NoticeIconItemType = NoticeIconItemTypeEnumKey;
-
-export type NoticeIconItem = {
-    /**
-     * @type string,null
-    */
-    avatar?: string | null;
-    /**
-     * @type string,null
-    */
-    datetime?: string | null;
-    /**
-     * @type string,null
-    */
-    description?: string | null;
-    /**
-     * @type string,null
-    */
-    extra?: string | null;
-    /**
-     * @type string,null
-    */
-    id?: string | null;
-    /**
-     * @type string,null
-    */
-    key?: string | null;
-    /**
-     * @type boolean,null
-    */
-    read?: boolean | null;
-    /**
-     * @type string,null
-    */
-    status?: string | null;
-    /**
-     * @type string,null
-    */
-    title?: string | null;
-    type?: (null | NoticeIconItemType);
-};
-
-export type NoticeIconList = {
-    /**
-     * @type array,null
-    */
-    data?: NoticeIconItem[] | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-    /**
-     * @minLength 0
-     * @type integer, int32
-    */
-    total: number;
 };
 
 export const operationSystemEnumEnum = {
@@ -1084,6 +1115,42 @@ export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof ty
  * @description Remote Desk Type Enum
 */
 export type RemoteDeskTypeEnum = RemoteDeskTypeEnumEnumKey;
+
+export type RestResponseServerInfo = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Server information
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Current API version supported by the server
+         * @type integer, int32
+        */
+        api_version: number;
+        /**
+         * @description Indicates whether the system is initialized (e.g., admin password set)
+         * @type boolean
+        */
+        initialized: boolean;
+        /**
+         * @description Startup mode of the server
+         * @type string
+        */
+        startup_mode: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
 
 export type RestResponseSystemInfo = {
     /**
@@ -1273,6 +1340,27 @@ export type RestResponseTelemetryStatus = {
 };
 
 /**
+ * @description Server information
+*/
+export type ServerInfo = {
+    /**
+     * @description Current API version supported by the server
+     * @type integer, int32
+    */
+    api_version: number;
+    /**
+     * @description Indicates whether the system is initialized (e.g., admin password set)
+     * @type boolean
+    */
+    initialized: boolean;
+    /**
+     * @description Startup mode of the server
+     * @type string
+    */
+    startup_mode: string;
+};
+
+/**
  * @description Version information for the API.
 */
 export type VersionInfo = {
@@ -1286,6 +1374,11 @@ export type VersionInfo = {
      * @type integer, int32
     */
     build_number: number;
+    /**
+     * @description Client ID of the server.
+     * @type string,null
+    */
+    client_id?: string | null;
     /**
      * @description The commit hash of the server.
      * @type string
@@ -1770,6 +1863,10 @@ export type UserResponeCurrentUser = {
         /**
          * @type string,null
         */
+        targetSessionId?: string | null;
+        /**
+         * @type string,null
+        */
         title?: string | null;
         /**
          * @minLength 0
@@ -1854,6 +1951,107 @@ export type ChangePasswordMutation = {
     Response: ChangePassword200;
     Request: ChangePasswordMutationRequest;
     Errors: ChangePassword403;
+};
+
+export type ListDeviceCodesQueryParams = {
+    /**
+     * @description Page number
+     * @minLength 0
+     * @type integer | undefined, int64
+    */
+    page?: number;
+    /**
+     * @description Page size
+     * @minLength 0
+     * @type integer | undefined, int64
+    */
+    page_size?: number;
+};
+
+/**
+ * @description List device codes successfully
+*/
+export type ListDeviceCodes200 = any;
+
+export type ListDeviceCodesQueryResponse = ListDeviceCodes200;
+
+export type ListDeviceCodesQuery = {
+    Response: ListDeviceCodes200;
+    QueryParams: ListDeviceCodesQueryParams;
+    Errors: any;
+};
+
+/**
+ * @description Create device code successfully
+*/
+export type CreateDeviceCode200 = any;
+
+export type CreateDeviceCodeMutationRequest = DeviceCodeCreateParams;
+
+export type CreateDeviceCodeMutationResponse = CreateDeviceCode200;
+
+export type CreateDeviceCodeMutation = {
+    Response: CreateDeviceCode200;
+    Request: CreateDeviceCodeMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Batch delete device codes successfully
+*/
+export type BatchDeleteDeviceCodes200 = any;
+
+export type BatchDeleteDeviceCodesMutationRequest = DeviceCodeBatchDeleteParams;
+
+export type BatchDeleteDeviceCodesMutationResponse = BatchDeleteDeviceCodes200;
+
+export type BatchDeleteDeviceCodesMutation = {
+    Response: BatchDeleteDeviceCodes200;
+    Request: BatchDeleteDeviceCodesMutationRequest;
+    Errors: any;
+};
+
+export type UpdateDeviceCodePathParams = {
+    /**
+     * @type integer, int32
+    */
+    id: number;
+};
+
+/**
+ * @description Update device code successfully
+*/
+export type UpdateDeviceCode200 = any;
+
+export type UpdateDeviceCodeMutationRequest = DeviceCodeUpdateParams;
+
+export type UpdateDeviceCodeMutationResponse = UpdateDeviceCode200;
+
+export type UpdateDeviceCodeMutation = {
+    Response: UpdateDeviceCode200;
+    Request: UpdateDeviceCodeMutationRequest;
+    PathParams: UpdateDeviceCodePathParams;
+    Errors: any;
+};
+
+export type DeleteDeviceCodePathParams = {
+    /**
+     * @type integer, int32
+    */
+    id: number;
+};
+
+/**
+ * @description Delete device code successfully
+*/
+export type DeleteDeviceCode200 = any;
+
+export type DeleteDeviceCodeMutationResponse = DeleteDeviceCode200;
+
+export type DeleteDeviceCodeMutation = {
+    Response: DeleteDeviceCode200;
+    PathParams: DeleteDeviceCodePathParams;
+    Errors: any;
 };
 
 /**
@@ -2027,6 +2225,11 @@ export type OpenSignalingHandleQueryParams = {
      * @type string,null
     */
     display_name?: string | null;
+    /**
+     * @description Client ID of the server.
+     * @type string,null
+    */
+    client_id?: string | null;
 };
 
 /**
@@ -2133,6 +2336,26 @@ export type ListTerminalQuery = {
 };
 
 /**
+ * @description System initialized successfully
+*/
+export type InitSystem200 = any;
+
+/**
+ * @description System already initialized
+*/
+export type InitSystem403 = any;
+
+export type InitSystemMutationRequest = InitParams;
+
+export type InitSystemMutationResponse = InitSystem200;
+
+export type InitSystemMutation = {
+    Response: InitSystem200;
+    Request: InitSystemMutationRequest;
+    Errors: InitSystem403;
+};
+
+/**
  * @description Login result
 */
 export type LoginAccount200 = LoginResult;
@@ -2190,20 +2413,15 @@ export type LogoutAccountMutation = {
 };
 
 /**
- * @description Notices
+ * @description Get server information successfully
 */
-export type GetNotices200 = NoticeIconList;
+export type QueryServerInfo200 = RestResponseServerInfo;
 
-/**
- * @description Unauthorized
-*/
-export type GetNotices401 = any;
+export type QueryServerInfoQueryResponse = QueryServerInfo200;
 
-export type GetNoticesQueryResponse = GetNotices200;
-
-export type GetNoticesQuery = {
-    Response: GetNotices200;
-    Errors: GetNotices401;
+export type QueryServerInfoQuery = {
+    Response: QueryServerInfo200;
+    Errors: any;
 };
 
 /**

@@ -1,3 +1,5 @@
+pub mod device;
+pub mod device_code;
 pub mod files;
 pub mod session;
 pub mod signaling;

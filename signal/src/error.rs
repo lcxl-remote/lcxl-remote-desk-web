@@ -1,4 +1,7 @@
-use std::fmt::{Display, Formatter};
+use std::{
+    backtrace::Backtrace,
+    fmt::{Display, Formatter},
+};
 
 use actix_web::ResponseError;
 use desk_utils::{
@@ -12,6 +15,8 @@ pub enum DeskSignalError {
     JsonError(serde_json::Error),
     /// An error occurred while handling WebSocket messages.
     ActixWsClosed(actix_ws::Closed),
+    /// A database error occurred.
+    DbErr(Backtrace, sea_orm::error::DbErr),
     /// A desk signal facade error occurred.
     DeskSignalFacadeError(desk_signal_facade::error::DeskSignalFacadeError),
 
@@ -36,6 +41,7 @@ impl Display for DeskSignalError {
             DeskSignalError::ActixWsClosed(err) => err.fmt(f),
             DeskSignalError::DeskSignalFacadeError(err) => err.fmt(f),
             DeskSignalError::CustomError(err) => err.fmt(f),
+            DeskSignalError::DbErr(backtrace, err) => err.fmt(f),
         }
     }
 }
@@ -48,6 +54,12 @@ impl From<serde_json::Error> for DeskSignalError {
 impl From<actix_ws::Closed> for DeskSignalError {
     fn from(err: actix_ws::Closed) -> Self {
         DeskSignalError::ActixWsClosed(err)
+    }
+}
+
+impl From<sea_orm::error::DbErr> for DeskSignalError {
+    fn from(err: sea_orm::error::DbErr) -> Self {
+        DeskSignalError::DbErr(Backtrace::capture(), err)
     }
 }
 

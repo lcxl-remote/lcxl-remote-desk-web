@@ -33,32 +33,10 @@ pub async fn get_current_user(
     info!("Connection Info: {:?}", req.connection_info());
     if let Some(client_ip_str) = req.connection_info().realip_remote_addr() {
         info!("Client IP: {}", client_ip_str);
-        if let Ok(client_ip) = client_ip_str.parse::<IpAddr>() {
-            info!("Parsed client IP: {:?}", client_ip);
-            let mut loopback = client_ip.is_loopback();
-            if let IpAddr::V6(ipv6) = client_ip {
-                if let Some(ipv4) = ipv6.to_ipv4_mapped() {
-                    info!("Parsed IPv4 from IPv6-mapped address: {:?}", ipv4);
-                    loopback = ipv4.is_loopback();
-                }
-            }
-            if loopback {
-                info!("Client IP is loopback, auto login as admin");
-                // Allow access for loopback IPs
-                let login_user_name = {
-                    let settings = settings.read().await;
-                    settings.user.login_user_name.clone()
-                };
-                let user_info = CurrentUser::new_admin(&login_user_name);
-
-                session.set_current_user(&user_info)?; // Store user information in session
-            }
-        } else {
-            warn!("Failed to parse client IP: {}", client_ip_str);
-        }
     } else {
         warn!("No client IP found in request");
     }
+
     if let Some(current_user) = session.get_current_user()? {
         let user_response = UserRespone::<CurrentUser> {
             data: current_user,

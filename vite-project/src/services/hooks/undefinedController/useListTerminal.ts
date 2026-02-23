@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
+import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listTerminal } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const listTerminalQueryKey = (session_id: ListTerminalPathParams["session_id"]) => [{ url: '/api/desk/terminals/:session_id', params: {session_id:session_id} }] as const
 

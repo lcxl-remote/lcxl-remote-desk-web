@@ -4,6 +4,7 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useNavigate, useSearchParams } from "react-router-dom"
+import { useEffect } from "react"
 import { useTranslation } from "react-i18next"
 import { Loader2, Lock, User } from "lucide-react"
 
@@ -21,16 +22,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { useToast } from "@/hooks/use-toast"
 import { useLoginAccount } from "@/services/hooks/undefinedController/useLoginAccount"
 import { useGetCurrentUser } from "@/services/hooks/undefinedController/useGetCurrentUser"
+import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
 
 const formSchema = z.object({
-    username: z.string().min(1, {
-        message: "Username is required",
-    }),
-    password: z.string().min(1, {
-        message: "Password is required",
-    }),
+    username: z.string().optional(),
+    password: z.string().optional(),
+    deviceCode: z.string().optional(),
     autoLogin: z.boolean().default(true),
     type: z.string().default("account"),
 })
@@ -46,12 +45,24 @@ export default function LoginPage() {
 
     const { mutateAsync: login } = useLoginAccount()
     const { refetch: fetchUserInfo } = useGetCurrentUser()
+    const { data: serverInfoResp, isLoading: isServerInfoLoading } = useQueryServerInfo()
+
+    const serverInfo = serverInfoResp?.data
+
+    useEffect(() => {
+        if (!isServerInfoLoading && serverInfo) {
+            if (!serverInfo.initialized) {
+                navigate("/init")
+            }
+        }
+    }, [serverInfo, isServerInfoLoading, navigate])
 
     const form = useForm<FormValues>({
         resolver: zodResolver(formSchema) as any, // Cast to any to avoid strict type mismatch issues
         defaultValues: {
             username: "",
             password: "",
+            deviceCode: "",
             autoLogin: true,
             type: "account",
         },
@@ -61,8 +72,9 @@ export default function LoginPage() {
         try {
             const response = await login({
                 data: {
-                    username: values.username,
-                    password: values.password,
+                    username: values.type === "account" ? (values.username || "") : "",
+                    password: values.type === "account" ? (values.password || "") : "",
+                    device_code: values.type === "device_code" ? values.deviceCode : undefined,
                     autoLogin: values.autoLogin,
                     type: values.type,
                 }
@@ -74,6 +86,15 @@ export default function LoginPage() {
                     title: t("pages.login.success", "Login successful"),
                 })
                 await fetchUserInfo()
+
+                if (values.type === "device_code") {
+                    const targetSessionId = (response as any).targetSessionId;
+                    if (targetSessionId) {
+                        navigate(`/desk/${targetSessionId}`)
+                        return;
+                    }
+                }
+
                 const redirect = searchParams.get("redirect") || "/"
                 navigate(redirect)
             } else {
@@ -83,11 +104,22 @@ export default function LoginPage() {
                     description: "Login failed with status: " + (response?.status || 'unknown'),
                 })
             }
-        } catch (error) {
+        } catch (error: any) {
+            let errorMsg = error?.message || "Unknown error";
+            if (error?.response?.data?.message) {
+                errorMsg = error.response.data.message;
+            } else if (typeof error?.response?.data === 'string') {
+                errorMsg = error.response.data;
+            }
+
+            if (values.type === "device_code" && error?.response?.status === 403) {
+                errorMsg = t("pages.login.deviceCode.offline", "Device is offline or device code is invalid");
+            }
+
             toast({
                 variant: "destructive",
                 title: t("pages.login.failure", "Login failed"),
-                description: (error as Error).message,
+                description: errorMsg,
             })
         }
     }
@@ -109,11 +141,16 @@ export default function LoginPage() {
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                        <TabsList className="grid w-full grid-cols-2 mb-4">
-                            <TabsTrigger value="account">{t('pages.login.accountLogin.tab', 'Account Login')}</TabsTrigger>
-                            <TabsTrigger value="mobile" disabled>{t('pages.login.phoneLogin.tab', 'Phone Login')}</TabsTrigger>
-                        </TabsList>
+                    <Tabs value={activeTab} onValueChange={(val) => {
+                        setActiveTab(val);
+                        form.setValue("type", val);
+                    }} className="w-full">
+                        {serverInfo && serverInfo.startup_mode !== "desk_server" && (
+                            <TabsList className="grid w-full grid-cols-2 mb-4">
+                                <TabsTrigger value="account">{t('pages.login.accountLogin.tab', 'Account Login')}</TabsTrigger>
+                                <TabsTrigger value="device_code">{t('pages.login.deviceCode.tab', 'Device Code Login')}</TabsTrigger>
+                            </TabsList>
+                        )}
                         <TabsContent value="account">
                             <Form {...form}>
                                 <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
@@ -141,6 +178,40 @@ export default function LoginPage() {
                                                     <div className="relative">
                                                         <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                                                         <Input type="password" placeholder={t('pages.login.password.placeholder', 'Password')} className="pl-9" {...field} />
+                                                    </div>
+                                                </FormControl>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                    <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
+                                        {form.formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                        {t('pages.login.submit', 'Login')}
+                                    </Button>
+                                </form>
+                            </Form>
+                        </TabsContent>
+                        <TabsContent value="device_code">
+                            <Form {...form}>
+                                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+                                    <FormField
+                                        control={form.control}
+                                        name="deviceCode"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormControl>
+                                                    <div className="relative">
+                                                        <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+                                                        <Input
+                                                            placeholder={t('pages.login.deviceCode.placeholder', '6-digit Device Code')}
+                                                            className="pl-9"
+                                                            maxLength={6}
+                                                            {...field}
+                                                            onChange={e => {
+                                                                e.target.value = e.target.value.toUpperCase();
+                                                                field.onChange(e);
+                                                            }}
+                                                        />
                                                     </div>
                                                 </FormControl>
                                                 <FormMessage />

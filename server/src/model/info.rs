@@ -41,6 +41,17 @@ pub struct SystemInfo {
     pub startup_mode: String,
 }
 
+/// Server information
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
+pub struct ServerInfo {
+    /// Startup mode of the server
+    pub startup_mode: String,
+    /// Current API version supported by the server
+    pub api_version: i32,
+    /// Indicates whether the system is initialized (e.g., admin password set)
+    pub initialized: bool,
+}
+
 impl From<&sysinfo::System> for SystemInfo {
     fn from(sys: &sysinfo::System) -> Self {
         let cpus = sys

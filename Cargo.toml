@@ -35,6 +35,11 @@ chrono = { version = "0.4", features = ["serde"] }
 
 utoipa = { version = "5", features = ["actix_extras", "chrono"] }
 utoipa_repr = "0.1"
+utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
+utoipa-actix-web = "0.1"
+utoipa-redoc = { version = "6", features = ["actix-web"] }
+utoipa-rapidoc = { version = "6", features = ["actix-web"] }
+utoipa-scalar = { version = "0.3", features = ["actix-web"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -77,3 +82,12 @@ uuid = "1.20"
 portable-pty = "0.9"
 
 url = "2.5.8"
+
+sea-orm = { version = "2.0.0-rc", features = [
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "macros",
+] }
+sea-orm-migration = "2.0.0-rc"
+
+rand = { version = "0.8.5", features = ["std"] }

@@ -20,8 +20,6 @@ pub enum DeskError {
     // RusqliteError(rusqlite::Error),
     /// A configuration error occurred.
     ConfigError(config::ConfigError),
-    /// A TOML edit error occurred.
-    TomlEditError(toml_edit::TomlError),
     /// A TOML ser error occurred.
     TomlError(toml::ser::Error),
     /// A connection pool error occurred.
@@ -142,7 +140,6 @@ impl Display for DeskError {
             DeskError::IoError(_backtrace, error) => error.fmt(f),
             DeskError::JsonError(error) => error.fmt(f),
             DeskError::ConfigError(error) => error.fmt(f),
-            DeskError::TomlEditError(error) => error.fmt(f),
             DeskError::TomlError(error) => error.fmt(f),
             DeskError::CustomError(error) => error.fmt(f),
             DeskError::AnyhowError(error) => error.fmt(f),
@@ -215,12 +212,6 @@ impl From<rusqlite::Error> for DeskError {
 impl From<config::ConfigError> for DeskError {
     fn from(err: config::ConfigError) -> Self {
         DeskError::ConfigError(err)
-    }
-}
-
-impl From<toml_edit::TomlError> for DeskError {
-    fn from(err: toml_edit::TomlError) -> Self {
-        DeskError::TomlEditError(err)
     }
 }
 

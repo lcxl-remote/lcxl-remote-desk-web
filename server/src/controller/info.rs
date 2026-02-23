@@ -4,8 +4,12 @@ use sysinfo::System;
 
 use crate::{
     error::DeskError,
-    model::{info::SystemInfo, settings::SharedSettings},
+    model::{
+        info::{ServerInfo, SystemInfo},
+        settings::SharedSettings,
+    },
 };
+use desk_server_version::SERVER_API_VERSION;
 
 #[utoipa::path(
     summary = "Get system information",
@@ -36,6 +40,33 @@ pub async fn query_sysinfo(settings: web::Data<SharedSettings>) -> Result<HttpRe
         system_info
     );
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(system_info)))
+}
+
+#[utoipa::path(
+    summary = "Get server information",
+    responses(
+        (status = 200, description = "Get server information successfully", body=RestResponse<ServerInfo>),
+    ),
+)]
+#[get("/api/server_info")]
+pub async fn query_server_info(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, DeskError> {
+    let (startup_mode, initialized) = {
+        let settings = settings.read().await;
+        let mode = settings.args.startup_mode.as_ref().to_string();
+
+        let init = !settings.user.login_password.is_empty();
+        (mode, init)
+    };
+
+    let info = ServerInfo {
+        startup_mode,
+        api_version: SERVER_API_VERSION,
+        initialized,
+    };
+
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))
 }
 
 #[cfg(test)]

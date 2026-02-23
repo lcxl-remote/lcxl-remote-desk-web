@@ -18,6 +18,8 @@ pub struct VersionInfo {
     pub operation_system: OperationSystemEnum,
     /// Display name of the remote desk.
     pub display_name: Option<String>,
+    /// Client ID of the server.
+    pub client_id: Option<String>,
 }
 
 impl VersionInfo {
@@ -27,6 +29,7 @@ impl VersionInfo {
         commit_hash: String,
         remote_desk_type: RemoteDeskTypeEnum,
         display_name: Option<String>,
+        client_id: Option<String>,
     ) -> Self {
         Self {
             api_version,
@@ -35,6 +38,7 @@ impl VersionInfo {
             remote_desk_type,
             operation_system: OperationSystemEnum::default(),
             display_name,
+            client_id,
         }
     }
 }

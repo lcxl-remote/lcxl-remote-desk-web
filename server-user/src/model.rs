@@ -33,6 +33,9 @@ pub struct CurrentUser {
     pub unread_count: Option<u32>,
     pub country: Option<String>,
     pub access: Option<String>,
+    #[serde(rename(serialize = "targetSessionId"))]
+    #[schema(rename = "targetSessionId")]
+    pub target_session_id: Option<String>,
     pub geographic: Option<Geographic>,
     pub address: Option<String>,
     pub phone: Option<String>,
@@ -53,6 +56,7 @@ impl CurrentUser {
             unread_count: None,
             country: None,
             access: Some(USER_ADMIN.to_string()),
+            target_session_id: None,
             geographic: None,
             address: None,
             phone: None,
