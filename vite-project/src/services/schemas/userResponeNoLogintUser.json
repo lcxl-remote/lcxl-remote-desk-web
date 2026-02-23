@@ -1,0 +1,1 @@
+{"type":"object","required":["data","errorCode","errorMessage","success"],"properties":{"data":{"type":"object","required":["isLogin"],"properties":{"isLogin":{"type":"boolean"}}},"errorCode":{"type":"integer","format":"int32"},"errorMessage":{"type":"string"},"success":{"type":"boolean"}},"x-readme-ref-name":"UserRespone_NoLogintUser"}

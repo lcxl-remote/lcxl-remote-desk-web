@@ -1,0 +1,1 @@
+{"type":"object","description":"Login result","required":["status","type","currentAuthority","api_version"],"properties":{"api_version":{"type":"integer","format":"int32","description":"return api version of signal/desk/manage server"},"currentAuthority":{"type":"string"},"status":{"type":"string"},"type":{"type":"string"}},"x-readme-ref-name":"LoginResult"}

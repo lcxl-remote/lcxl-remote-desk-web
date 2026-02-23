@@ -4,6 +4,7 @@ use utoipa::ToSchema;
 use crate::error::DeskError;
 
 pub const DATA_CHANNEL_LABEL_MOUSE_EVENT: &str = "mouse_event";
+pub const DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT: &str = "mouse_move_event";
 pub const DATA_CHANNEL_LABEL_KEYBOARD_EVENT: &str = "keyboard_event";
 pub const DATA_CHANNEL_LABEL_CLIPBOARD_EVENT: &str = "clipboard_event";
 pub const DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT: &str = "file_transfer_event";
@@ -41,6 +42,8 @@ pub struct MouseEventData {
     pub delta_x: f64,
     /// The distance that the mouse wheel has been rotated around the Y axis (if applicable) when the mouse event was fired.
     pub delta_y: f64,
+    /// Sequence number to prevent unordered packets (UDP-like channel) from overwriting newer states.
+    pub sequence_number: Option<u64>,
 }
 
 /// Keyboard event data structure

@@ -79,7 +79,9 @@ impl FileInfo {
         let file_name = if let Some(file_name) = path.file_name() {
             file_name.to_string_lossy().to_string()
         } else {
-            "".to_string()
+            // For paths like "C:\" where file_name() returns None,
+            // use the full path string as the display name
+            path.to_string_lossy().to_string()
         };
 
         let metadata = path.metadata();
@@ -106,23 +108,25 @@ impl FileInfo {
                 use chrono::{DateTime, Local};
                 match metadata.accessed() {
                     Ok(accessed) => file_info.accessed = DateTime::<Local>::from(accessed),
-                    Err(err) => file_info
-                        .add_err_msg(format!("Failed to get file accessed time: {:?}", err)),
+                    Err(err) => {
+                        file_info.add_err_msg(format!("Failed to get file accessed time: {}", err))
+                    }
                 }
                 match metadata.created() {
                     Ok(created) => file_info.created = DateTime::<Local>::from(created),
                     Err(err) => {
-                        file_info.add_err_msg(format!("Failed to get file created time: {:?}", err))
+                        file_info.add_err_msg(format!("Failed to get file created time: {}", err))
                     }
                 }
                 match metadata.modified() {
                     Ok(modified) => file_info.modified = DateTime::<Local>::from(modified),
-                    Err(err) => file_info
-                        .add_err_msg(format!("Failed to get file modified time: {:?}", err)),
+                    Err(err) => {
+                        file_info.add_err_msg(format!("Failed to get file modified time: {}", err))
+                    }
                 }
             }
             Err(err) => {
-                file_info.err_msg = Some(format!("Failed to get file metadata: {:?}", err));
+                file_info.err_msg = Some(format!("Failed to get file metadata: {}", err));
             }
         };
         Ok(file_info)

@@ -1,0 +1,1 @@
+{"type":"object","required":["rows","cols"],"properties":{"cols":{"type":"integer","format":"int32","minimum":0},"rows":{"type":"integer","format":"int32","minimum":0}},"x-readme-ref-name":"TerminalResizeData"}

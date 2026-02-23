@@ -75,8 +75,11 @@ pub enum SignalingType {
     /// Terminal closed
     TerminalClosed = 10014,
 
-    Error = 10000000,
-    Unknown = 10000001,
+    /// Error
+    Error = -1,
+    /// Unrecognized signaling type will map to this
+    #[serde(other)]
+    Unknown = -100,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
@@ -280,7 +283,7 @@ impl SignalingModel {
         } else {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::BLANK_SIGNALING_DATA,
-                &format!("Data can't be none, signal type: {:?}", self.signaling_type),
+                &format!("Data can't be none, signal type: {}", self.signaling_type),
             );
         }
     }
@@ -296,7 +299,7 @@ impl SignalingModel {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 &format!(
-                    "From session id can't be none, signal type: {:?}",
+                    "From session id can't be none, signal type: {}",
                     self.signaling_type
                 ),
             );
@@ -310,7 +313,7 @@ impl SignalingModel {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 &format!(
-                    "To session id can't be none, signal type: {:?}",
+                    "To session id can't be none, signal type: {}",
                     self.signaling_type
                 ),
             );

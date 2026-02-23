@@ -1,0 +1,1 @@
+{"type":"object","description":"VPX encoder settings","properties":{"bps":{"type":"integer","format":"int32","description":"Bitrate in bps (bits per second), default is 5,000,000 bps (5 Mbps)","default":5000000,"minimum":0}},"x-readme-ref-name":"VpxEncoderSettings"}

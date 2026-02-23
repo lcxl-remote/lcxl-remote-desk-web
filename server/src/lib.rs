@@ -39,7 +39,7 @@ use desk_signal::{
 };
 use desk_turn::service::startup_turn_server;
 use desk_utils::{
-    error::DeskErrorCode, logs::init_logs_by_str, network::check_ipv6_available, rest::RestResponse,
+    error::DeskErrorCode, network::check_ipv6_available, rest::RestResponse,
 };
 use error::DeskError;
 use log::{error, info, warn};
@@ -130,7 +130,7 @@ pub async fn run() -> Result<Server, DeskError> {
         let settings_clone = shared_settings.clone();
         actix_web::rt::spawn(async move {
             if let Err(e) = start_desk_session(settings_clone).await {
-                error!("Desk session error: {:?}", e);
+                error!("Desk session error: {}", e);
             }
         });
     }
@@ -271,7 +271,7 @@ pub async fn run() -> Result<Server, DeskError> {
             settings.system.port
         ));
         if let Err(e) = open_result {
-            warn!("Failed to open web browser: {:?}", e);
+            warn!("Failed to open web browser: {}", e);
         }
     }
     Ok(server)

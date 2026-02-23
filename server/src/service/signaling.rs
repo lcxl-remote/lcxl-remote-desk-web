@@ -40,6 +40,7 @@ use webrtc::{
         APIBuilder,
         interceptor_registry::register_default_interceptors,
         media_engine::{MIME_TYPE_H264, MediaEngine},
+        setting_engine::{SctpMaxMessageSize, SettingEngine},
     },
     ice_transport::{
         ice_connection_state::RTCIceConnectionState, ice_gatherer_state::RTCIceGathererState,
@@ -128,7 +129,7 @@ impl PeerSignalingSender for DeskSessionSender {
             .map_err(|e| {
                 DeskSignalFacadeError::CustomError(CustomDeskError::new(
                     DeskErrorCode::SYSTEM_ERROR,
-                    &format!("Failed to send signaling message: {:?}", e),
+                    &format!("Failed to send signaling message: {}", e),
                 ))
             })?;
         Ok(())
@@ -156,7 +157,7 @@ impl PeerSignalingSender for DeskSessionSender {
             .map_err(|e| {
                 DeskSignalFacadeError::CustomError(CustomDeskError::new(
                     DeskErrorCode::SYSTEM_ERROR,
-                    &format!("Failed to send error message: {:?}", e),
+                    &format!("Failed to send error message: {}", e),
                 ))
             })?;
         Ok(())
@@ -194,14 +195,14 @@ async fn handle_incoming_ws_message(
                 let text_str = match std::str::from_utf8(&text) {
                     Ok(s) => s,
                     Err(e) => {
-                        error!("Invalid UTF-8 text: {:?}", e);
+                        error!("Invalid UTF-8 text: {}", e);
                         return Ok(false);
                     }
                 };
                 let signaling_model = serde_json::from_str::<SignalingModel>(text_str)?;
                 if let Err(e) = desk_session.handle_message(&signaling_model).await {
                     log::warn!(
-                        "Error handling message, request_id: {}, signaling_type: {}, from_session_id: {:?}, to_session_id: {:?}, e: {:?}",
+                        "Error handling message, request_id: {}, signaling_type: {}, from_session_id: {:?}, to_session_id: {:?}, e: {}",
                         signaling_model.request_id,
                         signaling_model.signaling_type,
                         signaling_model.from_session_id,
@@ -216,14 +217,14 @@ async fn handle_incoming_ws_message(
                             signaling_model.signaling_type.into(),
                             signaling_model.from_session_id.clone(),
                             DeskErrorCode::SYSTEM_ERROR,
-                            &format!("Error handling message: {:?}", e),
+                            &format!("Error handling message: {}", e),
                         )
                         .await?;
                 }
             }
             awc::ws::Frame::Binary(bin) => {
                 if let Err(e) = desk_session.binary(bin).await {
-                    error!("Error handling binary: {:?}", e);
+                    error!("Error handling binary: {}", e);
                 }
             }
             awc::ws::Frame::Ping(msg) => {
@@ -237,7 +238,7 @@ async fn handle_incoming_ws_message(
             awc::ws::Frame::Continuation(_) => {}
         },
         Some(Err(e)) => {
-            error!("WS error: {:?}", e);
+            error!("WS error: {}", e);
             return Ok(true);
         }
         None => {
@@ -256,25 +257,25 @@ where
     match msg {
         Some(DeskSessionMessage::Text(text)) => {
             if let Err(e) = sink.send(awc::ws::Message::Text(text)).await {
-                error!("Failed to send text: {:?}", e);
+                error!("Failed to send text: {}", e);
                 return true;
             }
         }
         Some(DeskSessionMessage::Binary(bin)) => {
             if let Err(e) = sink.send(awc::ws::Message::Binary(bin)).await {
-                error!("Failed to send binary: {:?}", e);
+                error!("Failed to send binary: {}", e);
                 return true;
             }
         }
         Some(DeskSessionMessage::Ping(msg)) => {
             if let Err(e) = sink.send(awc::ws::Message::Ping(msg)).await {
-                error!("Failed to send ping: {:?}", e);
+                error!("Failed to send ping: {}", e);
                 return true;
             }
         }
         Some(DeskSessionMessage::Pong(msg)) => {
             if let Err(e) = sink.send(awc::ws::Message::Pong(msg)).await {
-                error!("Failed to send pong: {:?}", e);
+                error!("Failed to send pong: {}", e);
                 return true;
             }
         }
@@ -371,14 +372,14 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         let mut login_response = match client.post(&login_url).send_json(&login_params).await {
             Ok(res) => res,
             Err(e) => {
-                error!("Failed to login: {:?}", e);
+                error!("Failed to login: {}", e);
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
 
         if !login_response.status().is_success() {
-            error!("Login failed: {:?}", login_response.status());
+            error!("Login failed: {}", login_response.status());
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
@@ -434,7 +435,7 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to init desk session: {:?}", e);
+                error!("Failed to init desk session: {}", e);
                 break Ok(());
             }
         };
@@ -458,7 +459,7 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         info!("Desk session ended, cleaning up...");
 
         if let Err(e) = desk_session.shutdown().await {
-            error!("Error shutdown desk session: {:?}", e);
+            error!("Error shutdown desk session: {}", e);
         }
 
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -487,20 +488,6 @@ impl PeerConnection {
     }
 }
 
-impl Drop for PeerConnection {
-    fn drop(&mut self) {
-        info!("Begin to shutdown capture screen&audio runtime");
-        if let Some(capture_screen_thread) = self.capture_screen_thread.take() {
-            capture_screen_thread.join().unwrap();
-        }
-        if let Some(capture_audio_thread) = self.capture_audio_thread.take() {
-            capture_audio_thread.join().unwrap();
-        }
-
-        info!("End to shutdown capture screen&audio runtime");
-    }
-}
-
 /// Signaling context for handling WebSocket messages.
 pub struct DeskSession {
     pub settings: web::Data<SharedSettings>,
@@ -512,6 +499,39 @@ pub struct DeskSession {
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
     /// Terminal map: from_session_id -> RunningTerminal
     pub terminal_map: HashMap<String, RunningTerminal>,
+}
+
+enum ConnectionStateChangeResult {
+    NoChange,
+    Exit,
+    UpdateSettings(DeskSettings),
+}
+
+fn handle_connection_state_change(
+    state: &WebRTConnectionState,
+    task_name: &str,
+) -> ConnectionStateChangeResult {
+    match state {
+        WebRTConnectionState::Init => {
+            log::warn!(
+                "{} current state is Init, it should be happened?",
+                task_name
+            );
+            ConnectionStateChangeResult::NoChange
+        }
+        WebRTConnectionState::Connected => {
+            log::warn!("{}: RTC is connected again?", task_name);
+            ConnectionStateChangeResult::NoChange
+        }
+        WebRTConnectionState::UpdateSettings(new_desk_setting) => {
+            log::info!("{} update settings {:?}", task_name, new_desk_setting);
+            ConnectionStateChangeResult::UpdateSettings(new_desk_setting.clone())
+        }
+        _ => {
+            log::error!("{} unexpected state {:?}, exit", task_name, state);
+            ConnectionStateChangeResult::Exit
+        }
+    }
 }
 
 impl DeskSession {
@@ -590,7 +610,6 @@ impl DeskSession {
         // new rtc_peer_connection
         // Create a MediaEngine object to configure the supported codec
         let mut m = MediaEngine::default();
-
         m.register_default_codecs()?;
 
         let mut registry = Registry::new();
@@ -598,8 +617,14 @@ impl DeskSession {
         // Use the default set of Interceptors
         registry = register_default_interceptors(registry, &mut m)?;
 
+        // Create the SettingEngine
+        let mut setting_engine = SettingEngine::default();
+        // Allow unbounded SCTP message size to improve throughput on localhost
+        setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
+
         // Create the API object with the MediaEngine
         let api = APIBuilder::new()
+            .with_setting_engine(setting_engine)
             .with_media_engine(m)
             .with_interceptor_registry(registry)
             .build();
@@ -675,6 +700,8 @@ impl DeskSession {
     /// Starts the WebRTC connection
     pub async fn start_webrtc(
         &mut self,
+        request_id: &str,
+        from_session_id: &str,
         offer_model: &OfferModel,
         peer_connection: &mut PeerConnection,
     ) -> Result<(), DeskError> {
@@ -682,142 +709,162 @@ impl DeskSession {
             tokio::sync::watch::channel(WebRTConnectionState::Init);
         let peer_state_change_sender = ice_state_change_sender.clone();
         let update_setting_sender = ice_state_change_sender.clone();
-        let video_state_receiver = ice_connection_state_rx.clone();
-        let audio_state_receiver = ice_connection_state_rx.clone();
-        let video_mime_type = match offer_model.desk_settings.get_video_encoder_type()? {
-            VideoEncoderType::H264 => MIME_TYPE_H264,
-            VideoEncoderType::VP8 => MIME_TYPE_VP8,
-            VideoEncoderType::VP9 => MIME_TYPE_VP9,
-        };
-        let video_track = Arc::new(TrackLocalStaticSample::new(
-            RTCRtpCodecCapability {
-                mime_type: video_mime_type.to_owned(),
-                ..Default::default()
-            },
-            "video".to_owned(),
-            "webrtc-rs".to_owned(),
-        ));
-        // Add this newly created track to the PeerConnection
-        let rtp_sender = peer_connection
-            .rtc_peer_connection
-            .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
-            .await?;
 
-        // Read incoming RTCP packets
-        // Before these packets are returned they are processed by interceptors. For things
-        // like NACK this needs to be called.
-        tokio::spawn(async move {
-            let mut rtcp_buf = vec![0u8; 1500];
-            log::info!("Start to read incoming video RTCP packets");
-            while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
-            log::info!("Finished to read incoming video RTCP packets");
-            Result::<(), DeskError>::Ok(())
-        });
+        // Check if the SDP offer contains video/audio media sections.
+        // If not, it's a data-only connection (e.g., file transfer) — skip media tracks.
+        let sdp_str = &offer_model.offer.sdp;
+        let has_video = sdp_str.contains("m=video");
+        let has_audio = sdp_str.contains("m=audio");
 
-        let audio_track = Arc::new(TrackLocalStaticSample::new(
-            RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_OPUS.to_owned(),
-                channels: 2,
-                ..Default::default()
-            },
-            "audio".to_owned(),
-            "webrtc-rs".to_owned(),
-        ));
+        if has_video || has_audio {
+            log::info!("SDP offer contains media tracks, setting up video/audio capture");
+            let video_state_receiver = ice_connection_state_rx.clone();
+            let audio_state_receiver = ice_connection_state_rx.clone();
+            let video_mime_type = match offer_model.desk_settings.get_video_encoder_type()? {
+                VideoEncoderType::H264 => MIME_TYPE_H264,
+                VideoEncoderType::VP8 => MIME_TYPE_VP8,
+                VideoEncoderType::VP9 => MIME_TYPE_VP9,
+            };
+            let video_track = Arc::new(TrackLocalStaticSample::new(
+                RTCRtpCodecCapability {
+                    mime_type: video_mime_type.to_owned(),
+                    ..Default::default()
+                },
+                "video".to_owned(),
+                "webrtc-rs".to_owned(),
+            ));
+            // Add this newly created track to the PeerConnection
+            let rtp_sender = peer_connection
+                .rtc_peer_connection
+                .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
+                .await?;
 
-        // Add this newly created track to the PeerConnection
-        let rtp_sender = peer_connection
-            .rtc_peer_connection
-            .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal + Send + Sync>)
-            .await?;
-        // Read incoming RTCP packets
-        // Before these packets are returned they are processed by interceptors. For things
-        // like NACK this needs to be called.
-        tokio::spawn(async move {
-            let mut rtcp_buf = vec![0u8; 1500];
-            log::info!("Start to read incoming audio RTCP packets");
-            while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
-            log::info!("Finished to read incoming audio RTCP packets");
-            Result::<(), DeskError>::Ok(())
-        });
-
-        let _session_for_video = self.session.clone();
-
-        let local_settings = self.settings.read().await.clone();
-
-        // Spawn a blocking task to capture screen and send video
-        let desk_settings = offer_model.desk_settings.clone();
-        let signaling_state_for_screen = peer_connection.signaling_state.clone();
-
-        let capture_screen_thread = std::thread::spawn(move || {
-            let local = LocalSet::new();
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            local.spawn_local(async move {
-                let result = DeskSession::capture_screen_task(
-                    signaling_state_for_screen,
-                    desk_settings,
-                    video_state_receiver,
-                    video_track,
-                )
-                .await;
-
-                if let Err(error) = result {
-                    log::error!("Capture screen task failed, error: {:?}", error);
-                    // session_for_video.close(); // TODO: Implement close
-                    return Err(error);
-                }
-                log::info!("Capture screen task completed successfully");
-                return result;
+            // Read incoming RTCP packets
+            // Before these packets are returned they are processed by interceptors. For things
+            // like NACK this needs to be called.
+            tokio::spawn(async move {
+                let mut rtcp_buf = vec![0u8; 1500];
+                log::info!("Start to read incoming video RTCP packets");
+                while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
+                log::info!("Finished to read incoming video RTCP packets");
+                Result::<(), DeskError>::Ok(())
             });
 
-            // This will return once all senders are dropped and all
-            // spawned tasks have returned.
-            rt.block_on(local);
-        });
-        peer_connection.capture_screen_thread = Some(capture_screen_thread);
+            let audio_track = Arc::new(TrackLocalStaticSample::new(
+                RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_OPUS.to_owned(),
+                    channels: 2,
+                    ..Default::default()
+                },
+                "audio".to_owned(),
+                "webrtc-rs".to_owned(),
+            ));
 
-        let _session_for_audio = self.session.clone();
+            // Add this newly created track to the PeerConnection
+            let rtp_sender = peer_connection
+                .rtc_peer_connection
+                .add_track(Arc::clone(&audio_track) as Arc<dyn TrackLocal + Send + Sync>)
+                .await?;
+            // Read incoming RTCP packets
+            // Before these packets are returned they are processed by interceptors. For things
+            // like NACK this needs to be called.
+            tokio::spawn(async move {
+                let mut rtcp_buf = vec![0u8; 1500];
+                log::info!("Start to read incoming audio RTCP packets");
+                while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
+                log::info!("Finished to read incoming audio RTCP packets");
+                Result::<(), DeskError>::Ok(())
+            });
 
-        let audio_settings = local_settings.clone();
-        let audio_device = offer_model.desk_settings.audio_device.clone();
-        if let Some(audio_device) = audio_device {
-            log::info!("Start to capture audio with device: {:?}", audio_device);
+            let _session_for_video = self.session.clone();
 
-            let capture_audio_thread = std::thread::spawn(move || {
-                let local = LocalSet::new();
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
+            let local_settings = self.settings.read().await.clone();
 
-                local.spawn_local(async move {
-                    let result = DeskSession::capture_audio_task(
-                        audio_settings.desk,
-                        audio_state_receiver,
-                        audio_track,
-                    )
-                    .await;
+            // Spawn a blocking task to capture screen and send video
+            let desk_settings = offer_model.desk_settings.clone();
+            let signaling_state_for_screen = peer_connection.signaling_state.clone();
 
-                    if let Err(error) = result {
-                        log::error!("Capture audio task failed, error: {:?}", error);
-                        // session_for_audio.close(); // TODO: Implement close
-                        return Err(error);
-                    }
-                    log::info!("Capture audio task completed");
-                    return result;
+            if peer_connection.capture_screen_thread.is_none() {
+                let capture_screen_thread = std::thread::spawn(move || {
+                    let local = LocalSet::new();
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+
+                    local.spawn_local(async move {
+                        let result = DeskSession::capture_screen_task(
+                            signaling_state_for_screen,
+                            desk_settings,
+                            video_state_receiver,
+                            video_track,
+                        )
+                        .await;
+
+                        if let Err(error) = result {
+                            log::error!("Capture screen task failed, error: {}", error);
+                            // session_for_video.close(); // TODO: Implement close
+                            return Err(error);
+                        }
+                        log::info!("Capture screen task completed successfully");
+                        return result;
+                    });
+
+                    // This will return once all senders are dropped and all
+                    // spawned tasks have returned.
+                    rt.block_on(local);
                 });
+                peer_connection.capture_screen_thread = Some(capture_screen_thread);
+            } else {
+                log::info!("Screen capture thread already exists, skipping creation");
+            }
 
-                // This will return once all senders are dropped and all
-                // spawned tasks have returned.
-                rt.block_on(local);
-            });
+            let _session_for_audio = self.session.clone();
 
-            peer_connection.capture_audio_thread = Some(capture_audio_thread);
+            let audio_settings = local_settings.clone();
+            let audio_device = offer_model.desk_settings.audio_device.clone();
+            if let Some(audio_device) = audio_device {
+                log::info!("Start to capture audio with device: {:?}", audio_device);
+
+                if peer_connection.capture_audio_thread.is_none() {
+                    let capture_audio_thread = std::thread::spawn(move || {
+                        let local = LocalSet::new();
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .unwrap();
+
+                        local.spawn_local(async move {
+                            let result = DeskSession::capture_audio_task(
+                                audio_settings.desk,
+                                audio_state_receiver,
+                                audio_track,
+                            )
+                            .await;
+
+                            if let Err(error) = result {
+                                log::error!("Capture audio task failed, error: {}", error);
+                                // session_for_audio.close(); // TODO: Implement close
+                                return Err(error);
+                            }
+                            log::info!("Capture audio task completed");
+                            return result;
+                        });
+
+                        // This will return once all senders are dropped and all
+                        // spawned tasks have returned.
+                        rt.block_on(local);
+                    });
+
+                    peer_connection.capture_audio_thread = Some(capture_audio_thread);
+                } else {
+                    log::info!("Audio capture thread already exists, skipping creation");
+                }
+            } else {
+                log::info!("Will not capture audio because no device is selected");
+            }
         } else {
-            log::info!("Will not capture audio because no device is selected");
+            log::info!("SDP offer is data-only (no video/audio), skipping media track setup");
         }
 
         // Set the handler for ICE connection state
@@ -830,7 +877,7 @@ impl DeskSession {
                     let state = WebRTConnectionState::from(&connection_state);
                     if state != WebRTConnectionState::Init {
                         if let Err(error) = ice_state_change_sender.send(state) {
-                            log::error!("Failed to send connection state: {:?}", error);
+                            log::error!("Failed to send connection state: {}", error);
                         }
                     }
 
@@ -847,7 +894,7 @@ impl DeskSession {
                 let state = WebRTConnectionState::from(&s);
                 if state == WebRTConnectionState::Closed {
                     if let Err(error) = peer_state_change_sender.send(state) {
-                        log::error!("Failed to send connection state: {:?}", error);
+                        log::error!("Failed to send connection state: {}", error);
                     }
                 }
 
@@ -861,6 +908,41 @@ impl DeskSession {
             .on_ice_gathering_state_change(Box::new(move |s: RTCIceGathererState| {
                 info!("ICE gathering state has changed: {s}");
                 Box::pin(async {})
+            }));
+
+        // Set the handler for ICE candidate
+        let mut session_for_candidate = self.session.clone();
+        let request_id_for_candidate = request_id.to_string();
+        let from_session_id_for_candidate = from_session_id.to_string();
+
+        use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+        peer_connection
+            .rtc_peer_connection
+            .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
+                let mut session_sender = session_for_candidate.clone();
+                let request_id = request_id_for_candidate.clone();
+                let from_session_id = from_session_id_for_candidate.clone();
+
+                Box::pin(async move {
+                    if let Some(candidate) = c {
+                        // send via signaling
+                        match candidate.to_json() {
+                            Ok(json) => {
+                                let _ = session_sender
+                                    .send_to_peer(
+                                        &request_id,
+                                        SignalingType::Canid,
+                                        &from_session_id,
+                                        json,
+                                    )
+                                    .await;
+                            }
+                            Err(e) => {
+                                log::warn!("Failed to get json from candidate: {}", e);
+                            }
+                        }
+                    }
+                })
             }));
 
         // Register data channel creation handling
@@ -877,7 +959,7 @@ impl DeskSession {
                 Box::pin(async move {
                     let result = handle_data_channel_event(signaling_state, d.clone()).await;
                     if let Err(error) = result {
-                        log::error!("Failed to handle data channel event: {:?}", error);
+                        log::error!("Failed to handle data channel event: {}", error);
                     }
                 })
             }));
@@ -893,9 +975,13 @@ impl DeskSession {
             info!("Signaling session ended, result={:?}", result);
         }
         // shutdown terminal
-        // shutdown terminal
         for terminal in self.terminal_map.into_values() {
-            if let Ok(mut child) = terminal.child.lock() {
+            let child_arc = terminal.child.clone();
+            drop(terminal);
+            if let Ok(mut child) = child_arc.lock() {
+                if let Some(pid) = child.process_id() {
+                    force_kill_terminal_process(pid);
+                }
                 let result = child.kill();
                 info!("Terminal session ended, result={:?}", result);
             }
@@ -961,28 +1047,20 @@ impl DeskSession {
             // check if the connection is still alive
             tokio::select! {
              _ = ticker.tick() => {},
-             _ = connection_state_rx.changed() => {
+             res = connection_state_rx.changed() => {
+                if let Err(err) = res {
+                    log::info!("connection_state_tx dropped, err={}, exit capture screen task", err);
+                    break;
+                }
                 let state = connection_state_rx.borrow_and_update().clone();
-                match state {
-                    WebRTConnectionState::Init => {
-                        log::warn!("current state is {}, it should be happened?", state);
-                    },
-                    WebRTConnectionState::Connected => {
-                        log::warn!("capture_screen_task: RTC is connected again?");
-
-                    },
-                    WebRTConnectionState::UpdateSettings(new_desk_setting)=> {
-                        log::info!("update settings {:?}", new_desk_setting);
-                        // update desk settings with new values
-                        desk_settings = new_desk_setting;
-                        // update ticker interval based on new settings
+                match handle_connection_state_change(&state, "capture_screen_task") {
+                    ConnectionStateChangeResult::Exit => break,
+                    ConnectionStateChangeResult::UpdateSettings(new_setting) => {
+                        desk_settings = new_setting;
                         ticker = tokio::time::interval(desk_settings.get_duration_by_video_fps());
                         image_capture_type = capture.get_capture_type().into();
                     },
-                    _ => {
-                        log::error!("Unexcepted state {}, exit to capture screen", state);
-                        break;
-                    },
+                    ConnectionStateChangeResult::NoChange => {},
                 }
              },
             }
@@ -1006,7 +1084,7 @@ impl DeskSession {
                         log::error!("Failed to get nal info, custom error={}", custom_error);
                         continue;
                     }
-                    log::error!("Failed to get nal info, error={:?}", err);
+                    log::error!("Failed to get nal info, error={}", err);
                     continue;
                 }
             };
@@ -1078,22 +1156,18 @@ impl DeskSession {
             // check if the connection is still alive
             tokio::select! {
              _ = ticker.tick() => {},
-             _ = connection_state_rx.changed() => {
+             res = connection_state_rx.changed() => {
+                if let Err(err) = res {
+                    log::info!("connection_state_tx dropped, err={}, exit capture audio task", err);
+                    break;
+                }
                 let state = connection_state_rx.borrow_and_update().clone();
-                match state {
-                    WebRTConnectionState::Init => {
-                        log::warn!("current state is {}, it should be happened?", state);
+                match handle_connection_state_change(&state, "capture_audio_task") {
+                    ConnectionStateChangeResult::Exit => break,
+                    ConnectionStateChangeResult::UpdateSettings(_new_setting) => {
+                        // TODO: 暂时无音频配置更新
                     },
-                    WebRTConnectionState::Connected => {
-                        log::warn!("capture_audio_task: RTC is connected again?");
-                    },
-                    WebRTConnectionState::UpdateSettings(desk_setting)=> {
-                        log::info!("update settings {:?}", desk_setting);
-                    },
-                    _ => {
-                        log::error!("Unexcepted state {}, exit to capture audio", state);
-                        break;
-                    },
+                    ConnectionStateChangeResult::NoChange => {},
                 }
              },
             }
@@ -1102,8 +1176,8 @@ impl DeskSession {
                 let start = Instant::now();
                 //let buffer = opus_audio_capture.get_buffer()?;
                 let result = capture.get_buffer();
-                if result.is_err() {
-                    if let Err(DeskError::CustomError(ref err)) = result {
+                if let Err(error) = &result {
+                    if let DeskError::CustomError(err) = error {
                         if err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
                             // recreate audio capture
                             log::warn!("Failed to get audio buffer, recreate audio capture");
@@ -1112,7 +1186,7 @@ impl DeskSession {
                             continue;
                         }
                     }
-                    log::error!("Failed to get audio buffer, error: {:?}", result.err());
+                    log::error!("Failed to get audio buffer, error: {}", error);
                     break;
                 }
 
@@ -1162,7 +1236,24 @@ impl DeskSession {
                 self.handle_offer(&signaling_model).await?;
             }
             SignalingType::Answer => {}
-            SignalingType::Canid => {}
+            SignalingType::Canid => {
+                let from_session_id = signaling_model.check_and_get_from_session_id()?;
+                let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
+
+                use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+                if let Some(candidate_init) =
+                    signaling_model.get_data_with_type::<RTCIceCandidateInit>()?
+                {
+                    let peer_connection = rtc_peer_connection.read().await;
+                    if let Err(e) = peer_connection
+                        .rtc_peer_connection
+                        .add_ice_candidate(candidate_init)
+                        .await
+                    {
+                        log::warn!("Failed to add ice candidate: {}", e);
+                    }
+                }
+            }
             SignalingType::UpdateDeskSettings => {
                 self.handle_update_desk_settings(&signaling_model).await?;
             }
@@ -1215,10 +1306,7 @@ impl DeskSession {
             }
              */
             _ => {
-                error!(
-                    "Unknown signaling type: {:?}",
-                    signaling_model.signaling_type
-                );
+                error!("Unknown signaling type: {}", signaling_model.signaling_type);
 
                 self.session
                     .send_error(
@@ -1227,7 +1315,7 @@ impl DeskSession {
                         signaling_model.from_session_id.clone(),
                         DeskErrorCode::UNKNOWN_SIGNALING_TYPE,
                         &format!(
-                            "Failed to handle signaling type: {:?}",
+                            "Failed to handle signaling type: {}",
                             signaling_model.signaling_type
                         ),
                     )
@@ -1260,7 +1348,13 @@ impl DeskSession {
         // start webrtc first
         let mut rwlock_peer_connection = rtc_peer_connection.write().await;
         let peer_connection = rwlock_peer_connection.deref_mut();
-        self.start_webrtc(&offer_model, peer_connection).await?;
+        self.start_webrtc(
+            &signaling_model.request_id,
+            &from_session_id,
+            &offer_model,
+            peer_connection,
+        )
+        .await?;
         // Set the remote SessionDescription
         peer_connection
             .rtc_peer_connection
@@ -1270,18 +1364,11 @@ impl DeskSession {
             .rtc_peer_connection
             .create_answer(None)
             .await?;
-        let mut gather_complete = peer_connection
-            .rtc_peer_connection
-            .gathering_complete_promise()
-            .await;
 
         peer_connection
             .rtc_peer_connection
             .set_local_description(answer)
             .await?;
-
-        // wait for ice gathering complete
-        let _ = gather_complete.recv().await;
 
         if let Some(local_desc) = peer_connection
             .rtc_peer_connection
@@ -1312,7 +1399,7 @@ impl DeskSession {
         // notify the new desk settings to the capture screen task
         if let Some(sender) = &self.update_setting_sender {
             if let Err(e) = sender.send(WebRTConnectionState::UpdateSettings(desk_settings)) {
-                error!("Failed to send update settings: {:?}", e);
+                error!("Failed to send update settings: {}", e);
             }
         }
 
@@ -1326,22 +1413,43 @@ impl DeskSession {
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
         let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
 
-        let _ = signaling_model.get_data::<SignalRequestControlData>()?;
+        let control_data = signaling_model.get_data::<SignalRequestControlData>()?;
+        log::info!(
+            "Received RequireControl signaling from {}, control_data: {:?}",
+            from_session_id,
+            control_data
+        );
 
-        // auto accept handle request control
         let peer_connection = rtc_peer_connection.read().await;
         let mut signaling_state = peer_connection.signaling_state.write().await;
-        signaling_state.accept_control = true;
+
+        let reply_type = if control_data.accept {
+            signaling_state.accept_control = true;
+            log::info!(
+                "Auto accepting control request from {}, sending AcceptControl signaling",
+                from_session_id
+            );
+            SignalingType::AcceptControl
+        } else {
+            signaling_state.accept_control = false;
+            log::info!(
+                "Releasing control request from {}, sending CloseControl signaling",
+                from_session_id
+            );
+            SignalingType::CloseControl
+        };
+
+        self.session
+            .send_to_peer(
+                &signaling_model.request_id,
+                reply_type,
+                &from_session_id,
+                (),
+            )
+            .await?;
 
         Ok(())
     }
-
-    /*
-    async fn handle_version(&self, signaling_model: &SignalingModel) -> Result<(), DeskError> {
-        let version_info = signaling_model.get_data::<VersionInfo>()?;
-        info!("Receive signal server version info: {:?}", version_info);
-        Ok(())
-    } */
 
     pub async fn handle_manager_terminal_start(
         &mut self,
@@ -1374,6 +1482,9 @@ impl DeskSession {
 
         let mut cmd = CommandBuilder::new(execute_file_path);
         cmd.args(args_list);
+        if cfg!(unix) {
+            cmd.env("TERM", "xterm-256color");
+        }
 
         let child = pair.slave.spawn_command(cmd).map_err(|e| {
             DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &e.to_string())
@@ -1594,8 +1705,13 @@ impl DeskSession {
             signaling_model
         );
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        if let Some(mut terminal) = self.terminal_map.remove(&from_session_id) {
-            if let Ok(mut child) = terminal.child.lock() {
+        if let Some(terminal) = self.terminal_map.remove(&from_session_id) {
+            let child_arc = terminal.child.clone();
+            drop(terminal);
+            if let Ok(mut child) = child_arc.lock() {
+                if let Some(pid) = child.process_id() {
+                    force_kill_terminal_process(pid);
+                }
                 let _ = child.kill();
             }
         }
@@ -1684,5 +1800,23 @@ impl DeskSession {
             }
         }
         Ok(())
+    }
+}
+
+/// Helper function to kill a terminal process and all its descendants grouped by session ID.
+fn force_kill_terminal_process(root_pid: u32) {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let target_sid = sysinfo::Pid::from_u32(root_pid);
+    for (pid, proc) in sys.processes() {
+        if proc.session_id() == Some(target_sid) {
+            let result = proc.kill();
+            log::info!(
+                "Try to kill process, session_id={}, pid={}, result={}",
+                target_sid.as_u32(),
+                pid.as_u32(),
+                result
+            );
+        }
     }
 }

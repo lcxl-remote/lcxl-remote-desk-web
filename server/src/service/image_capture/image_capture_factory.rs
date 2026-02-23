@@ -76,7 +76,7 @@ pub fn list_image_capture() -> BTreeMap<String, Vec<DisplayInfo>> {
         .filter(|item| {
             if let Err(e) = &item.1 {
                 log::error!(
-                    "Failed to get image output list for type: {}, error: {:?}",
+                    "Failed to get image output list for type: {}, error: {}",
                     item.0,
                     e
                 );

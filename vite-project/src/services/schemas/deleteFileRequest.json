@@ -1,0 +1,1 @@
+{"type":"object","description":"Request body for deleting a file.","required":["file_path"],"properties":{"delete_permanently":{"type":["boolean","null"],"description":"Whether to delete permanently or move to trash"},"file_path":{"type":"string","description":"The path of file to be deleted"},"session_id":{"type":["string","null"]}},"x-readme-ref-name":"DeleteFileRequest"}

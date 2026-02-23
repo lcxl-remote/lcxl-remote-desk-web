@@ -143,7 +143,7 @@ pub async fn open_terminal_session(
     rt::spawn(async move {
         let result = signaling_context.do_handle_signaling(stream).await;
         if let Err(e) = result {
-            error!("Error handling terminal signaling: {:?}", e);
+            error!("Error handling terminal signaling: {}", e);
         } else {
             info!("Terminal signaling handle is finished");
         }
@@ -162,7 +162,7 @@ pub async fn open_terminal_session(
                 .await
                 .remove(&signaling_context.session_state.model.session_id);
             if let Err(e) = signaling_context.forward_to_peer(&command, false).await {
-                error!("Failed to send close terminal command: {:?}", e);
+                error!("Failed to send close terminal command: {}", e);
             } else {
                 info!("Sent close terminal command to peer: {}", to_session_id);
             }

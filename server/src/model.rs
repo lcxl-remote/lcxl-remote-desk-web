@@ -1,6 +1,7 @@
 pub mod audio_capture;
 pub mod audio_encoder;
 pub mod data_channel;
+pub mod file_transfer;
 pub mod image_capture;
 pub mod info;
 pub mod login;

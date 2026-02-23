@@ -188,7 +188,7 @@ impl Display for DeskError {
             DeskError::DeskSignalFacadeError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
-            log::error!("Failed to format error: {:?}", error)
+            log::error!("Failed to format error: {}", error)
         }
         err_fmt_result
     }

@@ -1,0 +1,1 @@
+{"type":"object","description":"Terminal list","required":["commands","current"],"properties":{"commands":{"type":"array","items":{"type":"array","items":{"type":"string"}},"description":"terminal command list"},"current":{"type":"integer","description":"current terminal index","minimum":0}},"x-readme-ref-name":"TerminalList"}

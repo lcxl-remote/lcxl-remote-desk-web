@@ -93,18 +93,15 @@ impl WindowsSystemSettingHelper {
                 subscriber,
                 inited_tx,
             );
-            if result.is_err() {
-                log::error!(
-                    "Private screen window thread exited with error: {:?}",
-                    result.err()
-                );
+            if let Err(error) = result {
+                log::error!("Private screen window thread exited with error: {}", error);
             } else {
                 log::warn!("Private screen window thread exited normally");
             }
         });
         let init_result = inited_rx.recv()?;
         if let Err(e) = init_result {
-            log::error!("Private screen window thread exited with error: {:?}", e);
+            log::error!("Private screen window thread exited with error: {}", e);
             return Err(e);
         }
         let clipboard = Clipboard::new().unwrap();
@@ -132,7 +129,7 @@ impl WindowsSystemSettingHelper {
         self.main_sender
             .send(PrivateScreenCommand::HideWindow)
             .map_err(|e| {
-                 DeskError::new_custom_error(
+                DeskError::new_custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
                     &format!("Failed to send ShowWindow command: {}", e),
                 )

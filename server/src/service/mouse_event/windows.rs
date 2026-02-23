@@ -33,21 +33,18 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         let x = (event.x * self.width as f64) as i32;
         let y = (event.y * self.height as f64) as i32;
         let result = unsafe { SetCursorPos(x, y) };
-        if result.is_err() {
+        if let Err(error) = result {
             log::error!(
-                "Failed to set cursor position to ({}, {}), error: {:?}",
+                "Failed to set cursor position to ({}, {}), error: {}",
                 x,
                 y,
-                result
+                error
             );
         }
         Ok(())
     }
 
-    fn handle_mouse_down(
-        &mut self,
-        event: &MouseEventData,
-    ) -> Result<(), crate::error::DeskError> {
+    fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), crate::error::DeskError> {
         let mut mouse_event_flags = MOUSE_EVENT_FLAGS(0);
         match event.button {
             0 => mouse_event_flags |= MOUSEEVENTF_LEFTDOWN,

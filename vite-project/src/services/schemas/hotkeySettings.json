@@ -1,0 +1,1 @@
+{"type":"object","properties":{"fsmodifiers":{"type":"integer","format":"int32","description":"HOT_KEY_MODIFIERS","default":3,"minimum":0},"vk":{"type":"integer","format":"int32","default":76,"minimum":0}},"x-readme-ref-name":"HotkeySettings"}

@@ -281,7 +281,7 @@ fn pw_thread(
 ) {
     let result = inner_pw_thread(main_sender, pw_receiver);
     if let Err(e) = result {
-        log::error!("Pipewire thread error: {:?}", e);
+        log::error!("Pipewire thread error: {}", e);
     } else {
         log::info!("Pipewire thread exited normally");
     }
@@ -682,7 +682,7 @@ mod tests {
                     }
                 },
                 Err(e) => {
-                    log::warn!("No image data received: {:?}", e);
+                    log::warn!("No image data received: {}", e);
                 }
             }
         }
@@ -701,7 +701,7 @@ mod tests {
                 Ok(image_info) => {
                     log::info!("Captured {:?} frames of image data", image_info.get_data())
                 }
-                Err(error) => log::error!("Failed to capture image: {:?}", error),
+                Err(error) => log::error!("Failed to capture image: {}", error),
             }
         }
         log::info!("Stopped pipewire image capture");

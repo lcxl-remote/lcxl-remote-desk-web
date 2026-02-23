@@ -320,10 +320,7 @@ impl PrivateScreenWindow {
             if let Err(ref e) = result {
                 if e.code().0 != 0x8007058Bu32 as i32 {
                     // ERROR_HOTKEY_NOT_REGISTERED
-                    log::error!(
-                        "Failed to unregister hotkey for private screen exit: {:?}",
-                        e
-                    );
+                    log::error!("Failed to unregister hotkey for private screen exit: {}", e);
                     result?;
                 } else {
                     log::warn!(
@@ -404,7 +401,7 @@ impl PrivateScreenWindow {
     fn message_handler(&mut self, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         self.inner_message_handler(message, wparam, lparam)
             .unwrap_or_else(|err| {
-                log::error!("message_handler error: {:?}", err);
+                log::error!("message_handler error: {}", err);
                 LRESULT(-1)
             })
     }
@@ -577,7 +574,7 @@ impl Drop for PrivateScreenWindow {
                 // Destroy the window
                 let result = DestroyWindow(self.state.hwnd);
                 if let Err(err) = result {
-                    log::error!("DestroyWindow error: {:?}", err);
+                    log::error!("DestroyWindow error: {}", err);
                 }
                 self.state.hwnd = HWND::default();
             }
@@ -586,7 +583,7 @@ impl Drop for PrivateScreenWindow {
                 log::debug!("PrivateScreenWindow drop instance: {:?}", self.instance);
                 let result = UnregisterClassW(self.window_class, Some(self.instance.into()));
                 if let Err(err) = result {
-                    log::error!("UnregisterClassW error: {:?}", err);
+                    log::error!("UnregisterClassW error: {}", err);
                 }
                 self.instance = HMODULE::default();
             }

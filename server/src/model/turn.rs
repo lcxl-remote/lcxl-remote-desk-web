@@ -40,7 +40,7 @@ impl Observer for TurnObserver {
                 })
                 .await
                 .unwrap_or_else(|error| {
-                    log::error!("Failed to spawn_blocking, use default, error: {:?}", error);
+                    log::error!("Failed to spawn_blocking, use default, error: {}", error);
                     UserSettings::default()
                 })
         });

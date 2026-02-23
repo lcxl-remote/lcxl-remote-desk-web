@@ -1,0 +1,1 @@
+{"type":"string","description":"Operation system enum","enum":["Windows","Linux","Mac","Android","Ios","Web","Other"],"x-readme-ref-name":"OperationSystemEnum"}

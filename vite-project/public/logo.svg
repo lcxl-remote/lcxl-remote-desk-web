@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- 现代化的渐变背景 -->
+  <defs>
+    <linearGradient id="primaryGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" /> <!-- Blue 500 -->
+      <stop offset="100%" stop-color="#8b5cf6" /> <!-- Violet 500 -->
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角矩形底座 -->
+  <rect x="5" y="5" width="90" height="90" rx="20" fill="url(#primaryGradient)" />
+
+  <!-- LCXL 艺术字路径 (折线几何风格) -->
+  <path 
+    d="M 25 35 
+       L 25 65 
+       L 40 65 
+       M 45 65 
+       L 45 35 
+       L 60 35 
+       M 52.5 50 
+       L 70 65 
+       M 70 35 
+       L 52.5 50 
+       M 75 35 
+       L 75 65 
+       L 90 65" 
+    stroke="white" 
+    stroke-width="8" 
+    stroke-linecap="round" 
+    stroke-linejoin="round"
+  />
+</svg>

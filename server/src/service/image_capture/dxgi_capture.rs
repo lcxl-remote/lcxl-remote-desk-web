@@ -229,7 +229,7 @@ impl ScreenRecordManager {
         unsafe {
             let result = GetProcessWindowStation();
             if let Err(err) = result {
-                log::error!("GetProcessWindowStation failed, error: {:?}", err);
+                log::error!("GetProcessWindowStation failed, error: {}", err);
             } else if let Ok(station) = result {
                 log::info!("GetProcessWindowStation success, handle: {:?}", station);
             }
@@ -243,7 +243,7 @@ impl ScreenRecordManager {
             SetThreadDesktop(current_deskop)?;
             let result = CloseDesktop(current_deskop);
             if let Err(err) = result {
-                log::warn!("Failed to close desktop, ignore, error: {:?}", err);
+                log::warn!("Failed to close desktop, ignore, error: {}", err);
             }
         };
         Ok(())
@@ -446,13 +446,13 @@ impl ScreenRecordManager {
                     Some(&mut device_context),
                 )
             };
-            if let Err(error) = result.clone() {
+            if let Err(error) = &result {
                 log::warn!(
-                    "Failed to create device with driver type {:?}, code: {}",
+                    "Failed to create device with driver type {:?}, err: {}",
                     driver_type,
-                    error.code()
+                    error
                 );
-            } else if let Ok(_) = result.clone() {
+            } else {
                 break;
             }
         }
@@ -1351,11 +1351,11 @@ impl ImageCapture for DigxImageCapture {
         if let Err(error) = result {
             if let DeskError::WindowsResultError(bt, err) = error {
                 if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
-                    log::warn!("capture frame timeout, will retry, error={:?}", err);
+                    log::warn!("capture frame timeout, will retry, error={}", err);
 
                     return DeskError::custom_error(
                         DeskErrorCode::ACTION_NEED_RETRY,
-                        &format!("capture frame timeout, will retry, error={:?}", err),
+                        &format!("capture frame timeout, will retry, error={}", err),
                     );
                 } else if err.code() == DXGI_ERROR_ACCESS_LOST
                     || err.code() == DXGI_ERROR_INVALID_CALL
@@ -1364,7 +1364,7 @@ impl ImageCapture for DigxImageCapture {
 
                     return DeskError::custom_error(
                         DeskErrorCode::ACTION_NEED_RETRY,
-                        &format!("capture frame is lost, will retry, error={:?}", err),
+                        &format!("capture frame is lost, will retry, error={}", err),
                     );
                 } else {
                     if err.code() == DXGI_ERROR_DEVICE_REMOVED {
@@ -1496,7 +1496,7 @@ mod tests {
             let windows_station_list = unsafe { windows_station_list_pointer.as_mut().unwrap() };
             windows_station_list.push(name);
         } else if let Err(e) = result {
-            log::error!("failed to add: {:?}", e);
+            log::error!("failed to add: {}", e);
         }
 
         return windows_core::BOOL::from(true);

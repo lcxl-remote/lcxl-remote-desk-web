@@ -6,7 +6,10 @@ use desk_signal_facade::model::{
 };
 use utoipa::OpenApi;
 
-use crate::model::data_channel::{KeyboardEventData, MouseEventData, SignalRequestControlData};
+use crate::model::{
+    data_channel::{KeyboardEventData, MouseEventData, SignalRequestControlData},
+    file_transfer::FileTransferMessage,
+};
 
 /// API version
 #[derive(OpenApi)]
@@ -21,5 +24,6 @@ use crate::model::data_channel::{KeyboardEventData, MouseEventData, SignalReques
     TerminalInputData,
     TerminalOutputData,
     TerminalResizeData,
+    FileTransferMessage,
 )))]
 pub struct ExtraSchemas;

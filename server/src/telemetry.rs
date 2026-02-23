@@ -4,7 +4,7 @@ use opentelemetry_sdk::{
     Resource,
     metrics::{PeriodicReader, SdkMeterProvider},
     propagation::TraceContextPropagator,
-    trace::{BatchConfig, SdkTracerProvider},
+    trace::SdkTracerProvider,
 };
 use std::time::Duration;
 use sysinfo::System;
@@ -63,11 +63,10 @@ pub fn init_telemetry(settings: &SystemSettings) -> Result<Option<WorkerGuard>> 
         }));
 
     let stdout_error = fmt::layer()
-        .with_thread_ids(true)
-        .with_thread_names(true)
+        .with_thread_ids(false)
+        .with_thread_names(false)
         .with_target(true)
         .with_line_number(true)
-        .pretty()
         .with_filter(LevelFilter::ERROR);
 
     // File appender

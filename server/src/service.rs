@@ -2,6 +2,7 @@ pub mod audio_capture;
 pub mod audio_encoder;
 pub mod data_channel;
 pub mod file_manager;
+pub mod file_transfer;
 pub mod image_capture;
 pub mod keyboard_event;
 pub mod mouse_event;

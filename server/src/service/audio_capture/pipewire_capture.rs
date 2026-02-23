@@ -526,7 +526,7 @@ mod tests {
                     }
                 },
                 Err(e) => {
-                    log::warn!("No audio data received: {:?}", e);
+                    log::warn!("No audio data received: {}", e);
                 }
             }
         }
