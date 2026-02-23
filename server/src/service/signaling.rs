@@ -928,7 +928,8 @@ impl DeskSession {
                         // send via signaling
                         match candidate.to_json() {
                             Ok(json) => {
-                                let _ = session_sender
+                                info!("Sending candidate signaling, candidate: {:?}", json);
+                                let result = session_sender
                                     .send_to_peer(
                                         &request_id,
                                         SignalingType::Canid,
@@ -936,9 +937,12 @@ impl DeskSession {
                                         json,
                                     )
                                     .await;
+                                if let Err(error) = result {
+                                    log::error!("Failed to send candidate signaling: {}", error);
+                                }
                             }
                             Err(e) => {
-                                log::warn!("Failed to get json from candidate: {}", e);
+                                log::error!("Failed to get json from candidate: {}", e);
                             }
                         }
                     }

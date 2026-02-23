@@ -8,7 +8,7 @@ export type SignalingMessage = {
     to_session_id?: string;
 };
 
-export function useDeskSignaling(deskId: string | null, onConnect?: () => void) {
+export function useDeskSignaling(deskId: string | null) {
     const socketRef = useRef<WebSocket | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [lastMessage, setLastMessage] = useState<SignalingMessage | null>(null);
@@ -31,6 +31,7 @@ export function useDeskSignaling(deskId: string | null, onConnect?: () => void) 
         socketRef.current = ws;
 
         ws.onopen = () => {
+            if (socketRef.current !== ws) return;
             console.log('WebSocket connected');
             setIsConnected(true);
 
@@ -48,16 +49,19 @@ export function useDeskSignaling(deskId: string | null, onConnect?: () => void) 
         };
 
         ws.onclose = () => {
+            if (socketRef.current !== ws) return;
             console.log('WebSocket disconnected');
             setIsConnected(false);
             socketRef.current = null;
         };
 
         ws.onerror = (error) => {
+            if (socketRef.current !== ws) return;
             console.error('WebSocket error:', error);
         };
 
         ws.onmessage = (event) => {
+            if (socketRef.current !== ws) return;
             try {
                 const message = JSON.parse(event.data) as SignalingMessage;
                 setLastMessage(message);
@@ -65,7 +69,7 @@ export function useDeskSignaling(deskId: string | null, onConnect?: () => void) 
                 console.error('Failed to parse signaling message', e);
             }
         };
-    }, [onConnect]);
+    }, []);
 
     const sendMessage = useCallback((type: number, data: any, toSessionId?: string) => {
         const msg: SignalingMessage = {
@@ -87,9 +91,15 @@ export function useDeskSignaling(deskId: string | null, onConnect?: () => void) 
     }, [connect]);
 
     useEffect(() => {
-        connect();
+        const timer = setTimeout(() => {
+            connect();
+        }, 300);
         return () => {
-            socketRef.current?.close();
+            clearTimeout(timer);
+            if (socketRef.current) {
+                socketRef.current.close();
+                socketRef.current = null;
+            }
         };
     }, [connect]);
 

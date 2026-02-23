@@ -42,6 +42,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         videoCodec: '', audioCodec: '',
         packetLoss: 0, networkType: ''
     });
+    const remoteCandidatesQueue = useRef<RTCIceCandidateInit[]>([]);
     const lastBytesReceivedRef = useRef<number>(0);
     const lastStatsTimeRef = useRef<number>(0);
     const lastPacketsLostRef = useRef<number>(0);
@@ -63,11 +64,33 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
                 const pc = peerConnection.current;
                 if (pc) {
                     await pc.setRemoteDescription(new RTCSessionDescription(signaling_data));
+                    console.log(`[WebRTC] Remote description set successfully. Flushing ${remoteCandidatesQueue.current.length} queued candidates.`);
+
+                    // Flush the ICE candidate queue
+                    while (remoteCandidatesQueue.current.length > 0) {
+                        const candidate = remoteCandidatesQueue.current.shift();
+                        if (candidate) {
+                            try {
+                                await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                            } catch (e) {
+                                console.warn('[WebRTC] Error adding queued ICE candidate', e);
+                            }
+                        }
+                    }
                 }
             } else if (signaling_type === SIGNALING_TYPE_CODE_CANID) {
                 const pc = peerConnection.current;
                 if (pc) {
-                    await pc.addIceCandidate(new RTCIceCandidate(signaling_data));
+                    if (pc.remoteDescription && pc.remoteDescription.type) {
+                        try {
+                            await pc.addIceCandidate(new RTCIceCandidate(signaling_data));
+                        } catch (e) {
+                            console.warn('[WebRTC] Error adding ICE candidate', e);
+                        }
+                    } else {
+                        console.log('[WebRTC] Queuing ICE candidate because remote description is not set yet');
+                        remoteCandidatesQueue.current.push(signaling_data);
+                    }
                 }
             }
         };
@@ -97,6 +120,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         };
 
         pc.oniceconnectionstatechange = () => {
+            console.log(`[WebRTC] ICE Connection State changed to: ${pc.iceConnectionState}`);
             if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                 setIsRTCConnected(true);
             } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
@@ -104,16 +128,33 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
             }
         }
 
+        pc.onconnectionstatechange = () => {
+            console.log(`[WebRTC] Connection State changed to: ${pc.connectionState}`);
+        }
+
+        pc.onsignalingstatechange = () => {
+            console.log(`[WebRTC] Signaling State changed to: ${pc.signalingState}`);
+        }
+
         pc.ontrack = (event) => {
-            console.log('Received remote track', event.streams[0]);
+            console.log('[WebRTC] ontrack fired!', event.track.kind, 'stream:', event.streams[0]?.id);
+            console.log(`[WebRTC] Track details - kind: ${event.track.kind}, enabled: ${event.track.enabled}, muted: ${event.track.muted}, readyState: ${event.track.readyState}`);
+
+            event.track.onmute = () => console.log(`[WebRTC] Track ${event.track.kind} muted by browser (often means no data or Safari paused it)`);
+            event.track.onunmute = () => console.log(`[WebRTC] Track ${event.track.kind} unmuted`);
+            event.track.onended = () => console.log(`[WebRTC] Track ${event.track.kind} ended`);
 
             // Disable Jitter Buffer to achieve absolute zero playout latencies
-            if (event.receiver && 'playoutDelayHint' in event.receiver) {
-                try {
-                    (event.receiver as any).playoutDelayHint = 0;
-                } catch (e) {
-                    console.warn('Failed to set playoutDelayHint', e);
+            try {
+                if (event.receiver && 'playoutDelayHint' in event.receiver) {
+                    // Type assertion to bypass strict missing TS checks in standard DOM lib
+                    const receiverWithPlayoutDelay = event.receiver as any;
+                    if (receiverWithPlayoutDelay.playoutDelayHint !== undefined) {
+                        receiverWithPlayoutDelay.playoutDelayHint = 0;
+                    }
                 }
+            } catch (e) {
+                console.warn('Failed to set playoutDelayHint, likely missing in this browser (e.g. Safari)', e);
             }
 
             setRemoteStream(event.streams[0]);

@@ -1,5 +1,5 @@
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useCallback } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { Terminal } from "xterm"
 import { FitAddon } from "xterm-addon-fit"
@@ -67,6 +67,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
 
         // Connect to WebSocket
         let ws: WebSocket | null = null;
+        let connectTimer: number;
 
         try {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -81,8 +82,10 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
             // But let's handle the parsing in the parent.
             url.searchParams.append("command", command);
 
-            ws = new WebSocket(url.toString());
-            socketRef.current = ws
+            const connectWS = () => {
+                try {
+                    ws = new WebSocket(url.toString());
+                    socketRef.current = ws;
 
             ws.onopen = () => {
                 console.log("Terminal WebSocket connected")
@@ -141,38 +144,44 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
                 }, 1000)
             }
 
-            ws.onerror = (error) => {
-                console.error("Terminal WebSocket error", error)
-            }
+                    ws.onerror = (error) => {
+                        console.error("Terminal WebSocket error", error)
+                    }
+                } catch (e) {
+                    console.error("WebSocket init error", e)
+                }
+            };
+
+            connectTimer = window.setTimeout(connectWS, 300);
 
             term.onData(data => {
-                if (ws && ws.readyState === WebSocket.OPEN && terminalStarted.current) {
+                if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN && terminalStarted.current) {
                     const signal = {
                         request_id: v4(),
                         signaling_type: SIGNALING_TYPE_CODE_DATA,
                         to_session_id: sessionId,
                         signaling_data: { content: data },
                     };
-                    ws.send(JSON.stringify(signal));
+                    socketRef.current.send(JSON.stringify(signal));
                 }
             })
 
             const sendResize = (size: { cols: number, rows: number }) => {
-                if (ws && ws.readyState === WebSocket.OPEN && terminalStarted.current) {
+                if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN && terminalStarted.current) {
                     const signal = {
                         request_id: v4(),
                         signaling_type: SIGNALING_TYPE_CODE_RESIZE,
                         to_session_id: sessionId,
                         signaling_data: { rows: size.rows, cols: size.cols },
                     };
-                    ws.send(JSON.stringify(signal));
+                    socketRef.current.send(JSON.stringify(signal));
                 }
             }
 
             term.onResize(sendResize)
 
         } catch (e) {
-            console.error("WebSocket init error", e)
+            console.error("WebSocket URL init error", e)
         }
 
         // Handle resize using ResizeObserver with debounce
@@ -191,6 +200,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
 
         return () => {
             console.log("Cleaning up terminal session")
+            clearTimeout(connectTimer);
             if (ws) {
                 // Remove onclose handler to avoid triggering onClose navigate when unmounting component normally
                 ws.onclose = null
@@ -244,8 +254,9 @@ export default function TerminalSession() {
     const { data: terminalList, isLoading } = useListTerminal(sessionId || '')
     const [selectedCommand, setSelectedCommand] = useState<string>("")
 
-    // Auto-select if only one command?
-    // Optionally.
+    const handleTerminalClose = useCallback(() => {
+        setSelectedCommand("");
+    }, []);
 
     if (isLoading) {
         return (
@@ -259,7 +270,7 @@ export default function TerminalSession() {
         return <TerminalView
             sessionId={sessionId}
             command={selectedCommand}
-            onClose={() => setSelectedCommand("")}
+            onClose={handleTerminalClose}
         />
     }
 
