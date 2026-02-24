@@ -14,6 +14,12 @@ pub struct Geographic {
 }
 
 pub const USER_ADMIN: &str = "admin";
+/// Trait for base user information.
+pub trait BaseUser {
+    fn get_name(&self) -> &str;
+    fn get_access(&self) -> Option<&str>;
+    fn get_target_session_id(&self) -> Option<&str>;
+}
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
 pub struct CurrentUser {
@@ -61,6 +67,20 @@ impl CurrentUser {
             address: None,
             phone: None,
         }
+    }
+}
+
+impl BaseUser for CurrentUser {
+    fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    fn get_access(&self) -> Option<&str> {
+        self.access.as_deref()
+    }
+
+    fn get_target_session_id(&self) -> Option<&str> {
+        self.target_session_id.as_deref()
     }
 }
 

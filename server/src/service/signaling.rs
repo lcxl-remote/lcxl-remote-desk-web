@@ -562,7 +562,7 @@ impl DeskSession {
     ) -> Result<(), DeskError> {
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
 
-        if self.rtc_peer_connection_map.contains_key(&from_session_id) {
+        if self.rtc_peer_connection_map.contains_key(from_session_id) {
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 "Peer connection already exists",
@@ -671,14 +671,14 @@ impl DeskSession {
             .send_to_peer(
                 &signaling_model.request_id,
                 SignalingType::Init,
-                &from_session_id,
+                from_session_id,
                 init_signaling_data,
             )
             .await?;
         info!("Sent init signaling");
 
         self.rtc_peer_connection_map.insert(
-            from_session_id,
+            from_session_id.to_owned(),
             Arc::new(tokio::sync::RwLock::new(PeerConnection {
                 rtc_peer_connection,
                 capture_screen_thread: None,
@@ -1274,7 +1274,7 @@ impl DeskSession {
             }
             SignalingType::CloseControl => {
                 let from_session_id = signaling_model.check_and_get_from_session_id()?;
-                if let Some(peer_connection) = self.rtc_peer_connection_map.remove(&from_session_id)
+                if let Some(peer_connection) = self.rtc_peer_connection_map.remove(from_session_id)
                 {
                     info!(
                         "Received CloseControl from session {}, shutting down peer connection",
@@ -1480,16 +1480,12 @@ impl DeskSession {
 
         // PTY setup
         let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| {
-                DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &e.to_string())
-            })?;
+        let pair = pty_system.openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
 
         let mut cmd = CommandBuilder::new(execute_file_path);
         cmd.args(args_list);
@@ -1497,26 +1493,22 @@ impl DeskSession {
             cmd.env("TERM", "xterm-256color");
         }
 
-        let child = pair.slave.spawn_command(cmd).map_err(|e| {
-            DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &e.to_string())
-        })?;
+        let child = pair.slave.spawn_command(cmd)?;
 
         // Wrap child in Arc<Mutex> for shared access
         let child = Arc::new(std::sync::Mutex::new(child));
         let child_clone = child.clone();
 
         // Spawn reader
-        let mut reader = pair.master.try_clone_reader().map_err(|e| {
-            DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &e.to_string())
-        })?;
+        let mut reader = pair.master.try_clone_reader()?;
         let session_sender = self.session.clone();
-        let terminal_session_id = from_session_id.clone();
+        let terminal_session_id = from_session_id.to_owned();
         // We need to know who to send TO. The controller put desk_session_id as `to_session_id`.
         // When we reply, `to_session_id` should be `terminal_session_id` (so Signal server can route it).
 
         // Monitor task for process exit (using tokio::spawn for coroutine)
         let monitor_sender = self.session.clone();
-        let monitor_session_id = from_session_id.clone();
+        let monitor_session_id = from_session_id.to_owned();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1542,16 +1534,15 @@ impl DeskSession {
                     );
                     let model = SignalingModel::new_request::<()>(
                         SignalingType::TerminalClosed,
-                        Some(monitor_session_id.clone()),
+                        Some(monitor_session_id.to_owned()),
                         None,
                     );
                     if let Ok(model) = model {
                         if let Ok(text) = serde_json::to_string(&model) {
-                            if let Err(e) = monitor_sender.sender.send(
-                                crate::service::signaling::DeskSessionMessage::Text(
-                                    bytestring::ByteString::from(text),
-                                ),
-                            ) {
+                            if let Err(e) = monitor_sender
+                                .sender
+                                .send(DeskSessionMessage::Text(ByteString::from(text)))
+                            {
                                 log::warn!(
                                     "Failed to send TerminalClosed to {}: {}",
                                     monitor_session_id,
@@ -1577,16 +1568,14 @@ impl DeskSession {
                         let data = TerminalOutputData { content };
                         let model = SignalingModel::new_request(
                             SignalingType::ReplyFromTerminal,
-                            Some(terminal_session_id.clone()),
+                            Some(terminal_session_id.to_owned()),
                             Some(&data),
                         );
                         if let Ok(model) = model {
                             if let Ok(text) = serde_json::to_string(&model) {
-                                let _ = session_sender.sender.send(
-                                    crate::service::signaling::DeskSessionMessage::Text(
-                                        bytestring::ByteString::from(text),
-                                    ),
-                                );
+                                let _ = session_sender
+                                    .sender
+                                    .send(DeskSessionMessage::Text(ByteString::from(text)));
                             }
                         }
                     }
@@ -1607,17 +1596,15 @@ impl DeskSession {
 
             let model = SignalingModel::new_request(
                 SignalingType::ReplyFromTerminal,
-                Some(terminal_session_id.clone()),
+                Some(terminal_session_id.to_owned()),
                 Some(&data),
             );
 
             if let Ok(model) = model {
                 if let Ok(text) = serde_json::to_string(&model) {
-                    let _ = session_sender.sender.send(
-                        crate::service::signaling::DeskSessionMessage::Text(
-                            bytestring::ByteString::from(text),
-                        ),
-                    );
+                    let _ = session_sender
+                        .sender
+                        .send(DeskSessionMessage::Text(ByteString::from(text)));
                 }
             }
         });
@@ -1630,7 +1617,7 @@ impl DeskSession {
         })?;
 
         self.terminal_map.insert(
-            from_session_id.clone(),
+            from_session_id.to_owned(),
             RunningTerminal {
                 master: pair.master,
                 child,
@@ -1643,17 +1630,15 @@ impl DeskSession {
             &signaling_model.request_id,
             SignalingType::TerminalStarted,
             None,
-            Some(from_session_id),
+            Some(from_session_id.to_owned()),
             None,
         );
         if let Ok(model) = model {
             if let Ok(text) = serde_json::to_string(&model) {
-                let _ =
-                    self.session
-                        .sender
-                        .send(crate::service::signaling::DeskSessionMessage::Text(
-                            bytestring::ByteString::from(text),
-                        ));
+                let _ = self
+                    .session
+                    .sender
+                    .send(DeskSessionMessage::Text(ByteString::from(text)));
             }
         }
         Ok(())
@@ -1671,7 +1656,7 @@ impl DeskSession {
                 return Ok(()); // Ignore empty
             };
 
-        if let Some(terminal) = self.terminal_map.get_mut(&from_session_id) {
+        if let Some(terminal) = self.terminal_map.get_mut(from_session_id) {
             let writer = &mut terminal.writer;
             if let Err(e) = writer.write_all(data_value.content.as_bytes()) {
                 warn!("Failed to write to pty: {}", e);
@@ -1692,7 +1677,7 @@ impl DeskSession {
                 return Ok(());
             };
 
-        if let Some(terminal) = self.terminal_map.get_mut(&from_session_id) {
+        if let Some(terminal) = self.terminal_map.get_mut(from_session_id) {
             let rows = data_value.rows;
             let cols = data_value.cols;
             if let Err(e) = terminal.master.resize(PtySize {
@@ -1716,7 +1701,7 @@ impl DeskSession {
             signaling_model
         );
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        if let Some(terminal) = self.terminal_map.remove(&from_session_id) {
+        if let Some(terminal) = self.terminal_map.remove(from_session_id) {
             let child_arc = terminal.child.clone();
             drop(terminal);
             if let Ok(mut child) = child_arc.lock() {
@@ -1793,7 +1778,7 @@ impl DeskSession {
                     .send_response(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileDelete,
-                        Some(from_session_id),
+                        Some(from_session_id.to_owned()),
                         &serde_json::json!({}),
                     )
                     .await?;
@@ -1803,7 +1788,7 @@ impl DeskSession {
                     .send_error(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileDelete,
-                        Some(from_session_id),
+                        Some(from_session_id.to_owned()),
                         e.to_error_code(),
                         &e.to_string(),
                     )

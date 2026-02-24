@@ -1,21 +1,33 @@
 use actix_session::{Session, SessionGetError, SessionInsertError};
+use serde::de::DeserializeOwned;
 
-use crate::model::CurrentUser;
+use crate::model::BaseUser;
 
 pub const SESSION_KEY_USERNAME: &str = "username";
 
-pub trait SessionExt {
-    fn get_current_user(&self) -> Result<Option<CurrentUser>, SessionGetError>;
-    fn set_current_user(&self, current_user: &CurrentUser) -> Result<(), SessionInsertError>;
+/// Trait for user session access.
+pub trait UserSessionAccessor {
+    fn get_current_user<T: BaseUser + DeserializeOwned>(
+        &self,
+    ) -> Result<Option<T>, SessionGetError>;
+    fn set_current_user<T: BaseUser + serde::Serialize>(
+        &self,
+        current_user: &T,
+    ) -> Result<(), SessionInsertError>;
     fn remove_current_user(&self) -> Option<String>;
 }
 
-impl SessionExt for Session {
-    fn get_current_user(&self) -> Result<Option<CurrentUser>, SessionGetError> {
-        self.get::<CurrentUser>(SESSION_KEY_USERNAME)
+impl UserSessionAccessor for Session {
+    fn get_current_user<T: BaseUser + DeserializeOwned>(
+        &self,
+    ) -> Result<Option<T>, SessionGetError> {
+        self.get::<T>(SESSION_KEY_USERNAME)
     }
 
-    fn set_current_user(&self, current_user: &CurrentUser) -> Result<(), SessionInsertError> {
+    fn set_current_user<T: BaseUser + serde::Serialize>(
+        &self,
+        current_user: &T,
+    ) -> Result<(), SessionInsertError> {
         // Store user information in session
         self.insert(SESSION_KEY_USERNAME, current_user)
     }

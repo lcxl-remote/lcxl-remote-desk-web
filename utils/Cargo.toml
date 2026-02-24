@@ -11,3 +11,4 @@ log = { workspace = true }
 env_logger = { workspace = true }
 utoipa = { workspace = true }
 serde = { workspace = true }
+rand = { workspace = true }

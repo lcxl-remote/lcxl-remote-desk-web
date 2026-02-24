@@ -11,7 +11,7 @@ use actix_web::{
 };
 use desk_server_user::{
     model::{CurrentUser, NoLogintUser, NoticeIconList, UserRespone},
-    service::SessionExt,
+    service::UserSessionAccessor,
 };
 use log::{info, warn};
 
@@ -68,7 +68,7 @@ pub async fn get_current_user(
 )]
 #[get("/api/notices")]
 pub async fn get_notices(session: Session) -> Result<HttpResponse, AWError> {
-    let user_opt = session.get_current_user()?;
+    let user_opt = session.get_current_user::<CurrentUser>()?;
 
     let user = if let Some(user) = user_opt {
         user
@@ -97,7 +97,7 @@ pub async fn reject_anonymous_users(
         Session::from_request(http_request, payload).await
     }?;
 
-    match session.get_current_user()? {
+    match session.get_current_user::<CurrentUser>()? {
         Some(_) => next.call(req).await,
         None => {
             warn!("Anonymous user tried to access protected resource.");

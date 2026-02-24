@@ -1,6 +1,6 @@
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
-use desk_server_user::service::SessionExt;
+use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::version::VersionInfo;
 use log::{error, info};
 
@@ -21,7 +21,7 @@ pub async fn open_signaling_handle(
     session: Session,
     stream: web::Payload,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let user_opt = session.get_current_user()?;
+    let user_opt = session.get_current_user::<CurrentUser>()?;
 
     let user = if let Some(user) = user_opt {
         user

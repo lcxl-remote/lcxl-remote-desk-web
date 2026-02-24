@@ -292,9 +292,9 @@ impl SignalingModel {
         &self.signaling_data
     }
 
-    pub fn check_and_get_from_session_id(&self) -> Result<String, DeskSignalFacadeError> {
+    pub fn check_and_get_from_session_id(&self) -> Result<&str, DeskSignalFacadeError> {
         if let Some(from_session_id) = &self.from_session_id {
-            return Ok(from_session_id.clone());
+            return Ok(from_session_id.as_str());
         } else {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
@@ -306,9 +306,9 @@ impl SignalingModel {
         }
     }
 
-    pub fn check_and_get_to_session_id(&self) -> Result<String, DeskSignalFacadeError> {
+    pub fn check_and_get_to_session_id(&self) -> Result<&str, DeskSignalFacadeError> {
         if let Some(to_session_id) = &self.to_session_id {
-            return Ok(to_session_id.clone());
+            return Ok(to_session_id.as_str());
         } else {
             return DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,

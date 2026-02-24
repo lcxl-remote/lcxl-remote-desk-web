@@ -8,7 +8,7 @@ use actix_web::web;
 use actix_ws::{AggregatedMessage, AggregatedMessageStream, Session};
 use bytes::Bytes;
 use bytestring::ByteString;
-use desk_server_user::model::CurrentUser;
+use desk_server_user::model::{BaseUser, CurrentUser};
 use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::{
     error::DeskSignalFacadeError,
@@ -58,10 +58,10 @@ pub async fn handle_signaling(
 }
 
 /// Signaling context for handling WebSocket messages.
-pub struct SignalingContext {
+pub struct SignalingContext<T: BaseUser> {
     pub session_state: SessionState,
     pub session_map: web::Data<SharedSessionMap>,
-    pub user: CurrentUser,
+    pub user: T,
 }
 
 impl ForwardSignalingSender for SessionState {
@@ -156,7 +156,7 @@ impl ForwardSignalingSender for SessionState {
     }
 }
 
-impl Drop for SignalingContext {
+impl<T: BaseUser> Drop for SignalingContext<T> {
     fn drop(&mut self) {
         let handle = match Handle::try_current() {
             Ok(handle) => handle,
@@ -188,14 +188,14 @@ impl Drop for SignalingContext {
     }
 }
 
-impl SignalingContext {
+impl<T: BaseUser> SignalingContext<T> {
     /// Initialize a new SignalingContext.
     pub async fn init(
         session_id: String,
         client_version_info: VersionInfo,
         session_map: web::Data<SharedSessionMap>,
         session: Session,
-        user: CurrentUser,
+        user: T,
         ip: Option<String>,
     ) -> Result<Self, DeskSignalError> {
         log::info!("Init new SignalingContext, session id: {}", session_id);
@@ -228,15 +228,7 @@ impl SignalingContext {
                 if let Some(db_model) = db_model_opt {
                     device_code = Some(db_model.device_code);
                 } else {
-                    use rand::Rng;
-                    const CHARSET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-                    let mut rng = rand::thread_rng();
-                    let new_code: String = (0..6)
-                        .map(|_| {
-                            let idx = rng.gen_range(0..CHARSET.len());
-                            CHARSET[idx] as char
-                        })
-                        .collect();
+                    let new_code = desk_utils::string::generate_device_code(6);
 
                     let new_model = device_code::ActiveModel {
                         client_id: Set(client_id.clone()),
@@ -281,10 +273,10 @@ impl SignalingContext {
         ignore_session_not_found: bool,
     ) -> Result<(), DeskSignalError> {
         // Device user restriction logic
-        if self.user.access.as_deref() == Some("device_user") {
-            if let Some(target_session) = &self.user.target_session_id {
+        if self.user.get_access() == Some("device_user") {
+            if let Some(target_session) = self.user.get_target_session_id() {
                 let to_session_id = signaling_model.check_and_get_to_session_id()?;
-                if to_session_id != *target_session {
+                if to_session_id != target_session {
                     return DeskSignalError::custom_error(
                         DeskErrorCode::SYSTEM_ERROR,
                         &format!(
@@ -313,7 +305,7 @@ impl SignalingContext {
         }
         let to_session_id = signaling_model.check_and_get_to_session_id()?;
         let session_map = self.session_map.read().await;
-        let to_session_state = if let Some(session_state) = session_map.get(&to_session_id) {
+        let to_session_state = if let Some(session_state) = session_map.get(to_session_id) {
             session_state
         } else {
             if ignore_session_not_found {

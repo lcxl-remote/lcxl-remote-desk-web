@@ -1,6 +1,6 @@
 use actix_session::Session;
 use actix_web::{Error as AWError, HttpResponse, post, web};
-use desk_server_user::{model::CurrentUser, service::SessionExt};
+use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_server_version::SERVER_API_VERSION;
 use log::{error, info};
 
