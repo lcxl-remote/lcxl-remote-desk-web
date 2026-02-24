@@ -2,14 +2,14 @@
 trigger: always_on
 ---
 
-本项目是基于WebRTC的远程桌面应用，目录说明：
+本项目是基于WebRTC技术的远程桌面应用，目录说明：
 
 最主要的三个模块：
 
 * server: 远程桌面服务端，运行在windows/linus/macos上，提供远程桌面、远程终端、远程文件管理等功能；
 * signal: 信令服务器主要功能在这里，默认集成在server上启动，也可以通过server的启动参数(startup_mode)来单独启动信令服务器；
 * vite-project: 前端项目，既是server/signal服务端的管理页面，也是远程桌面的web客户端；
-  * 前端和后端的交互相关的接口代码是由后端提供openapi的url接口，由 `vite-project/update_openapi.sh` 来更新；
+  * 前端和后端的交互相关的接口代码是由后端提供openapi接口，由 `vite-project/update_openapi.sh` 脚本负责更新；
 
 剩下来的模块：
 
