@@ -7,13 +7,16 @@ pub const SESSION_KEY_USERNAME: &str = "username";
 
 /// Trait for user session access.
 pub trait UserSessionAccessor {
+    /// Get current user from session.
     fn get_current_user<T: BaseUser + DeserializeOwned>(
         &self,
     ) -> Result<Option<T>, SessionGetError>;
+    /// Set current user to session.
     fn set_current_user<T: BaseUser + serde::Serialize>(
         &self,
         current_user: &T,
     ) -> Result<(), SessionInsertError>;
+    /// Remove current user from session.
     fn remove_current_user(&self) -> Option<String>;
 }
 

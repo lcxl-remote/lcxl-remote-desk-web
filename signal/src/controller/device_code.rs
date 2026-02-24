@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use actix_web::{HttpResponse, delete, get, post, put, web};
-use desk_utils::{error::DeskErrorCode, rest::RestResponse};
+use desk_utils::{error::DeskErrorCode, rest::RestResponse, string::generate_device_code};
 use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -120,12 +120,12 @@ pub async fn create_device_code(
 
     let new_code = if let Some(code) = params.device_code {
         if code.is_empty() {
-            generate_random_code()
+            generate_device_code(6)
         } else {
             code
         }
     } else {
-        generate_random_code()
+        generate_device_code(6)
     };
 
     let new_model = device_code::ActiveModel {
@@ -274,16 +274,4 @@ pub async fn batch_delete_device_codes(
     }
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed()))
-}
-
-fn generate_random_code() -> String {
-    use rand::Rng;
-    const CHARSET: &[u8] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
-    let mut rng = rand::thread_rng();
-    (0..6)
-        .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
 }
