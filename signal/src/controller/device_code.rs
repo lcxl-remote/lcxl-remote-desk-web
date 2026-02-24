@@ -210,7 +210,7 @@ pub async fn delete_device_code(
         for (_sid, sstate) in session_map_guard.iter() {
             if sstate.device_code.as_ref() == Some(&m.device_code) {
                 return Err(DeskSignalError::new_custom_error(
-                    desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::SYSTEM_ERROR,
                     "Cannot delete an online device code",
                 ));
             }
@@ -220,7 +220,7 @@ pub async fn delete_device_code(
         Ok(HttpResponse::Ok().json(RestResponse::succeed()))
     } else {
         Err(DeskSignalError::new_custom_error(
-            desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
+            DeskErrorCode::SYSTEM_ERROR,
             "Device code not found",
         ))
     }

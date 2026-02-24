@@ -66,6 +66,7 @@ use crate::service::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
 use crate::service::data_channel::handle_data_channel_event;
+use crate::service::file_manager;
 use crate::service::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture,
 };
@@ -1769,16 +1770,17 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        // ManagerFileDelete is a request from the http api, so it may not have a from_session_id
+        let from_session_id = signaling_model.from_session_id.clone();
         let params = signaling_model.get_data::<DeleteFileRequest>()?;
 
-        match crate::service::file_manager::delete_file(params).await {
+        match file_manager::delete_file(params).await {
             Ok(_) => {
                 self.session
                     .send_response(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileDelete,
-                        Some(from_session_id.to_owned()),
+                        from_session_id,
                         &serde_json::json!({}),
                     )
                     .await?;
@@ -1788,7 +1790,7 @@ impl DeskSession {
                     .send_error(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileDelete,
-                        Some(from_session_id.to_owned()),
+                        from_session_id,
                         e.to_error_code(),
                         &e.to_string(),
                     )

@@ -93,6 +93,7 @@ opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 tracing-opentelemetry = "0.32.1"
 tracing-appender = "0.2.4"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+trash = "5.2.5"
 
 
 [target."cfg(tokio_unstable)".dependencies]

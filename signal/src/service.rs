@@ -359,34 +359,6 @@ impl<T: BaseUser> SignalingContext<T> {
                 )?;
                 self.session_state.send_response(None, &response).await?;
             }
-            /*
-                      * This not send by client, it is send by signal server, so it is not need to handle
-                      SignalingType::StartTerminal => {
-                          let from_session_id = &self.session_state.model.session_id;
-                          self.forward_to_peer(&signaling_model).await?;
-                          if signaling_model.is_request() {
-                              log::info!("Adding terminal session id: {}", from_session_id);
-                              self.session_state
-                                  .terminal_session_ids
-                                  .write()
-                                  .await
-                                  .insert(from_session_id.clone());
-                          }
-                      }
-
-                      SignalingType::CloseTerminal => {
-                          let from_session_id = &self.session_state.model.session_id;
-                          if signaling_model.is_request() {
-                              log::info!("Removing terminal session id: {}", from_session_id);
-                              self.session_state
-                                  .terminal_session_ids
-                                  .write()
-                                  .await
-                                  .remove(from_session_id);
-                          }
-                          self.forward_to_peer(&signaling_model, true).await?;
-                      }
-            */
             SignalingType::SendDataToTerminal => {
                 let from_session_id = &self.session_state.model.session_id;
                 if signaling_model.is_request() {
@@ -447,6 +419,7 @@ impl<T: BaseUser> SignalingContext<T> {
             | SignalingType::ChangeDisplaySettings
             | SignalingType::UpdateDeskSettings
             | SignalingType::ManagerFileList
+            | SignalingType::ManagerFileDelete
             | SignalingType::ManagerSystemInfo
             | SignalingType::ManagerSystemStatue
             | SignalingType::ListTerminal
@@ -460,6 +433,13 @@ impl<T: BaseUser> SignalingContext<T> {
             }
             SignalingType::Unknown => {
                 log::warn!("Received unknown signaling type");
+            }
+            SignalingType::StartTerminal | SignalingType::CloseTerminal => {
+                // This not send by client, it is send by signal server, so it is not need to handle, and should not be received
+                log::warn!(
+                    "Received start/close terminal signaling type: {}, it should not be received",
+                    signaling_model.signaling_type
+                );
             }
             _ => {
                 log::error!(

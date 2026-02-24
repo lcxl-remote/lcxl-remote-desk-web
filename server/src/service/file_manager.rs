@@ -121,8 +121,8 @@ pub async fn list_files(query_list: FileListParams) -> Result<FileListResponse, 
 }
 
 pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), DeskError> {
-    let file = PathBuf::from(delete_file_request.file_path.as_str());
-    if !file.exists() {
+    let file_path = PathBuf::from(delete_file_request.file_path.as_str());
+    if !file_path.exists() {
         return Ok(());
     }
 
@@ -130,75 +130,21 @@ pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), D
     let delete_permanently = delete_file_request.delete_permanently.unwrap_or(false);
     if delete_permanently {
         warn!("Delete file {} permanently", delete_file_request.file_path);
-        fs::remove_file(delete_file_request.file_path.as_str()).await?;
+        fs::remove_file(&file_path).await?;
     } else {
         // move to trash dir
         info!("Move file {} to trash dir", delete_file_request.file_path);
-        #[cfg(target_os = "windows")]
-        {
-            use log::error;
-            use std::ffi::c_void;
-            use windows::Win32::Foundation::HWND;
-            use windows::Win32::UI::Shell::{
-                FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
-                SHFILEOPSTRUCTW, SHFileOperationW,
-            };
-
-            use windows::core::{BOOL, PCWSTR};
-
-            // SHFileOperationW requires pFrom to be double-null terminated
-            let mut path_utf16: Vec<u16> = delete_file_request.file_path.encode_utf16().collect();
-            path_utf16.push(0);
-            path_utf16.push(0);
-
-            let mut fileop = SHFILEOPSTRUCTW {
-                hwnd: HWND::default(),
-                wFunc: FO_DELETE,
-                pFrom: PCWSTR(path_utf16.as_ptr()),
-                pTo: PCWSTR::null(),
-                fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI).0 as u16,
-                fAnyOperationsAborted: BOOL::from(false),
-                hNameMappings: 0 as *mut c_void,
-                lpszProgressTitle: PCWSTR::null(),
-            };
-
-            // invoke SHFileOperationW to move file to trash
-            let opr_code = unsafe { SHFileOperationW(&mut fileop) };
-            if opr_code != 0 {
-                use desk_utils::error::DeskErrorCode;
-
-                error!(
-                    "Failed to delete file: {}, code: {}",
-                    delete_file_request.file_path, opr_code
-                );
-                return DeskError::custom_error(
-                    DeskErrorCode::WINDOWS_ERROR,
-                    &format!(
-                        "Failed to delete file: {}, code: {}",
-                        delete_file_request.file_path, opr_code
-                    ),
-                );
-            }
-
-            info!(
-                "Moved file {} to trash successfully",
-                delete_file_request.file_path
-            )
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            // Linux specific code to move file to trash
-
+        if let Err(e) = trash::delete(&file_path) {
             use desk_utils::error::DeskErrorCode;
-            return DeskError::custom_error(DeskErrorCode::SYSTEM_ERROR, "Need implementation");
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            // MacOS specific code to move file to trash
-            use desk_utils::error::DeskErrorCode;
-            return DeskError::custom_error(DeskErrorCode::SYSTEM_ERROR, "Need implementation");
+            log::error!(
+                "Failed to delete file to trash: {}, error: {}",
+                delete_file_request.file_path,
+                e
+            );
+            return DeskError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                &format!("Failed to move to trash: {}", e),
+            );
         }
     }
 

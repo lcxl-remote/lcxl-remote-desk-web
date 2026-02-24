@@ -2,9 +2,21 @@
 import { useState, useRef, useEffect } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight } from "lucide-react"
+import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import {
     Table,
     TableBody,
@@ -21,6 +33,7 @@ import {
 } from "@/components/ui/breadcrumb"
 import { Progress } from "@/components/ui/progress"
 import { useListFiles } from "@/services/hooks/undefinedController/useListFiles"
+import { useDeleteFile } from "@/services/hooks/undefinedController/useDeleteFile"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
 import { useFileTransfer, type TransferProgress } from "./use-file-transfer"
@@ -54,6 +67,13 @@ export default function FileList() {
         page_no: page,
         page_count: pageSize
     })
+
+    const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+    const [deleteDoubleConfirmOpen, setDeleteDoubleConfirmOpen] = useState(false)
+    const [fileToDelete, setFileToDelete] = useState<any>(null)
+    const [isPermanentDelete, setIsPermanentDelete] = useState(false)
+
+    const deleteMutation = useDeleteFile()
 
     useEffect(() => {
         if (isError) {
@@ -123,6 +143,52 @@ export default function FileList() {
         if (file.is_dir) return
         // Use file.path from backend directly
         downloadFile(file.path, file.name)
+    }
+
+    const handleDeleteClick = (e: React.MouseEvent, file: any) => {
+        e.stopPropagation()
+        setFileToDelete(file)
+        setIsPermanentDelete(false)
+        setDeleteConfirmOpen(true)
+    }
+
+    const confirmDelete = () => {
+        if (isPermanentDelete) {
+            setDeleteConfirmOpen(false)
+            setDeleteDoubleConfirmOpen(true)
+        } else {
+            executeDelete()
+        }
+    }
+
+    const executeDelete = () => {
+        if (!fileToDelete || !sessionId) return
+
+        deleteMutation.mutate({
+            data: {
+                session_id: sessionId,
+                file_path: fileToDelete.path,
+                delete_permanently: isPermanentDelete
+            }
+        }, {
+            onSuccess: () => {
+                toast({
+                    title: t('pages.fileManager.deleteSuccess', 'Deleted successfully'),
+                    variant: 'default',
+                })
+                refetch()
+                setDeleteConfirmOpen(false)
+                setDeleteDoubleConfirmOpen(false)
+                setFileToDelete(null)
+            },
+            onError: (err: any) => {
+                toast({
+                    title: t('pages.fileManager.deleteFailed', 'Delete failed'),
+                    description: err?.message || t('common.unknownError', 'Unknown error'),
+                    variant: 'destructive',
+                })
+            }
+        })
     }
 
     const handleUploadClick = () => {
@@ -307,6 +373,22 @@ export default function FileList() {
                                                 <Download className="h-3.5 w-3.5" />
                                             </Button>
                                         )}
+                                        {file.name !== ".." && (
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7 text-red-500 hover:text-red-700 hover:bg-red-50"
+                                                onClick={(e) => handleDeleteClick(e, file)}
+                                                title={t('pages.fileManager.delete', 'Delete')}
+                                                disabled={deleteMutation.isPending}
+                                            >
+                                                {deleteMutation.isPending && fileToDelete?.path === file.path ? (
+                                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                ) : (
+                                                    <Trash2 className="h-3.5 w-3.5" />
+                                                )}
+                                            </Button>
+                                        )}
                                     </TableCell>
                                 </TableRow>
                             ))}
@@ -345,6 +427,56 @@ export default function FileList() {
                     </div>
                 </div>
             )}
+
+            <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>{t('pages.fileManager.deleteConfirm.title', 'Confirm Deletion')}</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {t('pages.fileManager.deleteConfirm.description', 'Are you sure you want to delete this file/directory?')}
+                            <br />
+                            <span className="font-mono text-xs break-all mt-2 block p-2 bg-muted rounded">
+                                {fileToDelete?.path}
+                            </span>
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <div className="flex items-center space-x-2 py-4">
+                        <Checkbox
+                            id="permanent-delete"
+                            checked={isPermanentDelete}
+                            onCheckedChange={(checked) => setIsPermanentDelete(!!checked)}
+                        />
+                        <Label htmlFor="permanent-delete" className="text-sm font-medium leading-none cursor-pointer">
+                            {t('pages.fileManager.deletePermanently', 'Delete Permanently')}
+                        </Label>
+                    </div>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel>{t('common.cancel', 'Cancel')}</AlertDialogCancel>
+                        <AlertDialogAction onClick={confirmDelete} className={isPermanentDelete ? "bg-red-600 hover:bg-red-700" : ""}>
+                            {t('common.confirm', 'Confirm')}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+
+            <AlertDialog open={deleteDoubleConfirmOpen} onOpenChange={setDeleteDoubleConfirmOpen}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle className="text-red-600 text-lg font-bold">
+                            {t('pages.fileManager.deleteDoubleConfirm.title', 'Final Confirmation')}
+                        </AlertDialogTitle>
+                        <AlertDialogDescription>
+                            {t('pages.fileManager.deleteDoubleConfirm.description', 'This operation is irreversible. Are you absolutely sure?')}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel>{t('common.cancel', 'Cancel')}</AlertDialogCancel>
+                        <AlertDialogAction onClick={executeDelete} className="bg-red-600 hover:bg-red-700">
+                            {t('common.confirm', 'Confirm')}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
         </div>
     )
 }
