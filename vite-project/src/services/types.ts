@@ -810,6 +810,10 @@ export type InitParams = {
     */
     password: string;
     /**
+     * @type boolean
+    */
+    telemetry_consent: boolean;
+    /**
      * @type string
     */
     username: string;
