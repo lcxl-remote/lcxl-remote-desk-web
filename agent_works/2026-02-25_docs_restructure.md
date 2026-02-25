@@ -14,49 +14,38 @@
 
 ### 1. 修改 README_CN.md
 
-- [ ] 移除 `## 技术栈` (迁移至 DEVELOPMENT_CN.md)。
-- [ ] 移除 `## 项目结构` (已在代码库中直观体现，或在开发指南中详细说明)。
-- [ ] 移除 `## Docker 使用` 下的 `1. 执行构建脚本`。
-- [ ] 简化 `## 配置说明`，仅保留核心说明并链接到 `DEVELOPMENT_CN.md`。
-- [ ] 将“功能描述”中未实现的功能移至新章节 `## 路线图`。
-- [ ] 统一 Mermaid 架构图，补全 STUN 节点说明。
+- [x] 移除 `## 技术栈` (迁移至 DEVELOPMENT_CN.md)。
+- [x] 移除 `## 项目结构` (已在代码库中直观体现，或在开发指南中详细说明)。
+- [x] 移除 `## Docker 使用` 下的 `1. 执行构建脚本`。
+- [x] 简化 `## 配置说明`，仅保留核心说明并链接到 `DEVELOPMENT_CN.md`。
+- [x] 将“功能描述”中未实现的功能移至新章节 `## 路线图`。
+- [x] 统一 Mermaid 架构图，补全 STUN 节点说明。
 
 ### 2. 修改 DEVELOPMENT_CN.md
 
-- [ ] 在 `## 环境要求` 后插入从 README 迁移来的 `## 技术栈`。
-- [ ] 在 `## 开发配置详解` 中整合详细的配置文件参数说明。
-- [ ] 确保 `## 命令行参数` 章节准确无误。
+- [x] 在 `## 环境要求` 后插入从 README 迁移来的 `## 技术栈`。
+- [x] 在 `## 开发配置详解` 中整合详细的配置文件参数说明。
+- [x] 确保 `## 命令行参数` 章节准确无误。
 
 ### 3. 修改 README.md (同步中文版变更)
 
-- [ ] 同步移除 `## Tech Stack` 和 `## Project Structure`。
-- [ ] 同步移除 Docker 部分的 `1. Execute Build Script`。
-- [ ] 简化 `## Configuration` 并链接到 `DEVELOPMENT.md`。
-- [ ] 同步功能列表变更为 Features + Roadmap 结构。
-- [ ] 统一 Mermaid 架构图。
+- [x] 同步移除 `## Tech Stack` 和 `## Project Structure`。
+- [x] 同步移除 Docker 部分的 `1. Execute Build Script`。
+- [x] 简化 `## Configuration` 并链接到 `DEVELOPMENT.md`。
+- [x] 同步功能列表变更为 Features + Roadmap 结构。
+- [x] 统一 Mermaid 架构图。
 
 ### 4. 修改 DEVELOPMENT.md (对齐中文版)
 
-- [ ] [NEW] 插入 `## Tech Stack`。
-- [ ] [MODIFY] 扩展 `## Configuration Details`，对齐中文版的详细列表。
-- [ ] [NEW] 同步 `## CLI Arguments` 章节。
-- [ ] [NEW] 同步 `## Debugging Tips` 章节。
-- [ ] [NEW] 同步 `## FAQ` 章节。
-
-## 验证计划
-
-### 手动验证
-
-- 检查修改后的 `.md` 文件在预览中的格式是否正确。
-- 验证文档间的跳转链接是否依然有效。
-- 确保中英文档内容严格对应，术语翻译准确。
-
-### Git 提交
-
-- 使用英文提交信息：`docs: restructure README and DEVELOPMENT files for better clarity and alignment`
+- [x] [NEW] 插入 `## Tech Stack`。
+- [x] [MODIFY] 扩展 `## Configuration Details`，对齐中文版的详细列表。
+- [x] [NEW] 同步 `## CLI Arguments` 章节。
+- [x] [NEW] 同步 `## Debugging Tips` 章节。
+- [x] [NEW] 同步 `## FAQ` 章节。
 
 ---
-# 文档优化工作总结
+
+# 阶段一：文档结构重构工作总结
 
 针对项目文档（README 和 DEVELOPMENT 指南）的结构调整和内容对齐工作已完成。
 
@@ -81,6 +70,37 @@
 - 中英文文档内容高度一致，翻译符合语境。
 - 内部链接（如 `[开发指南](DEVELOPMENT.md)`）和页内锚点链接（如 `(#configuration-details)`）已通过手动核对或修正。
 
+---
+
+# 阶段二：开源准备增强工作总结
+
+项目已完成针对开源发布的一系列标准化整备与隐私优化工作。
+
+## 变更说明
+
+### 1. 社区规范与隐私优化
+
+- **[NEW] CONTRIBUTING_CN.md / CONTRIBUTING.md**: 建立了中英文贡献指南，统一沟通渠道为 GitHub Issue。
+- **[NEW] SECURITY_CN.md / SECURITY.md**: 建立了中英文安全政策。根据用户反馈，已**移除所有邮件地址**，改为引导用户使用 GitHub 原生的“[私密漏洞报告 (Private Vulnerability Reporting)](https://github.com/lcxl/lcxl-remote-desk-web/security/advisories/new)”功能，有效保护开发者隐私。
+
+### 2. GitHub 协作模板
+
+- **[NEW] .github/ISSUE_TEMPLATE/**: 部署了 Bug Report 和 Feature Request 模板。
+- **[NEW] .github/pull_request_template.md**: 部署了 PR 自测模板。
+
+### 3. 文档体系补全
+
+- 完成了 README 与 DEVELOPMENT 手册的高质量中英文对齐。
+- 修复了所有文档内的跳转链接与锚点。
+
+## 验证结论
+
+- 经多次核查，代码及文档中已不含硬编码的个人邮箱及敏感信息。
+- GitHub 维护模板格式正确。
+
 ## 提交记录
 
-- **Commit Message**: `docs: restructure README and DEVELOPMENT files for better clarity and alignment`
+- **Commit Message**: `chore: finalize open source readiness and privacy optimization`
+
+> [!IMPORTANT]
+> **后续操作**：请确保在 GitHub 仓库的 `Settings -> Code security and analysis` 中开启 `Private vulnerability reporting` 功能。

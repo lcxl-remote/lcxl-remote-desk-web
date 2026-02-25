@@ -140,6 +140,31 @@ video_fps = 30               # Reduce FPS during development to save resources
 - `vite-project/`: React frontend
 - `utils/`: Common utilities
 
+## API Documentation
+
+Once the server is running, access documentation at:
+
+- **Swagger UI**: `http://localhost:8081/swagger-ui/`
+- **ReDoc**: `http://localhost:8081/redoc`
+- **RapiDoc**: `http://localhost:8081/rapidoc`
+- **Scalar**: `http://localhost:8081/scalar`
+
+API spec definition: `http://localhost:8081/openapi.json`
+
+## CLI Arguments
+
+```bash
+cargo run -- --help
+```
+
+Available arguments:
+
+- `-c, --config-file-path <PATH>`: Path to configuration file (default: conf/config)
+- `-m, --startup-mode <MODE>`: Startup mode
+  - `default`: Full mode with signaling and desk server
+  - `signaling`: Signaling mode only (Signaling + TURN)
+  - `desk-server`: Desk server mode only
+
 ### Adding Features
 
 1. Define models in `server/src/model/`.
