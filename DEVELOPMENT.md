@@ -31,7 +31,8 @@ sudo apt install -y pkg-config
 sudo apt install -y libssl-dev
 sudo apt install -y libasound2-dev
 sudo apt install -y libpipewire-0.3-dev
-sudo apt install -y clang
+sudo apt install -y libx11-dev libxcb1-dev libxcb-randr0-dev libxext-dev
+sudo apt install -y clang libclang-dev
 sudo apt install -y cmake
 sudo apt install -y libvpx-dev
 ```
@@ -100,23 +101,19 @@ cargo run
 #### 进入前端目录
 
 ```bash
-cd static
+cd vite-project
 ```
 
 #### 安装依赖
 
 ```bash
 npm install
-# 或
-yarn install
 ```
 
 #### 启动开发服务器
 
 ```bash
-npm run start
-# 或
-npm start
+npm run dev
 ```
 
 #### 构建生产版本
@@ -229,9 +226,9 @@ API 规范定义：<http://localhost:8081/openapi.json>
   - **controller/**: 处理 HTTP 请求和路由
   - **model/**: 数据模型定义
   - **service/**: 业务逻辑实现
-- **signal/**: WebRTC 信令服务
-- **turn/**: TURN 中继服务器
-- **static/**: React 前端应用
+- **signal/**: WebRTC 信令服务 (及内置 TURN)
+- **vite-project/**: React + Vite 前端应用
+- **utils/**: 公共工具类库
 
 ### 添加新功能
 
@@ -274,13 +271,13 @@ cargo test
 运行格式化和检查：
 
 ```bash
-cd static
+cd vite-project
 
 # ESLint 检查
 npm run lint
 
-# 格式化代码
-npm run prettier
+# 如果配置了 prettier
+# npm run prettier
 ```
 
 ## 调试技巧
@@ -312,11 +309,11 @@ cargo build --release
 #### 前端
 
 ```bash
-cd static
+cd vite-project
 npm run build
 ```
 
-生成的静态文件位于 `static/dist/`
+生成的静态文件位于 `vite-project/dist/`，在 Docker 构建中会自动复制到 `server/static` 供后端嵌入。
 
 ### 镜像开发 (Docker Development)
 
@@ -398,7 +395,7 @@ cargo run -- --help
 **解决**：在 `config.toml` 中修改 `port` 配置
 
 **问题**：WebRTC 连接失败
-**解决**：检查 STUN/TURN 服务器配置，确保网络连接正常
+**解决**：检查 STUN/TURN 服务器配置，确保网络连接正常。如果是外网访问，请确保信令服务器模式已正确启动并映射了相应端口。
 
 ## 贡献指南
 

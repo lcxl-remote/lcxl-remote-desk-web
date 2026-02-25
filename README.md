@@ -24,12 +24,13 @@ LCXL Remote Desk Web 是一个基于 Web 技术的远程桌面解决方案，允
 
 ### 前端
 
-- **框架**: React 18
-- **UI 组件**: Ant Design 5.13 + Ant Design Pro Components 2.6
-- **构建工具**: UmiJS Max 4.1
-- **语言**: TypeScript 5.3
+- **框架**: React 19
+- **UI 组件**: TailwindCSS + Shadcn UI (Radix UI)
+- **构建工具**: Vite 7
+- **代码生成**: Kubb (OpenAPI to React Query/TypeScript)
+- **语言**: TypeScript 5.9
 - **终端模拟**: xterm.js 5.5
-- **WebSocket**: WebSocket 1.0
+- **状态管理**: TanStack Query (React Query) v5
 
 ### 多媒体处理
 
@@ -42,33 +43,22 @@ LCXL Remote Desk Web 是一个基于 Web 技术的远程桌面解决方案，允
 
 ```
 lcxl-remote-desk-web/
-├── server/                    # 主服务器应用
-│   └── src/
-│       ├── controller/        # 控制器
-│       │   ├── files.rs       # 文件传输
-│       │   ├── info.rs        # 系统信息
-│       │   ├── login.rs       # 用户登录
-│       │   ├── settings.rs    # 设置管理
-│       │   ├── signaling.rs   # WebRTC 信令
-│       │   ├── terminal.rs    # 终端控制
-│       │   ├── turn.rs        # TURN 服务器管理
-│       │   └── user.rs        # 用户管理
-│       ├── model/             # 数据模型
-│       ├── service/           # 业务逻辑
-│       └── main.rs            # 应用入口
-├── signal-facade/             # 信令门面
-├── signal/                    # 信令服务
-├── turn/                      # TURN 服务
-├── utils/                     # 工具库
-├── server-version/            # 服务器版本
-├── server-user/               # 服务器用户
-├── third-deps/                # 第三方依赖
-│   └── vpx-encode/           # VP8/VP9 编码器
-├── static/                    # 前端应用 (React + Ant Design Pro)
-│   └── src/                  # 前端源码
-├── conf/                      # 配置文件
-│   └── config.toml           # 主配置文件
-├── assembly/                  # 构建脚本
+├── server/                    # 主服务器应用 (Rust)
+├── signal/                    # 信令服务器
+├── turn/                      # TURN 服务器 (已集成在信令服务中)
+├── vite-project/              # 前端项目 (React + Vite + TailwindCSS)
+│   ├── src/                  # 前端源码
+│   └── update_openapi.sh     # OpenAPI 客户端更新脚本
+├── utils/                     # 公共工具库
+├── server-version/            # 服务器版本定义
+├── server-user/               # 用户管理模块
+├── signal-facade/             # 信令服务接口包
+├── third-deps/                # 修改后的第三方依赖 (如 vpx-encode)
+├── conf/                      # 配置文件目录
+├── common-utils/              # 通用工具 (如果存在)
+├── agent_works/               # AI 助手工作记录
+├── Dockerfile                 # 多阶段构建 Dockerfile
+├── docker-compose.yml         # Docker 编排配置
 └── Cargo.toml                # Rust 工作空间配置
 ```
 
@@ -140,11 +130,11 @@ cargo run --release
 
 ## Docker 使用
 
-本项目提供多阶段构建的 Docker 镜像，包含完整的项目前后端环境。
+本项目提供基于 Docker 的一键化部署方案，支持三阶段构建。
 
 ### 使用 Docker Compose (推荐)
 
-项目根目录提供了 `docker-compose.yml`，可以一键启动双端环境：
+项目根目录提供了 `docker-compose.yml`，可以一键启动：
 
 ```bash
 docker-compose up -d
