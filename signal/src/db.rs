@@ -24,7 +24,7 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
                 .connect_timeout(Duration::from_secs(8))
                 .idle_timeout(Duration::from_secs(8))
                 .max_lifetime(Duration::from_secs(8))
-                .sqlx_logging(true); // Optional: enable/disable query logging
+                .sqlx_logging(false); // Optional: enable/disable query logging
 
             let db = Database::connect(opt).await?;
 
