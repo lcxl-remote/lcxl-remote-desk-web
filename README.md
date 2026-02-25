@@ -11,6 +11,7 @@ LCXL Remote Desk Web 是一个基于 Web 技术的远程桌面解决方案，允
 ## 技术栈
 
 ### 后端
+
 - **语言**: Rust (Edition 2024, Rust 1.90+)
 - **Web 框架**: Actix-Web 4.11
 - **WebRTC**: webrtc-rs 0.13
@@ -22,6 +23,7 @@ LCXL Remote Desk Web 是一个基于 Web 技术的远程桌面解决方案，允
 - **Prometheus 监控**: Prometheus 0.13.4
 
 ### 前端
+
 - **框架**: React 18
 - **UI 组件**: Ant Design 5.13 + Ant Design Pro Components 2.6
 - **构建工具**: UmiJS Max 4.1
@@ -30,6 +32,7 @@ LCXL Remote Desk Web 是一个基于 Web 技术的远程桌面解决方案，允
 - **WebSocket**: WebSocket 1.0
 
 ### 多媒体处理
+
 - **视频捕获**: Windows (DirectX), Linux (X11RB)
 - **视频编码**: VP8, VP9 (libvpx)
 - **音频捕获**: Windows (WASAPI), Linux (ALSA, PipeWire)
@@ -115,22 +118,65 @@ LCXL Remote Desk Web 提供了以下功能：
 ### 运行服务器
 
 1. **下载或克隆项目**
+
 ```bash
 git clone <repository-url>
 cd lcxl-remote-desk-web
 ```
 
-2. **运行服务器**
+1. **运行服务器**
+
 ```bash
 cargo run --release
 ```
 
-3. **访问 Web 界面**
+1. **访问 Web 界面**
 打开浏览器访问：`http://localhost:8081`
 
 默认登录凭据：
+
 - 用户名: `admin`
 - 密码: `admin` (首次启动时会自动生成随机密码)
+
+## Docker 使用
+
+本项目提供多阶段构建的 Docker 镜像，包含完整的项目前后端环境。
+
+### 使用 Docker Compose (推荐)
+
+项目根目录提供了 `docker-compose.yml`，可以一键启动双端环境：
+
+```bash
+docker-compose up -d
+```
+
+启动后可通过 `docker-compose logs -f` 查看日志。
+
+### 使用 Docker 运行
+
+1. **执行构建脚本**
+
+```bash
+# 默认构建
+./build_docker.sh
+
+# 使用国内镜像源加速构建 (Cargo 阿里云镜像)
+./build_docker.sh --mirror
+```
+
+1. **启动容器**
+
+```bash
+docker run -d \
+  -p 8081:8081 \
+  -v ./conf:/app/conf \
+  -v ./logs:/app/logs \
+  --name remote-desk \
+  lcxl/lcxl-remote-desk-web:latest
+```
+
+> 💡 **提示**: 默认启动模式为 `signaling` (信令模式)。如需切换模式（例如 `default`），可通过命令行参数修改：
+> `docker run ... lcxl/lcxl-remote-desk-web:latest ./lcxl-remote-desk-server --startup-mode default`
 
 > 💡 **开发者提示**: 如需进行开发，请查看 [开发指南](DEVELOPMENT.md) 了解详细的环境配置和开发流程。
 
@@ -141,6 +187,7 @@ cargo run --release
 ### 服务器配置 (conf/config.toml)
 
 **系统设置 [system]**
+
 - `enable_ipv6`: 是否启用 IPv6 支持
 - `port`: 服务器监听端口
 - `listen_addr_ipv4`: IPv4 监听地址
@@ -150,15 +197,18 @@ cargo run --release
 - `open_browser_on_startup`: 启动时是否自动打开浏览器
 
 **用户设置 [user]**
+
 - `login_user_name`: 登录用户名
 - `login_password`: 登录密码
 
 **TURN 服务器 [turn]**
+
 - `realm`: TURN 服务器域
 - `interfaces`: 网络接口配置 (支持 UDP/TCP)
 - `static_credentials`: 静态凭据配置
 
 **桌面设置 [desk]**
+
 - `video_fps`: 视频帧率 (默认 60)
 - `video_encoder`: 视频编码器 (VP8/VP9)
 - `audio_encoder`: 音频编码器 (OPUS)
@@ -172,6 +222,7 @@ cargo run -- --help
 ```
 
 可用参数：
+
 - `-c, --config-file-path <PATH>`: 配置文件路径 (默认: conf/config)
 - `-m, --startup-mode <MODE>`: 启动模式
   - `default`: 默认模式，包含信令和桌面服务器
@@ -181,4 +232,3 @@ cargo run -- --help
 ## 许可证
 
 请参阅 LICENSE 文件了解详细信息。
-

@@ -1,0 +1,15 @@
+.git
+.vscode
+.agents
+target/
+logs/
+conf/
+vite-project/node_modules/
+node_modules/
+# *.lock is removed to allow Cargo.lock and package-lock.json
+*.log
+*.tmp
+temp/
+assembly/
+third-deps/**/target/
+**/target/

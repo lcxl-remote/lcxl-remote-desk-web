@@ -81,6 +81,7 @@ cargo run --release
 ```
 
 或使用 cargo 直接运行：
+
 ```bash
 cargo run
 ```
@@ -90,6 +91,7 @@ cargo run
 打开浏览器访问：`http://localhost:8081`
 
 默认登录凭据：
+
 - 用户名: `admin`
 - 密码: `admin` (首次启动时会自动生成随机密码)
 
@@ -128,6 +130,7 @@ npm run build
 ### 服务器配置 (conf/config.toml)
 
 #### 系统设置 [system]
+
 - `enable_ipv6`: 是否启用 IPv6 支持
 - `port`: 服务器监听端口
 - `listen_addr_ipv4`: IPv4 监听地址
@@ -137,15 +140,18 @@ npm run build
 - `open_browser_on_startup`: 启动时是否自动打开浏览器
 
 #### 用户设置 [user]
+
 - `login_user_name`: 登录用户名
 - `login_password`: 登录密码
 
 #### TURN 服务器 [turn]
+
 - `realm`: TURN 服务器域
 - `interfaces`: 网络接口配置 (支持 UDP/TCP)
 - `static_credentials`: 静态凭据配置
 
 #### 桌面设置 [desk]
+
 - `video_fps`: 视频帧率 (默认 60)
 - `video_encoder`: 视频编码器 (VP8/VP9)
 - `audio_encoder`: 音频编码器 (OPUS)
@@ -170,38 +176,44 @@ video_fps = 30               # 开发时可降低帧率以减少资源消耗
 
 服务器启动后，可以通过以下 URL 访问 API 文档：
 
-- **Swagger UI**: http://localhost:8081/swagger-ui/
-- **ReDoc**: http://localhost:8081/redoc
-- **RapiDoc**: http://localhost:8081/rapidoc
-- **Scalar**: http://localhost:8081/scalar
+- **Swagger UI**: <http://localhost:8081/swagger-ui/>
+- **ReDoc**: <http://localhost:8081/redoc>
+- **RapiDoc**: <http://localhost:8081/rapidoc>
+- **Scalar**: <http://localhost:8081/scalar>
 
-API 规范定义：http://localhost:8081/openapi.json
+API 规范定义：<http://localhost:8081/openapi.json>
 
 ### API 端点
 
 #### 认证相关
+
 - `POST /api/desk/login`: 用户登录
 - `POST /api/desk/logout`: 用户登出
 - `POST /api/desk/captcha`: 获取验证码
 - `POST /api/desk/password/change`: 修改密码
 
 #### 桌面控制
+
 - `GET /api/desk/info`: 获取系统信息
 - `GET /api/desk/settings`: 获取设置
 - `POST /api/desk/settings`: 更新设置
 
 #### 文件传输
+
 - `GET /api/desk/files`: 列出文件
 - `DELETE /api/desk/files`: 删除文件
 
 #### 终端控制
+
 - `GET /api/desk/terminal`: 列出终端会话
 - `POST /api/desk/terminal/open`: 打开终端会话
 
 #### WebRTC 信令
+
 - `GET /api/desk/signaling`: 建立 WebSocket 信令连接
 
 #### TURN 服务器
+
 - `GET /api/turn/info`: 获取 TURN 服务器信息
 - `GET /api/turn/sessions`: 获取 TURN 会话列表
 - `DELETE /api/turn/sessions`: 删除 TURN 会话
@@ -242,6 +254,7 @@ API 规范定义：http://localhost:8081/openapi.json
 - 使用 `cargo clippy` 进行代码检查
 
 运行格式化和检查：
+
 ```bash
 # 格式化代码
 cargo fmt
@@ -259,6 +272,7 @@ cargo test
 - 组件采用函数式组件 + Hooks 模式
 
 运行格式化和检查：
+
 ```bash
 cd static
 
@@ -288,21 +302,68 @@ npm run prettier
 ### 构建生产版本
 
 #### 后端
+
 ```bash
 cargo build --release
 ```
+
 生成的二进制文件位于 `target/release/`
 
 #### 前端
+
 ```bash
 cd static
 npm run build
 ```
+
 生成的静态文件位于 `static/dist/`
+
+### 镜像开发 (Docker Development)
+
+项目支持通过 Docker 进行容器化部署和开发。
+
+#### 1. 构建逻辑
+
+`Dockerfile` 采用了三阶段构建以优化镜像大小：
+
+- **frontend-builder**: 基于 `node:20-slim`，利用 `npm` 缓存挂载构建前端。
+- **rust-builder**: 基于 `rust:1.90-bookworm`，安装 C 库依赖，并将前端产物内置到 `server/static` 进行后端编译。
+- **runtime**: 基于 `debian:bookworm-slim`，精简运行环境。
+
+#### 2. 构建加速
+
+构建过程使用了 Docker BuildKit 的缓存机制：
+
+- `mount=type=cache,target=/root/.npm`: 缓存 npm 依赖。
+- `mount=type=cache,target=/usr/local/cargo/registry`: 缓存 Cargo 注册表。
+- `mount=type=cache,target=/app/target`: 缓存 Rust 编译产物。
+
+#### 3. 使用构建脚本
+
+项目根目录提供了 `build_docker.sh` 方便本地构建：
+
+```bash
+# 构建默认 Tag (lcxl/lcxl-remote-desk-web:latest)
+./build_docker.sh
+
+# 构建后推送到镜像中心
+./build_docker.sh --push
+```
+
+#### 4. 使用 Docker Compose
+
+推荐开发环境下使用 `docker-compose` 进行快速部署验证：
+
+```bash
+docker-compose up --build -d
+```
+
+注意：构建时必须确保本地 Docker 版本支持 BuildKit（脚本已自动设置 `DOCKER_BUILDKIT=1`）。
 
 ### 打包分发
 
 完整的应用包括：
+
 - 后端可执行文件
 - `conf/` 配置目录
 - `static/dist/` 前端静态文件
@@ -314,6 +375,7 @@ cargo run -- --help
 ```
 
 可用参数：
+
 - `-c, --config-file-path <PATH>`: 配置文件路径 (默认: conf/config)
 - `-m, --startup-mode <MODE>`: 启动模式
   - `default`: 默认模式，包含信令和桌面服务器
@@ -349,6 +411,7 @@ cargo run -- --help
 5. 开启 Pull Request
 
 提交前请确保：
+
 - [ ] 代码通过 `cargo fmt` 和 `cargo clippy` 检查
 - [ ] 前端代码通过 ESLint 检查
 - [ ] 添加了必要的测试

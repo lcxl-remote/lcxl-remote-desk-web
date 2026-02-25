@@ -1,0 +1,13 @@
+services:
+  remote-desk:
+    build: .
+    image: lcxl/lcxl-remote-desk-web:latest
+    container_name: remote-desk
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./conf:/app/conf
+      - ./logs:/app/logs
+    restart: always
+    # Default command is defined in Dockerfile, but can be overridden here
+    # command: ["./lcxl-remote-desk-server", "--startup-mode", "default"]
