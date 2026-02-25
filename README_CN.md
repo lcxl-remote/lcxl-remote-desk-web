@@ -10,63 +10,9 @@ LCXL Remote Desk Web 是一个基于 Web 技术的远程桌面解决方案，允
 
 ## 文档导航
 
-- 📖 [开发指南](DEVELOPMENT.md) - 环境配置、开发流程、API 文档
-- ⚙️ [配置说明](#配置说明) - 服务器配置参数
+- 📖 [开发指南](DEVELOPMENT_CN.md) - 环境配置、开发流程、API 文档
+- ⚙️ [配置说明](DEVELOPMENT_CN.md#开发配置详解) - 服务器配置参数
 - 🚀 [快速开始](#快速开始) - 快速运行指南
-
-## 技术栈
-
-### 后端
-
-- **语言**: Rust (Edition 2024, Rust 1.90+)
-- **Web 框架**: Actix-Web 4.11
-- **WebRTC**: webrtc-rs 0.13
-- **会话管理**: Actix-Session with Cookie
-- **日志**: env_logger 0.11
-- **配置管理**: config 0.15 (TOML)
-- **API 文档**: Utoipa 5 (支持 Swagger, Redoc, RapiDoc, Scalar)
-- **TURN 服务**: turn-server 3.4
-- **Prometheus 监控**: Prometheus 0.13.4
-
-### 前端
-
-- **框架**: React 19
-- **UI 组件**: TailwindCSS + Shadcn UI (Radix UI)
-- **构建工具**: Vite 7
-- **代码生成**: Kubb (OpenAPI to React Query/TypeScript)
-- **语言**: TypeScript 5.9
-- **终端模拟**: xterm.js 5.5
-- **状态管理**: TanStack Query (React Query) v5
-
-### 多媒体处理
-
-- **视频捕获**: Windows (DirectX), Linux (X11RB)
-- **视频编码**: VP8, VP9 (libvpx)
-- **音频捕获**: Windows (WASAPI), Linux (ALSA, PipeWire)
-- **音频编码**: Opus (libopus)
-
-## 项目结构
-
-```
-lcxl-remote-desk-web/
-├── server/                    # 主服务器应用 (Rust)
-├── signal/                    # 信令服务器
-├── turn/                      # TURN 服务器 (已集成在信令服务中)
-├── vite-project/              # 前端项目 (React + Vite + TailwindCSS)
-│   ├── src/                  # 前端源码
-│   └── update_openapi.sh     # OpenAPI 客户端更新脚本
-├── utils/                     # 公共工具库
-├── server-version/            # 服务器版本定义
-├── server-user/               # 用户管理模块
-├── signal-facade/             # 信令服务接口包
-├── third-deps/                # 修改后的第三方依赖 (如 vpx-encode)
-├── conf/                      # 配置文件目录
-├── common-utils/              # 通用工具 (如果存在)
-├── agent_works/               # AI 助手工作记录
-├── Dockerfile                 # 多阶段构建 Dockerfile
-├── docker-compose.yml         # Docker 编排配置
-└── Cargo.toml                # Rust 工作空间配置
-```
 
 ## 网络架构图
 
@@ -81,16 +27,16 @@ graph LR
     browser<--P2P Connection-->desk
 ```
 
-上面除了游览器以外有4个组件：
+上面除了游览器以外有组件：
 
 1. **信令服务器 (Signaling Server)**: 用于协调浏览器和远程桌面之间的连接，帮助建立 WebRTC 连接。
-2. **STUN 服务器**: 用于获取网络地址信息，帮助解决 NAT 遍历问题。
+2. **STUN 服务器**: 用于获取网络地址信息，协助内网穿透。
 3. **TURN 服务器**: 当 P2P 连接无法直接建立时，TURN 服务器作为中继服务器来传输数据。
 4. **LCXL Remote Desk Web (server)**: 远程桌面的后端服务，使用 Rust 开发。
 
-上面4个组件其实都集成在 LCXL Remote Desk Web 中。可以根据实际需求进行配置和扩展。
+上面组件其实都集成在 LCXL Remote Desk Web 中。可以根据实际需求进行配置和扩展。
 
-在远程桌面有公网IP或者在同一个局域网的情况下，浏览器可以直接与远程桌面建立 P2P 连接，不需要 TURN 服务器。在这种情况下，网络架构图如下：
+在远程桌面有公网IP或者在同一个局域网的情况下，浏览器可以直接与远程桌面建立 P2P 连接，不需要 STUN/TURN 服务器。在这种情况下，网络架构图如下：
 
 ```mermaid
 graph LR
@@ -105,9 +51,12 @@ LCXL Remote Desk Web 提供了以下功能：
 - **远程桌面访问**：用户可以通过浏览器访问远程计算机的桌面环境，无需安装额外的客户端软件。
 - **文件传输**：支持在本地和远程计算机之间传输文件，方便用户进行文件管理操作。
 - **终端控制**：提供命令行终端，用户可以直接在浏览器中执行命令，与远程计算机进行交互。
-- **共享屏幕**：可以将游览器窗口共享给其他用户，实现多人协作和屏幕共享。
-- **摄像头控制**：允许用户通过浏览器控制远程计算机的摄像头，实现视频监控或远程协助功能。
-- **共享摄像头**：支持多个用户同时观看同一个摄像头画面，方便团队协作和会议使用。
+
+## 路线图 (Roadmap)
+
+- [ ] **共享屏幕**: 将游览器窗口共享给其他用户，实现多人协作和屏幕共享。
+- [ ] **摄像头控制**: 允许用户通过浏览器控制远程计算机的摄像头，实现视频监控或远程协助功能。
+- [ ] **共享摄像头**: 支持多个用户同时观看同一个摄像头画面，方便团队协作和会议使用。
 
 ## 快速开始
 
@@ -129,14 +78,11 @@ cargo run --release
 1. **访问 Web 界面**
 打开浏览器访问：`http://localhost:8081`
 
-默认登录凭据：
-
-- 用户名: `admin`
-- 密码: `admin` (首次启动时会自动生成随机密码)
+如果是第一次使用，则会打开初始页面，输入管理员账号密码进行初始化。
 
 ## Docker 使用
 
-本项目提供基于 Docker 的一键化部署方案，支持三阶段构建。
+本项目提供基于 Docker 的一键化部署方案。
 
 ### 使用 Docker Compose (推荐)
 
@@ -150,17 +96,7 @@ docker-compose up -d
 
 ### 使用 Docker 运行
 
-1. **执行构建脚本**
-
-```bash
-# 默认构建
-./build_docker.sh
-
-# 使用国内镜像源加速构建 (Cargo 阿里云镜像)
-./build_docker.sh --mirror
-```
-
-1. **启动容器**
+启动容器示例：
 
 ```bash
 docker run -d \
@@ -178,38 +114,15 @@ docker run -d \
 
 ## 配置说明
 
-> 📚 **开发者**: 查看 [开发指南](DEVELOPMENT.md) 获取详细的开发配置说明和 API 文档。
+项目支持通过 `conf/config.toml` 进行详细配置。
 
-### 服务器配置 (conf/config.toml)
+核心配置项包括：
 
-**系统设置 [system]**
+- **系统设置**: 端口、监听地址、日志级别等。
+- **用户设置**: 初始管理账号密码。
+- **桌面设置**: 帧率、编码器、是否显示鼠标等。
 
-- `enable_ipv6`: 是否启用 IPv6 支持
-- `port`: 服务器监听端口
-- `listen_addr_ipv4`: IPv4 监听地址
-- `listen_addr_ipv6`: IPv6 监听地址
-- `log_level`: 日志级别 (error, warn, info, debug, trace)
-- `traceback`: 是否启用 Rust 错误回溯
-- `open_browser_on_startup`: 启动时是否自动打开浏览器
-
-**用户设置 [user]**
-
-- `login_user_name`: 登录用户名
-- `login_password`: 登录密码
-
-**TURN 服务器 [turn]**
-
-- `realm`: TURN 服务器域
-- `interfaces`: 网络接口配置 (支持 UDP/TCP)
-- `static_credentials`: 静态凭据配置
-
-**桌面设置 [desk]**
-
-- `video_fps`: 视频帧率 (默认 60)
-- `video_encoder`: 视频编码器 (VP8/VP9)
-- `audio_encoder`: 音频编码器 (OPUS)
-- `video_device_index`: 视频设备索引
-- `show_mouse`: 是否显示鼠标
+> 📚 有关配置参数的完整列表和详细说明，请参考 [开发指南 - 配置详解](DEVELOPMENT_CN.md#开发配置详解)。
 
 ## 命令行参数
 

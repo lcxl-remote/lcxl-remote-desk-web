@@ -11,61 +11,8 @@ LCXL Remote Desk Web is a Web-based remote desktop solution that allows users to
 ## Navigation
 
 - 📖 [Development Guide](DEVELOPMENT.md) - Environment setup, workflow, API documentation
-- ⚙️ [Configuration](#configuration) - Server parameters
+- ⚙️ [Configuration](DEVELOPMENT.md#configuration-details) - Server parameters
 - 🚀 [Quick Start](#quick-start) - Run guide
-
-## Tech Stack
-
-### Backend
-
-- **Language**: Rust (Edition 2024, Rust 1.90+)
-- **Web Framework**: Actix-Web 4.11
-- **WebRTC**: webrtc-rs 0.13
-- **Session Management**: Actix-Session with Cookie
-- **Logging**: env_logger 0.11
-- **Configuration**: config 0.15 (TOML)
-- **API Documentation**: Utoipa 5 (Swagger, Redoc, RapiDoc, Scalar)
-- **TURN Service**: turn-server 3.4
-- **Monitoring**: Prometheus 0.13.4
-
-### Frontend
-
-- **Framework**: React 19
-- **UI Components**: TailwindCSS + Shadcn UI (Radix UI)
-- **Build Tool**: Vite 7
-- **Code Generation**: Kubb (OpenAPI to React Query/TypeScript)
-- **Language**: TypeScript 5.9
-- **Terminal**: xterm.js 5.5
-- **State Management**: TanStack Query (React Query) v5
-
-### Multimedia
-
-- **Video Capture**: Windows (DirectX), Linux (X11RB)
-- **Video Encoding**: VP8, VP9 (libvpx)
-- **Audio Capture**: Windows (WASAPI), Linux (ALSA, PipeWire)
-- **Audio Encoding**: Opus (libopus)
-
-## Project Structure
-
-```
-lcxl-remote-desk-web/
-├── server/                    # Main server application (Rust)
-├── signal/                    # Signaling server
-├── turn/                      # TURN server (Integrated in signaling)
-├── vite-project/              # Frontend project (React + Vite + TailwindCSS)
-│   ├── src/                  # Frontend source code
-│   └── update_openapi.sh     # OpenAPI client update script
-├── utils/                     # Common utility library
-├── server-version/            # Server version definition
-├── server-user/               # User management module
-├── signal-facade/             # Signaling service interface
-├── third-deps/                # Modified third-party dependencies
-├── conf/                      # Configuration directory
-├── agent_works/               # AI assistant work logs
-├── Dockerfile                 # Multi-stage Dockerfile
-├── docker-compose.yml         # Docker compose configuration
-└── Cargo.toml                # Rust workspace configuration
-```
 
 ## Network Architecture
 
@@ -90,8 +37,12 @@ Components (all integrated within LCXL Remote Desk Web):
 - **Remote Desktop Access**: Access and control remote desktops via browser, no extra client required.
 - **File Transfer**: Transfer files between local and remote computers.
 - **Terminal Control**: Command-line interface directly in the browser.
-- **Screen Sharing**: Share browser windows with other users for collaboration.
-- **Camera Control**: Control and stream remote cameras via browser.
+
+## Roadmap
+
+- [ ] **Screen Sharing**: Share browser windows with other users for collaboration.
+- [ ] **Camera Control**: Control and stream remote cameras via browser.
+- [ ] **Shared Camera**: Support multiple users viewing the same camera stream.
 
 ## Quick Start
 
@@ -138,7 +89,7 @@ docker-compose up -d
 
 ## Configuration
 
-Detailed configuration options are available in the [Development Guide](DEVELOPMENT.md).
+Detailed configuration options are available in the [Development Guide](DEVELOPMENT.md#configuration-details).
 
 ## License
 

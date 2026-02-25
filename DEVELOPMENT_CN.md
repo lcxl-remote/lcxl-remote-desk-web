@@ -15,6 +15,39 @@
 
 ## 环境要求
 
+### 技术栈
+
+#### 后端
+
+- **语言**: Rust (Edition 2024, Rust 1.90+)
+- **Web 框架**: Actix-Web 4.11
+- **WebRTC**: webrtc-rs 0.13
+- **会话管理**: Actix-Session with Cookie
+- **日志**: env_logger 0.11
+- **配置管理**: config 0.15 (TOML)
+- **API 文档**: Utoipa 5 (支持 Swagger, Redoc, RapiDoc, Scalar)
+- **TURN 服务**: turn-server 3.4
+- **Prometheus 监控**: Prometheus 0.13.4
+
+#### 前端
+
+- **框架**: React 19
+- **UI 组件**: TailwindCSS + Shadcn UI (Radix UI)
+- **构建工具**: Vite 7
+- **代码生成**: Kubb (OpenAPI to React Query/TypeScript)
+- **语言**: TypeScript 5.9
+- **终端模拟**: xterm.js 5.5
+- **状态管理**: TanStack Query (React Query) v5
+
+#### 多媒体处理
+
+- **视频捕获**: Windows (DirectX), Linux (X11RB)
+- **视频编码**: VP8, VP9 (libvpx)
+- **音频捕获**: Windows (WASAPI), Linux (ALSA, PipeWire)
+- **音频编码**: Opus (libopus)
+
+### 系统环境
+
 ### Rust 开发环境
 
 - Rust 1.90 或更高版本
@@ -145,17 +178,17 @@ npm run build
 
 #### TURN 服务器 [turn]
 
-- `realm`: TURN 服务器域
-- `interfaces`: 网络接口配置 (支持 UDP/TCP)
-- `static_credentials`: 静态凭据配置
+- `realm`: TURN 服务器域，用于身份验证。
+- `interfaces`: 网络接口配置。支持 `udp` 和 `tcp` 协议，及监听端口。
+- `static_credentials`: 静态凭据配置，包含 `user` 和 `password`。
 
 #### 桌面设置 [desk]
 
-- `video_fps`: 视频帧率 (默认 60)
-- `video_encoder`: 视频编码器 (VP8/VP9)
-- `audio_encoder`: 音频编码器 (OPUS)
-- `video_device_index`: 视频设备索引
-- `show_mouse`: 是否显示鼠标
+- `video_fps`: 视频帧率 (默认 60)。降低此值可减少 CPU 和带宽占用。
+- `video_encoder`: 视频编码器。建议根据硬件支持选择 `VP8` 或 `VP9`。
+- `audio_encoder`: 音频编码器。目前主要支持 `OPUS`。
+- `video_device_index`: 指定要捕获的显示器索引（多显示器环境）。
+- `show_mouse`: 是否在远程画面中捕捉并显示移动的鼠标指针。
 
 ### 开发模式推荐配置
 
@@ -218,7 +251,7 @@ API 规范定义：<http://localhost:8081/openapi.json>
 - `DELETE /api/turn/sessions`: 删除 TURN 会话
 - `GET /api/turn/metrics`: 获取 TURN 统计指标
 
-## 开发指南
+## 开发实操指南
 
 ### 项目架构
 
@@ -296,7 +329,7 @@ npm run lint
 2. **浏览器开发工具**：使用 Chrome/Firefox DevTools 调试
 3. **React DevTools**：安装 React 浏览器扩展进行组件调试
 
-## 构建和发布
+## 镜像构建与部署 (Docker)
 
 ### 构建生产版本
 
