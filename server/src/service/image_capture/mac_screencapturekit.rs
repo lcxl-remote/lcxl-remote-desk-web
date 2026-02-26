@@ -116,18 +116,15 @@ impl StreamErrorHandler for ErrorHandler {
 impl MacScreencaptureKitImageCapture {
     pub fn new(_settings: &DeskSettings) -> Result<Self, DeskError> {
         let content = SCShareableContent::try_current().map_err(|e| {
-            DeskError::custom_error::<()>(DeskErrorCode::PERMISSION_ERROR, e).unwrap_err()
+            DeskError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, e.as_str())
         })?;
         let displays = content.displays;
 
         // Default to main display or first display
-        let display = displays.first().ok_or(
-            DeskError::custom_error::<()>(
-                DeskErrorCode::SYSTEM_ERROR,
-                "No displays found".to_string(),
-            )
-            .unwrap_err(),
-        )?;
+        let display = displays.first().ok_or(DeskError::new_custom_error(
+            DeskErrorCode::SYSTEM_ERROR,
+            "No displays found",
+        ))?;
 
         let width = display.width as u32;
         let height = display.height as u32;
@@ -167,15 +164,12 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
     ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         if self.stream.is_none() {
             let content = SCShareableContent::try_current().map_err(|e| {
-                DeskError::custom_error::<()>(DeskErrorCode::PERMISSION_ERROR, e).unwrap_err()
+                DeskError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, e.as_str())
             })?;
-            let display = content.displays.first().ok_or(
-                DeskError::custom_error::<()>(
-                    DeskErrorCode::SYSTEM_ERROR,
-                    "No display found".to_string(),
-                )
-                .unwrap_err(),
-            )?;
+            let display = content.displays.first().ok_or(DeskError::new_custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "No display found",
+            ))?;
 
             let filter = SCContentFilter::new(InitParams::Display(display.clone()));
 
@@ -195,8 +189,7 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
             stream.add_output(receiver, SCStreamOutputType::Screen);
 
             stream.start_capture().map_err(|e| {
-                DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, e.to_string())
-                    .unwrap_err()
+                DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, e.as_str())
             })?;
 
             self.stream = Some(stream);
@@ -215,11 +208,10 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
                 .unwrap();
             frame_guard = guard;
             if result.timed_out() {
-                return Err(DeskError::custom_error::<()>(
+                return Err(DeskError::new_custom_error(
                     DeskErrorCode::ACTION_NEED_RETRY,
-                    "No frame available (timeout)".to_string(),
-                )
-                .unwrap_err());
+                    "No frame available (timeout)",
+                ));
             }
         }
 
@@ -227,11 +219,10 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
             Ok(Box::new(info))
         } else {
             // Spurious wakeup or empty after wait
-            Err(DeskError::custom_error::<()>(
+            Err(DeskError::new_custom_error(
                 DeskErrorCode::ACTION_NEED_RETRY,
-                "No frame available".to_string(),
-            )
-            .unwrap_err())
+                "No frame available",
+            ))
         }
     }
 
@@ -280,7 +271,7 @@ impl MacScreencaptureKitImageOutputEnumerator {
 impl ImageOutputEnumerator for MacScreencaptureKitImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
         let content = SCShareableContent::try_current().map_err(|e| {
-            DeskError::custom_error::<()>(DeskErrorCode::PERMISSION_ERROR, e).unwrap_err()
+            DeskError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, e.as_str())
         })?;
         let mut display_infos = Vec::new();
 

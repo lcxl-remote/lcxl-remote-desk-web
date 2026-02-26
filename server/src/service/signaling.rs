@@ -1610,12 +1610,7 @@ impl DeskSession {
             }
         });
 
-        let writer = pair.master.take_writer().map_err(|e| {
-            DeskError::new_custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                &format!("Failed to take writer: {}", e),
-            )
-        })?;
+        let writer = pair.master.take_writer()?;
 
         self.terminal_map.insert(
             from_session_id.to_owned(),

@@ -87,15 +87,12 @@ impl AudioCapture for MacScreencaptureKitAudioCapture {
 
         // Initialize SCStream with audio capture enabled
         let content = SCShareableContent::try_current().map_err(|e| {
-            DeskError::custom_error::<()>(DeskErrorCode::PERMISSION_ERROR, e).unwrap_err()
+            DeskError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, e.as_str())
         })?;
-        let display = content.displays.first().ok_or(
-            DeskError::custom_error::<()>(
-                DeskErrorCode::SYSTEM_ERROR,
-                "No display found".to_string(),
-            )
-            .unwrap_err(),
-        )?;
+        let display = content.displays.first().ok_or(DeskError::new_custom_error(
+            DeskErrorCode::SYSTEM_ERROR,
+            "No display found",
+        ))?;
 
         let filter = SCContentFilter::new(InitParams::Display(display.clone()));
 
@@ -114,9 +111,9 @@ impl AudioCapture for MacScreencaptureKitAudioCapture {
         let mut stream = SCStream::new(filter, config, ErrorHandler);
         stream.add_output(receiver, SCStreamOutputType::Audio);
 
-        stream.start_capture().map_err(|e| {
-            DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, e.to_string()).unwrap_err()
-        })?;
+        stream
+            .start_capture()
+            .map_err(|e| DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, e.as_str()))?;
 
         self.stream = Some(stream);
         self.started = true;
@@ -144,8 +141,7 @@ impl AudioCapture for MacScreencaptureKitAudioCapture {
     fn stop(&mut self) -> Result<(), DeskError> {
         if let Some(stream) = &self.stream {
             stream.stop_capture().map_err(|e| {
-                DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, e.to_string())
-                    .unwrap_err()
+                DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, e.as_str())
             })?;
         }
         self.stream = None;

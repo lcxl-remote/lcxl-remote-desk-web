@@ -18,7 +18,7 @@ impl MacKeyboardEventHandler {
             Ok(source) => Ok(source),
             Err(_) => DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Failed to create event source".to_string(),
+                "Failed to create event source"
             ),
         }
     }
@@ -35,7 +35,7 @@ impl KeyboardEventHandler for MacKeyboardEventHandler {
                 }
                 Err(_) => DeskError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!("Failed to create key down event for key {}", event.key_code),
+                    &format!("Failed to create key down event for key {}", event.key_code),
                 ),
             }
         } else {
@@ -54,7 +54,7 @@ impl KeyboardEventHandler for MacKeyboardEventHandler {
                 }
                 Err(_) => DeskError::custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
-                    format!("Failed to create key up event for key {}", event.key_code),
+                    &format!("Failed to create key up event for key {}", event.key_code),
                 ),
             }
         } else {

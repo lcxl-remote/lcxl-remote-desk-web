@@ -31,7 +31,7 @@ impl MacMouseEventHandler {
             Ok(source) => Ok(source),
             Err(_) => DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Failed to create event source".to_string(),
+                "Failed to create event source",
             ),
         }
     }
@@ -49,7 +49,7 @@ impl MouseEventHandler for MacMouseEventHandler {
             }
             Err(_) => DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Failed to create mouse move event".to_string(),
+                "Failed to create mouse move event",
             ),
         }
     }
@@ -74,7 +74,7 @@ impl MouseEventHandler for MacMouseEventHandler {
             }
             Err(_) => DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                format!(
+                &format!(
                     "Failed to create mouse down event for button {}",
                     event.button
                 ),
@@ -102,7 +102,7 @@ impl MouseEventHandler for MacMouseEventHandler {
             }
             Err(_) => DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                format!(
+                &format!(
                     "Failed to create mouse up event for button {}",
                     event.button
                 ),
@@ -124,7 +124,7 @@ impl MouseEventHandler for MacMouseEventHandler {
             }
             Err(_) => DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Failed to create scroll event".to_string(),
+                "Failed to create scroll event",
             ),
         }
     }

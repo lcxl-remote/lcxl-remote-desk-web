@@ -80,12 +80,7 @@ async fn handle_text_message(
     upload_states: &Arc<Mutex<HashMap<String, UploadState>>>,
     cancelled_transfers: &Arc<Mutex<HashSet<String>>>,
 ) -> Result<(), DeskError> {
-    let msg_str = String::from_utf8(data.to_vec()).map_err(|e| {
-        DeskError::new_custom_error(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
-            &format!("Invalid UTF-8 in file transfer message: {}", e),
-        )
-    })?;
+    let msg_str = String::from_utf8(data.to_vec())?;
 
     let message: FileTransferMessage = serde_json::from_str(&msg_str)?;
 
@@ -187,12 +182,7 @@ async fn handle_binary_message(
                 transfer_id: transfer_id_owned.clone(),
             });
             let json = serde_json::to_string(&complete_msg)?;
-            dc.send_text(json).await.map_err(|e| {
-                DeskError::new_custom_error(
-                    crate::error::DeskErrorCode::SYSTEM_ERROR,
-                    &format!("Failed to send transfer complete: {}", e),
-                )
-            })?;
+            dc.send_text(json).await?;
             log::info!(
                 "Upload transfer {} completed successfully",
                 transfer_id_owned
@@ -223,12 +213,7 @@ async fn handle_download_request(
             message: format!("File not found: {}", req.file_path),
         });
         let json = serde_json::to_string(&error_msg)?;
-        dc.send_text(json).await.map_err(|e| {
-            DeskError::new_custom_error(
-                crate::error::DeskErrorCode::SYSTEM_ERROR,
-                &format!("Failed to send error: {}", e),
-            )
-        })?;
+        dc.send_text(json).await?;
         return Ok(());
     }
 
@@ -252,12 +237,7 @@ async fn handle_download_request(
         total_chunks,
     });
     let json = serde_json::to_string(&response)?;
-    dc.send_text(json).await.map_err(|e| {
-        DeskError::new_custom_error(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
-            &format!("Failed to send download response: {}", e),
-        )
-    })?;
+    dc.send_text(json).await?;
 
     // Read and send file chunks
     let mut file = match tokio::fs::File::open(&path).await {
@@ -323,12 +303,7 @@ async fn handle_download_request(
         }
 
         let send_start = std::time::Instant::now();
-        dc.send(&Bytes::from(chunk_bytes)).await.map_err(|e| {
-            DeskError::new_custom_error(
-                crate::error::DeskErrorCode::SYSTEM_ERROR,
-                &format!("Failed to send file chunk: {}", e),
-            )
-        })?;
+        dc.send(&Bytes::from(chunk_bytes)).await?;
         let send_duration = send_start.elapsed();
 
         // Performance monitoring & yield to allow SCTP stack to process ACKs
@@ -362,12 +337,7 @@ async fn handle_download_request(
         transfer_id: req.transfer_id.clone(),
     });
     let json = serde_json::to_string(&complete_msg)?;
-    dc.send_text(json).await.map_err(|e| {
-        DeskError::new_custom_error(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
-            &format!("Failed to send transfer complete: {}", e),
-        )
-    })?;
+    dc.send_text(json).await?;
 
     log::info!(
         "Download transfer {} completed: {} ({} bytes, {} chunks)",
@@ -395,12 +365,7 @@ async fn handle_upload_request(
             message: format!("Target directory not found: {}", req.target_dir),
         });
         let json = serde_json::to_string(&error_msg)?;
-        dc.send_text(json).await.map_err(|e| {
-            DeskError::new_custom_error(
-                crate::error::DeskErrorCode::SYSTEM_ERROR,
-                &format!("Failed to send error: {}", e),
-            )
-        })?;
+        dc.send_text(json).await?;
         return Ok(());
     }
 
@@ -436,12 +401,7 @@ async fn handle_upload_request(
         message: None,
     });
     let json = serde_json::to_string(&response)?;
-    dc.send_text(json).await.map_err(|e| {
-        DeskError::new_custom_error(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
-            &format!("Failed to send upload response: {}", e),
-        )
-    })?;
+    dc.send_text(json).await?;
 
     Ok(())
 }

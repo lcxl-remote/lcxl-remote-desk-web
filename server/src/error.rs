@@ -71,6 +71,8 @@ pub enum DeskError {
     ParseLevelError(log::ParseLevelError),
     /// A from utf16 error occurred.
     FromUtf16Error(std::string::FromUtf16Error),
+    /// A from utf8 error occurred.
+    FromUtf8Error(std::string::FromUtf8Error),
     /// A which error occurred.
     WhichError(which::Error),
     /// A regex error occurred.
@@ -165,6 +167,7 @@ impl Display for DeskError {
             }
             DeskError::ParseLevelError(error) => error.fmt(f),
             DeskError::FromUtf16Error(error) => error.fmt(f),
+            DeskError::FromUtf8Error (error) => error.fmt(f),
             DeskError::RegexError(error) => error.fmt(f),
             DeskError::WhichError(error) => error.fmt(f),
             DeskError::TokioWebrtcSendError(error) => error.fmt(f),
@@ -371,6 +374,12 @@ impl From<log::ParseLevelError> for DeskError {
 impl From<std::string::FromUtf16Error> for DeskError {
     fn from(err: std::string::FromUtf16Error) -> Self {
         DeskError::FromUtf16Error(err)
+    }
+}
+
+impl From<std::string::FromUtf8Error> for DeskError {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        DeskError::FromUtf8Error(err)
     }
 }
 
