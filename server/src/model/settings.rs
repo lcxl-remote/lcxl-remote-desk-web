@@ -231,7 +231,7 @@ impl Settings {
         // Load settings from config file
         let config = Config::builder()
             .add_source(File::with_name(args.config_file_path.as_str()).required(false))
-            .add_source(Environment::with_prefix("DESK"))
+            .add_source(Environment::with_prefix("LRD"))
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();

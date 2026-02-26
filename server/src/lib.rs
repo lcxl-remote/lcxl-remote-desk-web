@@ -6,13 +6,25 @@ pub mod service;
 pub mod telemetry;
 pub mod version;
 
-use std::{collections::BTreeMap, env, fs::File, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    env,
+    fs::{File, TryLockError},
+    io::ErrorKind,
+    path::Path,
+    sync::Arc,
+};
 
 use crate::controller::{
-    info::{query_server_info, query_sysinfo}, init::init_system, login::{change_password, get_captcha, login_account, logout_account}, settings::{query_settings, query_telemetry_status, update_settings, update_telemetry_consent}, turn::{
+    info::{query_server_info, query_sysinfo},
+    init::init_system,
+    login::{change_password, get_captcha, login_account, logout_account},
+    settings::{query_settings, query_telemetry_status, update_settings, update_telemetry_consent},
+    turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
         get_turn_session_statistics,
-    }, user::{get_current_user, get_notices, reject_anonymous_users}
+    },
+    user::{get_current_user, reject_anonymous_users},
 };
 use actix_server::Server;
 use actix_service::fn_service;
@@ -43,7 +55,7 @@ use desk_turn::service::startup_turn_server;
 use desk_utils::{error::DeskErrorCode, network::check_ipv6_available, rest::RestResponse};
 use error::DeskError;
 use log::{error, info, warn};
-use model::settings::{Args, Settings, SharedSettings, StartupMode, UserSettings};
+use model::settings::{Args, Settings, SharedSettings, StartupMode};
 use service::signaling::start_desk_session;
 use turn_server::statistics::Statistics;
 
@@ -53,13 +65,23 @@ use utoipa_rapidoc::RapiDoc;
 use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
-use uuid::Uuid;
 
 use crate::model::turn::TurnObserver;
 
 rust_i18n::i18n!("locales");
 
 pub async fn run() -> Result<Server, DeskError> {
+    // Create a lock file to prevent multiple instances of the server from running simultaneously.
+    let lock_file_path = env::temp_dir().join("lcxl_remote_desk_server.lock");
+    let lock_file = File::create(lock_file_path)?;
+    if let Err(TryLockError::WouldBlock) = lock_file.try_lock() {
+        error!("Failed to lock file, is another instance running?");
+        return Err(DeskError::from(std::io::Error::new(
+            ErrorKind::PermissionDenied,
+            "Failed to lock file, is another instance running?",
+        )));
+    }
+
     // Install default crypto provider
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -78,10 +100,6 @@ pub async fn run() -> Result<Server, DeskError> {
     let exec_file_path = env::current_exe()?;
     info!("Server execution file path: {:?}", exec_file_path);
 
-    // Create a lock file to prevent multiple instances of the server from running simultaneously.
-    let lock_file_path = env::temp_dir().join("lcxl_remote_desk_server.lock");
-    let lock_file = File::create(lock_file_path)?;
-    lock_file.try_lock()?;
     // Create a path to the static files directory, which is assumed to be in the same directory as the executable.
     let mut static_file_path = exec_file_path.clone();
     static_file_path.pop();
@@ -123,9 +141,9 @@ pub async fn run() -> Result<Server, DeskError> {
 
     // init desk_signal db
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
-        let settings_dir = std::path::Path::new(&settings.args.config_file_path)
+        let settings_dir = Path::new(&settings.args.config_file_path)
             .parent()
-            .unwrap_or(std::path::Path::new("."))
+            .unwrap_or(Path::new("."))
             .to_string_lossy()
             .to_string();
 

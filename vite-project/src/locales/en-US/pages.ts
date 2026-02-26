@@ -140,7 +140,7 @@ export default {
   'pages.system.settings.error': 'Error',
   'pages.system.settings.updateFailedMessage': 'Failed to update system settings',
   'pages.system.settings.alert.message': 'Warning',
-  'pages.system.settings.alert.description': 'Use environment variables (DFR_ prefixed) for settings with the highest priority, and they cannot be modified through this page.',
+  'pages.system.settings.alert.description': 'Use environment variables (LRD_ prefixed) for settings with the highest priority, and they cannot be modified through this page.',
   'pages.system.settings.configuration': 'Configuration',
   'pages.system.settings.configuration.description': 'Update the server properties and configuration.',
   'pages.system.settings.signalingUrl.description': 'Leave blank to use the default internal signaling server.',

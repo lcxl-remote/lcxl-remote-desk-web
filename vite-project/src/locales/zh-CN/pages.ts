@@ -138,7 +138,7 @@ export default {
   'pages.system.settings.error': '错误',
   'pages.system.settings.updateFailedMessage': '更新系统设置失败',
   'pages.system.settings.alert.message': '注意',
-  'pages.system.settings.alert.description': '使用环境变量（DFR_开头）的设置项优先级最高，且无法通过此页面进行修改。',
+  'pages.system.settings.alert.description': '使用环境变量（LRD_开头）的设置项优先级最高，且无法通过此页面进行修改。',
   'pages.system.settings.configuration': '系统配置',
   'pages.system.settings.configuration.description': '更新服务器属性和配置。',
   'pages.system.settings.signalingUrl.description': '留空以使用默认的内置信令服务器。',
