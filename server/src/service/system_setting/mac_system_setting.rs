@@ -1,14 +1,18 @@
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, SystemSettingHelper},
+    model::system_setting::{DisplaySettings, SystemSettingHelper, SystemSettingSubscriber},
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
-pub struct MacSystemSettingHelper;
+pub struct MacSystemSettingHelper {
+    subscriber: SystemSettingSubscriber,
+}
 
 impl MacSystemSettingHelper {
-    pub fn new(_settings: &DeskSettings) -> Result<Self, DeskError> {
-        Ok(Self)
+    pub fn new(_settings: &DeskSettings, subscriber:SystemSettingSubscriber) -> Result<Self, DeskError> {
+        Ok(Self {
+            subscriber,
+        })
     }
 }
 

@@ -30,7 +30,7 @@ pub fn create_system_setting_helper(
     }
     #[cfg(target_os = "macos")]
     {
-        let helper = MacSystemSettingHelper::new(desk_setting)?;
+        let helper = MacSystemSettingHelper::new(desk_setting, subscriber)?;
         Ok(Box::new(helper))
     }
 }
