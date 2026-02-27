@@ -87,6 +87,8 @@ pub struct PrivateScreenSettings {
     pub window_ex_style: Option<u32>,
     /// Optional hotkey settings for toggling the private screen
     pub hotkey: Option<HotkeySettings>,
+    /// Whether private screen is enabled by default
+    pub enabled: bool,
 }
 
 impl Default for PrivateScreenSettings {
@@ -96,6 +98,7 @@ impl Default for PrivateScreenSettings {
             window_style: None,
             window_ex_style: None,
             hotkey: None,
+            enabled: false,
         }
     }
 }

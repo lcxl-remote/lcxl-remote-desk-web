@@ -9,13 +9,26 @@ use crate::migration::Migrator;
 
 static DB_CONN: OnceCell<DatabaseConnection> = OnceCell::const_new();
 
+fn path_to_sqlite_url(path: &Path) -> String {
+    // let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    let path_str = path.to_string_lossy();
+    let stripped_path = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str);
+
+    // Convert Windows backslash to URL slash
+    let normalized_path = stripped_path.replace("\\", "/");
+
+    // URL encode the path
+    format!("sqlite://{}?mode=rwc", normalized_path)
+}
+
 /// Initialize database connection and return it.
 pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, DeskSignalError> {
     DB_CONN
         .get_or_try_init(|| async {
             let db_path = Path::new(config_dir).join("desk_signal.db");
-            let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
 
+            let db_url = path_to_sqlite_url(&db_path);
             log::info!("Connecting to SQLite database at {}", db_url);
 
             let mut opt = ConnectOptions::new(db_url);

@@ -66,11 +66,26 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::model::system_setting::{PrivateScreenCommand, SystemSettingEventType};
 use crate::model::turn::TurnObserver;
 
 rust_i18n::i18n!("locales");
 
+pub struct ExternalChannels {
+    pub private_screen_cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
+    pub private_screen_state_receiver:
+        Option<tokio::sync::mpsc::UnboundedReceiver<SystemSettingEventType>>,
+}
+
 pub async fn run() -> Result<Server, DeskError> {
+    run_with_channels(ExternalChannels {
+        private_screen_cmd_sender: None,
+        private_screen_state_receiver: None,
+    })
+    .await
+}
+
+pub async fn run_with_channels(channels: ExternalChannels) -> Result<Server, DeskError> {
     // Create a lock file to prevent multiple instances of the server from running simultaneously.
     let lock_file_path = env::temp_dir().join("lcxl_remote_desk_server.lock");
     let lock_file = File::create(lock_file_path)?;
@@ -91,9 +106,23 @@ pub async fn run() -> Result<Server, DeskError> {
         // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
         unsafe { env::set_var("RUST_BACKTRACE", "1") };
     }
-    // Initialize logging
-    // init_logs_by_str(settings.system.log_level.as_str())?;
+    // Initialize telemetry
     let _guard = telemetry::init_telemetry(&settings.system)?;
+
+    // determine startup mode
+    let startup_mode = settings.args.startup_mode.clone();
+
+    // init desk_signal db
+    if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
+        let settings_dir = Path::new(&settings.args.config_file_path)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_string_lossy()
+            .to_string();
+
+        desk_signal::db::init_db(&settings_dir).await?;
+    }
+
     info!("Server args: {:?}", args);
     info!("Server settings: {:?}", settings);
     // Get server execution file path
@@ -113,9 +142,6 @@ pub async fn run() -> Result<Server, DeskError> {
         Arc::new(settings.to_turn_server_config()?)
     };
 
-    // determine startup mode
-    let startup_mode = settings.args.startup_mode.clone();
-
     //start turn server if mode is Default or Signaling
     let turn_api_state =
         if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
@@ -131,26 +157,13 @@ pub async fn run() -> Result<Server, DeskError> {
         info!("Starting desk session");
         let settings_clone = shared_settings.clone();
         actix_web::rt::spawn(async move {
-            if let Err(e) = start_desk_session(settings_clone).await {
+            if let Err(e) = start_desk_session(settings_clone, channels).await {
                 error!("Desk session error: {}", e);
             }
         });
     }
 
     let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
-
-    // init desk_signal db
-    if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
-        let settings_dir = Path::new(&settings.args.config_file_path)
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_string_lossy()
-            .to_string();
-
-        if let Err(e) = desk_signal::db::init_db(&settings_dir).await {
-            error!("Failed to init desk_signal db: {}", e);
-        }
-    }
 
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity } from "lucide-react"
+import { Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -26,7 +26,9 @@ import {
     SIGNALING_TYPE_CODE_CLOSE_CONTROL,
     SIGNALING_TYPE_CODE_ACCEPT_CONTROL,
     SIGNALING_TYPE_CODE_DENY_CONTROL,
-    SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS
+    SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS,
+    SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN,
+    SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED
 } from "./constants"
 
 export default function DeskSession() {
@@ -74,6 +76,10 @@ export default function DeskSession() {
 
     const [showStats, setShowStats] = useState(false);
 
+    // Privacy screen state
+    const [isPrivateScreen, setIsPrivateScreen] = useState(false);
+    const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
+
     const { remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         lastMessage,
@@ -103,6 +109,16 @@ export default function DeskSession() {
         } else if (signaling_type === SIGNALING_TYPE_CODE_CLOSE_CONTROL) {
             console.log("Remote control CLOSED by peer.");
             setHasControl(false);
+        } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
+            const data = lastMessage.signaling_data;
+            if (data) {
+                console.log("Private screen state changed:", data);
+                setIsPrivateScreen(data.visible ?? false);
+                setIsPrivateScreenSupported(data.is_supported ?? true);
+                if (data.error_msg) {
+                    console.warn("Private screen error:", data.error_msg);
+                }
+            }
         }
     }, [lastMessage]);
 
@@ -183,6 +199,13 @@ export default function DeskSession() {
         }
         closeRTC();
         navigate(`/desk/${deskId}`);
+    };
+
+    const handleTogglePrivateScreen = () => {
+        if (!deskId) return;
+        const newState = !isPrivateScreen;
+        console.log(`Toggling private screen: ${newState}`);
+        sendMessage(SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN, { enable: newState }, deskId);
     };
 
     const handleFullscreen = () => {
@@ -501,6 +524,23 @@ export default function DeskSession() {
                                             <p>{showStats ? t('pages.desk.hideStats', 'Hide Network Stats') : t('pages.desk.showStats', 'Show Network Stats')}</p>
                                         </TooltipContent>
                                     </Tooltip>
+
+                                    {hasControl && isPrivateScreenSupported && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    className={`controlButton ${isPrivateScreen ? "bg-white/20 text-green-400" : ""}`}
+                                                    onClick={handleTogglePrivateScreen}
+                                                >
+                                                    {isPrivateScreen ? <ShieldCheck /> : <ShieldOff />}
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{isPrivateScreen ? t('pages.desk.disablePrivateScreen', 'Disable Privacy Screen') : t('pages.desk.enablePrivateScreen', 'Enable Privacy Screen')}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
 
                                     {hasControl && (
                                         <DropdownMenu>

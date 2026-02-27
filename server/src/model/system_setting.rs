@@ -27,7 +27,7 @@ pub trait SystemSettingHelper {
     fn block_input(&self, block: bool) -> Result<(), DeskError>;
 
     /// Enable or disable private screen mode
-    fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError>;
+    fn enable_private_screen(&self, from_session_id: &str, enable: bool) -> Result<(), DeskError>;
 
     /// Control monitor power (turn on/off)
     fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError>;
@@ -45,11 +45,21 @@ pub struct PrivateScreenState {
 #[derive(Debug, Clone)]
 pub enum SystemSettingEventType {
     PrivateScreenInited(PrivateScreenState),
-    PrivateScreenVisibleChanged(bool),
+    PrivateScreenVisibleChanged(String /*from session id*/, bool),
 
     PrivateScreenHotkeyRegisterError,
-    PrivateScreenUnknownError(String),
+    PrivateScreenUnknownError(
+        Option<String>, /*from session id*/
+        String,         /*error message*/
+    ),
     PrivateScreenClosed,
 }
 
-pub type SystemSettingSubscriber = fn(event_type: SystemSettingEventType) -> Result<(), DeskError>;
+#[derive(Debug, Clone)]
+pub enum PrivateScreenCommand {
+    Show(String /*from session id*/),
+    Hide(String /*from session id*/),
+    Quit,
+}
+
+pub type SystemSettingSubscriber = tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>;

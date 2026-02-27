@@ -8,7 +8,7 @@ async fn main() -> std::io::Result<()> {
             return server.await;
         }
         Err(e) => {
-            log::error!("Failed to start server: {:?}", e);
+            log::error!("Failed to start server: {}", e);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("{}", e),

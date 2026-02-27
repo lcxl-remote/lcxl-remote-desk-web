@@ -1,18 +1,21 @@
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, SystemSettingHelper, SystemSettingSubscriber},
+    model::system_setting::{DisplaySettings, SystemSettingHelper},
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
 pub struct MacSystemSettingHelper {
-    subscriber: SystemSettingSubscriber,
+    cmd_sender: Option<std::sync::mpsc::Sender<crate::model::system_setting::PrivateScreenCommand>>,
 }
 
 impl MacSystemSettingHelper {
-    pub fn new(_settings: &DeskSettings, subscriber:SystemSettingSubscriber) -> Result<Self, DeskError> {
-        Ok(Self {
-            subscriber,
-        })
+    pub fn new(
+        _settings: &DeskSettings,
+        cmd_sender: Option<
+            std::sync::mpsc::Sender<crate::model::system_setting::PrivateScreenCommand>,
+        >,
+    ) -> Result<Self, DeskError> {
+        Ok(Self { cmd_sender })
     }
 }
 
@@ -30,8 +33,21 @@ impl SystemSettingHelper for MacSystemSettingHelper {
         Ok(())
     }
 
-    fn enable_private_screen(&self, _enable: bool) -> Result<(), DeskError> {
-        // Not implemented on macOS yet
+    fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError> {
+        if let Some(sender) = &self.cmd_sender {
+            let cmd = if enable {
+                crate::model::system_setting::PrivateScreenCommand::Show
+            } else {
+                crate::model::system_setting::PrivateScreenCommand::Hide
+            };
+            if let Err(e) = sender.send(cmd) {
+                log::error!("Failed to send private screen command: {}", e);
+            }
+        } else {
+            log::warn!(
+                "Private screen command sender is not configured (maybe starting as standalone server)"
+            );
+        }
         Ok(())
     }
 
