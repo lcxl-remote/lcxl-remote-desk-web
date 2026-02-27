@@ -4561,6 +4561,8 @@ version = "0.1.0"
 dependencies = [
  "actix-rt",
  "clap",
+ "core-foundation 0.9.4",
+ "core-graphics 0.23.2",
  "desk-signal-facade",
  "lcxl-remote-desk-server",
  "log",

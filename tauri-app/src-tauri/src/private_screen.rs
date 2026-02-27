@@ -121,8 +121,10 @@ impl PrivateScreenManager {
             .map_err(|e| e.to_string())?;
         }
 
-        // Platform specific: block input
-        platform::block_input(true)?;
+        // Platform specific: block input (best effort; do not fail private screen)
+        if let Err(e) = platform::block_input(true) {
+            log::warn!("Failed to block local input, continue with private screen: {}", e);
+        }
 
         // 注册全局快捷键
         Self::register_hotkey(handle)?;
