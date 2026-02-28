@@ -6,20 +6,18 @@ use desk_utils::error::DeskErrorCode;
 
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, SystemSettingHelper},
+    model::system_setting::{DisplaySettings, PrivateScreenCommand, SystemSettingHelper},
 };
 
 pub struct LinuxSystemSettingHelper {
     clipboard: Clipboard,
-    cmd_sender: Option<std::sync::mpsc::Sender<crate::model::system_setting::PrivateScreenCommand>>,
+    cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
 }
 
 impl LinuxSystemSettingHelper {
     pub fn new(
         _desk_setting: &DeskSettings,
-        cmd_sender: Option<
-            std::sync::mpsc::Sender<crate::model::system_setting::PrivateScreenCommand>,
-        >,
+        cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
     ) -> Result<Self, DeskError> {
         Ok(Self {
             clipboard: Clipboard::new()?, // Assuming clipboard
@@ -71,12 +69,12 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
     }
 
-    fn enable_private_screen(&self, enable: bool) -> Result<(), DeskError> {
+    fn enable_private_screen(&self, from_session_id: &str, enable: bool) -> Result<(), DeskError> {
         if let Some(sender) = &self.cmd_sender {
             let cmd = if enable {
-                crate::model::system_setting::PrivateScreenCommand::Show
+                PrivateScreenCommand::Show(from_session_id.to_string())
             } else {
-                crate::model::system_setting::PrivateScreenCommand::Hide
+                PrivateScreenCommand::Hide(from_session_id.to_string())
             };
             if let Err(e) = sender.send(cmd) {
                 log::error!("Failed to send private screen command: {}", e);
