@@ -10,6 +10,7 @@ pub struct PrivateScreenManager {
     controlled_by_session_id: Option<String>,
 }
 
+#[cfg(not(target_os = "linux"))]
 const PRIVATE_SCREEN_WINDOW_LABEL: &str = "private-screen";
 const HOTKEY: &str = "ctrl+alt+l";
 
@@ -142,7 +143,6 @@ impl PrivateScreenManager {
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
             let _ = window.set_ignore_cursor_events(true);
-            let _ = platform::disable_compositor_bypass(handle, PRIVATE_SCREEN_WINDOW_LABEL);
 
             // Platform specific: block input (best effort; do not fail private screen)
             if let Err(e) = platform::block_input(true) {
@@ -151,9 +151,6 @@ impl PrivateScreenManager {
                     e
                 );
             }
-
-            let xid = platform::get_x11_frame_window_id(handle, PRIVATE_SCREEN_WINDOW_LABEL);
-            let _ = state_sender.send(SystemSettingEventType::PrivateScreenWindowId(xid));
 
             // 注册全局快捷键
             Self::register_hotkey(handle)?;

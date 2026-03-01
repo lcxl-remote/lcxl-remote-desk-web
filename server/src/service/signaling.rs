@@ -519,8 +519,6 @@ pub struct DeskSession {
     /// System setting helper
     pub system_setting_helper:
         Box<dyn crate::model::system_setting::SystemSettingHelper + Send + Sync>,
-    /// 隐私屏的 X11 窗口 ID（Linux 专用，跨线程共享）
-    pub exclude_window_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 enum ConnectionStateChangeResult {
@@ -573,18 +571,12 @@ impl DeskSession {
             )?;
 
         // 若是由 Tauri 启动，此时可能有 state_receiver 需要我们监听
-        let exclude_window_id_atomic = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let exclude_window_id_clone = exclude_window_id_atomic.clone();
 
         if let Some(mut rx) = channels.private_screen_state_receiver.take() {
             let session_clone = session.clone();
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     match event {
-                        SystemSettingEventType::PrivateScreenWindowId(id_opt) => {
-                            exclude_window_id_clone.store(id_opt.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
-                            log::info!("Received PrivateScreenWindowId: {:?}", id_opt);
-                        },
                         SystemSettingEventType::PrivateScreenVisibleChanged(from_session_id, visible) => {
                             let sender = session_clone.clone();
                             let data = PrivateScreenStateChangedData {
@@ -665,7 +657,6 @@ impl DeskSession {
             update_setting_sender: None,
             terminal_map: HashMap::new(),
             system_setting_helper: helper,
-            exclude_window_id: exclude_window_id_atomic,
         })
     }
     pub async fn init_ptc_peer_connection(
@@ -902,7 +893,6 @@ impl DeskSession {
             // Spawn a blocking task to capture screen and send video
             let desk_settings = offer_model.desk_settings.clone();
             let signaling_state_for_screen = peer_connection.signaling_state.clone();
-            let exclude_window_id = self.exclude_window_id.clone();
 
             if peer_connection.capture_screen_thread.is_none() {
                 let capture_screen_thread = std::thread::spawn(move || {
@@ -917,8 +907,7 @@ impl DeskSession {
                             signaling_state_for_screen,
                             desk_settings,
                             video_state_receiver,
-                            video_track,
-                            exclude_window_id,
+                            video_track
                         )
                         .await;
 
@@ -1120,7 +1109,6 @@ impl DeskSession {
         desk_settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
-        exclude_window_id: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<(), DeskError> {
         let mut desk_settings = desk_settings;
         log::info!(
@@ -1195,7 +1183,6 @@ impl DeskSession {
                 .with_label_values(&[image_capture_type])
                 .start_timer();
             
-            capture.set_exclude_window(exclude_window_id.load(std::sync::atomic::Ordering::Relaxed) as u32);
             let image_info_result = capture.capture(desk_settings.show_mouse);
 
             let image_info = match image_info_result {

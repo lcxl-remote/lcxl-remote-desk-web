@@ -53,9 +53,6 @@ pub enum SystemSettingEventType {
         String,         /*error message*/
     ),
     PrivateScreenClosed,
-    /// 隐私屏窗口的 X11 Window ID（用于 XComposite 排除捕获）
-    /// Some(id) = 隐私屏窗口显示, None = 隐私屏窗口隐藏
-    PrivateScreenWindowId(Option<u64>),
 }
 
 #[derive(Debug, Clone)]
