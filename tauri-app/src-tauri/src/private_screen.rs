@@ -41,7 +41,7 @@ impl PrivateScreenManager {
                                 }
                             }
 
-                            if let Err(e) = Self::show_window(&handle) {
+                            if let Err(e) = Self::show_window(&handle, &state_sender) {
                                 log::error!("Failed to show private screen: {}", e);
                                 let _ = state_sender.send(
                                     SystemSettingEventType::PrivateScreenUnknownError(
@@ -95,56 +95,103 @@ impl PrivateScreenManager {
         });
     }
 
-    fn show_window(handle: &AppHandle) -> Result<(), String> {
-        // If window already exists, just show it
-        if let Some(window) = handle.get_webview_window(PRIVATE_SCREEN_WINDOW_LABEL) {
+    pub fn show_window(
+        handle: &AppHandle,
+        state_sender: &tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>,
+    ) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(e) = platform::block_input(true) {
+                log::warn!("Failed to block input and set brightness: {}", e);
+            }
+            let _ = state_sender.send(SystemSettingEventType::PrivateScreenWindowId(None));
+            Self::register_hotkey(handle)?;
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let window =
+                if let Some(window) = handle.get_webview_window(PRIVATE_SCREEN_WINDOW_LABEL) {
+                    window
+                } else {
+                    // Create new window
+                    WebviewWindowBuilder::new(
+                        handle,
+                        PRIVATE_SCREEN_WINDOW_LABEL,
+                        WebviewUrl::App("private-screen.html".into()), // Using the placeholder HTML for now
+                    )
+                    .title("Private Screen")
+                    .always_on_top(true)
+                    .decorations(false)
+                    .skip_taskbar(true)
+                    .resizable(false)
+                    .content_protected(true) // Prevent screen capture
+                    .minimizable(false)
+                    .build()
+                    .map_err(|e| e.to_string())?
+                };
+
+            if let Ok(Some(monitor)) = window.primary_monitor() {
+                let _ = window.set_size(monitor.size().clone());
+                let _ = window.set_position(monitor.position().clone());
+            }
+
             window.show().map_err(|e| e.to_string())?;
             window.set_fullscreen(true).map_err(|e| e.to_string())?;
             window.set_always_on_top(true).map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
-        } else {
-            // Create new window
-            let _window = WebviewWindowBuilder::new(
-                handle,
-                PRIVATE_SCREEN_WINDOW_LABEL,
-                WebviewUrl::App("private-screen.html".into()), // Using the placeholder HTML for now
-            )
-            .title("Private Screen")
-            .fullscreen(true)
-            .always_on_top(true)
-            .decorations(false)
-            .skip_taskbar(true)
-            .resizable(false)
-            .content_protected(true) // Prevent screen capture
-            .minimizable(false)
-            .build()
-            .map_err(|e| e.to_string())?;
+            let _ = window.set_ignore_cursor_events(true);
+            let _ = platform::disable_compositor_bypass(handle, PRIVATE_SCREEN_WINDOW_LABEL);
+
+            // Platform specific: block input (best effort; do not fail private screen)
+            if let Err(e) = platform::block_input(true) {
+                log::warn!(
+                    "Failed to block local input, continue with private screen: {}",
+                    e
+                );
+            }
+
+            let xid = platform::get_x11_frame_window_id(handle, PRIVATE_SCREEN_WINDOW_LABEL);
+            let _ = state_sender.send(SystemSettingEventType::PrivateScreenWindowId(xid));
+
+            // 注册全局快捷键
+            Self::register_hotkey(handle)?;
+
+            Ok(())
         }
-
-        // Platform specific: block input (best effort; do not fail private screen)
-        if let Err(e) = platform::block_input(true) {
-            log::warn!("Failed to block local input, continue with private screen: {}", e);
-        }
-
-        // 注册全局快捷键
-        Self::register_hotkey(handle)?;
-
-        Ok(())
     }
 
     fn hide_window(handle: &AppHandle) -> Result<(), String> {
-        // 先取消输入拦截
-        let _ = platform::block_input(false);
-
-        // 注销全局快捷键
+        // 注销全局快捷键 (common for all platforms)
         let _ = Self::unregister_hotkey(handle);
 
-        // 隐藏窗口
-        if let Some(window) = handle.get_webview_window(PRIVATE_SCREEN_WINDOW_LABEL) {
-            window.hide().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "linux")]
+        {
+            // On Linux, we only unblock input and restore brightness.
+            // The window itself is not explicitly closed or hidden by the app.
+            if let Err(e) = platform::block_input(false) {
+                log::warn!("Failed to unblock input and restore brightness: {}", e);
+            }
+            return Ok(());
         }
 
-        Ok(())
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Platform specific: unblock input
+            if let Err(e) = platform::block_input(false) {
+                log::warn!("Failed to unblock local input: {}", e);
+            }
+
+            // Hide/close the window on non-Linux platforms
+            if let Some(window) = handle.get_webview_window(PRIVATE_SCREEN_WINDOW_LABEL) {
+                // Using close() instead of hide() as per the provided edit,
+                // assuming the intent is to fully dispose of the window.
+                window.close().map_err(|e| e.to_string())?;
+            }
+
+            Ok(())
+        }
     }
 
     fn register_hotkey(handle: &AppHandle) -> Result<(), String> {

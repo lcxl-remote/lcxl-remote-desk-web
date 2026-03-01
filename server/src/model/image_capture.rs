@@ -19,6 +19,13 @@ pub trait ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError>;
     fn get_capture_type(&self) -> ImageCaptureType;
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError>;
+
+    /// Set a window to exclude from screen capture (used for privacy screen on Linux X11).
+    /// The window_id is the X11 Window ID of the top-level frame window.
+    /// Pass 0 to disable exclusion and return to normal capture.
+    fn set_exclude_window(&mut self, _window_id: u32) {
+        // Default: no-op. Only X11 capture implements this.
+    }
 }
 
 /// Image Output Enumerator Trait

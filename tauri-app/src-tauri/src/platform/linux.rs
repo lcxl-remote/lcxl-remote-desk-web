@@ -1,101 +1,80 @@
 use std::sync::{Mutex, OnceLock};
-use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{self, ConnectionExt, GrabMode};
-use x11rb::rust_connection::RustConnection;
 
-struct X11Grabber {
-    conn: RustConnection,
-    root: u32,
+struct LinuxGrabber {
+    grabbed_devices: Vec<evdev::Device>,
 }
 
-static X11_GRABBER: OnceLock<Mutex<Option<X11Grabber>>> = OnceLock::new();
+static LINUX_GRABBER: OnceLock<Mutex<Option<LinuxGrabber>>> = OnceLock::new();
 
-fn grabber_slot() -> &'static Mutex<Option<X11Grabber>> {
-    X11_GRABBER.get_or_init(|| Mutex::new(None))
+fn grabber_slot() -> &'static Mutex<Option<LinuxGrabber>> {
+    LINUX_GRABBER.get_or_init(|| Mutex::new(None))
+}
+
+fn toggle_xrandr_brightness(on: bool) {
+    if let Ok(output) = std::process::Command::new("xrandr").output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains(" connected") {
+                if let Some(output_name) = line.split_whitespace().next() {
+                    let brightness = if on { "0.0" } else { "1.0" };
+                    let _ = std::process::Command::new("xrandr")
+                        .args(&["--output", output_name, "--brightness", brightness])
+                        .status();
+                }
+            }
+        }
+    }
 }
 
 pub fn block_input(block: bool) -> Result<(), String> {
-    // Wayland: not supported
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        log::warn!("Input blocking not supported on Wayland");
-        return Ok(());
-    }
-
     if block {
         let mut guard = grabber_slot()
             .lock()
-            .map_err(|e| format!("Failed to acquire X11 grabber lock: {}", e))?;
+            .map_err(|e| format!("Failed to acquire grabber lock: {}", e))?;
         if guard.is_some() {
-            return Ok(()); // Already grabbed
+            return Ok(());
         }
 
-        let (conn, screen_num) = RustConnection::connect(None)
-            .map_err(|e| format!("Failed to connect to X11: {}", e))?;
-        let screen = &conn.setup().roots[screen_num];
-        let root = screen.root;
+        toggle_xrandr_brightness(true);
 
-        // Grab keyboard: owner_events=false, async mode, current time
-        let kb_reply = conn
-            .grab_keyboard(
-                false,
-                root,
-                xproto::CURRENT_TIME,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-            )
-            .map_err(|e| format!("grab_keyboard request failed: {}", e))?
-            .reply()
-            .map_err(|e| format!("grab_keyboard reply failed: {}", e))?;
-
-        if kb_reply.status != xproto::GrabStatus::SUCCESS {
-            return Err(format!(
-                "grab_keyboard failed with status: {:?}",
-                kb_reply.status
-            ));
+        let mut grabbed_devices = Vec::new();
+        // 遍历所有 /dev/input/event* 设备
+        if let Ok(entries) = std::fs::read_dir("/dev/input") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.to_string_lossy().contains("event") {
+                    if let Ok(mut device) = evdev::Device::open(&path) {
+                        let name = device.name().unwrap_or("");
+                        // 跳过我们自己的虚拟输入设备
+                        if name == "lcxl-web-remote-desk-mouse"
+                            || name == "lcxl-web-remote-desk-keyboard"
+                        {
+                            continue;
+                        }
+                        // 尝试独占抓取物理设备
+                        if device.grab().is_ok() {
+                            grabbed_devices.push(device);
+                        }
+                    }
+                }
+            }
         }
 
-        // Grab pointer: owner_events=false, no event mask, no confine, no cursor change
-        let ptr_reply = conn
-            .grab_pointer(
-                false,
-                root,
-                0u16, // empty event mask — swallow all pointer events
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-                x11rb::NONE, // confine_to: none
-                x11rb::NONE, // cursor: none
-                xproto::CURRENT_TIME,
-            )
-            .map_err(|e| format!("grab_pointer request failed: {}", e))?
-            .reply()
-            .map_err(|e| format!("grab_pointer reply failed: {}", e))?;
-
-        if ptr_reply.status != xproto::GrabStatus::SUCCESS {
-            // Keyboard was already grabbed, release it before returning error
-            let _ = conn.ungrab_keyboard(xproto::CURRENT_TIME);
-            let _ = conn.flush();
-            return Err(format!(
-                "grab_pointer failed with status: {:?}",
-                ptr_reply.status
-            ));
-        }
-
-        conn.flush()
-            .map_err(|e| format!("Failed to flush X11 connection: {}", e))?;
-
-        log::info!("Linux X11: keyboard and pointer grabbed");
-        *guard = Some(X11Grabber { conn, root: root });
+        log::info!("Linux: {} physical devices grabbed", grabbed_devices.len());
+        *guard = Some(LinuxGrabber { grabbed_devices });
     } else {
         let mut guard = grabber_slot()
             .lock()
-            .map_err(|e| format!("Failed to acquire X11 grabber lock: {}", e))?;
-        if let Some(grabber) = guard.take() {
-            let _ = grabber.conn.ungrab_keyboard(xproto::CURRENT_TIME);
-            let _ = grabber.conn.ungrab_pointer(xproto::CURRENT_TIME);
-            let _ = grabber.conn.flush();
-            log::info!("Linux X11: keyboard and pointer ungrabbed");
+            .map_err(|e| format!("Failed to acquire grabber lock: {}", e))?;
+
+        toggle_xrandr_brightness(false);
+
+        if let Some(mut grabber) = guard.take() {
+            for device in grabber.grabbed_devices.iter_mut() {
+                let _ = device.ungrab();
+            }
+            log::info!("Linux: physical devices ungrabbed");
         }
     }
-
     Ok(())
 }
