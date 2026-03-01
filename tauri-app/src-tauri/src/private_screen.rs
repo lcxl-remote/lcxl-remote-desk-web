@@ -105,7 +105,6 @@ impl PrivateScreenManager {
             if let Err(e) = platform::block_input(true) {
                 log::warn!("Failed to block input and set brightness: {}", e);
             }
-            let _ = state_sender.send(SystemSettingEventType::PrivateScreenWindowId(None));
             Self::register_hotkey(handle)?;
             return Ok(());
         }

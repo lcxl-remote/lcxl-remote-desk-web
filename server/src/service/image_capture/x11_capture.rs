@@ -9,11 +9,9 @@ use x11rb::{
     connection::{Connection, RequestConnection},
     errors::ConnectionError,
     protocol::{
-        composite::{self, ConnectionExt as CompositeExt},
         randr::{self, ConnectionExt},
-        render::{self, ConnectionExt as RenderExt},
         shm::{self, ConnectionExt as _},
-        xproto::{self, ConnectionExt as XprotoExt, ImageFormat},
+        xproto::{ConnectionExt as XprotoExt, ImageFormat},
     },
     rust_connection::RustConnection,
 };
@@ -47,12 +45,6 @@ pub struct X11ImageCapture {
     shm_addr: *const u8,
     shm_id: Option<i32>,
     seg: Option<u32>,
-    // --- XComposite fields ---
-    exclude_window_id: u32,
-    composite_active: bool,
-    composite_pixmap: u32,
-    composite_picture: u32,
-    render_formats: Option<render::QueryPictFormatsReply>,
 }
 
 /// Workaround for *const not being Send + Sync
@@ -125,10 +117,6 @@ impl ImageCapture for X11ImageCapture {
         &mut self,
         _show_mouse: bool,
     ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
-        if self.exclude_window_id != 0 && self.composite_active {
-            return self.capture_composite(self.index);
-        }
-
         let image_info = match self.seg {
             Some(_) => self.capture_shm(self.index)?,
             None => self.capture_standard(self.index)?,
@@ -138,41 +126,6 @@ impl ImageCapture for X11ImageCapture {
 
     fn get_capture_type(&self) -> ImageCaptureType {
         ImageCaptureType::X11
-    }
-
-    fn set_exclude_window(&mut self, window_id: u32) {
-        let old_id = self.exclude_window_id;
-        self.exclude_window_id = window_id;
-
-        if window_id != 0 && !self.composite_active {
-            let screen = &self.connection.setup().roots[self.screen];
-            let root = screen.root;
-            if let Err(e) = self
-                .connection
-                .composite_redirect_subwindows(root, composite::Redirect::AUTOMATIC)
-            {
-                log::error!("Failed to composite_redirect_subwindows: {:?}", e);
-                self.exclude_window_id = old_id;
-                return;
-            }
-            let _ = self.connection.flush();
-            self.composite_active = true;
-            log::info!(
-                "XComposite redirect activated for exclude_window={}",
-                window_id
-            );
-        } else if window_id == 0 && self.composite_active {
-            let screen = &self.connection.setup().roots[self.screen];
-            let root = screen.root;
-            let _ = self
-                .connection
-                .composite_unredirect_subwindows(root, composite::Redirect::AUTOMATIC);
-            let _ = self.connection.flush();
-            self.composite_active = false;
-
-            self.cleanup_composite_resources();
-            log::info!("XComposite redirect deactivated");
-        }
     }
 
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
@@ -202,15 +155,6 @@ impl ImageCapture for X11ImageCapture {
 
 impl Drop for X11ImageCapture {
     fn drop(&mut self) {
-        if self.composite_active {
-            let screen = &self.connection.setup().roots[self.screen];
-            let root = screen.root;
-            let _ = self
-                .connection
-                .composite_unredirect_subwindows(root, composite::Redirect::AUTOMATIC);
-        }
-        self.cleanup_composite_resources();
-
         if let Some(seg) = self.seg {
             self.connection.shm_detach(seg).ok();
             unsafe {
@@ -219,12 +163,6 @@ impl Drop for X11ImageCapture {
             }
         }
     }
-}
-
-fn wrap_x11_err<E: std::fmt::Display>(e: E) -> DeskError {
-    DeskError::X11ConnectionError(x11rb::errors::ConnectionError::IoError(
-        std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-    ))
 }
 
 impl X11ImageCapture {
@@ -289,191 +227,7 @@ impl X11ImageCapture {
             shm_addr,
             shm_id,
             seg,
-            exclude_window_id: 0,
-            composite_active: false,
-            composite_pixmap: 0,
-            composite_picture: 0,
-            render_formats: None,
         })
-    }
-
-    fn cleanup_composite_resources(&mut self) {
-        if self.composite_picture != 0 {
-            let _ = self.connection.render_free_picture(self.composite_picture);
-            self.composite_picture = 0;
-        }
-        if self.composite_pixmap != 0 {
-            let _ = self.connection.free_pixmap(self.composite_pixmap);
-            self.composite_pixmap = 0;
-        }
-        let _ = self.connection.flush();
-    }
-
-    fn get_pict_format(&self, depth: u8) -> Result<render::Pictformat, DeskError> {
-        let formats = self.render_formats.as_ref().unwrap();
-        for format in &formats.formats {
-            if format.depth == depth {
-                return Ok(format.id);
-            }
-        }
-        DeskError::custom_error(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
-            &format!("No PictFormat found for depth {}", depth),
-        )
-    }
-
-    fn capture_composite(
-        &mut self,
-        index: usize,
-    ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
-        let display = self.displays.get(index).cloned().ok_or_else(|| {
-            ConnectionError::IoError(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Couldn't find specified Display",
-            ))
-        })?;
-
-        let screen = &self.connection.setup().roots[self.screen];
-        let root = screen.root;
-        let root_depth = screen.root_depth;
-
-        if self.render_formats.is_none() {
-            self.render_formats = Some(
-                self.connection
-                    .render_query_pict_formats()?
-                    .reply()
-                    .map_err(wrap_x11_err)?,
-            );
-        }
-
-        if self.composite_pixmap == 0 {
-            self.composite_pixmap = self.connection.generate_id().map_err(wrap_x11_err)?;
-            self.connection.create_pixmap(
-                root_depth,
-                self.composite_pixmap,
-                root,
-                display.width,
-                display.height,
-            )?;
-
-            self.composite_picture = self.connection.generate_id().map_err(wrap_x11_err)?;
-            let format_id = self.get_pict_format(root_depth)?;
-            self.connection.render_create_picture(
-                self.composite_picture,
-                self.composite_pixmap,
-                format_id,
-                &render::CreatePictureAux::new(),
-            )?;
-        }
-
-        self.connection.render_fill_rectangles(
-            render::PictOp::SRC,
-            self.composite_picture,
-            render::Color {
-                red: 0,
-                green: 0,
-                blue: 0,
-                alpha: 0xFFFF,
-            },
-            &[xproto::Rectangle {
-                x: 0,
-                y: 0,
-                width: display.width,
-                height: display.height,
-            }],
-        )?;
-
-        let tree = self
-            .connection
-            .query_tree(root)?
-            .reply()
-            .map_err(wrap_x11_err)?;
-
-        let mut cookies = Vec::new();
-        for &child in &tree.children {
-            if child != self.exclude_window_id {
-                let attr_cookie = self.connection.get_window_attributes(child)?;
-                let geom_cookie = self.connection.get_geometry(child)?;
-                cookies.push((child, attr_cookie, geom_cookie));
-            }
-        }
-
-        for (child, attr_cookie, geom_cookie) in cookies {
-            if let (Ok(attr), Ok(geom)) = (attr_cookie.reply(), geom_cookie.reply()) {
-                if attr.map_state != xproto::MapState::VIEWABLE {
-                    continue;
-                }
-
-                let src_x = (display.left - geom.x).max(0) as i16;
-                let src_y = (display.top - geom.y).max(0) as i16;
-                let dst_x = (geom.x - display.left).max(0) as i16;
-                let dst_y = (geom.y - display.top).max(0) as i16;
-
-                let avail_w = (geom.width as i16 - src_x).max(0) as u16;
-                let avail_h = (geom.height as i16 - src_y).max(0) as u16;
-                let copy_w = avail_w.min((display.width as i16 - dst_x).max(0) as u16);
-                let copy_h = avail_h.min((display.height as i16 - dst_y).max(0) as u16);
-
-                if copy_w > 0 && copy_h > 0 {
-                    if let Ok(pict_format) = self.get_pict_format(geom.depth) {
-                        if let Ok(win_pixmap) = self.connection.generate_id() {
-                            if self
-                                .connection
-                                .composite_name_window_pixmap(child, win_pixmap)
-                                .is_ok()
-                            {
-                                if let Ok(win_picture) = self.connection.generate_id() {
-                                    let _ = self.connection.render_create_picture(
-                                        win_picture,
-                                        win_pixmap,
-                                        pict_format,
-                                        &render::CreatePictureAux::new(),
-                                    );
-                                    let _ = self.connection.render_composite(
-                                        render::PictOp::OVER,
-                                        win_picture,
-                                        0u32,
-                                        self.composite_picture,
-                                        src_x,
-                                        src_y,
-                                        0,
-                                        0,
-                                        dst_x,
-                                        dst_y,
-                                        copy_w,
-                                        copy_h,
-                                    );
-                                    let _ = self.connection.render_free_picture(win_picture);
-                                }
-                                let _ = self.connection.free_pixmap(win_pixmap);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        self.connection.flush()?;
-
-        let image = self
-            .connection
-            .get_image(
-                ImageFormat::Z_PIXMAP,
-                self.composite_pixmap,
-                0,
-                0,
-                display.width,
-                display.height,
-                PLANE_MASK,
-            )?
-            .reply()
-            .map_err(wrap_x11_err)?;
-
-        Ok(Box::new(X11ImageInfo {
-            data: image.data,
-            width: display.width,
-            height: display.height,
-        }))
     }
 
     /// Captures the screen using standard protocols, which are a lot less inefficient.
