@@ -61,6 +61,14 @@ pub fn run_tauri_app() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Prevent Tauri from exiting when all windows are closed/hidden.
+            // This app is primarily a headless server; windows are created dynamically
+            // (e.g. privacy screen) and may be hidden/destroyed at any time.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
