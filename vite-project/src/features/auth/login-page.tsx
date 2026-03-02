@@ -1,12 +1,11 @@
-
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useNavigate, useSearchParams } from "react-router-dom"
-import { useEffect } from "react"
 import { useTranslation } from "react-i18next"
 import { Loader2, Lock, User } from "lucide-react"
+import axios from "axios"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -56,6 +55,42 @@ export default function LoginPage() {
             }
         }
     }, [serverInfo, isServerInfoLoading, navigate])
+
+    // Tauri auto-login: detect token in URL params
+    useEffect(() => {
+        const token = searchParams.get("token")
+        if (!token) return
+
+        const doTauriLogin = async () => {
+            try {
+                const response = await axios.post(`/api/login/tauri?token=${encodeURIComponent(token)}`)
+                if (response.data?.status === "ok") {
+                    toast({
+                        title: t("pages.login.success", "Login successful"),
+                    })
+                    await fetchUserInfo()
+
+                    // Navigate based on startup_mode
+                    const startupMode = response.data?.startup_mode
+                    if (startupMode === "desk-server" || startupMode === "desk_server") {
+                        navigate("/system/settings")
+                    } else {
+                        navigate("/desk/list")
+                    }
+                    return
+                }
+            } catch (error) {
+                // Token invalid or expired, fall through to normal login form
+                console.warn("Tauri auto-login failed:", error)
+            }
+            // Clean up the token from URL so user sees normal login form
+            const newParams = new URLSearchParams(searchParams)
+            newParams.delete("token")
+            window.history.replaceState({}, "", `${window.location.pathname}${newParams.toString() ? '?' + newParams.toString() : ''}`)
+        }
+
+        doTauriLogin()
+    }, [searchParams]) // eslint-disable-line react-hooks/exhaustive-deps
 
     const form = useForm<FormValues>({
         resolver: zodResolver(formSchema) as any, // Cast to any to avoid strict type mismatch issues

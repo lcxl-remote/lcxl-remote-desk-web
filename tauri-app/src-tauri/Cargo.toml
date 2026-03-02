@@ -8,7 +8,7 @@ rust-version.workspace = true
 lcxl-remote-desk-server = { path = "../../server" }
 desk-signal-facade = { workspace = true }
 
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,7 +16,9 @@ log = { workspace = true }
 tokio = { workspace = true }
 actix-rt = "2"
 clap = { version = "4.5", features = ["derive"] }
-
+uuid = { workspace = true, features = ["v4"] }
+ureq = { version = "2", features = ["json"] }
+config = "0.14"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",

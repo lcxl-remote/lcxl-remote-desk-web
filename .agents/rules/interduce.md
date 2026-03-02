@@ -4,7 +4,7 @@ trigger: always_on
 
 本项目是基于WebRTC技术的远程桌面应用，目录说明：
 
-最主要的三个模块：
+最主要的几个模块：
 
 * server: 远程桌面服务端，运行在windows/linus/macos上，提供远程桌面、远程终端、远程文件管理等功能；
 * signal: 信令服务器主要功能在这里，默认集成在server上启动，也可以通过server的启动参数(startup_mode)来单独启动信令服务器，信令通信使用websocket协议；

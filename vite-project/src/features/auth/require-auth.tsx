@@ -21,7 +21,7 @@ export default function RequireAuth({ children }: { children: React.ReactNode })
     }
 
     if (isError || !user) {
-        return <Navigate to="/user/login" state={{ from: location }} replace />;
+        return <Navigate to={`/user/login${location.search}`} state={{ from: location }} replace />;
     }
 
     return children;

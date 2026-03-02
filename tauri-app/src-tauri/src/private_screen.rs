@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub struct PrivateScreenManager {
     app_handle: AppHandle,
+    frontend_url: String,
     controlled_by_session_id: Option<String>,
 }
 
@@ -15,9 +16,10 @@ const PRIVATE_SCREEN_WINDOW_LABEL: &str = "private-screen";
 const HOTKEY: &str = "ctrl+alt+l";
 
 impl PrivateScreenManager {
-    pub fn new(app_handle: AppHandle) -> Self {
+    pub fn new(app_handle: AppHandle, frontend_url: String) -> Self {
         Self {
             app_handle,
+            frontend_url,
             controlled_by_session_id: None,
         }
     }
@@ -42,7 +44,7 @@ impl PrivateScreenManager {
                                 }
                             }
 
-                            if let Err(e) = Self::show_window(&handle, &state_sender) {
+                            if let Err(e) = self.show_window(&handle, &state_sender) {
                                 log::error!("Failed to show private screen: {}", e);
                                 let _ = state_sender.send(
                                     SystemSettingEventType::PrivateScreenUnknownError(
@@ -97,8 +99,9 @@ impl PrivateScreenManager {
     }
 
     pub fn show_window(
+        &self,
         handle: &AppHandle,
-        state_sender: &tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>,
+        _state_sender: &tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>,
     ) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
@@ -119,7 +122,11 @@ impl PrivateScreenManager {
                     WebviewWindowBuilder::new(
                         handle,
                         PRIVATE_SCREEN_WINDOW_LABEL,
-                        WebviewUrl::App("private-screen.html".into()), // Using the placeholder HTML for now
+                        WebviewUrl::External(
+                            format!("{}/private-screen", self.frontend_url)
+                                .parse()
+                                .unwrap(),
+                        ),
                     )
                     .title("Private Screen")
                     .always_on_top(true)

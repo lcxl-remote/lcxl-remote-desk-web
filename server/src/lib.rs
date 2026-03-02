@@ -75,12 +75,52 @@ pub struct ExternalChannels {
     pub private_screen_cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
     pub private_screen_state_receiver:
         Option<tokio::sync::mpsc::UnboundedReceiver<SystemSettingEventType>>,
+    /// One-time token for Tauri WebView auto-login
+    pub tauri_login_token: Option<String>,
+}
+
+use std::sync::Mutex;
+
+/// One-time token for Tauri auto-login.
+/// The token is consumed after the first successful use.
+pub struct TauriLoginToken(Mutex<Option<String>>);
+
+impl TauriLoginToken {
+    pub fn new(token: String) -> Self {
+        TauriLoginToken(Mutex::new(Some(token)))
+    }
+
+    /// Verify and consume the token. Returns true only once for the correct token.
+    pub fn verify_and_consume(&self, candidate: &str) -> bool {
+        let mut guard = self.0.lock().unwrap();
+        if let Some(ref stored) = *guard {
+            // Constant-time comparison to prevent timing attacks
+            if constant_time_eq(stored.as_bytes(), candidate.as_bytes()) {
+                *guard = None; // Consume: one-time use
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Constant-time byte comparison
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
 
 pub async fn run() -> Result<Server, DeskError> {
     run_with_channels(ExternalChannels {
         private_screen_cmd_sender: None,
         private_screen_state_receiver: None,
+        tauri_login_token: None,
     })
     .await
 }
@@ -137,6 +177,9 @@ pub async fn run_with_channels(channels: ExternalChannels) -> Result<Server, Des
     let secret_key = Key::generate();
     let shared_settings = web::Data::new(SharedSettings::from(settings.clone()));
 
+    let tauri_login_token: web::Data<Option<TauriLoginToken>> =
+        web::Data::new(channels.tauri_login_token.clone().map(TauriLoginToken::new));
+
     let config = {
         let settings = shared_settings.read().await;
         Arc::new(settings.to_turn_server_config()?)
@@ -171,10 +214,12 @@ pub async fn run_with_channels(channels: ExternalChannels) -> Result<Server, Des
 
         let turn_api_state = turn_api_state.clone();
         let startup_mode = startup_mode.clone();
+        let tauri_login_token = tauri_login_token.clone();
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
             .app_data(shared_settings.clone())
+            .app_data(tauri_login_token.clone())
             .app_data(session_map.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
@@ -200,6 +245,7 @@ pub async fn run_with_channels(channels: ExternalChannels) -> Result<Server, Des
             ) // <- limit size of the payload (global configuration)
             // no need to login for these routes
             .service(login_account)
+            .service(crate::controller::login::login_tauri)
             .service(logout_account)
             .service(get_current_user)
             .service(get_captcha)
