@@ -153,7 +153,7 @@ impl Default for SystemSettings {
             log_level: "info".to_string(),
             traceback: true,
             locale: None,
-            open_browser_on_startup: true,
+            open_browser_on_startup: false,
             signaling_url: None,
             client_id: None,
             telemetry_consent: None,

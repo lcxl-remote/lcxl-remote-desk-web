@@ -10,6 +10,8 @@ use crate::{
 
 pub struct UinputMouseEventHandler {
     pub virtual_device: VirtualDevice,
+    pub wheel_acc_x: f64,
+    pub wheel_acc_y: f64,
 }
 
 impl UinputMouseEventHandler {
@@ -31,12 +33,22 @@ impl UinputMouseEventHandler {
         //let keyset = AttributeSetRef::from(keys);
         let virtual_device = VirtualDevice::builder()?
             .name("lcxl-web-remote-desk-mouse")
+            .input_id(evdev::InputId::new(
+                evdev::BusType::BUS_USB,
+                0x1234,
+                0x5678,
+                0x111,
+            ))
             .with_keys(&keys)?
             .with_absolute_axis(&abs_x)?
             .with_absolute_axis(&abs_y)?
             .with_relative_axes(&rel_axes)?
             .build()?;
-        Ok(Self { virtual_device })
+        Ok(Self {
+            virtual_device,
+            wheel_acc_x: 0.0,
+            wheel_acc_y: 0.0,
+        })
     }
 }
 
@@ -52,48 +64,127 @@ impl MouseEventHandler for UinputMouseEventHandler {
             AbsoluteAxisCode::ABS_Y.0,
             (event.y * 32767.0) as i32,
         );
-        self.virtual_device.emit(&[input_event_x, input_event_y])?;
+        let syn_event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
+        let result = self
+            .virtual_device
+            .emit(&[input_event_x, input_event_y, syn_event]);
+        if let Err(e) = result {
+            log::error!("Failed to emit mouse move event: {}", e);
+            return Err(DeskError::from(e));
+        } else {
+            log::trace!(
+                "Mouse move event emitted successfully, x: {}, y: {}",
+                event.x,
+                event.y
+            );
+        }
         Ok(())
     }
 
     fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         let code = match event.button {
             0 => evdev::KeyCode::BTN_LEFT,
-            1 => evdev::KeyCode::BTN_RIGHT,
-            2 => evdev::KeyCode::BTN_MIDDLE,
+            1 => evdev::KeyCode::BTN_MIDDLE,
+            2 => evdev::KeyCode::BTN_RIGHT,
             _ => {
                 log::warn!("Unsupported mouse button: {}", event.button);
                 return Ok(());
             }
         };
         let down_event = *KeyEvent::new(code, 1);
-        self.virtual_device.emit(&[down_event])?;
+        let syn_event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
+        let result = self.virtual_device.emit(&[down_event, syn_event]);
+        if let Err(e) = result {
+            log::error!("Failed to emit mouse down event: {}", e);
+            return Err(DeskError::from(e));
+        } else {
+            log::info!(
+                "Mouse down event emitted successfully, button: {}",
+                event.button
+            );
+        }
         Ok(())
     }
 
     fn handle_mouse_up(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         let code = match event.button {
             0 => evdev::KeyCode::BTN_LEFT,
-            1 => evdev::KeyCode::BTN_RIGHT,
-            2 => evdev::KeyCode::BTN_MIDDLE,
+            1 => evdev::KeyCode::BTN_MIDDLE,
+            2 => evdev::KeyCode::BTN_RIGHT,
             _ => {
                 log::warn!("Unsupported mouse button: {}", event.button);
                 return Ok(());
             }
         };
         let up_event = *KeyEvent::new(code, 0);
-        self.virtual_device.emit(&[up_event])?;
+        let syn_event = InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0);
+        let result = self.virtual_device.emit(&[up_event, syn_event]);
+        if let Err(e) = result {
+            log::error!("Failed to emit mouse up event: {}", e);
+            return Err(DeskError::from(e));
+        } else {
+            log::info!(
+                "Mouse up event emitted successfully, button: {}",
+                event.button
+            );
+        }
         Ok(())
     }
 
     fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
-        let distance = event.delta_y as i32;
-        let wheel_input_event = InputEvent::new(
-            EventType::RELATIVE.0,
-            evdev::RelativeAxisCode::REL_WHEEL.0,
-            distance,
-        );
-        self.virtual_device.emit(&[wheel_input_event])?;
+        self.wheel_acc_y += event.delta_y;
+        self.wheel_acc_x += event.delta_x;
+
+        let step = 100.0;
+        let mut ticks_y = 0;
+        while self.wheel_acc_y >= step {
+            ticks_y += 1;
+            self.wheel_acc_y -= step;
+        }
+        while self.wheel_acc_y <= -step {
+            ticks_y -= 1;
+            self.wheel_acc_y += step;
+        }
+
+        let mut ticks_x = 0;
+        while self.wheel_acc_x >= step {
+            ticks_x += 1;
+            self.wheel_acc_x -= step;
+        }
+        while self.wheel_acc_x <= -step {
+            ticks_x -= 1;
+            self.wheel_acc_x += step;
+        }
+
+        if ticks_x == 0 && ticks_y == 0 {
+            return Ok(());
+        }
+
+        let mut events = Vec::new();
+        if ticks_y != 0 {
+            let wheel_event_y = evdev::InputEvent::new(
+                evdev::EventType::RELATIVE.0,
+                evdev::RelativeAxisCode::REL_WHEEL.0,
+                -ticks_y,
+            );
+            events.push(wheel_event_y);
+        }
+        if ticks_x != 0 {
+            let wheel_event_x = evdev::InputEvent::new(
+                evdev::EventType::RELATIVE.0,
+                evdev::RelativeAxisCode::REL_HWHEEL.0,
+                ticks_x,
+            );
+            events.push(wheel_event_x);
+        }
+
+        events.push(evdev::InputEvent::new(
+            evdev::EventType::SYNCHRONIZATION.0,
+            evdev::SynchronizationCode::SYN_REPORT.0,
+            0,
+        ));
+
+        self.virtual_device.emit(&events)?;
         Ok(())
     }
 }

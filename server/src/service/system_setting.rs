@@ -5,7 +5,5 @@ pub mod system_setting_factory;
 #[cfg(target_os = "windows")]
 pub mod windows_system_setting;
 
-#[cfg(target_os = "windows")]
-pub mod direct2d_private_screen;
 #[cfg(target_os = "macos")]
 pub mod mac_system_setting;

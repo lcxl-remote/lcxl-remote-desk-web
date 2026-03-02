@@ -10,6 +10,9 @@ use bytes::Bytes;
 use bytestring::ByteString;
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::private_screen::{
+    EnablePrivateScreenData, PrivateScreenStateChangedData,
+};
 use desk_signal_facade::model::signal::{
     InitSignalingData, LcxlRTCIceServer, OfferModel, PeerSignalingSender, RemoteDeskTypeEnum,
     SignalingModel, SignalingState, SignalingType, WebRTConnectionState,
@@ -58,6 +61,7 @@ use webrtc::{
 
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::login::{LoginParams, LoginResult};
+use crate::model::system_setting::SystemSettingEventType;
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -289,7 +293,10 @@ where
     false
 }
 
-pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(), DeskError> {
+pub async fn start_desk_session(
+    settings: web::Data<SharedSettings>,
+    mut channels: crate::ExternalChannels,
+) -> Result<(), DeskError> {
     let signaling_url = {
         let settings = settings.read().await;
         if let Some(url) = &settings.system.signaling_url {
@@ -431,6 +438,7 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
         info!("Connected to signaling server: {:?}", response);
 
         let (mut sink, mut stream) = framed.split();
+
         let (tx, mut rx) = mpsc::unbounded_channel::<DeskSessionMessage>();
         let session_sender = DeskSessionSender { sender: tx.clone() };
 
@@ -438,6 +446,7 @@ pub async fn start_desk_session(settings: web::Data<SharedSettings>) -> Result<(
             settings.clone(),
             session_sender,
             CurrentUser::new_admin(&username),
+            &mut channels,
         )
         .await
         {
@@ -507,6 +516,9 @@ pub struct DeskSession {
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
     /// Terminal map: from_session_id -> RunningTerminal
     pub terminal_map: HashMap<String, RunningTerminal>,
+    /// System setting helper
+    pub system_setting_helper:
+        Box<dyn crate::model::system_setting::SystemSettingHelper + Send + Sync>,
 }
 
 enum ConnectionStateChangeResult {
@@ -547,7 +559,96 @@ impl DeskSession {
         settings: web::Data<SharedSettings>,
         session: DeskSessionSender,
         user: CurrentUser,
+        channels: &mut crate::ExternalChannels,
     ) -> Result<Self, DeskError> {
+        let desk_settings = settings.read().await.clone().desk;
+
+        let cmd_sender = channels.private_screen_cmd_sender.clone();
+        let helper =
+            crate::service::system_setting::system_setting_factory::create_system_setting_helper(
+                &desk_settings,
+                cmd_sender,
+            )?;
+
+        // 若是由 Tauri 启动，此时可能有 state_receiver 需要我们监听
+
+        if let Some(mut rx) = channels.private_screen_state_receiver.take() {
+            let session_clone = session.clone();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        SystemSettingEventType::PrivateScreenVisibleChanged(from_session_id, visible) => {
+                            let sender = session_clone.clone();
+                            let data = PrivateScreenStateChangedData {
+                                visible,
+                                is_supported: true,
+                                error_msg: None,
+                            };
+                            if let Ok(model) = SignalingModel::new_request(
+                                SignalingType::PrivateScreenStateChanged,
+                                Some(from_session_id),
+                                Some(&data),
+                            ) {
+                                if let Ok(text) = serde_json::to_string(&model) {
+                                    let _ = sender.sender.send(DeskSessionMessage::Text(bytestring::ByteString::from(text)));
+                                }
+                            }
+                        },
+                        SystemSettingEventType::PrivateScreenInited(_) => {
+                            // Ignored or handle appropriately
+                        },
+                        SystemSettingEventType::PrivateScreenClosed => {
+                            let sender = session_clone.clone();
+                            let data = PrivateScreenStateChangedData {
+                                visible: false,
+                                is_supported: true,
+                                error_msg: None,
+                            };
+                            if let Ok(model) = SignalingModel::new_request(
+                                SignalingType::PrivateScreenStateChanged,
+                                None,
+                                Some(&data),
+                            ) {
+                                if let Ok(text) = serde_json::to_string(&model) {
+                                    let _ = sender.sender.send(DeskSessionMessage::Text(bytestring::ByteString::from(text)));
+                                }
+                            }
+                        },
+                        SystemSettingEventType::PrivateScreenUnknownError(from_session_id_opt, e) => {
+                            log::error!("Private screen error: {}", e);
+                            // We shouldn't send PrivateScreenStateChanged directly to the channel queue,
+                            // Instead, we should construct a Modeling message if we want to send it to the frontend.
+                            // But here we only have session_clone which is DeskSessionSender.
+                            // Let's add a method on DeskSessionMessage or handle in that loop.
+                            // I'll just change send() to send a Text message with SignalingModel.
+                           
+                            if let Some(from_session_id) = from_session_id_opt {
+                                 let sender = session_clone.clone();
+                                 let data = PrivateScreenStateChangedData {
+                                visible: false,
+                                is_supported: true, // or whatever
+                                error_msg: Some(e),
+                            };
+                            if let Ok(model) = SignalingModel::new_request(
+                                SignalingType::PrivateScreenStateChanged,
+                                Some(from_session_id),
+                                Some(&data),
+                            ) {
+                                if let Ok(text) = serde_json::to_string(&model) {
+                                    let _ = sender.sender.send(DeskSessionMessage::Text(bytestring::ByteString::from(text)));
+                                }
+                            }
+                            }
+                            
+                        },
+                        crate::model::system_setting::SystemSettingEventType::PrivateScreenHotkeyRegisterError => {
+                            log::error!("Private screen hotkey register error");
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(Self {
             settings,
             session,
@@ -555,6 +656,7 @@ impl DeskSession {
             rtc_peer_connection_map: HashMap::new(),
             update_setting_sender: None,
             terminal_map: HashMap::new(),
+            system_setting_helper: helper,
         })
     }
     pub async fn init_ptc_peer_connection(
@@ -805,7 +907,7 @@ impl DeskSession {
                             signaling_state_for_screen,
                             desk_settings,
                             video_state_receiver,
-                            video_track,
+                            video_track
                         )
                         .await;
 
@@ -919,7 +1021,7 @@ impl DeskSession {
             }));
 
         // Set the handler for ICE candidate
-        let mut session_for_candidate = self.session.clone();
+        let session_for_candidate = self.session.clone();
         let request_id_for_candidate = request_id.to_string();
         let from_session_id_for_candidate = from_session_id.to_string();
 
@@ -1080,6 +1182,7 @@ impl DeskSession {
             let timer = CAPTURE_SCREEN_HISTOGRAM
                 .with_label_values(&[image_capture_type])
                 .start_timer();
+            
             let image_info_result = capture.capture(desk_settings.show_mouse);
 
             let image_info = match image_info_result {
@@ -1290,6 +1393,16 @@ impl DeskSession {
                     );
                 }
             }
+            SignalingType::EnablePrivateScreen => {
+                let from_session_id = signaling_model.check_and_get_from_session_id()?;
+                if let Some(data) =
+                    signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
+                {
+                    let _ = self
+                        .system_setting_helper
+                        .enable_private_screen(&from_session_id, data.enable);
+                }
+            }
             SignalingType::ManagerFileList => {
                 self.handle_manager_file_list(signaling_model).await?;
             }
@@ -1297,6 +1410,7 @@ impl DeskSession {
                 self.handle_manager_file_delete(signaling_model).await?;
             }
             SignalingType::StartTerminal => {
+                // let's assume it was receiving &signaling_model in the codebase because that's the only one available
                 self.handle_manager_terminal_start(signaling_model).await?;
             }
             SignalingType::SendDataToTerminal => {

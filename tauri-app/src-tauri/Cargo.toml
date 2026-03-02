@@ -1,0 +1,37 @@
+[package]
+name = "lcxl-remote-desk-tauri"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lcxl-remote-desk-server = { path = "../../server" }
+desk-signal-facade = { workspace = true }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true }
+actix-rt = "2"
+clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["all-extensions"] }
+raw-window-handle = "0.6"
+evdev = "0.12"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.23", features = ["highsierra"] }
+core-foundation = "0.9"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

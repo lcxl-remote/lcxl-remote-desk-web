@@ -3,6 +3,7 @@ pub mod desk_settings;
 pub mod files;
 pub mod image_capture;
 pub mod os;
+pub mod private_screen;
 pub mod session;
 pub mod signal;
 pub mod terminal;

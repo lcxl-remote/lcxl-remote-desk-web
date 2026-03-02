@@ -99,6 +99,8 @@ pub enum DeskError {
     DeskTurnError(desk_turn::error::DeskTurnError),
     /// Desk Signal Facade error
     DeskSignalFacadeError(desk_signal_facade::error::DeskSignalFacadeError),
+    /// Desk Signal error
+    DeskSignalError(desk_signal::error::DeskSignalError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -167,7 +169,7 @@ impl Display for DeskError {
             }
             DeskError::ParseLevelError(error) => error.fmt(f),
             DeskError::FromUtf16Error(error) => error.fmt(f),
-            DeskError::FromUtf8Error (error) => error.fmt(f),
+            DeskError::FromUtf8Error(error) => error.fmt(f),
             DeskError::RegexError(error) => error.fmt(f),
             DeskError::WhichError(error) => error.fmt(f),
             DeskError::TokioWebrtcSendError(error) => error.fmt(f),
@@ -194,6 +196,7 @@ impl Display for DeskError {
             DeskError::DeskUtilsError(error) => error.fmt(f),
             DeskError::DeskTurnError(error) => error.fmt(f),
             DeskError::DeskSignalFacadeError(error) => error.fmt(f),
+            DeskError::DeskSignalError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {}", error)
@@ -457,6 +460,12 @@ impl From<desk_turn::error::DeskTurnError> for DeskError {
 impl From<desk_signal_facade::error::DeskSignalFacadeError> for DeskError {
     fn from(err: desk_signal_facade::error::DeskSignalFacadeError) -> Self {
         DeskError::DeskSignalFacadeError(err)
+    }
+}
+
+impl From<desk_signal::error::DeskSignalError> for DeskError {
+    fn from(err: desk_signal::error::DeskSignalError) -> Self {
+        DeskError::DeskSignalError(err)
     }
 }
 

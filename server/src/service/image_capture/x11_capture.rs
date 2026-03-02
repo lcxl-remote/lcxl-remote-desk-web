@@ -11,7 +11,7 @@ use x11rb::{
     protocol::{
         randr::{self, ConnectionExt},
         shm::{self, ConnectionExt as _},
-        xproto::{ConnectionExt as _, ImageFormat},
+        xproto::{ConnectionExt as XprotoExt, ImageFormat},
     },
     rust_connection::RustConnection,
 };

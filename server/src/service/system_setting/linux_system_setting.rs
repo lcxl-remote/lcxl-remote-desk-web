@@ -6,17 +6,22 @@ use desk_utils::error::DeskErrorCode;
 
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, SystemSettingHelper},
+    model::system_setting::{DisplaySettings, PrivateScreenCommand, SystemSettingHelper},
 };
 
 pub struct LinuxSystemSettingHelper {
     clipboard: Clipboard,
+    cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
 }
 
 impl LinuxSystemSettingHelper {
-    pub fn new(_desk_setting: &DeskSettings) -> Result<Self, DeskError> {
+    pub fn new(
+        _desk_setting: &DeskSettings,
+        cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
+    ) -> Result<Self, DeskError> {
         Ok(Self {
             clipboard: Clipboard::new()?, // Assuming clipboard
+            cmd_sender,
         })
     }
 }
@@ -64,8 +69,22 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
     }
 
-    fn enable_private_screen(&self, _enable: bool) -> Result<(), DeskError> {
-        DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
+    fn enable_private_screen(&self, from_session_id: &str, enable: bool) -> Result<(), DeskError> {
+        if let Some(sender) = &self.cmd_sender {
+            let cmd = if enable {
+                PrivateScreenCommand::Show(from_session_id.to_string())
+            } else {
+                PrivateScreenCommand::Hide(from_session_id.to_string())
+            };
+            if let Err(e) = sender.send(cmd) {
+                log::error!("Failed to send private screen command: {}", e);
+            }
+        } else {
+            log::warn!(
+                "Private screen command sender is not configured (maybe starting as standalone server)"
+            );
+        }
+        Ok(())
     }
 
     fn control_monitor_power(&self, _turn_off: bool) -> Result<(), DeskError> {

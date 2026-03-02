@@ -423,6 +423,8 @@ impl<T: BaseUser> SignalingContext<T> {
             | SignalingType::ManagerSystemInfo
             | SignalingType::ManagerSystemStatue
             | SignalingType::ListTerminal
+            | SignalingType::EnablePrivateScreen
+            | SignalingType::PrivateScreenStateChanged
             | SignalingType::TerminalStarted => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;

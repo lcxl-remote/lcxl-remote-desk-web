@@ -51,6 +51,11 @@ pub enum SignalingType {
     CloseControl = 204,
     ChangeDisplaySettings = 205,
 
+    /// Enable or disable private screen mode
+    EnablePrivateScreen = 206,
+    /// Private screen state changed notification
+    PrivateScreenStateChanged = 207,
+
     UpdateDeskSettings = 301,
 
     ManagerSystemInfo = 10003,
