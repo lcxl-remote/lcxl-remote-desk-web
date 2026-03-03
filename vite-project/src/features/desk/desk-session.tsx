@@ -195,6 +195,10 @@ export default function DeskSession() {
 
     const handleDisconnect = () => {
         if (deskId) {
+            if (isPrivateScreen) {
+                console.log(`Disabling private screen before disconnect`);
+                sendMessage(SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN, { enable: false }, deskId);
+            }
             sendMessage(SIGNALING_TYPE_CODE_CLOSE_CONTROL, null, deskId);
         }
         closeRTC();

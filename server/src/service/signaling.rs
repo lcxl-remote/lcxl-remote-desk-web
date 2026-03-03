@@ -103,6 +103,7 @@ pub enum DeskSessionMessage {
     Ping(Bytes),
     Pong(Bytes),
     Close,
+    WebRTCDropped(String),
 }
 
 #[derive(Clone)]
@@ -254,8 +255,11 @@ async fn handle_incoming_ws_message(
     Ok(false)
 }
 
-/// Handle outgoing websocket message
-async fn handle_outgoing_channel_message<S>(msg: Option<DeskSessionMessage>, sink: &mut S) -> bool
+async fn handle_outgoing_channel_message<S>(
+    msg: Option<DeskSessionMessage>,
+    sink: &mut S,
+    desk_session: &mut DeskSession,
+) -> bool
 where
     S: SinkExt<awc::ws::Message, Error = awc::error::WsProtocolError> + Unpin,
 {
@@ -287,6 +291,21 @@ where
         Some(DeskSessionMessage::Close) => {
             let _ = sink.close().await;
             return true;
+        }
+        Some(DeskSessionMessage::WebRTCDropped(from_session_id)) => {
+            info!(
+                "Received WebRTCDropped from session {}, shutting down peer connection and private screen",
+                from_session_id
+            );
+            if let Some(peer_connection) = desk_session.rtc_peer_connection_map.remove(&from_session_id) {
+                let peer_connection = peer_connection.read().await;
+                if let Err(e) = peer_connection.shutdown().await {
+                   error!("Failed to shutdown peer connection: {}", e);
+                }
+            }
+            let _ = desk_session
+                .system_setting_helper
+                .enable_private_screen(&from_session_id, false);
         }
         None => return true,
     }
@@ -466,7 +485,7 @@ pub async fn start_desk_session(
                     }
                 }
                 msg = rx.recv() => {
-                     if handle_outgoing_channel_message(msg, &mut sink).await {
+                     if handle_outgoing_channel_message(msg, &mut sink, &mut desk_session).await {
                         break;
                     }
                 }
@@ -997,15 +1016,21 @@ impl DeskSession {
 
         // Set the handler for Peer connection state
         // This will notify you when the peer has connected/disconnected
+        let peer_state_change_sender_for_drop = self.session.clone();
+        let from_session_id_for_drop = from_session_id.to_string();
         peer_connection
             .rtc_peer_connection
             .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
                 log::info!("Peer connection state has changed: {s}");
                 let state = WebRTConnectionState::from(&s);
                 if state == WebRTConnectionState::Closed {
-                    if let Err(error) = peer_state_change_sender.send(state) {
+                    if let Err(error) = peer_state_change_sender.send(state.clone()) {
                         log::error!("Failed to send connection state: {}", error);
                     }
+                }
+                
+                if s == RTCPeerConnectionState::Closed || s == RTCPeerConnectionState::Failed || s == RTCPeerConnectionState::Disconnected {
+                     let _ = peer_state_change_sender_for_drop.sender.send(DeskSessionMessage::WebRTCDropped(from_session_id_for_drop.clone()));
                 }
 
                 Box::pin(async {})
@@ -1084,9 +1109,12 @@ impl DeskSession {
     /// Shutdown the signaling context, including peer connection and capture tasks.
     pub async fn shutdown(self) -> Result<(), DeskError> {
         // shutdown rtc peer connection
-        for peer_connection in self.rtc_peer_connection_map.values() {
+        for (session_id, peer_connection) in self.rtc_peer_connection_map.iter() {
             let result = peer_connection.write().await.shutdown().await;
             info!("Signaling session ended, result={:?}", result);
+            let _ = self
+                .system_setting_helper
+                .enable_private_screen(session_id, false);
         }
         // shutdown terminal
         for terminal in self.terminal_map.into_values() {
@@ -1392,6 +1420,9 @@ impl DeskSession {
                         from_session_id
                     );
                 }
+                let _ = self
+                    .system_setting_helper
+                    .enable_private_screen(from_session_id, false);
             }
             SignalingType::EnablePrivateScreen => {
                 let from_session_id = signaling_model.check_and_get_from_session_id()?;
@@ -1558,8 +1589,11 @@ impl DeskSession {
             SignalingType::AcceptControl
         } else {
             signaling_state.accept_control = false;
+            let _ = self
+                .system_setting_helper
+                .enable_private_screen(from_session_id, false);
             log::info!(
-                "Releasing control request from {}, sending CloseControl signaling",
+                "Releasing control request from {}, sending CloseControl signaling (also disabling private screen if any)",
                 from_session_id
             );
             SignalingType::CloseControl

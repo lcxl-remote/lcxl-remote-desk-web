@@ -105,7 +105,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
     fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         let mut mouse_event_flags = MOUSE_EVENT_FLAGS(0);
         mouse_event_flags |= MOUSEEVENTF_WHEEL;
-        let wheel_delta = (event.delta_y * 120.0) as i32;
+        let wheel_delta = event.delta_y as i32;
         let mut input = INPUT::default();
         input.r#type = INPUT_MOUSE;
         input.Anonymous.mi.dwFlags = mouse_event_flags;
