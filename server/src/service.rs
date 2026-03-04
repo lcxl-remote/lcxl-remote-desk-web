@@ -1,5 +1,6 @@
 pub mod audio_capture;
 pub mod audio_encoder;
+pub mod clipboard_event;
 pub mod data_channel;
 pub mod file_manager;
 pub mod file_transfer;

@@ -10,8 +10,9 @@ use webrtc::{
 use crate::{
     error::DeskError,
     model::data_channel::{
-        DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT, DATA_CHANNEL_LABEL_KEYBOARD_EVENT,
-        DATA_CHANNEL_LABEL_MOUSE_EVENT, DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT,
+        DATA_CHANNEL_LABEL_CLIPBOARD_EVENT, DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT,
+        DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT,
+        DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT,
     },
     service::{
         file_transfer::handle_file_transfer_event, keyboard_event::handle_keyboard_event,
@@ -34,6 +35,11 @@ pub async fn handle_data_channel_event(
         }
         DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT => {
             handle_file_transfer_event(data_channel).await?;
+            return Ok(());
+        }
+        DATA_CHANNEL_LABEL_CLIPBOARD_EVENT => {
+            crate::service::clipboard_event::handle_clipboard_event(signaling_state, data_channel)
+                .await?;
             return Ok(());
         }
         label => {

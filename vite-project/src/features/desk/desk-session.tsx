@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff } from "lucide-react"
+import { Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -18,6 +18,7 @@ import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskInput } from "./use-desk-input"
+import { useDeskClipboard } from "./use-desk-clipboard"
 import { DeskConfigDialog } from "./desk-config-dialog"
 import type { DeskSettings } from "@/services/types"
 import {
@@ -80,10 +81,25 @@ export default function DeskSession() {
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
 
-    const { remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
+    const { remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         lastMessage,
         sendMessage
+    });
+
+    const {
+        clipboardEnabled,
+        transferProgress,
+        transferStatus,
+        errorMessage,
+        toggleClipboard,
+        fallbackToast,
+        execFallbackToastAction,
+        closeFallbackToast
+    } = useDeskClipboard({
+        clipboardChannel,
+        hasControl: isRTCConnected && hasControl,
+        isActive: true
     });
 
     const { sendKeyboardEvents } = useDeskInput({
@@ -186,9 +202,14 @@ export default function DeskSession() {
     const handleRequestControl = () => {
         const requestControlData = {
             accept: !hasControl,
-            accept_clipboard_sync: !hasControl,
+            accept_clipboard_sync: !hasControl, // Auto-request clipboard by default on control
             accept_file_transfer: !hasControl,
         };
+        // Auto-enable UI state if asking for control
+        if (!hasControl && window.isSecureContext !== false) {
+            if (!clipboardEnabled) toggleClipboard();
+        }
+
         console.log(`Sending REQUIRE_CONTROL signaling, requestControlData:`, requestControlData);
         sendMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, requestControlData, deskId);
     };
@@ -462,6 +483,32 @@ export default function DeskSession() {
                             </div>
                         )}
 
+                        {errorMessage && (
+                            <div className="absolute top-16 right-4 z-[60] bg-red-500/90 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md animate-in fade-in slide-in-from-top-4">
+                                {errorMessage}
+                            </div>
+                        )}
+
+                        {transferStatus !== 'idle' && transferStatus !== 'error' && (
+                            <div className="absolute top-16 right-4 z-[60] bg-black/80 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md border border-white/10 flex items-center gap-2 animate-in fade-in slide-in-from-top-4">
+                                <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+                                <span>{transferProgress ? `${t('pages.desk.syncing', 'Syncing clipboard...')} ${transferProgress}%` : t('pages.desk.syncing', 'Syncing clipboard...')}</span>
+                            </div>
+                        )}
+
+                        {fallbackToast.show && (
+                            <div className="absolute bottom-24 right-4 z-[60] bg-amber-500/90 text-white p-4 rounded-lg shadow-xl flex flex-col gap-3 min-w-[300px] animate-in slide-in-from-bottom-4 pointer-events-auto">
+                                <div className="flex justify-between items-start">
+                                    <span className="font-semibold text-sm">Action Required</span>
+                                    <button onClick={closeFallbackToast} className="text-white/80 hover:text-white"><XSquare className="w-4 h-4" /></button>
+                                </div>
+                                <p className="text-xs text-amber-100">{fallbackToast.text || 'Clipboard update received, please click to sync.'}</p>
+                                <Button variant="secondary" size="sm" className="w-full bg-white text-amber-900 hover:bg-amber-100" onClick={execFallbackToastAction}>
+                                    Sync Now
+                                </Button>
+                            </div>
+                        )}
+
                         {isConnected && (
                             <div
                                 ref={controlBarRef}
@@ -542,6 +589,31 @@ export default function DeskSession() {
                                             </TooltipTrigger>
                                             <TooltipContent>
                                                 <p>{isPrivateScreen ? t('pages.desk.disablePrivateScreen', 'Disable Privacy Screen') : t('pages.desk.enablePrivateScreen', 'Enable Privacy Screen')}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    )}
+
+                                    {hasControl && (
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    className={`controlButton ${clipboardEnabled ? "bg-white/20 text-blue-400" : "text-white/50"}`}
+                                                    onClick={(e) => {
+                                                        e.preventDefault();
+                                                        console.log("Clipboard Toggle Button Hit");
+                                                        if (typeof toggleClipboard === 'function') {
+                                                            toggleClipboard();
+                                                        } else {
+                                                            console.error("toggleClipboard is not a function!");
+                                                        }
+                                                    }}
+                                                >
+                                                    {clipboardEnabled ? <Clipboard /> : <ClipboardX />}
+                                                </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>{clipboardEnabled ? t('pages.desk.disableClipboardSync', 'Disable Clipboard Sync') : t('pages.desk.enableClipboardSync', 'Enable Clipboard Sync')} {!window.isSecureContext ? t('pages.desk.clipboardHttpsRequired', '(HTTPS Required)') : ''}</p>
                                             </TooltipContent>
                                         </Tooltip>
                                     )}

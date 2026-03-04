@@ -74,6 +74,18 @@ pub struct KeyboardEventData {
     pub is_composing: bool,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardEventData {
+    pub r#type: String, // "text", "image_start", "image_chunk", "image_end", "error"
+    pub content: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub total_bytes: Option<u64>,
+    pub chunk_count: Option<u32>,
+    pub index: Option<u32>,
+}
+
 /// Mouse Event Handler Trait
 pub trait MouseEventHandler {
     /// Handle mouse event

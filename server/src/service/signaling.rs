@@ -1582,6 +1582,7 @@ impl DeskSession {
 
         let reply_type = if control_data.accept {
             signaling_state.accept_control = true;
+            signaling_state.accept_clipboard_sync = control_data.accept_clipboard_sync;
             log::info!(
                 "Auto accepting control request from {}, sending AcceptControl signaling",
                 from_session_id
@@ -1589,6 +1590,7 @@ impl DeskSession {
             SignalingType::AcceptControl
         } else {
             signaling_state.accept_control = false;
+            signaling_state.accept_clipboard_sync = false;
             let _ = self
                 .system_setting_helper
                 .enable_private_screen(from_session_id, false);

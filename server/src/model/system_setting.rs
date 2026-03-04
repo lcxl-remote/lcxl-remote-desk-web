@@ -19,6 +19,14 @@ pub struct DisplaySettings {
     pub scaling_factor: Option<f64>, // Add
 }
 
+/// A representation of an image on the clipboard
+#[derive(Debug, Clone)]
+pub struct ClipboardImage {
+    pub width: usize,
+    pub height: usize,
+    pub bytes: std::borrow::Cow<'static, [u8]>,
+}
+
 pub trait SystemSettingHelper {
     /// Change display settings
     fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), DeskError>;
@@ -34,6 +42,15 @@ pub trait SystemSettingHelper {
 
     /// Set text to clipboard
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError>;
+
+    /// Read text from clipboard
+    fn get_text_from_clipboard(&mut self) -> Result<Option<String>, DeskError>;
+
+    /// Read image from clipboard
+    fn get_image_from_clipboard(&mut self) -> Result<Option<ClipboardImage>, DeskError>;
+
+    /// Set image to clipboard
+    fn set_image_to_clipboard(&mut self, image: &ClipboardImage) -> Result<(), DeskError>;
 }
 
 #[derive(Debug, Clone)]

@@ -11,9 +11,7 @@ pub struct MacSystemSettingHelper {
 impl MacSystemSettingHelper {
     pub fn new(
         _settings: &DeskSettings,
-        cmd_sender: Option<
-            std::sync::mpsc::Sender<PrivateScreenCommand>,
-        >,
+        cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
     ) -> Result<Self, DeskError> {
         Ok(Self { cmd_sender })
     }
@@ -59,6 +57,46 @@ impl SystemSettingHelper for MacSystemSettingHelper {
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError> {
         let mut clipboard = arboard::Clipboard::new().map_err(DeskError::ArboardError)?;
         clipboard.set_text(text).map_err(DeskError::ArboardError)?;
+        Ok(())
+    }
+
+    fn get_text_from_clipboard(&mut self) -> Result<Option<String>, DeskError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(DeskError::ArboardError)?;
+        match clipboard.get_text() {
+            Ok(text) => Ok(Some(text)),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(DeskError::ArboardError(e)),
+        }
+    }
+
+    fn get_image_from_clipboard(
+        &mut self,
+    ) -> Result<Option<crate::model::system_setting::ClipboardImage>, DeskError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(DeskError::ArboardError)?;
+        match clipboard.get_image() {
+            Ok(img) => Ok(Some(crate::model::system_setting::ClipboardImage {
+                width: img.width,
+                height: img.height,
+                bytes: img.bytes,
+            })),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(DeskError::ArboardError(e)),
+        }
+    }
+
+    fn set_image_to_clipboard(
+        &mut self,
+        image: &crate::model::system_setting::ClipboardImage,
+    ) -> Result<(), DeskError> {
+        let mut clipboard = arboard::Clipboard::new().map_err(DeskError::ArboardError)?;
+        let img_data = arboard::ImageData {
+            width: image.width,
+            height: image.height,
+            bytes: image.bytes.clone(),
+        };
+        clipboard
+            .set_image(img_data)
+            .map_err(DeskError::ArboardError)?;
         Ok(())
     }
 }

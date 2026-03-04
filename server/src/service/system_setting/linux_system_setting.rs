@@ -95,4 +95,39 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         self.clipboard.set_text(text)?;
         Ok(())
     }
+
+    fn get_text_from_clipboard(&mut self) -> Result<Option<String>, DeskError> {
+        match self.clipboard.get_text() {
+            Ok(text) => Ok(Some(text)),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(DeskError::from(e)),
+        }
+    }
+
+    fn get_image_from_clipboard(
+        &mut self,
+    ) -> Result<Option<crate::model::system_setting::ClipboardImage>, DeskError> {
+        match self.clipboard.get_image() {
+            Ok(img) => Ok(Some(crate::model::system_setting::ClipboardImage {
+                width: img.width,
+                height: img.height,
+                bytes: img.bytes,
+            })),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(DeskError::from(e)),
+        }
+    }
+
+    fn set_image_to_clipboard(
+        &mut self,
+        image: &crate::model::system_setting::ClipboardImage,
+    ) -> Result<(), DeskError> {
+        let img_data = arboard::ImageData {
+            width: image.width,
+            height: image.height,
+            bytes: image.bytes.clone(),
+        };
+        self.clipboard.set_image(img_data)?;
+        Ok(())
+    }
 }

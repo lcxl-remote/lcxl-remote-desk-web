@@ -34,6 +34,8 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
     const mouseChannel = useRef<RTCDataChannel | null>(null);
     const keyboardChannel = useRef<RTCDataChannel | null>(null);
     const mouseMoveChannel = useRef<RTCDataChannel | null>(null);
+    const clipboardChannel = useRef<RTCDataChannel | null>(null); // Added clipboardChannel ref
+    const fileTransferChannel = useRef<RTCDataChannel | null>(null); // Added fileTransferChannel ref
     const [isRTCConnected, setIsRTCConnected] = useState(false);
 
     const [rtcStats, setRtcStats] = useState<RTCStatsData>({
@@ -166,13 +168,24 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
 
         // Create Data Channels
         mouseChannel.current = pc.createDataChannel("mouse_event", { ordered: true });
-        keyboardChannel.current = pc.createDataChannel("keyboard_event", { ordered: true });
+        // keyboard events channel
+        keyboardChannel.current = pc.createDataChannel('keyboard_event', {
+            ordered: false,
+            maxRetransmits: 0,
+        });
+        // clipboard events channel
+        clipboardChannel.current = pc.createDataChannel('clipboard_event', {
+            ordered: true,
+        });
+        fileTransferChannel.current = pc.createDataChannel('file_transfer_event', { ordered: true });
         // { ordered: false, maxRetransmits: 0 } means unreliable and unordered UDP style channel for high-frequency updates
         mouseMoveChannel.current = pc.createDataChannel("mouse_move_event", { ordered: false, maxRetransmits: 0 });
 
         mouseChannel.current.onopen = () => console.log("Mouse channel open");
         keyboardChannel.current.onopen = () => console.log("Keyboard channel open");
         mouseMoveChannel.current.onopen = () => console.log("Mouse Move channel open");
+        clipboardChannel.current.onopen = () => console.log("Clipboard channel open"); // Added onopen for clipboardChannel
+        fileTransferChannel.current.onopen = () => console.log("File Transfer channel open"); // Added onopen for fileTransferChannel
 
         // Create Offer
         const offer = await pc.createOffer();
@@ -311,10 +324,12 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         remoteStream,
         initData,
         connect,
-        closeRTC,
+        closeRTC, // Kept closeRTC as it was not explicitly removed
         mouseChannel,
         keyboardChannel,
         mouseMoveChannel,
+        clipboardChannel, // Exposed clipboardChannel
+        fileTransferChannel, // Exposed fileTransferChannel
         isRTCConnected,
         rtcStats
     };

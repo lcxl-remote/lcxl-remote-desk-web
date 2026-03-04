@@ -480,6 +480,8 @@ impl From<&RTCPeerConnectionState> for WebRTConnectionState {
 pub struct SignalingState {
     /// accept control from remote peer
     pub accept_control: bool,
+    /// accept clipboard sync from remote peer
+    pub accept_clipboard_sync: bool,
     /// current display info
     pub display_info: DisplayInfo,
 }
