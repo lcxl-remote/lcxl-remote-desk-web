@@ -336,6 +336,17 @@ impl<T: BaseUser> SignalingContext<T> {
         log::debug!("Received text message: {}", text);
         let signaling_model = serde_json::from_str::<SignalingModel>(&text)?;
         match signaling_model.signaling_type {
+            SignalingType::Heartbeat => {
+                // Respond to heartbeat immediately to keep connection alive
+                let response = SignalingModel::success_response::<()>(
+                    &signaling_model.request_id,
+                    SignalingType::Heartbeat,
+                    None,
+                    None,
+                    None,
+                )?;
+                self.session_state.send_response(None, &response).await?;
+            }
             SignalingType::FetchSessions => {
                 let session_map = {
                     let session_map = self.session_map.read().await;

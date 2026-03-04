@@ -26,6 +26,9 @@ use crate::{
 /// Signaling Type
 #[repr(i32)]
 pub enum SignalingType {
+    /// Heartbeat for keeping WebSocket alive through reverse proxies
+    Heartbeat = 1,
+
     // /// API version, should not be used
     // Version = 11,
     /// Request list sessions

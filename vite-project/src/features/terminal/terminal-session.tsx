@@ -19,6 +19,8 @@ const SIGNALING_TYPE_CODE_DATA = 10008
 const SIGNALING_TYPE_CODE_RESIZE = 10009
 const SIGNALING_TYPE_CODE_TERMINAL_STARTED = 10013
 const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014
+const SIGNALING_TYPE_CODE_HEARTBEAT = 1
+const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
 function TerminalView({ sessionId, command, onClose }: { sessionId: string; command: string; onClose: () => void }) {
     const terminalRef = useRef<HTMLDivElement>(null)
@@ -28,6 +30,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
     const socketRef = useRef<WebSocket | null>(null)
     const resizeObserverRef = useRef<ResizeObserver | null>(null)
     const terminalStarted = useRef<boolean>(false)
+    const heartbeatTimerRef = useRef<number | null>(null)
 
     useEffect(() => {
         if (!terminalRef.current || !sessionId) return
@@ -95,6 +98,21 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
 
                         // Send initial size
                         sendResize({ rows: term.rows, cols: term.cols })
+
+                        // Start heartbeat to keep connection alive through reverse proxy
+                        if (heartbeatTimerRef.current !== null) {
+                            clearInterval(heartbeatTimerRef.current)
+                        }
+                        heartbeatTimerRef.current = window.setInterval(() => {
+                            if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+                                const heartbeat = {
+                                    request_id: v4(),
+                                    signaling_type: SIGNALING_TYPE_CODE_HEARTBEAT,
+                                    signaling_data: null,
+                                };
+                                socketRef.current.send(JSON.stringify(heartbeat));
+                            }
+                        }, TERMINAL_HEARTBEAT_INTERVAL_MS)
                     }
 
                     ws.onmessage = (event) => {
@@ -201,6 +219,10 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
         return () => {
             console.log("Cleaning up terminal session")
             clearTimeout(connectTimer);
+            if (heartbeatTimerRef.current !== null) {
+                clearInterval(heartbeatTimerRef.current)
+                heartbeatTimerRef.current = null
+            }
             if (ws) {
                 // Remove onclose handler to avoid triggering onClose navigate when unmounting component normally
                 ws.onclose = null
