@@ -117,15 +117,23 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 pub async fn run() -> Result<Server, DeskError> {
-    run_with_channels(ExternalChannels {
-        private_screen_cmd_sender: None,
-        private_screen_state_receiver: None,
-        tauri_login_token: None,
-    })
+    let args = Args::parse();
+    let settings = Settings::new(&args)?;
+    run_with_channels(
+        &settings,
+        ExternalChannels {
+            private_screen_cmd_sender: None,
+            private_screen_state_receiver: None,
+            tauri_login_token: None,
+        },
+    )
     .await
 }
 
-pub async fn run_with_channels(channels: ExternalChannels) -> Result<Server, DeskError> {
+pub async fn run_with_channels(
+    settings: &Settings,
+    channels: ExternalChannels,
+) -> Result<Server, DeskError> {
     // Create a lock file to prevent multiple instances of the server from running simultaneously.
     let lock_file_path = env::temp_dir().join("lcxl_remote_desk_server.lock");
     let lock_file = File::create(lock_file_path)?;
@@ -140,8 +148,6 @@ pub async fn run_with_channels(channels: ExternalChannels) -> Result<Server, Des
     // Install default crypto provider
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let args = Args::parse();
-    let settings = Settings::new(&args)?;
     if settings.system.traceback {
         // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
         unsafe { env::set_var("RUST_BACKTRACE", "1") };
@@ -163,7 +169,6 @@ pub async fn run_with_channels(channels: ExternalChannels) -> Result<Server, Des
         desk_signal::db::init_db(&settings_dir).await?;
     }
 
-    info!("Server args: {:?}", args);
     info!("Server settings: {:?}", settings);
     // Get server execution file path
     let exec_file_path = env::current_exe()?;

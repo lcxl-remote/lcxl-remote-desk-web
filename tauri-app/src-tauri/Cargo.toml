@@ -5,17 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-lcxl-remote-desk-server = { path = "../../server" }
+lcxl-remote-desk-server = { workspace = true }
 desk-signal-facade = { workspace = true }
+desk-utils = { workspace = true }
 
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-global-shortcut = "2"
+clap = { workspace = true }
+
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true }
+
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
 actix-rt = "2"
-clap = { version = "4.5", features = ["derive"] }
+
 uuid = { workspace = true, features = ["v4"] }
 ureq = { version = "2", features = ["json"] }
 config = "0.14"

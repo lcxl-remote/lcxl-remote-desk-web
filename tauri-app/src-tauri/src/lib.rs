@@ -1,19 +1,51 @@
 mod platform;
 mod private_screen;
+mod error;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static IS_EXITING: AtomicBool = AtomicBool::new(false);
 
+use clap::Parser as _;
+use lcxl_remote_desk_server::model::settings::{Args, Settings, StartupMode};
 use private_screen::PrivateScreenManager;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+use crate::error::DeskTauriError;
+
 const MAIN_WINDOW_LABEL: &str = "main";
 
-pub fn run_tauri_app() {
-    tauri::Builder::default()
+pub fn run()->Result<(), DeskTauriError> {
+    let args = Args::parse();
+    let settings = Settings::new(&args)?;
+    // Parse startup mode
+    let startup_mode = settings.args.startup_mode.clone();
+
+    match startup_mode {
+        StartupMode::Signaling => {
+            // Pure signaling mode, no Tauri window needed
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                let server = lcxl_remote_desk_server::run().await.unwrap();
+                server.await.unwrap();
+            });
+        }
+        _ => {
+            // Default or DeskServer mode, start Tauri
+            run_tauri_app(&settings);
+        }
+    };
+    Ok(())
+}
+
+
+pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
+    let settings = settings.clone();
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
 
             // Create server → tauri private screen command channel
@@ -22,47 +54,18 @@ pub fn run_tauri_app() {
             let (state_sender, state_receiver) = tokio::sync::mpsc::unbounded_channel();
 
             // Read server port from settings before starting server thread
-            let server_port = {
-                let args: Vec<String> = std::env::args().collect();
-                let mut config_path = "conf/config".to_string();
-                for (i, arg) in args.iter().enumerate() {
-                    if (arg == "--config-file-path" || arg == "-c") && i + 1 < args.len() {
-                        config_path = args[i + 1].clone();
-                    }
-                }
-                let config = config::Config::builder()
-                    .add_source(config::File::with_name(&config_path).required(false))
-                    .add_source(config::Environment::with_prefix("LRD"))
-                    .build();
-                if let Ok(cfg) = config {
-                    cfg.get::<u16>("system.port").unwrap_or(8081)
-                } else {
-                    8081u16
-                }
-            };
-            
-            let enable_ipv6 = {
-                let config = config::Config::builder()
-                    .add_source(config::File::with_name("conf/config").required(false))
-                    .add_source(config::Environment::with_prefix("LRD"))
-                    .build();
-                if let Ok(cfg) = config {
-                    cfg.get::<bool>("system.enable_ipv6").unwrap_or(true)
-                } else {
-                    true
-                }
-            };
+            let server_port = settings.system.port;
+            let enable_ipv6 = settings.system.enable_ipv6;
 
             let host = if enable_ipv6 { "[::1]" } else { "127.0.0.1" };
             let mut frontend_host_port = format!("{}:{}", host, server_port);
 
             // Use Vite dev server (5173) automatically when running in debug mode (e.g. IDE Run/Debug)
             // Unless explicitly forced to use production build frontend via args
-            let args: Vec<String> = std::env::args().collect();
-            if cfg!(debug_assertions) && !args.contains(&"--prod-frontend".to_string()) {
+            if cfg!(debug_assertions) && !settings.args.prod_frontend {
                 log::info!("Debug build detected, using vite dev server url for webview. (Use --prod-frontend to override)");
                 frontend_host_port = "127.0.0.1:5173".to_string(); 
-            } else if args.contains(&"--dev-frontend".to_string()) {
+            } else if settings.args.dev_frontend {
                 log::info!("--dev-frontend flag provided, using vite dev server url for webview.");
                 frontend_host_port = "127.0.0.1:5173".to_string(); 
             }
@@ -105,33 +108,11 @@ pub fn run_tauri_app() {
                 tauri_login_token: Some(tauri_token),
             };
 
-            // Read server port from settings before starting server thread
-            let (server_port, enable_ipv6) = {
-                let args: Vec<String> = std::env::args().collect();
-                let mut config_path = "conf/config".to_string();
-                for (i, arg) in args.iter().enumerate() {
-                    if (arg == "--config-file-path" || arg == "-c") && i + 1 < args.len() {
-                        config_path = args[i + 1].clone();
-                    }
-                }
-                let config = config::Config::builder()
-                    .add_source(config::File::with_name(&config_path).required(false))
-                    .add_source(config::Environment::with_prefix("LRD"))
-                    .build();
-                if let Ok(cfg) = config {
-                    (
-                        cfg.get::<u16>("system.port").unwrap_or(8081),
-                        cfg.get::<bool>("system.enable_ipv6").unwrap_or(true),
-                    )
-                } else {
-                    (8081u16, true)
-                }
-            };
-
+            // Start actix-web server (in a separate thread)
             std::thread::spawn(move || {
                 let system = actix_rt::System::new();
                 system.block_on(async {
-                    match lcxl_remote_desk_server::run_with_channels(channels).await {
+                    match lcxl_remote_desk_server::run_with_channels(&settings, channels).await {
                         Ok(server) => {
                             if let Err(e) = server.await {
                                 log::error!("Server error: {}", e);
@@ -276,9 +257,9 @@ pub fn run_tauri_app() {
 
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
+        .build(tauri::generate_context!())?;
+
+        app.run(|app, event| {
             // Intercept window close events to hide instead of quit
             match event {
                 tauri::RunEvent::WindowEvent { label, event: window_event, .. } => {
@@ -299,4 +280,5 @@ pub fn run_tauri_app() {
                 _ => {}
             }
         });
+        Ok(())
 }
