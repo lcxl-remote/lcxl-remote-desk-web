@@ -30,16 +30,31 @@ pub enum StartupMode {
     DeskServer,
 }
 
+/// Command line arguments
 #[derive(Parser, Debug, Clone, Default, Serialize, Deserialize)]
-#[command(version, about, long_about = None)]
+#[command(ignore_errors = true, version, about, long_about = None,group(
+    clap::ArgGroup::new("frontend_mode")
+        .args(["prod_frontend", "dev_frontend"])
+        .multiple(false)// only one of them can be set
+))]
 pub struct Args {
-    /// Name of the person to greet
+    /// Config file path
     #[clap(short, long, default_value = "conf/config")]
     pub config_file_path: String,
 
+    /// Startup mode
     #[clap(short, long, default_value_t, value_enum)]
     pub startup_mode: StartupMode,
+
+    /// Production frontend
+    #[arg(long)]
+    pub prod_frontend: bool,
+
+    /// Development frontend
+    #[arg(long)]
+    pub dev_frontend: bool,
 }
+
 /// System settings for the application. This struct is used to load and save settings from a configuration file.
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
