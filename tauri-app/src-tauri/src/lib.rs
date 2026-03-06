@@ -245,10 +245,10 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
                     .title("LCXL Remote Desktop")
                     .inner_size(1200.0, 800.0)
                     .center()
-                    .visible(false) // 先隐藏窗口，避免长时间白屏
+                    .visible(false) // hide window first to avoid long white screen
                     .on_page_load(|window, event| {
                         if let tauri::webview::PageLoadEvent::Finished = event.event() {
-                            // 页面加载完成后才显示窗口
+                            // show window after page load
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
