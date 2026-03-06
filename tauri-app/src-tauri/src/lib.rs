@@ -34,7 +34,7 @@ pub fn run()->Result<(), DeskTauriError> {
         }
         _ => {
             // Default or DeskServer mode, start Tauri
-            run_tauri_app(&settings);
+            run_tauri_app(&settings)?;
         }
     };
     Ok(())
