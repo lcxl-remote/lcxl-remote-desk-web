@@ -82,6 +82,9 @@ prometheus = "0.13.4"
 png = "0.17"
 base64 = "0.22"
 
+cpal = "0.15"
+ringbuf = "0.4"
+
 vpx-encode = { path = "../third-deps/vpx-encode", features = ["vp9"] }
 rust-i18n = "3.1"
 webbrowser = "1"

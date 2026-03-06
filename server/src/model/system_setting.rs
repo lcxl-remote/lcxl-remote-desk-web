@@ -80,3 +80,16 @@ pub enum PrivateScreenCommand {
 }
 
 pub type SystemSettingSubscriber = tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>;
+
+/// Command sent from server to tauri for whiteboard overlay management
+#[derive(Debug, Clone)]
+pub enum WhiteboardCommand {
+    /// Show whiteboard overlay and start rendering
+    Show(String /*from session id*/),
+    /// Forward a whiteboard drawing message to the overlay
+    DrawMessage(String /*serialized WhiteboardMessage JSON*/),
+    /// Hide whiteboard overlay
+    Hide(String /*from session id*/),
+    /// Quit whiteboard (cleanup)
+    Quit,
+}

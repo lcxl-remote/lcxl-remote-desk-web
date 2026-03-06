@@ -36,6 +36,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
     const mouseMoveChannel = useRef<RTCDataChannel | null>(null);
     const clipboardChannel = useRef<RTCDataChannel | null>(null); // Added clipboardChannel ref
     const fileTransferChannel = useRef<RTCDataChannel | null>(null); // Added fileTransferChannel ref
+    const whiteboardChannel = useRef<RTCDataChannel | null>(null);
     const [isRTCConnected, setIsRTCConnected] = useState(false);
 
     const [rtcStats, setRtcStats] = useState<RTCStatsData>({
@@ -180,12 +181,14 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         fileTransferChannel.current = pc.createDataChannel('file_transfer_event', { ordered: true });
         // { ordered: false, maxRetransmits: 0 } means unreliable and unordered UDP style channel for high-frequency updates
         mouseMoveChannel.current = pc.createDataChannel("mouse_move_event", { ordered: false, maxRetransmits: 0 });
+        whiteboardChannel.current = pc.createDataChannel("whiteboard_event", { ordered: true });
 
         mouseChannel.current.onopen = () => console.log("Mouse channel open");
         keyboardChannel.current.onopen = () => console.log("Keyboard channel open");
         mouseMoveChannel.current.onopen = () => console.log("Mouse Move channel open");
         clipboardChannel.current.onopen = () => console.log("Clipboard channel open"); // Added onopen for clipboardChannel
         fileTransferChannel.current.onopen = () => console.log("File Transfer channel open"); // Added onopen for fileTransferChannel
+        whiteboardChannel.current.onopen = () => console.log("Whiteboard channel open");
 
         // Create Offer
         const offer = await pc.createOffer();
@@ -321,6 +324,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
     }, [isRTCConnected]);
 
     return {
+        peerConnection,
         remoteStream,
         initData,
         connect,
@@ -330,6 +334,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         mouseMoveChannel,
         clipboardChannel, // Exposed clipboardChannel
         fileTransferChannel, // Exposed fileTransferChannel
+        whiteboardChannel,
         isRTCConnected,
         rtcStats
     };

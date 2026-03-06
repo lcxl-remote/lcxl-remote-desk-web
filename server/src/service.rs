@@ -1,5 +1,6 @@
 pub mod audio_capture;
 pub mod audio_encoder;
+pub mod audio_playback;
 pub mod clipboard_event;
 pub mod data_channel;
 pub mod file_manager;
@@ -11,3 +12,4 @@ pub mod signaling;
 pub mod system_setting;
 pub mod terminal;
 pub mod video_encoder;
+pub mod whiteboard_event;

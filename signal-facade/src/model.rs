@@ -8,3 +8,4 @@ pub mod session;
 pub mod signal;
 pub mod terminal;
 pub mod version;
+pub mod whiteboard;

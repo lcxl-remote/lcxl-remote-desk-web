@@ -538,6 +538,8 @@ pub struct DeskSession {
     /// System setting helper
     pub system_setting_helper:
         Box<dyn crate::model::system_setting::SystemSettingHelper + Send + Sync>,
+    /// Whiteboard command sender (available when Tauri is present)
+    pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<crate::model::system_setting::WhiteboardCommand>>,
 }
 
 enum ConnectionStateChangeResult {
@@ -668,6 +670,8 @@ impl DeskSession {
             });
         }
 
+        let whiteboard_cmd_sender = channels.whiteboard_cmd_sender.clone();
+
         Ok(Self {
             settings,
             session,
@@ -676,6 +680,7 @@ impl DeskSession {
             update_setting_sender: None,
             terminal_map: HashMap::new(),
             system_setting_helper: helper,
+            whiteboard_cmd_sender,
         })
     }
     pub async fn init_ptc_peer_connection(
@@ -786,6 +791,7 @@ impl DeskSession {
             video_device_list,
             video_encoder_list,
             desk_settings: local_settings.desk,
+            has_tauri: self.whiteboard_cmd_sender.is_some(),
         };
 
         info!("Sending init signaling: {:?}", init_signaling_data);
@@ -1085,8 +1091,9 @@ impl DeskSession {
             }));
 
         // Register data channel creation handling
-        // Used for mouse event, keyboard event, clipboard manage, file copy, etc.
+        // Used for mouse event, keyboard event, clipboard manage, file copy, whiteboard, etc.
         let signaling_state_for_data_channel = peer_connection.signaling_state.clone();
+        let whiteboard_sender_for_dc = self.whiteboard_cmd_sender.clone();
         peer_connection
             .rtc_peer_connection
             .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
@@ -1094,14 +1101,78 @@ impl DeskSession {
                 let d_id = d.id();
                 log::info!("New DataChannel {d_label} {d_id}");
                 let signaling_state = signaling_state_for_data_channel.clone();
+                let wb_sender = whiteboard_sender_for_dc.clone();
                 // Register channel opening handling
                 Box::pin(async move {
-                    let result = handle_data_channel_event(signaling_state, d.clone()).await;
+                    let result = handle_data_channel_event(signaling_state, d.clone(), wb_sender).await;
                     if let Err(error) = result {
                         log::error!("Failed to handle data channel event: {}", error);
                     }
                 })
             }));
+
+        // Register track handler for incoming audio from browser
+        let session_for_audio = self.session.clone();
+        let request_id_for_audio = request_id.to_string();
+        let from_session_id_for_audio = from_session_id.to_string();
+
+        peer_connection
+            .rtc_peer_connection
+            .on_track(Box::new(
+                move |track, _receiver, _transceiver| {
+                    let track_kind = track.kind().to_string();
+                    let track_id = track.id().to_string();
+                    log::info!(
+                        "Received remote track: kind={}, id={}",
+                        track_kind,
+                        track_id
+                    );
+
+                    if track_kind == "audio" {
+                        log::info!("Starting audio playback for remote audio track");
+                        let mut session_sender = session_for_audio.clone();
+                        let req_id = request_id_for_audio.clone();
+                        let from_session = from_session_id_for_audio.clone();
+                        
+                        // Capture the tokio handle so we can spawn from the std::thread inside audio_playback
+                        let handle = match tokio::runtime::Handle::try_current() {
+                            Ok(h) => Some(h),
+                            Err(e) => {
+                                log::error!("Failed to get tokio handle for audio playback error reporting: {}", e);
+                                None
+                            }
+                        };
+                        
+                        crate::service::audio_playback::start_audio_playback(track, move |err_msg| {
+                            log::warn!("Audio playback failed, notifying frontend: {}", err_msg);
+                            
+                            if let Some(rt_handle) = handle {
+                                rt_handle.spawn(async move {
+                                    let error_data = serde_json::json!({
+                                        "error": err_msg
+                                    });
+                                    let res = session_sender.send_to_peer(
+                                        &req_id,
+                                        SignalingType::AudioPlaybackError,
+                                        &from_session,
+                                        error_data
+                                    ).await;
+                                    if let Err(e) = res {
+                                        log::error!("Failed to send AudioPlaybackError signal: {}", e);
+                                    }
+                                });
+                            } else {
+                                log::error!("Cannot send AudioPlaybackError signal: no tokio handle available");
+                            }
+                        });
+                    } else {
+                        log::info!("Ignoring non-audio track: {}", track_kind);
+                    }
+
+                    Box::pin(async {})
+                },
+            ));
+
         self.update_setting_sender = Some(update_setting_sender);
         Ok(())
     }

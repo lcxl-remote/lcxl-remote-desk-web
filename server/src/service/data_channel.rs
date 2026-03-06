@@ -12,8 +12,9 @@ use crate::{
     model::data_channel::{
         DATA_CHANNEL_LABEL_CLIPBOARD_EVENT, DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT,
         DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT,
-        DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT,
+        DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT, DATA_CHANNEL_LABEL_WHITEBOARD_EVENT,
     },
+    model::system_setting::WhiteboardCommand,
     service::{
         file_transfer::handle_file_transfer_event, keyboard_event::handle_keyboard_event,
         mouse_event::handle_mouse_event,
@@ -23,6 +24,7 @@ use crate::{
 pub async fn handle_data_channel_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
+    whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
 ) -> Result<(), DeskError> {
     match data_channel.label() {
         DATA_CHANNEL_LABEL_MOUSE_EVENT | DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT => {
@@ -40,6 +42,19 @@ pub async fn handle_data_channel_event(
         DATA_CHANNEL_LABEL_CLIPBOARD_EVENT => {
             crate::service::clipboard_event::handle_clipboard_event(signaling_state, data_channel)
                 .await?;
+            return Ok(());
+        }
+        DATA_CHANNEL_LABEL_WHITEBOARD_EVENT => {
+            if let Some(sender) = whiteboard_cmd_sender {
+                crate::service::whiteboard_event::handle_whiteboard_event(
+                    signaling_state,
+                    data_channel,
+                    sender,
+                )
+                .await?;
+            } else {
+                log::warn!("Whiteboard data channel received but no tauri whiteboard support");
+            }
             return Ok(());
         }
         label => {

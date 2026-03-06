@@ -1,11 +1,13 @@
 mod platform;
 mod private_screen;
+mod whiteboard;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static IS_EXITING: AtomicBool = AtomicBool::new(false);
 
 use private_screen::PrivateScreenManager;
+use whiteboard::WhiteboardManager;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -94,6 +96,13 @@ pub fn run_tauri_app() {
             // Start private screen manager
             ps_manager.start(tauri_cmd_receiver, state_sender);
 
+            // Create whiteboard command channel
+            let (wb_cmd_sender, wb_cmd_receiver) = std::sync::mpsc::channel();
+
+            // Start whiteboard manager
+            let wb_manager = WhiteboardManager::new(handle.clone(), frontend_url.clone());
+            wb_manager.start(wb_cmd_receiver);
+
             // Generate a one-time login token
             let tauri_token = uuid::Uuid::new_v4().to_string();
             let tauri_token_for_window = tauri_token.clone();
@@ -103,6 +112,7 @@ pub fn run_tauri_app() {
                 private_screen_cmd_sender: Some(cmd_sender),
                 private_screen_state_receiver: Some(state_receiver),
                 tauri_login_token: Some(tauri_token),
+                whiteboard_cmd_sender: Some(wb_cmd_sender),
             };
 
             // Read server port from settings before starting server thread

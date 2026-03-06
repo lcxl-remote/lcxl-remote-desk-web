@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX } from "lucide-react"
+import { Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -19,6 +19,10 @@ import { useDeskSignaling } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskInput } from "./use-desk-input"
 import { useDeskClipboard } from "./use-desk-clipboard"
+import { useDeskWhiteboard } from "./use-desk-whiteboard"
+import WhiteboardCanvas from "./whiteboard-canvas"
+import WhiteboardToolbar from "./whiteboard-toolbar"
+import { useDeskMicrophone } from "./use-desk-microphone"
 import { DeskConfigDialog } from "./desk-config-dialog"
 import type { DeskSettings } from "@/services/types"
 import {
@@ -29,7 +33,8 @@ import {
     SIGNALING_TYPE_CODE_DENY_CONTROL,
     SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS,
     SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN,
-    SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED
+    SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED,
+    SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR
 } from "./constants"
 
 export default function DeskSession() {
@@ -81,7 +86,7 @@ export default function DeskSession() {
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
 
-    const { remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
+    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         lastMessage,
         sendMessage
@@ -110,6 +115,18 @@ export default function DeskSession() {
         isConnected: isRTCConnected && hasControl // Only enable inputs if we have control
     });
 
+    const whiteboard = useDeskWhiteboard({
+        videoRef,
+        whiteboardChannel,
+        isConnected: isRTCConnected && hasControl,
+        hasTauri: initData?.has_tauri ?? false,
+    });
+
+    const microphone = useDeskMicrophone({
+        peerConnection,
+        isConnected: isRTCConnected,
+    });
+
     // Handle incoming signaling messages regarding control
     useEffect(() => {
         if (!lastMessage) return;
@@ -132,11 +149,17 @@ export default function DeskSession() {
                 setIsPrivateScreen(data.visible ?? false);
                 setIsPrivateScreenSupported(data.is_supported ?? true);
                 if (data.error_msg) {
-                    console.warn("Private screen error:", data.error_msg);
+                    console.error("Private screen error:", data.error_msg);
                 }
             }
+        } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR) {
+            const data = lastMessage.signaling_data;
+            if (data && data.error) {
+                console.error("Remote audio playback error:", data.error);
+                microphone.forceError(data.error);
+            }
         }
-    }, [lastMessage]);
+    }, [lastMessage, microphone]);
 
     // Reset requested state if connection drops
     useEffect(() => {
@@ -428,6 +451,31 @@ export default function DeskSession() {
                             tabIndex={0}
                             onCanPlay={() => setIsVideoReady(true)}
                         />
+
+                        {/* Whiteboard canvas overlay */}
+                        <WhiteboardCanvas
+                            elements={whiteboard.elements}
+                            isActive={whiteboard.isActive}
+                            onPointerDown={whiteboard.handlePointerDown}
+                            onPointerMove={whiteboard.handlePointerMove}
+                            onPointerUp={whiteboard.handlePointerUp}
+                            onClick={whiteboard.handleCanvasClick}
+                        />
+
+                        {/* Whiteboard toolbar */}
+                        {whiteboard.isActive && (
+                            <WhiteboardToolbar
+                                tool={whiteboard.tool}
+                                setTool={whiteboard.setTool}
+                                color={whiteboard.color}
+                                setColor={whiteboard.setColor}
+                                strokeWidth={whiteboard.strokeWidth}
+                                setStrokeWidth={whiteboard.setStrokeWidth}
+                                onClear={whiteboard.clearAll}
+                                onUndo={whiteboard.undo}
+                                onClose={whiteboard.toggleWhiteboard}
+                            />
+                        )}
 
                         <div
                             className={`videoPlaceholder ${isVideoReady ? 'hidden' : ''}`}
@@ -722,6 +770,45 @@ export default function DeskSession() {
                                         </DropdownMenu>
                                     )}
 
+                                    {/* Whiteboard button */}
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                className={`controlButton ${whiteboard.isActive ? 'text-yellow-400' : ''}`}
+                                                onClick={whiteboard.toggleWhiteboard}
+                                                disabled={!whiteboard.canActivate}
+                                            >
+                                                <PenTool />
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                            <p>{whiteboard.canActivate
+                                                ? (whiteboard.isActive ? t('pages.desk.closeWhiteboard', 'Close Whiteboard') : t('pages.desk.openWhiteboard', 'Open Whiteboard'))
+                                                : t('pages.desk.whiteboardUnavailable', 'Whiteboard requires Tauri on remote')}
+                                            </p>
+                                        </TooltipContent>
+                                    </Tooltip>
+
+                                    {/* Microphone button */}
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                className={`controlButton ${microphone.isMicActive ? 'text-green-400' : ''} ${microphone.micError ? 'text-red-400' : ''}`}
+                                                onClick={microphone.toggleMicrophone}
+                                            >
+                                                {microphone.isMicActive ? <Mic /> : <MicOff />}
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                            <p>{microphone.micError
+                                                ? microphone.micError
+                                                : (microphone.isMicActive ? t('pages.desk.stopMic', 'Stop Microphone') : t('pages.desk.startMic', 'Start Microphone'))
+                                            }</p>
+                                        </TooltipContent>
+                                    </Tooltip>
+
                                     <Popover>
                                         <PopoverTrigger asChild>
                                             <Button
@@ -764,7 +851,7 @@ export default function DeskSession() {
                         )}
                     </div>
                 </TooltipProvider>
-            </div>
-        </div>
+            </div >
+        </div >
     )
 }

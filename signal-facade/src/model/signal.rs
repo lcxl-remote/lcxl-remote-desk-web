@@ -58,6 +58,8 @@ pub enum SignalingType {
     EnablePrivateScreen = 206,
     /// Private screen state changed notification
     PrivateScreenStateChanged = 207,
+    /// Audio playback error notification
+    AudioPlaybackError = 208,
 
     UpdateDeskSettings = 301,
 
@@ -437,6 +439,9 @@ pub struct InitSignalingData {
     pub video_encoder_list: Vec<String>,
     /// Current desk settings
     pub desk_settings: DeskSettings,
+    /// Whether the remote end has Tauri UI support (required for whiteboard overlay)
+    #[serde(default)]
+    pub has_tauri: bool,
 }
 
 /// WebRTC Connection State

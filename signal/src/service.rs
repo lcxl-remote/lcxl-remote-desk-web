@@ -436,7 +436,8 @@ impl<T: BaseUser> SignalingContext<T> {
             | SignalingType::ListTerminal
             | SignalingType::EnablePrivateScreen
             | SignalingType::PrivateScreenStateChanged
-            | SignalingType::TerminalStarted => {
+            | SignalingType::TerminalStarted
+            | SignalingType::AudioPlaybackError => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
             }
