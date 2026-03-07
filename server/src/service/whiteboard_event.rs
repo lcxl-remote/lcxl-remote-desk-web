@@ -4,7 +4,7 @@ use desk_signal_facade::model::signal::SignalingState;
 use tokio::sync::RwLock;
 use webrtc::data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage};
 
-use crate::model::system_setting::WhiteboardCommand;
+use crate::model::host_control::WhiteboardCommand;
 
 /// Handle whiteboard events from the DataChannel.
 /// Forwards drawing messages to the Tauri whiteboard overlay via the command sender.

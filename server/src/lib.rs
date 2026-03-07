@@ -69,9 +69,7 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::model::system_setting::{
-    PrivateScreenCommand, SystemSettingEventType, WhiteboardCommand,
-};
+use crate::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
 use crate::model::turn::TurnObserver;
 
 rust_i18n::i18n!("locales");
@@ -79,7 +77,7 @@ rust_i18n::i18n!("locales");
 pub struct ExternalChannels {
     pub private_screen_cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
     pub private_screen_state_receiver:
-        Option<tokio::sync::mpsc::UnboundedReceiver<SystemSettingEventType>>,
+        Option<tokio::sync::mpsc::UnboundedReceiver<HostControlEventType>>,
     /// One-time token for Tauri WebView auto-login
     pub tauri_login_token: Option<String>,
     /// Command sender for whiteboard overlay (available when Tauri is present)

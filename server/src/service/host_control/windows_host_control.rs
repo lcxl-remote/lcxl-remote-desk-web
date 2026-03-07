@@ -15,15 +15,15 @@ use windows_core::HSTRING;
 
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, PrivateScreenCommand, SystemSettingHelper},
+    model::host_control::{DisplaySettings, HostControlHelper, PrivateScreenCommand},
 };
 
-pub struct WindowsSystemSettingHelper {
+pub struct WindowsHostControlHelper {
     clipboard: Clipboard,
     cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
 }
 
-impl WindowsSystemSettingHelper {
+impl WindowsHostControlHelper {
     pub fn new(
         _desk_setting: &DeskSettings,
         cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
@@ -36,7 +36,7 @@ impl WindowsSystemSettingHelper {
     }
 }
 
-impl SystemSettingHelper for WindowsSystemSettingHelper {
+impl HostControlHelper for WindowsHostControlHelper {
     fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), DeskError> {
         let mut devmode = DEVMODEW::default();
         devmode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
@@ -122,9 +122,9 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
 
     fn get_image_from_clipboard(
         &mut self,
-    ) -> Result<Option<crate::model::system_setting::ClipboardImage>, DeskError> {
+    ) -> Result<Option<crate::model::host_control::ClipboardImage>, DeskError> {
         match self.clipboard.get_image() {
-            Ok(img) => Ok(Some(crate::model::system_setting::ClipboardImage {
+            Ok(img) => Ok(Some(crate::model::host_control::ClipboardImage {
                 width: img.width,
                 height: img.height,
                 bytes: img.bytes,
@@ -136,7 +136,7 @@ impl SystemSettingHelper for WindowsSystemSettingHelper {
 
     fn set_image_to_clipboard(
         &mut self,
-        image: &crate::model::system_setting::ClipboardImage,
+        image: &crate::model::host_control::ClipboardImage,
     ) -> Result<(), DeskError> {
         let img_data = arboard::ImageData {
             width: image.width,

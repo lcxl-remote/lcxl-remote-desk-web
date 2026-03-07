@@ -14,7 +14,7 @@ use crate::{
         DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT,
         DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT, DATA_CHANNEL_LABEL_WHITEBOARD_EVENT,
     },
-    model::system_setting::WhiteboardCommand,
+    model::host_control::WhiteboardCommand,
     service::{
         file_transfer::handle_file_transfer_event, keyboard_event::handle_keyboard_event,
         mouse_event::handle_mouse_event,

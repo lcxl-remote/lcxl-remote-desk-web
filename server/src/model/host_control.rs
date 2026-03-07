@@ -27,7 +27,7 @@ pub struct ClipboardImage {
     pub bytes: std::borrow::Cow<'static, [u8]>,
 }
 
-pub trait SystemSettingHelper {
+pub trait HostControlHelper {
     /// Change display settings
     fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), DeskError>;
 
@@ -60,7 +60,7 @@ pub struct PrivateScreenState {
 }
 
 #[derive(Debug, Clone)]
-pub enum SystemSettingEventType {
+pub enum HostControlEventType {
     PrivateScreenInited(PrivateScreenState),
     PrivateScreenVisibleChanged(String /*from session id*/, bool),
 
@@ -79,7 +79,7 @@ pub enum PrivateScreenCommand {
     Quit,
 }
 
-pub type SystemSettingSubscriber = tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>;
+pub type HostControlSubscriber = tokio::sync::mpsc::UnboundedSender<HostControlEventType>;
 
 /// Command sent from server to tauri for whiteboard overlay management
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-use lcxl_remote_desk_server::model::system_setting::WhiteboardCommand;
+use lcxl_remote_desk_server::model::host_control::WhiteboardCommand;
 use std::sync::mpsc;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 

@@ -6,15 +6,15 @@ use desk_utils::error::DeskErrorCode;
 
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, PrivateScreenCommand, SystemSettingHelper},
+    model::host_control::{DisplaySettings, HostControlHelper, PrivateScreenCommand},
 };
 
-pub struct LinuxSystemSettingHelper {
+pub struct LinuxHostControlHelper {
     clipboard: Option<Clipboard>,
     cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
 }
 
-impl LinuxSystemSettingHelper {
+impl LinuxHostControlHelper {
     pub fn new(
         _desk_setting: &DeskSettings,
         cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
@@ -35,7 +35,7 @@ impl LinuxSystemSettingHelper {
     }
 }
 
-impl SystemSettingHelper for LinuxSystemSettingHelper {
+impl HostControlHelper for LinuxHostControlHelper {
     fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), DeskError> {
         // FIXME Implement the logic to change display settings on Linux
         if let Ok(env_value) = env::var("WAYLAND_DISPLAY ") {
@@ -124,10 +124,10 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
 
     fn get_image_from_clipboard(
         &mut self,
-    ) -> Result<Option<crate::model::system_setting::ClipboardImage>, DeskError> {
+    ) -> Result<Option<crate::model::host_control::ClipboardImage>, DeskError> {
         if let Some(ref mut clipboard) = self.clipboard {
             match clipboard.get_image() {
-                Ok(img) => Ok(Some(crate::model::system_setting::ClipboardImage {
+                Ok(img) => Ok(Some(crate::model::host_control::ClipboardImage {
                     width: img.width,
                     height: img.height,
                     bytes: img.bytes,
@@ -143,7 +143,7 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
 
     fn set_image_to_clipboard(
         &mut self,
-        image: &crate::model::system_setting::ClipboardImage,
+        image: &crate::model::host_control::ClipboardImage,
     ) -> Result<(), DeskError> {
         if let Some(ref mut clipboard) = self.clipboard {
             let img_data = arboard::ImageData {

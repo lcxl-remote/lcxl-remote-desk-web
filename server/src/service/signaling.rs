@@ -65,7 +65,7 @@ use webrtc::{
 
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::login::{LoginParams, LoginResult};
-use crate::model::system_setting::SystemSettingEventType;
+use crate::model::host_control::HostControlEventType;
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -308,7 +308,7 @@ where
                 }
             }
             let _ = desk_session
-                .system_setting_helper
+                .host_control_helper
                 .enable_private_screen(&from_session_id, false);
         }
         None => return true,
@@ -540,10 +540,10 @@ pub struct DeskSession {
     /// Terminal map: from_session_id -> RunningTerminal
     pub terminal_map: HashMap<String, RunningTerminal>,
     /// System setting helper
-    pub system_setting_helper:
-        Box<dyn crate::model::system_setting::SystemSettingHelper + Send + Sync>,
+    pub host_control_helper:
+        Box<dyn crate::model::host_control::HostControlHelper + Send + Sync>,
     /// Whiteboard command sender (available when Tauri is present)
-    pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<crate::model::system_setting::WhiteboardCommand>>,
+    pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<crate::model::host_control::WhiteboardCommand>>,
 }
 
 enum ConnectionStateChangeResult {
@@ -590,7 +590,7 @@ impl DeskSession {
 
         let cmd_sender = channels.private_screen_cmd_sender.clone();
         let helper =
-            crate::service::system_setting::system_setting_factory::create_system_setting_helper(
+            crate::service::host_control::host_control_factory::create_host_control_helper(
                 &desk_settings,
                 cmd_sender,
             )?;
@@ -602,7 +602,7 @@ impl DeskSession {
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     match event {
-                        SystemSettingEventType::PrivateScreenVisibleChanged(from_session_id, visible) => {
+                        HostControlEventType::PrivateScreenVisibleChanged(from_session_id, visible) => {
                             let sender = session_clone.clone();
                             let data = PrivateScreenStateChangedData {
                                 visible,
@@ -619,10 +619,10 @@ impl DeskSession {
                                 }
                             }
                         },
-                        SystemSettingEventType::PrivateScreenInited(_) => {
+                        HostControlEventType::PrivateScreenInited(_) => {
                             // Ignored or handle appropriately
                         },
-                        SystemSettingEventType::PrivateScreenClosed => {
+                        HostControlEventType::PrivateScreenClosed => {
                             let sender = session_clone.clone();
                             let data = PrivateScreenStateChangedData {
                                 visible: false,
@@ -639,7 +639,7 @@ impl DeskSession {
                                 }
                             }
                         },
-                        SystemSettingEventType::PrivateScreenUnknownError(from_session_id_opt, e) => {
+                        HostControlEventType::PrivateScreenUnknownError(from_session_id_opt, e) => {
                             log::error!("Private screen error: {}", e);
                             // We shouldn't send PrivateScreenStateChanged directly to the channel queue,
                             // Instead, we should construct a Modeling message if we want to send it to the frontend.
@@ -666,7 +666,7 @@ impl DeskSession {
                             }
                             
                         },
-                        crate::model::system_setting::SystemSettingEventType::PrivateScreenHotkeyRegisterError => {
+                        crate::model::host_control::HostControlEventType::PrivateScreenHotkeyRegisterError => {
                             log::error!("Private screen hotkey register error");
                         }
                     }
@@ -683,7 +683,7 @@ impl DeskSession {
             rtc_peer_connection_map: HashMap::new(),
             update_setting_sender: None,
             terminal_map: HashMap::new(),
-            system_setting_helper: helper,
+            host_control_helper: helper,
             whiteboard_cmd_sender,
         })
     }
@@ -1215,7 +1215,7 @@ impl DeskSession {
             let result = peer_connection.write().await.shutdown().await;
             info!("Signaling session ended, result={:?}", result);
             let _ = self
-                .system_setting_helper
+                .host_control_helper
                 .enable_private_screen(session_id, false);
         }
         // shutdown terminal
@@ -1523,7 +1523,7 @@ impl DeskSession {
                     );
                 }
                 let _ = self
-                    .system_setting_helper
+                    .host_control_helper
                     .enable_private_screen(from_session_id, false);
             }
             SignalingType::EnablePrivateScreen => {
@@ -1532,7 +1532,7 @@ impl DeskSession {
                     signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
                 {
                     let _ = self
-                        .system_setting_helper
+                        .host_control_helper
                         .enable_private_screen(&from_session_id, data.enable);
                 }
             }
@@ -1694,7 +1694,7 @@ impl DeskSession {
             signaling_state.accept_control = false;
             signaling_state.accept_clipboard_sync = false;
             let _ = self
-                .system_setting_helper
+                .host_control_helper
                 .enable_private_screen(from_session_id, false);
             log::info!(
                 "Releasing control request from {}, sending CloseControl signaling (also disabling private screen if any)",

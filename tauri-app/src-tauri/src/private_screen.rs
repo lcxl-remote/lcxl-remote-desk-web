@@ -1,7 +1,5 @@
 use crate::platform;
-use lcxl_remote_desk_server::model::system_setting::{
-    PrivateScreenCommand, SystemSettingEventType,
-};
+use lcxl_remote_desk_server::model::host_control::{HostControlEventType, PrivateScreenCommand};
 use std::sync::mpsc;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -27,7 +25,7 @@ impl PrivateScreenManager {
     pub fn start(
         mut self,
         cmd_receiver: mpsc::Receiver<PrivateScreenCommand>,
-        state_sender: tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>,
+        state_sender: tokio::sync::mpsc::UnboundedSender<HostControlEventType>,
     ) {
         let handle = self.app_handle.clone();
         std::thread::spawn(move || {
@@ -47,7 +45,7 @@ impl PrivateScreenManager {
                             if let Err(e) = self.show_window(&handle, &state_sender) {
                                 log::error!("Failed to show private screen: {}", e);
                                 let _ = state_sender.send(
-                                    SystemSettingEventType::PrivateScreenUnknownError(
+                                    HostControlEventType::PrivateScreenUnknownError(
                                         Some(from_session_id.clone()),
                                         e.to_string(),
                                     ),
@@ -55,7 +53,7 @@ impl PrivateScreenManager {
                                 continue;
                             }
                             let _ = state_sender.send(
-                                SystemSettingEventType::PrivateScreenVisibleChanged(
+                                HostControlEventType::PrivateScreenVisibleChanged(
                                     from_session_id.clone(),
                                     true,
                                 ),
@@ -75,7 +73,7 @@ impl PrivateScreenManager {
                                 log::error!("Failed to hide private screen: {}", e);
                             }
                             let _ = state_sender.send(
-                                SystemSettingEventType::PrivateScreenVisibleChanged(
+                                HostControlEventType::PrivateScreenVisibleChanged(
                                     from_session_id.clone(),
                                     false,
                                 ),
@@ -101,7 +99,7 @@ impl PrivateScreenManager {
     pub fn show_window(
         &self,
         handle: &AppHandle,
-        _state_sender: &tokio::sync::mpsc::UnboundedSender<SystemSettingEventType>,
+        _state_sender: &tokio::sync::mpsc::UnboundedSender<HostControlEventType>,
     ) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {

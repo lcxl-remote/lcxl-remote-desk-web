@@ -1,14 +1,14 @@
 use crate::{
     error::DeskError,
-    model::system_setting::{DisplaySettings, PrivateScreenCommand, SystemSettingHelper},
+    model::host_control::{DisplaySettings, HostControlHelper, PrivateScreenCommand},
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
-pub struct MacSystemSettingHelper {
+pub struct MacHostControlHelper {
     cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
 }
 
-impl MacSystemSettingHelper {
+impl MacHostControlHelper {
     pub fn new(
         _settings: &DeskSettings,
         cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
@@ -17,7 +17,7 @@ impl MacSystemSettingHelper {
     }
 }
 
-impl SystemSettingHelper for MacSystemSettingHelper {
+impl HostControlHelper for MacHostControlHelper {
     fn change_display_settings(
         &self,
         _display_settings: &DisplaySettings,
@@ -71,10 +71,10 @@ impl SystemSettingHelper for MacSystemSettingHelper {
 
     fn get_image_from_clipboard(
         &mut self,
-    ) -> Result<Option<crate::model::system_setting::ClipboardImage>, DeskError> {
+    ) -> Result<Option<crate::model::host_control::ClipboardImage>, DeskError> {
         let mut clipboard = arboard::Clipboard::new().map_err(DeskError::ArboardError)?;
         match clipboard.get_image() {
-            Ok(img) => Ok(Some(crate::model::system_setting::ClipboardImage {
+            Ok(img) => Ok(Some(crate::model::host_control::ClipboardImage {
                 width: img.width,
                 height: img.height,
                 bytes: img.bytes,
@@ -86,7 +86,7 @@ impl SystemSettingHelper for MacSystemSettingHelper {
 
     fn set_image_to_clipboard(
         &mut self,
-        image: &crate::model::system_setting::ClipboardImage,
+        image: &crate::model::host_control::ClipboardImage,
     ) -> Result<(), DeskError> {
         let mut clipboard = arboard::Clipboard::new().map_err(DeskError::ArboardError)?;
         let img_data = arboard::ImageData {

@@ -15,9 +15,9 @@ use crate::{
     error::DeskError,
     model::{
         data_channel::ClipboardEventData,
-        system_setting::{ClipboardImage, SystemSettingHelper},
+        host_control::{ClipboardImage, HostControlHelper},
     },
-    service::system_setting::system_setting_factory::create_system_setting_helper,
+    service::host_control::host_control_factory::create_host_control_helper,
 };
 
 // 1MB max for text
@@ -43,12 +43,12 @@ pub async fn handle_clipboard_event(
     let desk_settings = {
         let state = signaling_state.read().await;
         // The display_info is available, we assume DeskSettings can be reconstructed or we pass a default one.
-        // Or we use create_system_setting_helper with default or existing settings.
+        // Or we use create_host_control_helper with default or existing settings.
         desk_signal_facade::model::desk_settings::DeskSettings::default()
     };
 
-    let setting_helper: Arc<Mutex<Box<dyn SystemSettingHelper + Send + Sync>>> = Arc::new(
-        Mutex::new(create_system_setting_helper(&desk_settings, None)?),
+    let setting_helper: Arc<Mutex<Box<dyn HostControlHelper + Send + Sync>>> = Arc::new(
+        Mutex::new(create_host_control_helper(&desk_settings, None)?),
     );
 
     // Last hash we pushed to local system clipboard, to prevent echo loop
