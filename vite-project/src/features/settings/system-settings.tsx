@@ -29,6 +29,7 @@ import {
     AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { useToast } from "@/hooks/use-toast"
+import { TelemetryDisclosure } from "@/components/telemetry-disclosure"
 
 const systemSettingsSchema = z.object({
     enable_ipv6: z.boolean(),
@@ -278,7 +279,10 @@ export function SystemSettings() {
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.system.settings.telemetry_consent", "Telemetry Consent")}</FormLabel>
+                                                <FormLabel className="flex items-center gap-2">
+                                                    {t("pages.system.settings.telemetry_consent", "Telemetry Consent")}
+                                                    <TelemetryDisclosure />
+                                                </FormLabel>
                                                 <FormDescription>{t("pages.system.settings.telemetry_consent.tooltip", "Help improve our product by sending anonymous usage data.")}</FormDescription>
                                             </div>
                                             <FormControl>

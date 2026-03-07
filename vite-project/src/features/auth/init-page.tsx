@@ -24,6 +24,7 @@ import { useToast } from "@/hooks/use-toast"
 import { useInitSystem } from "@/services/hooks/undefinedController/useInitSystem"
 import { ModeToggle } from "@/components/mode-toggle"
 import { LanguageToggle } from "@/components/language-toggle"
+import { TelemetryDisclosure } from "@/components/telemetry-disclosure"
 
 export default function InitPage() {
     const { t } = useTranslation()
@@ -41,7 +42,7 @@ export default function InitPage() {
         confirmPassword: z.string().min(1, {
             message: t("pages.init.confirmPassword.required", "Confirm password is required"),
         }),
-        telemetryConsent: z.boolean().default(false),
+        telemetryConsent: z.boolean().default(true),
     }).refine((data) => data.password === data.confirmPassword, {
         message: t("pages.init.confirmPassword.match", "Passwords don't match"),
         path: ["confirmPassword"],
@@ -57,7 +58,7 @@ export default function InitPage() {
             username: "",
             password: "",
             confirmPassword: "",
-            telemetryConsent: false,
+            telemetryConsent: true,
         },
     })
 
@@ -191,9 +192,12 @@ export default function InitPage() {
                                                 <FormLabel className="text-sm font-semibold cursor-pointer">
                                                     {t('pages.init.telemetry.label', 'Enable Telemetry')}
                                                 </FormLabel>
-                                                <FormDescription className="text-xs leading-relaxed">
-                                                    {t('pages.init.telemetry.description', 'Send anonymous usage data to help improve this product (off by default)')}
-                                                </FormDescription>
+                                                <div className="flex items-center gap-2">
+                                                    <FormDescription className="text-xs leading-relaxed">
+                                                        {t('pages.init.telemetry.description', 'Send anonymous usage data to help improve this product')}
+                                                    </FormDescription>
+                                                    <TelemetryDisclosure />
+                                                </div>
                                             </div>
                                         </FormItem>
                                     )}
