@@ -1292,12 +1292,6 @@ export type RestResponseSystemSettings = {
         */
         log_level?: string;
         /**
-         * @description Whether to open the browser automatically on server startup
-         * @default false
-         * @type boolean | undefined
-        */
-        open_browser_on_startup?: boolean;
-        /**
          * @description port number for the server to bind to
          * @minLength 0
          * @default 8081
@@ -1633,12 +1627,6 @@ export type SystemSettings = {
      * @type string | undefined
     */
     log_level?: string;
-    /**
-     * @description Whether to open the browser automatically on server startup
-     * @default false
-     * @type boolean | undefined
-    */
-    open_browser_on_startup?: boolean;
     /**
      * @description port number for the server to bind to
      * @minLength 0
