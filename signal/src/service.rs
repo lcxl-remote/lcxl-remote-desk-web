@@ -370,6 +370,12 @@ impl<T: BaseUser> SignalingContext<T> {
                 )?;
                 self.session_state.send_response(None, &response).await?;
             }
+            SignalingType::SessionList => {
+                log::warn!(
+                    "Received session list signaling type: {}, it should not be received",
+                    signaling_model.signaling_type
+                );
+            }
             SignalingType::SendDataToTerminal => {
                 let from_session_id = &self.session_state.model.session_id;
                 if signaling_model.is_request() {
@@ -453,16 +459,6 @@ impl<T: BaseUser> SignalingContext<T> {
                 log::warn!(
                     "Received start/close terminal signaling type: {}, it should not be received",
                     signaling_model.signaling_type
-                );
-            }
-            _ => {
-                log::error!(
-                    "Unsupported signaling type: {}, request_id: {}, from_session_id: {:?}, to_session_id: {:?}, data: {:?}",
-                    signaling_model.signaling_type,
-                    signaling_model.request_id,
-                    signaling_model.from_session_id,
-                    signaling_model.to_session_id,
-                    signaling_model.get_raw_data(),
                 );
             }
         }
