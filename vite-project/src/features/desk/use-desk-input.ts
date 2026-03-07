@@ -8,9 +8,10 @@ type UseDeskInputProps = {
     keyboardChannel: RefObject<RTCDataChannel | null>;
     mouseMoveChannel?: RefObject<RTCDataChannel | null>;
     isConnected: boolean;
+    ignoreInputEvents?: boolean; // When true, don't steal focus or send events (e.g. user is typing in UI)
 };
 
-export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected }: UseDeskInputProps) {
+export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected, ignoreInputEvents = false }: UseDeskInputProps) {
     const dimensionsRef = useRef({ width: 0, height: 0 });
     const sequenceNumberRef = useRef(0);
 
@@ -36,7 +37,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
 
     useEffect(() => {
         const element = videoRef.current;
-        if (!element || !isConnected) return;
+        if (!element || !isConnected || ignoreInputEvents) return;
 
         const handleMouseEvent = (eventType: string, event: MouseEvent | WheelEvent) => {
             const isMouseMove = eventType === "mousemove";
@@ -207,7 +208,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             element.removeEventListener("touchend", onTouchEnd);
             element.removeEventListener("touchcancel", onTouchCancel);
         };
-    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel]);
+    }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents]);
 
     const sendKeyboardEvents = useCallback((events: { event: "keydown" | "keyup", keyCode: number }[]) => {
         if (!keyboardChannel.current || keyboardChannel.current.readyState !== "open") {

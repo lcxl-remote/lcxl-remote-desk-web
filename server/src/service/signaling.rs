@@ -1094,6 +1094,7 @@ impl DeskSession {
         // Used for mouse event, keyboard event, clipboard manage, file copy, whiteboard, etc.
         let signaling_state_for_data_channel = peer_connection.signaling_state.clone();
         let whiteboard_sender_for_dc = self.whiteboard_cmd_sender.clone();
+        let from_session_id_for_dc = from_session_id.to_string();
         peer_connection
             .rtc_peer_connection
             .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
@@ -1102,9 +1103,10 @@ impl DeskSession {
                 log::info!("New DataChannel {d_label} {d_id}");
                 let signaling_state = signaling_state_for_data_channel.clone();
                 let wb_sender = whiteboard_sender_for_dc.clone();
+                let sid = from_session_id_for_dc.clone();
                 // Register channel opening handling
                 Box::pin(async move {
-                    let result = handle_data_channel_event(signaling_state, d.clone(), wb_sender).await;
+                    let result = handle_data_channel_event(signaling_state, d.clone(), wb_sender, sid).await;
                     if let Err(error) = result {
                         log::error!("Failed to handle data channel event: {}", error);
                     }

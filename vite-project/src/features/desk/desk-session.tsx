@@ -14,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Slider } from "@/components/ui/slider"
 
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
@@ -107,14 +108,6 @@ export default function DeskSession() {
         isActive: true
     });
 
-    const { sendKeyboardEvents } = useDeskInput({
-        videoRef,
-        mouseChannel,
-        keyboardChannel,
-        mouseMoveChannel,
-        isConnected: isRTCConnected && hasControl // Only enable inputs if we have control
-    });
-
     const whiteboard = useDeskWhiteboard({
         videoRef,
         whiteboardChannel,
@@ -122,10 +115,21 @@ export default function DeskSession() {
         hasTauri: initData?.has_tauri ?? false,
     });
 
+    const { sendKeyboardEvents } = useDeskInput({
+        videoRef,
+        mouseChannel,
+        keyboardChannel,
+        mouseMoveChannel,
+        isConnected: isRTCConnected && hasControl, // Only enable inputs if we have control
+        ignoreInputEvents: !!whiteboard.textInput,
+    });
+
     const microphone = useDeskMicrophone({
         peerConnection,
         isConnected: isRTCConnected,
     });
+
+    const { forceError } = microphone;
 
     // Handle incoming signaling messages regarding control
     useEffect(() => {
@@ -156,10 +160,10 @@ export default function DeskSession() {
             const data = lastMessage.signaling_data;
             if (data && data.error) {
                 console.error("Remote audio playback error:", data.error);
-                microphone.forceError(data.error);
+                forceError(data.error);
             }
         }
-    }, [lastMessage, microphone]);
+    }, [lastMessage, forceError]);
 
     // Reset requested state if connection drops
     useEffect(() => {
@@ -201,7 +205,7 @@ export default function DeskSession() {
         const interval = setInterval(() => {
             const v = videoRef.current;
             if (v) {
-                console.log(`[Video State] readyState: ${v.readyState}, paused: ${v.paused}, muted: ${v.muted}, videoWidth: ${v.videoWidth}, videoHeight: ${v.videoHeight}, srcObject: ${!!v.srcObject}`);
+                //console.log(`[Video State] readyState: ${v.readyState}, paused: ${v.paused}, muted: ${v.muted}, videoWidth: ${v.videoWidth}, videoHeight: ${v.videoHeight}, srcObject: ${!!v.srcObject}`);
             }
         }, 2000);
         return () => clearInterval(interval);
@@ -475,6 +479,52 @@ export default function DeskSession() {
                                 onUndo={whiteboard.undo}
                                 onClose={whiteboard.toggleWhiteboard}
                             />
+                        )}
+
+                        {/* Whiteboard text input overlay */}
+                        {whiteboard.textInput && (
+                            <form
+                                className="fixed z-[9999] flex items-center gap-2 bg-background p-2 rounded-lg shadow-lg border border-white/20"
+                                style={{
+                                    left: Math.min(whiteboard.textInput.clientX, window.innerWidth - 300),
+                                    top: Math.min(whiteboard.textInput.clientY, window.innerHeight - 60)
+                                }}
+                                onSubmit={(e) => {
+                                    e.preventDefault();
+                                    const input = e.currentTarget.elements.namedItem('textInput') as HTMLInputElement;
+                                    whiteboard.confirmTextInput(input.value);
+                                }}
+                            >
+                                <Input
+                                    id="textInput"
+                                    name="textInput"
+                                    autoFocus
+                                    className="w-48 h-8 text-foreground"
+                                    placeholder={t('pages.desk.enterText', 'Enter text...')}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                            if (e.currentTarget.value.trim()) {
+                                                whiteboard.confirmTextInput(e.currentTarget.value);
+                                            } else {
+                                                whiteboard.cancelTextInput();
+                                            }
+                                        }
+                                        if (e.key === 'Escape') {
+                                            whiteboard.cancelTextInput();
+                                        }
+                                    }}
+                                /*
+                                onBlur={(e) => {
+                                    // Auto-confirm on blur if not empty, otherwise cancel
+                                    if (e.target.value.trim()) {
+                                        whiteboard.confirmTextInput(e.target.value);
+                                    } else {
+                                        whiteboard.cancelTextInput();
+                                    }
+                                }}
+                                */
+                                />
+                            </form>
                         )}
 
                         <div

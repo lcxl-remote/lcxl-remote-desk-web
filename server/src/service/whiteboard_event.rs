@@ -12,6 +12,7 @@ pub async fn handle_whiteboard_event(
     _signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
     whiteboard_cmd_sender: std::sync::mpsc::Sender<WhiteboardCommand>,
+    session_id: String,
 ) -> Result<(), crate::error::DeskError> {
     let d_label = data_channel.label().to_owned();
     let d_id = data_channel.id();
@@ -42,9 +43,14 @@ pub async fn handle_whiteboard_event(
         };
         log::trace!("Whiteboard message received: {}", msg_str);
 
+        // First, ensure the window is shown
+        if let Err(e) = sender_for_msg.send(WhiteboardCommand::Show(session_id.clone())) {
+            log::error!("Failed to send whiteboard show command: {}", e);
+        }
+
         // Forward the raw JSON message to the tauri whiteboard manager
         if let Err(e) = sender_for_msg.send(WhiteboardCommand::DrawMessage(msg_str)) {
-            log::error!("Failed to send whiteboard command: {}", e);
+            log::error!("Failed to send whiteboard draw command: {}", e);
         }
 
         Box::pin(async {})

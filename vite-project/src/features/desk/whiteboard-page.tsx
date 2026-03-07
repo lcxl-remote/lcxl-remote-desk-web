@@ -11,33 +11,21 @@ export default function WhiteboardPage() {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [elements, setElements] = useState<WhiteboardElement[]>([]);
 
-    // Listen for Tauri whiteboard-draw events
+    // Force transparent background for the overlay window
     useEffect(() => {
-        let unlisten: (() => void) | null = null;
-
-        const setup = async () => {
-            try {
-                const { listen } = await import('@tauri-apps/api/event');
-                const unlistenFn = await listen('whiteboard-draw', (event: any) => {
-                    try {
-                        const msg = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
-                        handleMessage(msg);
-                    } catch (e) {
-                        console.error('Failed to parse whiteboard message:', e);
-                    }
-                });
-                unlisten = unlistenFn;
-            } catch (_e) {
-                console.warn('Failed to setup Tauri event listener (not in Tauri context?):', _e);
-            }
-        };
-
-        setup();
+        document.documentElement.style.setProperty('background', 'transparent', 'important');
+        document.body.style.setProperty('background', 'transparent', 'important');
+        const root = document.getElementById('root');
+        if (root) root.style.setProperty('background', 'transparent', 'important');
 
         return () => {
-            if (unlisten) unlisten();
+            document.documentElement.style.removeProperty('background');
+            document.body.style.removeProperty('background');
+            if (root) root.style.removeProperty('background');
         };
     }, []);
+
+
 
     const handleMessage = useCallback((msg: any) => {
         switch (msg.type) {
@@ -73,6 +61,25 @@ export default function WhiteboardPage() {
                 break;
         }
     }, []);
+
+    // Listen for window event dispatched by evaluate_script from Rust
+    useEffect(() => {
+        const handleEvent = (event: Event) => {
+            try {
+                const customEvent = event as CustomEvent;
+                const msg = typeof customEvent.detail === 'string' ? JSON.parse(customEvent.detail) : customEvent.detail;
+                handleMessage(msg);
+            } catch (e) {
+                console.error('Failed to parse whiteboard message:', e);
+            }
+        };
+
+        window.addEventListener('whiteboard-draw', handleEvent);
+
+        return () => {
+            window.removeEventListener('whiteboard-draw', handleEvent);
+        };
+    }, [handleMessage]);
 
     // Re-render when elements change
     useEffect(() => {

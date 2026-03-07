@@ -25,6 +25,7 @@ pub async fn handle_data_channel_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
     whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
+    session_id: String,
 ) -> Result<(), DeskError> {
     match data_channel.label() {
         DATA_CHANNEL_LABEL_MOUSE_EVENT | DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT => {
@@ -50,6 +51,7 @@ pub async fn handle_data_channel_event(
                     signaling_state,
                     data_channel,
                     sender,
+                    session_id,
                 )
                 .await?;
             } else {

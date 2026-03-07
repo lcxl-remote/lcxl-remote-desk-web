@@ -154,7 +154,8 @@ pub struct Settings {
     /// Terminal settings
     pub terminal: TerminalSettings,
 
-    /// Command line arguments
+    /// Command line arguments, come from clap and do not load from or save to config file
+    #[serde(skip)]
     pub args: Args,
 }
 

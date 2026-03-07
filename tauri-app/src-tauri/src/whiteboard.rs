@@ -38,12 +38,27 @@ impl WhiteboardManager {
                                 log::error!("Failed to show whiteboard window: {}", e);
                                 continue;
                             }
+                            log::info!("Whiteboard window shown");
                             self.controlled_by_session_id = Some(from_session_id);
                         }
                         WhiteboardCommand::DrawMessage(json_msg) => {
-                            // Forward drawing message to the webview via Tauri event
-                            if let Err(e) = handle.emit("whiteboard-draw", &json_msg) {
-                                log::error!("Failed to emit whiteboard draw event: {}", e);
+                            // Forward drawing message to the webview via evaluate_script to avoid IPC cross-origin block
+                            log::info!(
+                                "Forwarding drawing message to whiteboard window: {}",
+                                json_msg
+                            );
+                            if let Some(window) = handle.get_webview_window(WHITEBOARD_WINDOW_LABEL)
+                            {
+                                // Serialize the json message safely for JavaScript evaluation
+                                let safe_json = serde_json::to_string(&json_msg)
+                                    .unwrap_or_else(|_| "\"\"".to_string());
+                                let script = format!(
+                                    "window.dispatchEvent(new CustomEvent('whiteboard-draw', {{ detail: {} }}));",
+                                    safe_json
+                                );
+                                if let Err(e) = window.eval(&script) {
+                                    log::error!("Failed to eval whiteboard draw event: {}", e);
+                                }
                             }
                         }
                         WhiteboardCommand::Hide(from_session_id) => {
@@ -58,6 +73,7 @@ impl WhiteboardManager {
                             if let Err(e) = Self::hide_window(&handle) {
                                 log::error!("Failed to hide whiteboard window: {}", e);
                             }
+                            log::info!("Whiteboard window hidden");
                             self.controlled_by_session_id = None;
                         }
                         WhiteboardCommand::Quit => {

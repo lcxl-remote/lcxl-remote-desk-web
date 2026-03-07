@@ -1,0 +1,6 @@
+feat: implement interactive whiteboard and mono audio streaming
+
+1. Whiteboard: Added an interactive transparent overlay whiteboard utilizing WebRTC data channels for cross-device drawing. Overcame focus stealing issues in browser interactions by bypassing the remote input event hooks when interacting with the canvas toolbar and text inputs.
+2. Microphone: Added one-way audio streaming using cpal with Opus decoder. Provided ~60ms inner buffering and PLC to fix underruns.
+3. Tauri: Integrated whiteboard layer into Tauri without blocking existing privacy screen modes.
+4. Frontend: Migrated native browser prompts to customizable react inputs and decoupled local vs remote rendering loops to avoid echoed lines.

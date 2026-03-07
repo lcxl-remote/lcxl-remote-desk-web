@@ -29,7 +29,9 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
     const [color, setColor] = useState('#ff0000');
     const [strokeWidth, setStrokeWidth] = useState(3);
     const [fontSize, setFontSize] = useState(24);
+    // elements now only stores the in-progress stroke to prevent duplicate rendering with the remote video stream
     const [elements, setElements] = useState<WhiteboardElement[]>([]);
+    const [textInput, setTextInput] = useState<{ x: number; y: number; clientX: number; clientY: number } | null>(null);
     const isDrawingRef = useRef(false);
     const currentPointsRef = useRef<{ x: number; y: number }[]>([]);
     const currentIdRef = useRef('');
@@ -80,17 +82,15 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
         if (!point) return;
         currentPointsRef.current.push(point);
         // Update local canvas preview with in-progress stroke
-        setElements(prev => {
-            const filtered = prev.filter(el => el.id !== currentIdRef.current);
-            return [...filtered, {
-                id: currentIdRef.current,
-                type: 'draw',
-                tool: 'pen',
-                points: [...currentPointsRef.current],
-                color,
-                width: strokeWidth,
-            }];
-        });
+        // Only render the current stroke locally
+        setElements([{
+            id: currentIdRef.current,
+            type: 'draw',
+            tool: 'pen',
+            points: [...currentPointsRef.current],
+            color,
+            width: strokeWidth,
+        }]);
     }, [normalizePoint, color, strokeWidth]);
 
     const handlePointerUp = useCallback(() => {
@@ -107,29 +107,46 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
             };
             sendMessage(msg);
         }
+        // Clear the local stroke immediately. The remote video stream will show the drawn line instantly.
+        setElements([]);
         currentPointsRef.current = [];
     }, [color, strokeWidth, sendMessage]);
-
     const handleCanvasClick = useCallback((e: React.MouseEvent) => {
         if (!isActive || tool !== 'text') return;
+        // Don't open a new input if one is already open
+        if (textInput) return;
+
+        e.stopPropagation();
+
         const point = normalizePoint(e.clientX, e.clientY);
         if (!point) return;
 
-        const text = prompt('Enter text:');
-        if (!text) return;
+        setTextInput({
+            x: point.x,
+            y: point.y,
+            clientX: e.clientX,
+            clientY: e.clientY
+        });
+    }, [isActive, tool, normalizePoint, textInput]);
+
+    const confirmTextInput = useCallback((text: string) => {
+        if (!textInput || !text.trim()) {
+            setTextInput(null);
+            return;
+        }
 
         const id = generateId();
-        const element: WhiteboardElement = {
-            id, type: 'text',
-            x: point.x, y: point.y,
-            content: text, color, fontSize,
-        };
-        setElements(prev => [...prev, element]);
+        // Send the text directly, no need to store it locally
         sendMessage({
-            type: 'text', x: point.x, y: point.y,
-            content: text, color, fontSize: fontSize, id,
+            type: 'text', x: textInput.x, y: textInput.y,
+            content: text, color, fontSize, id,
         });
-    }, [isActive, tool, normalizePoint, color, fontSize, sendMessage]);
+        setTextInput(null);
+    }, [textInput, color, fontSize, sendMessage]);
+
+    const cancelTextInput = useCallback(() => {
+        setTextInput(null);
+    }, []);
 
     const clearAll = useCallback(() => {
         setElements([]);
@@ -137,10 +154,6 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
     }, [sendMessage]);
 
     const undo = useCallback(() => {
-        setElements(prev => {
-            if (prev.length === 0) return prev;
-            return prev.slice(0, -1);
-        });
         sendMessage({ type: 'undo' });
     }, [sendMessage]);
 
@@ -148,12 +161,14 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
         setIsActive(prev => {
             const next = !prev;
             if (!next) {
-                // Clear local elements when turning off whiteboard
+                // Clear local elements and remote elements when turning off whiteboard
                 setElements([]);
+                setTextInput(null);
+                sendMessage({ type: 'clear' });
             }
             return next;
         });
-    }, []);
+    }, [sendMessage]);
 
     const canActivate = isConnected && hasTauri;
 
@@ -164,6 +179,9 @@ export function useDeskWhiteboard({ videoRef, whiteboardChannel, isConnected, ha
         strokeWidth, setStrokeWidth,
         fontSize, setFontSize,
         elements,
+        textInput,
+        confirmTextInput,
+        cancelTextInput,
         canActivate,
         toggleWhiteboard,
         clearAll,

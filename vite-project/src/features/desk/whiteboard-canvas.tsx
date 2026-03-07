@@ -7,7 +7,7 @@ type WhiteboardCanvasProps = {
     onPointerDown: (e: React.PointerEvent) => void;
     onPointerMove: (e: React.PointerEvent) => void;
     onPointerUp: () => void;
-    onClick: (e: React.MouseEvent) => void;
+    onClick?: (e: React.MouseEvent) => void;
 };
 
 function renderElements(ctx: CanvasRenderingContext2D, elements: WhiteboardElement[], width: number, height: number) {
