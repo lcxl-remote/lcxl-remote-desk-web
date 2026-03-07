@@ -1286,11 +1286,32 @@ export type RestResponseSystemSettings = {
         */
         locale?: string | null;
         /**
+         * @description Interval in hours for the cleanup task (default 12)
+         * @minLength 0
+         * @default 12
+         * @type integer | undefined, int32
+        */
+        log_cleanup_interval_hours?: number;
+        /**
+         * @description Disk usage threshold for log cleanup (default 90%)
+         * @minLength 0
+         * @default 90
+         * @type integer | undefined, int32
+        */
+        log_cleanup_threshold_percent?: number;
+        /**
          * @description access logs are printed with the INFO level so ensure it is enabled by default
          * @default "info"
          * @type string | undefined
         */
         log_level?: string;
+        /**
+         * @description Log retention days (default 7)
+         * @minLength 0
+         * @default 7
+         * @type integer | undefined, int32
+        */
+        log_retention_days?: number;
         /**
          * @description port number for the server to bind to
          * @minLength 0
@@ -1622,11 +1643,32 @@ export type SystemSettings = {
     */
     locale?: string | null;
     /**
+     * @description Interval in hours for the cleanup task (default 12)
+     * @minLength 0
+     * @default 12
+     * @type integer | undefined, int32
+    */
+    log_cleanup_interval_hours?: number;
+    /**
+     * @description Disk usage threshold for log cleanup (default 90%)
+     * @minLength 0
+     * @default 90
+     * @type integer | undefined, int32
+    */
+    log_cleanup_threshold_percent?: number;
+    /**
      * @description access logs are printed with the INFO level so ensure it is enabled by default
      * @default "info"
      * @type string | undefined
     */
     log_level?: string;
+    /**
+     * @description Log retention days (default 7)
+     * @minLength 0
+     * @default 7
+     * @type integer | undefined, int32
+    */
+    log_retention_days?: number;
     /**
      * @description port number for the server to bind to
      * @minLength 0

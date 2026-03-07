@@ -41,6 +41,9 @@ const systemSettingsSchema = z.object({
     signaling_url: z.string().nullable(),
     port: z.number().min(1).max(65535),
     log_level: z.enum(["trace", "debug", "info", "warn", "error"]),
+    log_retention_days: z.number().min(1),
+    log_cleanup_threshold_percent: z.number().min(1).max(100),
+    log_cleanup_interval_hours: z.number().min(1),
 })
 
 type SystemSettingsFormValues = z.infer<typeof systemSettingsSchema>
@@ -68,6 +71,9 @@ export function SystemSettings() {
             signaling_url: null,
             port: 8081,
             log_level: "info",
+            log_retention_days: 7,
+            log_cleanup_threshold_percent: 90,
+            log_cleanup_interval_hours: 12,
         },
     })
 
@@ -85,6 +91,9 @@ export function SystemSettings() {
                 signaling_url: data.signaling_url || null,
                 port: data.port || 8081,
                 log_level: (data.log_level || "info") as any,
+                log_retention_days: data.log_retention_days ?? 7,
+                log_cleanup_threshold_percent: data.log_cleanup_threshold_percent ?? 90,
+                log_cleanup_interval_hours: data.log_cleanup_interval_hours ?? 12,
             })
         }
     }, [settingsResponse?.data, isLoading, form])
@@ -238,6 +247,51 @@ export function SystemSettings() {
                                         )}
                                     />
                                 )}
+                            </div>
+
+                            <div className="rounded-md border p-4 space-y-4">
+                                <h3 className="text-sm font-medium">{t("pages.system.settings.logCleanup.title", "Log Cleanup")}</h3>
+                                <div className="grid gap-6 md:grid-cols-3">
+                                    <FormField
+                                        control={form.control}
+                                        name="log_retention_days"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>{t("pages.system.settings.logCleanup.logRetentionDays", "Retention Days")}</FormLabel>
+                                                <FormControl>
+                                                    <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 7 : Number(e.target.value))} />
+                                                </FormControl>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                    <FormField
+                                        control={form.control}
+                                        name="log_cleanup_threshold_percent"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupThresholdPercent", "Disk Threshold (%)")}</FormLabel>
+                                                <FormControl>
+                                                    <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 90 : Number(e.target.value))} />
+                                                </FormControl>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                    <FormField
+                                        control={form.control}
+                                        name="log_cleanup_interval_hours"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupIntervalHours", "Cleanup Interval (Hours)")}</FormLabel>
+                                                <FormControl>
+                                                    <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 12 : Number(e.target.value))} />
+                                                </FormControl>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+                                </div>
                             </div>
 
                             <div className="space-y-4 rounded-md border p-4">

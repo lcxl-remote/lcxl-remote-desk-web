@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
+import type { RegenerateTurnSecretMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { RegenerateTurnSecretMutationResponse } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { regenerateTurnSecret } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const regenerateTurnSecretMutationKey = () => [{ url: '/api/desk/settings/turn/regenerate-secret' }] as const
 

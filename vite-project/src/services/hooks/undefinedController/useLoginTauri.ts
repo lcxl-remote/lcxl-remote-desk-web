@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
+import type { LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403 } from "../../types.ts";
-import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { loginTauri } from "../../clients.ts";
+import { mutationOptions, useMutation } from "@tanstack/react-query";
 
 export const loginTauriMutationKey = () => [{ url: '/api/login/tauri' }] as const
 

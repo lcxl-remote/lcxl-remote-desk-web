@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
+import type { OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { openSignalingHandle } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const openSignalingHandleQueryKey = (params: OpenSignalingHandleQueryParams) => [{ url: '/api/desk/signaling' }, ...(params ? [params] : [])] as const
 

@@ -17,10 +17,17 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use crate::model::settings::SystemSettings;
+use crate::model::settings::SharedSettings;
 use crate::version::{SERVER_BUILD_NUMBER, SERVER_COMMIT_HASH};
+use std::sync::Arc;
+use tracing;
 
-pub fn init_telemetry(settings: &SystemSettings) -> Result<Option<WorkerGuard>> {
+pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Option<WorkerGuard>> {
+    let settings = {
+        let settings_guard = shared_settings.read().await;
+        settings_guard.system.clone()
+    };
+
     // 1. Create a Resource with Service Info, OS Info, and Custom Tags
     let mut sys = System::new_all();
     sys.refresh_all();
@@ -135,5 +142,107 @@ pub fn init_telemetry(settings: &SystemSettings) -> Result<Option<WorkerGuard>> 
 
     registry.init();
 
+    // 5. Spawn log cleanup task
+    spawn_log_cleanup_task(shared_settings.clone());
+
     Ok(Some(guard))
+}
+
+fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
+    tokio::spawn(async move {
+        loop {
+            let (interval_hours, retention_days, threshold_percent) = {
+                let settings = shared_settings.read().await;
+                (
+                    settings.system.log_cleanup_interval_hours,
+                    settings.system.log_retention_days,
+                    settings.system.log_cleanup_threshold_percent,
+                )
+            };
+
+            tracing::info!(
+                "Starting log cleanup task. Interval: {}h, Retention: {}d, Threshold: {}%",
+                interval_hours,
+                retention_days,
+                threshold_percent
+            );
+
+            if let Err(e) = perform_log_cleanup(retention_days, threshold_percent).await {
+                tracing::error!("Log cleanup error: {}", e);
+            }
+
+            tokio::time::sleep(Duration::from_secs(interval_hours as u64 * 3600)).await;
+        }
+    });
+}
+
+async fn perform_log_cleanup(retention_days: u32, threshold_percent: u8) -> Result<()> {
+    let log_dir = "logs";
+    let path = std::path::Path::new(log_dir);
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let now = chrono::Local::now().naive_local().date();
+    let expiration_date = now - chrono::Duration::days(retention_days as i64);
+
+    let mut log_files = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        // Expected format: desk-server.log.YYYY-MM-DD
+        if file_name.starts_with("desk-server.log.") {
+            let date_str = &file_name["desk-server.log.".len()..];
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                if date < expiration_date {
+                    tracing::info!("Deleting expired log file: {}", file_name);
+                    let _ = std::fs::remove_file(entry.path());
+                } else if date < now {
+                    // Collect non-expired (but not current) files for potential disk space cleanup
+                    log_files.push((date, entry.path()));
+                }
+            }
+        }
+    }
+
+    // Sort by date (oldest first)
+    log_files.sort_by_key(|f| f.0);
+
+    // Check disk usage if threshold is set
+    if threshold_percent > 0 {
+        let mut disks = sysinfo::Disks::new_with_refreshed_list();
+
+        let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some(disk) = disks.iter().find(|d| abs_path.starts_with(d.mount_point())) {
+            let used_percent = ((disk.total_space() - disk.available_space()) as f64
+                / disk.total_space() as f64
+                * 100.0) as u8;
+
+            if used_percent > threshold_percent {
+                tracing::warn!(
+                    "Disk usage {}% exceeds threshold {}%. Cleaning up more logs...",
+                    used_percent,
+                    threshold_percent
+                );
+
+                for (_, file_path) in log_files {
+                    tracing::info!("Deleting log file due to disk space: {:?}", file_path);
+                    let _ = std::fs::remove_file(&file_path);
+
+                    // Re-check disk usage
+                    disks = sysinfo::Disks::new_with_refreshed_list();
+                    if let Some(d) = disks.iter().find(|d| abs_path.starts_with(d.mount_point())) {
+                        let current_used = ((d.total_space() - d.available_space()) as f64
+                            / d.total_space() as f64
+                            * 100.0) as u8;
+                        if current_used <= threshold_percent {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

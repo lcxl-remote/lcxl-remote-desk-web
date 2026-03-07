@@ -160,8 +160,11 @@ pub async fn run_with_channels(
         // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
         unsafe { env::set_var("RUST_BACKTRACE", "1") };
     }
+    // Initialize settings
+    let shared_settings = Arc::new(SharedSettings::from(settings.clone()));
+
     // Initialize telemetry
-    let _guard = telemetry::init_telemetry(&settings.system)?;
+    let _guard = telemetry::init_telemetry(shared_settings.clone()).await?;
 
     // determine startup mode
     let startup_mode = settings.args.startup_mode.clone();
@@ -188,7 +191,7 @@ pub async fn run_with_channels(
     static_file_path.push("static");
     info!("Server static file path: {:?}", static_file_path);
     let secret_key = Key::generate();
-    let shared_settings = web::Data::new(SharedSettings::from(settings.clone()));
+    let shared_settings_data = web::Data::from(shared_settings.clone());
 
     let tauri_login_token: web::Data<Option<TauriLoginToken>> =
         web::Data::new(channels.tauri_login_token.clone().map(TauriLoginToken::new));
@@ -202,7 +205,7 @@ pub async fn run_with_channels(
     let turn_api_state =
         if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
             log::info!("Starting turn server with config {:?}", config);
-            let observer = TurnObserver::new(shared_settings.clone(), Statistics::default());
+            let observer = TurnObserver::new(shared_settings_data.clone(), Statistics::default());
             Some(web::Data::new(startup_turn_server(config, observer).await?))
         } else {
             None
@@ -211,7 +214,7 @@ pub async fn run_with_channels(
     // start desk session if mode is Default or DeskServer
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::DeskServer {
         info!("Starting desk session");
-        let settings_clone = shared_settings.clone();
+        let settings_clone = shared_settings_data.clone();
         actix_web::rt::spawn(async move {
             if let Err(e) = start_desk_session(settings_clone, channels).await {
                 error!("Desk session error: {}", e);
@@ -231,7 +234,7 @@ pub async fn run_with_channels(
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
-            .app_data(shared_settings.clone())
+            .app_data(shared_settings_data.clone())
             .app_data(tauri_login_token.clone())
             .app_data(session_map.clone())
             .configure(|cfg| {

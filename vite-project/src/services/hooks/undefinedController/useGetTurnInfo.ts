@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
+import type { GetTurnInfoQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { GetTurnInfoQueryResponse } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { getTurnInfo } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const getTurnInfoQueryKey = () => [{ url: '/api/turn/info' }] as const
 

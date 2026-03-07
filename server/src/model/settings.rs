@@ -86,6 +86,12 @@ pub struct SystemSettings {
     pub telemetry_consent: Option<bool>,
     /// Auto start the application on system login
     pub auto_start: Option<bool>,
+    /// Log retention days (default 7)
+    pub log_retention_days: u32,
+    /// Disk usage threshold for log cleanup (default 90%)
+    pub log_cleanup_threshold_percent: u8,
+    /// Interval in hours for the cleanup task (default 12)
+    pub log_cleanup_interval_hours: u32,
 }
 
 /// User settings
@@ -177,6 +183,9 @@ impl Default for SystemSettings {
             client_id: None,
             telemetry_consent: None,
             auto_start: None,
+            log_retention_days: 7,
+            log_cleanup_threshold_percent: 90,
+            log_cleanup_interval_hours: 12,
         }
     }
 }
