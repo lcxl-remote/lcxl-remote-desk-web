@@ -169,7 +169,6 @@ npm run build
 - `listen_addr_ipv6`: IPv6 监听地址
 - `log_level`: 日志级别 (error, warn, info, debug, trace)
 - `traceback`: 是否启用 Rust 错误回溯
-- `open_browser_on_startup`: 启动时是否自动打开浏览器
 
 #### 用户设置 [user]
 
@@ -196,7 +195,6 @@ npm run build
 [system]
 log_level = "debug"          # 开发时使用 debug 级别日志
 traceback = true             # 启用错误回溯
-open_browser_on_startup = true  # 自动打开浏览器
 
 [desk]
 video_fps = 30               # 开发时可降低帧率以减少资源消耗

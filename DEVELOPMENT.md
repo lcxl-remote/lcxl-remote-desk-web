@@ -98,7 +98,6 @@ npm run dev
 - `listen_addr_ipv6`: IPv6 listening address.
 - `log_level`: Logging level (error, warn, info, debug, trace).
 - `traceback`: Whether to enable Rust error backtrace.
-- `open_browser_on_startup`: Whether to automatically open the browser on startup.
 
 #### User [user]
 
@@ -125,7 +124,6 @@ npm run dev
 [system]
 log_level = "debug"
 traceback = true
-open_browser_on_startup = true
 
 [desk]
 video_fps = 30               # Reduce FPS during development to save resources

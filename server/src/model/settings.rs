@@ -78,8 +78,6 @@ pub struct SystemSettings {
 
     /// Optional locale setting (e.g., "en", "zh-CN")
     pub locale: Option<String>,
-    /// Whether to open the browser automatically on server startup
-    pub open_browser_on_startup: bool,
     /// Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling"
     pub signaling_url: Option<String>,
     /// Client ID for telemetry
@@ -175,7 +173,6 @@ impl Default for SystemSettings {
             log_level: "info".to_string(),
             traceback: true,
             locale: None,
-            open_browser_on_startup: false,
             signaling_url: None,
             client_id: None,
             telemetry_consent: None,

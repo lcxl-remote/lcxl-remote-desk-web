@@ -31,7 +31,6 @@ import {
 import { useToast } from "@/hooks/use-toast"
 
 const systemSettingsSchema = z.object({
-    open_browser_on_startup: z.boolean(),
     enable_ipv6: z.boolean(),
     traceback: z.boolean(),
     telemetry_consent: z.boolean().nullable(),
@@ -59,7 +58,6 @@ export function SystemSettings() {
     const form = useForm<SystemSettingsFormValues>({
         resolver: zodResolver(systemSettingsSchema),
         defaultValues: {
-            open_browser_on_startup: true,
             enable_ipv6: true,
             traceback: true,
             telemetry_consent: null,
@@ -77,7 +75,6 @@ export function SystemSettings() {
         if (settingsResponse?.data && !form.formState.isDirty && !isLoading) {
             const data = settingsResponse.data
             form.reset({
-                open_browser_on_startup: data.open_browser_on_startup ?? true,
                 enable_ipv6: data.enable_ipv6 ?? true,
                 traceback: data.traceback ?? true,
                 telemetry_consent: data.telemetry_consent ?? null,
@@ -243,21 +240,6 @@ export function SystemSettings() {
                             </div>
 
                             <div className="space-y-4 rounded-md border p-4">
-                                <FormField
-                                    control={form.control}
-                                    name="open_browser_on_startup"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
-                                            <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.system.settings.openBrowserOnStartup", "Open Browser on Startup")}</FormLabel>
-                                                <FormDescription>{t("pages.system.settings.openBrowserOnStartup.description", "Automatically launch the web interface when the application starts.")}</FormDescription>
-                                            </div>
-                                            <FormControl>
-                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
-                                            </FormControl>
-                                        </FormItem>
-                                    )}
-                                />
 
                                 <FormField
                                     control={form.control}
