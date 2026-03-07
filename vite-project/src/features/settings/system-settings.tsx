@@ -3,10 +3,11 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save } from "lucide-react"
+import { Loader2, Save, ShieldCheck, RefreshCw } from "lucide-react"
 
 import { useQuerySettings } from "@/services/hooks/undefinedController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/undefinedController/useUpdateSettings"
+import { useRegenerateTurnSecret } from "@/services/hooks/undefinedController/useRegenerateTurnSecret"
 import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
 
 import { Button } from "@/components/ui/button"
@@ -16,6 +17,17 @@ import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+    AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { useToast } from "@/hooks/use-toast"
 
 const systemSettingsSchema = z.object({
@@ -39,6 +51,7 @@ export function SystemSettings() {
 
     const { data: settingsResponse, isLoading } = useQuerySettings()
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateSettings()
+    const { mutateAsync: regenerateSecret, isPending: isRegenerating } = useRegenerateTurnSecret()
     const { data: serverInfoResp } = useQueryServerInfo()
 
     const serverInfo = serverInfoResp?.data
@@ -90,6 +103,22 @@ export function SystemSettings() {
                 variant: "destructive",
                 title: t('pages.system.settings.error', 'Error'),
                 description: t('pages.system.settings.updateFailedMessage', "Failed to update system settings"),
+            })
+        }
+    }
+
+    const onRegenerateSecret = async () => {
+        try {
+            await regenerateSecret()
+            toast({
+                title: t('pages.system.settings.success', 'Success'),
+                description: t('pages.system.settings.regenerateSecretSuccess', "TURN secret updated, please restart the server."),
+            })
+        } catch (error) {
+            toast({
+                variant: "destructive",
+                title: t('pages.system.settings.error', 'Error'),
+                description: t('pages.system.settings.regenerateSecretError', "Failed to regenerate TURN secret"),
             })
         }
     }
@@ -302,6 +331,45 @@ export function SystemSettings() {
                             </div>
                         </form>
                     </Form>
+                </CardContent>
+            </Card>
+
+            <Card className="mt-8 border-destructive/20">
+                <CardHeader>
+                    <div className="flex items-center gap-2">
+                        <ShieldCheck className="h-5 w-5 text-destructive" />
+                        <CardTitle>{t("pages.system.settings.turnSecurity", "TURN Security")}</CardTitle>
+                    </div>
+                    <CardDescription>
+                        {t("pages.system.settings.turnSecurity.description", "Manage TURN server security credentials.")}
+                    </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                    <p className="text-sm text-muted-foreground">
+                        {t("pages.system.settings.regenerateSecretDescription", "Regenerating the secret will invalidate existing TURN sessions and requires a server restart to take effect.")}
+                    </p>
+                    <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                            <Button variant="outline" className="text-destructive hover:bg-destructive/10" disabled={isRegenerating}>
+                                {isRegenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                                {t("pages.system.settings.regenerateSecret", "Regenerate TURN Secret")}
+                            </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>{t("pages.system.settings.regenerateSecretConfirm", "Are you sure?")}</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                    {t("pages.system.settings.regenerateSecretDescription", "This action will update the internal TURN secret. All active TURN connections will eventually fail and a server restart is REQUIRED for the new secret to take effect.")}
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                                <AlertDialogCancel>{t("common.cancel", "Cancel")}</AlertDialogCancel>
+                                <AlertDialogAction onClick={onRegenerateSecret} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                                    {t("common.confirm", "Confirm")}
+                                </AlertDialogAction>
+                            </AlertDialogFooter>
+                        </AlertDialogContent>
+                    </AlertDialog>
                 </CardContent>
             </Card>
         </div>

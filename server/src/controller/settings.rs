@@ -106,3 +106,21 @@ pub async fn update_telemetry_consent(
     );
     Ok(HttpResponse::Ok().finish())
 }
+
+#[utoipa::path(
+    summary = "Regenerate TURN static_auth_secret",
+    responses(
+        (status = 200, description = "Regenerate TURN static_auth_secret successfully"),
+    ),
+)]
+#[post("/settings/turn/regenerate-secret")]
+pub async fn regenerate_turn_secret(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let mut settings = settings.write().await;
+    let new_secret = uuid::Uuid::new_v4().to_string().replace("-", "");
+    settings.turn.static_auth_secret = Some(new_secret);
+    settings.save()?;
+    info!("Regenerate TURN static_auth_secret successfully");
+    Ok(HttpResponse::Ok().finish())
+}

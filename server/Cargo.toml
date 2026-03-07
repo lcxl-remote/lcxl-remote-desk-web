@@ -81,6 +81,8 @@ prometheus = "0.13.4"
 
 png = "0.17"
 base64 = "0.22"
+hmac = "0.12"
+sha1 = "0.10"
 
 cpal = "0.15"
 ringbuf = "0.4"

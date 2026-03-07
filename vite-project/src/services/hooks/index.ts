@@ -39,6 +39,7 @@ export type { QuerySysinfoQueryKey } from "./undefinedController/useQuerySysinfo
 export type { QuerySysinfoSuspenseQueryKey } from "./undefinedController/useQuerySysinfoSuspense.ts";
 export type { QueryTelemetryStatusQueryKey } from "./undefinedController/useQueryTelemetryStatus.ts";
 export type { QueryTelemetryStatusSuspenseQueryKey } from "./undefinedController/useQueryTelemetryStatusSuspense.ts";
+export type { RegenerateTurnSecretMutationKey } from "./undefinedController/useRegenerateTurnSecret.ts";
 export type { UpdateDeviceCodeMutationKey } from "./undefinedController/useUpdateDeviceCode.ts";
 export type { UpdateSettingsMutationKey } from "./undefinedController/useUpdateSettings.ts";
 export type { UpdateTelemetryConsentMutationKey } from "./undefinedController/useUpdateTelemetryConsent.ts";
@@ -165,6 +166,9 @@ export { useQueryTelemetryStatus } from "./undefinedController/useQueryTelemetry
 export { queryTelemetryStatusSuspenseQueryKey } from "./undefinedController/useQueryTelemetryStatusSuspense.ts";
 export { queryTelemetryStatusSuspenseQueryOptions } from "./undefinedController/useQueryTelemetryStatusSuspense.ts";
 export { useQueryTelemetryStatusSuspense } from "./undefinedController/useQueryTelemetryStatusSuspense.ts";
+export { regenerateTurnSecretMutationKey } from "./undefinedController/useRegenerateTurnSecret.ts";
+export { regenerateTurnSecretMutationOptions } from "./undefinedController/useRegenerateTurnSecret.ts";
+export { useRegenerateTurnSecret } from "./undefinedController/useRegenerateTurnSecret.ts";
 export { updateDeviceCodeMutationKey } from "./undefinedController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./undefinedController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./undefinedController/useUpdateDeviceCode.ts";

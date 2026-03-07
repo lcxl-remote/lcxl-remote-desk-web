@@ -2219,6 +2219,18 @@ export type UpdateSettingsMutation = {
     Errors: any;
 };
 
+/**
+ * @description Regenerate TURN static_auth_secret successfully
+*/
+export type RegenerateTurnSecret200 = any;
+
+export type RegenerateTurnSecretMutationResponse = RegenerateTurnSecret200;
+
+export type RegenerateTurnSecretMutation = {
+    Response: RegenerateTurnSecret200;
+    Errors: any;
+};
+
 export type OpenSignalingHandleQueryParams = {
     /**
      * @description The version of the API. This is a simple integer that increments when API is changed.

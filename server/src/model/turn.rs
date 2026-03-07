@@ -1,12 +1,14 @@
 use actix_web::web;
+use base64::prelude::*;
+use hmac::{Hmac, Mac};
 use serde_json::json;
-use tokio::runtime::Handle;
+use sha1::Sha1;
 use turn_server::{
     statistics::Statistics,
     turn::{Observer, SessionAddr},
 };
 
-use crate::model::settings::{SharedSettings, UserSettings};
+use crate::model::settings::SharedSettings;
 
 #[derive(Clone)]
 pub struct TurnObserver {
@@ -26,30 +28,21 @@ impl TurnObserver {
 impl Observer for TurnObserver {
     fn get_password(&self, username: &str) -> Option<String> {
         // Match the static authentication information first.
-
-        // Spawn a local task to get user settings from shared settings.
         log::info!("get_password: username={}", username);
-        let new_settings = self.settings.clone();
+        let settings = self.settings.blocking_read();
 
-        let handle = Handle::current();
-        let user_settings = futures::executor::block_on(async move {
-            handle
-                .spawn_blocking(move || {
-                    let settings = new_settings.blocking_read();
-                    settings.user.clone()
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    log::error!("Failed to spawn_blocking, use default, error: {}", error);
-                    UserSettings::default()
-                })
-        });
-
-        if user_settings.login_user_name == username {
-            log::info!("found user by username={}", username);
-            return Some(user_settings.login_password.clone());
+        if let Some(secret) = &settings.turn.static_auth_secret {
+            let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes()).ok()?;
+            mac.update(username.as_bytes());
+            let result = mac.finalize();
+            let code = result.into_bytes();
+            return Some(BASE64_STANDARD.encode(code));
         }
-        log::info!("not found user by username={}", username);
+
+        log::warn!(
+            "static_auth_secret not found, authentication failed for username={}",
+            username
+        );
         None
     }
 

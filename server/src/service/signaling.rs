@@ -4,6 +4,10 @@ use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
+use base64::prelude::*;
+
 use actix_web::web;
 use awc::{Client, Connector};
 use bytes::Bytes;
@@ -683,6 +687,23 @@ impl DeskSession {
             whiteboard_cmd_sender,
         })
     }
+}
+
+pub fn generate_turn_credentials(secret: &str, username: &str, ttl_secs: u64) -> (String, String) {
+    let expiration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + ttl_secs;
+    let username = format!("{}:{}", expiration, username);
+    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(username.as_bytes());
+    let result = mac.finalize();
+    let code = result.into_bytes();
+    (username, BASE64_STANDARD.encode(code))
+}
+
+impl DeskSession {
     pub async fn init_ptc_peer_connection(
         &mut self,
         signaling_model: &SignalingModel,
@@ -730,10 +751,17 @@ impl DeskSession {
         }
 
         if !turn_urls.is_empty() {
+            let (username, credential) = if let Some(ref secret) = local_settings.turn.static_auth_secret {
+                generate_turn_credentials(secret, &local_settings.user.login_user_name, 24 * 3600)
+            } else {
+                warn!("static_auth_secret not found, falling back to static password authentication");
+                (local_settings.user.login_user_name.clone(), local_settings.user.login_password.clone())
+            };
+
             let ice_turn_server = RTCIceServer {
                 urls: turn_urls,
-                username: local_settings.user.login_user_name.clone(),
-                credential: local_settings.user.login_password.clone(),
+                username,
+                credential,
             };
             // Only add TURN server to client configuration, not server configuration
             // forcing server to use Host candidates or STUN only.

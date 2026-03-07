@@ -258,11 +258,17 @@ impl Settings {
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
-
         if settings.system.client_id.is_none() {
             let new_id = Uuid::new_v4().to_string();
             info!("Generated new client_id: {}", new_id);
             settings.system.client_id = Some(new_id);
+            settings.save()?;
+        }
+
+        if settings.turn.static_auth_secret.is_none() {
+            let new_secret = Uuid::new_v4().to_string().replace("-", "");
+            info!("Generated new TURN static_auth_secret");
+            settings.turn.static_auth_secret = Some(new_secret);
             settings.save()?;
         }
 
