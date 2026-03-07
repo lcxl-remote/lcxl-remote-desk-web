@@ -29,9 +29,26 @@ impl Observer for TurnObserver {
     fn get_password(&self, username: &str) -> Option<String> {
         // Match the static authentication information first.
         log::info!("get_password: username={}", username);
-        let settings = self.settings.blocking_read();
 
-        if let Some(secret) = &settings.turn.static_auth_secret {
+        let handle = tokio::runtime::Handle::current();
+        let settings_data = self.settings.clone();
+        let secret = futures::executor::block_on(async move {
+            handle
+                .spawn_blocking(move || {
+                    let settings = settings_data.blocking_read();
+                    settings.turn.static_auth_secret.clone()
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    log::error!(
+                        "Failed to spawn_blocking for get_password, error: {}",
+                        error
+                    );
+                    None
+                })
+        });
+
+        if let Some(secret) = secret {
             let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes()).ok()?;
             mac.update(username.as_bytes());
             let result = mac.finalize();
