@@ -240,7 +240,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
     }, [sessionId, command, onClose])
 
     return (
-        <div className="h-screen w-full flex flex-col bg-[#1e1e1e] overflow-hidden relative">
+        <div className="h-full w-full flex flex-col bg-[#1e1e1e] overflow-hidden relative">
             <div className="absolute top-2 right-4 z-10 flex gap-2">
                 <Button
                     variant="secondary"
@@ -258,7 +258,9 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
                     Switch Shell
                 </Button>
             </div>
-            <div className="flex-1 w-full p-2 overflow-hidden relative" ref={terminalRef} />
+            <div className="flex-1 w-full p-2 overflow-hidden relative">
+                <div className="absolute inset-2 overflow-hidden" ref={terminalRef} />
+            </div>
             {!isConnected && (
                 <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white flex items-center gap-2 pointer-events-none">
                     <Loader2 className="h-6 w-6 animate-spin" />
@@ -282,7 +284,7 @@ export default function TerminalSession() {
 
     if (isLoading) {
         return (
-            <div className="flex h-screen items-center justify-center">
+            <div className="flex h-full items-center justify-center">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
             </div>
         )
@@ -299,7 +301,7 @@ export default function TerminalSession() {
     const commands = terminalList?.commands || []
 
     return (
-        <div className="flex h-screen items-center justify-center bg-muted/40 p-4 relative">
+        <div className="flex h-full items-center justify-center bg-muted/40 p-4 relative">
             <div className="absolute top-4 left-4">
                 <Button variant="outline" size="sm" onClick={() => navigate(`/desk/${sessionId}`)}>
                     <ArrowLeft className="mr-2 h-4 w-4" />

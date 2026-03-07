@@ -41,8 +41,8 @@ export default function Layout() {
                         <ModeToggle />
                     </div>
                 </header>
-                <div className="flex flex-1 flex-col gap-4 p-4 pt-0">
-                    <div className="min-h-screen rounded-xl bg-muted/50 md:min-h-min p-4">
+                <div className="flex flex-1 flex-col overflow-hidden relative p-4 pt-0">
+                    <div className="flex-1 relative rounded-xl bg-muted/50 overflow-hidden">
                         <Outlet />
                     </div>
                 </div>
