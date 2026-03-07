@@ -35,8 +35,8 @@ export function DeviceCodeList() {
     const pageSize = 20
 
     const { data: listResp, isLoading, refetch } = useListDeviceCodes({
-        page,
-        page_size: pageSize
+        page: page as any,
+        page_size: pageSize as any
     })
 
     const { mutateAsync: createDeviceCode, isPending: isCreating } = useCreateDeviceCode()

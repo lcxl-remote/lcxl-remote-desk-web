@@ -23,6 +23,7 @@ const systemSettingsSchema = z.object({
     enable_ipv6: z.boolean(),
     traceback: z.boolean(),
     telemetry_consent: z.boolean().nullable(),
+    auto_start: z.boolean().nullable(),
     listen_addr_ipv4: z.string().min(1, "IPv4 address is required"),
     listen_addr_ipv6: z.string(),
     signaling_url: z.string().nullable(),
@@ -49,6 +50,7 @@ export function SystemSettings() {
             enable_ipv6: true,
             traceback: true,
             telemetry_consent: null,
+            auto_start: null,
             listen_addr_ipv4: "0.0.0.0",
             listen_addr_ipv6: "::",
             signaling_url: null,
@@ -66,6 +68,7 @@ export function SystemSettings() {
                 enable_ipv6: data.enable_ipv6 ?? true,
                 traceback: data.traceback ?? true,
                 telemetry_consent: data.telemetry_consent ?? null,
+                auto_start: data.auto_start ?? null,
                 listen_addr_ipv4: data.listen_addr_ipv4 || "0.0.0.0",
                 listen_addr_ipv6: data.listen_addr_ipv6 || "::",
                 signaling_url: data.signaling_url || null,
@@ -266,6 +269,22 @@ export function SystemSettings() {
                                             <div className="space-y-0.5">
                                                 <FormLabel>{t("pages.system.settings.telemetry_consent", "Telemetry Consent")}</FormLabel>
                                                 <FormDescription>{t("pages.system.settings.telemetry_consent.tooltip", "Help improve our product by sending anonymous usage data.")}</FormDescription>
+                                            </div>
+                                            <FormControl>
+                                                <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />
+                                            </FormControl>
+                                        </FormItem>
+                                    )}
+                                />
+
+                                <FormField
+                                    control={form.control}
+                                    name="auto_start"
+                                    render={({ field }) => (
+                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
+                                            <div className="space-y-0.5">
+                                                <FormLabel>{t("pages.system.settings.auto_start", "Auto-Start at Login")}</FormLabel>
+                                                <FormDescription>{t("pages.system.settings.auto_start.tooltip", "Automatically start the application in the background when you log in to the OS.")}</FormDescription>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />

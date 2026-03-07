@@ -49,6 +49,14 @@ pub async fn update_settings(
 ) -> Result<HttpResponse, AWError> {
     let params = requst_json.into_inner();
     let mut settings = settings.write().await;
+
+    // Check auto_start flag and update system registry/startup folder if needed
+    if let Some(auto_start_enable) = params.auto_start {
+        if let Err(e) = crate::service::auto_start::update_auto_start_status(auto_start_enable) {
+            log::error!("Failed to update auto start status: {:?}", e);
+        }
+    }
+
     settings.system = params;
     // save new settings to file
     settings.save()?;

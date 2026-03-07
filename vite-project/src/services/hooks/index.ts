@@ -25,6 +25,7 @@ export type { ListSessionsSuspenseQueryKey } from "./undefinedController/useList
 export type { ListTerminalQueryKey } from "./undefinedController/useListTerminal.ts";
 export type { ListTerminalSuspenseQueryKey } from "./undefinedController/useListTerminalSuspense.ts";
 export type { LoginAccountMutationKey } from "./undefinedController/useLoginAccount.ts";
+export type { LoginTauriMutationKey } from "./undefinedController/useLoginTauri.ts";
 export type { LogoutAccountMutationKey } from "./undefinedController/useLogoutAccount.ts";
 export type { OpenSignalingHandleQueryKey } from "./undefinedController/useOpenSignalingHandle.ts";
 export type { OpenSignalingHandleSuspenseQueryKey } from "./undefinedController/useOpenSignalingHandleSuspense.ts";
@@ -122,6 +123,9 @@ export { useListTerminalSuspense } from "./undefinedController/useListTerminalSu
 export { loginAccountMutationKey } from "./undefinedController/useLoginAccount.ts";
 export { loginAccountMutationOptions } from "./undefinedController/useLoginAccount.ts";
 export { useLoginAccount } from "./undefinedController/useLoginAccount.ts";
+export { loginTauriMutationKey } from "./undefinedController/useLoginTauri.ts";
+export { loginTauriMutationOptions } from "./undefinedController/useLoginTauri.ts";
+export { useLoginTauri } from "./undefinedController/useLoginTauri.ts";
 export { logoutAccountMutationKey } from "./undefinedController/useLogoutAccount.ts";
 export { logoutAccountMutationOptions } from "./undefinedController/useLogoutAccount.ts";
 export { useLogoutAccount } from "./undefinedController/useLogoutAccount.ts";

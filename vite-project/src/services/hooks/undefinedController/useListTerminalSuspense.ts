@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import { listTerminal } from "../../clients.ts";
+import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../types.ts";
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
+import { listTerminal } from "../../clients.ts";
 
 export const listTerminalSuspenseQueryKey = (session_id: ListTerminalPathParams["session_id"]) => [{ url: '/api/desk/terminals/:session_id', params: {session_id:session_id} }] as const
 

@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { updateTelemetryConsent } from "../../clients.ts";
+import type { UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { updateTelemetryConsent } from "../../clients.ts";
 
 export const updateTelemetryConsentMutationKey = () => [{ url: '/api/desk/telemetry/consent' }] as const
 

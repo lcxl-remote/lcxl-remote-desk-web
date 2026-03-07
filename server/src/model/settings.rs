@@ -53,6 +53,10 @@ pub struct Args {
     /// Development frontend
     #[arg(long)]
     pub dev_frontend: bool,
+
+    /// Start in hidden mode (used for auto-start)
+    #[arg(long)]
+    pub hidden: bool,
 }
 
 /// System settings for the application. This struct is used to load and save settings from a configuration file.
@@ -82,6 +86,8 @@ pub struct SystemSettings {
     pub client_id: Option<String>,
     /// Telemetry consent status
     pub telemetry_consent: Option<bool>,
+    /// Auto start the application on system login
+    pub auto_start: Option<bool>,
 }
 
 /// User settings
@@ -173,6 +179,7 @@ impl Default for SystemSettings {
             signaling_url: None,
             client_id: None,
             telemetry_consent: None,
+            auto_start: None,
         }
     }
 }

@@ -56,7 +56,7 @@ export type CpuInfo = {
      * @minLength 0
      * @type integer, int64
     */
-    frequency: number;
+    frequency: bigint;
     /**
      * @description CPU name
      * @type string
@@ -256,6 +256,12 @@ export type HotkeySettings = {
 */
 export type PrivateScreenSettings = {
     /**
+     * @description Whether private screen is enabled by default
+     * @default false
+     * @type boolean | undefined
+    */
+    enabled?: boolean;
+    /**
      * @default null
     */
     hotkey?: (null | HotkeySettings);
@@ -446,7 +452,7 @@ export type DeviceCodeListResult = {
      * @minLength 0
      * @type integer, int64
     */
-    total: number;
+    total: bigint;
 };
 
 export type DeviceCodeUpdateParams = {
@@ -561,12 +567,12 @@ export type DownloadResponse = {
      * @minLength 0
      * @type integer, int64
     */
-    file_size: number;
+    file_size: bigint;
     /**
      * @minLength 0
      * @type integer, int64
     */
-    total_chunks: number;
+    total_chunks: bigint;
     /**
      * @type string
     */
@@ -638,7 +644,7 @@ export type FileInfo = {
      * @minLength 0
      * @type integer, int64
     */
-    size: number;
+    size: bigint;
 };
 
 export type FileListResponse = {
@@ -649,7 +655,7 @@ export type FileListResponse = {
     /**
      * @type integer, int64
     */
-    total_count: number;
+    total_count: bigint;
 };
 
 export type UploadRequest = {
@@ -666,7 +672,7 @@ export type UploadRequest = {
      * @minLength 0
      * @type integer, int64
     */
-    file_size: number;
+    file_size: bigint;
     /**
      * @type string
     */
@@ -675,7 +681,7 @@ export type UploadRequest = {
      * @minLength 0
      * @type integer, int64
     */
-    total_chunks: number;
+    total_chunks: bigint;
     /**
      * @type string
     */
@@ -861,6 +867,11 @@ export type InitSignalingData = {
      * @type object
     */
     desk_settings: DeskSettings;
+    /**
+     * @description Whether the remote end has Tauri UI support (required for whiteboard overlay)
+     * @type boolean | undefined
+    */
+    has_tauri?: boolean;
     /**
      * @description ICE servers to use for signaling.
      * @type array
@@ -1201,25 +1212,25 @@ export type RestResponseSystemInfo = {
          * @minLength 0
          * @type integer, int64
         */
-        total_memory: number;
+        total_memory: bigint;
         /**
          * @description Total swap in bytes
          * @minLength 0
          * @type integer, int64
         */
-        total_swap: number;
+        total_swap: bigint;
         /**
          * @description Used memory in bytes
          * @minLength 0
          * @type integer, int64
         */
-        used_memory: number;
+        used_memory: bigint;
         /**
          * @description Used swap in bytes
          * @minLength 0
          * @type integer, int64
         */
-        used_swap: number;
+        used_swap: bigint;
     };
     /**
      * @type string,null
@@ -1241,6 +1252,11 @@ export type RestResponseSystemSettings = {
      * @type object | undefined
     */
     data?: {
+        /**
+         * @description Auto start the application on system login
+         * @type boolean,null
+        */
+        auto_start?: boolean | null;
         /**
          * @description Client ID for telemetry
          * @type string,null
@@ -1277,7 +1293,7 @@ export type RestResponseSystemSettings = {
         log_level?: string;
         /**
          * @description Whether to open the browser automatically on server startup
-         * @default true
+         * @default false
          * @type boolean | undefined
         */
         open_browser_on_startup?: boolean;
@@ -1553,31 +1569,36 @@ export type SystemInfo = {
      * @minLength 0
      * @type integer, int64
     */
-    total_memory: number;
+    total_memory: bigint;
     /**
      * @description Total swap in bytes
      * @minLength 0
      * @type integer, int64
     */
-    total_swap: number;
+    total_swap: bigint;
     /**
      * @description Used memory in bytes
      * @minLength 0
      * @type integer, int64
     */
-    used_memory: number;
+    used_memory: bigint;
     /**
      * @description Used swap in bytes
      * @minLength 0
      * @type integer, int64
     */
-    used_swap: number;
+    used_swap: bigint;
 };
 
 /**
  * @description System settings for the application. This struct is used to load and save settings from a configuration file.
 */
 export type SystemSettings = {
+    /**
+     * @description Auto start the application on system login
+     * @type boolean,null
+    */
+    auto_start?: boolean | null;
     /**
      * @description Client ID for telemetry
      * @type string,null
@@ -1614,7 +1635,7 @@ export type SystemSettings = {
     log_level?: string;
     /**
      * @description Whether to open the browser automatically on server startup
-     * @default true
+     * @default false
      * @type boolean | undefined
     */
     open_browser_on_startup?: boolean;
@@ -1757,7 +1778,7 @@ export type TurnInfo = {
      * @minLength 0
      * @type integer, int64
     */
-    uptime: number;
+    uptime: bigint;
 };
 
 export type TurnSession = {
@@ -1769,7 +1790,7 @@ export type TurnSession = {
      * @minLength 0
      * @type integer, int64
     */
-    expires: number;
+    expires: bigint;
     /**
      * @type array
     */
@@ -1963,13 +1984,13 @@ export type ListDeviceCodesQueryParams = {
      * @minLength 0
      * @type integer | undefined, int64
     */
-    page?: number;
+    page?: bigint;
     /**
      * @description Page size
      * @minLength 0
      * @type integer | undefined, int64
     */
-    page_size?: number;
+    page_size?: bigint;
 };
 
 /**
@@ -2091,11 +2112,11 @@ export type ListFilesQueryParams = {
     /**
      * @type integer, int64
     */
-    page_no: number;
+    page_no: bigint;
     /**
      * @type integer, int64
     */
-    page_count: number;
+    page_count: bigint;
     /**
      * @description Minimum file size
      * @type integer,null, int64
@@ -2414,6 +2435,32 @@ export type LogoutAccountMutationResponse = LogoutAccount200;
 export type LogoutAccountMutation = {
     Response: LogoutAccount200;
     Errors: any;
+};
+
+export type LoginTauriQueryParams = {
+    /**
+     * @description One-time login token generated by Tauri
+     * @type string
+    */
+    token: string;
+};
+
+/**
+ * @description Login result
+*/
+export type LoginTauri200 = LoginResult;
+
+/**
+ * @description Invalid or expired token
+*/
+export type LoginTauri403 = any;
+
+export type LoginTauriMutationResponse = LoginTauri200;
+
+export type LoginTauriMutation = {
+    Response: LoginTauri200;
+    QueryParams: LoginTauriQueryParams;
+    Errors: LoginTauri403;
 };
 
 /**

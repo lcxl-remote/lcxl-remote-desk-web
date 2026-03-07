@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { listDeviceCodes } from "../../clients.ts";
+import type { ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { listDeviceCodes } from "../../clients.ts";
 
 export const listDeviceCodesQueryKey = (params: ListDeviceCodesQueryParams = {}) => [{ url: '/api/desk/device_codes' }, ...(params ? [params] : [])] as const
 

@@ -45,6 +45,8 @@ pub fn run()->Result<(), DeskTauriError> {
 
 pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
     let settings = settings.clone();
+    let hidden_mode = settings.args.hidden;
+    
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(move |app| {
@@ -246,11 +248,15 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
                     .inner_size(1200.0, 800.0)
                     .center()
                     .visible(false) // hide window first to avoid long white screen
-                    .on_page_load(|window, event| {
+                    .on_page_load(move |window, event| {
                         if let tauri::webview::PageLoadEvent::Finished = event.event() {
-                            // show window after page load
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                            if !hidden_mode {
+                                // show window after page load
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            } else {
+                                log::info!("Hidden mode enabled, main window remains hidden on page load.");
+                            }
                         }
                     })
                     .build()

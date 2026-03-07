@@ -55,6 +55,7 @@ impl DeskErrorCode {
 
     pub const GENERATE_LOCAL_DESCRIPTION_FAILED: DeskErrorCode = DeskErrorCode(10001);
     pub const BLANK_SIGNALING_DATA: DeskErrorCode = DeskErrorCode(10002);
+    pub const AUTO_START_ERROR: DeskErrorCode = DeskErrorCode(10006);
 
     // for windows platform
     /// windows error code

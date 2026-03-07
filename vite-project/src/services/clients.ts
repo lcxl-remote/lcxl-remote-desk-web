@@ -4,8 +4,8 @@
 */
 
 import fetch from "@kubb/plugin-client/clients/axios";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@kubb/plugin-client/clients/axios";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -400,6 +400,24 @@ export async function logoutAccount(config: Partial<RequestConfig> & { client?: 
 
 
   const res = await request<LogoutAccountMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getLogoutAccountUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getLoginTauriUrl() {
+  const res = { method: 'POST', url: `/api/login/tauri` as const }
+  return res
+}
+
+/**
+ * @summary Auto-login from Tauri WebView using one-time token
+ * {@link /api/login/tauri}
+ */
+export async function loginTauri(params: LoginTauriQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, unknown>({ method : "POST", url : getLoginTauriUrl().url.toString(), params, ... requestConfig })
   return res.data
 }
 

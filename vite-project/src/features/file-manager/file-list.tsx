@@ -64,8 +64,8 @@ export default function FileList() {
     const { data, isLoading, refetch, isError, error } = useListFiles({
         session_id: sessionId,
         path: currentPath,
-        page_no: page,
-        page_count: pageSize
+        page_no: page as any,
+        page_count: pageSize as any
     })
 
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
@@ -95,7 +95,7 @@ export default function FileList() {
     }, [closeConnection])
 
     const files = data?.file_info_list || []
-    const totalCount = data?.total_count || 0
+    const totalCount = Number(data?.total_count || 0)
     const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
 
     const handleNavigate = (path: string) => {
