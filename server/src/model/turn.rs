@@ -49,11 +49,28 @@ impl Observer for TurnObserver {
         });
 
         if let Some(secret) = secret {
-            let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes()).ok()?;
-            mac.update(username.as_bytes());
-            let result = mac.finalize();
-            let code = result.into_bytes();
-            return Some(BASE64_STANDARD.encode(code));
+            // Reuse the implementation of turn-server
+
+            // Because (TURN REST api) this RFC does not mandate the format of the username,
+            // only suggested values. In principle, the RFC also indicates that the
+            // timestamp part of username can be set at will, so the timestamp is not
+            // verified here, and the external web service guarantees its security by
+            // itself.
+            //
+            // https://datatracker.ietf.org/doc/html/draft-uberti-behave-turn-rest-00#section-2.2
+
+            let base64_code = BASE64_STANDARD.encode(
+                turn_server::stun::util::hmac_sha1(secret.as_bytes(), &[username.as_bytes()])
+                    .ok()?
+                    .into_bytes()
+                    .as_slice(),
+            );
+            log::info!(
+                "get_password: username={}, base64 code={}",
+                username,
+                base64_code
+            );
+            return Some(base64_code);
         }
 
         log::warn!(

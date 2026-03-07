@@ -696,11 +696,11 @@ pub fn generate_turn_credentials(secret: &str, username: &str, ttl_secs: u64) ->
         .as_secs()
         + ttl_secs;
     let username = format!("{}:{}", expiration, username);
-    let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(username.as_bytes());
-    let result = mac.finalize();
-    let code = result.into_bytes();
-    (username, BASE64_STANDARD.encode(code))
+    let code = turn_server::stun::util::hmac_sha1(secret.as_bytes(), &[username.as_bytes()])
+                        .unwrap()
+                        .into_bytes();
+    let code_slice = code.as_slice();
+    (username, BASE64_STANDARD.encode(code_slice))
 }
 
 impl DeskSession {
@@ -763,6 +763,7 @@ impl DeskSession {
                 username,
                 credential,
             };
+            log::info!("Init turn config for ICE, ice_turn_server: {:?}", ice_turn_server);
             // Only add TURN server to client configuration, not server configuration
             // forcing server to use Host candidates or STUN only.
             // This avoids "Self-Reflective Relay" (Hairpinning) issues on local machine.
