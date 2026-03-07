@@ -487,12 +487,16 @@ impl<T: BaseUser> SignalingContext<T> {
             match msg {
                 Ok(AggregatedMessage::Text(text)) => {
                     // echo text message
-                    self.handle_message(text).await?;
+                    if let Err(e) = self.handle_message(text).await {
+                        log::error!("Error handling signaling message: {}", e);
+                    }
                 }
 
                 Ok(AggregatedMessage::Binary(bin)) => {
                     // echo binary message
-                    self.binary(bin).await?;
+                    if let Err(e) = self.binary(bin).await {
+                        log::error!("Error handling binary message: {}", e);
+                    }
                 }
 
                 Ok(AggregatedMessage::Ping(msg)) => {

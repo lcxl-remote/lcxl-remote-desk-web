@@ -61,6 +61,7 @@ pub async fn fetch_terminal_list(
 ) -> Result<TerminalList, DeskError> {
     let shell_list = [
         "cmd",
+        "pwsh",
         "powershell",
         "bash",
         "wsl",
@@ -76,7 +77,7 @@ pub async fn fetch_terminal_list(
 pub async fn fetch_terminal_list(
     settings: web::Data<SharedSettings>,
 ) -> Result<TerminalList, DeskError> {
-    let shell_list = ["bash", "csh", "fish", "ksh", "sh", "zsh"];
+    let shell_list = ["bash", "csh", "fish", "ksh", "sh", "zsh", "pwsh"];
     let shell_regexe_list = [r"python(\d(\.\d{0,2})?)?"];
     inner_fetch_terminal_list(settings, &shell_list, &shell_regexe_list).await
 }

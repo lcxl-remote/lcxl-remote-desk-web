@@ -14,6 +14,8 @@ type UseDeskInputProps = {
 export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMoveChannel, isConnected, ignoreInputEvents = false }: UseDeskInputProps) {
     const dimensionsRef = useRef({ width: 0, height: 0 });
     const sequenceNumberRef = useRef(0);
+    const pressedKeysRef = useRef<Set<number>>(new Set());
+    const pressedButtonsRef = useRef<Set<number>>(new Set());
 
     useEffect(() => {
         const element = videoRef.current;
@@ -91,6 +93,12 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
                 sequence_number: isMouseMove ? ++sequenceNumberRef.current : 0,
             };
             channel.send(JSON.stringify(mouseEvent));
+
+            if (eventType === "mousedown") {
+                pressedButtonsRef.current.add(event.button);
+            } else if (eventType === "mouseup") {
+                pressedButtonsRef.current.delete(event.button);
+            }
         };
 
         const handleKeyboardEvent = (eventType: string, event: KeyboardEvent) => {
@@ -111,6 +119,12 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
                 is_composing: event.isComposing,
             };
             keyboardChannel.current.send(JSON.stringify(keyboardEvent));
+
+            if (eventType === "keydown") {
+                pressedKeysRef.current.add(event.keyCode);
+            } else if (eventType === "keyup") {
+                pressedKeysRef.current.delete(event.keyCode);
+            }
         };
 
         const onMouseMove = (e: MouseEvent) => handleMouseEvent("mousemove", e);
@@ -181,6 +195,48 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
         const onTouchEnd = (e: TouchEvent) => handleTouchEvent("mouseup", e);
         const onTouchCancel = (e: TouchEvent) => handleTouchEvent("mouseup", e);
 
+        const handleBlur = () => {
+            // Release all pressed mouse buttons
+            if (mouseChannel.current && mouseChannel.current.readyState === "open") {
+                pressedButtonsRef.current.forEach(button => {
+                    const mouseEvent = {
+                        event: "mouseup",
+                        x: 0,
+                        y: 0,
+                        button: button,
+                        buttons: 0,
+                        alt_key: false,
+                        delta_x: 0,
+                        delta_y: 0,
+                        sequence_number: 0,
+                    };
+                    mouseChannel.current?.send(JSON.stringify(mouseEvent));
+                });
+            }
+            pressedButtonsRef.current.clear();
+
+            // Release all pressed keys
+            if (keyboardChannel.current && keyboardChannel.current.readyState === "open") {
+                pressedKeysRef.current.forEach(keyCode => {
+                    const kbEvent = {
+                        event: "keyup",
+                        key: "",
+                        code: "",
+                        key_code: keyCode,
+                        alt_key: false,
+                        ctrl_key: false,
+                        shift_key: false,
+                        meta_key: false,
+                        repeat: false,
+                        location: 0,
+                        is_composing: false,
+                    };
+                    keyboardChannel.current?.send(JSON.stringify(kbEvent));
+                });
+            }
+            pressedKeysRef.current.clear();
+        };
+
         element.addEventListener("mousemove", onMouseMove);
         element.addEventListener("mouseup", onMouseUp);
         element.addEventListener("mousedown", onMouseDown);
@@ -193,6 +249,9 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
         element.addEventListener("touchmove", onTouchMove, { passive: false });
         element.addEventListener("touchend", onTouchEnd, { passive: false });
         element.addEventListener("touchcancel", onTouchCancel, { passive: false });
+
+        element.addEventListener("blur", handleBlur);
+        window.addEventListener("blur", handleBlur);
 
         return () => {
             element.removeEventListener("mousemove", onMouseMove);
@@ -207,6 +266,9 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             element.removeEventListener("touchmove", onTouchMove);
             element.removeEventListener("touchend", onTouchEnd);
             element.removeEventListener("touchcancel", onTouchCancel);
+
+            element.removeEventListener("blur", handleBlur);
+            window.removeEventListener("blur", handleBlur);
         };
     }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents]);
 

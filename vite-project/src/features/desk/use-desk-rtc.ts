@@ -323,6 +323,19 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         return () => clearInterval(interval);
     }, [isRTCConnected]);
 
+    // Ensure RTC connection is closed when the hook is unmounted
+    useEffect(() => {
+        return () => {
+            if (peerConnection.current) {
+                console.log("[WebRTC] Hook unmounting, closing peer connection");
+                peerConnection.current.close();
+                peerConnection.current = null;
+            }
+            setIsRTCConnected(false);
+            setRemoteStream(null);
+        };
+    }, []);
+
     return {
         peerConnection,
         remoteStream,
