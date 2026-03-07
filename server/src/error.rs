@@ -86,7 +86,7 @@ pub enum DeskError {
     /// A std fs try lock error occurred.
     TryLockError(std::fs::TryLockError),
     /// An arboard clipboard error occurred.
-    ArboardError(arboard::Error),
+    ArboardError(Backtrace, arboard::Error),
     /// An address parse error occurred.
     AddrParseError(std::net::AddrParseError),
     // A thread error occurred.
@@ -189,7 +189,9 @@ impl Display for DeskError {
             DeskError::MpscRecvTimeoutError(error) => error.fmt(f),
             DeskError::MpscRecvError(error) => error.fmt(f),
             DeskError::TryLockError(error) => error.fmt(f),
-            DeskError::ArboardError(error) => error.fmt(f),
+            DeskError::ArboardError(backtrace, error) => {
+                desk_utils::error::format_backtrace(f, backtrace, error)
+            }
             DeskError::AddrParseError(error) => error.fmt(f),
             DeskError::ThreadError(any_error) => f.write_fmt(format_args!("{:?}", any_error)),
             DeskError::UrlParseError(error) => error.fmt(f),
@@ -424,7 +426,7 @@ impl From<std::fs::TryLockError> for DeskError {
 
 impl From<arboard::Error> for DeskError {
     fn from(err: arboard::Error) -> Self {
-        DeskError::ArboardError(err)
+        DeskError::ArboardError(backtrace::Backtrace::capture(), err)
     }
 }
 

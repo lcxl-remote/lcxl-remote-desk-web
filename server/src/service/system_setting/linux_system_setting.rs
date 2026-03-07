@@ -10,7 +10,7 @@ use crate::{
 };
 
 pub struct LinuxSystemSettingHelper {
-    clipboard: Clipboard,
+    clipboard: Option<Clipboard>,
     cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
 }
 
@@ -19,8 +19,17 @@ impl LinuxSystemSettingHelper {
         _desk_setting: &DeskSettings,
         cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
     ) -> Result<Self, DeskError> {
+        let clipboard_result = Clipboard::new();
+        let clipboard = match clipboard_result {
+            Ok(clipboard) => Some(clipboard),
+            Err(e) => {
+                log::warn!("Failed to create clipboard: {}", e);
+                None
+            }
+        };
+
         Ok(Self {
-            clipboard: Clipboard::new()?, // Assuming clipboard
+            clipboard,
             cmd_sender,
         })
     }
@@ -92,29 +101,43 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
     }
 
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), DeskError> {
-        self.clipboard.set_text(text)?;
+        if let Some(ref mut clipboard) = self.clipboard {
+            clipboard.set_text(text)?;
+        } else {
+            log::warn!("Clipboard is not available");
+        }
         Ok(())
     }
 
     fn get_text_from_clipboard(&mut self) -> Result<Option<String>, DeskError> {
-        match self.clipboard.get_text() {
-            Ok(text) => Ok(Some(text)),
-            Err(arboard::Error::ContentNotAvailable) => Ok(None),
-            Err(e) => Err(DeskError::from(e)),
+        if let Some(ref mut clipboard) = self.clipboard {
+            match clipboard.get_text() {
+                Ok(text) => Ok(Some(text)),
+                Err(arboard::Error::ContentNotAvailable) => Ok(None),
+                Err(e) => Err(DeskError::from(e)),
+            }
+        } else {
+            log::warn!("Clipboard is not available");
+            Ok(None)
         }
     }
 
     fn get_image_from_clipboard(
         &mut self,
     ) -> Result<Option<crate::model::system_setting::ClipboardImage>, DeskError> {
-        match self.clipboard.get_image() {
-            Ok(img) => Ok(Some(crate::model::system_setting::ClipboardImage {
-                width: img.width,
-                height: img.height,
-                bytes: img.bytes,
-            })),
-            Err(arboard::Error::ContentNotAvailable) => Ok(None),
-            Err(e) => Err(DeskError::from(e)),
+        if let Some(ref mut clipboard) = self.clipboard {
+            match clipboard.get_image() {
+                Ok(img) => Ok(Some(crate::model::system_setting::ClipboardImage {
+                    width: img.width,
+                    height: img.height,
+                    bytes: img.bytes,
+                })),
+                Err(arboard::Error::ContentNotAvailable) => Ok(None),
+                Err(e) => Err(DeskError::from(e)),
+            }
+        } else {
+            log::warn!("Clipboard is not available");
+            Ok(None)
         }
     }
 
@@ -122,12 +145,16 @@ impl SystemSettingHelper for LinuxSystemSettingHelper {
         &mut self,
         image: &crate::model::system_setting::ClipboardImage,
     ) -> Result<(), DeskError> {
-        let img_data = arboard::ImageData {
-            width: image.width,
-            height: image.height,
-            bytes: image.bytes.clone(),
-        };
-        self.clipboard.set_image(img_data)?;
+        if let Some(ref mut clipboard) = self.clipboard {
+            let img_data = arboard::ImageData {
+                width: image.width,
+                height: image.height,
+                bytes: image.bytes.clone(),
+            };
+            clipboard.set_image(img_data)?;
+        } else {
+            log::warn!("Clipboard is not available");
+        }
         Ok(())
     }
 }
