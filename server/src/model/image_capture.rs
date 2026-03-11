@@ -40,9 +40,9 @@ pub enum ImageCaptureType {
     /// Capture image from X11 device
     #[cfg(target_os = "linux")]
     X11,
-    /// Capture image from PipeWire device
+    /// Capture image via Wayland portal + PipeWire
     #[cfg(target_os = "linux")]
-    PIPEWIRE,
+    WAYLANDPORTAL,
     /// Capture image using ScreenCaptureKit
     #[cfg(target_os = "macos")]
     SCKIT,

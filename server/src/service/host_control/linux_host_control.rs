@@ -38,7 +38,7 @@ impl LinuxHostControlHelper {
 impl HostControlHelper for LinuxHostControlHelper {
     fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), DeskError> {
         // FIXME Implement the logic to change display settings on Linux
-        if let Ok(env_value) = env::var("WAYLAND_DISPLAY ") {
+        if let Ok(env_value) = env::var("WAYLAND_DISPLAY") {
             log::info!("Current Wayland display: {}", env_value);
             Command::new("wlr-randr")
                 .arg("--output")

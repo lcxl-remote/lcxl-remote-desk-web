@@ -65,6 +65,7 @@ export function DeskConfigDialog({
             enable_audio: false,
             video_encoder: null,
             audio_encoder: null,
+            wayland_control_mode: "auto",
             video_fps: undefined,
         },
     })
@@ -76,6 +77,7 @@ export function DeskConfigDialog({
                 show_mouse: initData.desk_settings.show_mouse ?? true,
                 adaptive_web_page_resolution: initData.desk_settings.adaptive_web_page_resolution ?? true,
                 video_zoom_ratio: initData.desk_settings.video_zoom_ratio ?? 100,
+                wayland_control_mode: initData.desk_settings.wayland_control_mode ?? "auto",
             })
         }
     }, [initData, form])
@@ -100,6 +102,7 @@ export function DeskConfigDialog({
             ...values,
             video_device_index: Number(values.video_device_index),
             video_zoom_ratio: Number(values.video_zoom_ratio),
+            wayland_control_mode: values.wayland_control_mode ?? "auto",
         }
 
         if (values.video_fps !== undefined && values.video_fps !== null) {
@@ -356,6 +359,33 @@ export function DeskConfigDialog({
                                                                 {encoder}
                                                             </SelectItem>
                                                         ))}
+                                                    </SelectContent>
+                                                </Select>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <FormField
+                                        control={form.control}
+                                        name="wayland_control_mode"
+                                        render={({ field }) => (
+                                            <FormItem>
+                                                <FormLabel>{t('pages.desk.waylandControlMode', 'Wayland Control Mode')}</FormLabel>
+                                                <Select
+                                                    onValueChange={(val) => field.onChange(val)}
+                                                    value={field.value || "auto"}
+                                                >
+                                                    <FormControl>
+                                                        <SelectTrigger>
+                                                            <SelectValue placeholder={t('pages.desk.autoBackendControl', 'Auto')} />
+                                                        </SelectTrigger>
+                                                    </FormControl>
+                                                    <SelectContent>
+                                                        <SelectItem value="auto">{t('pages.desk.autoBackendControl', 'Auto')}</SelectItem>
+                                                        <SelectItem value="portal">portal</SelectItem>
+                                                        <SelectItem value="uinput">uinput</SelectItem>
+                                                        <SelectItem value="none">none</SelectItem>
                                                     </SelectContent>
                                                 </Select>
                                                 <FormMessage />

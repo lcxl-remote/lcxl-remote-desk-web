@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::controller::{
-    info::{query_server_info, query_sysinfo},
+    info::{query_backend_info, query_server_info, query_sysinfo},
     init::init_system,
     login::{change_password, get_captcha, login_account, logout_account},
     settings::{
@@ -282,6 +282,7 @@ pub async fn run_with_channels(
                             .service(list_terminal)
                             .service(open_terminal_session)
                             .service(query_sysinfo)
+                            .service(query_backend_info)
                             .configure(move |cfg| {
                                 if startup_mode == StartupMode::Default
                                     || startup_mode == StartupMode::Signaling

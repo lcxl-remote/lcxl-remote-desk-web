@@ -9,18 +9,18 @@ use webrtc::{
 
 use crate::{
     error::DeskError,
-    model::data_channel::{
+    model::{data_channel::{
         DATA_CHANNEL_LABEL_CLIPBOARD_EVENT, DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT,
         DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT,
         DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT, DATA_CHANNEL_LABEL_WHITEBOARD_EVENT,
-    },
-    model::host_control::WhiteboardCommand,
+    }, host_control::WhiteboardCommand},
     service::{
-        file_transfer::handle_file_transfer_event, keyboard_event::handle_keyboard_event,
-        mouse_event::handle_mouse_event,
+        clipboard_event::handle_clipboard_event, file_transfer::handle_file_transfer_event, keyboard_event::handle_keyboard_event, mouse_event::handle_mouse_event, whiteboard_event::handle_whiteboard_event
     },
 };
 
+/// Handle data channel event
+/// session_id: from session id
 pub async fn handle_data_channel_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
@@ -41,13 +41,13 @@ pub async fn handle_data_channel_event(
             return Ok(());
         }
         DATA_CHANNEL_LABEL_CLIPBOARD_EVENT => {
-            crate::service::clipboard_event::handle_clipboard_event(signaling_state, data_channel)
+           handle_clipboard_event(signaling_state, data_channel)
                 .await?;
             return Ok(());
         }
         DATA_CHANNEL_LABEL_WHITEBOARD_EVENT => {
             if let Some(sender) = whiteboard_cmd_sender {
-                crate::service::whiteboard_event::handle_whiteboard_event(
+                handle_whiteboard_event(
                     signaling_state,
                     data_channel,
                     sender,

@@ -9,6 +9,7 @@ import { useQuerySettings } from "@/services/hooks/undefinedController/useQueryS
 import { useUpdateSettings } from "@/services/hooks/undefinedController/useUpdateSettings"
 import { useRegenerateTurnSecret } from "@/services/hooks/undefinedController/useRegenerateTurnSecret"
 import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
+import { useQueryBackendInfo } from "@/services/hooks/undefinedController/useQueryBackendInfo"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -56,8 +57,10 @@ export function SystemSettings() {
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateSettings()
     const { mutateAsync: regenerateSecret, isPending: isRegenerating } = useRegenerateTurnSecret()
     const { data: serverInfoResp } = useQueryServerInfo()
+    const { data: backendInfoResp } = useQueryBackendInfo()
 
     const serverInfo = serverInfoResp?.data
+    const backendInfo = backendInfoResp?.data
 
     const form = useForm<SystemSettingsFormValues>({
         resolver: zodResolver(systemSettingsSchema),
@@ -410,6 +413,34 @@ export function SystemSettings() {
                             </AlertDialogFooter>
                         </AlertDialogContent>
                     </AlertDialog>
+                </CardContent>
+            </Card>
+
+            <Card className="mt-6">
+                <CardHeader>
+                    <CardTitle>{t("pages.system.settings.backendDiagnostics", "Backend Diagnostics")}</CardTitle>
+                    <CardDescription>{t("pages.system.settings.backendDiagnostics.description", "Wayland/X11 capture and control runtime status.")}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2 text-sm">
+                    <div><span className="font-medium">OS:</span> {backendInfo?.os ?? "-"}</div>
+                    <div><span className="font-medium">WAYLAND_DISPLAY:</span> {String(backendInfo?.wayland_env ?? false)}</div>
+                    <div><span className="font-medium">DISPLAY:</span> {String(backendInfo?.x11_env ?? false)}</div>
+                    <div><span className="font-medium">Capture Backend:</span> {backendInfo?.resolved_image_capture ?? "-"}</div>
+                    <div><span className="font-medium">Input Backend:</span> {backendInfo?.resolved_input_control ?? "-"}</div>
+                    <div><span className="font-medium">Input Runtime:</span> {backendInfo?.input_backend_runtime_status ?? "-"}</div>
+                    <div><span className="font-medium">Portal Available:</span> {backendInfo?.portal_available === undefined ? "-" : String(backendInfo.portal_available)}</div>
+                    {backendInfo?.input_backend_error && (
+                        <Alert variant="destructive" className="mt-2">
+                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.inputError", "Input Backend Error")}</AlertTitle>
+                            <AlertDescription>{backendInfo.input_backend_error}</AlertDescription>
+                        </Alert>
+                    )}
+                    {backendInfo?.portal_error && (
+                        <Alert variant="destructive" className="mt-2">
+                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.portalError", "Portal Error")}</AlertTitle>
+                            <AlertDescription>{backendInfo.portal_error}</AlertDescription>
+                        </Alert>
+                    )}
                 </CardContent>
             </Card>
         </div>

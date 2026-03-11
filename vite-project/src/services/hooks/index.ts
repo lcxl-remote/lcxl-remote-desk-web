@@ -31,6 +31,8 @@ export type { OpenSignalingHandleQueryKey } from "./undefinedController/useOpenS
 export type { OpenSignalingHandleSuspenseQueryKey } from "./undefinedController/useOpenSignalingHandleSuspense.ts";
 export type { OpenTerminalSessionQueryKey } from "./undefinedController/useOpenTerminalSession.ts";
 export type { OpenTerminalSessionSuspenseQueryKey } from "./undefinedController/useOpenTerminalSessionSuspense.ts";
+export type { QueryBackendInfoQueryKey } from "./undefinedController/useQueryBackendInfo.ts";
+export type { QueryBackendInfoSuspenseQueryKey } from "./undefinedController/useQueryBackendInfoSuspense.ts";
 export type { QueryServerInfoQueryKey } from "./undefinedController/useQueryServerInfo.ts";
 export type { QueryServerInfoSuspenseQueryKey } from "./undefinedController/useQueryServerInfoSuspense.ts";
 export type { QuerySettingsQueryKey } from "./undefinedController/useQuerySettings.ts";
@@ -142,6 +144,12 @@ export { useOpenTerminalSession } from "./undefinedController/useOpenTerminalSes
 export { openTerminalSessionSuspenseQueryKey } from "./undefinedController/useOpenTerminalSessionSuspense.ts";
 export { openTerminalSessionSuspenseQueryOptions } from "./undefinedController/useOpenTerminalSessionSuspense.ts";
 export { useOpenTerminalSessionSuspense } from "./undefinedController/useOpenTerminalSessionSuspense.ts";
+export { queryBackendInfoQueryKey } from "./undefinedController/useQueryBackendInfo.ts";
+export { queryBackendInfoQueryOptions } from "./undefinedController/useQueryBackendInfo.ts";
+export { useQueryBackendInfo } from "./undefinedController/useQueryBackendInfo.ts";
+export { queryBackendInfoSuspenseQueryKey } from "./undefinedController/useQueryBackendInfoSuspense.ts";
+export { queryBackendInfoSuspenseQueryOptions } from "./undefinedController/useQueryBackendInfoSuspense.ts";
+export { useQueryBackendInfoSuspense } from "./undefinedController/useQueryBackendInfoSuspense.ts";
 export { queryServerInfoQueryKey } from "./undefinedController/useQueryServerInfo.ts";
 export { queryServerInfoQueryOptions } from "./undefinedController/useQueryServerInfo.ts";
 export { useQueryServerInfo } from "./undefinedController/useQueryServerInfo.ts";

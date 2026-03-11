@@ -218,6 +218,8 @@ export default {
   'pages.desk.clipboardHttpsRequired': '(HTTPS Required)',
   'pages.desk.showStats': 'Show Network Stats',
   'pages.desk.hideStats': 'Hide Network Stats',
+  'pages.desk.initializingCapture': 'Initializing remote capture...',
+  'pages.desk.waitingPermission': 'Waiting for host authorization dialog.',
   'pages.desk.openWhiteboard': 'Open Whiteboard',
   'pages.desk.closeWhiteboard': 'Close Whiteboard',
   'pages.desk.whiteboardUnavailable': 'Whiteboard requires Tauri on remote',

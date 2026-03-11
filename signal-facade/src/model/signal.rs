@@ -492,6 +492,8 @@ pub struct SignalingState {
     pub accept_clipboard_sync: bool,
     /// current display info
     pub display_info: DisplayInfo,
+    /// wayland control mode: portal/uinput/auto/none
+    pub wayland_control_mode: Option<String>,
 }
 
 /// Offer Model

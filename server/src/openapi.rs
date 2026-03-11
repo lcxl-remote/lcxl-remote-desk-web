@@ -12,6 +12,7 @@ use utoipa::OpenApi;
 use crate::model::{
     data_channel::{KeyboardEventData, MouseEventData, SignalRequestControlData},
     file_transfer::FileTransferMessage,
+    info::BackendInfo,
 };
 
 /// API version
@@ -31,5 +32,6 @@ use crate::model::{
     DeviceCodeItem,
     DeviceCodeListResult,
     DeviceCodeBatchDeleteParams,
+    BackendInfo,
 )))]
 pub struct ExtraSchemas;

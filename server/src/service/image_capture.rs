@@ -12,6 +12,10 @@ pub mod x11_capture;
 pub mod pipewire_capture;
 #[cfg(target_os = "linux")]
 pub mod pipewire_utils;
+#[cfg(target_os = "linux")]
+pub mod portal_client;
+#[cfg(target_os = "linux")]
+pub mod wayland_portal_capture;
 
 #[cfg(target_os = "macos")]
 pub mod mac_screencapturekit;

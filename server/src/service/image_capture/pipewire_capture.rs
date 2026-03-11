@@ -1,6 +1,9 @@
-use std::{collections::HashMap, ffi::CStr, thread::JoinHandle, time::Duration};
+use std::{collections::HashMap, ffi::CStr, os::fd::OwnedFd as StdOwnedFd, thread::JoinHandle};
 
-use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
+use desk_signal_facade::model::{
+    desk_settings::DeskSettings,
+    image_capture::{DisplayInfo, DisplayRect},
+};
 use desk_utils::error::DeskErrorCode;
 use pipewire::{
     context::Context,
@@ -21,7 +24,7 @@ use pipewire::{
 use serde::Deserialize;
 use zbus::{
     blocking::Proxy,
-    zvariant::{DeserializeDict, OwnedFd, OwnedObjectPath, Type},
+    zvariant::{DeserializeDict, OwnedFd as ZbusOwnedFd, OwnedObjectPath, Type},
 };
 
 use crate::{
@@ -58,6 +61,27 @@ pub struct ScreenCastStartResponse {
     pub restore_token: Option<String>,
 }
 
+fn stream_to_display_info(stream: &ScreenCastStartStream) -> DisplayInfo {
+    let (left, top) = stream.position.unwrap_or((0, 0));
+    let (width, height) = stream.size.unwrap_or((0, 0));
+    DisplayInfo {
+        device_name: stream
+            .id
+            .clone()
+            .unwrap_or_else(|| "pipewire-display-default".to_string()),
+        display_device_name: stream.mapping_id.clone(),
+        desktop_coordinates: DisplayRect {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        },
+        attached_to_desktop: true,
+        rotation: 0,
+        resolutions: vec![],
+    }
+}
+
 /// https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html
 pub struct ScreenCast<'a> {
     proxy: Proxy<'a>,
@@ -92,9 +116,10 @@ impl ScreenCast<'_> {
             zbus::zvariant::Value::from(&session_handle_token),
         );
 
+        let response_stream = portal_request.receive_signal("Response")?;
         self.proxy.call_method("CreateSession", &(options))?;
-
-        let response: ScreenCastCreateSessionResponse = wait_zbus_response(&portal_request)?;
+        let response: ScreenCastCreateSessionResponse =
+            wait_zbus_response(&portal_request, response_stream)?;
 
         let unique_name = conn
             .unique_name()
@@ -128,10 +153,11 @@ impl ScreenCast<'_> {
         options.insert("types", zbus::zvariant::Value::from(1_u32));
         options.insert("multiple", zbus::zvariant::Value::from(false));
 
+        let response_stream = portal_request.receive_signal("Response")?;
         self.proxy
             .call_method("SelectSources", &(session, options))?;
-
-        portal_request.receive_signal("Response")?;
+        let _: HashMap<String, zbus::zvariant::OwnedValue> =
+            wait_zbus_response(&portal_request, response_stream)?;
 
         Ok(())
     }
@@ -146,18 +172,41 @@ impl ScreenCast<'_> {
 
         options.insert("handle_token", zbus::zvariant::Value::from(&handle_token));
 
+        let response_stream = portal_request.receive_signal("Response")?;
         self.proxy.call_method("Start", &(session, "", options))?;
-
-        wait_zbus_response(&portal_request)
+        wait_zbus_response(&portal_request, response_stream)
     }
 
     #[allow(dead_code)]
-    pub fn open_pipe_wire_remote(&self, session: &OwnedObjectPath) -> Result<OwnedFd, DeskError> {
+    pub fn open_pipe_wire_remote(
+        &self,
+        session: &OwnedObjectPath,
+    ) -> Result<ZbusOwnedFd, DeskError> {
         let options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
-        let fd: OwnedFd = self.proxy.call("OpenPipeWireRemote", &(session, options))?;
+        let fd: ZbusOwnedFd = self.proxy.call("OpenPipeWireRemote", &(session, options))?;
 
         Ok(fd)
     }
+}
+
+fn close_portal_session(session: &OwnedObjectPath) -> Result<(), DeskError> {
+    let conn = get_zbus_connection()?;
+    let proxy = Proxy::new(
+        conn,
+        "org.freedesktop.portal.Desktop",
+        session.as_str(),
+        "org.freedesktop.portal.Session",
+    )?;
+    proxy.call_method("Close", &())?;
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct PipewireSetup {
+    pub stream_id: u32,
+    pub current_output: Option<DisplayInfo>,
+    pub portal_session: Option<OwnedObjectPath>,
+    pub remote_fd: Option<StdOwnedFd>,
 }
 
 #[derive(Debug)]
@@ -278,8 +327,9 @@ fn get_spa_definition() -> Result<pipewire::spa::pod::Object, DeskError> {
 fn pw_thread(
     main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
+    setup: PipewireSetup,
 ) {
-    let result = inner_pw_thread(main_sender, pw_receiver);
+    let result = inner_pw_thread(main_sender, pw_receiver, setup);
     if let Err(e) = result {
         log::error!("Pipewire thread error: {}", e);
     } else {
@@ -290,229 +340,251 @@ fn pw_thread(
 fn inner_pw_thread(
     main_sender: std::sync::mpsc::Sender<PipewireCallback>,
     pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
+    setup: PipewireSetup,
 ) -> Result<(), DeskError> {
-    let screen_cast = ScreenCast::new()?;
-    let session = screen_cast.create_session()?;
-    screen_cast.select_sources(&session)?;
-    let response = screen_cast.start(&session)?;
-    // 获取流节点ID
-    let stream_id = response
-        .streams
-        .ok_or(DeskError::ZbusError(zbus::Error::Failure(
-            "Stream ID not found".to_owned(),
-        )))?
-        .first()
-        .ok_or(DeskError::ZbusError(zbus::Error::Failure(
-            "Stream ID not found".to_owned(),
-        )))?
-        .0;
+    let PipewireSetup {
+        stream_id,
+        current_output,
+        portal_session,
+        remote_fd,
+    } = setup;
+    log::info!(
+        "PipeWire thread: starting, stream_id={}, has_remote_fd={}, has_portal_session={}",
+        stream_id,
+        remote_fd.is_some(),
+        portal_session.is_some()
+    );
+    if let Some(current_output) = current_output {
+        let _ = main_sender.send(PipewireCallback::CurrentOutput(current_output));
+    }
 
-    pipewire::init();
+    let run_result = (|| -> Result<(), DeskError> {
+        pipewire::init();
 
-    let main_loop = MainLoop::new(None)?;
+        let main_loop = MainLoop::new(None)?;
 
-    let context = Context::new(&main_loop)?;
-    let core = context.connect(None)?;
-    let data = UserData {
-        format: Default::default(),
-        cursor_move: false,
-        main_sender,
-        captured_count: 0,
-    };
+        let context = Context::new(&main_loop)?;
+        let core = if let Some(remote_fd) = remote_fd {
+            log::info!("PipeWire thread: connecting core with portal fd");
+            context.connect_fd(remote_fd, None)?
+        } else {
+            log::info!("PipeWire thread: connecting core with default PipeWire socket");
+            context.connect(None)?
+        };
+        let data = UserData {
+            format: Default::default(),
+            cursor_move: false,
+            main_sender,
+            captured_count: 0,
+        };
 
-    let _listener = core
-        .add_listener_local()
-        .info(|i| log::debug!("VIDEO CORE:\n{i:#?}"))
-        .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
-        .done(|d, _| log::debug!("DONE: {d}"))
-        .register();
-    let registry = core.get_registry()?;
-    let _listener_reg = registry
-        .add_listener_local()
-        .global(|global| {
-            log::info!(
-                "object: id:{} type:{}/{}, props: {:?}",
-                global.id,
-                global.type_,
-                global.version,
-                global.props
-            );
-            match global.type_ {
-                ObjectType::Node => {
-                    log::info!("Found node: id: {}, version: {}", global.id, global.version);
+        let _listener = core
+            .add_listener_local()
+            .info(|i| log::debug!("VIDEO CORE:\n{i:#?}"))
+            .error(|e, f, g, h| log::error!("{e},{f},{g},{h}"))
+            .done(|d, _| log::debug!("DONE: {d}"))
+            .register();
+        let registry = core.get_registry()?;
+        let _listener_reg = registry
+            .add_listener_local()
+            .global(|global| {
+                log::info!(
+                    "object: id:{} type:{}/{}, props: {:?}",
+                    global.id,
+                    global.type_,
+                    global.version,
+                    global.props
+                );
+                match global.type_ {
+                    ObjectType::Node => {
+                        log::info!("Found node: id: {}, version: {}", global.id, global.version);
+                    }
+                    ObjectType::Port => {
+                        log::info!("Found port: id: {}, version: {}", global.id, global.version);
+                    }
+                    ObjectType::Client => {
+                        log::info!(
+                            "Found client: id: {}, version: {}",
+                            global.id,
+                            global.version
+                        );
+                    }
+                    _ => {}
                 }
-                ObjectType::Port => {
-                    log::info!("Found port: id: {}, version: {}", global.id, global.version);
+                if let Some(props) = global.props {
+                    if props.get("media.class") == Some("Video/Sink") {
+                        log::info!("Found image device: {:?}", props.get("device.name"));
+                    }
                 }
-                ObjectType::Client => {
-                    log::info!(
-                        "Found client: id: {}, version: {}",
-                        global.id,
-                        global.version
-                    );
+            })
+            .register();
+
+        /* Create a simple stream, the simple stream manages the core and remote
+         * objects for you if you don't need to deal with them.
+         *
+         * If you plan to autoconnect your stream, you need to provide at least
+         * media, category and role properties.
+         *
+         * Pass your events and a user_data pointer as the last arguments. This
+         * will inform you about the stream state. The most important event
+         * you need to listen to is the process event where you need to produce
+         * the data.
+         */
+        let mut props = properties! {
+            *pipewire::keys::MEDIA_TYPE => "Video",
+            *pipewire::keys::MEDIA_CATEGORY => "Capture",
+            *pipewire::keys::MEDIA_ROLE => "Screen",
+        };
+
+        let stream = pipewire::stream::Stream::new(&core, "video-capture", props)?;
+
+        let _listener = stream
+            .add_local_listener_with_user_data(data)
+            .state_changed(|_, _user_data, old, new| {
+                log::info!("Stream state changed from {:?} to {:?}", old, new);
+            })
+            .control_info(|_, _user_data, id: u32, control| {
+                if let Some(control) = unsafe { control.as_ref() } {
+                    log::info!("Stream control info, id: {}, control: {:?}", id, control);
+                    let cstr = unsafe { CStr::from_ptr(control.name) };
+                    if let Ok(name) = cstr.to_str() {
+                        log::info!("Stream control name: {}", name);
+                    }
+                } else {
+                    log::info!("Stream control info, id: {}, control is NULL", id);
                 }
-                _ => {}
-            }
-            if let Some(props) = global.props {
-                if props.get("media.class") == Some("Video/Sink") {
-                    log::info!("Found image device: {:?}", props.get("device.name"));
+            })
+            .param_changed(|_, user_data, id: u32, param| {
+                // NULL means to clear the format
+                let Some(param) = param else {
+                    return;
+                };
+
+                let (media_type, media_subtype) = match format_utils::parse_format(param) {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                log::info!(
+                    "Stream param changed, id: {}, media type: {:?}, media sub type: {:?}",
+                    id,
+                    media_type,
+                    media_subtype
+                );
+                match id {
+                    x if x == pipewire::spa::param::ParamType::Format.as_raw() => {
+                        // only accept raw image
+                        if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+                            return;
+                        }
+
+                        // call a helper function to parse the format for us.
+                        user_data
+                            .format
+                            .parse(param)
+                            .expect("Failed to parse param changed to VideoInfoRaw");
+                        user_data
+                            .main_sender
+                            .send(PipewireCallback::Format(user_data.format.clone()))
+                            .expect("Failed to send image format to main thread");
+
+                        log::info!(
+                            "capturing video size :{:?} frame rate:{:?}",
+                            user_data.format.size(),
+                            user_data.format.framerate(),
+                        );
+                    }
+                    _ => return,
                 }
-            }
-        })
-        .register();
-
-    /* Create a simple stream, the simple stream manages the core and remote
-     * objects for you if you don't need to deal with them.
-     *
-     * If you plan to autoconnect your stream, you need to provide at least
-     * media, category and role properties.
-     *
-     * Pass your events and a user_data pointer as the last arguments. This
-     * will inform you about the stream state. The most important event
-     * you need to listen to is the process event where you need to produce
-     * the data.
-     */
-    let mut props = properties! {
-        *pipewire::keys::MEDIA_TYPE => "Video",
-        *pipewire::keys::MEDIA_CATEGORY => "Capture",
-        *pipewire::keys::MEDIA_ROLE => "Screen",
-    };
-
-    let stream = pipewire::stream::Stream::new(&core, "video-capture", props)?;
-
-    let _listener = stream
-        .add_local_listener_with_user_data(data)
-        .state_changed(|_, _user_data, old, new| {
-            log::info!("Stream state changed from {:?} to {:?}", old, new);
-        })
-        .control_info(|_, _user_data, id: u32, control| {
-            if let Some(control) = unsafe { control.as_ref() } {
-                log::info!("Stream control info, id: {}, control: {:?}", id, control);
-                let cstr = unsafe { CStr::from_ptr(control.name) };
-                if let Ok(name) = cstr.to_str() {
-                    log::info!("Stream control name: {}", name);
-                }
-            } else {
-                log::info!("Stream control info, id: {}, control is NULL", id);
-            }
-        })
-        .param_changed(|_, user_data, id: u32, param| {
-            // NULL means to clear the format
-            let Some(param) = param else {
-                return;
-            };
-
-            let (media_type, media_subtype) = match format_utils::parse_format(param) {
-                Ok(v) => v,
-                Err(_) => return,
-            };
-            log::info!(
-                "Stream param changed, id: {}, media type: {:?}, media sub type: {:?}",
-                id,
-                media_type,
-                media_subtype
-            );
-            match id {
-                x if x == pipewire::spa::param::ParamType::Format.as_raw() => {
-                    // only accept raw image
-                    if media_type != MediaType::Video || media_subtype != MediaSubtype::Raw {
+            })
+            .process(|stream, user_data| match stream.dequeue_buffer() {
+                None => log::error!("out of buffers"),
+                Some(mut buffer) => {
+                    let datas = buffer.datas_mut();
+                    if datas.is_empty() {
                         return;
                     }
 
-                    // call a helper function to parse the format for us.
-                    user_data
-                        .format
-                        .parse(param)
-                        .expect("Failed to parse param changed to VideoInfoRaw");
-                    user_data
-                        .main_sender
-                        .send(PipewireCallback::Format(user_data.format.clone()))
-                        .expect("Failed to send image format to main thread");
+                    let data = &mut datas[0];
 
-                    log::info!(
-                        "capturing video size :{:?} frame rate:{:?}",
-                        user_data.format.size(),
-                        user_data.format.framerate(),
-                    );
+                    let size = user_data.format.size();
+                    if let Some(frame_data) = data.data() {
+                        let pipewire_image_info = PipewireImageInfo {
+                            image_type: match user_data.format.format() {
+                                VideoFormat::RGB | VideoFormat::RGBx => ImageType::RGB,
+                                VideoFormat::BGRA | VideoFormat::BGRx => ImageType::BGRA,
+                                _ => {
+                                    log::error!(
+                                        "Unsupported format: {:?}",
+                                        user_data.format.format()
+                                    );
+                                    return;
+                                }
+                            },
+                            data: frame_data.to_vec(),
+                            width: size.width,
+                            height: size.height,
+                        };
+
+                        user_data
+                            .main_sender
+                            .send(PipewireCallback::ImageInfo(pipewire_image_info))
+                            .expect("Failed to send video samples to main thread");
+                    }
                 }
-                _ => return,
-            }
-        })
-        .process(|stream, user_data| match stream.dequeue_buffer() {
-            None => log::error!("out of buffers"),
-            Some(mut buffer) => {
-                let datas = buffer.datas_mut();
-                if datas.is_empty() {
-                    return;
+            })
+            .register()?;
+
+        let pw_obj = get_spa_definition()?;
+        /* Make one parameter with the supported formats. The SPA_PARAM_EnumFormat
+         * id means that this is a format enumeration (of 1 value).
+         * We leave the channels and rate empty to accept the native graph
+         * rate and channels. */
+        let video_spa_values: Vec<u8> = PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &pipewire::spa::pod::Value::Object(pw_obj),
+        )
+        .unwrap()
+        .0
+        .into_inner();
+
+        let mut video_params = [Pod::from_bytes(&video_spa_values).unwrap()];
+
+        /* Now connect this stream. We ask that our process function is
+         * called in a realtime thread. */
+        stream.connect(
+            pipewire::spa::utils::Direction::Input,
+            Some(stream_id),
+            pipewire::stream::StreamFlags::AUTOCONNECT
+                | pipewire::stream::StreamFlags::MAP_BUFFERS
+                | pipewire::stream::StreamFlags::RT_PROCESS,
+            &mut video_params,
+        )?;
+        log::info!("PipeWire thread: stream connected, entering main loop");
+
+        // When we receive a `Terminate` message, quit the main loop.
+        let main_loop_for_pw = main_loop.clone();
+        let _receiver = pw_receiver.attach(main_loop_for_pw.loop_(), {
+            let mainloop = main_loop.clone();
+            move |command| match command {
+                PipewireCommand::Terminate => {
+                    log::warn!("PipewireLoop terminating");
+                    mainloop.quit()
                 }
-
-                let data = &mut datas[0];
-
-                let size = user_data.format.size();
-                if let Some(frame_data) = data.data() {
-                    let pipewire_image_info = PipewireImageInfo {
-                        image_type: match user_data.format.format() {
-                            VideoFormat::RGB | VideoFormat::RGBx => ImageType::RGB,
-                            VideoFormat::BGRA | VideoFormat::BGRx => ImageType::BGRA,
-                            _ => {
-                                log::error!("Unsupported format: {:?}", user_data.format.format());
-                                return;
-                            }
-                        },
-                        data: frame_data.to_vec(),
-                        width: size.width,
-                        height: size.height,
-                    };
-
-                    user_data
-                        .main_sender
-                        .send(PipewireCallback::ImageInfo(pipewire_image_info))
-                        .expect("Failed to send video samples to main thread");
-                }
             }
-        })
-        .register()?;
+        });
 
-    let pw_obj = get_spa_definition()?;
-    /* Make one parameter with the supported formats. The SPA_PARAM_EnumFormat
-     * id means that this is a format enumeration (of 1 value).
-     * We leave the channels and rate empty to accept the native graph
-     * rate and channels. */
-    let video_spa_values: Vec<u8> = PodSerializer::serialize(
-        std::io::Cursor::new(Vec::new()),
-        &pipewire::spa::pod::Value::Object(pw_obj),
-    )
-    .unwrap()
-    .0
-    .into_inner();
+        main_loop.run();
+        log::info!("PipeWire thread: main loop exited");
+        Ok(())
+    })();
 
-    let mut video_params = [Pod::from_bytes(&video_spa_values).unwrap()];
-
-    /* Now connect this stream. We ask that our process function is
-     * called in a realtime thread. */
-    stream.connect(
-        pipewire::spa::utils::Direction::Input,
-        Some(stream_id),
-        pipewire::stream::StreamFlags::AUTOCONNECT
-            | pipewire::stream::StreamFlags::MAP_BUFFERS
-            | pipewire::stream::StreamFlags::RT_PROCESS,
-        &mut video_params,
-    )?;
-
-    // When we receive a `Terminate` message, quit the main loop.
-    let main_loop_for_pw = main_loop.clone();
-    let _receiver = pw_receiver.attach(main_loop_for_pw.loop_(), {
-        let mainloop = main_loop.clone();
-        move |command| match command {
-            PipewireCommand::Terminate => {
-                log::warn!("PipewireLoop terminating");
-                mainloop.quit()
-            }
+    if let Some(session) = portal_session.as_ref() {
+        if let Err(err) = close_portal_session(session) {
+            log::warn!("Failed to close portal session, error: {}", err);
         }
-    });
+    }
 
-    main_loop.run();
-    Ok(())
+    run_result
 }
 
 pub struct PipewireLoop {
@@ -532,6 +604,7 @@ pub enum PipewireCommand {
 pub enum PipewireCallback {
     ImageInfo(PipewireImageInfo),
     Format(VideoInfoRaw),
+    CurrentOutput(DisplayInfo),
 }
 
 impl PipewireLoop {
@@ -542,9 +615,20 @@ impl PipewireLoop {
         pw_sender: pipewire::channel::Sender<PipewireCommand>,
         pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
     ) -> Result<Self, DeskError> {
+        let setup = PipewireImageCapture::create_screencast_setup()?;
+        Self::new_with_setup(desk_settings, main_sender, pw_sender, pw_receiver, setup)
+    }
+
+    pub fn new_with_setup(
+        _desk_settings: &DeskSettings,
+        main_sender: std::sync::mpsc::Sender<PipewireCallback>,
+        pw_sender: pipewire::channel::Sender<PipewireCommand>,
+        pw_receiver: pipewire::channel::Receiver<PipewireCommand>,
+        setup: PipewireSetup,
+    ) -> Result<Self, DeskError> {
         let main_sender_for_pw = main_sender.clone();
         let pw_thread = Some(std::thread::spawn(move || {
-            pw_thread(main_sender_for_pw, pw_receiver)
+            pw_thread(main_sender_for_pw, pw_receiver, setup)
         }));
 
         Ok(Self {
@@ -572,17 +656,30 @@ pub struct PipewireImageCapture {
     pub main_receiver: Option<std::sync::mpsc::Receiver<PipewireCallback>>,
     pub pw_sender: Option<pipewire::channel::Sender<PipewireCommand>>,
     pub format: Option<VideoInfoRaw>,
+    pub current_output: Option<DisplayInfo>,
 }
 
-impl ImageCapture for PipewireImageCapture {
-    fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+impl PipewireImageCapture {
+    pub fn capture(
+        &mut self,
+        show_mouse: bool,
+    ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         let receiver = self.main_receiver.as_ref().unwrap();
         let mut last_frame = None;
         for item in receiver.try_iter() {
             match item {
                 PipewireCallback::ImageInfo(image_info) => {
-                    log::info!("Captured image info: {:?}", image_info);
+                    log::debug!(
+                        "Captured frame: type={:?}, width={}, height={}, bytes={}",
+                        image_info.image_type,
+                        image_info.width,
+                        image_info.height,
+                        image_info.data.len()
+                    );
                     last_frame = Some(image_info);
+                }
+                PipewireCallback::CurrentOutput(output) => {
+                    self.current_output = Some(output);
                 }
                 _ => {
                     log::warn!("Unexpected callback: {:?}", item);
@@ -599,48 +696,76 @@ impl ImageCapture for PipewireImageCapture {
         }
     }
 
-    fn get_capture_type(&self) -> crate::model::image_capture::ImageCaptureType {
-        todo!()
+    pub fn create_screencast_setup() -> Result<PipewireSetup, DeskError> {
+        log::info!("PipeWire setup: creating ScreenCast proxy");
+        let screen_cast = ScreenCast::new()?;
+        log::info!("PipeWire setup: creating portal session");
+        let session = screen_cast.create_session()?;
+        log::info!("PipeWire setup: selecting sources");
+        screen_cast.select_sources(&session)?;
+        log::info!("PipeWire setup: starting portal session");
+        let response = screen_cast.start(&session)?;
+        let streams = response
+            .streams
+            .ok_or(DeskError::ZbusError(zbus::Error::Failure(
+                "Stream ID not found".to_owned(),
+            )))?;
+        let selected_stream =
+            streams
+                .into_iter()
+                .next()
+                .ok_or(DeskError::ZbusError(zbus::Error::Failure(
+                    "Stream ID not found".to_owned(),
+                )))?;
+        log::info!(
+            "PipeWire setup: selected stream id={}, stream_info={:?}",
+            selected_stream.0,
+            selected_stream.1
+        );
+        let remote_fd: StdOwnedFd = screen_cast.open_pipe_wire_remote(&session)?.into();
+        log::info!("PipeWire setup: OpenPipeWireRemote succeeded");
+        Ok(PipewireSetup {
+            stream_id: selected_stream.0,
+            current_output: Some(stream_to_display_info(&selected_stream.1)),
+            portal_session: Some(session),
+            remote_fd: Some(remote_fd),
+        })
     }
 
-    fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
-        todo!()
-    }
-}
-
-impl PipewireImageCapture {
-    pub fn new(desk_settings: &DeskSettings) -> Result<Self, DeskError> {
+    pub fn new_with_setup(
+        desk_settings: &DeskSettings,
+        setup: PipewireSetup,
+    ) -> Result<Self, DeskError> {
+        log::info!("PipeWire capture: spawning PipeWire loop");
+        let initial_output = setup.current_output.clone();
         let (main_sender, main_receiver) = std::sync::mpsc::channel();
         let (pw_sender, pw_receiver) = pipewire::channel::channel();
 
         let pw_sender_clone = pw_sender.clone();
 
-        let pipewire_loop =
-            PipewireLoop::new(desk_settings, main_sender, pw_sender_clone, pw_receiver)?;
+        let pipewire_loop = PipewireLoop::new_with_setup(
+            desk_settings,
+            main_sender,
+            pw_sender_clone,
+            pw_receiver,
+            setup,
+        )?;
 
-        let pipewire_callback = main_receiver.recv_timeout(Duration::from_secs(30))?;
-        let audio_format;
-        match pipewire_callback {
-            PipewireCallback::Format(format) => {
-                log::info!("Received image format: {:?}", format);
-                audio_format = format;
-            }
-            _ => {
-                log::error!("Expected format callback, got {:?}", pipewire_callback);
-                return DeskError::custom_error(
-                    DeskErrorCode::SYSTEM_ERROR,
-                    "Failed to get image format",
-                );
-            }
-        }
+        log::info!("PipeWire capture: initialized without blocking for first format callback");
 
         Ok(Self {
             desk_settings: desk_settings.clone(),
             pipewire_loop: Some(pipewire_loop),
             main_receiver: Some(main_receiver),
             pw_sender: Some(pw_sender),
-            format: Some(audio_format),
+            format: None,
+            current_output: initial_output,
         })
+    }
+
+    pub fn new(desk_settings: &DeskSettings) -> Result<Self, DeskError> {
+        let setup = Self::create_screencast_setup()?;
+        Self::new_with_setup(desk_settings, setup)
     }
 }
 
@@ -679,6 +804,9 @@ mod tests {
                     }
                     PipewireCallback::Format(format) => {
                         log::info!("Received image format: {:?}", format);
+                    }
+                    PipewireCallback::CurrentOutput(output) => {
+                        log::info!("Received current output: {:?}", output);
                     }
                 },
                 Err(e) => {

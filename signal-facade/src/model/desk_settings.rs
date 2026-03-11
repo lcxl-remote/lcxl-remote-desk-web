@@ -144,6 +144,8 @@ pub struct DeskSettings {
     pub private_screen: PrivateScreenSettings,
     /// Display name
     pub display_name: Option<String>,
+    /// Wayland control mode: portal/uinput/none
+    pub wayland_control_mode: Option<String>,
 }
 
 impl DeskSettings {
@@ -177,6 +179,7 @@ impl Default for DeskSettings {
             opus_encoder: None,
             private_screen: PrivateScreenSettings::default(),
             display_name: None,
+            wayland_control_mode: None,
         }
     }
 }

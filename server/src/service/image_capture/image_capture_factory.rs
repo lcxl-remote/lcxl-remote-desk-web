@@ -15,6 +15,7 @@ use crate::service::image_capture::{
 #[cfg(target_os = "linux")]
 use crate::service::image_capture::{
     pipewire_capture::{PipewireImageCapture, PipewireImageOutputEnumerator},
+    wayland_portal_capture::{WaylandPortalImageCapture, WaylandPortalImageOutputEnumerator},
     x11_capture::{X11ImageCapture, X11ImageOutputEnumerator},
 };
 use crate::{
@@ -57,10 +58,14 @@ pub fn create_image_capture(
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
-        ImageCaptureType::PIPEWIRE => Box::new(PipewireImageCapture::new(desk_settings)?),
+        ImageCaptureType::WAYLANDPORTAL => Box::new(WaylandPortalImageCapture::new(desk_settings)?),
         #[cfg(target_os = "macos")]
         ImageCaptureType::SCKIT => Box::new(MacScreencaptureKitImageCapture::new(desk_settings)?),
     };
+    log::info!(
+        "Image capture factory: backend instance created, image_capture_type={:?}",
+        image_capture_type
+    );
     Ok(capture)
 }
 
@@ -87,6 +92,19 @@ pub fn list_image_capture() -> BTreeMap<String, Vec<DisplayInfo>> {
         .collect()
 }
 
+pub async fn list_image_capture_async() -> BTreeMap<String, Vec<DisplayInfo>> {
+    match tokio::task::spawn_blocking(list_image_capture).await {
+        Ok(result) => result,
+        Err(err) => {
+            log::error!(
+                "Failed to list image capture backends in blocking task: {}",
+                err
+            );
+            BTreeMap::new()
+        }
+    }
+}
+
 pub fn list_image_output(
     image_capture_type: ImageCaptureType,
 ) -> Result<Vec<DisplayInfo>, DeskError> {
@@ -98,7 +116,7 @@ pub fn list_image_output(
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageOutputEnumerator::new()),
         #[cfg(target_os = "linux")]
-        ImageCaptureType::PIPEWIRE => Box::new(PipewireImageOutputEnumerator::new()),
+        ImageCaptureType::WAYLANDPORTAL => Box::new(WaylandPortalImageOutputEnumerator::new()),
         #[cfg(target_os = "macos")]
         ImageCaptureType::SCKIT => Box::new(MacScreencaptureKitImageOutputEnumerator::new()),
     };

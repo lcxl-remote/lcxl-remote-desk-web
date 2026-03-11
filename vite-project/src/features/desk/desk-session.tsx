@@ -533,6 +533,13 @@ export default function DeskSession() {
                         >
                             <div className="placeholderContent">
                                 <span className="artText">LCXL Remote Desk</span>
+                                {!initData && (
+                                    <p className="mt-3 text-sm text-white/80">
+                                        {t('pages.desk.initializingCapture', 'Initializing remote capture...')}
+                                        <br />
+                                        {t('pages.desk.waitingPermission', 'Waiting for host authorization dialog.')}
+                                    </p>
+                                )}
                             </div>
                         </div>
 

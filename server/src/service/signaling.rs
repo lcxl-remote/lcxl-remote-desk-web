@@ -76,7 +76,7 @@ use crate::service::audio_encoder::audio_encoder_factory::{
 use crate::service::data_channel::handle_data_channel_event;
 use crate::service::file_manager;
 use crate::service::image_capture::image_capture_factory::{
-    create_image_capture, list_image_capture,
+    create_image_capture, list_image_capture_async,
 };
 use crate::service::terminal::fetch_terminal_list;
 use crate::service::video_encoder::video_encoder_factory::{
@@ -805,7 +805,7 @@ impl DeskSession {
         let audio_device_list = list_audio_capture();
         let audio_encoder_list = list_audio_encoder();
         // get video device
-        let video_device_list = list_image_capture();
+        let video_device_list = list_image_capture_async().await;
 
         let video_encoder_list = list_video_encoder();
 
@@ -869,6 +869,12 @@ impl DeskSession {
         offer_model: &OfferModel,
         peer_connection: &mut PeerConnection,
     ) -> Result<(), DeskError> {
+        {
+            let mut signaling_state = peer_connection.signaling_state.write().await;
+            signaling_state.wayland_control_mode =
+                offer_model.desk_settings.wayland_control_mode.clone();
+        }
+
         let (ice_state_change_sender, ice_connection_state_rx) =
             tokio::sync::watch::channel(WebRTConnectionState::Init);
         let peer_state_change_sender = ice_state_change_sender.clone();
@@ -879,6 +885,11 @@ impl DeskSession {
         let sdp_str = &offer_model.offer.sdp;
         let has_video = sdp_str.contains("m=video");
         let has_audio = sdp_str.contains("m=audio");
+        log::info!(
+            "SDP media detection: has_video={}, has_audio={}",
+            has_video,
+            has_audio
+        );
 
         if has_video || has_audio {
             log::info!("SDP offer contains media tracks, setting up video/audio capture");
@@ -1245,9 +1256,15 @@ impl DeskSession {
             "Preparing to capture screen, desk settings: {:?}",
             desk_settings
         );
+        log::info!("Capture screen task: creating image capture backend");
         let mut capture = create_image_capture(&desk_settings)?;
         let mut image_capture_type = capture.get_capture_type().into();
+        log::info!(
+            "Capture screen task: image capture backend created, type={}",
+            image_capture_type
+        );
         //TODO
+        log::info!("Capture screen task: querying current display info");
         let display_info = capture.get_current_output()?;
         {
             let mut signaling_state = signaling_state.write().await;
@@ -1258,6 +1275,7 @@ impl DeskSession {
             );
         }
 
+        log::info!("Capture screen task: creating video encoder");
         let mut encoder = create_video_encoder(&desk_settings, &display_info)?;
         // Wait for connection established
         while let Ok(_) = connection_state_rx.changed().await {
@@ -1654,6 +1672,14 @@ impl DeskSession {
     ) -> Result<(), DeskError> {
         let desk_settings = signaling_model.get_data::<DeskSettings>()?;
         info!("Receive update desk settings: {:?}", desk_settings);
+
+        if let Some(from_session_id) = &signaling_model.from_session_id {
+            if let Some(peer_connection) = self.rtc_peer_connection_map.get(from_session_id) {
+                let peer_connection = peer_connection.read().await;
+                let mut signaling_state = peer_connection.signaling_state.write().await;
+                signaling_state.wayland_control_mode = desk_settings.wayland_control_mode.clone();
+            }
+        }
 
         // notify the new desk settings to the capture screen task
         if let Some(sender) = &self.update_setting_sender {

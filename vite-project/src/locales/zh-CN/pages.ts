@@ -216,6 +216,8 @@ export default {
   'pages.desk.clipboardHttpsRequired': '(需要 HTTPS)',
   'pages.desk.showStats': '显示网络统计',
   'pages.desk.hideStats': '隐藏网络统计',
+  'pages.desk.initializingCapture': '正在初始化远程画面...',
+  'pages.desk.waitingPermission': '正在等待被控端授权弹窗确认。',
   'pages.desk.openWhiteboard': '打开白板',
   'pages.desk.closeWhiteboard': '关闭白板',
   'pages.desk.whiteboardUnavailable': '白板需要被控端运行 Tauri 版本',

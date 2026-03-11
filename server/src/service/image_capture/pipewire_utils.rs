@@ -1,9 +1,10 @@
-use std::{env, sync::LazyLock};
+use std::{env, mem::forget, sync::LazyLock, time::Instant};
 
 use serde::Deserialize;
 use xcb::{ConnResult, Connection as XcbConnection};
 use zbus::Result as ZBusResult;
 use zbus::blocking::{Connection as ZBusConnection, Proxy};
+use zbus::blocking::proxy::SignalIterator;
 use zbus::zvariant::Type;
 
 use crate::error::DeskError;
@@ -48,20 +49,33 @@ pub fn get_zbus_portal_request(
     Ok(request)
 }
 
-pub fn wait_zbus_response<'a, T>(request: &Proxy<'a>) -> Result<T, DeskError>
+pub fn wait_zbus_response<'a, T>(request: &Proxy<'a>, mut response: SignalIterator<'_>) -> Result<T, DeskError>
 where
     T: for<'de> Deserialize<'de> + Type,
 {
-    let mut response = request.receive_signal("Response")?;
+    let start_at = Instant::now();
+    log::info!(
+        "Portal DBus: waiting Response signal, request_path={}",
+        request.path()
+    );
 
     let message = response
         .next()
         .ok_or(DeskError::ZbusError(zbus::Error::Failure(
-            "Failed get response".to_owned(),
+            "Failed to get portal response signal".to_owned(),
         )))?;
 
     let body = message.body();
     let (code, body): (u32, T) = body.deserialize()?;
+    log::info!(
+        "Portal DBus: got Response signal, request_path={}, code={}, elapsed_ms={}",
+        request.path(),
+        code,
+        start_at.elapsed().as_millis()
+    );
+    // Workaround: dropping SignalIterator may block in some desktop environments.
+    // We intentionally skip drop here to avoid stalling the capture/control flow.
+    forget(response);
 
     if code == 0 {
         return Ok(body);

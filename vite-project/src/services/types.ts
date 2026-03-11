@@ -43,6 +43,62 @@ export type AudioDevice = {
 };
 
 /**
+ * @description Runtime backend diagnostics
+*/
+export type BackendInfo = {
+    /**
+     * @description Input backend error detail when not ready
+     * @type string,null
+    */
+    input_backend_error?: string | null;
+    /**
+     * @description Runtime status for input backend (ready/fallback/disabled)
+     * @type string
+    */
+    input_backend_runtime_status: string;
+    /**
+     * @description Current target OS name
+     * @type string
+    */
+    os: string;
+    /**
+     * @description Whether portal service is reachable
+     * @type boolean,null
+    */
+    portal_available?: boolean | null;
+    /**
+     * @description Portal error detail when unavailable
+     * @type string,null
+    */
+    portal_error?: string | null;
+    /**
+     * @description Requested image capture from settings
+     * @type string,null
+    */
+    requested_image_capture?: string | null;
+    /**
+     * @description Resolved image capture backend used by factory
+     * @type string
+    */
+    resolved_image_capture: string;
+    /**
+     * @description Resolved input control backend based on wayland_control_mode and environment
+     * @type string
+    */
+    resolved_input_control: string;
+    /**
+     * @description Whether WAYLAND_DISPLAY is present
+     * @type boolean
+    */
+    wayland_env: boolean;
+    /**
+     * @description Whether DISPLAY is present
+     * @type boolean
+    */
+    x11_env: boolean;
+};
+
+/**
  * @description CPU information
 */
 export type CpuInfo = {
@@ -396,6 +452,11 @@ export type DeskSettings = {
      * @default null
     */
     vp9_encoder?: (null | VpxEncoderSettings);
+    /**
+     * @description Wayland control mode: portal/uinput/none
+     * @type string,null
+    */
+    wayland_control_mode?: string | null;
 };
 
 export type DeviceCodeBatchDeleteParams = {
@@ -1130,6 +1191,77 @@ export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof ty
  * @description Remote Desk Type Enum
 */
 export type RemoteDeskTypeEnum = RemoteDeskTypeEnumEnumKey;
+
+export type RestResponseBackendInfo = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Runtime backend diagnostics
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Input backend error detail when not ready
+         * @type string,null
+        */
+        input_backend_error?: string | null;
+        /**
+         * @description Runtime status for input backend (ready/fallback/disabled)
+         * @type string
+        */
+        input_backend_runtime_status: string;
+        /**
+         * @description Current target OS name
+         * @type string
+        */
+        os: string;
+        /**
+         * @description Whether portal service is reachable
+         * @type boolean,null
+        */
+        portal_available?: boolean | null;
+        /**
+         * @description Portal error detail when unavailable
+         * @type string,null
+        */
+        portal_error?: string | null;
+        /**
+         * @description Requested image capture from settings
+         * @type string,null
+        */
+        requested_image_capture?: string | null;
+        /**
+         * @description Resolved image capture backend used by factory
+         * @type string
+        */
+        resolved_image_capture: string;
+        /**
+         * @description Resolved input control backend based on wayland_control_mode and environment
+         * @type string
+        */
+        resolved_input_control: string;
+        /**
+         * @description Whether WAYLAND_DISPLAY is present
+         * @type boolean
+        */
+        wayland_env: boolean;
+        /**
+         * @description Whether DISPLAY is present
+         * @type boolean
+        */
+        x11_env: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
 
 export type RestResponseServerInfo = {
     /**
@@ -2006,6 +2138,18 @@ export type ChangePasswordMutation = {
     Response: ChangePassword200;
     Request: ChangePasswordMutationRequest;
     Errors: ChangePassword403;
+};
+
+/**
+ * @description Get backend diagnostics successfully
+*/
+export type QueryBackendInfo200 = RestResponseBackendInfo;
+
+export type QueryBackendInfoQueryResponse = QueryBackendInfo200;
+
+export type QueryBackendInfoQuery = {
+    Response: QueryBackendInfo200;
+    Errors: any;
 };
 
 export type ListDeviceCodesQueryParams = {
