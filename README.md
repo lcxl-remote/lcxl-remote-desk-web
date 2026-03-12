@@ -1,96 +1,121 @@
-# LCXL Remote Desk Web——Web-based Remote Desktop
+# LCXL Remote Desk Web —— Efficient WebRTC-based Remote Desktop
 
-[中文](README_CN.md)
+[English](README.md) | [中文](README_CN.md)
 
-LCXL Remote Desk Web is a Web-based remote desktop solution that allows users to access and control remote computers through a web browser. The project uses WebRTC technology for efficient video streaming, with a Rust-based backend and a React-based frontend.
+LCXL Remote Desk Web is a modern remote desktop solution leveraging WebRTC technology. It allows users to gain high-performance access and control of remote computers through just a web browser, eliminating the need for any plugins or dedicated client software for management. The backend is written in Rust, and the frontend is built with React + Vite + Tailwind CSS.
 
 > [!WARNING]
-> **Disclaimer**: This project is currently in its **early development stage**. The codebase may be unstable, contain unfixed bugs, or have incomplete features.
-> **Security Risk Warning**: Remote desktop technology involves deep access to computer systems. When using this project for remote connections, please ensure your network environment is secure and be aware of potential security risks (e.g., unauthorized access, data leakage). The author(s) shall not be held liable for any damages or losses arising from the use of this project.
+> **Disclaimer**: This project is currently in the **early development stage**. The codebase may be unstable, contain unfixed bugs, or have incomplete features.
+> **Security Warning**: Remote desktop technology involves deep access to computer systems. Ensure your network environment is secure when using this project. The author(s) shall not be held liable for any damages arising from the use of this project.
 
-## Navigation
+---
 
-- 📖 [Development Guide](DEVELOPMENT.md) - Environment setup, workflow, API documentation
-- ⚙️ [Configuration](DEVELOPMENT.md#configuration-details) - Server parameters
-- 🚀 [Quick Start](#quick-start) - Run guide
+## 🏗️ Core Architecture & Modules
 
-## Network Architecture
+The project is designed with modularity to meet various deployment requirements:
+
+*   **`server`**: The core remote desktop service running on the host machine (Windows/Linux/MacOS). It handles screen capture, audio collection, command execution, and file management (CLI-only version).
+*   **`signal`**: The signaling server. Enabled by default within `server`, but can also be deployed independently. It uses WebSocket to coordinate peer connections.
+*   **`vite-project`**: The web frontend application. Serves as both the management dashboard and the remote client.
+*   **`tauri-app`**: An enhanced server version with a GUI. It provides features that require local UI visibility, such as Privacy Screen and Whiteboard.
+*   **`turn`**: Integrated TURN/STUN services (currently bundled with the signaling service) to ensure NAT traversal in complex network environments.
+*   **`utils`**: Common utility packages.
+*   **`signal-facade`**: Interface definitions for the signaling service.
+
+---
+
+## ✨ Key Features
+
+- 🖥️ **High-Performance Desktop Connection**: Based on WebRTC video streams, supporting H264/VP8/VP9 hardware/software encoding for ultra-low latency.
+- ⌨️ **Full-Featured Terminal**: Built-in remote terminal powered by xterm.js, supporting full shell interaction.
+- 📂 **File Management System**: Supports file uploads, downloads, deletions, and a **Recycle Bin** mechanism to prevent accidental loss.
+- 📋 **Bidirectional Clipboard**: Synchronize text clipboards between local and remote.
+- 🎨 **Remote Whiteboard**: Draw and annotate directly on the remote screen, ideal for presentations and collaboration (requires `tauri-app`).
+- 🔒 **Privacy Screen Mode**: Lock local display and input to ensure privacy during remote operations (requires `tauri-app`).
+- 🔊 **Audio Support**: Captures remote audio and synchronizes it for playback.
+- 🌐 **Multi-language Support (i18n)**: UI and documentation support both English and Chinese.
+
+---
+
+## 📡 Network Architecture
 
 ```mermaid
 graph LR
-    browser[Browser]<-->SignalingServer[Signaling Server]
-    SignalingServer<-->desk[LCXL Remote Desk Web]
-    browser<-->stun[STUN Server]<-->desk
-    browser<-->turn[TURN Server]<-->desk
-    browser<--P2P Connection-->desk
+    browser[Browser Client]<-->Signaling[Signaling Service]
+    Signaling<-->DeskServer[Remote Desk Service]
+    browser<-->STUN[STUN/TURN Server]<-->DeskServer
+    browser<-- P2P Connection / Relay -->DeskServer
 ```
 
-Components (all integrated within LCXL Remote Desk Web):
+> **Note**: Signaling and TURN servers are integrated into the `server` by default. Direct P2P connections are prioritized in public or local network environments.
 
-1. **Signaling Server**: Coordinates the connection between browser and remote desktop.
-2. **STUN Server**: Retrieves network address information for NAT traversal.
-3. **TURN Server**: Relays data when P2P connection cannot be established.
-4. **LCXL Remote Desk Web (server)**: The remote desktop backend service.
+---
 
-## Features
+## 🚀 Quick Start
 
-- **Remote Desktop Access**: Access and control remote desktops via browser, no extra client required.
-- **File Transfer**: Transfer files between local and remote computers.
-- **Terminal Control**: Command-line interface directly in the browser.
+### Option 1: Run from Source (Recommended for Developers)
 
-## Roadmap
+1. **Prerequisites**:
+   - Install [Rust](https://www.rust-lang.org/) (latest stable)
+   - Install [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/)
 
-- [ ] **Screen Sharing**: Share browser windows with other users for collaboration.
-- [ ] **Camera Control**: Control and stream remote cameras via browser.
-- [ ] **Shared Camera**: Support multiple users viewing the same camera stream.
+2. **Start Backend**:
+   ```bash
+   # Run in the server directory (starts Signaling and Desktop services by default)
+   cargo run --release
+   ```
 
-## Quick Start
+3. **Start Frontend**:
+   ```bash
+   cd vite-project
+   pnpm install
+   pnpm dev
+   ```
+   Access `http://localhost:5173`.
 
-### Running the Server
+### Option 2: Docker Deployment
 
-1. **Clone the repository**
-
-```bash
-git clone <repository-url>
-cd lcxl-remote-desk-web
-```
-
-1. **Run the server**
-
-```bash
-cargo run --release
-```
-
-1. **Access the Web Interface**
-Open browser at: `http://localhost:8081`
-
-Default credentials:
-
-- Username: `admin`
-- Password: `admin` (A random password is automatically generated on first startup)
-
-## Docker Usage
-
-### Using Docker Compose (Recommended)
+One-click deployment using Docker Compose is recommended:
 
 ```bash
 docker-compose up -d
 ```
+Access `http://localhost:8081` after startup. Admin setup is required on first access.
 
-### Building Docker Image
+### Option 3: Tauri Desktop Client
 
+For scenarios requiring "Privacy Screen" or "Whiteboard" features:
 ```bash
-# Default build
-./build_docker.sh
-
-# Build with mirror for speed
-./build_docker.sh --mirror
+cd tauri-app
+cargo tauri dev
 ```
 
-## Configuration
+---
 
-Detailed configuration options are available in the [Development Guide](DEVELOPMENT.md#configuration-details).
+## ⚙️ Key Configuration
 
-## License
+The project is fine-tuned via `conf/config.toml`. Key parameters:
 
-See the LICENSE file for details.
+- **System**: `listen_addr`, `log_level`, `port`.
+- **Desktop**: `fps`, `encoder_type` (vpx/openh264/manual), `show_cursor`.
+- **Mode Switching**: Use the `-m` flag to toggle between `default`, `signaling`, or `desk-server` modes.
+
+> 📚 For more details, refer to the [Development Guide (DEVELOPMENT.md)](DEVELOPMENT.md).
+
+---
+
+## 🗺️ Roadmap
+
+- [x] High-performance WebRTC desktop streaming
+- [x] Cross-platform support (Linux/Windows/MacOS)
+- [x] Remote terminal and file management
+- [x] Privacy Screen and Whiteboard features
+- [ ] Mobile interface optimization
+- [ ] RBAC (Role-Based Access Control) system
+- [ ] Session recording support
+
+---
+
+## 📄 License
+
+This project is licensed under the [Apache-2.0](LICENSE) License.
