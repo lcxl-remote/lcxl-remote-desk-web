@@ -198,6 +198,7 @@ export default {
   'pages.desk.controlRequestDenied': 'Control request denied',
   'pages.desk.controlClosedByRemote': 'Control closed by remote host',
   'pages.desk.serverError': 'Server error: {error_message}',
+  'pages.desk.adminPrivilegeWarning': 'The remote server is not running with administrative/root privileges. Some operations (e.g., UAC elevation, system input blocking) may be restricted.',
   'pages.desk.exitControl': 'Exit Control',
   'pages.desk.requestControl': 'Request Control',
   'pages.desk.exitFullscreen': 'Exit Fullscreen',

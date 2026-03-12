@@ -196,6 +196,7 @@ export default {
   'pages.desk.controlRequestDenied': '控制请求被拒绝',
   'pages.desk.controlClosedByRemote': '控制已被远程主机关闭',
   'pages.desk.serverError': '服务器错误: {error_message}',
+  'pages.desk.adminPrivilegeWarning': '远程服务器当前未以管理员/root权限运行。某些操作（如 UAC 提权、系统输入拦截）可能会受限。',
   'pages.desk.exitControl': '退出控制',
   'pages.desk.requestControl': '请求控制',
   'pages.desk.exitFullscreen': '退出全屏',

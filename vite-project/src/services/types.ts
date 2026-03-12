@@ -939,6 +939,11 @@ export type InitSignalingData = {
     */
     ice_servers: LcxlRTCIceServer[];
     /**
+     * @description Whether the server is running with administrative privileges
+     * @type boolean,null
+    */
+    is_admin?: boolean | null;
+    /**
      * @description User name for signaling.
      * @type string
     */
@@ -1284,6 +1289,11 @@ export type RestResponseServerInfo = {
         */
         initialized: boolean;
         /**
+         * @description Whether the system is running with administrative privileges
+         * @type boolean,null
+        */
+        is_admin?: boolean | null;
+        /**
          * @description Startup mode of the server
          * @type string
         */
@@ -1319,6 +1329,11 @@ export type RestResponseSystemInfo = {
          * @type string,null
         */
         host_name?: string | null;
+        /**
+         * @description Whether the system is running with administrative privileges
+         * @type boolean,null
+        */
+        is_admin?: boolean | null;
         /**
          * @description System kernel version
          * @type string,null
@@ -1521,6 +1536,11 @@ export type ServerInfo = {
     */
     initialized: boolean;
     /**
+     * @description Whether the system is running with administrative privileges
+     * @type boolean,null
+    */
+    is_admin?: boolean | null;
+    /**
      * @description Startup mode of the server
      * @type string
     */
@@ -1691,6 +1711,11 @@ export type SystemInfo = {
      * @type string,null
     */
     host_name?: string | null;
+    /**
+     * @description Whether the system is running with administrative privileges
+     * @type boolean,null
+    */
+    is_admin?: boolean | null;
     /**
      * @description System kernel version
      * @type string,null

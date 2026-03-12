@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { openTerminalSession } from "../../clients.ts";
+import type { OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { openTerminalSession } from "../../clients.ts";
 
 export const openTerminalSessionQueryKey = (session_id: OpenTerminalSessionPathParams["session_id"], params: OpenTerminalSessionQueryParams) => [{ url: '/api/desk/terminal/:session_id', params: {session_id:session_id} }, ...(params ? [params] : [])] as const
 

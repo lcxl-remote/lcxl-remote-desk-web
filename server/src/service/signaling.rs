@@ -819,6 +819,7 @@ impl DeskSession {
             video_encoder_list,
             desk_settings: local_settings.desk,
             has_tauri: self.whiteboard_cmd_sender.is_some(),
+            is_admin: desk_utils::permission::is_admin(),
         };
 
         info!("Sending init signaling: {:?}", init_signaling_data);

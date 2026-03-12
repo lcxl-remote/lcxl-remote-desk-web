@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { QueryBackendInfoQueryResponse } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import { queryBackendInfo } from "../../clients.ts";
+import type { QueryBackendInfoQueryResponse } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryBackendInfo } from "../../clients.ts";
 
 export const queryBackendInfoQueryKey = () => [{ url: '/api/desk/backend_info' }] as const
 

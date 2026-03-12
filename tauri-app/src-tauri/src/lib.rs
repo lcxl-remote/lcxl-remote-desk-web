@@ -119,7 +119,7 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
                 tauri_login_token: Some(tauri_token),
                 whiteboard_cmd_sender: Some(wb_cmd_sender),
             };
-
+            let startup_mode = settings.args.startup_mode.clone();
             // Start actix-web server (in a separate thread)
             std::thread::spawn(move || {
                 let system = actix_rt::System::new();
@@ -141,7 +141,18 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
 
             let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>).unwrap();
             let show_i = MenuItem::with_id(app, "show", "Open Window", true, None::<&str>).unwrap();
-            let tray_menu = Menu::with_items(app, &[&show_i, &quit_i]).unwrap();
+            
+            let mut menu_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&show_i];
+
+            let is_admin = desk_utils::permission::is_admin();
+            let is_signaling = startup_mode == StartupMode::Signaling;
+            let elevate_i = MenuItem::with_id(app, "elevate", "Elevate Privileges (提升权限)", true, None::<&str>).unwrap();
+            if !is_admin && !is_signaling {
+                menu_items.push(&elevate_i);
+            }
+
+            menu_items.push(&quit_i);
+            let tray_menu = Menu::with_items(app, &menu_items).unwrap();
             let default_icon = app.default_window_icon().unwrap().clone();
             
             let _tray = TrayIconBuilder::new()
@@ -158,6 +169,49 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
                             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                            }
+                        }
+                        "elevate" => {
+                            let curr_exe = std::env::current_exe().unwrap();
+                            #[cfg(target_os = "windows")]
+                            {
+                                use windows::Win32::UI::Shell::ShellExecuteW;
+                                use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+                                use windows::core::PCWSTR;
+                                use std::os::windows::ffi::OsStrExt;
+
+                                let mut path: Vec<u16> = curr_exe.as_os_str().encode_wide().collect();
+                                path.push(0);
+                                let mut operation: Vec<u16> = "runas".encode_utf16().collect();
+                                operation.push(0);
+
+                                unsafe {
+                                    ShellExecuteW(
+                                        None,
+                                        PCWSTR(operation.as_ptr()),
+                                        PCWSTR(path.as_ptr()),
+                                        None,
+                                        None,
+                                        SW_SHOW,
+                                    );
+                                }
+                                std::process::exit(0);
+                            }
+
+                            #[cfg(any(target_os = "linux", target_os = "macos"))]
+                            {
+                                let cmd = if cfg!(target_os = "macos") {
+                                    format!("osascript -e 'do shell script \"{}\" with administrator privileges'", curr_exe.display())
+                                } else {
+                                    format!("pkexec \"{}\"", curr_exe.display())
+                                };
+                                
+                                std::process::Command::new("sh")
+                                    .arg("-c")
+                                    .arg(cmd)
+                                    .spawn()
+                                    .ok();
+                                std::process::exit(0);
                             }
                         }
                         _ => {}

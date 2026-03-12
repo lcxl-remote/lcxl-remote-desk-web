@@ -4,11 +4,11 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import { deleteFile } from "../../clients.ts";
+import type { DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501 } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
+import { deleteFile } from "../../clients.ts";
 
 export const deleteFileMutationKey = () => [{ url: '/api/desk/file' }] as const
 

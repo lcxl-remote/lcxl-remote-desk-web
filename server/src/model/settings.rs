@@ -16,7 +16,16 @@ use uuid::Uuid;
 use crate::error::DeskError;
 
 #[derive(
-    clap::ValueEnum, Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq, AsRefStr,
+    clap::ValueEnum,
+    Clone,
+    Default,
+    Debug,
+    Serialize,
+    Deserialize,
+    PartialEq,
+    Eq,
+    AsRefStr,
+    ToSchema,
 )]
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]

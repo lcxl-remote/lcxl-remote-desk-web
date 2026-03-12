@@ -33,6 +33,8 @@ import {
 import { Checkbox } from "@/components/ui/checkbox"
 import { Slider } from "@/components/ui/slider"
 import { Input } from "@/components/ui/input"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { AlertTriangle } from "lucide-react"
 import type { InitSignalingData, DeskSettings } from "@/services/types"
 
 interface DeskConfigDialogProps {
@@ -131,6 +133,15 @@ export function DeskConfigDialog({
                 <DialogHeader>
                     <DialogTitle>{t('pages.desk.deskConfig', 'Remote Desk Configuration')}</DialogTitle>
                 </DialogHeader>
+                {initData?.is_admin === false && (
+                    <Alert variant="destructive">
+                        <AlertTriangle className="h-4 w-4" />
+                        <AlertTitle>{t('pages.system.settings.alert.message', 'Warning')}</AlertTitle>
+                        <AlertDescription>
+                            {t('pages.desk.adminPrivilegeWarning', 'The remote server is not running with administrative/root privileges. Some operations may be restricted.')}
+                        </AlertDescription>
+                    </Alert>
+                )}
                 <Form {...form}>
                     <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
                         <div className="space-y-4 py-4">

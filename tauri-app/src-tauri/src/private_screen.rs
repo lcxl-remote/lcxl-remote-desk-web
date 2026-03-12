@@ -112,11 +112,15 @@ impl PrivateScreenManager {
 
         #[cfg(not(target_os = "linux"))]
         {
+            use tauri::Manager as _;
+
             let window =
                 if let Some(window) = handle.get_webview_window(PRIVATE_SCREEN_WINDOW_LABEL) {
                     window
                 } else {
                     // Create new window
+
+                    use tauri::{WebviewUrl, WebviewWindowBuilder};
                     WebviewWindowBuilder::new(
                         handle,
                         PRIVATE_SCREEN_WINDOW_LABEL,
@@ -180,6 +184,8 @@ impl PrivateScreenManager {
         #[cfg(not(target_os = "linux"))]
         {
             // Platform specific: unblock input
+
+            use tauri::Manager as _;
             if let Err(e) = platform::block_input(false) {
                 log::warn!("Failed to unblock local input: {}", e);
             }

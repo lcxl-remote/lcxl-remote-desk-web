@@ -442,6 +442,8 @@ pub struct InitSignalingData {
     /// Whether the remote end has Tauri UI support (required for whiteboard overlay)
     #[serde(default)]
     pub has_tauri: bool,
+    /// Whether the server is running with administrative privileges
+    pub is_admin: bool,
 }
 
 /// WebRTC Connection State

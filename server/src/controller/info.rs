@@ -5,7 +5,9 @@ use sysinfo::System;
 use crate::{
     error::DeskError,
     model::{
-        image_capture::ImageCaptureTypeHelper as _, info::{BackendInfo, ServerInfo, SystemInfo}, settings::SharedSettings
+        image_capture::ImageCaptureTypeHelper as _,
+        info::{BackendInfo, ServerInfo, SystemInfo},
+        settings::{SharedSettings, StartupMode},
     },
 };
 use desk_server_version::SERVER_API_VERSION;
@@ -36,9 +38,15 @@ pub async fn query_sysinfo(settings: web::Data<SharedSettings>) -> Result<HttpRe
     let mut sys = System::new_all();
     sys.refresh_all();
     let mut system_info = SystemInfo::from(&sys);
-    system_info.startup_mode = {
+    let startup_mode = {
         let settings = settings.read().await;
-        settings.args.startup_mode.as_ref().to_string()
+        settings.args.startup_mode.clone()
+    };
+    system_info.startup_mode = startup_mode.clone();
+    system_info.is_admin = if startup_mode != StartupMode::Signaling {
+        Some(desk_utils::permission::is_admin())
+    } else {
+        None
     };
     log::info!(
         "Get system information successfully, info: {:?}",
@@ -59,10 +67,12 @@ pub async fn query_server_info(
 ) -> Result<HttpResponse, DeskError> {
     let (startup_mode, initialized) = {
         let settings = settings.read().await;
-        let mode = settings.args.startup_mode.as_ref().to_string();
+        let mode = settings.args.startup_mode.clone();
+        let mode_str = mode.as_ref().to_string();
 
         let init = !settings.user.login_password.is_empty();
-        (mode, init)
+
+        (mode_str, init)
     };
 
     let info = ServerInfo {
