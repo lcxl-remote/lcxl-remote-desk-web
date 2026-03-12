@@ -29,7 +29,7 @@ use zbus::{
 
 use crate::{
     error::DeskError,
-    model::image_capture::{ImageCapture, ImageInfo, ImageOutputEnumerator, ImageType},
+    model::image_capture::{ImageInfo, ImageOutputEnumerator, ImageType},
     service::image_capture::pipewire_utils::{
         get_zbus_connection, get_zbus_portal_request, wait_zbus_response,
     },

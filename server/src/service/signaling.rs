@@ -4,8 +4,6 @@ use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
 use base64::prelude::*;
 
 use actix_web::web;

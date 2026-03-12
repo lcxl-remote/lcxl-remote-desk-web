@@ -1,7 +1,7 @@
 use crate::platform;
 use lcxl_remote_desk_server::model::host_control::{HostControlEventType, PrivateScreenCommand};
 use std::sync::mpsc;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::AppHandle;
 
 pub struct PrivateScreenManager {
     app_handle: AppHandle,

@@ -14,7 +14,6 @@ use crate::service::image_capture::{
 };
 #[cfg(target_os = "linux")]
 use crate::service::image_capture::{
-    pipewire_capture::{PipewireImageCapture, PipewireImageOutputEnumerator},
     wayland_portal_capture::{WaylandPortalImageCapture, WaylandPortalImageOutputEnumerator},
     x11_capture::{X11ImageCapture, X11ImageOutputEnumerator},
 };
@@ -70,26 +69,23 @@ pub fn create_image_capture(
 }
 
 pub fn list_image_capture() -> BTreeMap<String, Vec<DisplayInfo>> {
-    ImageCaptureType::iter()
-        .map(|x| {
-            //output_list_result =  get_image_output_list(x);
-            (
-                Into::<&'static str>::into(x).to_string(),
-                list_image_output(x),
-            )
-        })
-        .filter(|item| {
-            if let Err(e) = &item.1 {
+    let mut result = BTreeMap::new();
+    for x in ImageCaptureType::iter() {
+        let name: String = Into::<&'static str>::into(x).to_string();
+        match list_image_output(x) {
+            Ok(output_list) => {
+                result.insert(name, output_list);
+            }
+            Err(e) => {
                 log::error!(
                     "Failed to get image output list for type: {}, error: {}",
-                    item.0,
+                    name,
                     e
                 );
             }
-            item.1.is_ok()
-        })
-        .map(|item| (item.0, item.1.unwrap()))
-        .collect()
+        }
+    }
+    result
 }
 
 pub async fn list_image_capture_async() -> BTreeMap<String, Vec<DisplayInfo>> {

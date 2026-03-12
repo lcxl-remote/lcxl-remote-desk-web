@@ -1,8 +1,6 @@
 use actix_web::web;
 use base64::prelude::*;
-use hmac::{Hmac, Mac};
 use serde_json::json;
-use sha1::Sha1;
 use turn_server::{
     statistics::Statistics,
     turn::{Observer, SessionAddr},

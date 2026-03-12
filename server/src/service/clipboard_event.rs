@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
     time::Duration,
