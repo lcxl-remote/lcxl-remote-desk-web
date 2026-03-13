@@ -52,6 +52,7 @@ export default {
   'menu.settings': '设置',
   'menu.settings.account': '个人设置',
   'menu.settings.system': '系统设置',
+  'menu.settings.security': '安全设置',
   'menu.settings.deviceCode': '设备码管理',
   'menu.desk': '桌面',
   'menu.desk.file-list': '文件列表',

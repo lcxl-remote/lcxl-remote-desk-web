@@ -64,6 +64,7 @@ use webrtc::{
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::login::{LoginParams, LoginResult};
 use crate::model::host_control::HostControlEventType;
+use crate::model::security_approval::{SecurityApprovalRequest, SecurityPermissionType};
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -542,6 +543,8 @@ pub struct DeskSession {
         Box<dyn crate::model::host_control::HostControlHelper + Send + Sync>,
     /// Whiteboard command sender (available when Tauri is present)
     pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<crate::model::host_control::WhiteboardCommand>>,
+    /// Security approval channel sender (available when Tauri is present)
+    pub security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
 }
 
 enum ConnectionStateChangeResult {
@@ -673,6 +676,7 @@ impl DeskSession {
         }
 
         let whiteboard_cmd_sender = channels.whiteboard_cmd_sender.clone();
+        let security_approval_sender = channels.security_approval_sender.clone();
 
         Ok(Self {
             settings,
@@ -683,7 +687,87 @@ impl DeskSession {
             terminal_map: HashMap::new(),
             host_control_helper: helper,
             whiteboard_cmd_sender,
+            security_approval_sender,
         })
+    }
+
+    /// Check a security permission from settings.
+    /// - `Some(true)` → allow
+    /// - `Some(false)` → deny
+    /// - `None` → if Tauri present, prompt user via dialog; else deny
+    ///
+    /// If `remember` is checked by the user, updates SecuritySettings in config.
+    async fn check_security_permission(
+        &self,
+        permission: Option<bool>,
+        permission_type: SecurityPermissionType,
+        from_session_id: Option<String>,
+    ) -> bool {
+        match permission {
+            Some(true) => true,
+            Some(false) => false,
+            None => {
+                // Try to prompt user via Tauri dialog
+                if let Some(ref sender) = self.security_approval_sender {
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    let req_id = uuid::Uuid::new_v4().to_string();
+                    let request = SecurityApprovalRequest {
+                        req_id: req_id.clone(),
+                        permission_type: permission_type.clone(),
+                        from_session_id,
+                    };
+                    crate::model::security_approval::PENDING_APPROVALS.lock().unwrap().insert(req_id.clone(), response_tx);
+                    
+                    if sender.send(request).is_ok() {
+                        // Wait for user response (with timeout handled by Tauri side)
+                        match response_rx.await {
+                            Ok(response) => {
+                                if response.remember {
+                                    // Persist the choice to SecuritySettings
+                                    // Ensure we don't hold any .read() guard on settings before calling this
+                                    let mut settings = self.settings.write().await;
+                                    match permission_type {
+                                        SecurityPermissionType::RemoteControl => {
+                                            settings.security.allow_remote_control = Some(response.approved);
+                                        }
+                                        SecurityPermissionType::ClipboardSync => {
+                                            settings.security.allow_clipboard_sync = Some(response.approved);
+                                        }
+                                        SecurityPermissionType::PrivateScreen => {
+                                            settings.security.allow_private_screen = Some(response.approved);
+                                        }
+                                        SecurityPermissionType::Whiteboard => {
+                                            settings.security.allow_whiteboard = Some(response.approved);
+                                        }
+                                        SecurityPermissionType::Terminal => {
+                                            settings.security.allow_terminal = Some(response.approved);
+                                        }
+                                        SecurityPermissionType::FileBrowse => {
+                                            settings.security.allow_file_browse = Some(response.approved);
+                                        }
+                                        SecurityPermissionType::FileTransfer => {
+                                            settings.security.allow_file_transfer = Some(response.approved);
+                                        }
+                                    }
+                                    if let Err(e) = settings.save() {
+                                        log::error!("Failed to save security settings: {}", e);
+                                    }
+                                }
+                                return response.approved;
+                            }
+                            Err(_) => {
+                                log::warn!("Security approval response channel dropped, denying");
+                                crate::model::security_approval::PENDING_APPROVALS.lock().unwrap().remove(&req_id);
+                                return false;
+                            }
+                        }
+                    }
+                }
+                // No Tauri (headless mode) — default deny
+                log::info!("No GUI available, defaulting to deny for {:?}", permission_type);
+                false
+            }
+        }
     }
 }
 
@@ -1134,6 +1218,8 @@ impl DeskSession {
         let signaling_state_for_data_channel = peer_connection.signaling_state.clone();
         let whiteboard_sender_for_dc = self.whiteboard_cmd_sender.clone();
         let from_session_id_for_dc = from_session_id.to_string();
+        let settings_for_dc = self.settings.clone();
+        let security_sender_for_dc = self.security_approval_sender.clone();
         peer_connection
             .rtc_peer_connection
             .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
@@ -1143,9 +1229,13 @@ impl DeskSession {
                 let signaling_state = signaling_state_for_data_channel.clone();
                 let wb_sender = whiteboard_sender_for_dc.clone();
                 let sid = from_session_id_for_dc.clone();
+                let settings = settings_for_dc.clone();
+                let security_sender = security_sender_for_dc.clone();
                 // Register channel opening handling
                 Box::pin(async move {
-                    let result = handle_data_channel_event(signaling_state, d.clone(), wb_sender, sid).await;
+                    let result = handle_data_channel_event(
+                        signaling_state, d.clone(), wb_sender, sid, settings, security_sender
+                    ).await;
                     if let Err(error) = result {
                         log::error!("Failed to handle data channel event: {}", error);
                     }
@@ -1548,6 +1638,27 @@ impl DeskSession {
                 if let Some(data) =
                     signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
                 {
+                    if data.enable {
+                        let allow_private_screen = { self.settings.read().await.security.allow_private_screen };
+                        let approved = self.check_security_permission(
+                            allow_private_screen,
+                            SecurityPermissionType::PrivateScreen,
+                            Some(from_session_id.to_string()),
+                        ).await;
+                        
+                        if !approved {
+                            log::warn!("Enable private screen denied by security settings or user for {}", from_session_id);
+                            self.session.send_error(
+                                &signaling_model.request_id,
+                                signaling_model.signaling_type.into(),
+                                Some(from_session_id.to_string()),
+                                DeskErrorCode::PERMISSION_ERROR,
+                                "Private screen access denied",
+                            ).await?;
+                            return Ok(());
+                        }
+                    }
+
                     let _ = self
                         .host_control_helper
                         .enable_private_screen(&from_session_id, data.enable);
@@ -1704,12 +1815,45 @@ impl DeskSession {
             control_data
         );
 
+        // check security permission!
+        let allow_control = { self.settings.read().await.security.allow_remote_control };
+        let allow_clipboard = { self.settings.read().await.security.allow_clipboard_sync };
+
+        let control_approved = self.check_security_permission(
+            allow_control,
+            SecurityPermissionType::RemoteControl,
+            Some(from_session_id.to_string()),
+        ).await;
+
+        if !control_approved {
+            log::warn!("Remote control request denied by security settings or user for {}", from_session_id);
+            self.session
+                .send_to_peer(
+                    &signaling_model.request_id,
+                    SignalingType::DenyControl,
+                    &from_session_id,
+                    (),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        let clipboard_approved = if control_data.accept_clipboard_sync {
+            self.check_security_permission(
+                allow_clipboard,
+                SecurityPermissionType::ClipboardSync,
+                Some(from_session_id.to_string()),
+            ).await
+        } else {
+            false
+        };
+
         let peer_connection = rtc_peer_connection.read().await;
         let mut signaling_state = peer_connection.signaling_state.write().await;
 
         let reply_type = if control_data.accept {
             signaling_state.accept_control = true;
-            signaling_state.accept_clipboard_sync = control_data.accept_clipboard_sync;
+            signaling_state.accept_clipboard_sync = clipboard_approved;
             log::info!(
                 "Auto accepting control request from {}, sending AcceptControl signaling",
                 from_session_id
@@ -1745,6 +1889,25 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        
+        let allow_terminal = { self.settings.read().await.security.allow_terminal };
+        let approved = self.check_security_permission(
+            allow_terminal,
+            SecurityPermissionType::Terminal,
+            Some(from_session_id.to_string()),
+        ).await;
+
+        if !approved {
+            self.session.send_error(
+                &signaling_model.request_id,
+                signaling_model.signaling_type.into(),
+                Some(from_session_id.to_string()),
+                DeskErrorCode::PERMISSION_ERROR,
+                "Terminal access denied by security settings or user",
+            ).await?;
+            return Ok(());
+        }
+
         // The from_session_id IS the terminal_session_id generated by the controller.
         let start_terminal_session = signaling_model.get_data::<StartTerminalSession>()?;
         let command = start_terminal_session.command;
@@ -1812,7 +1975,7 @@ impl DeskSession {
                     );
                     let model = SignalingModel::new_request::<()>(
                         SignalingType::TerminalClosed,
-                        Some(monitor_session_id.to_owned()),
+                        Some(monitor_session_id.to_string()),
                         None,
                     );
                     if let Ok(model) = model {
@@ -2010,6 +2173,23 @@ impl DeskSession {
     ) -> Result<(), DeskError> {
         // ManagerFileList is a request from the http api, so it may not have a from_session_id
         let from_session_id = signaling_model.from_session_id.clone();
+        let allow_file_browse = { self.settings.read().await.security.allow_file_browse };
+        let approved = self.check_security_permission(
+            allow_file_browse,
+            SecurityPermissionType::FileBrowse,
+            from_session_id.clone(),
+        ).await;
+
+        if !approved {
+            self.session.send_error(
+                &signaling_model.request_id,
+                signaling_model.signaling_type.into(),
+                from_session_id.clone(),
+                DeskErrorCode::PERMISSION_ERROR,
+                "File browse access denied",
+            ).await?;
+            return Ok(());
+        }
 
         let params = signaling_model.get_data::<FileListParams>()?;
         match crate::service::file_manager::list_files(params).await {
@@ -2018,7 +2198,7 @@ impl DeskSession {
                     .send_response(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileList,
-                        from_session_id,
+                        from_session_id.clone(),
                         &response,
                     )
                     .await?;
@@ -2028,7 +2208,7 @@ impl DeskSession {
                     .send_error(
                         &signaling_model.request_id,
                         SignalingType::ManagerFileList,
-                        from_session_id,
+                        from_session_id.clone(),
                         e.to_error_code(),
                         &e.to_string(),
                     )
@@ -2042,8 +2222,26 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        // ManagerFileDelete is a request from the http api, so it may not have a from_session_id
+        // ManagerFileList is a request from the http api, so it may not have a from_session_id
         let from_session_id = signaling_model.from_session_id.clone();
+        let allow_file_browse = { self.settings.read().await.security.allow_file_browse };
+        let approved = self.check_security_permission(
+            allow_file_browse,
+            SecurityPermissionType::FileBrowse,
+            from_session_id.clone(),
+        ).await;
+
+        if !approved {
+            self.session.send_error(
+                &signaling_model.request_id,
+                signaling_model.signaling_type.into(),
+                from_session_id.clone(),
+                DeskErrorCode::PERMISSION_ERROR,
+                "File delete access denied",
+            ).await?;
+            return Ok(());
+        }
+
         let params = signaling_model.get_data::<DeleteFileRequest>()?;
 
         match file_manager::delete_file(params).await {

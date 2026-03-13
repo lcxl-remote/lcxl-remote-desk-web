@@ -9,3 +9,5 @@ pub mod signal;
 pub mod terminal;
 pub mod version;
 pub mod whiteboard;
+pub mod security_settings;
+

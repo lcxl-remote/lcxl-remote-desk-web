@@ -1,0 +1,1 @@
+{"type":"object","required":["req_id","approved","remember"],"properties":{"approved":{"type":"boolean"},"remember":{"type":"boolean"},"req_id":{"type":"string"}},"x-readme-ref-name":"SecurityApprovalSubmitParams"}

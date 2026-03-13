@@ -93,6 +93,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 {
                     title: "menu.settings.system",
                     url: "/system/settings",
+                },
+                {
+                    title: "menu.settings.security",
+                    url: "/system/security",
                 }
             ];
 

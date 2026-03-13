@@ -2,6 +2,7 @@ mod platform;
 mod private_screen;
 mod whiteboard;
 mod error;
+mod security_approval;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -49,6 +50,7 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
     
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .invoke_handler(tauri::generate_handler![])
         .setup(move |app| {
             let handle = app.handle().clone();
 
@@ -112,12 +114,18 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
             let tauri_token = uuid::Uuid::new_v4().to_string();
             let tauri_token_for_window = tauri_token.clone();
 
+            // Set up Security Approval Manager
+            let (security_sender, security_receiver) = std::sync::mpsc::channel();
+            let sa_manager = crate::security_approval::SecurityApprovalManager::new(handle.clone());
+            sa_manager.start(security_receiver);
+
             // Start actix-web server (in a separate thread)
             let channels = lcxl_remote_desk_server::ExternalChannels {
                 private_screen_cmd_sender: Some(cmd_sender),
                 private_screen_state_receiver: Some(state_receiver),
                 tauri_login_token: Some(tauri_token),
                 whiteboard_cmd_sender: Some(wb_cmd_sender),
+                security_approval_sender: Some(security_sender),
             };
             let startup_mode = settings.args.startup_mode.clone();
             // Start actix-web server (in a separate thread)

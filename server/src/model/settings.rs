@@ -3,7 +3,9 @@ use std::{fs, ops::Deref, path::PathBuf};
 use chrono::{DateTime, Local};
 use clap::Parser;
 use config::{Config, Environment, File};
-use desk_signal_facade::model::{desk_settings::DeskSettings, terminal::TerminalSettings};
+use desk_signal_facade::model::{
+    desk_settings::DeskSettings, security_settings::SecuritySettings, terminal::TerminalSettings,
+};
 use desk_turn::model::TurnSettings;
 use desk_utils::error::DeskErrorCode;
 use log::{debug, info};
@@ -172,6 +174,9 @@ pub struct Settings {
 
     /// Terminal settings
     pub terminal: TerminalSettings,
+    /// Security settings for remote access permissions
+    #[serde(default)]
+    pub security: SecuritySettings,
 
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]

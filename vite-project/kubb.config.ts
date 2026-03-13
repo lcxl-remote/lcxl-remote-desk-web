@@ -23,6 +23,7 @@ export default defineConfig({
             },
         }),
         pluginClient({
+            importPath: '@/lib/kubb-client',
             output: {
                 path: './clients.ts',
             },

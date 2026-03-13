@@ -6,6 +6,7 @@ pub mod host_control;
 pub mod image_capture;
 pub mod info;
 pub mod login;
+pub mod security_approval;
 pub mod settings;
 pub mod turn;
 pub mod video_encoder;

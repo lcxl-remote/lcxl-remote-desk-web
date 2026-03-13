@@ -940,9 +940,9 @@ export type InitSignalingData = {
     ice_servers: LcxlRTCIceServer[];
     /**
      * @description Whether the server is running with administrative privileges
-     * @type boolean,null
+     * @type boolean
     */
-    is_admin?: boolean | null;
+    is_admin: boolean;
     /**
      * @description User name for signaling.
      * @type string
@@ -1268,6 +1268,62 @@ export type RestResponseBackendInfo = {
     success: boolean;
 };
 
+export type RestResponseSecuritySettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Security settings for controlling remote access permissions.\n\nEach field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Allow clipboard synchronization
+         * @type boolean,null
+        */
+        allow_clipboard_sync?: boolean | null;
+        /**
+         * @description Allow file browsing (list/delete files via signaling)
+         * @type boolean,null
+        */
+        allow_file_browse?: boolean | null;
+        /**
+         * @description Allow file transfer (upload/download via DataChannel)
+         * @type boolean,null
+        */
+        allow_file_transfer?: boolean | null;
+        /**
+         * @description Allow enabling private screen mode
+         * @type boolean,null
+        */
+        allow_private_screen?: boolean | null;
+        /**
+         * @description Allow remote desktop control (mouse/keyboard input)
+         * @type boolean,null
+        */
+        allow_remote_control?: boolean | null;
+        /**
+         * @description Allow remote terminal access
+         * @type boolean,null
+        */
+        allow_terminal?: boolean | null;
+        /**
+         * @description Allow whiteboard overlay
+         * @type boolean,null
+        */
+        allow_whiteboard?: boolean | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseServerInfo = {
     /**
      * @type integer, int32
@@ -1289,11 +1345,6 @@ export type RestResponseServerInfo = {
         */
         initialized: boolean;
         /**
-         * @description Whether the system is running with administrative privileges
-         * @type boolean,null
-        */
-        is_admin?: boolean | null;
-        /**
          * @description Startup mode of the server
          * @type string
         */
@@ -1308,6 +1359,16 @@ export type RestResponseServerInfo = {
     */
     success: boolean;
 };
+
+export const startupModeEnum = {
+    default: "default",
+    signaling: "signaling",
+    "desk-server": "desk-server"
+} as const;
+
+export type StartupModeEnumKey = (typeof startupModeEnum)[keyof typeof startupModeEnum];
+
+export type StartupMode = StartupModeEnumKey;
 
 export type RestResponseSystemInfo = {
     /**
@@ -1353,7 +1414,7 @@ export type RestResponseSystemInfo = {
          * @description Startup mode
          * @type string
         */
-        startup_mode: string;
+        startup_mode: StartupMode;
         /**
          * @description Total memory in bytes
          * @minLength 0
@@ -1522,6 +1583,84 @@ export type RestResponseTelemetryStatus = {
 };
 
 /**
+ * @description Used by Tauri to send security approval requests to the frontend
+*/
+export type SecurityApprovalEventPayload = {
+    /**
+     * @type string,null
+    */
+    from_session_id?: string | null;
+    /**
+     * @type string
+    */
+    i18n_key: string;
+    /**
+     * @type string
+    */
+    permission_type: string;
+    /**
+     * @type string
+    */
+    req_id: string;
+};
+
+export type SecurityApprovalSubmitParams = {
+    /**
+     * @type boolean
+    */
+    approved: boolean;
+    /**
+     * @type boolean
+    */
+    remember: boolean;
+    /**
+     * @type string
+    */
+    req_id: string;
+};
+
+/**
+ * @description Security settings for controlling remote access permissions.\n\nEach field uses `Option<bool>`:\n  - `None`  — not configured (GUI: prompt user; headless: deny)\n  - `Some(true)`  — always allow\n  - `Some(false)` — always deny
+*/
+export type SecuritySettings = {
+    /**
+     * @description Allow clipboard synchronization
+     * @type boolean,null
+    */
+    allow_clipboard_sync?: boolean | null;
+    /**
+     * @description Allow file browsing (list/delete files via signaling)
+     * @type boolean,null
+    */
+    allow_file_browse?: boolean | null;
+    /**
+     * @description Allow file transfer (upload/download via DataChannel)
+     * @type boolean,null
+    */
+    allow_file_transfer?: boolean | null;
+    /**
+     * @description Allow enabling private screen mode
+     * @type boolean,null
+    */
+    allow_private_screen?: boolean | null;
+    /**
+     * @description Allow remote desktop control (mouse/keyboard input)
+     * @type boolean,null
+    */
+    allow_remote_control?: boolean | null;
+    /**
+     * @description Allow remote terminal access
+     * @type boolean,null
+    */
+    allow_terminal?: boolean | null;
+    /**
+     * @description Allow whiteboard overlay
+     * @type boolean,null
+    */
+    allow_whiteboard?: boolean | null;
+};
+
+/**
  * @description Server information
 */
 export type ServerInfo = {
@@ -1535,11 +1674,6 @@ export type ServerInfo = {
      * @type boolean
     */
     initialized: boolean;
-    /**
-     * @description Whether the system is running with administrative privileges
-     * @type boolean,null
-    */
-    is_admin?: boolean | null;
     /**
      * @description Startup mode of the server
      * @type string
@@ -1735,7 +1869,7 @@ export type SystemInfo = {
      * @description Startup mode
      * @type string
     */
-    startup_mode: string;
+    startup_mode: StartupMode;
     /**
      * @description Total memory in bytes
      * @minLength 0
@@ -2376,6 +2510,48 @@ export type ListFilesQueryResponse = ListFiles200;
 export type ListFilesQuery = {
     Response: ListFiles200;
     QueryParams: ListFilesQueryParams;
+    Errors: any;
+};
+
+/**
+ * @description Query security settings successfully
+*/
+export type QuerySecuritySettings200 = RestResponseSecuritySettings;
+
+export type QuerySecuritySettingsQueryResponse = QuerySecuritySettings200;
+
+export type QuerySecuritySettingsQuery = {
+    Response: QuerySecuritySettings200;
+    Errors: any;
+};
+
+/**
+ * @description Update security settings successfully
+*/
+export type UpdateSecuritySettings200 = any;
+
+export type UpdateSecuritySettingsMutationRequest = SecuritySettings;
+
+export type UpdateSecuritySettingsMutationResponse = UpdateSecuritySettings200;
+
+export type UpdateSecuritySettingsMutation = {
+    Response: UpdateSecuritySettings200;
+    Request: UpdateSecuritySettingsMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Submit security approval successfully
+*/
+export type SubmitSecurityApproval200 = any;
+
+export type SubmitSecurityApprovalMutationRequest = SecurityApprovalSubmitParams;
+
+export type SubmitSecurityApprovalMutationResponse = SubmitSecurityApproval200;
+
+export type SubmitSecurityApprovalMutation = {
+    Response: SubmitSecurityApproval200;
+    Request: SubmitSecurityApprovalMutationRequest;
     Errors: any;
 };
 

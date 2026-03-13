@@ -1,9 +1,20 @@
 import axios from "axios";
 import type { AxiosRequestConfig, AxiosResponse, AxiosError, AxiosInstance } from "axios";
 
-export const client = axios.create({
-    baseURL: "/api",
-});
+export const client = axios.create({});
+
+// Intercept desktop custom RestResponse success=false
+client.interceptors.response.use(
+    (response) => {
+        if (response.data && typeof response.data === "object" && response.data.success === false) {
+            return Promise.reject(new Error(response.data.message || "Request failed"));
+        }
+        return response;
+    },
+    (error) => {
+        return Promise.reject(error);
+    }
+);
 
 export default client;
 
