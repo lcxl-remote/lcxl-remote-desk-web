@@ -1,7 +1,8 @@
 use lcxl_remote_desk_server::model::security_approval::{
-    SecurityApprovalEventPayload, SecurityApprovalReceiver,
+    SecurityApprovalEventPayload, SecurityApprovalReceiver, SecurityPermissionType,
 };
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 pub struct SecurityApprovalManager {
     app_handle: AppHandle,
@@ -18,9 +19,9 @@ impl SecurityApprovalManager {
         std::thread::spawn(move || {
             while let Ok(req) = receiver.recv() {
                 let payload = SecurityApprovalEventPayload {
-                    req_id: req.req_id,
+                    req_id: req.req_id.clone(),
                     permission_type: format!("{:?}", req.permission_type),
-                    from_session_id: req.from_session_id,
+                    from_session_id: req.from_session_id.clone(),
                     i18n_key: req.permission_type.i18n_key().to_string(),
                 };
 
@@ -45,6 +46,28 @@ impl SecurityApprovalManager {
                         log::error!("Failed to eval security approval request: {}", e);
                     }
                 }
+
+                // Show system notification (tray message)
+                let permission_key = match req.permission_type {
+                    SecurityPermissionType::RemoteControl => "permission.remote_control",
+                    SecurityPermissionType::ClipboardSync => "permission.clipboard_sync",
+                    SecurityPermissionType::PrivateScreen => "permission.private_screen",
+                    SecurityPermissionType::Whiteboard => "permission.whiteboard",
+                    SecurityPermissionType::Terminal => "permission.terminal",
+                    SecurityPermissionType::FileBrowse => "permission.file_browse",
+                    SecurityPermissionType::FileTransfer => "permission.file_transfer",
+                };
+
+                let permission_name = rust_i18n::t!(permission_key);
+                let title = rust_i18n::t!("security_approval_title");
+                let msg = rust_i18n::t!("permission_requested", permission = permission_name);
+
+                app_handle.notification()
+                    .builder()
+                    .title(title)
+                    .body(msg)
+                    .show()
+                    .unwrap_or_else(|e| log::error!("Failed to show notification: {}", e));
 
                 // emit to frontend (for scenarios where tauri injection exists)
                 if let Err(e) = app_handle.emit("security-approval-request", payload) {

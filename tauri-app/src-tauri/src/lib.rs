@@ -16,6 +16,8 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 use crate::error::DeskTauriError;
 
+rust_i18n::i18n!("locales");
+
 const MAIN_WINDOW_LABEL: &str = "main";
 
 pub fn run()->Result<(), DeskTauriError> {
@@ -50,6 +52,7 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
     
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![])
         .setup(move |app| {
             let handle = app.handle().clone();

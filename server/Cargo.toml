@@ -62,10 +62,10 @@ uuid = { workspace = true }
 portable-pty = { workspace = true }
 
 url = { workspace = true }
+rust-i18n = { workspace = true }
 
 toml = "0.9"
 config = { version = "0.15", features = ["toml"] }
-
 
 mime = "0.3"
 yuv = "0.8"
@@ -88,8 +88,7 @@ cpal = "0.15"
 ringbuf = "0.4"
 
 vpx-encode = { path = "../third-deps/vpx-encode", features = ["vp9"] }
-rust-i18n = "3.1"
-webbrowser = "1"
+
 sysinfo = "0.37"
 opentelemetry = { version = "0.31.0", features = ["metrics", "trace"] }
 opentelemetry-otlp = { version = "0.31.0", features = [

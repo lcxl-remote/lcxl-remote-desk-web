@@ -1,0 +1,29 @@
+_version: 2
+security_approval_title:
+  en: "Security Approval Required"
+  zh-CN: "需要安全授权"
+permission_requested:
+  en: "Permission requested: %{permission}"
+  zh-CN: "控制端请求: %{permission}"
+permission:
+  remote_control:
+    en: "Remote Control"
+    zh-CN: "远程控制"
+  clipboard_sync:
+    en: "Clipboard Sync"
+    zh-CN: "剪贴板同步"
+  private_screen:
+    en: "Private Screen"
+    zh-CN: "隐私屏"
+  whiteboard:
+    en: "Whiteboard"
+    zh-CN: "白板"
+  terminal:
+    en: "Terminal Access"
+    zh-CN: "终端访问"
+  file_browse:
+    en: "File Browse"
+    zh-CN: "文件浏览"
+  file_transfer:
+    en: "File Transfer"
+    zh-CN: "文件传输"

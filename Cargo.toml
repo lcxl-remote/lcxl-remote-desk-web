@@ -94,3 +94,5 @@ sea-orm = { version = "2.0.0-rc", features = [
 sea-orm-migration = "2.0.0-rc"
 
 rand = { version = "0.9", features = ["std"] }
+
+rust-i18n = "3.1"

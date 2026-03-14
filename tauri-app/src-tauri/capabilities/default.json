@@ -7,6 +7,7 @@
     "permissions": [
         "core:default",
         "global-shortcut:default",
+        "notification:default",
         "core:window:default",
         "core:window:allow-create",
         "core:window:allow-close",
