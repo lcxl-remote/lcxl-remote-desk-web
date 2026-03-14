@@ -402,7 +402,12 @@ export default {
   'security.select.deny': '始终拒绝',
   'pages.system.security.save': '保存设置',
 
-  'security.dialog.title': '需要安全授权',
+  'pages.system.security.behavior': '授权行为',
+  'security.permission.approvalTimeout': '授权框超时时间',
+  'pages.system.security.approvalTimeoutDesc': '在指定时间内未进行操作将自动拒绝请求。',
+  'security.timeout.never': '从不',
+
+  'security.dialog.title': '需要安全授权', 
   'security.dialog.description': 'ID 为 ',
   'security.dialog.description2': ' 的控制端正在向您申请以下权限：',
   'security.dialog.rememberChoice': '记住此选项',

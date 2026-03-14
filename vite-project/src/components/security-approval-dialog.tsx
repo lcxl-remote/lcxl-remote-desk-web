@@ -14,11 +14,16 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { SecurityApprovalEventPayload } from "@/services/types";
+import { useQuerySecuritySettings } from "@/services/hooks/undefinedController/useQuerySecuritySettings";
 
 export function SecurityApprovalDialog() {
   const { t } = useTranslation();
   const [queue, setQueue] = useState<SecurityApprovalEventPayload[]>([]);
   const [remember, setRemember] = useState(false);
+  const [timeLeft, setTimeLeft] = useState<number | null>(null);
+
+  const { data: settingsResponse } = useQuerySecuritySettings();
+  const timeout = settingsResponse?.data?.approval_timeout;
 
   useEffect(() => {
     let unlistenFn: UnlistenFn | undefined;
@@ -72,6 +77,29 @@ export function SecurityApprovalDialog() {
 
   const currentRequest = queue[0];
 
+  useEffect(() => {
+    if (currentRequest && timeout && timeout > 0) {
+      setTimeLeft(timeout);
+    } else {
+      setTimeLeft(null);
+    }
+  }, [currentRequest, timeout]);
+
+  useEffect(() => {
+    if (timeLeft === null) return;
+
+    if (timeLeft <= 0) {
+      handleResponse(false);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => (prev !== null ? prev - 1 : null));
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [timeLeft]);
+
   const handleResponse = async (approved: boolean) => {
     if (!currentRequest) return;
     try {
@@ -91,6 +119,7 @@ export function SecurityApprovalDialog() {
     } finally {
       // Reset state and move to next request
       setRemember(false);
+      setTimeLeft(null);
       setQueue((prev) => prev.slice(1));
     }
   };
@@ -133,6 +162,7 @@ export function SecurityApprovalDialog() {
         <AlertDialogFooter>
           <AlertDialogCancel onClick={() => handleResponse(false)}>
             {t("security.dialog.deny", "Deny")}
+            {timeLeft !== null && ` (${timeLeft}s)`}
           </AlertDialogCancel>
           <AlertDialogAction onClick={() => handleResponse(true)}>
             {t("security.dialog.allow", "Allow")}

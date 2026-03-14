@@ -24,6 +24,7 @@ const securitySettingsSchema = z.object({
     allow_terminal: z.boolean().nullable(),
     allow_file_browse: z.boolean().nullable(),
     allow_file_transfer: z.boolean().nullable(),
+    approval_timeout: z.number().nullable(),
 })
 
 type SecuritySettingsFormValues = z.infer<typeof securitySettingsSchema>
@@ -38,6 +39,16 @@ const mapFromSelectValue = (val: string): boolean | null => {
     if (val === "allow") return true
     if (val === "deny") return false
     return null
+}
+
+const mapTimeoutToSelectValue = (val: number | null) => {
+    return (val ?? 0).toString()
+}
+
+const mapTimeoutFromSelectValue = (val: string): number | null => {
+    if (!val || val === "") return null
+    const num = parseInt(val, 10)
+    return num > 0 ? num : null
 }
 
 export function SecuritySettings() {
@@ -58,6 +69,7 @@ export function SecuritySettings() {
             allow_terminal: null,
             allow_file_browse: null,
             allow_file_transfer: null,
+            approval_timeout: null,
         },
     })
 
@@ -73,6 +85,7 @@ export function SecuritySettings() {
                 allow_terminal: data.allow_terminal ?? null,
                 allow_file_browse: data.allow_file_browse ?? null,
                 allow_file_transfer: data.allow_file_transfer ?? null,
+                approval_timeout: data.approval_timeout ?? null,
             })
         }
     }, [settingsResponse?.data, isLoading, form])
@@ -169,6 +182,48 @@ export function SecuritySettings() {
                                         )}
                                     />
                                 ))}
+                            </div>
+
+                            <div className="space-y-4 pt-4 border-t">
+                                <h3 className="text-lg font-medium">{t("pages.system.security.behavior", "Approval Behavior")}</h3>
+                                <FormField
+                                    control={form.control}
+                                    name="approval_timeout"
+                                    render={({ field }) => (
+                                        <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
+                                            <div className="space-y-0.5">
+                                                <FormLabel className="text-base">{t("security.permission.approvalTimeout", "Approval Timeout")}</FormLabel>
+                                                <FormDescription>
+                                                    {t("pages.system.security.approvalTimeoutDesc", "Automatically deny the request if no action is taken within the specified time.")}
+                                                </FormDescription>
+                                            </div>
+                                            <div className="w-48 ml-4">
+                                                <Select
+                                                    onValueChange={(val) => {
+                                                        if (val !== undefined && val !== null && val !== "") {
+                                                            field.onChange(mapTimeoutFromSelectValue(val))
+                                                        }
+                                                    }}
+                                                    value={mapTimeoutToSelectValue(field.value)}
+                                                >
+                                                    <FormControl>
+                                                        <SelectTrigger>
+                                                            <SelectValue placeholder="Select timeout" />
+                                                        </SelectTrigger>
+                                                    </FormControl>
+                                                    <SelectContent>
+                                                        <SelectItem value="0">{t("security.timeout.never", "Never")}</SelectItem>
+                                                        <SelectItem value="10">10s</SelectItem>
+                                                        <SelectItem value="30">30s</SelectItem>
+                                                        <SelectItem value="60">1m</SelectItem>
+                                                        <SelectItem value="120">2m</SelectItem>
+                                                        <SelectItem value="300">5m</SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                            </div>
+                                        </FormItem>
+                                    )}
+                                />
                             </div>
 
                             <div className="flex justify-end pt-4">

@@ -24,4 +24,6 @@ pub struct SecuritySettings {
     pub allow_file_browse: Option<bool>,
     /// Allow file transfer (upload/download via DataChannel)
     pub allow_file_transfer: Option<bool>,
+    /// Timeout for security approval requests in seconds
+    pub approval_timeout: Option<u32>,
 }

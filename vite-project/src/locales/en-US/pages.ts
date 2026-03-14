@@ -404,6 +404,11 @@ export default {
   'security.select.deny': 'Always deny',
   'pages.system.security.save': 'Save Changes',
 
+  'pages.system.security.behavior': 'Approval Behavior',
+  'security.permission.approvalTimeout': 'Approval Timeout',
+  'pages.system.security.approvalTimeoutDesc': 'Automatically deny the request if no action is taken within the specified time.',
+  'security.timeout.never': 'Never',
+
   'security.dialog.title': 'Security Approval Required',
   'security.dialog.description': 'A controller with ID ',
   'security.dialog.description2': ' is requesting permission to:',

@@ -1313,6 +1313,12 @@ export type RestResponseSecuritySettings = {
          * @type boolean,null
         */
         allow_whiteboard?: boolean | null;
+        /**
+         * @description Timeout for security approval requests in seconds
+         * @minLength 0
+         * @type integer,null, int32
+        */
+        approval_timeout?: number | null;
     };
     /**
      * @type string,null
@@ -1658,6 +1664,12 @@ export type SecuritySettings = {
      * @type boolean,null
     */
     allow_whiteboard?: boolean | null;
+    /**
+     * @description Timeout for security approval requests in seconds
+     * @minLength 0
+     * @type integer,null, int32
+    */
+    approval_timeout?: number | null;
 };
 
 /**
