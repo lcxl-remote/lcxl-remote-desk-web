@@ -596,7 +596,7 @@ impl DeskSession {
                 cmd_sender,
             )?;
 
-        // 若是由 Tauri 启动，此时可能有 state_receiver 需要我们监听
+        // If started by Tauri, there might be a state_receiver we need to listen to
 
         if let Some(mut rx) = channels.private_screen_state_receiver.take() {
             let session_clone = session.clone();
@@ -1517,7 +1517,7 @@ impl DeskSession {
                 match handle_connection_state_change(&state, "capture_audio_task") {
                     ConnectionStateChangeResult::Exit => break,
                     ConnectionStateChangeResult::UpdateSettings(_new_setting) => {
-                        // TODO: 暂时无音频配置更新
+                        // TODO: No audio configuration updates for now
                     },
                     ConnectionStateChangeResult::NoChange => {},
                 }

@@ -38,20 +38,20 @@ pub fn block_input(block: bool) -> Result<(), String> {
         toggle_xrandr_brightness(true);
 
         let mut grabbed_devices = Vec::new();
-        // 遍历所有 /dev/input/event* 设备
+        // Iterate over all /dev/input/event* devices
         if let Ok(entries) = std::fs::read_dir("/dev/input") {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.to_string_lossy().contains("event") {
                     if let Ok(mut device) = evdev::Device::open(&path) {
                         let name = device.name().unwrap_or("");
-                        // 跳过我们自己的虚拟输入设备
+                        // Skip our own virtual input devices
                         if name == "lcxl-web-remote-desk-mouse"
                             || name == "lcxl-web-remote-desk-keyboard"
                         {
                             continue;
                         }
-                        // 尝试独占抓取物理设备
+                        // Attempt to grab physical devices exclusively
                         if device.grab().is_ok() {
                             grabbed_devices.push(device);
                         }

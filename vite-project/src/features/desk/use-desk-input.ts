@@ -145,7 +145,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
                 return;
             }
             if (event.cancelable) {
-                event.preventDefault(); // 阻止滚动、拉拽缩放等默认触摸行为
+                event.preventDefault(); // Prevent default touch behaviors like scrolling and pinch-to-zoom
             }
             element.focus();
 

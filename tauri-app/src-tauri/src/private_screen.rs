@@ -160,7 +160,7 @@ impl PrivateScreenManager {
                 );
             }
 
-            // 注册全局快捷键
+            // Register global hotkey
             Self::register_hotkey(handle)?;
 
             Ok(())
@@ -168,7 +168,7 @@ impl PrivateScreenManager {
     }
 
     fn hide_window(handle: &AppHandle) -> Result<(), String> {
-        // 注销全局快捷键 (common for all platforms)
+        // Unregister global hotkey (common for all platforms)
         let _ = Self::unregister_hotkey(handle);
 
         #[cfg(target_os = "linux")]

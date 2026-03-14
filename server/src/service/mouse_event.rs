@@ -133,7 +133,7 @@ pub async fn handle_mouse_event(
                         if seq > 0 {
                             let mut last_seq = last_sequence_num.lock().await;
                             if seq < *last_seq {
-                                // 抛弃迟到的过期乱序包
+                                // Discard late/expired out-of-order packets
                                 return;
                             }
                             *last_seq = seq;

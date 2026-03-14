@@ -27,11 +27,11 @@ impl SecurityApprovalManager {
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.unminimize();
-                    // 破解现代系统防止后台抢焦点的限制 (Windows/macOS)
+                    // Bypass modern system restrictions preventing background focus stealing (Windows/macOS)
                     let _ = window.set_always_on_top(true);
                     let _ = window.set_focus();
                     let _ = window.set_always_on_top(false);
-                    // 提示用户托盘有消息（任务栏闪烁）
+                    // Notify user of tray message (taskbar flashing)
                     let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
 
                     // Send payload via dispatchEvent for external url scenarios without tauri injection
