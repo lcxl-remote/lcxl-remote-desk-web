@@ -20,8 +20,8 @@ use crate::controller::{
     init::init_system,
     login::{change_password, get_captcha, login_account, logout_account},
     settings::{
-        query_settings, query_telemetry_status, regenerate_turn_secret, update_settings,
-        update_telemetry_consent,
+        query_settings, query_security_settings, query_telemetry_status, regenerate_turn_secret, update_settings, update_security_settings,
+        update_telemetry_consent, submit_security_approval,
     },
     turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
@@ -82,6 +82,8 @@ pub struct ExternalChannels {
     pub tauri_login_token: Option<String>,
     /// Command sender for whiteboard overlay (available when Tauri is present)
     pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
+    /// Channel for sending security approval requests to Tauri dialog
+    pub security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
 }
 
 use std::sync::Mutex;
@@ -131,6 +133,7 @@ pub async fn run() -> Result<Server, DeskError> {
             private_screen_state_receiver: None,
             tauri_login_token: None,
             whiteboard_cmd_sender: None,
+            security_approval_sender: None,
         },
     )
     .await
@@ -275,6 +278,9 @@ pub async fn run_with_channels(
                             .service(change_password)
                             .service(query_settings)
                             .service(update_settings)
+                            .service(query_security_settings)
+                            .service(update_security_settings)
+                            .service(submit_security_approval)
                             .service(regenerate_turn_secret)
                             .service(query_telemetry_status)
                             .service(update_telemetry_consent)

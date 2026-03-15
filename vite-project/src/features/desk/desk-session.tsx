@@ -46,6 +46,7 @@ export default function DeskSession() {
     // Control state
     const [hasControl, setHasControl] = useState(false);
     const [hasRequested, setHasRequested] = useState(false);
+    const [isWaitingApproval, setIsWaitingApproval] = useState(false);
     const hasRequestedRef = useRef(false);
 
     const { isConnected, lastMessage, sendMessage } = useDeskSignaling(deskId || null)
@@ -139,13 +140,16 @@ export default function DeskSession() {
         if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
             console.log("Remote control request ACCEPTED by peer.");
             setHasControl(true);
+            setIsWaitingApproval(false);
             videoRef.current?.focus();
         } else if (signaling_type === SIGNALING_TYPE_CODE_DENY_CONTROL) {
             console.log("Remote control request DENIED by peer.");
             setHasControl(false);
+            setIsWaitingApproval(false);
         } else if (signaling_type === SIGNALING_TYPE_CODE_CLOSE_CONTROL) {
             console.log("Remote control CLOSED by peer.");
             setHasControl(false);
+            setIsWaitingApproval(false);
         } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
             const data = lastMessage.signaling_data;
             if (data) {
@@ -239,6 +243,7 @@ export default function DeskSession() {
 
         console.log(`Sending REQUIRE_CONTROL signaling, requestControlData:`, requestControlData);
         sendMessage(SIGNALING_TYPE_CODE_REQUIRE_CONTROL, requestControlData, deskId);
+        setIsWaitingApproval(true);
     };
 
     const handleDisconnect = () => {
@@ -588,6 +593,13 @@ export default function DeskSession() {
                             </div>
                         )}
 
+                        {isWaitingApproval && (
+                            <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80 text-white px-6 py-4 rounded-lg shadow-2xl backdrop-blur-md border border-white/10 flex flex-col items-center gap-4 animate-in fade-in slide-in-from-bottom-4">
+                                <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
+                                <span className="text-lg font-medium">{t('pages.desk.waitingPermission', 'Waiting for host authorization dialog.')}</span>
+                            </div>
+                        )}
+
                         {errorMessage && (
                             <div className="absolute top-16 right-4 z-[60] bg-red-500/90 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md animate-in fade-in slide-in-from-top-4">
                                 {errorMessage}
@@ -627,12 +639,13 @@ export default function DeskSession() {
                                                 variant="ghost"
                                                 className="controlButton"
                                                 onClick={handleRequestControl}
+                                                disabled={isWaitingApproval}
                                             >
-                                                {hasControl ? <XSquare /> : <MousePointer2 />}
+                                                {isWaitingApproval ? <Loader2 className="animate-spin" /> : hasControl ? <XSquare /> : <MousePointer2 />}
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            <p>{hasControl ? t('pages.desk.exitControl', 'Exit Control') : t('pages.desk.requestControl', 'Request Control')}</p>
+                                            <p>{isWaitingApproval ? t('pages.desk.waitingPermission', 'Waiting for host authorization dialog.') : hasControl ? t('pages.desk.exitControl', 'Exit Control') : t('pages.desk.requestControl', 'Request Control')}</p>
                                         </TooltipContent>
                                     </Tooltip>
 

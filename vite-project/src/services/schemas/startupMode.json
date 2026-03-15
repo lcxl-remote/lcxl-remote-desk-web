@@ -1,0 +1,1 @@
+{"type":"string","enum":["default","signaling","desk-server"],"x-readme-ref-name":"StartupMode"}

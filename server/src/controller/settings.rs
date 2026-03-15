@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::model::settings::{SharedSettings, SystemSettings};
+use crate::model::security_approval::{SecurityApprovalResponse, PENDING_APPROVALS};
+use desk_signal_facade::model::security_settings::SecuritySettings;
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct TelemetryStatus {
@@ -123,4 +125,68 @@ pub async fn regenerate_turn_secret(
     settings.save()?;
     info!("Regenerate TURN static_auth_secret successfully");
     Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Query security settings",
+    responses(
+        (status = 200, description = "Query security settings successfully",
+         body = RestResponse<SecuritySettings>),
+    ),
+)]
+#[get("/security-settings")]
+pub async fn query_security_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let settings = settings.read().await;
+    let security = settings.security.clone();
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(security)))
+}
+
+#[utoipa::path(
+    summary = "Update security settings",
+    request_body(content = SecuritySettings),
+    responses(
+        (status = 200, description = "Update security settings successfully"),
+    ),
+)]
+#[post("/security-settings")]
+pub async fn update_security_settings(
+    request_json: web::Json<SecuritySettings>,
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let params = request_json.into_inner();
+    let mut settings = settings.write().await;
+    settings.security = params;
+    settings.save()?;
+    info!("Update security settings successfully, {:?}", settings.security);
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct SecurityApprovalSubmitParams {
+    pub req_id: String,
+    pub approved: bool,
+    pub remember: bool,
+}
+
+#[utoipa::path(
+    summary = "Submit security approval",
+    request_body(content = SecurityApprovalSubmitParams),
+    responses(
+        (status = 200, description = "Submit security approval successfully"),
+    ),
+)]
+#[post("/security-settings/approval/submit")]
+pub async fn submit_security_approval(
+    request_json: web::Json<SecurityApprovalSubmitParams>,
+) -> Result<HttpResponse, AWError> {
+    let params = request_json.into_inner();
+    if let Some(sender) = PENDING_APPROVALS.lock().unwrap().remove(&params.req_id) {
+        let _ = sender.send(SecurityApprovalResponse {
+            approved: params.approved,
+            remember: params.remember,
+        });
+    }
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true)))
 }

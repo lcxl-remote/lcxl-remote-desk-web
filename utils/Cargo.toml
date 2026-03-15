@@ -12,3 +12,9 @@ env_logger = { workspace = true }
 utoipa = { workspace = true }
 serde = { workspace = true }
 rand = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Win32_UI_Shell"] }

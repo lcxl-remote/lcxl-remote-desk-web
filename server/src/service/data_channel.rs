@@ -26,6 +26,8 @@ pub async fn handle_data_channel_event(
     data_channel: Arc<RTCDataChannel>,
     whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
     session_id: String,
+    settings: actix_web::web::Data<crate::model::settings::SharedSettings>,
+    security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
 ) -> Result<(), DeskError> {
     match data_channel.label() {
         DATA_CHANNEL_LABEL_MOUSE_EVENT | DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT => {
@@ -37,7 +39,7 @@ pub async fn handle_data_channel_event(
             return Ok(());
         }
         DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT => {
-            handle_file_transfer_event(data_channel).await?;
+            handle_file_transfer_event(data_channel, settings, security_approval_sender, session_id).await?;
             return Ok(());
         }
         DATA_CHANNEL_LABEL_CLIPBOARD_EVENT => {
@@ -52,6 +54,8 @@ pub async fn handle_data_channel_event(
                     data_channel,
                     sender,
                     session_id,
+                    settings,
+                    security_approval_sender,
                 )
                 .await?;
             } else {

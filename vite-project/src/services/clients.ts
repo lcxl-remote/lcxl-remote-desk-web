@@ -3,9 +3,9 @@
 * Do not edit manually.
 */
 
-import fetch from "@kubb/plugin-client/clients/axios";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
-import type { Client, RequestConfig, ResponseErrorConfig } from "@kubb/plugin-client/clients/axios";
+import fetch from "@/lib/kubb-client";
+import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -184,6 +184,60 @@ export async function listFiles(params: ListFilesQueryParams, config: Partial<Re
 
 
   const res = await request<ListFilesQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getListFilesUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getQuerySecuritySettingsUrl() {
+  const res = { method: 'GET', url: `/api/desk/security-settings` as const }
+  return res
+}
+
+/**
+ * @summary Query security settings
+ * {@link /api/desk/security-settings}
+ */
+export async function querySecuritySettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<QuerySecuritySettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQuerySecuritySettingsUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateSecuritySettingsUrl() {
+  const res = { method: 'POST', url: `/api/desk/security-settings` as const }
+  return res
+}
+
+/**
+ * @summary Update security settings
+ * {@link /api/desk/security-settings}
+ */
+export async function updateSecuritySettings(data?: UpdateSecuritySettingsMutationRequest, config: Partial<RequestConfig<UpdateSecuritySettingsMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateSecuritySettingsMutationResponse, ResponseErrorConfig<Error>, UpdateSecuritySettingsMutationRequest>({ method : "POST", url : getUpdateSecuritySettingsUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getSubmitSecurityApprovalUrl() {
+  const res = { method: 'POST', url: `/api/desk/security-settings/approval/submit` as const }
+  return res
+}
+
+/**
+ * @summary Submit security approval
+ * {@link /api/desk/security-settings/approval/submit}
+ */
+export async function submitSecurityApproval(data: SubmitSecurityApprovalMutationRequest, config: Partial<RequestConfig<SubmitSecurityApprovalMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<SubmitSecurityApprovalMutationResponse, ResponseErrorConfig<Error>, SubmitSecurityApprovalMutationRequest>({ method : "POST", url : getSubmitSecurityApprovalUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 

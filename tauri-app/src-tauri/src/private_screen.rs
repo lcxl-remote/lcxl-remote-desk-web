@@ -112,11 +112,15 @@ impl PrivateScreenManager {
 
         #[cfg(not(target_os = "linux"))]
         {
+            use tauri::Manager as _;
+
             let window =
                 if let Some(window) = handle.get_webview_window(PRIVATE_SCREEN_WINDOW_LABEL) {
                     window
                 } else {
                     // Create new window
+
+                    use tauri::{WebviewUrl, WebviewWindowBuilder};
                     WebviewWindowBuilder::new(
                         handle,
                         PRIVATE_SCREEN_WINDOW_LABEL,
@@ -156,7 +160,7 @@ impl PrivateScreenManager {
                 );
             }
 
-            // 注册全局快捷键
+            // Register global hotkey
             Self::register_hotkey(handle)?;
 
             Ok(())
@@ -164,7 +168,7 @@ impl PrivateScreenManager {
     }
 
     fn hide_window(handle: &AppHandle) -> Result<(), String> {
-        // 注销全局快捷键 (common for all platforms)
+        // Unregister global hotkey (common for all platforms)
         let _ = Self::unregister_hotkey(handle);
 
         #[cfg(target_os = "linux")]
@@ -180,6 +184,8 @@ impl PrivateScreenManager {
         #[cfg(not(target_os = "linux"))]
         {
             // Platform specific: unblock input
+
+            use tauri::Manager as _;
             if let Err(e) = platform::block_input(false) {
                 log::warn!("Failed to unblock local input: {}", e);
             }

@@ -13,6 +13,7 @@ use crate::model::{
     data_channel::{KeyboardEventData, MouseEventData, SignalRequestControlData},
     file_transfer::FileTransferMessage,
     info::BackendInfo,
+    security_approval::SecurityApprovalEventPayload,
 };
 
 /// API version
@@ -33,5 +34,6 @@ use crate::model::{
     DeviceCodeListResult,
     DeviceCodeBatchDeleteParams,
     BackendInfo,
+    SecurityApprovalEventPayload,
 )))]
 pub struct ExtraSchemas;

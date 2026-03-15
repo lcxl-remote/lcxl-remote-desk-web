@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::model::settings::StartupMode;
+
 /// CPU information
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct CpuInfo {
@@ -38,7 +40,9 @@ pub struct SystemInfo {
     /// List of CPU information
     pub cpus: Vec<CpuInfo>,
     /// Startup mode
-    pub startup_mode: String,
+    pub startup_mode: StartupMode,
+    /// Whether the system is running with administrative privileges
+    pub is_admin: Option<bool>,
 }
 
 /// Server information
@@ -101,7 +105,8 @@ impl From<&sysinfo::System> for SystemInfo {
             total_swap: sys.total_swap(),
             used_swap: sys.used_swap(),
             cpus,
-            startup_mode: "Default".to_string(),
+            startup_mode: StartupMode::Default,
+            is_admin: None,
         }
     }
 }

@@ -10,6 +10,10 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 
 use crate::error::DeskError;
 use crate::model::file_transfer::*;
+use crate::model::security_approval::{
+    SecurityApprovalSender, SecurityPermissionType, check_security_permission,
+};
+use crate::model::settings::SharedSettings;
 
 /// State for an active upload transfer
 struct UploadState {
@@ -23,6 +27,9 @@ struct UploadState {
 /// Handle file_transfer_event data channel
 pub async fn handle_file_transfer_event(
     data_channel: Arc<RTCDataChannel>,
+    settings: actix_web::web::Data<SharedSettings>,
+    security_approval_sender: Option<SecurityApprovalSender>,
+    session_id: String,
 ) -> Result<(), DeskError> {
     let d_label = data_channel.label().to_owned();
     let d_id = data_channel.id();
@@ -50,12 +57,55 @@ pub async fn handle_file_transfer_event(
     let upload_states_for_msg = upload_states.clone();
     let cancelled_for_msg = cancelled_transfers.clone();
 
+    // Auth cache for DataChannel lifetime
+    let permission_cache = Arc::new(tokio::sync::RwLock::new(None::<bool>));
+
     data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
         let dc = dc_for_msg.clone();
         let upload_states = upload_states_for_msg.clone();
         let cancelled = cancelled_for_msg.clone();
 
+        let settings = settings.clone();
+        let sender = security_approval_sender.clone();
+        let session_id = session_id.clone();
+        let permission_cache = permission_cache.clone();
+
         Box::pin(async move {
+            // Check permission first
+            let mut allowed = false;
+            let from_session_id = session_id.clone();
+            {
+                let cache = permission_cache.read().await;
+                if let Some(res) = *cache {
+                    allowed = res;
+                } else {
+                    drop(cache);
+                    let mut cache_write = permission_cache.write().await;
+                    if let Some(res) = *cache_write {
+                        allowed = res;
+                    } else {
+                        let allow_transfer = { settings.read().await.security.allow_file_transfer };
+                        let approved = check_security_permission(
+                            &settings,
+                            sender.as_ref(),
+                            allow_transfer,
+                            SecurityPermissionType::FileTransfer,
+                            Some(session_id),
+                        )
+                        .await;
+                        *cache_write = Some(approved);
+                        allowed = approved;
+                    }
+                }
+            }
+            if !allowed {
+                log::warn!(
+                    "File transfer message blocked by security settings or user for {}",
+                    from_session_id
+                );
+                return;
+            }
+
             let result = if msg.is_string {
                 // Text message: JSON control message
                 handle_text_message(&dc, &msg.data, &upload_states, &cancelled).await
