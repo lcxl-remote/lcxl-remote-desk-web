@@ -64,7 +64,9 @@ use webrtc::{
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::login::{LoginParams, LoginResult};
 use crate::model::host_control::HostControlEventType;
-use crate::model::security_approval::{SecurityApprovalRequest, SecurityPermissionType};
+use crate::model::security_approval::{
+    SecurityPermissionType, check_security_permission
+};
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -689,85 +691,6 @@ impl DeskSession {
             whiteboard_cmd_sender,
             security_approval_sender,
         })
-    }
-
-    /// Check a security permission from settings.
-    /// - `Some(true)` → allow
-    /// - `Some(false)` → deny
-    /// - `None` → if Tauri present, prompt user via dialog; else deny
-    ///
-    /// If `remember` is checked by the user, updates SecuritySettings in config.
-    async fn check_security_permission(
-        &self,
-        permission: Option<bool>,
-        permission_type: SecurityPermissionType,
-        from_session_id: Option<String>,
-    ) -> bool {
-        match permission {
-            Some(true) => true,
-            Some(false) => false,
-            None => {
-                // Try to prompt user via Tauri dialog
-                if let Some(ref sender) = self.security_approval_sender {
-                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                    let req_id = uuid::Uuid::new_v4().to_string();
-                    let request = SecurityApprovalRequest {
-                        req_id: req_id.clone(),
-                        permission_type: permission_type.clone(),
-                        from_session_id,
-                    };
-                    crate::model::security_approval::PENDING_APPROVALS.lock().unwrap().insert(req_id.clone(), response_tx);
-                    
-                    if sender.send(request).is_ok() {
-                        // Wait for user response (with timeout handled by Tauri side)
-                        match response_rx.await {
-                            Ok(response) => {
-                                if response.remember {
-                                    // Persist the choice to SecuritySettings
-                                    // Ensure we don't hold any .read() guard on settings before calling this
-                                    let mut settings = self.settings.write().await;
-                                    match permission_type {
-                                        SecurityPermissionType::RemoteControl => {
-                                            settings.security.allow_remote_control = Some(response.approved);
-                                        }
-                                        SecurityPermissionType::ClipboardSync => {
-                                            settings.security.allow_clipboard_sync = Some(response.approved);
-                                        }
-                                        SecurityPermissionType::PrivateScreen => {
-                                            settings.security.allow_private_screen = Some(response.approved);
-                                        }
-                                        SecurityPermissionType::Whiteboard => {
-                                            settings.security.allow_whiteboard = Some(response.approved);
-                                        }
-                                        SecurityPermissionType::Terminal => {
-                                            settings.security.allow_terminal = Some(response.approved);
-                                        }
-                                        SecurityPermissionType::FileBrowse => {
-                                            settings.security.allow_file_browse = Some(response.approved);
-                                        }
-                                        SecurityPermissionType::FileTransfer => {
-                                            settings.security.allow_file_transfer = Some(response.approved);
-                                        }
-                                    }
-                                    if let Err(e) = settings.save() {
-                                        log::error!("Failed to save security settings: {}", e);
-                                    }
-                                }
-                                return response.approved;
-                            }
-                            Err(_) => {
-                                log::warn!("Security approval response channel dropped, denying");
-                                crate::model::security_approval::PENDING_APPROVALS.lock().unwrap().remove(&req_id);
-                                return false;
-                            }
-                        }
-                    }
-                }
-                // No Tauri (headless mode) — default deny
-                log::info!("No GUI available, defaulting to deny for {:?}", permission_type);
-                false
-            }
-        }
     }
 }
 
@@ -1640,7 +1563,9 @@ impl DeskSession {
                 {
                     if data.enable {
                         let allow_private_screen = { self.settings.read().await.security.allow_private_screen };
-                        let approved = self.check_security_permission(
+                        let approved = check_security_permission(
+                            &self.settings,
+                            self.security_approval_sender.as_ref(),
                             allow_private_screen,
                             SecurityPermissionType::PrivateScreen,
                             Some(from_session_id.to_string()),
@@ -1819,7 +1744,9 @@ impl DeskSession {
         let allow_control = { self.settings.read().await.security.allow_remote_control };
         let allow_clipboard = { self.settings.read().await.security.allow_clipboard_sync };
 
-        let control_approved = self.check_security_permission(
+        let control_approved = check_security_permission(
+            &self.settings,
+            self.security_approval_sender.as_ref(),
             allow_control,
             SecurityPermissionType::RemoteControl,
             Some(from_session_id.to_string()),
@@ -1839,7 +1766,9 @@ impl DeskSession {
         }
 
         let clipboard_approved = if control_data.accept_clipboard_sync {
-            self.check_security_permission(
+            check_security_permission(
+                &self.settings,
+                self.security_approval_sender.as_ref(),
                 allow_clipboard,
                 SecurityPermissionType::ClipboardSync,
                 Some(from_session_id.to_string()),
@@ -1891,7 +1820,9 @@ impl DeskSession {
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
         
         let allow_terminal = { self.settings.read().await.security.allow_terminal };
-        let approved = self.check_security_permission(
+        let approved = check_security_permission(
+            &self.settings,
+            self.security_approval_sender.as_ref(),
             allow_terminal,
             SecurityPermissionType::Terminal,
             Some(from_session_id.to_string()),
@@ -2174,7 +2105,9 @@ impl DeskSession {
         // ManagerFileList is a request from the http api, so it may not have a from_session_id
         let from_session_id = signaling_model.from_session_id.clone();
         let allow_file_browse = { self.settings.read().await.security.allow_file_browse };
-        let approved = self.check_security_permission(
+        let approved = check_security_permission(
+            &self.settings,
+            self.security_approval_sender.as_ref(),
             allow_file_browse,
             SecurityPermissionType::FileBrowse,
             from_session_id.clone(),
@@ -2225,7 +2158,9 @@ impl DeskSession {
         // ManagerFileList is a request from the http api, so it may not have a from_session_id
         let from_session_id = signaling_model.from_session_id.clone();
         let allow_file_browse = { self.settings.read().await.security.allow_file_browse };
-        let approved = self.check_security_permission(
+        let approved = check_security_permission(
+            &self.settings,
+            self.security_approval_sender.as_ref(),
             allow_file_browse,
             SecurityPermissionType::FileBrowse,
             from_session_id.clone(),

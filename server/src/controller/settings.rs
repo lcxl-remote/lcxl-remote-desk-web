@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::model::settings::{SharedSettings, SystemSettings};
-use crate::model::security_approval::{SecurityApprovalResponse, PENDING_APPROVALS};
+use crate::model::security_approval::{
+    SecurityApprovalCommand, SecurityApprovalResponse, SecurityApprovalSender, PENDING_APPROVALS,
+};
 use desk_signal_facade::model::security_settings::SecuritySettings;
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
@@ -180,13 +182,25 @@ pub struct SecurityApprovalSubmitParams {
 #[post("/security-settings/approval/submit")]
 pub async fn submit_security_approval(
     request_json: web::Json<SecurityApprovalSubmitParams>,
+    sender: web::Data<Option<SecurityApprovalSender>>,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
-    if let Some(sender) = PENDING_APPROVALS.lock().unwrap().remove(&params.req_id) {
-        let _ = sender.send(SecurityApprovalResponse {
-            approved: params.approved,
-            remember: params.remember,
-        });
+    let mut empty = false;
+    {
+        let mut approvals = PENDING_APPROVALS.lock().unwrap();
+        if let Some(sender) = approvals.remove(&params.req_id) {
+            let _ = sender.send(SecurityApprovalResponse {
+                approved: params.approved,
+                remember: params.remember,
+            });
+        }
+        empty = approvals.is_empty();
+    }
+
+    if empty {
+        if let Some(s) = &**sender {
+            let _ = s.send(SecurityApprovalCommand::Finish);
+        }
     }
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true)))
 }

@@ -212,6 +212,8 @@ pub async fn run_with_channels(
             None
         };
 
+    let security_approval_sender = web::Data::new(channels.security_approval_sender.clone());
+
     // start desk session if mode is Default or DeskServer
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::DeskServer {
         info!("Starting desk session");
@@ -232,12 +234,14 @@ pub async fn run_with_channels(
         let turn_api_state = turn_api_state.clone();
         let startup_mode = startup_mode.clone();
         let tauri_login_token = tauri_login_token.clone();
+        let security_approval_sender = security_approval_sender.clone();
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
             .app_data(shared_settings_data.clone())
             .app_data(tauri_login_token.clone())
             .app_data(session_map.clone())
+            .app_data(security_approval_sender.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
                     cfg.app_data(turn_api_state.clone());

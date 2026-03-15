@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use utoipa::ToSchema;
 
+use crate::model::settings::SharedSettings;
+
 /// Type of security permission being requested
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub enum SecurityPermissionType {
@@ -60,13 +62,23 @@ pub struct SecurityApprovalEventPayload {
     pub i18n_key: String,
 }
 
+/// Command sent to Tauri to manage security approval dialog
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum SecurityApprovalCommand {
+    /// Show a new approval request
+    Request(SecurityApprovalRequest),
+    /// Finish all current approvals (unset always_on_top)
+    Finish,
+}
+
 pub static PENDING_APPROVALS: Lazy<
     Mutex<HashMap<String, tokio::sync::oneshot::Sender<SecurityApprovalResponse>>>,
 > = Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// The channel sender type used to send approval requests to Tauri
-pub type SecurityApprovalSender = std::sync::mpsc::Sender<SecurityApprovalRequest>;
-pub type SecurityApprovalReceiver = std::sync::mpsc::Receiver<SecurityApprovalRequest>;
+/// The channel sender type used to send approval commands to Tauri
+pub type SecurityApprovalSender = std::sync::mpsc::Sender<SecurityApprovalCommand>;
+pub type SecurityApprovalReceiver = std::sync::mpsc::Receiver<SecurityApprovalCommand>;
 
 /// Check a security permission from settings.
 /// - `Some(true)` → allow
@@ -75,7 +87,7 @@ pub type SecurityApprovalReceiver = std::sync::mpsc::Receiver<SecurityApprovalRe
 ///
 /// If `remember` is checked by the user, updates SecuritySettings in config.
 pub async fn check_security_permission(
-    settings: &crate::model::settings::SharedSettings,
+    settings: &SharedSettings,
     security_approval_sender: Option<&SecurityApprovalSender>,
     permission: Option<bool>,
     permission_type: SecurityPermissionType,
@@ -98,7 +110,7 @@ pub async fn check_security_permission(
                     .unwrap()
                     .insert(req_id.clone(), response_tx);
 
-                if sender.send(request).is_ok() {
+                if sender.send(SecurityApprovalCommand::Request(request)).is_ok() {
                     // Wait for user response
                     match response_rx.await {
                         Ok(response) => {
@@ -142,7 +154,11 @@ pub async fn check_security_permission(
                         }
                         Err(_) => {
                             log::warn!("Security approval response channel dropped, denying");
-                            PENDING_APPROVALS.lock().unwrap().remove(&req_id);
+                            let mut approvals = PENDING_APPROVALS.lock().unwrap();
+                            approvals.remove(&req_id);
+                            if approvals.is_empty() {
+                                let _ = sender.send(SecurityApprovalCommand::Finish);
+                            }
                             return false;
                         }
                     }
