@@ -289,6 +289,8 @@ export default {
   'pages.deskList.platform': 'Platform',
   'pages.deskList.connect': 'Connect',
   'pages.deskList.enterManagement': 'Enter Management',
+  'pages.desk.display': 'Display',
+  'pages.desk.audio': 'Audio',
   'pages.desk.displayConfig': 'Display Configuration',
   'pages.desk.screenCaptureMode': 'Screen Capture Mode',
   'pages.desk.screenCaptureModePlaceholder': 'Please select a screen capture mode',
