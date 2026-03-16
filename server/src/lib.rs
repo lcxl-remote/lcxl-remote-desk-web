@@ -20,8 +20,9 @@ use crate::controller::{
     init::init_system,
     login::{change_password, get_captcha, login_account, logout_account},
     settings::{
-        query_settings, query_security_settings, query_telemetry_status, regenerate_turn_secret, update_settings, update_security_settings,
-        update_telemetry_consent, submit_security_approval,
+        query_security_settings, query_settings, query_telemetry_status, regenerate_turn_secret,
+        submit_security_approval, update_security_settings, update_settings,
+        update_telemetry_consent,
     },
     turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,

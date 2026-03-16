@@ -13,6 +13,6 @@ pub mod mouse_event;
 pub mod signaling;
 pub mod terminal;
 pub mod video_encoder;
-pub mod whiteboard_event;
 #[cfg(target_os = "linux")]
 pub mod wayland_remote_desktop;
+pub mod whiteboard_event;

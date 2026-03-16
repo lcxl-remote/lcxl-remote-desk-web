@@ -15,7 +15,6 @@ trigger: always_on
 剩下来的模块：
 
 * turn：turn服务器的主要功能在这里，目前和信令服务器绑定，也就是启动信令服务的功能会同时启用turn功能；
-* third-deps: 修改后的三方包，以便满足本项目的需求；
 * utils：公共工具包；
 * server-version：服务版本号，只有一个代表API接口版本的变量，会同时提供给外部使用；
 * signal-facade：信令服务功能的接口包，同时会提供给外部使用；

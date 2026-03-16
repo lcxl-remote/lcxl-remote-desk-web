@@ -62,11 +62,9 @@ use webrtc::{
 };
 
 use crate::model::data_channel::SignalRequestControlData;
-use crate::model::login::{LoginParams, LoginResult};
 use crate::model::host_control::HostControlEventType;
-use crate::model::security_approval::{
-    SecurityPermissionType, check_security_permission
-};
+use crate::model::login::{LoginParams, LoginResult};
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -302,10 +300,13 @@ where
                 "Received WebRTCDropped from session {}, shutting down peer connection and private screen",
                 from_session_id
             );
-            if let Some(peer_connection) = desk_session.rtc_peer_connection_map.remove(&from_session_id) {
+            if let Some(peer_connection) = desk_session
+                .rtc_peer_connection_map
+                .remove(&from_session_id)
+            {
                 let peer_connection = peer_connection.read().await;
                 if let Err(e) = peer_connection.shutdown().await {
-                   error!("Failed to shutdown peer connection: {}", e);
+                    error!("Failed to shutdown peer connection: {}", e);
                 }
             }
             let _ = desk_session
@@ -541,10 +542,10 @@ pub struct DeskSession {
     /// Terminal map: from_session_id -> RunningTerminal
     pub terminal_map: HashMap<String, RunningTerminal>,
     /// System setting helper
-    pub host_control_helper:
-        Box<dyn crate::model::host_control::HostControlHelper + Send + Sync>,
+    pub host_control_helper: Box<dyn crate::model::host_control::HostControlHelper + Send + Sync>,
     /// Whiteboard command sender (available when Tauri is present)
-    pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<crate::model::host_control::WhiteboardCommand>>,
+    pub whiteboard_cmd_sender:
+        Option<std::sync::mpsc::Sender<crate::model::host_control::WhiteboardCommand>>,
     /// Security approval channel sender (available when Tauri is present)
     pub security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
 }
@@ -702,8 +703,8 @@ pub fn generate_turn_credentials(secret: &str, username: &str, ttl_secs: u64) ->
         + ttl_secs;
     let username = format!("{}:{}", expiration, username);
     let code = turn_server::stun::util::hmac_sha1(secret.as_bytes(), &[username.as_bytes()])
-                        .unwrap()
-                        .into_bytes();
+        .unwrap()
+        .into_bytes();
     let code_slice = code.as_slice();
     (username, BASE64_STANDARD.encode(code_slice))
 }
@@ -756,11 +757,18 @@ impl DeskSession {
         }
 
         if !turn_urls.is_empty() {
-            let (username, credential) = if let Some(ref secret) = local_settings.turn.static_auth_secret {
+            let (username, credential) = if let Some(ref secret) =
+                local_settings.turn.static_auth_secret
+            {
                 generate_turn_credentials(secret, &local_settings.user.login_user_name, 24 * 3600)
             } else {
-                warn!("static_auth_secret not found, falling back to static password authentication");
-                (local_settings.user.login_user_name.clone(), local_settings.user.login_password.clone())
+                warn!(
+                    "static_auth_secret not found, falling back to static password authentication"
+                );
+                (
+                    local_settings.user.login_user_name.clone(),
+                    local_settings.user.login_password.clone(),
+                )
             };
 
             let ice_turn_server = RTCIceServer {
@@ -768,7 +776,10 @@ impl DeskSession {
                 username,
                 credential,
             };
-            log::info!("Init turn config for ICE, ice_turn_server: {:?}", ice_turn_server);
+            log::info!(
+                "Init turn config for ICE, ice_turn_server: {:?}",
+                ice_turn_server
+            );
             // Only add TURN server to client configuration, not server configuration
             // forcing server to use Host candidates or STUN only.
             // This avoids "Self-Reflective Relay" (Hairpinning) issues on local machine.
@@ -902,7 +913,7 @@ impl DeskSession {
             let video_state_receiver = ice_connection_state_rx.clone();
             let audio_state_receiver = ice_connection_state_rx.clone();
             let video_mime_type = match offer_model.desk_settings.get_video_encoder_type()? {
-                VideoEncoderType::H264 => MIME_TYPE_H264,
+                VideoEncoderType::H264 | VideoEncoderType::X264 => MIME_TYPE_H264,
                 VideoEncoderType::VP8 => MIME_TYPE_VP8,
                 VideoEncoderType::VP9 => MIME_TYPE_VP9,
             };
@@ -978,7 +989,7 @@ impl DeskSession {
                             signaling_state_for_screen,
                             desk_settings,
                             video_state_receiver,
-                            video_track
+                            video_track,
                         )
                         .await;
 
@@ -1080,9 +1091,14 @@ impl DeskSession {
                         log::error!("Failed to send connection state: {}", error);
                     }
                 }
-                
-                if s == RTCPeerConnectionState::Closed || s == RTCPeerConnectionState::Failed || s == RTCPeerConnectionState::Disconnected {
-                     let _ = peer_state_change_sender_for_drop.sender.send(DeskSessionMessage::WebRTCDropped(from_session_id_for_drop.clone()));
+
+                if s == RTCPeerConnectionState::Closed
+                    || s == RTCPeerConnectionState::Failed
+                    || s == RTCPeerConnectionState::Disconnected
+                {
+                    let _ = peer_state_change_sender_for_drop.sender.send(
+                        DeskSessionMessage::WebRTCDropped(from_session_id_for_drop.clone()),
+                    );
                 }
 
                 Box::pin(async {})
@@ -1157,8 +1173,14 @@ impl DeskSession {
                 // Register channel opening handling
                 Box::pin(async move {
                     let result = handle_data_channel_event(
-                        signaling_state, d.clone(), wb_sender, sid, settings, security_sender
-                    ).await;
+                        signaling_state,
+                        d.clone(),
+                        wb_sender,
+                        sid,
+                        settings,
+                        security_sender,
+                    )
+                    .await;
                     if let Err(error) = result {
                         log::error!("Failed to handle data channel event: {}", error);
                     }
@@ -1170,62 +1192,67 @@ impl DeskSession {
         let request_id_for_audio = request_id.to_string();
         let from_session_id_for_audio = from_session_id.to_string();
 
-        peer_connection
-            .rtc_peer_connection
-            .on_track(Box::new(
-                move |track, _receiver, _transceiver| {
-                    let track_kind = track.kind().to_string();
-                    let track_id = track.id().to_string();
-                    log::info!(
-                        "Received remote track: kind={}, id={}",
-                        track_kind,
-                        track_id
-                    );
+        peer_connection.rtc_peer_connection.on_track(Box::new(
+            move |track, _receiver, _transceiver| {
+                let track_kind = track.kind().to_string();
+                let track_id = track.id().to_string();
+                log::info!(
+                    "Received remote track: kind={}, id={}",
+                    track_kind,
+                    track_id
+                );
 
-                    if track_kind == "audio" {
-                        log::info!("Starting audio playback for remote audio track");
-                        let mut session_sender = session_for_audio.clone();
-                        let req_id = request_id_for_audio.clone();
-                        let from_session = from_session_id_for_audio.clone();
-                        
-                        // Capture the tokio handle so we can spawn from the std::thread inside audio_playback
-                        let handle = match tokio::runtime::Handle::try_current() {
-                            Ok(h) => Some(h),
-                            Err(e) => {
-                                log::error!("Failed to get tokio handle for audio playback error reporting: {}", e);
-                                None
-                            }
-                        };
-                        
-                        crate::service::audio_playback::start_audio_playback(track, move |err_msg| {
-                            log::warn!("Audio playback failed, notifying frontend: {}", err_msg);
-                            
-                            if let Some(rt_handle) = handle {
-                                rt_handle.spawn(async move {
-                                    let error_data = serde_json::json!({
-                                        "error": err_msg
-                                    });
-                                    let res = session_sender.send_to_peer(
+                if track_kind == "audio" {
+                    log::info!("Starting audio playback for remote audio track");
+                    let mut session_sender = session_for_audio.clone();
+                    let req_id = request_id_for_audio.clone();
+                    let from_session = from_session_id_for_audio.clone();
+
+                    // Capture the tokio handle so we can spawn from the std::thread inside audio_playback
+                    let handle = match tokio::runtime::Handle::try_current() {
+                        Ok(h) => Some(h),
+                        Err(e) => {
+                            log::error!(
+                                "Failed to get tokio handle for audio playback error reporting: {}",
+                                e
+                            );
+                            None
+                        }
+                    };
+
+                    crate::service::audio_playback::start_audio_playback(track, move |err_msg| {
+                        log::warn!("Audio playback failed, notifying frontend: {}", err_msg);
+
+                        if let Some(rt_handle) = handle {
+                            rt_handle.spawn(async move {
+                                let error_data = serde_json::json!({
+                                    "error": err_msg
+                                });
+                                let res = session_sender
+                                    .send_to_peer(
                                         &req_id,
                                         SignalingType::AudioPlaybackError,
                                         &from_session,
-                                        error_data
-                                    ).await;
-                                    if let Err(e) = res {
-                                        log::error!("Failed to send AudioPlaybackError signal: {}", e);
-                                    }
-                                });
-                            } else {
-                                log::error!("Cannot send AudioPlaybackError signal: no tokio handle available");
-                            }
-                        });
-                    } else {
-                        log::info!("Ignoring non-audio track: {}", track_kind);
-                    }
+                                        error_data,
+                                    )
+                                    .await;
+                                if let Err(e) = res {
+                                    log::error!("Failed to send AudioPlaybackError signal: {}", e);
+                                }
+                            });
+                        } else {
+                            log::error!(
+                                "Cannot send AudioPlaybackError signal: no tokio handle available"
+                            );
+                        }
+                    });
+                } else {
+                    log::info!("Ignoring non-audio track: {}", track_kind);
+                }
 
-                    Box::pin(async {})
-                },
-            ));
+                Box::pin(async {})
+            },
+        ));
 
         self.update_setting_sender = Some(update_setting_sender);
         Ok(())
@@ -1342,7 +1369,7 @@ impl DeskSession {
             let timer = CAPTURE_SCREEN_HISTOGRAM
                 .with_label_values(&[image_capture_type])
                 .start_timer();
-            
+
             let image_info_result = capture.capture(desk_settings.show_mouse);
 
             let image_info = match image_info_result {
@@ -1562,24 +1589,31 @@ impl DeskSession {
                     signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
                 {
                     if data.enable {
-                        let allow_private_screen = { self.settings.read().await.security.allow_private_screen };
+                        let allow_private_screen =
+                            { self.settings.read().await.security.allow_private_screen };
                         let approved = check_security_permission(
                             &self.settings,
                             self.security_approval_sender.as_ref(),
                             allow_private_screen,
                             SecurityPermissionType::PrivateScreen,
                             Some(from_session_id.to_string()),
-                        ).await;
-                        
+                        )
+                        .await;
+
                         if !approved {
-                            log::warn!("Enable private screen denied by security settings or user for {}", from_session_id);
-                            self.session.send_error(
-                                &signaling_model.request_id,
-                                signaling_model.signaling_type.into(),
-                                Some(from_session_id.to_string()),
-                                DeskErrorCode::PERMISSION_ERROR,
-                                "Private screen access denied",
-                            ).await?;
+                            log::warn!(
+                                "Enable private screen denied by security settings or user for {}",
+                                from_session_id
+                            );
+                            self.session
+                                .send_error(
+                                    &signaling_model.request_id,
+                                    signaling_model.signaling_type.into(),
+                                    Some(from_session_id.to_string()),
+                                    DeskErrorCode::PERMISSION_ERROR,
+                                    "Private screen access denied",
+                                )
+                                .await?;
                             return Ok(());
                         }
                     }
@@ -1750,10 +1784,14 @@ impl DeskSession {
             allow_control,
             SecurityPermissionType::RemoteControl,
             Some(from_session_id.to_string()),
-        ).await;
+        )
+        .await;
 
         if !control_approved {
-            log::warn!("Remote control request denied by security settings or user for {}", from_session_id);
+            log::warn!(
+                "Remote control request denied by security settings or user for {}",
+                from_session_id
+            );
             self.session
                 .send_to_peer(
                     &signaling_model.request_id,
@@ -1772,7 +1810,8 @@ impl DeskSession {
                 allow_clipboard,
                 SecurityPermissionType::ClipboardSync,
                 Some(from_session_id.to_string()),
-            ).await
+            )
+            .await
         } else {
             false
         };
@@ -1818,7 +1857,7 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        
+
         let allow_terminal = { self.settings.read().await.security.allow_terminal };
         let approved = check_security_permission(
             &self.settings,
@@ -1826,16 +1865,19 @@ impl DeskSession {
             allow_terminal,
             SecurityPermissionType::Terminal,
             Some(from_session_id.to_string()),
-        ).await;
+        )
+        .await;
 
         if !approved {
-            self.session.send_error(
-                &signaling_model.request_id,
-                signaling_model.signaling_type.into(),
-                Some(from_session_id.to_string()),
-                DeskErrorCode::PERMISSION_ERROR,
-                "Terminal access denied by security settings or user",
-            ).await?;
+            self.session
+                .send_error(
+                    &signaling_model.request_id,
+                    signaling_model.signaling_type.into(),
+                    Some(from_session_id.to_string()),
+                    DeskErrorCode::PERMISSION_ERROR,
+                    "Terminal access denied by security settings or user",
+                )
+                .await?;
             return Ok(());
         }
 
@@ -2111,16 +2153,19 @@ impl DeskSession {
             allow_file_browse,
             SecurityPermissionType::FileBrowse,
             from_session_id.clone(),
-        ).await;
+        )
+        .await;
 
         if !approved {
-            self.session.send_error(
-                &signaling_model.request_id,
-                signaling_model.signaling_type.into(),
-                from_session_id.clone(),
-                DeskErrorCode::PERMISSION_ERROR,
-                "File browse access denied",
-            ).await?;
+            self.session
+                .send_error(
+                    &signaling_model.request_id,
+                    signaling_model.signaling_type.into(),
+                    from_session_id.clone(),
+                    DeskErrorCode::PERMISSION_ERROR,
+                    "File browse access denied",
+                )
+                .await?;
             return Ok(());
         }
 
@@ -2164,16 +2209,19 @@ impl DeskSession {
             allow_file_browse,
             SecurityPermissionType::FileBrowse,
             from_session_id.clone(),
-        ).await;
+        )
+        .await;
 
         if !approved {
-            self.session.send_error(
-                &signaling_model.request_id,
-                signaling_model.signaling_type.into(),
-                from_session_id.clone(),
-                DeskErrorCode::PERMISSION_ERROR,
-                "File delete access denied",
-            ).await?;
+            self.session
+                .send_error(
+                    &signaling_model.request_id,
+                    signaling_model.signaling_type.into(),
+                    from_session_id.clone(),
+                    DeskErrorCode::PERMISSION_ERROR,
+                    "File delete access denied",
+                )
+                .await?;
             return Ok(());
         }
 

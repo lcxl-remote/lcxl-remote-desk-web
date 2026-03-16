@@ -3,8 +3,8 @@ use std::{env, mem::forget, sync::LazyLock, time::Instant};
 use serde::Deserialize;
 use xcb::{ConnResult, Connection as XcbConnection};
 use zbus::Result as ZBusResult;
-use zbus::blocking::{Connection as ZBusConnection, Proxy};
 use zbus::blocking::proxy::SignalIterator;
+use zbus::blocking::{Connection as ZBusConnection, Proxy};
 use zbus::zvariant::Type;
 
 use crate::error::DeskError;
@@ -49,7 +49,10 @@ pub fn get_zbus_portal_request(
     Ok(request)
 }
 
-pub fn wait_zbus_response<'a, T>(request: &Proxy<'a>, mut response: SignalIterator<'_>) -> Result<T, DeskError>
+pub fn wait_zbus_response<'a, T>(
+    request: &Proxy<'a>,
+    mut response: SignalIterator<'_>,
+) -> Result<T, DeskError>
 where
     T: for<'de> Deserialize<'de> + Type,
 {

@@ -110,7 +110,10 @@ pub async fn check_security_permission(
                     .unwrap()
                     .insert(req_id.clone(), response_tx);
 
-                if sender.send(SecurityApprovalCommand::Request(request)).is_ok() {
+                if sender
+                    .send(SecurityApprovalCommand::Request(request))
+                    .is_ok()
+                {
                     // Wait for user response
                     match response_rx.await {
                         Ok(response) => {

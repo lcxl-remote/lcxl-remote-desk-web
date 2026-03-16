@@ -4,7 +4,10 @@ use desk_signal_facade::model::signal::SignalingState;
 use tokio::sync::RwLock;
 use webrtc::data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage};
 
-use crate::model::{host_control::WhiteboardCommand, security_approval::{SecurityPermissionType, check_security_permission}};
+use crate::model::{
+    host_control::WhiteboardCommand,
+    security_approval::{SecurityPermissionType, check_security_permission},
+};
 
 /// Handle whiteboard events from the DataChannel.
 /// Forwards drawing messages to the Tauri whiteboard overlay via the command sender.
@@ -64,14 +67,18 @@ pub async fn handle_whiteboard_event(
                             allow_whiteboard,
                             SecurityPermissionType::Whiteboard,
                             Some(session_id.clone()),
-                        ).await;
+                        )
+                        .await;
                         *cache_write = Some(approved);
                         allowed = approved;
                     }
                 }
             }
             if !allowed {
-                log::warn!("Whiteboard message blocked by security settings or user for {}", session_id);
+                log::warn!(
+                    "Whiteboard message blocked by security settings or user for {}",
+                    session_id
+                );
                 return;
             }
 

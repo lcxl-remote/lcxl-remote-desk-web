@@ -80,7 +80,8 @@ impl PortalClient<'_> {
         );
         let response_stream = request.receive_signal("Response")?;
         self.proxy.call_method("CreateSession", &(options))?;
-        let response: ScreenCastCreateSessionResponse = wait_zbus_response(&request, response_stream)?;
+        let response: ScreenCastCreateSessionResponse =
+            wait_zbus_response(&request, response_stream)?;
 
         let unique_name = conn
             .unique_name()

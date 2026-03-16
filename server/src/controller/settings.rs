@@ -5,10 +5,10 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::model::settings::{SharedSettings, SystemSettings};
 use crate::model::security_approval::{
-    SecurityApprovalCommand, SecurityApprovalResponse, SecurityApprovalSender, PENDING_APPROVALS,
+    PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse, SecurityApprovalSender,
 };
+use crate::model::settings::{SharedSettings, SystemSettings};
 use desk_signal_facade::model::security_settings::SecuritySettings;
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
@@ -161,7 +161,10 @@ pub async fn update_security_settings(
     let mut settings = settings.write().await;
     settings.security = params;
     settings.save()?;
-    info!("Update security settings successfully, {:?}", settings.security);
+    info!(
+        "Update security settings successfully, {:?}",
+        settings.security
+    );
     Ok(HttpResponse::Ok().finish())
 }
 

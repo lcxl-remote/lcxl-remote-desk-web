@@ -18,7 +18,7 @@ impl MacKeyboardEventHandler {
             Ok(source) => Ok(source),
             Err(_) => DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
-                "Failed to create event source"
+                "Failed to create event source",
             ),
         }
     }

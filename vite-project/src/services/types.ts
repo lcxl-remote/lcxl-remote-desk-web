@@ -419,13 +419,12 @@ export type DeskSettings = {
     */
     video_device_index?: number;
     /**
-     * @description Video encode bitrate in bps (bits per second)
+     * @description Video encode quality (0-63)
      * @minLength 0
-     * @default 10000000
+     * @default 22
      * @type integer | undefined, int32
-    */
-    video_encode_bps?: number;
-    /**
+     */
+     video_quality?: number;    /**
      * @description Video encoder name, None for auto detection
      * @type string,null
     */

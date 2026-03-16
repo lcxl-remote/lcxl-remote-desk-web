@@ -69,6 +69,7 @@ config = { version = "0.15", features = ["toml"] }
 
 mime = "0.3"
 yuv = "0.8"
+x264 = { git = "https://github.com/lcxl/x264.git", tag = "v0.7.1" }
 openh264 = "0.9.3"
 
 opusic-c = "1.5"
@@ -87,7 +88,9 @@ sha1 = "0.10"
 cpal = "0.15"
 ringbuf = "0.4"
 
-vpx-encode = { path = "../third-deps/vpx-encode", features = ["vp9"] }
+vpx-encode = { git = "https://github.com/lcxl/vpx-encode.git", tag = "v0.7.0", features = [
+    "vp9",
+] }
 
 sysinfo = "0.37"
 opentelemetry = { version = "0.31.0", features = ["metrics", "trace"] }

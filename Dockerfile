@@ -41,6 +41,8 @@ RUN apt-get update && apt-get install -y \
     clang \
     libclang-dev \
     cmake \
+    nasm \
+    libx264-dev \
     libvpx-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -82,6 +84,7 @@ RUN apt-get update && apt-get install -y \
     libxcb-randr0 \
     libxext6 \
     libvpx7 \
+    libx264-164 \
     ca-certificates \
     openssl \
     && rm -rf /var/lib/apt/lists/*

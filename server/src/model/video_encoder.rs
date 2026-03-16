@@ -12,14 +12,15 @@ pub trait VideoEncoder {
 
 #[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
 pub enum VideoEncoderType {
-    H264,
+    X264,
     VP8,
     VP9,
+    H264,
 }
 
 impl Default for VideoEncoderType {
     fn default() -> Self {
-        return VideoEncoderType::H264;
+        return VideoEncoderType::X264;
     }
 }
 pub trait VideoEncoderTypeHelper {

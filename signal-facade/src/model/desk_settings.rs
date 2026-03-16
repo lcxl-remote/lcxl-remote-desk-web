@@ -5,6 +5,24 @@ use utoipa::ToSchema;
 
 use crate::model::audio_capture::SelectedAudioDevice;
 
+/// X264 encoder settings
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[serde(default)]
+pub struct X264EncoderSettings {
+    /// Quality (CRF), 0-51, default is 22. Lower is better.
+    pub quality: u32,
+    /// Group of Pictures, default is 0, which means the encoder will decide the value.
+    pub gop: u32,
+}
+
+impl Default for X264EncoderSettings {
+    fn default() -> Self {
+        Self {
+            quality: 22,
+            gop: 0,
+        }
+    }
+}
 /// H264 encoder settings
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
@@ -28,13 +46,18 @@ impl Default for H264EncoderSettings {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct VpxEncoderSettings {
-    /// Bitrate in bps (bits per second), default is 5,000,000 bps (5 Mbps)
+    /// Bitrate in bps (bits per second), default is 50,000,000 bps (50 Mbps)
     pub bps: u32,
+    /// Quality (CQ Level), 0-63, default is 25. Lower is better.
+    pub quality: u32,
 }
 
 impl Default for VpxEncoderSettings {
     fn default() -> Self {
-        Self { bps: 5_000_000 }
+        Self {
+            bps: 50_000_000,
+            quality: 25,
+        }
     }
 }
 
@@ -111,8 +134,8 @@ pub struct DeskSettings {
     pub enable_d3d_debug: bool,
     /// Video device index
     pub video_device_index: u32,
-    /// Video encode bitrate in bps (bits per second)
-    pub video_encode_bps: u32,
+    /// Video encode quality, 0-63, lower is better. Default is 22.
+    pub video_quality: u32,
     /// Enable adaptive web page resolution
     pub adaptive_web_page_resolution: bool,
     /// Video zoom ratio (e.g., 50 for 50% zoom)
@@ -131,6 +154,8 @@ pub struct DeskSettings {
     pub audio_device: Option<SelectedAudioDevice>,
     /// Audio encoder name, None for auto detection
     pub audio_encoder: Option<String>,
+    /// x264 encoder settings
+    pub x264_encoder: Option<X264EncoderSettings>,
     /// h264 encoder settings
     pub h264_encoder: Option<H264EncoderSettings>,
     /// VP8 encoder settings
@@ -163,7 +188,7 @@ impl Default for DeskSettings {
         Self {
             enable_d3d_debug: false,
             video_device_index: 0,
-            video_encode_bps: 10_000_000,
+            video_quality: 22,
             adaptive_web_page_resolution: false,
             video_zoom_ratio: 100,
             video_fps: 60,
@@ -173,6 +198,7 @@ impl Default for DeskSettings {
             video_encoder: None,
             audio_device: None,
             audio_encoder: None,
+            x264_encoder: None,
             h264_encoder: None,
             vp8_encoder: None,
             vp9_encoder: None,

@@ -6,7 +6,9 @@ use strum::IntoEnumIterator;
 use crate::{
     error::DeskError,
     model::video_encoder::{VideoEncoder, VideoEncoderType, VideoEncoderTypeHelper},
-    service::video_encoder::{h264_encoder::H264Encoder, vpx_encoder::VpxEncoder},
+    service::video_encoder::{
+        h264_encoder::H264Encoder, vpx_encoder::VpxEncoder, x264_encoder::X264Encoder,
+    },
 };
 
 impl VideoEncoderTypeHelper for DeskSettings {
@@ -35,6 +37,10 @@ pub fn create_video_encoder(
     display_info: &DisplayInfo,
 ) -> Result<Box<dyn VideoEncoder>, DeskError> {
     let encoder: Box<dyn VideoEncoder> = match desk_setting.get_video_encoder_type()? {
+        VideoEncoderType::X264 => Box::new(X264Encoder::new(
+            desk_setting.x264_encoder.clone().unwrap_or_default(),
+            display_info,
+        )?),
         VideoEncoderType::H264 => Box::new(H264Encoder::new(
             desk_setting.h264_encoder.clone().unwrap_or_default(),
         )),

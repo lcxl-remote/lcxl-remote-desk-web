@@ -113,7 +113,10 @@ impl WaylandRemoteDesktop {
         let select_request = get_zbus_portal_request(conn, &select_token)?;
         select_options.insert("handle_token", zbus::zvariant::Value::from(&select_token));
         select_options.insert("types", zbus::zvariant::Value::from(types));
-        log::info!("Wayland RemoteDesktop: calling SelectDevices, types={}", types);
+        log::info!(
+            "Wayland RemoteDesktop: calling SelectDevices, types={}",
+            types
+        );
         let select_response_stream = select_request.receive_signal("Response")?;
         proxy.call_method("SelectDevices", &(&session, select_options))?;
         let _: HashMap<String, OwnedValue> =
@@ -133,7 +136,10 @@ impl WaylandRemoteDesktop {
             .streams
             .and_then(|v| v.into_iter().next().map(|x| x.0))
             .unwrap_or(0);
-        log::info!("Wayland RemoteDesktop: Start succeeded, stream_id={}", stream_id);
+        log::info!(
+            "Wayland RemoteDesktop: Start succeeded, stream_id={}",
+            stream_id
+        );
 
         Ok(Self {
             session,

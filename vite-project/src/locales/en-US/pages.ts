@@ -309,6 +309,8 @@ export default {
   'pages.desk.audioDeviceRequired': 'Please select an audio device!',
   'pages.desk.encodingConfig': 'Encoding Configuration',
   'pages.desk.videoEncoder': 'Video Encoder',
+  'pages.desk.videoQuality': 'Video Quality',
+  'pages.desk.videoQualityDescription': '0-63, lower is better',
   'pages.desk.autoDetect': 'Auto Detect',
   'pages.desk.adaptiveBitrate': 'Adaptive Bitrate',
   'pages.desk.bitrate': 'Bitrate (bps)',

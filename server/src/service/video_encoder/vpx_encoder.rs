@@ -34,6 +34,7 @@ impl VpxEncoder {
             height: display_info.desktop_coordinates.height() as u32,
             timebase: [1, 1000],
             bitrate: setting.bps,
+            quality: Some(setting.quality),
             codec,
         };
         let encoder = vpx_encode::Encoder::new(config)?;

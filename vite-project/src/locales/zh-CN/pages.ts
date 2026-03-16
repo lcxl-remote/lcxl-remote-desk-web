@@ -307,6 +307,8 @@ export default {
   'pages.desk.audioDeviceRequired': '请选择一个音频设备!',
   'pages.desk.encodingConfig': '编码配置',
   'pages.desk.videoEncoder': '视频编码',
+  'pages.desk.videoQuality': '视频质量',
+  'pages.desk.videoQualityDescription': '0-63, 越小质量越好',
   'pages.desk.autoDetect': '自动检测',
   'pages.desk.adaptiveBitrate': '自适应码率',
   'pages.desk.bitrate': '码率 bps',

@@ -64,6 +64,7 @@ export function DeskConfigDialog({
             show_mouse: true,
             adaptive_web_page_resolution: true,
             video_zoom_ratio: 100,
+            video_quality: 22,
             enable_audio: false,
             video_encoder: null,
             audio_encoder: null,
@@ -79,6 +80,7 @@ export function DeskConfigDialog({
                 show_mouse: initData.desk_settings.show_mouse ?? true,
                 adaptive_web_page_resolution: initData.desk_settings.adaptive_web_page_resolution ?? true,
                 video_zoom_ratio: initData.desk_settings.video_zoom_ratio ?? 100,
+                video_quality: initData.desk_settings.video_quality ?? 22,
                 wayland_control_mode: initData.desk_settings.wayland_control_mode ?? "auto",
             })
         }
@@ -104,6 +106,7 @@ export function DeskConfigDialog({
             ...values,
             video_device_index: Number(values.video_device_index),
             video_zoom_ratio: Number(values.video_zoom_ratio),
+            video_quality: Number(values.video_quality),
             wayland_control_mode: values.wayland_control_mode ?? "auto",
         }
 
@@ -399,6 +402,30 @@ export function DeskConfigDialog({
                                                         <SelectItem value="none">none</SelectItem>
                                                     </SelectContent>
                                                 </Select>
+                                                <FormMessage />
+                                            </FormItem>
+                                        )}
+                                    />
+
+                                    <FormField
+                                        control={form.control}
+                                        name="video_quality"
+                                        render={({ field }) => (
+                                            <FormItem className="pt-2">
+                                                <FormLabel className="flex justify-between">
+                                                    <span>{t('pages.desk.videoQuality', 'Video Quality')} ({t('pages.desk.videoQualityDescription', '0-63, lower is better')})</span>
+                                                    <span className="text-muted-foreground">{field.value}</span>
+                                                </FormLabel>
+                                                <FormControl>
+                                                    <Slider
+                                                        min={0}
+                                                        max={63}
+                                                        step={1}
+                                                        value={[field.value ?? 22]}
+                                                        onValueChange={(vals: number[]) => field.onChange(vals[0])}
+                                                        className="py-2"
+                                                    />
+                                                </FormControl>
                                                 <FormMessage />
                                             </FormItem>
                                         )}

@@ -64,13 +64,15 @@ pub fn create_mouse_event_handler(
             }
             "uinput" => {
                 log::info!("Mouse handler: using forced uinput backend");
-                return Ok(Box::new(linux::UinputMouseEventHandler::new(width, height)?));
+                return Ok(Box::new(linux::UinputMouseEventHandler::new(
+                    width, height,
+                )?));
             }
             "portal" => {
                 log::info!("Mouse handler: using forced wayland portal backend");
-                return Ok(Box::new(wayland_portal::WaylandPortalMouseEventHandler::new(
-                    width, height,
-                )?));
+                return Ok(Box::new(
+                    wayland_portal::WaylandPortalMouseEventHandler::new(width, height)?,
+                ));
             }
             _ => {}
         }
@@ -87,7 +89,9 @@ pub fn create_mouse_event_handler(
             }
         }
         log::info!("Mouse handler: fallback to uinput backend");
-        Ok(Box::new(linux::UinputMouseEventHandler::new(width, height)?))
+        Ok(Box::new(linux::UinputMouseEventHandler::new(
+            width, height,
+        )?))
     }
     #[cfg(target_os = "macos")]
     {

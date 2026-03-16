@@ -62,6 +62,7 @@ impl MouseEventHandler for WaylandPortalMouseEventHandler {
     }
 
     fn handle_mouse_wheel(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
-        self.portal.notify_pointer_axis(event.delta_x, event.delta_y)
+        self.portal
+            .notify_pointer_axis(event.delta_x, event.delta_y)
     }
 }

@@ -21,10 +21,12 @@ impl WaylandPortalKeyboardEventHandler {
 
 impl KeyboardEventHandler for WaylandPortalKeyboardEventHandler {
     fn handle_key_down(&mut self, event: &KeyboardEventData) -> Result<(), DeskError> {
-        self.portal.notify_keyboard_keycode(event.key_code as i32, 1)
+        self.portal
+            .notify_keyboard_keycode(event.key_code as i32, 1)
     }
 
     fn handle_key_up(&mut self, event: &KeyboardEventData) -> Result<(), DeskError> {
-        self.portal.notify_keyboard_keycode(event.key_code as i32, 0)
+        self.portal
+            .notify_keyboard_keycode(event.key_code as i32, 0)
     }
 }
