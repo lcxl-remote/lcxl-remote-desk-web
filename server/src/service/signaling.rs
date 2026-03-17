@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -19,16 +18,12 @@ use desk_signal_facade::model::signal::{
     InitSignalingData, LcxlRTCIceServer, OfferModel, PeerSignalingSender, RemoteDeskTypeEnum,
     SignalingModel, SignalingState, SignalingType, WebRTConnectionState,
 };
-use desk_signal_facade::model::terminal::{
-    StartTerminalSession, TerminalInputData, TerminalOutputData, TerminalResizeData,
-};
 use desk_signal_facade::{error::DeskSignalFacadeError, model::version::VersionInfo};
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 
 use futures_util::{SinkExt, StreamExt};
 
 use log::{error, info, warn};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use prometheus::{HistogramVec, register_histogram_vec};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
@@ -73,18 +68,14 @@ use crate::service::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
 use crate::service::data_channel::handle_data_channel_event;
-use crate::service::file_manager;
 use crate::service::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture_async,
 };
-use crate::service::terminal::fetch_terminal_list;
 use crate::service::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
 use crate::version;
 use crate::{error::DeskError, model::settings::SharedSettings};
-use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
-
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("capture_screen_histogram", "help", &["type"]).unwrap()
 });
@@ -92,12 +83,7 @@ pub static WEBRTC_WRITE_SAMPLE_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new
     register_histogram_vec!("webrtc_write_sample_histogram", "help", &["type"]).unwrap()
 });
 
-/// Running terminal model
-pub struct RunningTerminal {
-    pub master: Box<dyn MasterPty + Send>,
-    pub child: Arc<std::sync::Mutex<Box<dyn Child + Send + Sync>>>,
-    pub writer: Box<dyn Write + Send>,
-}
+
 
 #[derive(Debug)]
 pub enum DeskSessionMessage {
@@ -111,7 +97,7 @@ pub enum DeskSessionMessage {
 
 #[derive(Clone)]
 pub struct DeskSessionSender {
-    sender: mpsc::UnboundedSender<DeskSessionMessage>,
+    pub sender: mpsc::UnboundedSender<DeskSessionMessage>,
 }
 
 impl PeerSignalingSender for DeskSessionSender {
@@ -540,7 +526,7 @@ pub struct DeskSession {
     /// Tokio watch sender for WebRTConnectionState updates
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
     /// Terminal map: from_session_id -> RunningTerminal
-    pub terminal_map: HashMap<String, RunningTerminal>,
+    pub terminal_map: HashMap<String, crate::service::terminal::RunningTerminal>,
     /// System setting helper
     pub host_control_helper: Box<dyn crate::model::host_control::HostControlHelper + Send + Sync>,
     /// Whiteboard command sender (available when Tauri is present)
@@ -1274,7 +1260,7 @@ impl DeskSession {
             drop(terminal);
             if let Ok(mut child) = child_arc.lock() {
                 if let Some(pid) = child.process_id() {
-                    force_kill_terminal_process(pid);
+                    crate::service::terminal::force_kill_terminal_process(pid);
                 }
                 let result = child.kill();
                 info!("Terminal session ended, result={:?}", result);
@@ -1624,26 +1610,26 @@ impl DeskSession {
                 }
             }
             SignalingType::ManagerFileList => {
-                self.handle_manager_file_list(signaling_model).await?;
+                crate::service::file_manager::handle_manager_file_list(self, signaling_model).await?;
             }
             SignalingType::ManagerFileDelete => {
-                self.handle_manager_file_delete(signaling_model).await?;
+                crate::service::file_manager::handle_manager_file_delete(self, signaling_model).await?;
             }
             SignalingType::StartTerminal => {
                 // let's assume it was receiving &signaling_model in the codebase because that's the only one available
-                self.handle_manager_terminal_start(signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_start(self, signaling_model).await?;
             }
             SignalingType::SendDataToTerminal => {
-                self.handle_manager_terminal_data(signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_data(self, signaling_model).await?;
             }
             SignalingType::ResizeTerminal => {
-                self.handle_manager_terminal_resize(signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_resize(self, signaling_model).await?;
             }
             SignalingType::CloseTerminal => {
-                self.handle_manager_terminal_close(signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_close(self, signaling_model).await?;
             }
             SignalingType::ListTerminal => {
-                self.handle_list_terminals(signaling_model).await?;
+                crate::service::terminal::handle_list_terminals(self, signaling_model).await?;
             }
             /*
             SignalingType::Version => {
@@ -1852,422 +1838,4 @@ impl DeskSession {
         Ok(())
     }
 
-    pub async fn handle_manager_terminal_start(
-        &mut self,
-        signaling_model: &SignalingModel,
-    ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
-
-        let allow_terminal = { self.settings.read().await.security.allow_terminal };
-        let approved = check_security_permission(
-            &self.settings,
-            self.security_approval_sender.as_ref(),
-            allow_terminal,
-            SecurityPermissionType::Terminal,
-            Some(from_session_id.to_string()),
-        )
-        .await;
-
-        if !approved {
-            self.session
-                .send_error(
-                    &signaling_model.request_id,
-                    signaling_model.signaling_type.into(),
-                    Some(from_session_id.to_string()),
-                    DeskErrorCode::PERMISSION_ERROR,
-                    "Terminal access denied by security settings or user",
-                )
-                .await?;
-            return Ok(());
-        }
-
-        // The from_session_id IS the terminal_session_id generated by the controller.
-        let start_terminal_session = signaling_model.get_data::<StartTerminalSession>()?;
-        let command = start_terminal_session.command;
-        if command.is_empty() {
-            return DeskError::custom_error(DeskErrorCode::INVALID_PARAMS, "Missing command");
-        }
-
-        let terminal_command_list: Vec<&str> = command.split(",").collect();
-        let execute_file_path = terminal_command_list[0];
-        let args_list = &terminal_command_list[1..];
-
-        // PTY setup
-        let pty_system = native_pty_system();
-        let pair = pty_system.openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
-
-        let mut cmd = CommandBuilder::new(execute_file_path);
-        cmd.args(args_list);
-        if cfg!(unix) {
-            cmd.env("TERM", "xterm-256color");
-        }
-
-        let child = pair.slave.spawn_command(cmd)?;
-
-        // Wrap child in Arc<Mutex> for shared access
-        let child = Arc::new(std::sync::Mutex::new(child));
-        let child_clone = child.clone();
-
-        // Spawn reader
-        let mut reader = pair.master.try_clone_reader()?;
-        let session_sender = self.session.clone();
-        let terminal_session_id = from_session_id.to_owned();
-        // We need to know who to send TO. The controller put desk_session_id as `to_session_id`.
-        // When we reply, `to_session_id` should be `terminal_session_id` (so Signal server can route it).
-
-        // Monitor task for process exit (using tokio::spawn for coroutine)
-        let monitor_sender = self.session.clone();
-        let monitor_session_id = from_session_id.to_owned();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let exited = {
-                    if let Ok(mut child) = child_clone.lock() {
-                        match child.try_wait() {
-                            Ok(Some(_)) => true,
-                            Ok(None) => false,
-                            Err(e) => {
-                                log::warn!("Failed to wait child: {}", e);
-                                true // Assume exited on error
-                            }
-                        }
-                    } else {
-                        true // Poisioned mutex
-                    }
-                };
-
-                if exited {
-                    log::info!(
-                        "Process exited, sending TerminalClosed to {}",
-                        monitor_session_id
-                    );
-                    let model = SignalingModel::new_request::<()>(
-                        SignalingType::TerminalClosed,
-                        Some(monitor_session_id.to_string()),
-                        None,
-                    );
-                    if let Ok(model) = model {
-                        if let Ok(text) = serde_json::to_string(&model) {
-                            if let Err(e) = monitor_sender
-                                .sender
-                                .send(DeskSessionMessage::Text(ByteString::from(text)))
-                            {
-                                log::warn!(
-                                    "Failed to send TerminalClosed to {}: {}",
-                                    monitor_session_id,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-        });
-
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 1024];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(n) => {
-                        if n == 0 {
-                            break;
-                        }
-                        let content = String::from_utf8_lossy(&buf[..n]).to_string();
-                        let data = TerminalOutputData { content };
-                        let model = SignalingModel::new_request(
-                            SignalingType::ReplyFromTerminal,
-                            Some(terminal_session_id.to_owned()),
-                            Some(&data),
-                        );
-                        if let Ok(model) = model {
-                            if let Ok(text) = serde_json::to_string(&model) {
-                                let _ = session_sender
-                                    .sender
-                                    .send(DeskSessionMessage::Text(ByteString::from(text)));
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to read from terminal, session id: {}, error: {}",
-                            terminal_session_id,
-                            e
-                        );
-                        break;
-                    }
-                }
-            }
-            // Send close message
-            let data = TerminalOutputData {
-                content: "\r\n\x1b[33m[Process exited]\x1b[0m\r\n".to_string(),
-            };
-
-            let model = SignalingModel::new_request(
-                SignalingType::ReplyFromTerminal,
-                Some(terminal_session_id.to_owned()),
-                Some(&data),
-            );
-
-            if let Ok(model) = model {
-                if let Ok(text) = serde_json::to_string(&model) {
-                    let _ = session_sender
-                        .sender
-                        .send(DeskSessionMessage::Text(ByteString::from(text)));
-                }
-            }
-        });
-
-        let writer = pair.master.take_writer()?;
-
-        self.terminal_map.insert(
-            from_session_id.to_owned(),
-            RunningTerminal {
-                master: pair.master,
-                child,
-                writer,
-            },
-        );
-
-        // send terminal started signal
-        let model = SignalingModel::success_response::<()>(
-            &signaling_model.request_id,
-            SignalingType::TerminalStarted,
-            None,
-            Some(from_session_id.to_owned()),
-            None,
-        );
-        if let Ok(model) = model {
-            if let Ok(text) = serde_json::to_string(&model) {
-                let _ = self
-                    .session
-                    .sender
-                    .send(DeskSessionMessage::Text(ByteString::from(text)));
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn handle_manager_terminal_data(
-        &mut self,
-        signaling_model: &SignalingModel,
-    ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        let data_value =
-            if let Some(v) = signaling_model.get_data_with_type::<TerminalInputData>()? {
-                v
-            } else {
-                return Ok(()); // Ignore empty
-            };
-
-        if let Some(terminal) = self.terminal_map.get_mut(from_session_id) {
-            let writer = &mut terminal.writer;
-            if let Err(e) = writer.write_all(data_value.content.as_bytes()) {
-                warn!("Failed to write to pty: {}", e);
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn handle_manager_terminal_resize(
-        &mut self,
-        signaling_model: &SignalingModel,
-    ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        let data_value =
-            if let Some(v) = signaling_model.get_data_with_type::<TerminalResizeData>()? {
-                v
-            } else {
-                return Ok(());
-            };
-
-        if let Some(terminal) = self.terminal_map.get_mut(from_session_id) {
-            let rows = data_value.rows;
-            let cols = data_value.cols;
-            if let Err(e) = terminal.master.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            }) {
-                warn!("Failed to resize pty: {}", e);
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn handle_manager_terminal_close(
-        &mut self,
-        signaling_model: &SignalingModel,
-    ) -> Result<(), DeskError> {
-        log::info!(
-            "handle_manager_terminal_close, signaling_model: {:?}",
-            signaling_model
-        );
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        if let Some(terminal) = self.terminal_map.remove(from_session_id) {
-            let child_arc = terminal.child.clone();
-            drop(terminal);
-            if let Ok(mut child) = child_arc.lock() {
-                if let Some(pid) = child.process_id() {
-                    force_kill_terminal_process(pid);
-                }
-                let _ = child.kill();
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn handle_list_terminals(
-        &mut self,
-        signaling_model: &SignalingModel,
-    ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.from_session_id.clone();
-        let terminals = fetch_terminal_list(self.settings.clone()).await?;
-        self.session
-            .send_response(
-                &signaling_model.request_id,
-                signaling_model.signaling_type.into(),
-                from_session_id,
-                &terminals,
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn handle_manager_file_list(
-        &mut self,
-        signaling_model: &SignalingModel,
-    ) -> Result<(), DeskError> {
-        // ManagerFileList is a request from the http api, so it may not have a from_session_id
-        let from_session_id = signaling_model.from_session_id.clone();
-        let allow_file_browse = { self.settings.read().await.security.allow_file_browse };
-        let approved = check_security_permission(
-            &self.settings,
-            self.security_approval_sender.as_ref(),
-            allow_file_browse,
-            SecurityPermissionType::FileBrowse,
-            from_session_id.clone(),
-        )
-        .await;
-
-        if !approved {
-            self.session
-                .send_error(
-                    &signaling_model.request_id,
-                    signaling_model.signaling_type.into(),
-                    from_session_id.clone(),
-                    DeskErrorCode::PERMISSION_ERROR,
-                    "File browse access denied",
-                )
-                .await?;
-            return Ok(());
-        }
-
-        let params = signaling_model.get_data::<FileListParams>()?;
-        match crate::service::file_manager::list_files(params).await {
-            Ok(response) => {
-                self.session
-                    .send_response(
-                        &signaling_model.request_id,
-                        SignalingType::ManagerFileList,
-                        from_session_id.clone(),
-                        &response,
-                    )
-                    .await?;
-            }
-            Err(e) => {
-                self.session
-                    .send_error(
-                        &signaling_model.request_id,
-                        SignalingType::ManagerFileList,
-                        from_session_id.clone(),
-                        e.to_error_code(),
-                        &e.to_string(),
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-
-    pub async fn handle_manager_file_delete(
-        &mut self,
-        signaling_model: &SignalingModel,
-    ) -> Result<(), DeskError> {
-        // ManagerFileList is a request from the http api, so it may not have a from_session_id
-        let from_session_id = signaling_model.from_session_id.clone();
-        let allow_file_browse = { self.settings.read().await.security.allow_file_browse };
-        let approved = check_security_permission(
-            &self.settings,
-            self.security_approval_sender.as_ref(),
-            allow_file_browse,
-            SecurityPermissionType::FileBrowse,
-            from_session_id.clone(),
-        )
-        .await;
-
-        if !approved {
-            self.session
-                .send_error(
-                    &signaling_model.request_id,
-                    signaling_model.signaling_type.into(),
-                    from_session_id.clone(),
-                    DeskErrorCode::PERMISSION_ERROR,
-                    "File delete access denied",
-                )
-                .await?;
-            return Ok(());
-        }
-
-        let params = signaling_model.get_data::<DeleteFileRequest>()?;
-
-        match file_manager::delete_file(params).await {
-            Ok(_) => {
-                self.session
-                    .send_response(
-                        &signaling_model.request_id,
-                        SignalingType::ManagerFileDelete,
-                        from_session_id,
-                        &serde_json::json!({}),
-                    )
-                    .await?;
-            }
-            Err(e) => {
-                self.session
-                    .send_error(
-                        &signaling_model.request_id,
-                        SignalingType::ManagerFileDelete,
-                        from_session_id,
-                        e.to_error_code(),
-                        &e.to_string(),
-                    )
-                    .await?;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Helper function to kill a terminal process and all its descendants grouped by session ID.
-fn force_kill_terminal_process(root_pid: u32) {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    let target_sid = sysinfo::Pid::from_u32(root_pid);
-    for (pid, proc) in sys.processes() {
-        if proc.session_id() == Some(target_sid) {
-            let result = proc.kill();
-            log::info!(
-                "Try to kill process, session_id={}, pid={}, result={}",
-                target_sid.as_u32(),
-                pid.as_u32(),
-                result
-            );
-        }
-    }
 }

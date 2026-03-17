@@ -2,6 +2,10 @@ use crate::error::DeskError;
 use desk_signal_facade::model::files::{
     DeleteFileRequest, FileInfo, FileListParams, FileListResponse,
 };
+use desk_signal_facade::model::signal::{SignalingModel, SignalingType, PeerSignalingSender};
+use desk_utils::error::DeskErrorCode;
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::service::signaling::DeskSession;
 
 use log::{debug, info, warn};
 use std::path::PathBuf;
@@ -149,6 +153,119 @@ pub async fn delete_file(delete_file_request: DeleteFileRequest) -> Result<(), D
     }
 
     info!("Delete file {} successfully", delete_file_request.file_path);
+    Ok(())
+}
+
+pub async fn handle_manager_file_list(
+    desk_session: &mut DeskSession,
+    signaling_model: &SignalingModel,
+) -> Result<(), DeskError> {
+    // ManagerFileList is a request from the http api, so it may not have a from_session_id
+    let from_session_id = signaling_model.from_session_id.clone();
+    let allow_file_browse = { desk_session.settings.read().await.security.allow_file_browse };
+    let approved = check_security_permission(
+        &desk_session.settings,
+        desk_session.security_approval_sender.as_ref(),
+        allow_file_browse,
+        SecurityPermissionType::FileBrowse,
+        from_session_id.clone(),
+    )
+    .await;
+
+    if !approved {
+        desk_session.session
+            .send_error(
+                &signaling_model.request_id,
+                signaling_model.signaling_type.into(),
+                from_session_id.clone(),
+                DeskErrorCode::PERMISSION_ERROR,
+                "File browse access denied",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    let params = signaling_model.get_data::<FileListParams>()?;
+    match list_files(params).await {
+        Ok(response) => {
+            desk_session.session
+                .send_response(
+                    &signaling_model.request_id,
+                    SignalingType::ManagerFileList,
+                    from_session_id.clone(),
+                    &response,
+                )
+                .await?;
+        }
+        Err(e) => {
+            desk_session.session
+                .send_error(
+                    &signaling_model.request_id,
+                    SignalingType::ManagerFileList,
+                    from_session_id.clone(),
+                    e.to_error_code(),
+                    &e.to_string(),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_manager_file_delete(
+    desk_session: &mut DeskSession,
+    signaling_model: &SignalingModel,
+) -> Result<(), DeskError> {
+    // ManagerFileList is a request from the http api, so it may not have a from_session_id
+    let from_session_id = signaling_model.from_session_id.clone();
+    let allow_file_browse = { desk_session.settings.read().await.security.allow_file_browse };
+    let approved = check_security_permission(
+        &desk_session.settings,
+        desk_session.security_approval_sender.as_ref(),
+        allow_file_browse,
+        SecurityPermissionType::FileBrowse,
+        from_session_id.clone(),
+    )
+    .await;
+
+    if !approved {
+        desk_session.session
+            .send_error(
+                &signaling_model.request_id,
+                signaling_model.signaling_type.into(),
+                from_session_id.clone(),
+                DeskErrorCode::PERMISSION_ERROR,
+                "File delete access denied",
+            )
+            .await?;
+        return Ok(());
+    }
+
+    let params = signaling_model.get_data::<DeleteFileRequest>()?;
+
+    match delete_file(params).await {
+        Ok(_) => {
+            desk_session.session
+                .send_response(
+                    &signaling_model.request_id,
+                    SignalingType::ManagerFileDelete,
+                    from_session_id,
+                    &serde_json::json!({}),
+                )
+                .await?;
+        }
+        Err(e) => {
+            desk_session.session
+                .send_error(
+                    &signaling_model.request_id,
+                    SignalingType::ManagerFileDelete,
+                    from_session_id,
+                    e.to_error_code(),
+                    &e.to_string(),
+                )
+                .await?;
+        }
+    }
     Ok(())
 }
 
