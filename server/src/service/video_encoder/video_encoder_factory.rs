@@ -38,20 +38,20 @@ pub fn create_video_encoder(
 ) -> Result<Box<dyn VideoEncoder>, DeskError> {
     let encoder: Box<dyn VideoEncoder> = match desk_setting.get_video_encoder_type()? {
         VideoEncoderType::X264 => Box::new(X264Encoder::new(
-            desk_setting.x264_encoder.clone().unwrap_or_default(),
+            desk_setting.get_x264_encoder_settings(),
             display_info,
         )?),
         VideoEncoderType::H264 => Box::new(H264Encoder::new(
-            desk_setting.h264_encoder.clone().unwrap_or_default(),
+            desk_setting.get_h264_encoder_settings(display_info),
         )),
         VideoEncoderType::VP8 => Box::new(VpxEncoder::new(
             vpx_encode::VideoCodecId::VP8,
-            desk_setting.vp8_encoder.clone().unwrap_or_default(),
+            desk_setting.get_vp8_encoder_settings(),
             display_info,
         )?),
         VideoEncoderType::VP9 => Box::new(VpxEncoder::new(
             vpx_encode::VideoCodecId::VP9,
-            desk_setting.vp9_encoder.clone().unwrap_or_default(),
+            desk_setting.get_vp9_encoder_settings(),
             display_info,
         )?),
     };

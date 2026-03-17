@@ -345,12 +345,39 @@ export type PrivateScreenSettings = {
 */
 export type VpxEncoderSettings = {
     /**
-     * @description Bitrate in bps (bits per second), default is 5,000,000 bps (5 Mbps)
+     * @description Bitrate in bps (bits per second), default is 50,000,000 bps (50 Mbps)
      * @minLength 0
-     * @default 5000000
+     * @default 50000000
      * @type integer | undefined, int32
     */
     bps?: number;
+    /**
+     * @description Quality (CQ Level), 0-63, default is 25. Lower is better.
+     * @minLength 0
+     * @default 25
+     * @type integer | undefined, int32
+    */
+    quality?: number;
+};
+
+/**
+ * @description X264 encoder settings
+*/
+export type X264EncoderSettings = {
+    /**
+     * @description Group of Pictures, default is 0, which means the encoder will decide the value.
+     * @minLength 0
+     * @default 0
+     * @type integer | undefined, int32
+    */
+    gop?: number;
+    /**
+     * @description Quality (CRF), 0-51, default is 22. Lower is better.
+     * @minLength 0
+     * @default 22
+     * @type integer | undefined, int32
+    */
+    quality?: number;
 };
 
 /**
@@ -419,12 +446,6 @@ export type DeskSettings = {
     */
     video_device_index?: number;
     /**
-     * @description Video encode quality (0-63)
-     * @minLength 0
-     * @default 22
-     * @type integer | undefined, int32
-     */
-     video_quality?: number;    /**
      * @description Video encoder name, None for auto detection
      * @type string,null
     */
@@ -436,6 +457,13 @@ export type DeskSettings = {
      * @type integer | undefined, int32
     */
     video_fps?: number;
+    /**
+     * @description Video encode quality, 0-63, lower is better. Default is 22.
+     * @minLength 0
+     * @default 22
+     * @type integer | undefined, int32
+    */
+    video_quality?: number;
     /**
      * @description Video zoom ratio (e.g., 50 for 50% zoom)
      * @minLength 0
@@ -456,6 +484,10 @@ export type DeskSettings = {
      * @type string,null
     */
     wayland_control_mode?: string | null;
+    /**
+     * @default null
+    */
+    x264_encoder?: (null | X264EncoderSettings);
 };
 
 export type DeviceCodeBatchDeleteParams = {

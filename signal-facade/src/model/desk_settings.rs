@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::model::audio_capture::SelectedAudioDevice;
+use crate::model::{audio_capture::SelectedAudioDevice, image_capture::DisplayInfo};
 
 /// X264 encoder settings
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
@@ -36,7 +36,7 @@ pub struct H264EncoderSettings {
 impl Default for H264EncoderSettings {
     fn default() -> Self {
         Self {
-            bps: 10_000_000,
+            bps: 4_000_000,
             gop: 0,
         }
     }
@@ -181,6 +181,74 @@ impl DeskSettings {
         }
         Duration::from_micros((1000_000 as f32 / video_fps as f32) as u64)
     }
+
+    pub fn get_x264_encoder_settings(&self) -> X264EncoderSettings {
+        if let Some(ref x264_encoder) = self.x264_encoder {
+            return x264_encoder.clone();
+        }
+        // use video_quality to create a default x264 encoder settings
+        let mut encoder_settings = X264EncoderSettings::default();
+        encoder_settings.quality = self.video_quality;
+        encoder_settings
+    }
+
+    pub fn get_h264_encoder_settings(&self, display_info: &DisplayInfo) -> H264EncoderSettings {
+        if let Some(ref h264_encoder) = self.h264_encoder {
+            return h264_encoder.clone();
+        }
+        // Use video_quality to create a default h264 encoder settings
+        let mut encoder_settings = H264EncoderSettings::default();
+
+        // Calculate bps based on resolution and quality
+        // video_quality: 0 (highest) to 63 (lowest)
+        // BPP (Bits Per Pixel) range: 0.02 (lowest) to 0.20 (highest)
+        // For 1080p, 60fps:
+        // Quality 0: 1920 * 1080 * 60 * 0.20 = 24.8 Mbps
+        // Quality 63: 1920 * 1080 * 60 * 0.02 = 2.48 Mbps
+
+        let width = display_info.desktop_coordinates.width() as u64;
+        let height = display_info.desktop_coordinates.height() as u64;
+        let fps = if self.video_fps == 0 { 60 } else { self.video_fps } as u64;
+        let pixels_per_second = width * height * fps;
+
+        // Linear interpolation for BPP
+        // bpp = max_bpp - (video_quality / 63.0) * (max_bpp - min_bpp)
+        let max_bpp = 0.20f64;
+        let min_bpp = 0.02f64;
+        let quality_ratio = (self.video_quality as f64 / 63.0).clamp(0.0, 1.0);
+        let bpp = max_bpp - quality_ratio * (max_bpp - min_bpp);
+
+        let mut bps = (pixels_per_second as f64 * bpp) as u32;
+
+        // Cap bps at 100 Mbps to prevent OpenH264 error and excessive bandwidth usage
+        let max_bps = 100_000_000;
+        if bps > max_bps {
+            bps = max_bps;
+        }
+
+        encoder_settings.bps = bps;
+        encoder_settings
+    }
+
+    pub fn get_vp8_encoder_settings(&self) -> VpxEncoderSettings {
+        if let Some(ref vp8_encoder) = self.vp8_encoder {
+            return vp8_encoder.clone();
+        }
+        // use video_quality to create a default vp8 encoder settings
+        let mut encoder_settings = VpxEncoderSettings::default();
+        encoder_settings.quality = self.video_quality;
+        encoder_settings
+    }
+
+    pub fn get_vp9_encoder_settings(&self) -> VpxEncoderSettings {
+        if let Some(ref vp9_encoder) = self.vp9_encoder {
+            return vp9_encoder.clone();
+        }
+        // use video_quality to create a default vp9 encoder settings
+        let mut encoder_settings = VpxEncoderSettings::default();
+        encoder_settings.quality = self.video_quality;
+        encoder_settings
+    }
 }
 
 impl Default for DeskSettings {
@@ -207,5 +275,54 @@ impl Default for DeskSettings {
             display_name: None,
             wayland_control_mode: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::image_capture::DisplayRect;
+
+    use super::*;
+
+    #[test]
+    fn test_get_h264_encoder_settings() {
+        let mut settings = DeskSettings::default();
+        let mut display_info = DisplayInfo::default();
+        display_info.desktop_coordinates = DisplayRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        settings.video_fps = 60;
+
+        // Test quality 0 (highest)
+        settings.video_quality = 0;
+        let h264_0 = settings.get_h264_encoder_settings(&display_info);
+        // 1920 * 1080 * 60 * 0.20 = 24,883,200
+        assert!(h264_0.bps > 24_000_000 && h264_0.bps < 25_000_000);
+
+        // Test quality 63 (lowest)
+        settings.video_quality = 63;
+        let h264_63 = settings.get_h264_encoder_settings(&display_info);
+        // 1920 * 1080 * 60 * 0.02 = 2,488,320
+        assert!(h264_63.bps > 2_400_000 && h264_63.bps < 2_500_000);
+
+        // Test with 4K resolution
+        display_info.desktop_coordinates = DisplayRect {
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 2160,
+        };
+        settings.video_quality = 0;
+        let h264_4k = settings.get_h264_encoder_settings(&display_info);
+        // 3840 * 2160 * 60 * 0.20 = 99,532,800
+        assert_eq!(h264_4k.bps, 99_532_800);
+
+        // Test with custom high resolution (should hit cap)
+        display_info.desktop_coordinates.right = 4000;
+        let h264_hit_cap = settings.get_h264_encoder_settings(&display_info);
+        assert_eq!(h264_hit_cap.bps, 100_000_000);
     }
 }
