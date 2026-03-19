@@ -112,6 +112,12 @@ pub struct TurnSettings {
 
     /// enable turn server
     pub enable_turn: bool,
+
+    /// Minimum port for TURN relay
+    pub relay_min_port: u16,
+
+    /// Maximum port for TURN relay
+    pub relay_max_port: u16,
 }
 
 impl Default for TurnSettings {
@@ -123,6 +129,8 @@ impl Default for TurnSettings {
             static_auth_secret: None,
             enable_stun: true,
             enable_turn: false,
+            relay_min_port: 50000,
+            relay_max_port: 50050,
         }
     }
 }

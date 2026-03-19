@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use turn::{
     auth::AuthHandler,
-    relay::relay_static::RelayAddressGeneratorStatic,
+    relay::relay_range::RelayAddressGeneratorRanges,
     server::{
         config::{ConnConfig, ServerConfig},
         Server,
@@ -107,14 +107,9 @@ where
     for iface in &settings.interfaces {
         if iface.transport == TurnTransport::UDP {
             let bind_addr: SocketAddr = iface.listen.parse().map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Invalid bind addr: {}", e)))?;
-            let udp_socket = UdpSocket::bind(bind_addr)
+            let udp_socket = Arc::new(UdpSocket::bind(bind_addr)
                 .await
-                .map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Bind failed: {}", e)))?;
-
-            let tracked_conn = TrackedUdpConn {
-                inner: udp_socket,
-                statistics: statistics.clone(),
-            };
+                .map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Bind failed: {}", e)))?);
 
             let external_ip: std::net::IpAddr = iface
                 .external
@@ -124,14 +119,17 @@ where
                 .parse()
                 .unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
 
-            let relay_generator = Box::new(RelayAddressGeneratorStatic {
+            let relay_generator = Box::new(RelayAddressGeneratorRanges {
                 relay_address: external_ip,
-                address: "0.0.0.0".parse().unwrap(),
+                min_port: settings.relay_min_port,
+                max_port: settings.relay_max_port,
+                max_retries: 10,
+                address: "0.0.0.0".to_owned(),
                 net: Arc::new(webrtc_util::vnet::net::Net::new(None)),
             });
 
             conn_configs.push(ConnConfig {
-                conn: Arc::new(tracked_conn),
+                conn: udp_socket,
                 relay_addr_generator: relay_generator,
             });
         }
