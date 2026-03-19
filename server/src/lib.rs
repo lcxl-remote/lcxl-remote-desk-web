@@ -61,7 +61,7 @@ use error::DeskError;
 use log::{error, info, warn};
 use model::settings::{Args, Settings, SharedSettings, StartupMode};
 use service::signaling::start_desk_session;
-use turn_server::statistics::Statistics;
+use crate::model::turn::TurnAuthHandler;
 
 use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
@@ -71,7 +71,7 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
-use crate::model::turn::TurnObserver;
+
 
 rust_i18n::i18n!("locales");
 
@@ -198,17 +198,16 @@ pub async fn run_with_channels(
     let tauri_login_token: web::Data<Option<TauriLoginToken>> =
         web::Data::new(channels.tauri_login_token.clone().map(TauriLoginToken::new));
 
-    let config = {
-        let settings = shared_settings.read().await;
-        Arc::new(settings.to_turn_server_config()?)
-    };
-
     //start turn server if mode is Default or Signaling
     let turn_api_state =
         if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
-            log::info!("Starting turn server with config {:?}", config);
-            let observer = TurnObserver::new(shared_settings_data.clone(), Statistics::default());
-            Some(web::Data::new(startup_turn_server(config, observer).await?))
+            log::info!("Starting turn server");
+            let settings = {
+                let settings = shared_settings.read().await;
+                settings.turn.clone()
+            };
+            let auth_handler = Arc::new(TurnAuthHandler::new(shared_settings_data.clone()));
+            Some(web::Data::from(startup_turn_server(settings, auth_handler).await?))
         } else {
             None
         };

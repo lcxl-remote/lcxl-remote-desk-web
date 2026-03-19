@@ -10,7 +10,10 @@ desk-utils = { path = "../utils" }
 
 utoipa = { workspace = true }
 serde = { workspace = true }
-turn-server = { workspace = true }
+turn = { workspace = true }
+webrtc-util = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
 log = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }

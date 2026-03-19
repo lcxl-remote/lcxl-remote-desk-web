@@ -1,11 +1,6 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
 
 use serde::{Deserialize, Serialize};
-use turn_server::{
-    config::{Config, Interface, Transport},
-    statistics::Statistics,
-    turn::{Observer, Service, SessionAddr},
-};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskTurnError;
@@ -17,14 +12,16 @@ pub static SOFTWARE: &str = concat!(
 );
 
 /// TURN API state.
-pub struct TurnApiState<T>
-where
-    T: Clone + Observer + 'static,
-{
-    pub config: Arc<Config>,
-    pub service: Service<T>,
-    pub statistics: Statistics,
+pub struct TurnApiState {
     pub uptime: Instant,
+    pub statistics: Arc<std::sync::RwLock<Statistics>>,
+    pub settings: TurnSettings,
+}
+
+#[derive(Default, Debug)]
+pub struct Statistics {
+    pub global: TurnSessionStatistics,
+    pub sessions: HashMap<std::net::SocketAddr, TurnSessionStatistics>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
@@ -46,20 +43,11 @@ impl FromStr for TurnTransport {
     }
 }
 
-impl From<Transport> for TurnTransport {
-    fn from(value: Transport) -> Self {
-        match value {
-            Transport::UDP => TurnTransport::UDP,
-            Transport::TCP => TurnTransport::TCP,
-        }
-    }
-}
-
 #[derive(Deserialize, Serialize, Debug, Clone, ToSchema)]
 pub struct TurnInterface {
     pub transport: TurnTransport,
     /// turn server listen address
-    pub bind: String,
+    pub listen: String,
     /// external address
     ///
     /// specify the node external address and port.
@@ -67,16 +55,6 @@ pub struct TurnInterface {
     /// you need to manually specify the server external IP
     /// address and service listening port.
     pub external: String,
-}
-
-impl From<Interface> for TurnInterface {
-    fn from(value: Interface) -> Self {
-        TurnInterface {
-            transport: value.transport.into(),
-            bind: value.bind.to_string(),
-            external: value.external.to_string(),
-        }
-    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -94,15 +72,6 @@ pub struct TurnQueryParams {
     pub interface: String,
 }
 
-impl Into<SessionAddr> for TurnQueryParams {
-    fn into(self) -> SessionAddr {
-        SessionAddr {
-            address: self.address.parse().unwrap(),
-            interface: self.interface.parse().unwrap(),
-        }
-    }
-}
-
 #[derive(Serialize, ToSchema)]
 pub struct TurnSession {
     pub username: String,
@@ -112,7 +81,7 @@ pub struct TurnSession {
     pub expires: u64,
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Serialize, ToSchema, Default, Debug, Clone)]
 pub struct TurnSessionStatistics {
     pub received_bytes: usize,
     pub send_bytes: usize,
@@ -122,8 +91,6 @@ pub struct TurnSessionStatistics {
 }
 
 /// Turn Server Settings
-/// See also `turn_server::config::Config`
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TurnSettings {
@@ -131,21 +98,13 @@ pub struct TurnSettings {
     pub realm: String,
 
     /// turn server listen interfaces
-    pub interfaces: Vec<Interface>,
+    pub interfaces: Vec<TurnInterface>,
 
     /// static user password
-    ///
-    /// This option can be used to specify the
-    /// static identity authentication information used by the turn server for
-    /// verification. Note: this is a high-priority authentication method, turn
-    /// The server will try to use static authentication first, and then use
-    /// external control service authentication.
     pub static_credentials: HashMap<String, String>,
+
     /// Static authentication key value (string) that applies only to the TURN
     /// REST API.
-    ///
-    /// If set, the turn server will not request external services via the HTTP
-    /// Hooks API to obtain the key.
     pub static_auth_secret: Option<String>,
 
     /// enable stun server

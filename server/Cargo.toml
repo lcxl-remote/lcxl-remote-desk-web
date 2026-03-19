@@ -47,7 +47,9 @@ serde_urlencoded = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 anyhow = { workspace = true }
-turn-server = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+async-trait = { workspace = true }
 
 webrtc = { workspace = true }
 webrtc-ice = { workspace = true }
@@ -77,13 +79,9 @@ opusic-c = "1.5"
 codepage = "0.1"
 encoding_rs = "0.8"
 regex = "1.11"
-# turn-server dependencies prometheus 0.13.4, if use 0.14, promethueus global variable will not be shared between app with turn-server lib
 prometheus = "0.13.4"
-
 png = "0.17"
 base64 = "0.22"
-hmac = "0.12"
-sha1 = "0.10"
 
 cpal = "0.15"
 ringbuf = "0.4"

@@ -31,7 +31,8 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio::time::Instant;
-use turn_server::config::Transport;
+use desk_turn::model::TurnTransport as Transport;
+use hmac::Mac;
 use url::Url;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
@@ -688,10 +689,10 @@ pub fn generate_turn_credentials(secret: &str, username: &str, ttl_secs: u64) ->
         .as_secs()
         + ttl_secs;
     let username = format!("{}:{}", expiration, username);
-    let code = turn_server::stun::util::hmac_sha1(secret.as_bytes(), &[username.as_bytes()])
-        .unwrap()
-        .into_bytes();
-    let code_slice = code.as_slice();
+    let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(username.as_bytes());
+    let code_slice = mac.finalize().into_bytes();
     (username, BASE64_STANDARD.encode(code_slice))
 }
 

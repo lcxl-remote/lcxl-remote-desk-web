@@ -3,7 +3,7 @@ use desk_turn::model::{
     TurnApiState, TurnInfo, TurnQueryParams, TurnSession, TurnSessionStatistics,
 };
 
-use crate::{error::DeskError, model::turn::TurnObserver};
+use crate::error::DeskError;
 
 #[utoipa::path(
     summary = "Get turn server info",
@@ -13,7 +13,7 @@ use crate::{error::DeskError, model::turn::TurnObserver};
 )]
 #[get("/info")]
 pub async fn get_turn_info(
-    api_state: web::Data<TurnApiState<TurnObserver>>,
+    api_state: web::Data<TurnApiState>,
 ) -> Result<HttpResponse, DeskError> {
     let response = desk_turn::controller::get_turn_info(api_state).await?;
     Ok(response)
@@ -28,7 +28,7 @@ pub async fn get_turn_info(
 )]
 #[get("/session")]
 pub async fn get_turn_session(
-    api_state: web::Data<TurnApiState<TurnObserver>>,
+    api_state: web::Data<TurnApiState>,
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskError> {
     let response = desk_turn::controller::get_turn_session(api_state, query).await?;
@@ -45,7 +45,7 @@ pub async fn get_turn_session(
 )]
 #[get("/session/statistics")]
 pub async fn get_turn_session_statistics(
-    api_state: web::Data<TurnApiState<TurnObserver>>,
+    api_state: web::Data<TurnApiState>,
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskError> {
     let response = desk_turn::controller::get_turn_session_statistics(api_state, query).await?;
@@ -62,7 +62,7 @@ pub async fn get_turn_session_statistics(
 )]
 #[delete("/session")]
 pub async fn delete_turn_session(
-    api_state: web::Data<TurnApiState<TurnObserver>>,
+    api_state: web::Data<TurnApiState>,
     query: web::Query<TurnQueryParams>,
 ) -> Result<HttpResponse, DeskError> {
     let response = desk_turn::controller::delete_turn_session(api_state, query).await?;
@@ -77,7 +77,9 @@ pub async fn delete_turn_session(
     ),
 )]
 #[get("/metrics")]
-pub async fn get_turn_metrics() -> Result<HttpResponse, DeskError> {
-    let response = desk_turn::controller::get_turn_metrics().await?;
+pub async fn get_turn_metrics(
+    api_state: web::Data<TurnApiState>,
+) -> Result<HttpResponse, DeskError> {
+    let response = desk_turn::controller::get_turn_metrics(api_state).await?;
     Ok(response)
 }

@@ -204,32 +204,7 @@ impl Default for SystemSettings {
     }
 }
 
-impl Settings {
-    pub fn to_turn_server_config(&self) -> Result<turn_server::config::Config, DeskError> {
-        let turn_config = turn_server::config::Config {
-            turn: turn_server::config::Turn {
-                realm: self.turn.realm.clone(),
-                interfaces: self.turn.interfaces.clone(),
-            },
-            api: turn_server::config::Api {
-                bind: "127.0.0.1:3000".parse()?,
-            },
-            log: turn_server::config::Log {
-                level: self
-                    .system
-                    .log_level
-                    .as_str()
-                    .parse()
-                    .unwrap_or(turn_server::config::LogLevel::Info),
-            },
-            auth: turn_server::config::Auth {
-                static_credentials: self.turn.static_credentials.clone(),
-                static_auth_secret: self.turn.static_auth_secret.clone(),
-            },
-        };
-        Ok(turn_config)
-    }
-}
+
 
 impl Default for UserSettings {
     fn default() -> Self {

@@ -11,6 +11,8 @@ fn main() -> ExitCode {
         }
         Err(e) => {
             log::error!("Server exit with error: {}", e);
+            // log may not be initialized, so print to stderr
+            eprintln!("Server exit with error: {}", e);
             ExitCode::FAILURE
         }
     }
