@@ -21,8 +21,10 @@ use desk_signal_facade::{
 use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
 use serde::Serialize;
+use serde_json;
 use tokio::{runtime::Handle, sync::RwLock};
 use uuid::Uuid;
+use std::net::{IpAddr, SocketAddr};
 
 use crate::{
     error::DeskSignalError,
@@ -62,6 +64,79 @@ pub struct SignalingContext<T: BaseUser> {
     pub session_state: SessionState,
     pub session_map: web::Data<SharedSessionMap>,
     pub user: T,
+}
+
+fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
+    if let Ok(sock) = addr.parse::<SocketAddr>() {
+        return Some(sock.ip());
+    }
+    if let Ok(ip) = addr.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    None
+}
+
+fn rewrite_mdns_candidate_with_ip(
+    signaling_model: &SignalingModel,
+    fallback_ip: IpAddr,
+) -> Option<SignalingModel> {
+    let data = match signaling_model.get_raw_data() {
+        Some(d) => d.clone(),
+        None => return None,
+    };
+    let mut obj = match data.as_object() {
+        Some(o) => o.clone(),
+        None => return None,
+    };
+
+    let candidate_value = match obj.get("candidate") {
+        Some(v) => v,
+        None => return None,
+    };
+    let candidate_str = match candidate_value.as_str() {
+        Some(s) => s,
+        None => return None,
+    };
+
+    if !candidate_str.contains(".local") {
+        return None;
+    }
+
+    let mut parts = candidate_str
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    if parts.len() < 6 {
+        return None;
+    }
+
+    let host = parts[4].clone();
+    if !host.ends_with(".local") {
+        return None;
+    }
+
+    parts[4] = fallback_ip.to_string();
+    let new_candidate = parts.join(" ");
+    obj.insert(
+        "candidate".to_string(),
+        serde_json::Value::String(new_candidate.clone()),
+    );
+
+    log::info!(
+        "Rewrote mDNS ICE candidate using signaling peer IP {}: {} -> {}",
+        fallback_ip,
+        host,
+        new_candidate
+    );
+
+    Some(SignalingModel::new(
+        &signaling_model.request_id,
+        signaling_model.signaling_type,
+        signaling_model.from_session_id.clone(),
+        signaling_model.to_session_id.clone(),
+        Some(serde_json::Value::Object(obj)),
+        signaling_model.response_state.clone(),
+    ))
 }
 
 impl ForwardSignalingSender for SessionState {
@@ -422,13 +497,33 @@ impl<T: BaseUser> SignalingContext<T> {
             SignalingType::ReplyFromTerminal | SignalingType::TerminalClosed => {
                 self.forward_to_peer(&signaling_model, true).await?;
             }
-
+            
+            SignalingType::Canid => {
+                let fallback_ip = self
+                    .session_state
+                    .model
+                    .ip
+                    .as_deref()
+                    .and_then(parse_ip_from_peer_addr);
+                if let Some(ip) = fallback_ip.map(|ip| {
+                    if ip.is_ipv6() && ip.is_loopback() {
+                        IpAddr::from([127, 0, 0, 1])
+                    } else {
+                        ip
+                    }
+                }) {
+                    if let Some(rewritten) = rewrite_mdns_candidate_with_ip(&signaling_model, ip) {
+                        self.forward_to_peer(&rewritten, false).await?;
+                        return Ok(());
+                    }
+                }
+                self.forward_to_peer(&signaling_model, false).await?;
+            }
             // Forwarding types
             SignalingType::RequestRemote
             | SignalingType::Init
             | SignalingType::Offer
             | SignalingType::Answer
-            | SignalingType::Canid
             | SignalingType::RequireControl
             | SignalingType::AcceptControl
             | SignalingType::DenyControl

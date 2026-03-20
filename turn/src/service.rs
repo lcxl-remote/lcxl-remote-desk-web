@@ -23,7 +23,7 @@ use crate::{
 
 /// A custom `Conn` wrapper that counts incoming and outgoing bytes/packets.
 struct TrackedUdpConn {
-    inner: UdpSocket,
+    inner: Arc<UdpSocket>,
     statistics: Arc<RwLock<Statistics>>,
 }
 
@@ -41,6 +41,7 @@ impl Conn for TrackedUdpConn {
 
     async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
         let (n, addr) = self.inner.recv_from(buf).await?;
+        log::info!("TURN UDP recv_from: {} bytes from {}", n, addr);
 
         if let Ok(mut stats) = self.statistics.write() {
             stats.global.received_bytes += n;
@@ -61,6 +62,7 @@ impl Conn for TrackedUdpConn {
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
         let n = self.inner.send_to(buf, target).await?;
+        log::info!("TURN UDP send_to: {} bytes to {}", n, target);
 
         if let Ok(mut stats) = self.statistics.write() {
             stats.global.send_bytes += n;
@@ -111,6 +113,8 @@ where
                 .await
                 .map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Bind failed: {}", e)))?);
 
+            log::info!("TURN UDP bind: {}", bind_addr);
+
             let external_ip: std::net::IpAddr = iface
                 .external
                 .split(':')
@@ -118,6 +122,11 @@ where
                 .unwrap_or("0.0.0.0")
                 .parse()
                 .unwrap_or_else(|_| "0.0.0.0".parse().unwrap());
+
+            let tracked_conn = Arc::new(TrackedUdpConn {
+                inner: udp_socket,
+                statistics: statistics.clone(),
+            });
 
             let relay_generator = Box::new(RelayAddressGeneratorRanges {
                 relay_address: external_ip,
@@ -129,7 +138,7 @@ where
             });
 
             conn_configs.push(ConnConfig {
-                conn: udp_socket,
+                conn: tracked_conn,
                 relay_addr_generator: relay_generator,
             });
         }

@@ -118,6 +118,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
 
         pc.onicecandidate = (event) => {
             if (event.candidate !== null) {
+                console.log("[WebRTC] Send ICE canididate:", event.candidate);
                 sendMessage(SIGNALING_TYPE_CODE_CANID, event.candidate, deskId);
             }
         };

@@ -23,16 +23,19 @@ use desk_utils::error::{CustomDeskError, DeskErrorCode};
 
 use futures_util::{SinkExt, StreamExt};
 
+use desk_turn::model::TurnTransport as Transport;
+use hmac::Mac;
 use log::{error, info, warn};
+use once_cell::sync::OnceCell;
 use prometheus::{HistogramVec, register_histogram_vec};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
 use serde::Serialize;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
+use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio::time::Instant;
-use desk_turn::model::TurnTransport as Transport;
-use hmac::Mac;
 use url::Url;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
@@ -56,11 +59,15 @@ use webrtc::{
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
 };
+use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
 use crate::model::data_channel::SignalRequestControlData;
-use crate::model::host_control::HostControlEventType;
+use crate::model::host_control::{HostControlEventType, HostControlHelper, WhiteboardCommand};
 use crate::model::login::{LoginParams, LoginResult};
-use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::model::security_approval::{
+    SecurityApprovalSender, SecurityPermissionType, check_security_permission,
+};
+use crate::model::settings::StartupMode;
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -69,9 +76,11 @@ use crate::service::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
 use crate::service::data_channel::handle_data_channel_event;
+use crate::service::host_control::host_control_factory::create_host_control_helper;
 use crate::service::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture_async,
 };
+use crate::service::terminal::RunningTerminal;
 use crate::service::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
@@ -83,8 +92,6 @@ pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
 pub static WEBRTC_WRITE_SAMPLE_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("webrtc_write_sample_histogram", "help", &["type"]).unwrap()
 });
-
-
 
 #[derive(Debug)]
 pub enum DeskSessionMessage {
@@ -527,14 +534,48 @@ pub struct DeskSession {
     /// Tokio watch sender for WebRTConnectionState updates
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
     /// Terminal map: from_session_id -> RunningTerminal
-    pub terminal_map: HashMap<String, crate::service::terminal::RunningTerminal>,
+    pub terminal_map: HashMap<String, RunningTerminal>,
     /// System setting helper
-    pub host_control_helper: Box<dyn crate::model::host_control::HostControlHelper + Send + Sync>,
+    pub host_control_helper: Box<dyn HostControlHelper + Send + Sync>,
     /// Whiteboard command sender (available when Tauri is present)
-    pub whiteboard_cmd_sender:
-        Option<std::sync::mpsc::Sender<crate::model::host_control::WhiteboardCommand>>,
+    pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
     /// Security approval channel sender (available when Tauri is present)
-    pub security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
+    pub security_approval_sender: Option<SecurityApprovalSender>,
+}
+
+static MDNS_CONN: OnceCell<std::sync::Arc<DnsConn>> = OnceCell::new();
+
+async fn get_mdns_conn() -> Result<std::sync::Arc<DnsConn>, webrtc_mdns::Error> {
+    if let Some(conn) = MDNS_CONN.get() {
+        return Ok(conn.clone());
+    }
+
+    let mut cfg = MdnsConfig::default();
+    cfg.query_interval = Duration::from_millis(200);
+
+    // Bind to an ephemeral port to avoid conflicts with any existing mDNS listener.
+    let conn = DnsConn::server("0.0.0.0:0".parse().expect("valid mdns bind"), cfg)?;
+    let conn = std::sync::Arc::new(conn);
+    let _ = MDNS_CONN.set(conn.clone());
+    Ok(conn)
+}
+
+async fn resolve_mdns_host(host: &str) -> Option<IpAddr> {
+    let conn = get_mdns_conn().await.ok()?;
+    let (_close_tx, close_rx) = mpsc::channel(1);
+
+    // Timeout quickly to avoid blocking ICE too long.
+    match tokio::time::timeout(Duration::from_millis(800), conn.query(host, close_rx)).await {
+        Ok(Ok((_answer, addr))) => Some(addr.ip()),
+        Ok(Err(e)) => {
+            log::warn!("mDNS query failed for {}: {:?}", host, e);
+            None
+        }
+        Err(_) => {
+            log::warn!("mDNS query timed out for {}", host);
+            None
+        }
+    }
 }
 
 enum ConnectionStateChangeResult {
@@ -580,11 +621,7 @@ impl DeskSession {
         let desk_settings = settings.read().await.clone().desk;
 
         let cmd_sender = channels.private_screen_cmd_sender.clone();
-        let helper =
-            crate::service::host_control::host_control_factory::create_host_control_helper(
-                &desk_settings,
-                cmd_sender,
-            )?;
+        let helper = create_host_control_helper(&desk_settings, cmd_sender)?;
 
         // If started by Tauri, there might be a state_receiver we need to listen to
 
@@ -593,7 +630,10 @@ impl DeskSession {
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     match event {
-                        HostControlEventType::PrivateScreenVisibleChanged(from_session_id, visible) => {
+                        HostControlEventType::PrivateScreenVisibleChanged(
+                            from_session_id,
+                            visible,
+                        ) => {
                             let sender = session_clone.clone();
                             let data = PrivateScreenStateChangedData {
                                 visible,
@@ -606,13 +646,15 @@ impl DeskSession {
                                 Some(&data),
                             ) {
                                 if let Ok(text) = serde_json::to_string(&model) {
-                                    let _ = sender.sender.send(DeskSessionMessage::Text(bytestring::ByteString::from(text)));
+                                    let _ = sender.sender.send(DeskSessionMessage::Text(
+                                        bytestring::ByteString::from(text),
+                                    ));
                                 }
                             }
-                        },
+                        }
                         HostControlEventType::PrivateScreenInited(_) => {
                             // Ignored or handle appropriately
-                        },
+                        }
                         HostControlEventType::PrivateScreenClosed => {
                             let sender = session_clone.clone();
                             let data = PrivateScreenStateChangedData {
@@ -626,10 +668,12 @@ impl DeskSession {
                                 Some(&data),
                             ) {
                                 if let Ok(text) = serde_json::to_string(&model) {
-                                    let _ = sender.sender.send(DeskSessionMessage::Text(bytestring::ByteString::from(text)));
+                                    let _ = sender.sender.send(DeskSessionMessage::Text(
+                                        bytestring::ByteString::from(text),
+                                    ));
                                 }
                             }
-                        },
+                        }
                         HostControlEventType::PrivateScreenUnknownError(from_session_id_opt, e) => {
                             log::error!("Private screen error: {}", e);
                             // We shouldn't send PrivateScreenStateChanged directly to the channel queue,
@@ -637,27 +681,28 @@ impl DeskSession {
                             // But here we only have session_clone which is DeskSessionSender.
                             // Let's add a method on DeskSessionMessage or handle in that loop.
                             // I'll just change send() to send a Text message with SignalingModel.
-                           
+
                             if let Some(from_session_id) = from_session_id_opt {
-                                 let sender = session_clone.clone();
-                                 let data = PrivateScreenStateChangedData {
-                                visible: false,
-                                is_supported: true, // or whatever
-                                error_msg: Some(e),
-                            };
-                            if let Ok(model) = SignalingModel::new_request(
-                                SignalingType::PrivateScreenStateChanged,
-                                Some(from_session_id),
-                                Some(&data),
-                            ) {
-                                if let Ok(text) = serde_json::to_string(&model) {
-                                    let _ = sender.sender.send(DeskSessionMessage::Text(bytestring::ByteString::from(text)));
+                                let sender = session_clone.clone();
+                                let data = PrivateScreenStateChangedData {
+                                    visible: false,
+                                    is_supported: true, // or whatever
+                                    error_msg: Some(e),
+                                };
+                                if let Ok(model) = SignalingModel::new_request(
+                                    SignalingType::PrivateScreenStateChanged,
+                                    Some(from_session_id),
+                                    Some(&data),
+                                ) {
+                                    if let Ok(text) = serde_json::to_string(&model) {
+                                        let _ = sender.sender.send(DeskSessionMessage::Text(
+                                            bytestring::ByteString::from(text),
+                                        ));
+                                    }
                                 }
                             }
-                            }
-                            
-                        },
-                        crate::model::host_control::HostControlEventType::PrivateScreenHotkeyRegisterError => {
+                        }
+                        HostControlEventType::PrivateScreenHotkeyRegisterError => {
                             log::error!("Private screen hotkey register error");
                         }
                     }
@@ -714,23 +759,57 @@ impl DeskSession {
             let shared_settings = self.settings.read().await;
             shared_settings.clone()
         };
+
+        // Create the SettingEngine
+        let mut setting_engine = SettingEngine::default();
+        // Allow unbounded SCTP message size to improve throughput on localhost
+        setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
+
         let mut stun_urls = Vec::<String>::new();
         let mut turn_urls = Vec::<String>::new();
+        let mut external_ips = vec![];
         for interface in local_settings.turn.interfaces.iter() {
             if interface.transport == Transport::TCP {
+                //TODO tcp is not support yeat
                 turn_urls.push(format!(
                     "turn:{}?transport=tcp",
                     interface.external.to_string()
                 ));
             } else {
-                if local_settings.turn.enable_stun {
+                if local_settings.turn.enable_stun || local_settings.turn.enable_turn {
                     stun_urls.push(format!("stun:{}", interface.external.to_string()));
+
+                    let external = interface.external.as_str();
+                    if let Some((ip_str, _)) = external.split_once(':') {
+                        if ip_str.parse::<IpAddr>().is_ok() {
+                            let ip = ip_str.to_string();
+                            if !external_ips.contains(&ip) {
+                                external_ips.push(ip);
+                            }
+                        }
+                    } else if let Some(stripped) = external.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                        if stripped.parse::<IpAddr>().is_ok() {
+                            let ip = stripped.to_string();
+                            if !external_ips.contains(&ip) {
+                                external_ips.push(ip);
+                            }
+                        }
+                    } else if external.parse::<IpAddr>().is_ok() {
+                        if !external_ips.contains(&interface.external) {
+                            external_ips.push(interface.external.clone());
+                        }
+                    }
                 }
                 if local_settings.turn.enable_turn {
                     turn_urls.push(format!("turn:{}", interface.external.to_string()));
                 }
             }
         }
+        if !external_ips.is_empty() && self.settings.read().await.args.startup_mode == StartupMode::Default {
+            //NOT SET now. Only default(turn+desk) server need to set nat 1to1 ips
+            // setting_engine.set_nat_1to1_ips(external_ips, RTCIceCandidateType::Host);
+        }
+
         let mut ice_servers = Vec::new();
         let mut client_ice_servers = Vec::new();
 
@@ -767,10 +846,17 @@ impl DeskSession {
                 "Init turn config for ICE, ice_turn_server: {:?}",
                 ice_turn_server
             );
-            // Only add TURN server to client configuration, not server configuration
-            // forcing server to use Host candidates or STUN only.
-            // This avoids "Self-Reflective Relay" (Hairpinning) issues on local machine.
-            client_ice_servers.push(ice_turn_server);
+            client_ice_servers.push(ice_turn_server.clone());
+
+            if self.settings.read().await.args.startup_mode == StartupMode::DeskServer {
+                client_ice_servers.push(ice_turn_server.clone());
+                ice_servers.push(ice_turn_server);
+            } else {
+                // Only add TURN server to client configuration, not server configuration
+                // forcing server to use Host candidates or STUN only.
+                // This avoids "Self-Reflective Relay" (Hairpinning) issues on local machine.
+                client_ice_servers.push(ice_turn_server);
+            }
         }
 
         // new rtc_peer_connection
@@ -783,10 +869,7 @@ impl DeskSession {
         // Use the default set of Interceptors
         registry = register_default_interceptors(registry, &mut m)?;
 
-        // Create the SettingEngine
-        let mut setting_engine = SettingEngine::default();
-        // Allow unbounded SCTP message size to improve throughput on localhost
-        setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
+        
 
         // Create the API object with the MediaEngine
         let api = APIBuilder::new()
@@ -1530,9 +1613,51 @@ impl DeskSession {
                 let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
 
                 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
-                if let Some(candidate_init) =
+                if let Some(mut candidate_init) =
                     signaling_model.get_data_with_type::<RTCIceCandidateInit>()?
                 {
+                    let to_session_id =
+                        signaling_model.to_session_id.as_deref().unwrap_or("<none>");
+                    log::info!(
+                        "Received ICE candidate from {} to {}: candidate=\"{}\" sdp_mid={:?} sdp_mline_index={:?} ufrag={:?}",
+                        from_session_id,
+                        to_session_id,
+                        candidate_init.candidate,
+                        candidate_init.sdp_mid,
+                        candidate_init.sdp_mline_index,
+                        candidate_init.username_fragment
+                    );
+                    if candidate_init.candidate.contains(".local") {
+                        let mut parts = candidate_init
+                            .candidate
+                            .split_whitespace()
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>();
+                        if parts.len() >= 6 {
+                            let host = parts[4].to_string();
+                            if host.ends_with(".local") {
+                                if let Some(ip) = resolve_mdns_host(&host).await {
+                                    log::info!("Resolved mDNS host {} -> {}", host, ip);
+                                    parts[4] = ip.to_string();
+                                    candidate_init.candidate = parts.join(" ");
+                                    log::info!(
+                                        "Rewritten ICE candidate after mDNS resolution: {}",
+                                        candidate_init.candidate
+                                    );
+                                } else {
+                                    log::warn!(
+                                        "Failed to resolve mDNS host {}. ICE may fail unless client disables mDNS.",
+                                        host
+                                    );
+                                }
+                            }
+                        } else {
+                            log::warn!(
+                                "Malformed ICE candidate (too few parts) for mDNS handling: {}",
+                                candidate_init.candidate
+                            );
+                        }
+                    }
                     let peer_connection = rtc_peer_connection.read().await;
                     if let Err(e) = peer_connection
                         .rtc_peer_connection
@@ -1611,23 +1736,29 @@ impl DeskSession {
                 }
             }
             SignalingType::ManagerFileList => {
-                crate::service::file_manager::handle_manager_file_list(self, signaling_model).await?;
+                crate::service::file_manager::handle_manager_file_list(self, signaling_model)
+                    .await?;
             }
             SignalingType::ManagerFileDelete => {
-                crate::service::file_manager::handle_manager_file_delete(self, signaling_model).await?;
+                crate::service::file_manager::handle_manager_file_delete(self, signaling_model)
+                    .await?;
             }
             SignalingType::StartTerminal => {
                 // let's assume it was receiving &signaling_model in the codebase because that's the only one available
-                crate::service::terminal::handle_manager_terminal_start(self, signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_start(self, signaling_model)
+                    .await?;
             }
             SignalingType::SendDataToTerminal => {
-                crate::service::terminal::handle_manager_terminal_data(self, signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_data(self, signaling_model)
+                    .await?;
             }
             SignalingType::ResizeTerminal => {
-                crate::service::terminal::handle_manager_terminal_resize(self, signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_resize(self, signaling_model)
+                    .await?;
             }
             SignalingType::CloseTerminal => {
-                crate::service::terminal::handle_manager_terminal_close(self, signaling_model).await?;
+                crate::service::terminal::handle_manager_terminal_close(self, signaling_model)
+                    .await?;
             }
             SignalingType::ListTerminal => {
                 crate::service::terminal::handle_list_terminals(self, signaling_model).await?;
@@ -1838,5 +1969,4 @@ impl DeskSession {
 
         Ok(())
     }
-
 }

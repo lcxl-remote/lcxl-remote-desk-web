@@ -4651,6 +4651,7 @@ dependencies = [
  "vpx-encode",
  "webrtc",
  "webrtc-ice",
+ "webrtc-mdns",
  "webrtc-media",
  "which",
  "windows 0.61.3",
