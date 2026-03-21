@@ -31,7 +31,6 @@ use prometheus::{HistogramVec, register_histogram_vec};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;
 use serde::Serialize;
-use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
@@ -39,6 +38,8 @@ use tokio::time::Instant;
 use url::Url;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
+use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::{
     api::{
         APIBuilder,
@@ -787,7 +788,9 @@ impl DeskSession {
                                 external_ips.push(ip);
                             }
                         }
-                    } else if let Some(stripped) = external.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                    } else if let Some(stripped) =
+                        external.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+                    {
                         if stripped.parse::<IpAddr>().is_ok() {
                             let ip = stripped.to_string();
                             if !external_ips.contains(&ip) {
@@ -805,7 +808,9 @@ impl DeskSession {
                 }
             }
         }
-        if !external_ips.is_empty() && self.settings.read().await.args.startup_mode == StartupMode::Default {
+        if !external_ips.is_empty()
+            && self.settings.read().await.args.startup_mode == StartupMode::Default
+        {
             //NOT SET now. Only default(turn+desk) server need to set nat 1to1 ips
             // setting_engine.set_nat_1to1_ips(external_ips, RTCIceCandidateType::Host);
         }
@@ -868,8 +873,6 @@ impl DeskSession {
 
         // Use the default set of Interceptors
         registry = register_default_interceptors(registry, &mut m)?;
-
-        
 
         // Create the API object with the MediaEngine
         let api = APIBuilder::new()
@@ -978,7 +981,8 @@ impl DeskSession {
             has_audio
         );
 
-        if has_video || has_audio {
+        let is_desktop_mode = has_video || has_audio;
+        if is_desktop_mode {
             log::info!("SDP offer contains media tracks, setting up video/audio capture");
             let video_state_receiver = ice_connection_state_rx.clone();
             let audio_state_receiver = ice_connection_state_rx.clone();
@@ -1188,7 +1192,6 @@ impl DeskSession {
         let request_id_for_candidate = request_id.to_string();
         let from_session_id_for_candidate = from_session_id.to_string();
 
-        use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
         peer_connection
             .rtc_peer_connection
             .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
@@ -1325,6 +1328,11 @@ impl DeskSession {
         ));
 
         self.update_setting_sender = Some(update_setting_sender);
+        if is_desktop_mode {
+            let mut settings = self.settings.write().await;
+            settings.desk = offer_model.desk_settings.clone();
+            log::info!("Desk settings updated: {:?}", settings.desk);
+        }
         Ok(())
     }
 

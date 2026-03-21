@@ -162,12 +162,17 @@ export function DeskConfigDialog({
                                     render={({ field }) => (
                                         <FormItem>
                                             <FormLabel>{t('pages.desk.screenCaptureMode', 'Screen Capture Mode')}</FormLabel>
+                                            {/* Radix Select + RHF reset can miss value updates; re-mount to reflect initial data */}
+                                            {(() => {
+                                                const currentValue = field.value || ""
+                                                return (
                                             <Select
+                                                key={`image-capture-${currentValue || "empty"}`}
                                                 onValueChange={(value: string) => {
                                                     field.onChange(value)
                                                     form.setValue("video_device_index", 0) // Reset device index when capture mode changes
                                                 }}
-                                                value={field.value || ""}
+                                                defaultValue={currentValue}
                                             >
                                                 <FormControl>
                                                     <SelectTrigger>
@@ -182,6 +187,8 @@ export function DeskConfigDialog({
                                                     ))}
                                                 </SelectContent>
                                             </Select>
+                                                )
+                                            })()}
                                             <FormMessage />
                                         </FormItem>
                                     )}
@@ -194,9 +201,13 @@ export function DeskConfigDialog({
                                         render={({ field }) => (
                                             <FormItem>
                                                 <FormLabel>{t('pages.desk.displayDevice', 'Display Device')}</FormLabel>
+                                                {(() => {
+                                                    const currentValue = field.value !== undefined ? String(field.value) : "0"
+                                                    return (
                                                 <Select
                                                     onValueChange={field.onChange}
-                                                    value={field.value !== undefined ? String(field.value) : "0"}
+                                                    key={`video-device-${currentValue}`}
+                                                    defaultValue={currentValue}
                                                 >
                                                     <FormControl>
                                                         <SelectTrigger>
@@ -211,6 +222,8 @@ export function DeskConfigDialog({
                                                         ))}
                                                     </SelectContent>
                                                 </Select>
+                                                    )
+                                                })()}
                                                 <FormMessage />
                                             </FormItem>
                                         )}
@@ -312,9 +325,13 @@ export function DeskConfigDialog({
                                             render={({ field }) => (
                                                 <FormItem>
                                                     <FormLabel>{t('pages.desk.audioCaptureMode', 'Audio Capture Mode')}</FormLabel>
+                                                    {(() => {
+                                                        const currentValue = field.value || ""
+                                                        return (
                                                     <Select
                                                         onValueChange={field.onChange}
-                                                        value={field.value || ""}
+                                                        key={`audio-capture-${currentValue || "empty"}`}
+                                                        defaultValue={currentValue}
                                                     >
                                                         <FormControl>
                                                             <SelectTrigger>
@@ -329,6 +346,8 @@ export function DeskConfigDialog({
                                                             ))}
                                                         </SelectContent>
                                                     </Select>
+                                                        )
+                                                    })()}
                                                     <FormMessage />
                                                 </FormItem>
                                             )}
@@ -343,13 +362,15 @@ export function DeskConfigDialog({
                                                     return (
                                                         <FormItem>
                                                             <FormLabel>{t('pages.desk.audioDevice', 'Audio Device')}</FormLabel>
+                                                            {(() => (
                                                             <Select
                                                                 onValueChange={(val) => {
                                                                     try {
                                                                         field.onChange(JSON.parse(val));
                                                                     } catch (e) { /* ignore parse error */ }
                                                                 }}
-                                                                value={stringValue}
+                                                                key={`audio-device-${stringValue || "empty"}`}
+                                                                defaultValue={stringValue}
                                                             >
                                                                 <FormControl>
                                                                     <SelectTrigger>
@@ -379,6 +400,7 @@ export function DeskConfigDialog({
                                                                     })}
                                                                 </SelectContent>
                                                             </Select>
+                                                            ))()}
                                                             <FormMessage />
                                                         </FormItem>
                                                     )
@@ -392,9 +414,13 @@ export function DeskConfigDialog({
                                             render={({ field }) => (
                                                 <FormItem>
                                                     <FormLabel>{t('pages.desk.audioEncoder', 'Audio Encoder')}</FormLabel>
+                                                    {(() => {
+                                                        const currentValue = field.value || "auto"
+                                                        return (
                                                     <Select
                                                         onValueChange={(val) => field.onChange(val === "auto" ? null : val)}
-                                                        value={field.value || "auto"}
+                                                        key={`audio-encoder-${currentValue}`}
+                                                        defaultValue={currentValue}
                                                     >
                                                         <FormControl>
                                                             <SelectTrigger>
@@ -407,9 +433,11 @@ export function DeskConfigDialog({
                                                                 <SelectItem key={encoder} value={encoder}>
                                                                     {encoder}
                                                                 </SelectItem>
-                                                            ))}
-                                                        </SelectContent>
-                                                    </Select>
+                                                                ))}
+                                                            </SelectContent>
+                                                        </Select>
+                                                        )
+                                                    })()}
                                                     <FormMessage />
                                                 </FormItem>
                                             )}
@@ -426,9 +454,13 @@ export function DeskConfigDialog({
                                     render={({ field }) => (
                                         <FormItem>
                                             <FormLabel>{t('pages.desk.videoEncoder', 'Video Encoder')}</FormLabel>
+                                            {(() => {
+                                                const currentValue = field.value || "auto"
+                                                return (
                                             <Select
                                                 onValueChange={(val) => field.onChange(val === "auto" ? null : val)}
-                                                value={field.value || "auto"}
+                                                key={`video-encoder-${currentValue}`}
+                                                defaultValue={currentValue}
                                             >
                                                 <FormControl>
                                                     <SelectTrigger>
@@ -444,6 +476,8 @@ export function DeskConfigDialog({
                                                     ))}
                                                 </SelectContent>
                                             </Select>
+                                                )
+                                            })()}
                                             <FormMessage />
                                         </FormItem>
                                     )}
@@ -455,9 +489,13 @@ export function DeskConfigDialog({
                                     render={({ field }) => (
                                         <FormItem>
                                             <FormLabel>{t('pages.desk.waylandControlMode', 'Wayland Control Mode')}</FormLabel>
+                                            {(() => {
+                                                const currentValue = field.value || "auto"
+                                                return (
                                             <Select
                                                 onValueChange={(val) => field.onChange(val)}
-                                                value={field.value || "auto"}
+                                                key={`wayland-control-${currentValue}`}
+                                                defaultValue={currentValue}
                                             >
                                                 <FormControl>
                                                     <SelectTrigger>
@@ -471,6 +509,8 @@ export function DeskConfigDialog({
                                                     <SelectItem value="none">none</SelectItem>
                                                 </SelectContent>
                                             </Select>
+                                                )
+                                            })()}
                                             <FormMessage />
                                         </FormItem>
                                     )}
