@@ -1,7 +1,5 @@
 use std::{fs, ops::Deref, path::PathBuf};
 
-use chrono::{DateTime, Local};
-use clap::Parser;
 use config::{Config, Environment, File};
 use desk_signal_facade::model::{
     desk_settings::DeskSettings, security_settings::SecuritySettings, terminal::TerminalSettings,
@@ -10,157 +8,20 @@ use desk_turn::model::TurnSettings;
 use desk_utils::error::DeskErrorCode;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use strum_macros::AsRefStr;
 use tokio::sync::RwLock;
-use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use crate::error::DeskError;
 
-#[derive(
-    clap::ValueEnum,
-    Clone,
-    Default,
-    Debug,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Eq,
-    AsRefStr,
-    ToSchema,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum StartupMode {
-    /// Default mode, includes both signaling server and desk server
-    #[default]
-    Default,
-    /// Signaling mode, include signaling server and turn server
-    Signaling,
-    /// Desk Server only
-    DeskServer,
-}
+mod list;
+mod log_config;
+mod system;
+mod user;
 
-/// Command line arguments
-#[derive(Parser, Debug, Clone, Default, Serialize, Deserialize)]
-#[command(ignore_errors = true, version, about, long_about = None,group(
-    clap::ArgGroup::new("frontend_mode")
-        .args(["prod_frontend", "dev_frontend"])
-        .multiple(false)// only one of them can be set
-))]
-pub struct Args {
-    /// Config file path
-    #[clap(short, long, default_value = "conf/config")]
-    pub config_file_path: String,
-
-    /// Startup mode
-    #[clap(short, long, default_value_t, value_enum)]
-    pub startup_mode: StartupMode,
-
-    /// Production frontend
-    #[arg(long)]
-    pub prod_frontend: bool,
-
-    /// Development frontend
-    #[arg(long)]
-    pub dev_frontend: bool,
-
-    /// Start in hidden mode (used for auto-start)
-    #[arg(long)]
-    pub hidden: bool,
-}
-
-/// System settings for the application. This struct is used to load and save settings from a configuration file.
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-#[serde(default)]
-pub struct SystemSettings {
-    /// Enable IPv6 support
-    pub enable_ipv6: bool,
-    /// port number for the server to bind to
-    pub port: u16,
-    /// listen ipv4 address for the server to bind to
-    pub listen_addr_ipv4: String,
-    /// listen ipv6 address for the server to bind to
-    pub listen_addr_ipv6: String,
-
-    /// Optional locale setting (e.g., "en", "zh-CN")
-    pub locale: Option<String>,
-    /// Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling"
-    pub signaling_url: Option<String>,
-    /// Client ID for telemetry
-    pub client_id: Option<String>,
-    /// Telemetry consent status
-    pub telemetry_consent: Option<bool>,
-    /// Auto start the application on system login
-    pub auto_start: Option<bool>,
-}
-
-/// Log settings for the application.
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
-#[serde(default)]
-pub struct LogSettings {
-    /// access logs are printed with the INFO level so ensure it is enabled by default
-    pub log_level: String,
-    /// Enable Rust backtrace for errors
-    pub traceback: bool,
-    /// Log retention days (default 7)
-    pub log_retention_days: u32,
-    /// Disk usage threshold for log cleanup (default 90%)
-    pub log_cleanup_threshold_percent: u8,
-    /// Interval in hours for the cleanup task (default 12)
-    pub log_cleanup_interval_hours: u32,
-}
-
-/// User settings
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct UserSettings {
-    /// login user name
-    pub login_user_name: String,
-    /// login password
-    pub login_password: String,
-}
-
-/// Query parameters for listing files.
-#[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
-pub struct ListSettings {
-    /// Page number, start from 1
-    pub page_no: i64,
-    /// Page count, must be greater than 0
-    pub page_count: i64,
-    /// Minimum file size
-    pub min_file_size: Option<i64>,
-    /// Max file size
-    pub max_file_size: Option<i64>,
-    /// Dir path of the directory containing the file
-    pub dir_path: Option<String>,
-    /// File name filtering
-    pub file_name: Option<String>,
-    /// New field for file extension filtering
-    pub file_extension: Option<String>,
-    /// Optional file extension list filtering, comma(,) separated values.
-    pub file_extension_list: Option<String>,
-    /// MD5 hash of the file content, used for filtering files by their content.
-    pub md5: Option<String>,
-    /// Optional time range filter for file creation.
-    pub start_created_time: Option<DateTime<Local>>,
-    pub end_created_time: Option<DateTime<Local>>,
-    /// Optional time range filter for file modification.
-    pub start_modified_time: Option<DateTime<Local>>,
-    pub end_modified_time: Option<DateTime<Local>>,
-
-    /// Minimum file md5 count
-    pub min_md5_count: Option<i64>,
-    /// Max file md5 count
-    pub max_md5_count: Option<i64>,
-    /// Optional order by field.
-    pub order_by: Option<String>,
-    /// Optional order direction, true for ascending, false for descending. Default is descending.
-    pub order_asc: Option<bool>,
-
-    /// Optional filter for duplicate files in a specific directory path. If set, if files within this directory duplicate those outside of it, they will be displayed.
-    pub filter_dup_file_by_dir_path: Option<bool>,
-}
+pub use list::*;
+pub use log_config::*;
+pub use system::*;
+pub use user::*;
 
 /// Desk Settings
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -189,70 +50,6 @@ pub struct Settings {
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]
     pub args: Args,
-}
-
-impl Default for SystemSettings {
-    fn default() -> Self {
-        Self {
-            enable_ipv6: true,
-            port: 8081,
-            listen_addr_ipv4: "0.0.0.0".to_string(),
-            listen_addr_ipv6: "::".to_string(),
-            locale: None,
-            signaling_url: None,
-            client_id: None,
-            telemetry_consent: None,
-            auto_start: None,
-        }
-    }
-}
-
-impl Default for LogSettings {
-    fn default() -> Self {
-        Self {
-            log_level: "info".to_string(),
-            traceback: true,
-            log_retention_days: 7,
-            log_cleanup_threshold_percent: 90,
-            log_cleanup_interval_hours: 12,
-        }
-    }
-}
-
-
-
-impl Default for UserSettings {
-    fn default() -> Self {
-        Self {
-            login_user_name: "admin".to_string(),
-            login_password: "".to_string(),
-        }
-    }
-}
-
-impl Default for ListSettings {
-    fn default() -> Self {
-        Self {
-            page_no: 1,
-            page_count: 20,
-            min_file_size: None,
-            max_file_size: None,
-            dir_path: None,
-            file_name: None,
-            file_extension: None,
-            file_extension_list: None,
-            md5: None,
-            start_created_time: None,
-            end_created_time: None,
-            start_modified_time: None,
-            end_modified_time: None,
-            min_md5_count: Some(2),
-            max_md5_count: None,
-            order_by: None,
-            order_asc: None,
-            filter_dup_file_by_dir_path: None,
-        }
-    }
 }
 
 impl Settings {
