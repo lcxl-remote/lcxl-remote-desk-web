@@ -15,7 +15,7 @@ use windows_core::HSTRING;
 
 use crate::{
     error::DeskError,
-    model::host_control::{DisplaySettings, HostControlHelper, PrivateScreenCommand},
+    model::host_control::{ClipboardImage, DisplaySettings, HostControlHelper, PrivateScreenCommand},
 };
 
 pub struct WindowsHostControlHelper {
@@ -122,9 +122,9 @@ impl HostControlHelper for WindowsHostControlHelper {
 
     fn get_image_from_clipboard(
         &mut self,
-    ) -> Result<Option<crate::model::host_control::ClipboardImage>, DeskError> {
+    ) -> Result<Option<ClipboardImage>, DeskError> {
         match self.clipboard.get_image() {
-            Ok(img) => Ok(Some(crate::model::host_control::ClipboardImage {
+            Ok(img) => Ok(Some(ClipboardImage {
                 width: img.width,
                 height: img.height,
                 bytes: img.bytes,
@@ -136,7 +136,7 @@ impl HostControlHelper for WindowsHostControlHelper {
 
     fn set_image_to_clipboard(
         &mut self,
-        image: &crate::model::host_control::ClipboardImage,
+        image: &ClipboardImage,
     ) -> Result<(), DeskError> {
         let img_data = arboard::ImageData {
             width: image.width,

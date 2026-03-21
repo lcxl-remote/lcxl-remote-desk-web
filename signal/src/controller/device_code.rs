@@ -68,7 +68,7 @@ impl DeviceCodeItem {
 #[get("/device_codes")]
 pub async fn list_device_codes(
     query: web::Query<DeviceCodeListParams>,
-    session_map: web::Data<crate::model::SharedSessionMap>,
+    session_map: web::Data<SharedSessionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let page = std::cmp::max(1, query.page.unwrap_or(1));
@@ -198,7 +198,7 @@ pub async fn update_device_code(
 #[delete("/device_codes/{id}")]
 pub async fn delete_device_code(
     path: web::Path<i32>,
-    session_map: web::Data<crate::model::SharedSessionMap>,
+    session_map: web::Data<SharedSessionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let id = path.into_inner();
@@ -241,7 +241,7 @@ pub struct DeviceCodeBatchDeleteParams {
 #[post("/device_codes/batch_delete")]
 pub async fn batch_delete_device_codes(
     body: web::Json<DeviceCodeBatchDeleteParams>,
-    session_map: web::Data<crate::model::SharedSessionMap>,
+    session_map: web::Data<SharedSessionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let params = body.into_inner();

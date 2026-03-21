@@ -44,7 +44,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
         Ok(())
     }
 
-    fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), crate::error::DeskError> {
+    fn handle_mouse_down(&mut self, event: &MouseEventData) -> Result<(), DeskError> {
         let mut mouse_event_flags = MOUSE_EVENT_FLAGS(0);
         match event.button {
             0 => mouse_event_flags |= MOUSEEVENTF_LEFTDOWN,

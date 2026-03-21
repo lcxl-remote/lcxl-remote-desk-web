@@ -6,7 +6,7 @@ use webrtc::data_channel::{RTCDataChannel, data_channel_message::DataChannelMess
 
 use crate::model::{
     host_control::WhiteboardCommand,
-    security_approval::{SecurityPermissionType, check_security_permission},
+    security_approval::{SecurityApprovalSender, SecurityPermissionType, check_security_permission}, settings::SharedSettings,
 };
 
 /// Handle whiteboard events from the DataChannel.
@@ -16,8 +16,8 @@ pub async fn handle_whiteboard_event(
     data_channel: Arc<RTCDataChannel>,
     whiteboard_cmd_sender: std::sync::mpsc::Sender<WhiteboardCommand>,
     session_id: String,
-    settings: actix_web::web::Data<crate::model::settings::SharedSettings>,
-    security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
+    settings: actix_web::web::Data<SharedSettings>,
+    security_approval_sender: Option<SecurityApprovalSender>,
 ) -> Result<(), crate::error::DeskError> {
     let d_label = data_channel.label().to_owned();
     let d_id = data_channel.id();

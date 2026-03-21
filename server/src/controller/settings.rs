@@ -9,6 +9,7 @@ use crate::model::security_approval::{
     PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse, SecurityApprovalSender,
 };
 use crate::model::settings::{LogSettings, SharedSettings, SystemSettings};
+use crate::service::auto_start::update_auto_start_status;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
@@ -56,7 +57,7 @@ pub async fn update_settings(
 
     // Check auto_start flag and update system registry/startup folder if needed
     if let Some(auto_start_enable) = params.auto_start {
-        if let Err(e) = crate::service::auto_start::update_auto_start_status(auto_start_enable) {
+        if let Err(e) = update_auto_start_status(auto_start_enable) {
             log::error!("Failed to update auto start status: {:?}", e);
         }
     }

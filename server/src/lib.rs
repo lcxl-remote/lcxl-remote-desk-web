@@ -15,7 +15,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::controller::{
+use crate::{controller::{
     info::{query_backend_info, query_server_info, query_sysinfo},
     init::init_system,
     login::{change_password, get_captcha, login_account, logout_account},
@@ -29,7 +29,7 @@ use crate::controller::{
         get_turn_session_statistics,
     },
     user::{get_current_user, reject_anonymous_users},
-};
+}, model::turn::TurnAuthHandler};
 use actix_server::Server;
 use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
@@ -61,7 +61,6 @@ use error::DeskError;
 use log::{error, info, warn};
 use model::settings::{Args, Settings, SharedSettings, StartupMode};
 use service::signaling::start_desk_session;
-use crate::model::turn::TurnAuthHandler;
 
 use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
@@ -71,7 +70,6 @@ use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
-
 
 rust_i18n::i18n!("locales");
 
@@ -206,7 +204,7 @@ pub async fn run_with_channels(
                 let settings = shared_settings.read().await;
                 settings.turn.clone()
             };
-            let auth_handler = Arc::new(TurnAuthHandler::new(shared_settings_data.clone()));
+            let auth_handler = Arc::new(TurnAuthHandler::new(settings.static_auth_secret.clone()));
             match startup_turn_server(settings, auth_handler).await {
                 Ok(s) => Some(web::Data::from(s)),
                 Err(e) => {

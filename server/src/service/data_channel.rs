@@ -14,8 +14,7 @@ use crate::{
             DATA_CHANNEL_LABEL_CLIPBOARD_EVENT, DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT,
             DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT,
             DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT, DATA_CHANNEL_LABEL_WHITEBOARD_EVENT,
-        },
-        host_control::WhiteboardCommand,
+        }, host_control::WhiteboardCommand, security_approval::SecurityApprovalSender, settings::SharedSettings
     },
     service::{
         clipboard_event::handle_clipboard_event, file_transfer::handle_file_transfer_event,
@@ -31,8 +30,8 @@ pub async fn handle_data_channel_event(
     data_channel: Arc<RTCDataChannel>,
     whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
     session_id: String,
-    settings: actix_web::web::Data<crate::model::settings::SharedSettings>,
-    security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
+    settings: actix_web::web::Data<SharedSettings>,
+    security_approval_sender: Option<SecurityApprovalSender>,
 ) -> Result<(), DeskError> {
     match data_channel.label() {
         DATA_CHANNEL_LABEL_MOUSE_EVENT | DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT => {

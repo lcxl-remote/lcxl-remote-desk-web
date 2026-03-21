@@ -76,12 +76,18 @@ use crate::service::audio_capture::audio_capture_factory::{
 use crate::service::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
+use crate::service::audio_playback::start_audio_playback;
 use crate::service::data_channel::handle_data_channel_event;
+use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
 use crate::service::host_control::host_control_factory::create_host_control_helper;
 use crate::service::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture_async,
 };
-use crate::service::terminal::RunningTerminal;
+use crate::service::terminal::{
+    RunningTerminal, force_kill_terminal_process, handle_list_terminals,
+    handle_manager_terminal_close, handle_manager_terminal_data, handle_manager_terminal_resize,
+    handle_manager_terminal_start,
+};
 use crate::service::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
@@ -1293,7 +1299,7 @@ impl DeskSession {
                         }
                     };
 
-                    crate::service::audio_playback::start_audio_playback(track, move |err_msg| {
+                    start_audio_playback(track, move |err_msg| {
                         log::warn!("Audio playback failed, notifying frontend: {}", err_msg);
 
                         if let Some(rt_handle) = handle {
@@ -1352,7 +1358,7 @@ impl DeskSession {
             drop(terminal);
             if let Ok(mut child) = child_arc.lock() {
                 if let Some(pid) = child.process_id() {
-                    crate::service::terminal::force_kill_terminal_process(pid);
+                    force_kill_terminal_process(pid);
                 }
                 let result = child.kill();
                 info!("Terminal session ended, result={:?}", result);
@@ -1744,32 +1750,26 @@ impl DeskSession {
                 }
             }
             SignalingType::ManagerFileList => {
-                crate::service::file_manager::handle_manager_file_list(self, signaling_model)
-                    .await?;
+                handle_manager_file_list(self, signaling_model).await?;
             }
             SignalingType::ManagerFileDelete => {
-                crate::service::file_manager::handle_manager_file_delete(self, signaling_model)
-                    .await?;
+                handle_manager_file_delete(self, signaling_model).await?;
             }
             SignalingType::StartTerminal => {
                 // let's assume it was receiving &signaling_model in the codebase because that's the only one available
-                crate::service::terminal::handle_manager_terminal_start(self, signaling_model)
-                    .await?;
+                handle_manager_terminal_start(self, signaling_model).await?;
             }
             SignalingType::SendDataToTerminal => {
-                crate::service::terminal::handle_manager_terminal_data(self, signaling_model)
-                    .await?;
+                handle_manager_terminal_data(self, signaling_model).await?;
             }
             SignalingType::ResizeTerminal => {
-                crate::service::terminal::handle_manager_terminal_resize(self, signaling_model)
-                    .await?;
+                handle_manager_terminal_resize(self, signaling_model).await?;
             }
             SignalingType::CloseTerminal => {
-                crate::service::terminal::handle_manager_terminal_close(self, signaling_model)
-                    .await?;
+                handle_manager_terminal_close(self, signaling_model).await?;
             }
             SignalingType::ListTerminal => {
-                crate::service::terminal::handle_list_terminals(self, signaling_model).await?;
+                handle_list_terminals(self, signaling_model).await?;
             }
             /*
             SignalingType::Version => {

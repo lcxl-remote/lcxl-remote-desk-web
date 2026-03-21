@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use desk_utils::error::DeskErrorCode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use webrtc::data_channel::RTCDataChannel;
@@ -203,7 +204,7 @@ async fn handle_binary_message(
 ) -> Result<(), DeskError> {
     let (transfer_id, chunk_index, chunk_data) = parse_binary_chunk(data).ok_or_else(|| {
         DeskError::new_custom_error(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
+            DeskErrorCode::SYSTEM_ERROR,
             "Invalid binary chunk: too short",
         )
     })?;

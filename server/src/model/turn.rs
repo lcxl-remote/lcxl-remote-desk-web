@@ -1,11 +1,8 @@
 use std::net::SocketAddr;
 
-use actix_web::web;
 use base64::prelude::*;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
-
-use crate::model::settings::SharedSettings;
 
 use webrtc::turn;
 
@@ -14,12 +11,7 @@ pub struct TurnAuthHandler {
 }
 
 impl TurnAuthHandler {
-    pub fn new(settings: web::Data<SharedSettings>) -> Self {
-        // Clone the secret during initialization to avoid blocking async contexts later
-        let secret = {
-            let s = futures::executor::block_on(settings.read());
-            s.turn.static_auth_secret.clone()
-        };
+    pub fn new(secret: Option<String>) -> Self {
         Self { secret }
     }
 }
