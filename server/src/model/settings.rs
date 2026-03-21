@@ -82,10 +82,6 @@ pub struct SystemSettings {
     pub listen_addr_ipv4: String,
     /// listen ipv6 address for the server to bind to
     pub listen_addr_ipv6: String,
-    /// access logs are printed with the INFO level so ensure it is enabled by default
-    pub log_level: String,
-    /// Enable Rust backtrace for errors
-    pub traceback: bool,
 
     /// Optional locale setting (e.g., "en", "zh-CN")
     pub locale: Option<String>,
@@ -97,6 +93,16 @@ pub struct SystemSettings {
     pub telemetry_consent: Option<bool>,
     /// Auto start the application on system login
     pub auto_start: Option<bool>,
+}
+
+/// Log settings for the application.
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+#[serde(default)]
+pub struct LogSettings {
+    /// access logs are printed with the INFO level so ensure it is enabled by default
+    pub log_level: String,
+    /// Enable Rust backtrace for errors
+    pub traceback: bool,
     /// Log retention days (default 7)
     pub log_retention_days: u32,
     /// Disk usage threshold for log cleanup (default 90%)
@@ -162,6 +168,8 @@ pub struct ListSettings {
 pub struct Settings {
     /// System settings
     pub system: SystemSettings,
+    /// Log settings
+    pub log: LogSettings,
     /// User settings
     pub user: UserSettings,
     /// List settings
@@ -190,13 +198,20 @@ impl Default for SystemSettings {
             port: 8081,
             listen_addr_ipv4: "0.0.0.0".to_string(),
             listen_addr_ipv6: "::".to_string(),
-            log_level: "info".to_string(),
-            traceback: true,
             locale: None,
             signaling_url: None,
             client_id: None,
             telemetry_consent: None,
             auto_start: None,
+        }
+    }
+}
+
+impl Default for LogSettings {
+    fn default() -> Self {
+        Self {
+            log_level: "info".to_string(),
+            traceback: true,
             log_retention_days: 7,
             log_cleanup_threshold_percent: 90,
             log_cleanup_interval_hours: 12,

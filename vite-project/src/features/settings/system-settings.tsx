@@ -34,17 +34,12 @@ import { TelemetryDisclosure } from "@/components/telemetry-disclosure"
 
 const systemSettingsSchema = z.object({
     enable_ipv6: z.boolean(),
-    traceback: z.boolean(),
     telemetry_consent: z.boolean().nullable(),
     auto_start: z.boolean().nullable(),
     listen_addr_ipv4: z.string().min(1, "IPv4 address is required"),
     listen_addr_ipv6: z.string(),
     signaling_url: z.string().nullable(),
     port: z.number().min(1).max(65535),
-    log_level: z.enum(["trace", "debug", "info", "warn", "error"]),
-    log_retention_days: z.number().min(1),
-    log_cleanup_threshold_percent: z.number().min(1).max(100),
-    log_cleanup_interval_hours: z.number().min(1),
 })
 
 type SystemSettingsFormValues = z.infer<typeof systemSettingsSchema>
@@ -66,17 +61,12 @@ export function SystemSettings() {
         resolver: zodResolver(systemSettingsSchema),
         defaultValues: {
             enable_ipv6: true,
-            traceback: true,
             telemetry_consent: null,
             auto_start: null,
             listen_addr_ipv4: "0.0.0.0",
             listen_addr_ipv6: "::",
             signaling_url: null,
             port: 8081,
-            log_level: "info",
-            log_retention_days: 7,
-            log_cleanup_threshold_percent: 90,
-            log_cleanup_interval_hours: 12,
         },
     })
 
@@ -86,17 +76,12 @@ export function SystemSettings() {
             const data = settingsResponse.data
             form.reset({
                 enable_ipv6: data.enable_ipv6 ?? true,
-                traceback: data.traceback ?? true,
                 telemetry_consent: data.telemetry_consent ?? null,
                 auto_start: data.auto_start ?? null,
                 listen_addr_ipv4: data.listen_addr_ipv4 || "0.0.0.0",
                 listen_addr_ipv6: data.listen_addr_ipv6 || "::",
                 signaling_url: data.signaling_url || null,
                 port: data.port || 8081,
-                log_level: (data.log_level || "info") as any,
-                log_retention_days: data.log_retention_days ?? 7,
-                log_cleanup_threshold_percent: data.log_cleanup_threshold_percent ?? 90,
-                log_cleanup_interval_hours: data.log_cleanup_interval_hours ?? 12,
             })
         }
     }, [settingsResponse?.data, isLoading, form])
@@ -183,31 +168,6 @@ export function SystemSettings() {
 
                                 <FormField
                                     control={form.control}
-                                    name="log_level"
-                                    render={({ field }) => (
-                                        <FormItem>
-                                            <FormLabel>{t("pages.system.settings.logLevel", "Log Level")}</FormLabel>
-                                            <Select onValueChange={field.onChange} defaultValue={field.value}>
-                                                <FormControl>
-                                                    <SelectTrigger>
-                                                        <SelectValue placeholder="Select log level" />
-                                                    </SelectTrigger>
-                                                </FormControl>
-                                                <SelectContent>
-                                                    <SelectItem value="trace">TRACE</SelectItem>
-                                                    <SelectItem value="debug">DEBUG</SelectItem>
-                                                    <SelectItem value="info">INFO</SelectItem>
-                                                    <SelectItem value="warn">WARN</SelectItem>
-                                                    <SelectItem value="error">ERROR</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                            <FormMessage />
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <FormField
-                                    control={form.control}
                                     name="listen_addr_ipv4"
                                     render={({ field }) => (
                                         <FormItem>
@@ -252,51 +212,6 @@ export function SystemSettings() {
                                 )}
                             </div>
 
-                            <div className="rounded-md border p-4 space-y-4">
-                                <h3 className="text-sm font-medium">{t("pages.system.settings.logCleanup.title", "Log Cleanup")}</h3>
-                                <div className="grid gap-6 md:grid-cols-3">
-                                    <FormField
-                                        control={form.control}
-                                        name="log_retention_days"
-                                        render={({ field }) => (
-                                            <FormItem>
-                                                <FormLabel>{t("pages.system.settings.logCleanup.logRetentionDays", "Retention Days")}</FormLabel>
-                                                <FormControl>
-                                                    <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 7 : Number(e.target.value))} />
-                                                </FormControl>
-                                                <FormMessage />
-                                            </FormItem>
-                                        )}
-                                    />
-                                    <FormField
-                                        control={form.control}
-                                        name="log_cleanup_threshold_percent"
-                                        render={({ field }) => (
-                                            <FormItem>
-                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupThresholdPercent", "Disk Threshold (%)")}</FormLabel>
-                                                <FormControl>
-                                                    <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 90 : Number(e.target.value))} />
-                                                </FormControl>
-                                                <FormMessage />
-                                            </FormItem>
-                                        )}
-                                    />
-                                    <FormField
-                                        control={form.control}
-                                        name="log_cleanup_interval_hours"
-                                        render={({ field }) => (
-                                            <FormItem>
-                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupIntervalHours", "Cleanup Interval (Hours)")}</FormLabel>
-                                                <FormControl>
-                                                    <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 12 : Number(e.target.value))} />
-                                                </FormControl>
-                                                <FormMessage />
-                                            </FormItem>
-                                        )}
-                                    />
-                                </div>
-                            </div>
-
                             <div className="space-y-4 rounded-md border p-4">
 
                                 <FormField
@@ -306,22 +221,6 @@ export function SystemSettings() {
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
                                                 <FormLabel>{t("pages.system.settings.enableIpv6", "Enable IPv6")}</FormLabel>
-                                            </div>
-                                            <FormControl>
-                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
-                                            </FormControl>
-                                        </FormItem>
-                                    )}
-                                />
-
-                                <FormField
-                                    control={form.control}
-                                    name="traceback"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
-                                            <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.system.settings.traceback", "Enable Traceback")}</FormLabel>
-                                                <FormDescription>{t("pages.system.settings.traceback.description", "Record detailed crash stack traces for bug reports.")}</FormDescription>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value} onCheckedChange={field.onChange} />

@@ -33,6 +33,8 @@ export type { OpenTerminalSessionQueryKey } from "./undefinedController/useOpenT
 export type { OpenTerminalSessionSuspenseQueryKey } from "./undefinedController/useOpenTerminalSessionSuspense.ts";
 export type { QueryBackendInfoQueryKey } from "./undefinedController/useQueryBackendInfo.ts";
 export type { QueryBackendInfoSuspenseQueryKey } from "./undefinedController/useQueryBackendInfoSuspense.ts";
+export type { QueryLogSettingsQueryKey } from "./undefinedController/useQueryLogSettings.ts";
+export type { QueryLogSettingsSuspenseQueryKey } from "./undefinedController/useQueryLogSettingsSuspense.ts";
 export type { QuerySecuritySettingsQueryKey } from "./undefinedController/useQuerySecuritySettings.ts";
 export type { QuerySecuritySettingsSuspenseQueryKey } from "./undefinedController/useQuerySecuritySettingsSuspense.ts";
 export type { QueryServerInfoQueryKey } from "./undefinedController/useQueryServerInfo.ts";
@@ -46,6 +48,7 @@ export type { QueryTelemetryStatusSuspenseQueryKey } from "./undefinedController
 export type { RegenerateTurnSecretMutationKey } from "./undefinedController/useRegenerateTurnSecret.ts";
 export type { SubmitSecurityApprovalMutationKey } from "./undefinedController/useSubmitSecurityApproval.ts";
 export type { UpdateDeviceCodeMutationKey } from "./undefinedController/useUpdateDeviceCode.ts";
+export type { UpdateLogSettingsMutationKey } from "./undefinedController/useUpdateLogSettings.ts";
 export type { UpdateSecuritySettingsMutationKey } from "./undefinedController/useUpdateSecuritySettings.ts";
 export type { UpdateSettingsMutationKey } from "./undefinedController/useUpdateSettings.ts";
 export type { UpdateTelemetryConsentMutationKey } from "./undefinedController/useUpdateTelemetryConsent.ts";
@@ -154,6 +157,12 @@ export { useQueryBackendInfo } from "./undefinedController/useQueryBackendInfo.t
 export { queryBackendInfoSuspenseQueryKey } from "./undefinedController/useQueryBackendInfoSuspense.ts";
 export { queryBackendInfoSuspenseQueryOptions } from "./undefinedController/useQueryBackendInfoSuspense.ts";
 export { useQueryBackendInfoSuspense } from "./undefinedController/useQueryBackendInfoSuspense.ts";
+export { queryLogSettingsQueryKey } from "./undefinedController/useQueryLogSettings.ts";
+export { queryLogSettingsQueryOptions } from "./undefinedController/useQueryLogSettings.ts";
+export { useQueryLogSettings } from "./undefinedController/useQueryLogSettings.ts";
+export { queryLogSettingsSuspenseQueryKey } from "./undefinedController/useQueryLogSettingsSuspense.ts";
+export { queryLogSettingsSuspenseQueryOptions } from "./undefinedController/useQueryLogSettingsSuspense.ts";
+export { useQueryLogSettingsSuspense } from "./undefinedController/useQueryLogSettingsSuspense.ts";
 export { querySecuritySettingsQueryKey } from "./undefinedController/useQuerySecuritySettings.ts";
 export { querySecuritySettingsQueryOptions } from "./undefinedController/useQuerySecuritySettings.ts";
 export { useQuerySecuritySettings } from "./undefinedController/useQuerySecuritySettings.ts";
@@ -193,6 +202,9 @@ export { useSubmitSecurityApproval } from "./undefinedController/useSubmitSecuri
 export { updateDeviceCodeMutationKey } from "./undefinedController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./undefinedController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./undefinedController/useUpdateDeviceCode.ts";
+export { updateLogSettingsMutationKey } from "./undefinedController/useUpdateLogSettings.ts";
+export { updateLogSettingsMutationOptions } from "./undefinedController/useUpdateLogSettings.ts";
+export { useUpdateLogSettings } from "./undefinedController/useUpdateLogSettings.ts";
 export { updateSecuritySettingsMutationKey } from "./undefinedController/useUpdateSecuritySettings.ts";
 export { updateSecuritySettingsMutationOptions } from "./undefinedController/useUpdateSecuritySettings.ts";
 export { useUpdateSecuritySettings } from "./undefinedController/useUpdateSecuritySettings.ts";

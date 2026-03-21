@@ -23,9 +23,9 @@ use std::sync::Arc;
 use tracing;
 
 pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Option<WorkerGuard>> {
-    let settings = {
+    let (settings, log_settings) = {
         let settings_guard = shared_settings.read().await;
-        settings_guard.system.clone()
+        (settings_guard.system.clone(), settings_guard.log.clone())
     };
 
     // 1. Create a Resource with Service Info, OS Info, and Custom Tags
@@ -56,7 +56,7 @@ pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Opti
         .build();
 
     // 2. Setup Logging (Stdout + File)
-    let log_level = &settings.log_level;
+    let log_level = &log_settings.log_level;
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
@@ -154,9 +154,9 @@ fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
             let (interval_hours, retention_days, threshold_percent) = {
                 let settings = shared_settings.read().await;
                 (
-                    settings.system.log_cleanup_interval_hours,
-                    settings.system.log_retention_days,
-                    settings.system.log_cleanup_threshold_percent,
+                    settings.log.log_cleanup_interval_hours,
+                    settings.log.log_retention_days,
+                    settings.log.log_cleanup_threshold_percent,
                 )
             };
 

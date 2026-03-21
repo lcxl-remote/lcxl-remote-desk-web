@@ -20,9 +20,9 @@ use crate::controller::{
     init::init_system,
     login::{change_password, get_captcha, login_account, logout_account},
     settings::{
-        query_security_settings, query_settings, query_telemetry_status, regenerate_turn_secret,
-        submit_security_approval, update_security_settings, update_settings,
-        update_telemetry_consent,
+        query_log_settings, query_security_settings, query_settings, query_telemetry_status,
+        regenerate_turn_secret, submit_security_approval, update_log_settings,
+        update_security_settings, update_settings, update_telemetry_consent,
     },
     turn::{
         delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
@@ -158,7 +158,7 @@ pub async fn run_with_channels(
     // Install default crypto provider
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    if settings.system.traceback {
+    if settings.log.traceback {
         // Set RUST_BACKTRACE environment variable to 1 to enable backtraces for errors. This is useful for debugging.
         unsafe { env::set_var("RUST_BACKTRACE", "1") };
     }
@@ -207,7 +207,13 @@ pub async fn run_with_channels(
                 settings.turn.clone()
             };
             let auth_handler = Arc::new(TurnAuthHandler::new(shared_settings_data.clone()));
-            Some(web::Data::from(startup_turn_server(settings, auth_handler).await?))
+            match startup_turn_server(settings, auth_handler).await {
+                Ok(s) => Some(web::Data::from(s)),
+                Err(e) => {
+                    error!("Failed to start turn server: {}", e);
+                    None
+                }
+            }
         } else {
             None
         };
@@ -282,6 +288,8 @@ pub async fn run_with_channels(
                             .service(change_password)
                             .service(query_settings)
                             .service(update_settings)
+                            .service(query_log_settings)
+                            .service(update_log_settings)
                             .service(query_security_settings)
                             .service(update_security_settings)
                             .service(submit_security_approval)

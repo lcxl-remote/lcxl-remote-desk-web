@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 use crate::model::security_approval::{
     PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse, SecurityApprovalSender,
 };
-use crate::model::settings::{SharedSettings, SystemSettings};
+use crate::model::settings::{LogSettings, SharedSettings, SystemSettings};
 use desk_signal_facade::model::security_settings::SecuritySettings;
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
@@ -65,6 +65,45 @@ pub async fn update_settings(
     // save new settings to file
     settings.save()?;
     info!("Update system settings successfully, {:?}", settings.system);
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Query log settings",
+    responses(
+        (status = 200, description = "Query log settings successfully", body=RestResponse<LogSettings>),
+    ),
+)]
+#[get("/settings/log")]
+pub async fn query_log_settings(settings: web::Data<SharedSettings>) -> Result<HttpResponse, AWError> {
+    let settings = settings.read().await;
+    let log_settings = settings.log.clone();
+    info!(
+        "Query log settings successfully, settings: {:?}",
+        log_settings
+    );
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(log_settings)))
+}
+
+#[utoipa::path(
+    summary = "Update log settings",
+    request_body(content = LogSettings),
+    responses(
+        (status = 200, description = "Update log settings successfully"),
+    ),
+)]
+#[post("/settings/log")]
+pub async fn update_log_settings(
+    requst_json: web::Json<LogSettings>,
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let params = requst_json.into_inner();
+    let mut settings = settings.write().await;
+
+    settings.log = params;
+    // save new settings to file
+    settings.save()?;
+    info!("Update log settings successfully, {:?}", settings.log);
     Ok(HttpResponse::Ok().finish())
 }
 

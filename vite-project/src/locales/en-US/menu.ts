@@ -52,6 +52,7 @@ export default {
   'menu.settings': 'Settings',
   'menu.settings.account': 'Account Settings',
   'menu.settings.system': 'System Settings',
+  'menu.settings.log': 'Log Settings',
   'menu.settings.security': 'Security Settings',
   'menu.settings.deviceCode': 'Device Codes',
   'menu.desk': 'Desk',

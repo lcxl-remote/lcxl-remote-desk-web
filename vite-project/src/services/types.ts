@@ -255,7 +255,7 @@ export type H264EncoderSettings = {
     /**
      * @description Bitrate in bps (bits per second), default is 10,000,000 bps (10 Mbps)
      * @minLength 0
-     * @default 10000000
+     * @default 4000000
      * @type integer | undefined, int32
     */
     bps?: number;
@@ -1056,6 +1056,45 @@ export type KeyboardEventData = {
 };
 
 /**
+ * @description Log settings for the application.
+*/
+export type LogSettings = {
+    /**
+     * @description Interval in hours for the cleanup task (default 12)
+     * @minLength 0
+     * @default 12
+     * @type integer | undefined, int32
+    */
+    log_cleanup_interval_hours?: number;
+    /**
+     * @description Disk usage threshold for log cleanup (default 90%)
+     * @minLength 0
+     * @default 90
+     * @type integer | undefined, int32
+    */
+    log_cleanup_threshold_percent?: number;
+    /**
+     * @description access logs are printed with the INFO level so ensure it is enabled by default
+     * @default "info"
+     * @type string | undefined
+    */
+    log_level?: string;
+    /**
+     * @description Log retention days (default 7)
+     * @minLength 0
+     * @default 7
+     * @type integer | undefined, int32
+    */
+    log_retention_days?: number;
+    /**
+     * @description Enable Rust backtrace for errors
+     * @default true
+     * @type boolean | undefined
+    */
+    traceback?: boolean;
+};
+
+/**
  * @description Login params
 */
 export type LoginParams = {
@@ -1299,6 +1338,60 @@ export type RestResponseBackendInfo = {
     success: boolean;
 };
 
+export type RestResponseLogSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Log settings for the application.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Interval in hours for the cleanup task (default 12)
+         * @minLength 0
+         * @default 12
+         * @type integer | undefined, int32
+        */
+        log_cleanup_interval_hours?: number;
+        /**
+         * @description Disk usage threshold for log cleanup (default 90%)
+         * @minLength 0
+         * @default 90
+         * @type integer | undefined, int32
+        */
+        log_cleanup_threshold_percent?: number;
+        /**
+         * @description access logs are printed with the INFO level so ensure it is enabled by default
+         * @default "info"
+         * @type string | undefined
+        */
+        log_level?: string;
+        /**
+         * @description Log retention days (default 7)
+         * @minLength 0
+         * @default 7
+         * @type integer | undefined, int32
+        */
+        log_retention_days?: number;
+        /**
+         * @description Enable Rust backtrace for errors
+         * @default true
+         * @type boolean | undefined
+        */
+        traceback?: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseSecuritySettings = {
     /**
      * @type integer, int32
@@ -1531,33 +1624,6 @@ export type RestResponseSystemSettings = {
         */
         locale?: string | null;
         /**
-         * @description Interval in hours for the cleanup task (default 12)
-         * @minLength 0
-         * @default 12
-         * @type integer | undefined, int32
-        */
-        log_cleanup_interval_hours?: number;
-        /**
-         * @description Disk usage threshold for log cleanup (default 90%)
-         * @minLength 0
-         * @default 90
-         * @type integer | undefined, int32
-        */
-        log_cleanup_threshold_percent?: number;
-        /**
-         * @description access logs are printed with the INFO level so ensure it is enabled by default
-         * @default "info"
-         * @type string | undefined
-        */
-        log_level?: string;
-        /**
-         * @description Log retention days (default 7)
-         * @minLength 0
-         * @default 7
-         * @type integer | undefined, int32
-        */
-        log_retention_days?: number;
-        /**
          * @description port number for the server to bind to
          * @minLength 0
          * @default 8081
@@ -1574,12 +1640,6 @@ export type RestResponseSystemSettings = {
          * @type boolean,null
         */
         telemetry_consent?: boolean | null;
-        /**
-         * @description Enable Rust backtrace for errors
-         * @default true
-         * @type boolean | undefined
-        */
-        traceback?: boolean;
     };
     /**
      * @type string,null
@@ -1977,33 +2037,6 @@ export type SystemSettings = {
     */
     locale?: string | null;
     /**
-     * @description Interval in hours for the cleanup task (default 12)
-     * @minLength 0
-     * @default 12
-     * @type integer | undefined, int32
-    */
-    log_cleanup_interval_hours?: number;
-    /**
-     * @description Disk usage threshold for log cleanup (default 90%)
-     * @minLength 0
-     * @default 90
-     * @type integer | undefined, int32
-    */
-    log_cleanup_threshold_percent?: number;
-    /**
-     * @description access logs are printed with the INFO level so ensure it is enabled by default
-     * @default "info"
-     * @type string | undefined
-    */
-    log_level?: string;
-    /**
-     * @description Log retention days (default 7)
-     * @minLength 0
-     * @default 7
-     * @type integer | undefined, int32
-    */
-    log_retention_days?: number;
-    /**
      * @description port number for the server to bind to
      * @minLength 0
      * @default 8081
@@ -2020,12 +2053,6 @@ export type SystemSettings = {
      * @type boolean,null
     */
     telemetry_consent?: boolean | null;
-    /**
-     * @description Enable Rust backtrace for errors
-     * @default true
-     * @type boolean | undefined
-    */
-    traceback?: boolean;
 };
 
 export type TelemetryConsent = {
@@ -2104,15 +2131,15 @@ export type TurnTransport = TurnTransportEnumKey;
 
 export type TurnInterface = {
     /**
-     * @description turn server listen address
-     * @type string
-    */
-    bind: string;
-    /**
      * @description external address\n\nspecify the node external address and port.\nfor the case of exposing the service to the outside,\nyou need to manually specify the server external IP\naddress and service listening port.
      * @type string
     */
     external: string;
+    /**
+     * @description turn server listen address
+     * @type string
+    */
+    listen: string;
     /**
      * @type string
     */
@@ -2634,6 +2661,33 @@ export type UpdateSettingsMutationResponse = UpdateSettings200;
 export type UpdateSettingsMutation = {
     Response: UpdateSettings200;
     Request: UpdateSettingsMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Query log settings successfully
+*/
+export type QueryLogSettings200 = RestResponseLogSettings;
+
+export type QueryLogSettingsQueryResponse = QueryLogSettings200;
+
+export type QueryLogSettingsQuery = {
+    Response: QueryLogSettings200;
+    Errors: any;
+};
+
+/**
+ * @description Update log settings successfully
+*/
+export type UpdateLogSettings200 = any;
+
+export type UpdateLogSettingsMutationRequest = LogSettings;
+
+export type UpdateLogSettingsMutationResponse = UpdateLogSettings200;
+
+export type UpdateLogSettingsMutation = {
+    Response: UpdateLogSettings200;
+    Request: UpdateLogSettingsMutationRequest;
     Errors: any;
 };
 
