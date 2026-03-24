@@ -1,7 +1,11 @@
 use clap::Parser;
+use desk_utils::error::DeskErrorCode;
 use serde::{Deserialize, Serialize};
 use strum_macros::AsRefStr;
 use utoipa::ToSchema;
+use uuid::Uuid;
+
+use crate::error::DeskError;
 
 #[derive(
     clap::ValueEnum,
@@ -74,11 +78,40 @@ pub struct SystemSettings {
     /// Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling"
     pub signaling_url: Option<String>,
     /// Client ID for telemetry
-    pub client_id: Option<String>,
+    client_id: Option<String>,
     /// Telemetry consent status
     pub telemetry_consent: Option<bool>,
     /// Auto start the application on system login
     pub auto_start: Option<bool>,
+}
+
+impl SystemSettings {
+    /// Get client id, if not set, return error
+    pub fn get_client_id(&self) -> Result<String, DeskError> {
+        if let Some(client_id) = &self.client_id {
+            Ok(client_id.clone())
+        } else {
+            Err(DeskError::new_custom_error(
+                DeskErrorCode::CLIENT_ID_NOT_FOUND,
+                "client_id is not set",
+            ))
+        }
+    }
+
+    pub fn get_or_generate_client_id(&mut self) -> String {
+        if let Some(client_id) = &self.client_id {
+            client_id.clone()
+        } else {
+            self.generate_client_id()
+        }
+    }
+
+    pub fn generate_client_id(&mut self) -> String {
+        let new_id = Uuid::new_v4().to_string();
+        log::info!("Generated new client_id: {}", new_id);
+        self.client_id = Some(new_id.clone());
+        new_id
+    }
 }
 
 impl Default for SystemSettings {

@@ -39,13 +39,14 @@ impl DeskErrorCode {
     pub const INVALID_STATE: DeskErrorCode = DeskErrorCode(2);
     pub const NOT_IMPLEMENTED_YET: DeskErrorCode = DeskErrorCode(3);
     pub const PERMISSION_ERROR: DeskErrorCode = DeskErrorCode(4);
-
-    pub const FILE_PATH_NOT_FOUND: DeskErrorCode = DeskErrorCode(11);
-    pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
-    pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
-
     pub const INVALID_PARAMS: DeskErrorCode = DeskErrorCode(5);
     pub const UNKNOWN_SIGNALING_TYPE: DeskErrorCode = DeskErrorCode(6);
+
+    pub const FILE_PATH_NOT_FOUND: DeskErrorCode = DeskErrorCode(11);
+    pub const CLIENT_ID_NOT_FOUND: DeskErrorCode = DeskErrorCode(12);
+
+    pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
+    pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
 
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 

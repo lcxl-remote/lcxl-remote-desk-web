@@ -76,7 +76,9 @@ pub async fn update_settings(
     ),
 )]
 #[get("/settings/log")]
-pub async fn query_log_settings(settings: web::Data<SharedSettings>) -> Result<HttpResponse, AWError> {
+pub async fn query_log_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
     let settings = settings.read().await;
     let log_settings = settings.log.clone();
     info!(
@@ -228,8 +230,7 @@ pub async fn submit_security_approval(
     sender: web::Data<Option<SecurityApprovalSender>>,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
-    let mut empty = false;
-    {
+    let empty = {
         let mut approvals = PENDING_APPROVALS.lock().unwrap();
         if let Some(sender) = approvals.remove(&params.req_id) {
             let _ = sender.send(SecurityApprovalResponse {
@@ -237,8 +238,8 @@ pub async fn submit_security_approval(
                 remember: params.remember,
             });
         }
-        empty = approvals.is_empty();
-    }
+        approvals.is_empty()
+    };
 
     if empty {
         if let Some(s) = &**sender {

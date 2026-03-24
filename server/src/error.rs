@@ -8,6 +8,7 @@ use desk_signal_facade::model::signal::WebRTConnectionState;
 use desk_utils::{error::CustomDeskError, rest::RestResponse};
 
 pub use desk_utils::error::DeskErrorCode;
+use webrtc::turn;
 
 /// Custom error type for the application.
 #[derive(Debug)]
@@ -93,6 +94,8 @@ pub enum DeskError {
     ThreadError(Box<dyn std::any::Any + Send + 'static>),
     /// A url parse error occurred.
     UrlParseError(url::ParseError),
+    /// A turn error occurred.
+    TurnError(turn::Error),
     /// Desk utils error
     DeskUtilsError(desk_utils::error::DeskUtilsError),
     /// Desk turn error
@@ -195,6 +198,7 @@ impl Display for DeskError {
             DeskError::AddrParseError(error) => error.fmt(f),
             DeskError::ThreadError(any_error) => f.write_fmt(format_args!("{:?}", any_error)),
             DeskError::UrlParseError(error) => error.fmt(f),
+            DeskError::TurnError(error) => error.fmt(f),
             DeskError::DeskUtilsError(error) => error.fmt(f),
             DeskError::DeskTurnError(error) => error.fmt(f),
             DeskError::DeskSignalFacadeError(error) => error.fmt(f),
@@ -445,6 +449,12 @@ impl From<Box<dyn std::any::Any + Send + 'static>> for DeskError {
 impl From<url::ParseError> for DeskError {
     fn from(err: url::ParseError) -> Self {
         DeskError::UrlParseError(err)
+    }
+}
+
+impl From<turn::Error> for DeskError {
+    fn from(err: turn::Error) -> Self {
+        DeskError::TurnError(err)
     }
 }
 

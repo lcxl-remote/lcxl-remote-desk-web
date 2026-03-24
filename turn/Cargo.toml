@@ -6,15 +6,22 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-desk-utils = { path = "../utils" }
+desk-utils = { workspace = true }
+desk-signal-facade = { workspace = true }
+
+turn = { workspace = true }
+webrtc = { workspace = true }
+webrtc-util = { workspace = true }
 
 utoipa = { workspace = true }
 serde = { workspace = true }
-turn = { workspace = true }
-webrtc-util = { workspace = true }
+
 async-trait = { workspace = true }
 tokio = { workspace = true }
 log = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
 actix-web = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+base64 = { workspace = true }

@@ -2,6 +2,7 @@ use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::version::VersionInfo;
+use desk_turn::model::TurnApiState;
 use log::{error, info};
 
 use crate::{model::SharedSessionMap, service::handle_signaling};
@@ -20,6 +21,7 @@ pub async fn open_signaling_handle(
     session_map: web::Data<SharedSessionMap>,
     session: Session,
     stream: web::Payload,
+    turn_api_state: web::Data<TurnApiState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let user_opt = session.get_current_user::<CurrentUser>()?;
 
@@ -47,7 +49,16 @@ pub async fn open_signaling_handle(
     // start task but don't wait for it
     rt::spawn(async move {
         // receive messages from websocket
-        let result = handle_signaling(version_info, stream, session_map, session, user, ip).await;
+        let result = handle_signaling(
+            version_info,
+            stream,
+            session_map,
+            session,
+            user,
+            ip,
+            turn_api_state.into_inner().as_ref().settings.clone(),
+        )
+        .await;
         if let Err(e) = result {
             error!("Error handling signaling: {}", e);
         } else {

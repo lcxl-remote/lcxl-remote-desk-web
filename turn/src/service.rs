@@ -10,8 +10,8 @@ use turn::{
     auth::AuthHandler,
     relay::relay_range::RelayAddressGeneratorRanges,
     server::{
-        config::{ConnConfig, ServerConfig},
         Server,
+        config::{ConnConfig, ServerConfig},
     },
 };
 use webrtc_util::Conn;
@@ -108,10 +108,13 @@ where
 
     for iface in &settings.interfaces {
         if iface.transport == TurnTransport::UDP {
-            let bind_addr: SocketAddr = iface.listen.parse().map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Invalid bind addr: {}", e)))?;
-            let udp_socket = Arc::new(UdpSocket::bind(bind_addr)
-                .await
-                .map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Bind failed: {}", e)))?);
+            let bind_addr: SocketAddr = iface.listen.parse().map_err(|e| {
+                DeskTurnError::AnyhowError(anyhow::anyhow!("Invalid bind addr: {}", e))
+            })?;
+            let udp_socket =
+                Arc::new(UdpSocket::bind(bind_addr).await.map_err(|e| {
+                    DeskTurnError::AnyhowError(anyhow::anyhow!("Bind failed: {}", e))
+                })?);
 
             log::info!("TURN UDP bind: {}", bind_addr);
 
@@ -156,15 +159,15 @@ where
         alloc_close_notify: None,
     };
 
-    let server = Server::new(config).await.map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Server start failed: {}", e)))?;
-
-    // We start it, it runs asynchronously in background inside Server.
-    Box::leak(Box::new(server));
+    let server = Server::new(config)
+        .await
+        .map_err(|e| DeskTurnError::AnyhowError(anyhow::anyhow!("Server start failed: {}", e)))?;
 
     let api_state = Arc::new(TurnApiState {
         uptime: Instant::now(),
         statistics,
         settings,
+        server,
     });
 
     log::info!("Turn server started successfully.");

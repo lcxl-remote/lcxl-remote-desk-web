@@ -1,6 +1,8 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Instant};
 
+use desk_signal_facade::model::signal::LcxlRTCIceServer;
 use serde::{Deserialize, Serialize};
+use turn::server::Server;
 use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskTurnError;
@@ -16,6 +18,7 @@ pub struct TurnApiState {
     pub uptime: Instant,
     pub statistics: Arc<std::sync::RwLock<Statistics>>,
     pub settings: TurnSettings,
+    pub server: Server,
 }
 
 #[derive(Default, Debug)]
@@ -118,6 +121,30 @@ pub struct TurnSettings {
 
     /// Maximum port for TURN relay
     pub relay_max_port: u16,
+}
+
+impl TurnSettings {
+    pub fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer {
+        let mut urls = vec![];
+        for interface in self.interfaces.iter() {
+            urls.push(format!(
+                "turn:{}?transport={}",
+                interface.external,
+                if interface.transport == TurnTransport::UDP {
+                    "udp"
+                } else {
+                    "tcp"
+                }
+            ));
+        }
+        let ice_server = LcxlRTCIceServer {
+            urls: urls,
+            username: username.to_owned(),
+            credential: credential.to_owned(),
+        };
+
+        ice_server
+    }
 }
 
 impl Default for TurnSettings {

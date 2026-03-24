@@ -7,6 +7,7 @@ use desk_signal_facade::model::{
     terminal::{ListTerminalPath, StartTerminalPath, StartTerminalSession, TerminalList},
     version::VersionInfo,
 };
+use desk_turn::model::TurnApiState;
 use desk_utils::error::DeskErrorCode;
 use log::{error, info};
 
@@ -67,6 +68,7 @@ pub async fn open_terminal_session(
     session_map: web::Data<SharedSessionMap>,
     session: Session,
     stream: web::Payload,
+    turn_api_state: web::Data<TurnApiState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let user_opt = session.get_current_user::<CurrentUser>()?;
 
@@ -117,6 +119,7 @@ pub async fn open_terminal_session(
         session,
         user,
         ip,
+        turn_api_state.into_inner().as_ref().settings.clone(),
     )
     .await?;
 

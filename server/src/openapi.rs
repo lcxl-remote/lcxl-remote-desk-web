@@ -4,7 +4,7 @@ use desk_signal::controller::device_code::{
 use desk_signal_facade::model::{
     desk_settings::DeskSettings,
     session::SessionList,
-    signal::{InitSignalingData, SignalingModel},
+    signal::{InitSignalingData, RequestRemoteModel, SignalingModel},
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
 use utoipa::OpenApi;
@@ -20,6 +20,7 @@ use crate::model::{
 #[derive(OpenApi)]
 #[openapi(components(schemas(
     SignalingModel,
+    RequestRemoteModel,
     InitSignalingData,
     DeskSettings,
     KeyboardEventData,

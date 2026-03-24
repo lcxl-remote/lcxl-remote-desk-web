@@ -15,21 +15,24 @@ use std::{
     sync::Arc,
 };
 
-use crate::{controller::{
-    info::{query_backend_info, query_server_info, query_sysinfo},
-    init::init_system,
-    login::{change_password, get_captcha, login_account, logout_account},
-    settings::{
-        query_log_settings, query_security_settings, query_settings, query_telemetry_status,
-        regenerate_turn_secret, submit_security_approval, update_log_settings,
-        update_security_settings, update_settings, update_telemetry_consent,
+use crate::{
+    controller::{
+        info::{query_backend_info, query_server_info, query_sysinfo},
+        init::init_system,
+        login::{change_password, get_captcha, login_account, logout_account},
+        settings::{
+            query_log_settings, query_security_settings, query_settings, query_telemetry_status,
+            regenerate_turn_secret, submit_security_approval, update_log_settings,
+            update_security_settings, update_settings, update_telemetry_consent,
+        },
+        turn::{
+            delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
+            get_turn_session_statistics,
+        },
+        user::{get_current_user, reject_anonymous_users},
     },
-    turn::{
-        delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
-        get_turn_session_statistics,
-    },
-    user::{get_current_user, reject_anonymous_users},
-}, model::turn::TurnAuthHandler};
+    model::turn::TurnAuthHandler,
+};
 use actix_server::Server;
 use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
@@ -196,16 +199,22 @@ pub async fn run_with_channels(
     let tauri_login_token: web::Data<Option<TauriLoginToken>> =
         web::Data::new(channels.tauri_login_token.clone().map(TauriLoginToken::new));
 
+    let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
+
     //start turn server if mode is Default or Signaling
     let turn_api_state =
         if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
             log::info!("Starting turn server");
-            let settings = {
+            let turn_settings = {
                 let settings = shared_settings.read().await;
                 settings.turn.clone()
             };
-            let auth_handler = Arc::new(TurnAuthHandler::new(settings.static_auth_secret.clone()));
-            match startup_turn_server(settings, auth_handler).await {
+
+            let auth_handler = Arc::new(TurnAuthHandler::new(
+                turn_settings.clone(),
+                session_map.clone(),
+            ));
+            match startup_turn_server(turn_settings, auth_handler).await {
                 Ok(s) => Some(web::Data::from(s)),
                 Err(e) => {
                     error!("Failed to start turn server: {}", e);
@@ -228,8 +237,6 @@ pub async fn run_with_channels(
             }
         });
     }
-
-    let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
 
     // Start the Actix web server
     let mut http_server = HttpServer::new(move || {

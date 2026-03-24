@@ -400,7 +400,16 @@ pub trait ForwardSignalingSender {
         T: ?Sized + Serialize + Sync;
 }
 
-///RTC IceServer
+/// Turn transport type
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Hash, ToSchema)]
+pub enum TurnTransport {
+    /// Stun transport
+    Stun,
+    /// Turn transport
+    Turn,
+}
+
+/// RTC IceServer
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize, Hash, ToSchema)]
 pub struct LcxlRTCIceServer {
     /// List of URLs associated with the ICE server, e.g. ["stun:stun.l.google.com:19302"]
@@ -409,6 +418,23 @@ pub struct LcxlRTCIceServer {
     pub username: String,
     /// Credential for the ICE server, if any.
     pub credential: String,
+}
+
+impl LcxlRTCIceServer {
+    /// Get transport type from url
+    pub fn transport(&self) -> Option<TurnTransport> {
+        if self.urls.is_empty() {
+            return None;
+        }
+        let url = self.urls[0].clone();
+        if url.starts_with("stun:") {
+            return Some(TurnTransport::Stun);
+        } else if url.starts_with("turn:") {
+            return Some(TurnTransport::Turn);
+        } else {
+            return None;
+        }
+    }
 }
 
 impl From<RTCIceServer> for LcxlRTCIceServer {
@@ -421,11 +447,30 @@ impl From<RTCIceServer> for LcxlRTCIceServer {
     }
 }
 
+impl Into<RTCIceServer> for &LcxlRTCIceServer {
+    fn into(self) -> RTCIceServer {
+        RTCIceServer {
+            urls: self.urls.clone(),
+            username: self.username.clone(),
+            credential: self.credential.clone(),
+        }
+    }
+}
+/// RequestRemoteModel is used to request remote access.
+/// web browser -> signaling server -> desk server
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
+pub struct RequestRemoteModel {
+    /// ICE servers, the value comes from signaling server
+    #[serde(default)]
+    pub ice_servers: Vec<LcxlRTCIceServer>,
+}
+
 /// InitSignalingData is used to initialize signaling data.
+/// desk server -> signaling server -> web browser
 /// see https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct InitSignalingData {
-    /// ICE servers to use for signaling.
+    // ICE servers, the value comes from signaling server
     pub ice_servers: Vec<LcxlRTCIceServer>,
     /// User name for signaling.
     pub user_name: String,
@@ -499,6 +544,7 @@ pub struct SignalingState {
 }
 
 /// Offer Model
+/// web browser -> signaling server -> desk server
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfferModel {
     /// offer session description

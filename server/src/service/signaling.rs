@@ -3,8 +3,6 @@ use std::ops::DerefMut;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use base64::prelude::*;
-
 use actix_web::web;
 use awc::{Client, Connector};
 use bytes::Bytes;
@@ -15,16 +13,14 @@ use desk_signal_facade::model::private_screen::{
     EnablePrivateScreenData, PrivateScreenStateChangedData,
 };
 use desk_signal_facade::model::signal::{
-    InitSignalingData, LcxlRTCIceServer, OfferModel, PeerSignalingSender, RemoteDeskTypeEnum,
-    SignalingModel, SignalingState, SignalingType, WebRTConnectionState,
+    InitSignalingData, OfferModel, PeerSignalingSender, RemoteDeskTypeEnum, RequestRemoteModel,
+    SignalingModel, SignalingState, SignalingType, TurnTransport, WebRTConnectionState,
 };
 use desk_signal_facade::{error::DeskSignalFacadeError, model::version::VersionInfo};
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
 
 use futures_util::{SinkExt, StreamExt};
 
-use desk_turn::model::TurnTransport as Transport;
-use hmac::Mac;
 use log::{error, info, warn};
 use once_cell::sync::OnceCell;
 use prometheus::{HistogramVec, register_histogram_vec};
@@ -39,7 +35,6 @@ use url::Url;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
-use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::{
     api::{
         APIBuilder,
@@ -49,7 +44,6 @@ use webrtc::{
     },
     ice_transport::{
         ice_connection_state::RTCIceConnectionState, ice_gatherer_state::RTCIceGathererState,
-        ice_server::RTCIceServer,
     },
     interceptor::registry::Registry,
     media::Sample,
@@ -68,7 +62,7 @@ use crate::model::login::{LoginParams, LoginResult};
 use crate::model::security_approval::{
     SecurityApprovalSender, SecurityPermissionType, check_security_permission,
 };
-use crate::model::settings::StartupMode;
+use crate::model::settings::{StartupMode, TraversalMode};
 use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use crate::service::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
@@ -360,7 +354,7 @@ pub async fn start_desk_session(
 
     let client_id = {
         let settings = settings.read().await;
-        settings.system.client_id.clone()
+        settings.system.get_client_id()?
     };
 
     let version_info = VersionInfo::new(
@@ -369,7 +363,7 @@ pub async fn start_desk_session(
         version::SERVER_COMMIT_HASH.to_string(),
         RemoteDeskTypeEnum::Server,
         display_name,
-        client_id,
+        Some(client_id),
     );
     let version_query = serde_urlencoded::to_string(&version_info).unwrap();
 
@@ -734,26 +728,13 @@ impl DeskSession {
     }
 }
 
-pub fn generate_turn_credentials(secret: &str, username: &str, ttl_secs: u64) -> (String, String) {
-    let expiration = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + ttl_secs;
-    let username = format!("{}:{}", expiration, username);
-    let mut mac = hmac::Hmac::<sha1::Sha1>::new_from_slice(secret.as_bytes())
-        .expect("HMAC can take key of any size");
-    mac.update(username.as_bytes());
-    let code_slice = mac.finalize().into_bytes();
-    (username, BASE64_STANDARD.encode(code_slice))
-}
-
 impl DeskSession {
     pub async fn init_ptc_peer_connection(
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        let request_remote_model = signaling_model.get_data::<RequestRemoteModel>()?;
 
         if self.rtc_peer_connection_map.contains_key(from_session_id) {
             return DeskError::custom_error(
@@ -772,101 +753,30 @@ impl DeskSession {
         // Allow unbounded SCTP message size to improve throughput on localhost
         setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
 
-        let mut stun_urls = Vec::<String>::new();
-        let mut turn_urls = Vec::<String>::new();
-        let mut external_ips = vec![];
-        for interface in local_settings.turn.interfaces.iter() {
-            if interface.transport == Transport::TCP {
-                //TODO tcp is not support yeat
-                turn_urls.push(format!(
-                    "turn:{}?transport=tcp",
-                    interface.external.to_string()
-                ));
-            } else {
-                if local_settings.turn.enable_stun || local_settings.turn.enable_turn {
-                    stun_urls.push(format!("stun:{}", interface.external.to_string()));
-
-                    let external = interface.external.as_str();
-                    if let Some((ip_str, _)) = external.split_once(':') {
-                        if ip_str.parse::<IpAddr>().is_ok() {
-                            let ip = ip_str.to_string();
-                            if !external_ips.contains(&ip) {
-                                external_ips.push(ip);
-                            }
-                        }
-                    } else if let Some(stripped) =
-                        external.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        let mut ice_servers = Vec::new();
+        for ice_server in request_remote_model.ice_servers.iter() {
+            match ice_server.transport() {
+                Some(TurnTransport::Stun) => {
+                    // check if traversal mode is stun or turn
+                    if local_settings.turn_client.traversal_mode == TraversalMode::Stun
+                        || local_settings.turn_client.traversal_mode == TraversalMode::Turn
                     {
-                        if stripped.parse::<IpAddr>().is_ok() {
-                            let ip = stripped.to_string();
-                            if !external_ips.contains(&ip) {
-                                external_ips.push(ip);
-                            }
-                        }
-                    } else if external.parse::<IpAddr>().is_ok() {
-                        if !external_ips.contains(&interface.external) {
-                            external_ips.push(interface.external.clone());
-                        }
+                        ice_servers.push(ice_server.clone());
                     }
                 }
-                if local_settings.turn.enable_turn {
-                    turn_urls.push(format!("turn:{}", interface.external.to_string()));
+                Some(TurnTransport::Turn) => {
+                    if local_settings.turn_client.traversal_mode == TraversalMode::Turn
+                        && self.settings.read().await.args.startup_mode == StartupMode::DeskServer
+                    {
+                        ice_servers.push(ice_server.clone());
+                    }
                 }
-            }
-        }
-        if !external_ips.is_empty()
-            && self.settings.read().await.args.startup_mode == StartupMode::Default
-        {
-            //NOT SET now. Only default(turn+desk) server need to set nat 1to1 ips
-            // setting_engine.set_nat_1to1_ips(external_ips, RTCIceCandidateType::Host);
-        }
-
-        let mut ice_servers = Vec::new();
-        let mut client_ice_servers = Vec::new();
-
-        if !stun_urls.is_empty() {
-            let ice_stun_server = RTCIceServer {
-                urls: stun_urls,
-                ..Default::default()
-            };
-            ice_servers.push(ice_stun_server.clone());
-            client_ice_servers.push(ice_stun_server);
-        }
-
-        if !turn_urls.is_empty() {
-            let (username, credential) = if let Some(ref secret) =
-                local_settings.turn.static_auth_secret
-            {
-                generate_turn_credentials(secret, &local_settings.user.login_user_name, 24 * 3600)
-            } else {
-                warn!(
-                    "static_auth_secret not found, falling back to static password authentication"
-                );
-                (
-                    local_settings.user.login_user_name.clone(),
-                    local_settings.user.login_password.clone(),
-                )
-            };
-
-            let ice_turn_server = RTCIceServer {
-                urls: turn_urls,
-                username,
-                credential,
-            };
-            log::info!(
-                "Init turn config for ICE, ice_turn_server: {:?}",
-                ice_turn_server
-            );
-            client_ice_servers.push(ice_turn_server.clone());
-
-            if self.settings.read().await.args.startup_mode == StartupMode::DeskServer {
-                client_ice_servers.push(ice_turn_server.clone());
-                ice_servers.push(ice_turn_server);
-            } else {
-                // Only add TURN server to client configuration, not server configuration
-                // forcing server to use Host candidates or STUN only.
-                // This avoids "Self-Reflective Relay" (Hairpinning) issues on local machine.
-                client_ice_servers.push(ice_turn_server);
+                None => {
+                    return DeskError::custom_error(
+                        DeskErrorCode::SYSTEM_ERROR,
+                        "Invalid ICE server transport",
+                    );
+                }
             }
         }
 
@@ -889,7 +799,10 @@ impl DeskSession {
 
         // Prepare the configuration for Server (use only STUN/Host)
         let config = RTCConfiguration {
-            ice_servers: ice_servers.clone(),
+            ice_servers: ice_servers
+                .iter()
+                .map(|ice_server| ice_server.into())
+                .collect(),
             ..Default::default()
         };
 
@@ -905,10 +818,8 @@ impl DeskSession {
         let video_encoder_list = list_video_encoder();
 
         let init_signaling_data = InitSignalingData {
-            ice_servers: client_ice_servers
-                .iter()
-                .map(|s| LcxlRTCIceServer::from(s.clone()))
-                .collect(),
+            // signal server will fill ice_servers
+            ice_servers: vec![],
             user_name: self.user.name.clone(),
             audio_device_list,
             audio_encoder_list,

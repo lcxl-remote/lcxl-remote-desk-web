@@ -14,17 +14,21 @@ use desk_signal_facade::{
     error::DeskSignalFacadeError,
     model::{
         session::{SessionList, SessionModel},
-        signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
+        signal::{
+            ForwardSignalingSender, InitSignalingData, LcxlRTCIceServer, RemoteDeskTypeEnum,
+            RequestRemoteModel, SignalingModel, SignalingType,
+        },
         version::VersionInfo,
     },
 };
+use desk_turn::model::{TurnSettings, TurnTransport};
 use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json;
+use std::net::{IpAddr, SocketAddr};
 use tokio::{runtime::Handle, sync::RwLock};
 use uuid::Uuid;
-use std::net::{IpAddr, SocketAddr};
 
 use crate::{
     error::DeskSignalError,
@@ -38,6 +42,7 @@ pub async fn handle_signaling(
     session: Session,
     user: CurrentUser,
     ip: Option<String>,
+    turn: TurnSettings,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
     let random_uuid = Uuid::new_v4();
@@ -50,6 +55,7 @@ pub async fn handle_signaling(
         session,
         user,
         ip,
+        turn,
     )
     .await?;
 
@@ -64,6 +70,7 @@ pub struct SignalingContext<T: BaseUser> {
     pub session_state: SessionState,
     pub session_map: web::Data<SharedSessionMap>,
     pub user: T,
+    pub turn: TurnSettings,
 }
 
 fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -272,6 +279,7 @@ impl<T: BaseUser> SignalingContext<T> {
         session: Session,
         user: T,
         ip: Option<String>,
+        turn: TurnSettings,
     ) -> Result<Self, DeskSignalError> {
         log::info!("Init new SignalingContext, session id: {}", session_id);
         if client_version_info.api_version > SERVER_API_VERSION {
@@ -338,6 +346,7 @@ impl<T: BaseUser> SignalingContext<T> {
             session_state,
             session_map,
             user,
+            turn,
         })
     }
 
@@ -497,7 +506,7 @@ impl<T: BaseUser> SignalingContext<T> {
             SignalingType::ReplyFromTerminal | SignalingType::TerminalClosed => {
                 self.forward_to_peer(&signaling_model, true).await?;
             }
-            
+
             SignalingType::Canid => {
                 let fallback_ip = self
                     .session_state
@@ -519,10 +528,60 @@ impl<T: BaseUser> SignalingContext<T> {
                 }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
+
+            SignalingType::RequestRemote => {
+                let mut data = signaling_model.get_data_with_default::<RequestRemoteModel>()?;
+                // TODO need to support static auth secret
+                // ice servers
+                // username is session_id
+                // password is client id
+                let client_id_opt = self.session_state.model.version_info.client_id.clone();
+                if let Some(client_id) = client_id_opt {
+                    let ice_server = self
+                        .turn
+                        .get_ice_servers(&self.session_state.model.session_id, &client_id);
+
+                    data.ice_servers.push(ice_server);
+                }
+                let data = Some(serde_json::to_value(data)?);
+                let new_signaling_model = SignalingModel::new(
+                    signaling_model.request_id.as_str(),
+                    signaling_model.signaling_type,
+                    signaling_model.from_session_id,
+                    signaling_model.to_session_id,
+                    data,
+                    signaling_model.response_state,
+                );
+                self.forward_to_peer(&new_signaling_model, false).await?;
+            }
+
+            SignalingType::Init => {
+                let mut data = signaling_model.get_data::<InitSignalingData>()?;
+                // TODO need to support static auth secret
+                // ice servers
+                // username is session_id
+                // password is client id
+                let client_id_opt = self.session_state.model.version_info.client_id.clone();
+                if let Some(client_id) = client_id_opt {
+                    let ice_server = self
+                        .turn
+                        .get_ice_servers(&self.session_state.model.session_id, &client_id);
+
+                    data.ice_servers.push(ice_server);
+                }
+                let data = Some(serde_json::to_value(data)?);
+                let new_signaling_model = SignalingModel::new(
+                    signaling_model.request_id.as_str(),
+                    signaling_model.signaling_type,
+                    signaling_model.from_session_id,
+                    signaling_model.to_session_id,
+                    data,
+                    signaling_model.response_state,
+                );
+                self.forward_to_peer(&new_signaling_model, false).await?;
+            }
             // Forwarding types
-            SignalingType::RequestRemote
-            | SignalingType::Init
-            | SignalingType::Offer
+            SignalingType::Offer
             | SignalingType::Answer
             | SignalingType::RequireControl
             | SignalingType::AcceptControl

@@ -16,11 +16,13 @@ use crate::error::DeskError;
 mod list;
 mod log_config;
 mod system;
+mod turn_client;
 mod user;
 
 pub use list::*;
 pub use log_config::*;
 pub use system::*;
+pub use turn_client::*;
 pub use user::*;
 
 /// Desk Settings
@@ -35,9 +37,10 @@ pub struct Settings {
     pub user: UserSettings,
     /// List settings
     pub list: ListSettings,
-    /// Turn settings
+    /// Turn server settings
     pub turn: TurnSettings,
-
+    /// Turn client settings(desk server as a turn client)
+    pub turn_client: TurnClientSettings,
     /// Desk settings
     pub desk: DeskSettings,
 
@@ -65,10 +68,8 @@ impl Settings {
             .build()?;
         let mut settings = config.try_deserialize::<Settings>()?;
         settings.args = args.clone();
-        if settings.system.client_id.is_none() {
-            let new_id = Uuid::new_v4().to_string();
-            info!("Generated new client_id: {}", new_id);
-            settings.system.client_id = Some(new_id);
+        if settings.system.get_client_id().is_err() {
+            settings.system.generate_client_id();
             settings.save()?;
         }
 

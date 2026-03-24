@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tracing;
 
 pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Option<WorkerGuard>> {
-    let (settings, log_settings) = {
+    let (mut system_settings, log_settings) = {
         let settings_guard = shared_settings.read().await;
         (settings_guard.system.clone(), settings_guard.log.clone())
     };
@@ -38,7 +38,7 @@ pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Opti
     let cpu_count = sys.cpus().len().to_string();
     let total_memory = sys.total_memory().to_string();
 
-    let client_id = settings.client_id.clone().unwrap_or_default();
+    let client_id = system_settings.get_or_generate_client_id();
 
     let resource = Resource::builder()
         .with_attributes(vec![
@@ -85,7 +85,7 @@ pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Opti
         .with_writer(non_blocking);
 
     // 3. Setup OpenTelemetry (Optional based on consent)
-    let otel_layer = if settings.telemetry_consent == Some(true) {
+    let otel_layer = if system_settings.telemetry_consent == Some(true) {
         // Set global propagator
         global::set_text_map_propagator(TraceContextPropagator::new());
 

@@ -2,6 +2,7 @@ use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::{signal::RemoteDeskTypeEnum, version::VersionInfo};
+use desk_turn::model::{TurnApiState, TurnSettings};
 use log::{error, info, warn};
 
 use crate::{model::SharedSessionMap, service::handle_signaling};
@@ -20,6 +21,7 @@ pub async fn open_device_signaling_handle(
     session_map: web::Data<SharedSessionMap>,
     _session: Session,
     stream: web::Payload,
+    turn_api_state: web::Data<TurnApiState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let version_info = query.0.clone();
 
@@ -69,6 +71,7 @@ pub async fn open_device_signaling_handle(
             actix_session,
             virtual_user,
             ip,
+            turn_api_state.into_inner().as_ref().settings.clone(),
         )
         .await;
         if let Err(e) = result {
