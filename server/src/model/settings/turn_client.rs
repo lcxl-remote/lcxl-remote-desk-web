@@ -9,7 +9,7 @@ pub enum TraversalMode {
     Turn,
     /// desk server will use stun server to relay
     Stun,
-    /// desk server will not use turn server to relay
+    /// desk server will not use turn/stun server to relay
     None,
 }
 

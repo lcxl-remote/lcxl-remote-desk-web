@@ -11,6 +11,7 @@ use crate::model::security_approval::{
 use crate::model::settings::{LogSettings, SharedSettings, SystemSettings};
 use crate::service::auto_start::update_auto_start_status;
 use desk_signal_facade::model::security_settings::SecuritySettings;
+use desk_turn::model::TurnSettings;
 
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct TelemetryStatus {
@@ -66,6 +67,48 @@ pub async fn update_settings(
     // save new settings to file
     settings.save()?;
     info!("Update system settings successfully, {:?}", settings.system);
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    summary = "Query turn settings",
+    responses(
+        (status = 200, description = "Query turn settings successfully", body=RestResponse<TurnSettings>),
+    ),
+)]
+#[get("/settings/turn")]
+pub async fn query_turn_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let settings = settings.read().await;
+    let turn_settings = settings.turn.clone();
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(turn_settings)))
+}
+
+#[utoipa::path(
+    summary = "Update turn settings",
+    request_body(content = TurnSettings),
+    responses(
+        (status = 200, description = "Update turn settings successfully"),
+    ),
+)]
+#[post("/settings/turn")]
+pub async fn update_turn_settings(
+    request_json: web::Json<TurnSettings>,
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let params = request_json.into_inner();
+    let mut settings = settings.write().await;
+
+    settings.turn.realm = params.realm;
+    settings.turn.interfaces = params.interfaces;
+    settings.turn.enable_stun = params.enable_stun;
+    settings.turn.enable_turn = params.enable_turn;
+    settings.turn.relay_min_port = params.relay_min_port;
+    settings.turn.relay_max_port = params.relay_max_port;
+
+    settings.save()?;
+    info!("Update turn settings successfully");
     Ok(HttpResponse::Ok().finish())
 }
 

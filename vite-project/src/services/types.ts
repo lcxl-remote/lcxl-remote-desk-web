@@ -939,7 +939,7 @@ export type LcxlRTCIceServer = {
 };
 
 /**
- * @description InitSignalingData is used to initialize signaling data.\nsee https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
+ * @description InitSignalingData is used to initialize signaling data.\ndesk server -> signaling server -> web browser\nsee https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
 */
 export type InitSignalingData = {
     /**
@@ -965,7 +965,6 @@ export type InitSignalingData = {
     */
     has_tauri?: boolean;
     /**
-     * @description ICE servers to use for signaling.
      * @type array
     */
     ice_servers: LcxlRTCIceServer[];
@@ -1266,6 +1265,17 @@ export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof ty
  * @description Remote Desk Type Enum
 */
 export type RemoteDeskTypeEnum = RemoteDeskTypeEnumEnumKey;
+
+/**
+ * @description RequestRemoteModel is used to request remote access.\nweb browser -> signaling server -> desk server
+*/
+export type RequestRemoteModel = {
+    /**
+     * @description ICE servers, the value comes from signaling server
+     * @type array | undefined
+    */
+    ice_servers?: LcxlRTCIceServer[];
+};
 
 export type RestResponseBackendInfo = {
     /**
@@ -1668,6 +1678,103 @@ export type RestResponseTelemetryStatus = {
          * @type boolean
         */
         needed: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export const turnTransportEnum = {
+    tcp: "tcp",
+    udp: "udp"
+} as const;
+
+export type TurnTransportEnumKey = (typeof turnTransportEnum)[keyof typeof turnTransportEnum];
+
+export type TurnTransport = TurnTransportEnumKey;
+
+export type TurnInterface = {
+    /**
+     * @description external address\n\nspecify the node external address and port.\nfor the case of exposing the service to the outside,\nyou need to manually specify the server external IP\naddress and service listening port.
+     * @type string
+    */
+    external: string;
+    /**
+     * @description turn server listen address
+     * @type string
+    */
+    listen: string;
+    /**
+     * @type string
+    */
+    transport: TurnTransport;
+};
+
+export type RestResponseTurnSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Turn Server Settings
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description enable stun server
+         * @default true
+         * @type boolean | undefined
+        */
+        enable_stun?: boolean;
+        /**
+         * @description enable turn server
+         * @default false
+         * @type boolean | undefined
+        */
+        enable_turn?: boolean;
+        /**
+         * @description turn server listen interfaces
+         * @type array | undefined
+        */
+        interfaces?: TurnInterface[];
+        /**
+         * @description turn server realm
+         * @default "localhost"
+         * @type string | undefined
+        */
+        realm?: string;
+        /**
+         * @description Maximum port for TURN relay
+         * @minLength 0
+         * @default 50050
+         * @type integer | undefined, int32
+        */
+        relay_max_port?: number;
+        /**
+         * @description Minimum port for TURN relay
+         * @minLength 0
+         * @default 50000
+         * @type integer | undefined, int32
+        */
+        relay_min_port?: number;
+        /**
+         * @description Static authentication key value (string) that applies only to the TURN\nREST API.
+         * @type string,null
+        */
+        static_auth_secret?: string | null;
+        /**
+         * @description static user password
+         * @default [object Object]
+         * @type object | undefined
+        */
+        static_credentials?: {
+            [key: string]: string;
+        };
     };
     /**
      * @type string,null
@@ -2120,32 +2227,6 @@ export type TerminalResizeData = {
     rows: number;
 };
 
-export const turnTransportEnum = {
-    tcp: "tcp",
-    udp: "udp"
-} as const;
-
-export type TurnTransportEnumKey = (typeof turnTransportEnum)[keyof typeof turnTransportEnum];
-
-export type TurnTransport = TurnTransportEnumKey;
-
-export type TurnInterface = {
-    /**
-     * @description external address\n\nspecify the node external address and port.\nfor the case of exposing the service to the outside,\nyou need to manually specify the server external IP\naddress and service listening port.
-     * @type string
-    */
-    external: string;
-    /**
-     * @description turn server listen address
-     * @type string
-    */
-    listen: string;
-    /**
-     * @type string
-    */
-    transport: TurnTransport;
-};
-
 export type TurnInfo = {
     /**
      * @type array
@@ -2223,6 +2304,62 @@ export type TurnSessionStatistics = {
      * @type integer
     */
     send_pkts: number;
+};
+
+/**
+ * @description Turn Server Settings
+*/
+export type TurnSettings = {
+    /**
+     * @description enable stun server
+     * @default true
+     * @type boolean | undefined
+    */
+    enable_stun?: boolean;
+    /**
+     * @description enable turn server
+     * @default false
+     * @type boolean | undefined
+    */
+    enable_turn?: boolean;
+    /**
+     * @description turn server listen interfaces
+     * @type array | undefined
+    */
+    interfaces?: TurnInterface[];
+    /**
+     * @description turn server realm
+     * @default "localhost"
+     * @type string | undefined
+    */
+    realm?: string;
+    /**
+     * @description Maximum port for TURN relay
+     * @minLength 0
+     * @default 50050
+     * @type integer | undefined, int32
+    */
+    relay_max_port?: number;
+    /**
+     * @description Minimum port for TURN relay
+     * @minLength 0
+     * @default 50000
+     * @type integer | undefined, int32
+    */
+    relay_min_port?: number;
+    /**
+     * @description Static authentication key value (string) that applies only to the TURN\nREST API.
+     * @type string,null
+    */
+    static_auth_secret?: string | null;
+    /**
+     * @description static user password
+     * @default [object Object]
+     * @type object | undefined
+    */
+    static_credentials?: {
+        [key: string]: string;
+    };
 };
 
 export type UserResponeCurrentUser = {
@@ -2688,6 +2825,33 @@ export type UpdateLogSettingsMutationResponse = UpdateLogSettings200;
 export type UpdateLogSettingsMutation = {
     Response: UpdateLogSettings200;
     Request: UpdateLogSettingsMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Query turn settings successfully
+*/
+export type QueryTurnSettings200 = RestResponseTurnSettings;
+
+export type QueryTurnSettingsQueryResponse = QueryTurnSettings200;
+
+export type QueryTurnSettingsQuery = {
+    Response: QueryTurnSettings200;
+    Errors: any;
+};
+
+/**
+ * @description Update turn settings successfully
+*/
+export type UpdateTurnSettings200 = any;
+
+export type UpdateTurnSettingsMutationRequest = TurnSettings;
+
+export type UpdateTurnSettingsMutationResponse = UpdateTurnSettings200;
+
+export type UpdateTurnSettingsMutation = {
+    Response: UpdateTurnSettings200;
+    Request: UpdateTurnSettingsMutationRequest;
     Errors: any;
 };
 

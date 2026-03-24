@@ -22,8 +22,9 @@ use crate::{
         login::{change_password, get_captcha, login_account, logout_account},
         settings::{
             query_log_settings, query_security_settings, query_settings, query_telemetry_status,
-            regenerate_turn_secret, submit_security_approval, update_log_settings,
-            update_security_settings, update_settings, update_telemetry_consent,
+            query_turn_settings, regenerate_turn_secret, submit_security_approval,
+            update_log_settings, update_security_settings, update_settings,
+            update_telemetry_consent, update_turn_settings,
         },
         turn::{
             delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
@@ -293,6 +294,8 @@ pub async fn run_with_channels(
                             .service(change_password)
                             .service(query_settings)
                             .service(update_settings)
+                            .service(query_turn_settings)
+                            .service(update_turn_settings)
                             .service(query_log_settings)
                             .service(update_log_settings)
                             .service(query_security_settings)

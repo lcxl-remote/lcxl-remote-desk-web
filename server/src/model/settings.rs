@@ -13,13 +13,11 @@ use uuid::Uuid;
 
 use crate::error::DeskError;
 
-mod list;
 mod log_config;
 mod system;
 mod turn_client;
 mod user;
 
-pub use list::*;
 pub use log_config::*;
 pub use system::*;
 pub use turn_client::*;
@@ -35,8 +33,6 @@ pub struct Settings {
     pub log: LogSettings,
     /// User settings
     pub user: UserSettings,
-    /// List settings
-    pub list: ListSettings,
     /// Turn server settings
     pub turn: TurnSettings,
     /// Turn client settings(desk server as a turn client)

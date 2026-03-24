@@ -2,7 +2,7 @@ use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::{signal::RemoteDeskTypeEnum, version::VersionInfo};
-use desk_turn::model::{TurnApiState, TurnSettings};
+use desk_turn::model::TurnApiState;
 use log::{error, info, warn};
 
 use crate::{model::SharedSessionMap, service::handle_signaling};

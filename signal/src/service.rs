@@ -15,13 +15,13 @@ use desk_signal_facade::{
     model::{
         session::{SessionList, SessionModel},
         signal::{
-            ForwardSignalingSender, InitSignalingData, LcxlRTCIceServer, RemoteDeskTypeEnum,
+            ForwardSignalingSender, InitSignalingData, RemoteDeskTypeEnum,
             RequestRemoteModel, SignalingModel, SignalingType,
         },
         version::VersionInfo,
     },
 };
-use desk_turn::model::{TurnSettings, TurnTransport};
+use desk_turn::model::TurnSettings;
 use desk_utils::error::DeskErrorCode;
 use futures_util::StreamExt;
 use serde::Serialize;

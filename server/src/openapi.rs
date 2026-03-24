@@ -7,6 +7,7 @@ use desk_signal_facade::model::{
     signal::{InitSignalingData, RequestRemoteModel, SignalingModel},
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
+use desk_turn::model::{TurnInterface, TurnSettings};
 use utoipa::OpenApi;
 
 use crate::model::{
@@ -36,5 +37,7 @@ use crate::model::{
     DeviceCodeBatchDeleteParams,
     BackendInfo,
     SecurityApprovalEventPayload,
+    TurnSettings,
+    TurnInterface,
 )))]
 pub struct ExtraSchemas;

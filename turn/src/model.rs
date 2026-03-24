@@ -94,7 +94,7 @@ pub struct TurnSessionStatistics {
 }
 
 /// Turn Server Settings
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct TurnSettings {
     /// turn server realm

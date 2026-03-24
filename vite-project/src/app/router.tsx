@@ -12,6 +12,7 @@ import FileManager from '@/features/file-manager/file-list';
 import TerminalSession from '@/features/terminal/terminal-session';
 import RequireAuth from '@/features/auth/require-auth';
 import { SystemSettings } from '@/features/settings/system-settings';
+import { TurnSettings } from '@/features/settings/turn-settings';
 import { LogSettings } from '@/features/settings/log-settings';
 import { SecuritySettings } from '@/features/settings/security-settings';
 import { UserSettings } from '@/features/settings/user-settings';
@@ -73,6 +74,10 @@ export const router = createBrowserRouter([
             {
                 path: 'system/settings',
                 element: <SystemSettings />,
+            },
+            {
+                path: 'system/turn',
+                element: <TurnSettings />,
             },
             {
                 path: 'system/log',
