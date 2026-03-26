@@ -5,7 +5,7 @@
 
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, ListSessionsQueryResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -364,6 +364,42 @@ export async function updateTurnSettings(data?: UpdateTurnSettingsMutationReques
   const requestData = data
 
   const res = await request<UpdateTurnSettingsMutationResponse, ResponseErrorConfig<Error>, UpdateTurnSettingsMutationRequest>({ method : "POST", url : getUpdateTurnSettingsUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getQueryTurnClientSettingsUrl() {
+  const res = { method: 'GET', url: `/api/desk/settings/turn-client` as const }
+  return res
+}
+
+/**
+ * @summary Query turn client settings
+ * {@link /api/desk/settings/turn-client}
+ */
+export async function queryTurnClientSettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<QueryTurnClientSettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryTurnClientSettingsUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateTurnClientSettingsUrl() {
+  const res = { method: 'POST', url: `/api/desk/settings/turn-client` as const }
+  return res
+}
+
+/**
+ * @summary Update turn client settings
+ * {@link /api/desk/settings/turn-client}
+ */
+export async function updateTurnClientSettings(data: UpdateTurnClientSettingsMutationRequest, config: Partial<RequestConfig<UpdateTurnClientSettingsMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateTurnClientSettingsMutationResponse, ResponseErrorConfig<Error>, UpdateTurnClientSettingsMutationRequest>({ method : "POST", url : getUpdateTurnClientSettingsUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 

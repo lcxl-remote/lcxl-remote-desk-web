@@ -53,6 +53,7 @@ export default {
   'menu.settings.account': '个人设置',
   'menu.settings.system': '系统设置',
   'menu.settings.turn': 'TURN 设置',
+  'menu.settings.turnClient': 'TURN 客户端设置',
   'menu.settings.log': '日志设置',
   'menu.settings.security': '安全设置',
   'menu.settings.deviceCode': '设备码管理',

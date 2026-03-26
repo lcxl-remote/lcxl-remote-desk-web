@@ -15,6 +15,7 @@ use crate::model::{
     file_transfer::FileTransferMessage,
     info::BackendInfo,
     security_approval::SecurityApprovalEventPayload,
+    settings::{TurnClientSettings, TraversalMode},
 };
 
 /// API version
@@ -39,5 +40,7 @@ use crate::model::{
     SecurityApprovalEventPayload,
     TurnSettings,
     TurnInterface,
+    TurnClientSettings,
+    TraversalMode,
 )))]
 pub struct ExtraSchemas;

@@ -8,7 +8,7 @@ use utoipa::ToSchema;
 use crate::model::security_approval::{
     PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse, SecurityApprovalSender,
 };
-use crate::model::settings::{LogSettings, SharedSettings, SystemSettings};
+use crate::model::settings::{LogSettings, SharedSettings, SystemSettings, TurnClientSettings};
 use crate::service::auto_start::update_auto_start_status;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_turn::model::TurnSettings;
@@ -290,4 +290,40 @@ pub async fn submit_security_approval(
         }
     }
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true)))
+}
+
+#[utoipa::path(
+    summary = "Query turn client settings",
+    responses(
+        (status = 200, description = "Query turn client settings successfully", body=RestResponse<TurnClientSettings>),
+    ),
+)]
+#[get("/settings/turn-client")]
+pub async fn query_turn_client_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let settings = settings.read().await;
+    let turn_client_settings = settings.turn_client.clone();
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(turn_client_settings)))
+}
+
+#[utoipa::path(
+    summary = "Update turn client settings",
+    request_body(content = TurnClientSettings),
+    responses(
+        (status = 200, description = "Update turn client settings successfully"),
+    ),
+)]
+#[post("/settings/turn-client")]
+pub async fn update_turn_client_settings(
+    request_json: web::Json<TurnClientSettings>,
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let params = request_json.into_inner();
+    let mut settings = settings.write().await;
+
+    settings.turn_client = params;
+    settings.save()?;
+    info!("Update turn client settings successfully");
+    Ok(HttpResponse::Ok().finish())
 }

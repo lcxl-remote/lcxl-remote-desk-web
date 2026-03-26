@@ -1689,6 +1689,42 @@ export type RestResponseTelemetryStatus = {
     success: boolean;
 };
 
+export const traversalModeEnum = {
+    turn: "turn",
+    stun: "stun",
+    none: "none"
+} as const;
+
+export type TraversalModeEnumKey = (typeof traversalModeEnum)[keyof typeof traversalModeEnum];
+
+export type TraversalMode = TraversalModeEnumKey;
+
+export type RestResponseTurnClientSettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Turn client settings\nDesk server as a turn client to connect to the turn server
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Traversal mode
+         * @type string
+        */
+        traversal_mode: TraversalMode;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export const turnTransportEnum = {
     tcp: "tcp",
     udp: "udp"
@@ -2225,6 +2261,17 @@ export type TerminalResizeData = {
      * @type integer, int32
     */
     rows: number;
+};
+
+/**
+ * @description Turn client settings\nDesk server as a turn client to connect to the turn server
+*/
+export type TurnClientSettings = {
+    /**
+     * @description Traversal mode
+     * @type string
+    */
+    traversal_mode: TraversalMode;
 };
 
 export type TurnInfo = {
@@ -2852,6 +2899,33 @@ export type UpdateTurnSettingsMutationResponse = UpdateTurnSettings200;
 export type UpdateTurnSettingsMutation = {
     Response: UpdateTurnSettings200;
     Request: UpdateTurnSettingsMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Query turn client settings successfully
+*/
+export type QueryTurnClientSettings200 = RestResponseTurnClientSettings;
+
+export type QueryTurnClientSettingsQueryResponse = QueryTurnClientSettings200;
+
+export type QueryTurnClientSettingsQuery = {
+    Response: QueryTurnClientSettings200;
+    Errors: any;
+};
+
+/**
+ * @description Update turn client settings successfully
+*/
+export type UpdateTurnClientSettings200 = any;
+
+export type UpdateTurnClientSettingsMutationRequest = TurnClientSettings;
+
+export type UpdateTurnClientSettingsMutationResponse = UpdateTurnClientSettings200;
+
+export type UpdateTurnClientSettingsMutation = {
+    Response: UpdateTurnClientSettings200;
+    Request: UpdateTurnClientSettingsMutationRequest;
     Errors: any;
 };
 

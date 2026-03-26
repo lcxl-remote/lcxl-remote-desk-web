@@ -13,6 +13,7 @@ import TerminalSession from '@/features/terminal/terminal-session';
 import RequireAuth from '@/features/auth/require-auth';
 import { SystemSettings } from '@/features/settings/system-settings';
 import { TurnSettings } from '@/features/settings/turn-settings';
+import { TurnClientSettingsPage } from '@/features/settings/turn-client-settings';
 import { LogSettings } from '@/features/settings/log-settings';
 import { SecuritySettings } from '@/features/settings/security-settings';
 import { UserSettings } from '@/features/settings/user-settings';
@@ -78,6 +79,10 @@ export const router = createBrowserRouter([
             {
                 path: 'system/turn',
                 element: <TurnSettings />,
+            },
+            {
+                path: 'system/turn-client',
+                element: <TurnClientSettingsPage />,
             },
             {
                 path: 'system/log',
