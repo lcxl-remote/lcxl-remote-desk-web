@@ -13,12 +13,12 @@ pub struct Geographic {
     pub city: Option<LabelKey>,
 }
 
+use desk_signal_facade::model::signal::SignalingUser;
+
 pub const USER_ADMIN: &str = "admin";
 /// Trait for base user information.
-pub trait BaseUser {
+pub trait BaseUser: SignalingUser {
     fn get_name(&self) -> &str;
-    fn get_access(&self) -> Option<&str>;
-    fn get_target_connection_id(&self) -> Option<&str>;
 }
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
@@ -74,7 +74,9 @@ impl BaseUser for CurrentUser {
     fn get_name(&self) -> &str {
         &self.name
     }
+}
 
+impl SignalingUser for CurrentUser {
     fn get_access(&self) -> Option<&str> {
         self.access.as_deref()
     }

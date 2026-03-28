@@ -147,6 +147,12 @@ impl TurnSettings {
     }
 }
 
+impl desk_signal_facade::model::signal::TurnProvider for TurnSettings {
+    fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer {
+        self.get_ice_servers(username, credential)
+    }
+}
+
 impl Default for TurnSettings {
     fn default() -> Self {
         Self {

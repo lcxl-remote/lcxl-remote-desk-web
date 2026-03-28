@@ -21,9 +21,11 @@ impl DeskSignalFacadeError {
         error_code: DeskErrorCode,
         message: &str,
     ) -> Result<T, DeskSignalFacadeError> {
-        Err(DeskSignalFacadeError::CustomError(CustomDeskError::new(
-            error_code, message,
-        )))
+        Err(Self::new_custom_error(error_code, message))
+    }
+
+    pub fn new_custom_error(error_code: DeskErrorCode, message: &str) -> DeskSignalFacadeError {
+        DeskSignalFacadeError::CustomError(CustomDeskError::new(error_code, message))
     }
 }
 

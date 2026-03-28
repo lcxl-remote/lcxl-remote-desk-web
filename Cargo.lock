@@ -2444,6 +2444,7 @@ name = "desk-server-user"
 version = "0.1.0"
 dependencies = [
  "actix-session",
+ "desk-signal-facade",
  "serde",
  "utoipa",
 ]
@@ -2487,8 +2488,13 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "actix-ws",
+ "bytes",
+ "bytestring",
  "chrono",
  "desk-utils",
+ "futures",
+ "futures-util",
+ "log",
  "serde",
  "serde_json",
  "serde_repr",

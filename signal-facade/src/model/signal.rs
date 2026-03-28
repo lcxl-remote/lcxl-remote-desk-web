@@ -579,3 +579,15 @@ pub struct RequestRemote {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RequestRemoteData {}
+
+/// Minimal user trait for signaling permission checks.
+/// Both web/server-user::CurrentUser and manager::CurrentUser should implement this.
+pub trait SignalingUser: Send + Sync {
+    fn get_access(&self) -> Option<&str>;
+    fn get_target_connection_id(&self) -> Option<&str>;
+}
+
+pub trait TurnProvider: Send + Sync {
+    fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer;
+}
+

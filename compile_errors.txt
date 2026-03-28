@@ -1,0 +1,42 @@
+   Compiling desk-signal v0.1.0 (D:\source\lcxl-remote-desk-workspace\web\signal)
+error[E0061]: this function takes 9 arguments but 7 arguments were supplied
+   --> signal\src\controller\terminal.rs:115:33
+    |
+115 |       let mut signaling_context = SignalingContext::init(
+    |  _________________________________^^^^^^^^^^^^^^^^^^^^^^-
+116 | |         connection_id,
+117 | |         client_version_info,
+118 | |         connection_map_clone,
+...   |
+122 | |         turn_api_state.into_inner().as_ref().settings.clone(),
+123 | |     )
+    | |_____- two arguments of type `std::option::Option<std::string::String>` and `i32` are missing
+    |
+note: expected `Arc<dyn TurnProvider>`, found `TurnSettings`
+   --> signal\src\controller\terminal.rs:122:9
+    |
+122 |         turn_api_state.into_inner().as_ref().settings.clone(),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: expected struct `Arc<(dyn TurnProvider + 'static)>`
+               found struct `TurnSettings`
+note: associated function defined here
+   --> D:\source\lcxl-remote-desk-workspace\web\signal-facade\src\service.rs:171:18
+    |
+171 |     pub async fn init(
+    |                  ^^^^
+help: provide the arguments
+    |
+115 -     let mut signaling_context = SignalingContext::init(
+116 -         connection_id,
+117 -         client_version_info,
+118 -         connection_map_clone,
+119 -         ws_session,
+120 -         user,
+121 -         ip,
+122 -         turn_api_state.into_inner().as_ref().settings.clone(),
+123 -     )
+115 +     let mut signaling_context = SignalingContext::init(connection_id, client_version_info, connection_map_clone, ws_session, user, ip, /* Arc<(dyn TurnProvider + 'static)> */, /* std::option::Option<std::string::String> */, /* i32 */)
+    |
+
+For more information about this error, try `rustc --explain E0061`.
+error: could not compile `desk-signal` (lib) due to 1 previous error

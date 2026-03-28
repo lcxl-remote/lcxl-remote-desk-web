@@ -21,3 +21,8 @@ strum_macros = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
+bytes = { workspace = true }
+bytestring = { workspace = true }
+futures-util = { workspace = true }
+log = { workspace = true }
+futures = { workspace = true }

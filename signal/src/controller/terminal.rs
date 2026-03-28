@@ -119,7 +119,9 @@ pub async fn open_terminal_session(
         ws_session,
         user,
         ip,
-        turn_api_state.into_inner().as_ref().settings.clone(),
+        std::sync::Arc::new(turn_api_state.into_inner().as_ref().settings.clone()),
+        None,
+        desk_server_version::SERVER_API_VERSION,
     )
     .await?;
 
