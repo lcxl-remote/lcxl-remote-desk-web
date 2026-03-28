@@ -2,7 +2,7 @@ use actix_web::{HttpResponse, delete, get, web};
 use desk_utils::error::DeskErrorCode;
 
 use crate::error::DeskSignalError;
-use crate::model::SharedSessionMap;
+use crate::model::SharedConnectionMap;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::signal::{ForwardSignalingSender, SignalingType};
 
@@ -16,21 +16,21 @@ use desk_signal_facade::model::signal::{ForwardSignalingSender, SignalingType};
 #[get("/file/list")]
 pub async fn list_files(
     query_list: web::Query<FileListParams>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
-    let session_id = if let Some(id) = &query_list.session_id {
+    let connection_id = if let Some(id) = &query_list.connection_id {
         id.clone()
     } else {
         return DeskSignalError::custom_error(
             DeskErrorCode::INVALID_PARAMS,
-            "session_id is required",
+            "connection_id is required",
         );
     };
 
     let response = {
-        let session_map = session_map.read().await;
-        if let Some(session) = session_map.get(&session_id) {
-            session
+        let connection_map = connection_map.read().await;
+        if let Some(connection) = connection_map.get(&connection_id) {
+            connection
                 .request_peer_with_callback(
                     SignalingType::ManagerFileList,
                     Some(&query_list.into_inner()),
@@ -40,7 +40,7 @@ pub async fn list_files(
         } else {
             return DeskSignalError::custom_error(
                 DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Session {} not found", session_id),
+                &format!("Connection {} not found", connection_id),
             );
         }
     };
@@ -70,22 +70,22 @@ pub async fn list_files(
 #[delete("/file")]
 pub async fn delete_file(
     requst_json: web::Json<DeleteFileRequest>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let delete_file_request = requst_json.into_inner();
-    let session_id = if let Some(id) = &delete_file_request.session_id {
+    let connection_id = if let Some(id) = &delete_file_request.connection_id {
         id.clone()
     } else {
         return DeskSignalError::custom_error(
             DeskErrorCode::INVALID_PARAMS,
-            "session_id is required",
+            "connection_id is required",
         );
     };
 
     let response = {
-        let session_map = session_map.read().await;
-        if let Some(session) = session_map.get(&session_id) {
-            session
+        let connection_map = connection_map.read().await;
+        if let Some(connection) = connection_map.get(&connection_id) {
+            connection
                 .request_peer_with_callback(
                     SignalingType::ManagerFileDelete,
                     Some(&delete_file_request),
@@ -95,7 +95,7 @@ pub async fn delete_file(
         } else {
             return DeskSignalError::custom_error(
                 DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Session {} not found", session_id),
+                &format!("Connection {} not found", connection_id),
             );
         }
     };

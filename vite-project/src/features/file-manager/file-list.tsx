@@ -51,7 +51,7 @@ function formatRemainingTime(seconds: number): string {
 }
 
 export default function FileList() {
-    const { id: sessionId } = useParams<{ id: string }>()
+    const { id: connectionId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
     // Empty path: Windows shows drive letters, others show root "/"
@@ -62,7 +62,7 @@ export default function FileList() {
     const { toast } = useToast()
 
     const { data, isLoading, refetch, isError, error } = useListFiles({
-        session_id: sessionId,
+        connection_id: connectionId,
         path: currentPath,
         page_no: page as any,
         page_count: pageSize as any
@@ -85,7 +85,7 @@ export default function FileList() {
         }
     }, [isError, error, toast, t])
 
-    const { transfers, downloadFile, uploadFile, cancelTransfer, removeTransfer, closeConnection } = useFileTransfer(sessionId)
+    const { transfers, downloadFile, uploadFile, cancelTransfer, removeTransfer, closeConnection } = useFileTransfer(connectionId)
 
     // Cleanup WebRTC connection when leaving the page
     useEffect(() => {
@@ -162,11 +162,11 @@ export default function FileList() {
     }
 
     const executeDelete = () => {
-        if (!fileToDelete || !sessionId) return
+        if (!fileToDelete || !connectionId) return
 
         deleteMutation.mutate({
             data: {
-                session_id: sessionId,
+                connection_id: connectionId,
                 file_path: fileToDelete.path,
                 delete_permanently: isPermanentDelete
             }
@@ -226,7 +226,7 @@ export default function FileList() {
         <div className="space-y-4 h-full flex flex-col">
             <div className="flex items-center justify-between px-4 py-2 border-b">
                 <div className="flex items-center gap-2 overflow-hidden">
-                    <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${sessionId}`)} title={t('pages.fileManager.backToDashboard', 'Back to Dashboard')}>
+                    <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${connectionId}`)} title={t('pages.fileManager.backToDashboard', 'Back to Dashboard')}>
                         <ArrowLeft className="h-4 w-4" />
                     </Button>
                     <Button variant="ghost" size="icon" onClick={() => handleNavigate("")}>

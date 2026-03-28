@@ -4,7 +4,7 @@ pub mod files;
 pub mod image_capture;
 pub mod os;
 pub mod private_screen;
-pub mod session;
+pub mod connection;
 pub mod signal;
 pub mod terminal;
 pub mod version;

@@ -10,29 +10,29 @@ import type { OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, O
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { openTerminalSession } from "../../clients.ts";
 
-export const openTerminalSessionQueryKey = (session_id: OpenTerminalSessionPathParams["session_id"], params: OpenTerminalSessionQueryParams) => [{ url: '/api/desk/terminal/:session_id', params: {session_id:session_id} }, ...(params ? [params] : [])] as const
+export const openTerminalSessionQueryKey = (connection_id: OpenTerminalSessionPathParams["connection_id"], params: OpenTerminalSessionQueryParams) => [{ url: '/api/desk/terminal/:connection_id', params: {connection_id:connection_id} }, ...(params ? [params] : [])] as const
 
 export type OpenTerminalSessionQueryKey = ReturnType<typeof openTerminalSessionQueryKey>
 
-export function openTerminalSessionQueryOptions(session_id: OpenTerminalSessionPathParams["session_id"], params: OpenTerminalSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function openTerminalSessionQueryOptions(connection_id: OpenTerminalSessionPathParams["connection_id"], params: OpenTerminalSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
-        const queryKey = openTerminalSessionQueryKey(session_id, params)
+        const queryKey = openTerminalSessionQueryKey(connection_id, params)
         return queryOptions<OpenTerminalSessionQueryResponse, ResponseErrorConfig<Error>, OpenTerminalSessionQueryResponse, typeof queryKey>({
-         enabled: !!(session_id&& params),
+         enabled: !!(connection_id&& params),
          queryKey,
          queryFn: async ({ signal }) => {
             config.signal = signal
-            return openTerminalSession(session_id, params, config)
+            return openTerminalSession(connection_id, params, config)
          },
         })
 
 }
 
 /**
- * @summary Open terminal session
- * {@link /api/desk/terminal/:session_id}
+ * @summary Open terminal connection
+ * {@link /api/desk/terminal/:connection_id}
  */
-export function useOpenTerminalSession<TData = OpenTerminalSessionQueryResponse, TQueryData = OpenTerminalSessionQueryResponse, TQueryKey extends QueryKey = OpenTerminalSessionQueryKey>(session_id: OpenTerminalSessionPathParams["session_id"], params: OpenTerminalSessionQueryParams, options: 
+export function useOpenTerminalSession<TData = OpenTerminalSessionQueryResponse, TQueryData = OpenTerminalSessionQueryResponse, TQueryKey extends QueryKey = OpenTerminalSessionQueryKey>(connection_id: OpenTerminalSessionPathParams["connection_id"], params: OpenTerminalSessionQueryParams, options: 
 {
   query?: Partial<QueryObserverOptions<OpenTerminalSessionQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
@@ -41,11 +41,11 @@ export function useOpenTerminalSession<TData = OpenTerminalSessionQueryResponse,
 
          const { query: queryConfig = {}, client: config = {} } = options ?? {}
          const { client: queryClient, ...queryOptions } = queryConfig
-         const queryKey = queryOptions?.queryKey ?? openTerminalSessionQueryKey(session_id, params)
+         const queryKey = queryOptions?.queryKey ?? openTerminalSessionQueryKey(connection_id, params)
          
 
          const query = useQuery({
-          ...openTerminalSessionQueryOptions(session_id, params, config),
+          ...openTerminalSessionQueryOptions(connection_id, params, config),
           queryKey,
           ...queryOptions
          } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }

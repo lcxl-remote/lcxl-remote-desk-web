@@ -5,35 +5,35 @@ use std::{
 };
 
 use actix_ws::Session;
-use desk_signal_facade::model::{session::SessionModel, signal::SignalingModel};
+use desk_signal_facade::model::{connection::ConnectionModel, signal::SignalingModel};
 use tokio::sync::{RwLock, oneshot};
 
-/// session state
+/// connection state
 #[derive(Clone)]
-pub struct SessionState {
-    /// session model
-    pub model: SessionModel,
+pub struct ConnectionState {
+    /// connection model
+    pub model: ConnectionModel,
     /// actix web socket session
     pub session: Arc<RwLock<Session>>,
-    /// terminal session id(from_session_id) set, when from_session(browser) is closed, signal server should send close message to desk server to close related terminal processes
-    pub terminal_session_ids: Arc<RwLock<HashSet<String /*from_session_id */>>>,
+    /// terminal connection id(from_connection_id) set, when from_connection(browser) is closed, signal server should send close message to desk server to close related terminal processes
+    pub terminal_connection_ids: Arc<RwLock<HashSet<String /*from_connection_id */>>>,
     /// request_id -> oneshot::Sender<SignalingModel>
     pub request_callback_map:
         Arc<RwLock<HashMap<String /* request_id */, oneshot::Sender<SignalingModel>>>>,
-    /// device code assigned to this session (if it's a Server session)
+    /// device code assigned to this connection (if it's a Server connection)
     pub device_code: Option<String>,
 }
 
-pub struct SharedSessionMap(pub RwLock<BTreeMap<String /* session_id */, SessionState>>);
+pub struct SharedConnectionMap(pub RwLock<BTreeMap<String /* connection_id */, ConnectionState>>);
 
-impl SharedSessionMap {
-    pub fn from(session_map: BTreeMap<String, SessionState>) -> Self {
-        SharedSessionMap(RwLock::new(session_map))
+impl SharedConnectionMap {
+    pub fn from(connection_map: BTreeMap<String, ConnectionState>) -> Self {
+        SharedConnectionMap(RwLock::new(connection_map))
     }
 }
 
-impl Deref for SharedSessionMap {
-    type Target = RwLock<BTreeMap<String, SessionState>>;
+impl Deref for SharedConnectionMap {
+    type Target = RwLock<BTreeMap<String, ConnectionState>>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }

@@ -1,4 +1,4 @@
-use crate::{error::DeskSignalError, model::SharedSessionMap, service::SignalingContext, version};
+use crate::{error::DeskSignalError, model::SharedConnectionMap, service::SignalingContext, version};
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
@@ -21,21 +21,21 @@ use uuid::Uuid;
 
     ),
 )]
-#[get("/terminals/{session_id}")]
+#[get("/terminals/{connection_id}")]
 pub async fn list_terminal(
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
     path: web::Path<ListTerminalPath>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let response = {
-        let session_map = session_map.read().await;
-        if let Some(session) = session_map.get(&path.session_id) {
-            session
+        let connection_map = connection_map.read().await;
+        if let Some(connection) = connection_map.get(&path.connection_id) {
+            connection
                 .request_peer_with_callback::<()>(SignalingType::ListTerminal, None, None)
                 .await?
         } else {
             return DeskSignalError::custom_error(
                 DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Session {} is not found to list terminal", path.session_id),
+                &format!("Connection {} is not found to list terminal", path.connection_id),
             );
         }
     };
@@ -54,18 +54,18 @@ pub async fn list_terminal(
 }
 
 #[utoipa::path(
-    summary = "Open terminal session",
+    summary = "Open terminal connection",
     params(StartTerminalSession, StartTerminalPath),
     responses(
         (status = 200, description = "return websocket stream"),
     ),
 )]
-#[get("/terminal/{session_id}")]
+#[get("/terminal/{connection_id}")]
 pub async fn open_terminal_session(
     req: HttpRequest,
     path: web::Path<StartTerminalPath>,
     query_list: web::Query<StartTerminalSession>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
     turn_api_state: web::Data<TurnApiState>,
@@ -83,17 +83,17 @@ pub async fn open_terminal_session(
         ));
     }
 
-    let to_session_id = path.session_id.clone();
+    let to_connection_id = path.connection_id.clone();
 
-    info!("Proxying terminal session to desk: {}", to_session_id);
-    let (res, session, stream) = actix_ws::handle(&req, stream)?;
+    info!("Proxying terminal connection to desk: {}", to_connection_id);
+    let (res, ws_session, stream) = actix_ws::handle(&req, stream)?;
     let stream = stream
         .aggregate_continuations()
         .max_continuation_size(2_usize.pow(20));
 
     let start_terminal_session = query_list.clone().into_inner();
 
-    let session_map_clone = session_map.clone();
+    let connection_map_clone = connection_map.clone();
     let ip = req
         .connection_info()
         .realip_remote_addr()
@@ -110,13 +110,13 @@ pub async fn open_terminal_session(
     );
 
     let random_uuid = Uuid::new_v4();
-    let session_id = String::from(random_uuid);
+    let connection_id = String::from(random_uuid);
     // Handle signaling logic here
     let mut signaling_context = SignalingContext::init(
-        session_id,
+        connection_id,
         client_version_info,
-        session_map_clone,
-        session,
+        connection_map_clone,
+        ws_session,
         user,
         ip,
         turn_api_state.into_inner().as_ref().settings.clone(),
@@ -126,23 +126,23 @@ pub async fn open_terminal_session(
     // send start terminal command
     let start_terminal_command = SignalingModel::new_request(
         SignalingType::StartTerminal,
-        Some(to_session_id.clone()),
+        Some(to_connection_id.clone()),
         Some(&start_terminal_session),
     )?;
     signaling_context
         .forward_to_peer(&start_terminal_command, false)
         .await?;
     signaling_context
-        .session_state
-        .terminal_session_ids
+        .connection_state
+        .terminal_connection_ids
         .write()
         .await
-        .insert(signaling_context.session_state.model.session_id.clone());
+        .insert(signaling_context.connection_state.model.connection_id.clone());
 
     log::info!(
         "Sent start terminal command from {} to peer: {}",
-        signaling_context.session_state.model.session_id,
-        to_session_id
+        signaling_context.connection_state.model.connection_id,
+        to_connection_id
     );
     rt::spawn(async move {
         let result = signaling_context.do_handle_signaling(stream).await;
@@ -154,21 +154,21 @@ pub async fn open_terminal_session(
         // send close terminal command
         let close_terminal_command = SignalingModel::new_request::<()>(
             SignalingType::CloseTerminal,
-            Some(to_session_id.clone()),
+            Some(to_connection_id.clone()),
             None,
         );
 
         if let Ok(command) = close_terminal_command {
             signaling_context
-                .session_state
-                .terminal_session_ids
+                .connection_state
+                .terminal_connection_ids
                 .write()
                 .await
-                .remove(&signaling_context.session_state.model.session_id);
+                .remove(&signaling_context.connection_state.model.connection_id);
             if let Err(e) = signaling_context.forward_to_peer(&command, false).await {
                 error!("Failed to send close terminal command: {}", e);
             } else {
-                info!("Sent close terminal command to peer: {}", to_session_id);
+                info!("Sent close terminal command to peer: {}", to_connection_id);
             }
         }
     });

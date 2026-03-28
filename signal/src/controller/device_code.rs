@@ -6,7 +6,7 @@ use sea_orm::*;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::{entity::device_code, error::DeskSignalError, model::SharedSessionMap};
+use crate::{entity::device_code, error::DeskSignalError, model::SharedConnectionMap};
 
 #[derive(Serialize, Deserialize, ToSchema, Debug)]
 pub struct DeviceCodeListParams {
@@ -68,7 +68,7 @@ impl DeviceCodeItem {
 #[get("/device_codes")]
 pub async fn list_device_codes(
     query: web::Query<DeviceCodeListParams>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let page = std::cmp::max(1, query.page.unwrap_or(1));
@@ -84,10 +84,10 @@ pub async fn list_device_codes(
         .all(db)
         .await?;
 
-    let session_map_guard = session_map.read().await;
+    let connection_map_guard = connection_map.read().await;
     let mut online_codes = HashSet::new();
-    for (_sid, sstate) in session_map_guard.iter() {
-        if let Some(code) = &sstate.device_code {
+    for (_cid, cstate) in connection_map_guard.iter() {
+        if let Some(code) = &cstate.device_code {
             online_codes.insert(code.clone());
         }
     }
@@ -155,7 +155,7 @@ pub async fn create_device_code(
 pub async fn update_device_code(
     path: web::Path<i32>,
     body: web::Json<DeviceCodeUpdateParams>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let id = path.into_inner();
@@ -168,10 +168,10 @@ pub async fn update_device_code(
         active_model.device_code = Set(params.device_code.clone());
         active_model.updated_at = Set(chrono::Utc::now());
         let result = active_model.update(db).await?;
-        let session_map_guard = session_map.read().await;
+        let connection_map_guard = connection_map.read().await;
         let mut is_online = false;
-        for (_sid, sstate) in session_map_guard.iter() {
-            if sstate.device_code.as_ref() == Some(&params.device_code) {
+        for (_cid, cstate) in connection_map_guard.iter() {
+            if cstate.device_code.as_ref() == Some(&params.device_code) {
                 is_online = true;
                 break;
             }
@@ -198,7 +198,7 @@ pub async fn update_device_code(
 #[delete("/device_codes/{id}")]
 pub async fn delete_device_code(
     path: web::Path<i32>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let id = path.into_inner();
@@ -206,9 +206,9 @@ pub async fn delete_device_code(
     let model = device_code::Entity::find_by_id(id).one(db).await?;
 
     if let Some(m) = model {
-        let session_map_guard = session_map.read().await;
-        for (_sid, sstate) in session_map_guard.iter() {
-            if sstate.device_code.as_ref() == Some(&m.device_code) {
+        let connection_map_guard = connection_map.read().await;
+        for (_cid, cstate) in connection_map_guard.iter() {
+            if cstate.device_code.as_ref() == Some(&m.device_code) {
                 return Err(DeskSignalError::new_custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
                     "Cannot delete an online device code",
@@ -241,7 +241,7 @@ pub struct DeviceCodeBatchDeleteParams {
 #[post("/device_codes/batch_delete")]
 pub async fn batch_delete_device_codes(
     body: web::Json<DeviceCodeBatchDeleteParams>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalError> {
     let db = crate::db::get_db();
     let params = body.into_inner();
@@ -251,10 +251,10 @@ pub async fn batch_delete_device_codes(
         .all(db)
         .await?;
 
-    let session_map_guard = session_map.read().await;
+    let connection_map_guard = connection_map.read().await;
     let mut online_codes = std::collections::HashSet::new();
-    for (_sid, sstate) in session_map_guard.iter() {
-        if let Some(code) = &sstate.device_code {
+    for (_cid, cstate) in connection_map_guard.iter() {
+        if let Some(code) = &cstate.device_code {
             online_codes.insert(code.clone());
         }
     }

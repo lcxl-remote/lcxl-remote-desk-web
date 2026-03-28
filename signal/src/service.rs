@@ -13,7 +13,7 @@ use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::{
     error::DeskSignalFacadeError,
     model::{
-        session::{SessionList, SessionModel},
+        connection::{ConnectionList, ConnectionModel},
         signal::{
             ForwardSignalingSender, InitSignalingData, RemoteDeskTypeEnum,
             RequestRemoteModel, SignalingModel, SignalingType,
@@ -32,27 +32,27 @@ use uuid::Uuid;
 
 use crate::{
     error::DeskSignalError,
-    model::{SessionState, SharedSessionMap},
+    model::{ConnectionState, SharedConnectionMap},
 };
 
 pub async fn handle_signaling(
     client_version_info: VersionInfo,
     stream: AggregatedMessageStream,
-    session_map: web::Data<SharedSessionMap>,
-    session: Session,
+    connection_map: web::Data<SharedConnectionMap>,
+    ws_session: Session,
     user: CurrentUser,
     ip: Option<String>,
     turn: TurnSettings,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
     let random_uuid = Uuid::new_v4();
-    let session_id = String::from(random_uuid);
+    let connection_id = String::from(random_uuid);
     // Handle signaling logic here
     let mut signaling_context = SignalingContext::init(
-        session_id,
+        connection_id,
         client_version_info,
-        session_map,
-        session,
+        connection_map,
+        ws_session,
         user,
         ip,
         turn,
@@ -67,8 +67,8 @@ pub async fn handle_signaling(
 
 /// Signaling context for handling WebSocket messages.
 pub struct SignalingContext<T: BaseUser> {
-    pub session_state: SessionState,
-    pub session_map: web::Data<SharedSessionMap>,
+    pub connection_state: ConnectionState,
+    pub connection_map: web::Data<SharedConnectionMap>,
     pub user: T,
     pub turn: TurnSettings,
 }
@@ -139,24 +139,24 @@ fn rewrite_mdns_candidate_with_ip(
     Some(SignalingModel::new(
         &signaling_model.request_id,
         signaling_model.signaling_type,
-        signaling_model.from_session_id.clone(),
-        signaling_model.to_session_id.clone(),
+        signaling_model.from_connection_id.clone(),
+        signaling_model.to_connection_id.clone(),
         Some(serde_json::Value::Object(obj)),
         signaling_model.response_state.clone(),
     ))
 }
 
-impl ForwardSignalingSender for SessionState {
+impl ForwardSignalingSender for ConnectionState {
     async fn send_response(
         &self,
-        from_session_id: Option<String>,
+        from_connection_id: Option<String>,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskSignalFacadeError> {
         let signaling_model = SignalingModel::success_response(
             &signaling_model.request_id,
             signaling_model.signaling_type,
-            from_session_id,
-            Some(self.model.session_id.clone()),
+            from_connection_id,
+            Some(self.model.connection_id.clone()),
             signaling_model.get_raw_data().as_ref(),
         )?;
         self.session
@@ -169,14 +169,14 @@ impl ForwardSignalingSender for SessionState {
 
     async fn send_to_peer(
         &self,
-        from_session_id: &str,
+        from_connection_id: &str,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskSignalFacadeError> {
         let signaling_model = SignalingModel::new(
             &signaling_model.request_id,
             signaling_model.signaling_type,
-            Some(from_session_id.to_owned()),
-            Some(self.model.session_id.clone()),
+            Some(from_connection_id.to_owned()),
+            Some(self.model.connection_id.clone()),
             signaling_model.get_raw_data().clone(),
             signaling_model.response_state.clone(),
         );
@@ -199,7 +199,7 @@ impl ForwardSignalingSender for SessionState {
         T: ?Sized + Serialize + Sync,
     {
         let signaling_model =
-            SignalingModel::new_request(signaling_type, Some(self.model.session_id.clone()), data)?;
+            SignalingModel::new_request(signaling_type, Some(self.model.connection_id.clone()), data)?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.session
             .write()
@@ -250,22 +250,22 @@ impl<T: BaseUser> Drop for SignalingContext<T> {
                 return;
             }
         };
-        let session_id = self.session_state.model.session_id.clone();
-        let session_map = self.session_map.clone();
+        let connection_id = self.connection_state.model.connection_id.clone();
+        let connection_map = self.connection_map.clone();
         let removed_value = futures::executor::block_on(async move {
             handle
-                .spawn_blocking(move || session_map.blocking_write().remove(&session_id))
+                .spawn_blocking(move || connection_map.blocking_write().remove(&connection_id))
                 .await
         });
         match removed_value {
             Ok(None) => log::error!(
-                "Failed to remove session from map: session {} not found",
-                self.session_state.model.session_id
+                "Failed to remove connection from map: connection {} not found",
+                self.connection_state.model.connection_id
             ),
-            Ok(Some(session_state)) => {
-                log::info!("Removed session from map: {:?}", session_state.model)
+            Ok(Some(connection_state)) => {
+                log::info!("Removed connection from map: {:?}", connection_state.model)
             }
-            Err(err) => log::error!("Failed to remove session from map: {:?}", err),
+            Err(err) => log::error!("Failed to remove connection from map: {:?}", err),
         }
     }
 }
@@ -273,15 +273,15 @@ impl<T: BaseUser> Drop for SignalingContext<T> {
 impl<T: BaseUser> SignalingContext<T> {
     /// Initialize a new SignalingContext.
     pub async fn init(
-        session_id: String,
+        connection_id: String,
         client_version_info: VersionInfo,
-        session_map: web::Data<SharedSessionMap>,
-        session: Session,
+        connection_map: web::Data<SharedConnectionMap>,
+        ws_session: Session,
         user: T,
         ip: Option<String>,
         turn: TurnSettings,
     ) -> Result<Self, DeskSignalError> {
-        log::info!("Init new SignalingContext, session id: {}", session_id);
+        log::info!("Init new SignalingContext, connection id: {}", connection_id);
         if client_version_info.api_version > SERVER_API_VERSION {
             log::warn!(
                 "Client API version({}) is higher than server's({}). This may cause compatibility issues.",
@@ -290,8 +290,8 @@ impl<T: BaseUser> SignalingContext<T> {
             );
         }
 
-        let session_model = SessionModel {
-            session_id: session_id.clone(),
+        let connection_model = ConnectionModel {
+            connection_id: connection_id.clone(),
             version_info: client_version_info.clone(),
             ip,
         };
@@ -330,21 +330,21 @@ impl<T: BaseUser> SignalingContext<T> {
             }
         }
 
-        let session_state = SessionState {
-            model: session_model,
-            session: Arc::new(RwLock::new(session)),
-            terminal_session_ids: Arc::new(RwLock::new(HashSet::new())),
+        let connection_state = ConnectionState {
+            model: connection_model,
+            session: Arc::new(RwLock::new(ws_session)),
+            terminal_connection_ids: Arc::new(RwLock::new(HashSet::new())),
             request_callback_map: Arc::new(RwLock::new(HashMap::new())),
             device_code,
         };
 
-        session_map
+        connection_map
             .write()
             .await
-            .insert(session_id.clone(), session_state.clone());
+            .insert(connection_id.clone(), connection_state.clone());
         Ok(Self {
-            session_state,
-            session_map,
+            connection_state,
+            connection_map,
             user,
             turn,
         })
@@ -354,18 +354,18 @@ impl<T: BaseUser> SignalingContext<T> {
     pub async fn forward_to_peer(
         &self,
         signaling_model: &SignalingModel,
-        ignore_session_not_found: bool,
+        ignore_connection_not_found: bool,
     ) -> Result<(), DeskSignalError> {
         // Device user restriction logic
         if self.user.get_access() == Some("device_user") {
-            if let Some(target_session) = self.user.get_target_session_id() {
-                let to_session_id = signaling_model.check_and_get_to_session_id()?;
-                if to_session_id != target_session {
+            if let Some(target_connection) = self.user.get_target_connection_id() {
+                let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
+                if to_connection_id != target_connection {
                     return DeskSignalError::custom_error(
                         DeskErrorCode::SYSTEM_ERROR,
                         &format!(
                             "Permission denied: cannot send message to {}",
-                            to_session_id
+                            to_connection_id
                         ),
                     );
                 }
@@ -373,7 +373,7 @@ impl<T: BaseUser> SignalingContext<T> {
         }
 
         if let Some(tx) = self
-            .session_state
+            .connection_state
             .request_callback_map
             .write()
             .await
@@ -387,15 +387,15 @@ impl<T: BaseUser> SignalingContext<T> {
             })?;
             return Ok(());
         }
-        let to_session_id = signaling_model.check_and_get_to_session_id()?;
-        let session_map = self.session_map.read().await;
-        let to_session_state = if let Some(session_state) = session_map.get(to_session_id) {
-            session_state
+        let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
+        let connection_map = self.connection_map.read().await;
+        let to_connection_state = if let Some(connection_state) = connection_map.get(to_connection_id) {
+            connection_state
         } else {
-            if ignore_session_not_found {
+            if ignore_connection_not_found {
                 log::warn!(
-                    "Session {} is not found to forward signaling, ignore it: {:?}",
-                    to_session_id,
+                    "Connection {} is not found to forward signaling, ignore it: {:?}",
+                    to_connection_id,
                     signaling_model
                 );
                 return Ok(());
@@ -403,13 +403,13 @@ impl<T: BaseUser> SignalingContext<T> {
             return DeskSignalError::custom_error(
                 DeskErrorCode::SESSION_NOT_FOUND,
                 &format!(
-                    "Session {} is not found to forward signaling: {:?}",
-                    to_session_id, signaling_model
+                    "Connection {} is not found to forward signaling: {:?}",
+                    to_connection_id, signaling_model
                 ),
             );
         };
-        to_session_state
-            .send_to_peer(&self.session_state.model.session_id, signaling_model)
+        to_connection_state
+            .send_to_peer(&self.connection_state.model.connection_id, signaling_model)
             .await?;
 
         Ok(())
@@ -429,52 +429,52 @@ impl<T: BaseUser> SignalingContext<T> {
                     None,
                     None,
                 )?;
-                self.session_state.send_response(None, &response).await?;
+                self.connection_state.send_response(None, &response).await?;
             }
-            SignalingType::FetchSessions => {
-                let session_map = {
-                    let session_map = self.session_map.read().await;
-                    session_map
+            SignalingType::FetchConnections => {
+                let connection_map = {
+                    let connection_map = self.connection_map.read().await;
+                    connection_map
                         .iter()
                         .map(|item| (item.0.clone(), item.1.model.clone()))
                         .collect()
                 };
-                let session_list = SessionList {
-                    current_session_id: self.session_state.model.session_id.clone(),
-                    session_map,
+                let connection_list = ConnectionList {
+                    current_connection_id: self.connection_state.model.connection_id.clone(),
+                    connection_map,
                 };
 
-                log::info!("Sending session list to client: {:?}", session_list);
+                log::info!("Sending connection list to client: {:?}", connection_list);
                 let response = SignalingModel::success_response(
                     &signaling_model.request_id,
-                    SignalingType::SessionList,
+                    SignalingType::ConnectionList,
                     None,
                     None,
-                    Some(&session_list),
+                    Some(&connection_list),
                 )?;
-                self.session_state.send_response(None, &response).await?;
+                self.connection_state.send_response(None, &response).await?;
             }
-            SignalingType::SessionList => {
+            SignalingType::ConnectionList => {
                 log::warn!(
-                    "Received session list signaling type: {}, it should not be received",
+                    "Received connection list signaling type: {}, it should not be received",
                     signaling_model.signaling_type
                 );
             }
             SignalingType::SendDataToTerminal => {
-                let from_session_id = &self.session_state.model.session_id;
+                let from_connection_id = &self.connection_state.model.connection_id;
                 if signaling_model.is_request() {
                     if !self
-                        .session_state
-                        .terminal_session_ids
+                        .connection_state
+                        .terminal_connection_ids
                         .read()
                         .await
-                        .contains(from_session_id)
+                        .contains(from_connection_id)
                     {
                         return DeskSignalError::custom_error(
                             DeskErrorCode::SYSTEM_ERROR,
                             &format!(
-                                "Session {} is not a terminal, can not send data to terminal",
-                                from_session_id
+                                "Connection {} is not a terminal, can not send data to terminal",
+                                from_connection_id
                             ),
                         );
                     }
@@ -482,20 +482,20 @@ impl<T: BaseUser> SignalingContext<T> {
                 self.forward_to_peer(&signaling_model, false).await?;
             }
             SignalingType::ResizeTerminal => {
-                let from_session_id = &self.session_state.model.session_id;
+                let from_connection_id = &self.connection_state.model.connection_id;
                 if signaling_model.is_request() {
                     if !self
-                        .session_state
-                        .terminal_session_ids
+                        .connection_state
+                        .terminal_connection_ids
                         .read()
                         .await
-                        .contains(from_session_id)
+                        .contains(from_connection_id)
                     {
                         return DeskSignalError::custom_error(
                             DeskErrorCode::SYSTEM_ERROR,
                             &format!(
-                                "Session {} is not a terminal, can not resize terminal",
-                                from_session_id
+                                "Connection {} is not a terminal, can not resize terminal",
+                                from_connection_id
                             ),
                         );
                     }
@@ -509,7 +509,7 @@ impl<T: BaseUser> SignalingContext<T> {
 
             SignalingType::Canid => {
                 let fallback_ip = self
-                    .session_state
+                    .connection_state
                     .model
                     .ip
                     .as_deref()
@@ -533,13 +533,13 @@ impl<T: BaseUser> SignalingContext<T> {
                 let mut data = signaling_model.get_data_with_default::<RequestRemoteModel>()?;
                 // TODO need to support static auth secret
                 // ice servers
-                // username is session_id
+                // username is connection_id
                 // password is client id
-                let client_id_opt = self.session_state.model.version_info.client_id.clone();
+                let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
                     let ice_server = self
                         .turn
-                        .get_ice_servers(&self.session_state.model.session_id, &client_id);
+                        .get_ice_servers(&self.connection_state.model.connection_id, &client_id);
 
                     data.ice_servers.push(ice_server);
                 }
@@ -547,8 +547,8 @@ impl<T: BaseUser> SignalingContext<T> {
                 let new_signaling_model = SignalingModel::new(
                     signaling_model.request_id.as_str(),
                     signaling_model.signaling_type,
-                    signaling_model.from_session_id,
-                    signaling_model.to_session_id,
+                    signaling_model.from_connection_id,
+                    signaling_model.to_connection_id,
                     data,
                     signaling_model.response_state,
                 );
@@ -559,13 +559,13 @@ impl<T: BaseUser> SignalingContext<T> {
                 let mut data = signaling_model.get_data::<InitSignalingData>()?;
                 // TODO need to support static auth secret
                 // ice servers
-                // username is session_id
+                // username is connection_id
                 // password is client id
-                let client_id_opt = self.session_state.model.version_info.client_id.clone();
+                let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
                     let ice_server = self
                         .turn
-                        .get_ice_servers(&self.session_state.model.session_id, &client_id);
+                        .get_ice_servers(&self.connection_state.model.connection_id, &client_id);
 
                     data.ice_servers.push(ice_server);
                 }
@@ -573,8 +573,8 @@ impl<T: BaseUser> SignalingContext<T> {
                 let new_signaling_model = SignalingModel::new(
                     signaling_model.request_id.as_str(),
                     signaling_model.signaling_type,
-                    signaling_model.from_session_id,
-                    signaling_model.to_session_id,
+                    signaling_model.from_connection_id,
+                    signaling_model.to_connection_id,
                     data,
                     signaling_model.response_state,
                 );
@@ -625,7 +625,7 @@ impl<T: BaseUser> SignalingContext<T> {
     }
 
     pub async fn ping(&mut self, bin: Bytes) -> Result<(), DeskSignalError> {
-        self.session_state.session.write().await.pong(&bin).await?;
+        self.connection_state.session.write().await.pong(&bin).await?;
         Ok(())
     }
 

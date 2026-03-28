@@ -30,7 +30,7 @@ pub async fn handle_file_transfer_event(
     data_channel: Arc<RTCDataChannel>,
     settings: actix_web::web::Data<SharedSettings>,
     security_approval_sender: Option<SecurityApprovalSender>,
-    session_id: String,
+    connection_id: String,
 ) -> Result<(), DeskError> {
     let d_label = data_channel.label().to_owned();
     let d_id = data_channel.id();
@@ -68,13 +68,13 @@ pub async fn handle_file_transfer_event(
 
         let settings = settings.clone();
         let sender = security_approval_sender.clone();
-        let session_id = session_id.clone();
+        let connection_id = connection_id.clone();
         let permission_cache = permission_cache.clone();
 
         Box::pin(async move {
             // Check permission first
             let mut allowed = false;
-            let from_session_id = session_id.clone();
+            let from_connection_id = connection_id.clone();
             {
                 let cache = permission_cache.read().await;
                 if let Some(res) = *cache {
@@ -91,7 +91,7 @@ pub async fn handle_file_transfer_event(
                             sender.as_ref(),
                             allow_transfer,
                             SecurityPermissionType::FileTransfer,
-                            Some(session_id),
+                            Some(connection_id),
                         )
                         .await;
                         *cache_write = Some(approved);
@@ -102,7 +102,7 @@ pub async fn handle_file_transfer_event(
             if !allowed {
                 log::warn!(
                     "File transfer message blocked by security settings or user for {}",
-                    from_session_id
+                    from_connection_id
                 );
                 return;
             }

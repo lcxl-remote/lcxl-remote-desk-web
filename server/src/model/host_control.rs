@@ -35,7 +35,7 @@ pub trait HostControlHelper {
     fn block_input(&self, block: bool) -> Result<(), DeskError>;
 
     /// Enable or disable private screen mode
-    fn enable_private_screen(&self, from_session_id: &str, enable: bool) -> Result<(), DeskError>;
+    fn enable_private_screen(&self, from_connection_id: &str, enable: bool) -> Result<(), DeskError>;
 
     /// Control monitor power (turn on/off)
     fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError>;
@@ -62,11 +62,11 @@ pub struct PrivateScreenState {
 #[derive(Debug, Clone)]
 pub enum HostControlEventType {
     PrivateScreenInited(PrivateScreenState),
-    PrivateScreenVisibleChanged(String /*from session id*/, bool),
+    PrivateScreenVisibleChanged(String /*from connection id*/, bool),
 
     PrivateScreenHotkeyRegisterError,
     PrivateScreenUnknownError(
-        Option<String>, /*from session id*/
+        Option<String>, /*from connection id*/
         String,         /*error message*/
     ),
     PrivateScreenClosed,
@@ -74,8 +74,8 @@ pub enum HostControlEventType {
 
 #[derive(Debug, Clone)]
 pub enum PrivateScreenCommand {
-    Show(String /*from session id*/),
-    Hide(String /*from session id*/),
+    Show(String /*from connection id*/),
+    Hide(String /*from connection id*/),
     Quit,
 }
 
@@ -85,11 +85,11 @@ pub type HostControlSubscriber = tokio::sync::mpsc::UnboundedSender<HostControlE
 #[derive(Debug, Clone)]
 pub enum WhiteboardCommand {
     /// Show whiteboard overlay and start rendering
-    Show(String /*from session id*/),
+    Show(String /*from connection id*/),
     /// Forward a whiteboard drawing message to the overlay
     DrawMessage(String /*serialized WhiteboardMessage JSON*/),
     /// Hide whiteboard overlay
-    Hide(String /*from session id*/),
+    Hide(String /*from connection id*/),
     /// Quit whiteboard (cleanup)
     Quit,
 }

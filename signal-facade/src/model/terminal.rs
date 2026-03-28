@@ -35,15 +35,15 @@ impl Default for TerminalSettings {
 /// List terminal query path
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct ListTerminalPath {
-    /// session id
-    pub session_id: String,
+    /// connection id
+    pub connection_id: String,
 }
 
 /// Start terminal query path
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct StartTerminalPath {
-    /// session id
-    pub session_id: String,
+    /// connection id
+    pub connection_id: String,
 }
 
 /// SignalingType::SendDataToTerminal

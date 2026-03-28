@@ -6,7 +6,7 @@ export type SignalingMessage = {
     request_id?: string;
     signaling_type: number;
     signaling_data: any;
-    to_session_id?: string;
+    to_connection_id?: string;
 };
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -22,108 +22,99 @@ export function useDeskSignaling(deskId: string | null) {
 
     // Heartbeat state
     const heartbeatTimerRef = useRef<number | null>(null);
+    const heartbeatCheckTimerRef = useRef<number | null>(null);
     const lastHeartbeatResponseRef = useRef<number>(Date.now());
 
-    // Reconnection state
-    const reconnectAttemptRef = useRef<number>(0);
+    // Reconnect state
     const reconnectTimerRef = useRef<number | null>(null);
+    const reconnectAttemptsRef = useRef<number>(0);
     const intentionalCloseRef = useRef<boolean>(false);
 
     const clearHeartbeat = useCallback(() => {
         if (heartbeatTimerRef.current !== null) {
-            clearInterval(heartbeatTimerRef.current);
+            window.clearInterval(heartbeatTimerRef.current);
             heartbeatTimerRef.current = null;
+        }
+        if (heartbeatCheckTimerRef.current !== null) {
+            window.clearInterval(heartbeatCheckTimerRef.current);
+            heartbeatCheckTimerRef.current = null;
         }
     }, []);
 
     const clearReconnectTimer = useCallback(() => {
         if (reconnectTimerRef.current !== null) {
-            clearTimeout(reconnectTimerRef.current);
+            window.clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = null;
         }
     }, []);
 
     const connect = useCallback(() => {
-        if (socketRef.current?.readyState === WebSocket.OPEN || socketRef.current?.readyState === WebSocket.CONNECTING) return;
+        if (intentionalCloseRef.current) return;
+        if (socketRef.current && (socketRef.current.readyState === WebSocket.CONNECTING || socketRef.current.readyState === WebSocket.OPEN)) return;
+
+        console.log('Connecting to signaling server...');
+        clearReconnectTimer();
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
-        const url = new URL(`${protocol}//${host}/api/desk/signaling`);
-
-        url.searchParams.append("api_version", "1");
-        url.searchParams.append("build_number", "1");
-        url.searchParams.append("commit_hash", "1");
-        url.searchParams.append("operation_system", "wasm");
-        url.searchParams.append("remote_desk_type", "browser");
-
-        const ws = new WebSocket(url.toString());
+        const ws = new WebSocket(`${protocol}//${host}/api/desk/signaling`);
         socketRef.current = ws;
 
         ws.onopen = () => {
-            if (socketRef.current !== ws) return;
-            console.log('WebSocket connected');
+            console.log('Signaling WebSocket connected');
             setIsConnected(true);
-            reconnectAttemptRef.current = 0;
-
-            // Send queued messages
-            while (messageQueue.current.length > 0) {
-                const msg = messageQueue.current.shift();
-                if (msg) {
-                    ws.send(JSON.stringify(msg));
-                }
-            }
-
-            // Start heartbeat
+            reconnectAttemptsRef.current = 0;
             lastHeartbeatResponseRef.current = Date.now();
-            clearHeartbeat();
+
+            // Setup heartbeat
             heartbeatTimerRef.current = window.setInterval(() => {
-                if (ws.readyState !== WebSocket.OPEN) return;
-
-                // Check if heartbeat timed out
-                const elapsed = Date.now() - lastHeartbeatResponseRef.current;
-                if (elapsed > HEARTBEAT_TIMEOUT_MS) {
-                    console.warn(`Heartbeat timeout (${elapsed}ms), closing WebSocket to trigger reconnect`);
-                    ws.close();
-                    return;
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        request_id: v4(),
+                        signaling_type: SIGNALING_TYPE_CODE_HEARTBEAT,
+                        signaling_data: null,
+                    }));
                 }
-
-                // Send heartbeat
-                const heartbeat: SignalingMessage = {
-                    request_id: v4(),
-                    signaling_type: SIGNALING_TYPE_CODE_HEARTBEAT,
-                    signaling_data: null,
-                };
-                ws.send(JSON.stringify(heartbeat));
             }, HEARTBEAT_INTERVAL_MS);
+
+            // Heartbeat watchdog
+            heartbeatCheckTimerRef.current = window.setInterval(() => {
+                const now = Date.now();
+                if (now - lastHeartbeatResponseRef.current > HEARTBEAT_TIMEOUT_MS) {
+                    console.warn('Signaling heartbeat timed out, reconnecting...');
+                    ws.close();
+                }
+            }, HEARTBEAT_INTERVAL_MS);
+
+            // Process queued messages
+            const queue = [...messageQueue.current];
+            messageQueue.current = [];
+            queue.forEach(msg => {
+                ws.send(JSON.stringify(msg));
+            });
         };
 
         ws.onclose = () => {
-            if (socketRef.current !== ws) return;
-            console.log('WebSocket disconnected');
+            console.log('Signaling WebSocket closed');
             setIsConnected(false);
-            socketRef.current = null;
             clearHeartbeat();
 
-            // Schedule reconnect if not intentional close
             if (!intentionalCloseRef.current) {
-                const attempt = reconnectAttemptRef.current;
-                const delay = Math.min(RECONNECT_BASE_DELAY_MS * Math.pow(2, attempt), RECONNECT_MAX_DELAY_MS);
-                console.log(`Scheduling reconnect attempt ${attempt + 1} in ${delay}ms`);
-                reconnectAttemptRef.current = attempt + 1;
-                clearReconnectTimer();
-                reconnectTimerRef.current = window.setTimeout(() => {
-                    connect();
-                }, delay);
+                const delay = Math.min(
+                    RECONNECT_BASE_DELAY_MS * Math.pow(1.5, reconnectAttemptsRef.current),
+                    RECONNECT_MAX_DELAY_MS
+                );
+                reconnectAttemptsRef.current++;
+                console.log(`Reconnecting in ${delay}ms...`);
+                reconnectTimerRef.current = window.setTimeout(connect, delay);
             }
         };
 
         ws.onerror = (error) => {
-            if (socketRef.current !== ws) return;
-            console.error('WebSocket error:', error);
+            console.error('Signaling WebSocket error', error);
         };
 
         ws.onmessage = (event) => {
-            if (socketRef.current !== ws) return;
             try {
                 const message = JSON.parse(event.data) as SignalingMessage;
 
@@ -140,12 +131,12 @@ export function useDeskSignaling(deskId: string | null) {
         };
     }, [clearHeartbeat, clearReconnectTimer]);
 
-    const sendMessage = useCallback((type: number, data: any, toSessionId?: string) => {
+    const sendMessage = useCallback((type: number, data: any, toConnectionId?: string) => {
         const msg: SignalingMessage = {
             request_id: v4(),
             signaling_type: type,
             signaling_data: data,
-            to_session_id: toSessionId,
+            to_connection_id: toConnectionId,
         };
 
         if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -161,20 +152,24 @@ export function useDeskSignaling(deskId: string | null) {
 
     useEffect(() => {
         intentionalCloseRef.current = false;
-        const timer = setTimeout(() => {
-            connect();
-        }, 300);
+        connect();
+
         return () => {
-            clearTimeout(timer);
+            console.log('Cleaning up signaling connection');
             intentionalCloseRef.current = true;
             clearHeartbeat();
             clearReconnectTimer();
             if (socketRef.current) {
+                socketRef.current.onclose = null;
                 socketRef.current.close();
                 socketRef.current = null;
             }
         };
     }, [connect, clearHeartbeat, clearReconnectTimer]);
 
-    return { isConnected, lastMessage, sendMessage };
+    return {
+        isConnected,
+        lastMessage,
+        sendMessage,
+    };
 }

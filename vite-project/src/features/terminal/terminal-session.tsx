@@ -22,7 +22,7 @@ const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014
 const SIGNALING_TYPE_CODE_HEARTBEAT = 1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
-function TerminalView({ sessionId, command, onClose }: { sessionId: string; command: string; onClose: () => void }) {
+function TerminalView({ connectionId, command, onClose }: { connectionId: string; command: string; onClose: () => void }) {
     const terminalRef = useRef<HTMLDivElement>(null)
     const [isConnected, setIsConnected] = useState(false)
     const xtermRef = useRef<Terminal | null>(null)
@@ -33,7 +33,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
     const heartbeatTimerRef = useRef<number | null>(null)
 
     useEffect(() => {
-        if (!terminalRef.current || !sessionId) return
+        if (!terminalRef.current || !connectionId) return
 
         // Initialize xterm
         const term = new Terminal({
@@ -75,7 +75,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
         try {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
-            const url = new URL(`${protocol}//${host}/api/desk/terminal/${sessionId}`);
+            const url = new URL(`${protocol}//${host}/api/desk/terminal/${connectionId}`);
 
             // Add command param
             // Legacy logic: command = encodeURIComponent(select_command.join(","))
@@ -177,7 +177,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
                     const signal = {
                         request_id: v4(),
                         signaling_type: SIGNALING_TYPE_CODE_DATA,
-                        to_session_id: sessionId,
+                        to_connection_id: connectionId,
                         signaling_data: { content: data },
                     };
                     socketRef.current.send(JSON.stringify(signal));
@@ -189,7 +189,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
                     const signal = {
                         request_id: v4(),
                         signaling_type: SIGNALING_TYPE_CODE_RESIZE,
-                        to_session_id: sessionId,
+                        to_connection_id: connectionId,
                         signaling_data: { rows: size.rows, cols: size.cols },
                     };
                     socketRef.current.send(JSON.stringify(signal));
@@ -237,7 +237,7 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
             xtermRef.current = null
             term.dispose()
         }
-    }, [sessionId, command, onClose])
+    }, [connectionId, command, onClose])
 
     return (
         <div className="h-full w-full flex flex-col bg-[#1e1e1e] overflow-hidden relative">
@@ -272,10 +272,10 @@ function TerminalView({ sessionId, command, onClose }: { sessionId: string; comm
 }
 
 export default function TerminalSession() {
-    const { id: sessionId } = useParams<{ id: string }>()
+    const { id: connectionId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
-    const { data: terminalList, isLoading } = useListTerminal(sessionId || '')
+    const { data: terminalList, isLoading } = useListTerminal(connectionId || '')
     const [selectedCommand, setSelectedCommand] = useState<string>("")
 
     const handleTerminalClose = useCallback(() => {
@@ -290,9 +290,9 @@ export default function TerminalSession() {
         )
     }
 
-    if (selectedCommand && sessionId) {
+    if (selectedCommand && connectionId) {
         return <TerminalView
-            sessionId={sessionId}
+            connectionId={connectionId}
             command={selectedCommand}
             onClose={handleTerminalClose}
         />
@@ -303,7 +303,7 @@ export default function TerminalSession() {
     return (
         <div className="flex h-full items-center justify-center bg-muted/40 p-4 relative">
             <div className="absolute top-4 left-4">
-                <Button variant="outline" size="sm" onClick={() => navigate(`/desk/${sessionId}`)}>
+                <Button variant="outline" size="sm" onClick={() => navigate(`/desk/${connectionId}`)}>
                     <ArrowLeft className="mr-2 h-4 w-4" />
                     Dashboard
                 </Button>

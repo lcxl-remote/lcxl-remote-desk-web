@@ -98,6 +98,117 @@ export type BackendInfo = {
     x11_env: boolean;
 };
 
+export const operationSystemEnumEnum = {
+    Windows: "Windows",
+    Linux: "Linux",
+    Mac: "Mac",
+    Android: "Android",
+    Ios: "Ios",
+    Web: "Web",
+    Other: "Other"
+} as const;
+
+export type OperationSystemEnumEnumKey = (typeof operationSystemEnumEnum)[keyof typeof operationSystemEnumEnum];
+
+/**
+ * @description Operation system enum
+*/
+export type OperationSystemEnum = OperationSystemEnumEnumKey;
+
+export const remoteDeskTypeEnumEnum = {
+    browser: "browser",
+    server: "server",
+    signal: "signal",
+    manager: "manager"
+} as const;
+
+export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof typeof remoteDeskTypeEnumEnum];
+
+/**
+ * @description Remote Desk Type Enum
+*/
+export type RemoteDeskTypeEnum = RemoteDeskTypeEnumEnumKey;
+
+/**
+ * @description Version information for the API.
+*/
+export type VersionInfo = {
+    /**
+     * @description The version of the API. This is a simple integer that increments when API is changed.
+     * @type integer, int32
+    */
+    api_version: number;
+    /**
+     * @description The build number of the server.
+     * @type integer, int32
+    */
+    build_number: number;
+    /**
+     * @description Client ID of the server.
+     * @type string,null
+    */
+    client_id?: string | null;
+    /**
+     * @description The commit hash of the server.
+     * @type string
+    */
+    commit_hash: string;
+    /**
+     * @description Display name of the remote desk.
+     * @type string,null
+    */
+    display_name?: string | null;
+    /**
+     * @description Operation system enum
+     * @type string
+    */
+    operation_system: OperationSystemEnum;
+    /**
+     * @description Remote Desk Type Enum
+     * @type string
+    */
+    remote_desk_type: RemoteDeskTypeEnum;
+};
+
+/**
+ * @description Connection information
+*/
+export type ConnectionModel = {
+    /**
+     * @description Connection ID
+     * @type string
+    */
+    connection_id: string;
+    /**
+     * @description IP address of the connection
+     * @type string,null
+    */
+    ip?: string | null;
+    /**
+     * @description Version information for the API.
+     * @type object
+    */
+    version_info: VersionInfo;
+};
+
+/**
+ * @description Connection list information
+*/
+export type ConnectionList = {
+    /**
+     * @description Connection map
+     * @type object
+    */
+    connection_map: {
+        [key: string]: ConnectionModel;
+    };
+    /**
+     * @description Current connection ID
+     * @type string
+    */
+    current_connection_id: string;
+};
+
 /**
  * @description CPU information
 */
@@ -196,7 +307,7 @@ export type CurrentUser = {
     /**
      * @type string,null
     */
-    targetSessionId?: string | null;
+    targetConnectionId?: string | null;
     /**
      * @type string,null
     */
@@ -217,6 +328,10 @@ export type CurrentUser = {
 */
 export type DeleteFileRequest = {
     /**
+     * @type string,null
+    */
+    connection_id?: string | null;
+    /**
      * @description Whether to delete permanently or move to trash
      * @type boolean,null
     */
@@ -226,10 +341,6 @@ export type DeleteFileRequest = {
      * @type string
     */
     file_path: string;
-    /**
-     * @type string,null
-    */
-    session_id?: string | null;
 };
 
 /**
@@ -1143,7 +1254,7 @@ export type LoginResult = {
     /**
      * @type string,null
     */
-    targetSessionId?: string | null;
+    targetConnectionId?: string | null;
     /**
      * @type string
     */
@@ -1209,23 +1320,6 @@ export type NoLogintUser = {
     isLogin: boolean;
 };
 
-export const operationSystemEnumEnum = {
-    Windows: "Windows",
-    Linux: "Linux",
-    Mac: "Mac",
-    Android: "Android",
-    Ios: "Ios",
-    Web: "Web",
-    Other: "Other"
-} as const;
-
-export type OperationSystemEnumEnumKey = (typeof operationSystemEnumEnum)[keyof typeof operationSystemEnumEnum];
-
-/**
- * @description Operation system enum
-*/
-export type OperationSystemEnum = OperationSystemEnumEnumKey;
-
 /**
  * @description Password params
 */
@@ -1251,20 +1345,6 @@ export type PasswordParams = {
     */
     username: string;
 };
-
-export const remoteDeskTypeEnumEnum = {
-    browser: "browser",
-    server: "server",
-    signal: "signal",
-    manager: "manager"
-} as const;
-
-export type RemoteDeskTypeEnumEnumKey = (typeof remoteDeskTypeEnumEnum)[keyof typeof remoteDeskTypeEnumEnum];
-
-/**
- * @description Remote Desk Type Enum
-*/
-export type RemoteDeskTypeEnum = RemoteDeskTypeEnumEnumKey;
 
 /**
  * @description RequestRemoteModel is used to request remote access.\nweb browser -> signaling server -> desk server
@@ -1829,7 +1909,7 @@ export type SecurityApprovalEventPayload = {
     /**
      * @type string,null
     */
-    from_session_id?: string | null;
+    from_connection_id?: string | null;
     /**
      * @type string
     */
@@ -1928,86 +2008,6 @@ export type ServerInfo = {
 };
 
 /**
- * @description Version information for the API.
-*/
-export type VersionInfo = {
-    /**
-     * @description The version of the API. This is a simple integer that increments when API is changed.
-     * @type integer, int32
-    */
-    api_version: number;
-    /**
-     * @description The build number of the server.
-     * @type integer, int32
-    */
-    build_number: number;
-    /**
-     * @description Client ID of the server.
-     * @type string,null
-    */
-    client_id?: string | null;
-    /**
-     * @description The commit hash of the server.
-     * @type string
-    */
-    commit_hash: string;
-    /**
-     * @description Display name of the remote desk.
-     * @type string,null
-    */
-    display_name?: string | null;
-    /**
-     * @description Operation system enum
-     * @type string
-    */
-    operation_system: OperationSystemEnum;
-    /**
-     * @description Remote Desk Type Enum
-     * @type string
-    */
-    remote_desk_type: RemoteDeskTypeEnum;
-};
-
-/**
- * @description Session information
-*/
-export type SessionModel = {
-    /**
-     * @description IP address of the session
-     * @type string,null
-    */
-    ip?: string | null;
-    /**
-     * @description Session ID
-     * @type string
-    */
-    session_id: string;
-    /**
-     * @description Version information for the API.
-     * @type object
-    */
-    version_info: VersionInfo;
-};
-
-/**
- * @description Session list information
-*/
-export type SessionList = {
-    /**
-     * @description Current session ID
-     * @type string
-    */
-    current_session_id: string;
-    /**
-     * @description Session map
-     * @type object
-    */
-    session_map: {
-        [key: string]: SessionModel;
-    };
-};
-
-/**
  * @description Signal request control data
 */
 export type SignalRequestControlData = {
@@ -2051,10 +2051,10 @@ export type SignalingType = number;
 */
 export type SignalingModel = {
     /**
-     * @description From session id, if None, means from signal server
+     * @description From connection id, if None, means from signal server
      * @type string,null
     */
-    from_session_id?: string | null;
+    from_connection_id?: string | null;
     /**
      * @description Request id
      * @type string
@@ -2071,10 +2071,10 @@ export type SignalingModel = {
     */
     signaling_type: SignalingType;
     /**
-     * @description To session id, if None, means to signal server
+     * @description To connection id, if None, means to signal server
      * @type string,null
     */
-    to_session_id?: string | null;
+    to_connection_id?: string | null;
 };
 
 /**
@@ -2463,7 +2463,7 @@ export type UserResponeCurrentUser = {
         /**
          * @type string,null
         */
-        targetSessionId?: string | null;
+        targetConnectionId?: string | null;
         /**
          * @type string,null
         */
@@ -2562,6 +2562,18 @@ export type QueryBackendInfoQueryResponse = QueryBackendInfo200;
 
 export type QueryBackendInfoQuery = {
     Response: QueryBackendInfo200;
+    Errors: any;
+};
+
+/**
+ * @description List of online desk connections
+*/
+export type ListConnections200 = ConnectionModel[];
+
+export type ListConnectionsQueryResponse = ListConnections200;
+
+export type ListConnectionsQuery = {
+    Response: ListConnections200;
     Errors: any;
 };
 
@@ -2748,10 +2760,10 @@ export type ListFilesQueryParams = {
     */
     end_modified_time?: string | null;
     /**
-     * @description Session ID for remote desk
+     * @description Connection ID for remote desk
      * @type string,null
     */
-    session_id?: string | null;
+    connection_id?: string | null;
 };
 
 /**
@@ -2806,18 +2818,6 @@ export type SubmitSecurityApprovalMutationResponse = SubmitSecurityApproval200;
 export type SubmitSecurityApprovalMutation = {
     Response: SubmitSecurityApproval200;
     Request: SubmitSecurityApprovalMutationRequest;
-    Errors: any;
-};
-
-/**
- * @description List of online desk sessions
-*/
-export type ListSessions200 = SessionModel[];
-
-export type ListSessionsQueryResponse = ListSessions200;
-
-export type ListSessionsQuery = {
-    Response: ListSessions200;
     Errors: any;
 };
 
@@ -3033,10 +3033,10 @@ export type QueryTelemetryStatusQuery = {
 
 export type OpenTerminalSessionPathParams = {
     /**
-     * @description session id
+     * @description connection id
      * @type string
     */
-    session_id: string;
+    connection_id: string;
 };
 
 export type OpenTerminalSessionQueryParams = {
@@ -3063,10 +3063,10 @@ export type OpenTerminalSessionQuery = {
 
 export type ListTerminalPathParams = {
     /**
-     * @description session id
+     * @description connection id
      * @type string
     */
-    session_id: string;
+    connection_id: string;
 };
 
 /**

@@ -7,7 +7,7 @@ const WHITEBOARD_WINDOW_LABEL: &str = "whiteboard";
 pub struct WhiteboardManager {
     app_handle: AppHandle,
     frontend_url: String,
-    controlled_by_session_id: Option<String>,
+    controlled_by_connection_id: Option<String>,
 }
 
 impl WhiteboardManager {
@@ -15,7 +15,7 @@ impl WhiteboardManager {
         Self {
             app_handle,
             frontend_url,
-            controlled_by_session_id: None,
+            controlled_by_connection_id: None,
         }
     }
 
@@ -25,11 +25,11 @@ impl WhiteboardManager {
             loop {
                 match cmd_receiver.recv() {
                     Ok(cmd) => match cmd {
-                        WhiteboardCommand::Show(from_session_id) => {
-                            if let Some(ref controlled) = self.controlled_by_session_id {
-                                if controlled != &from_session_id {
+                        WhiteboardCommand::Show(from_connection_id) => {
+                            if let Some(ref controlled) = self.controlled_by_connection_id {
+                                if controlled != &from_connection_id {
                                     log::warn!(
-                                        "Whiteboard is already controlled by another session"
+                                        "Whiteboard is already controlled by another connection"
                                     );
                                     continue;
                                 }
@@ -39,7 +39,7 @@ impl WhiteboardManager {
                                 continue;
                             }
                             log::info!("Whiteboard window shown");
-                            self.controlled_by_session_id = Some(from_session_id);
+                            self.controlled_by_connection_id = Some(from_connection_id);
                         }
                         WhiteboardCommand::DrawMessage(json_msg) => {
                             // Forward drawing message to the webview via evaluate_script to avoid IPC cross-origin block
@@ -61,11 +61,11 @@ impl WhiteboardManager {
                                 }
                             }
                         }
-                        WhiteboardCommand::Hide(from_session_id) => {
-                            if let Some(ref controlled) = self.controlled_by_session_id {
-                                if controlled != &from_session_id {
+                        WhiteboardCommand::Hide(from_connection_id) => {
+                            if let Some(ref controlled) = self.controlled_by_connection_id {
+                                if controlled != &from_connection_id {
                                     log::warn!(
-                                        "Whiteboard is already controlled by another session"
+                                        "Whiteboard is already controlled by another connection"
                                     );
                                     continue;
                                 }
@@ -74,7 +74,7 @@ impl WhiteboardManager {
                                 log::error!("Failed to hide whiteboard window: {}", e);
                             }
                             log::info!("Whiteboard window hidden");
-                            self.controlled_by_session_id = None;
+                            self.controlled_by_connection_id = None;
                         }
                         WhiteboardCommand::Quit => {
                             let _ = Self::hide_window(&handle);

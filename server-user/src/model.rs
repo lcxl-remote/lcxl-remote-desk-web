@@ -18,7 +18,7 @@ pub const USER_ADMIN: &str = "admin";
 pub trait BaseUser {
     fn get_name(&self) -> &str;
     fn get_access(&self) -> Option<&str>;
-    fn get_target_session_id(&self) -> Option<&str>;
+    fn get_target_connection_id(&self) -> Option<&str>;
 }
 
 #[derive(Serialize, Deserialize, Debug, ToSchema)]
@@ -39,9 +39,9 @@ pub struct CurrentUser {
     pub unread_count: Option<u32>,
     pub country: Option<String>,
     pub access: Option<String>,
-    #[serde(rename(serialize = "targetSessionId"))]
-    #[schema(rename = "targetSessionId")]
-    pub target_session_id: Option<String>,
+    #[serde(rename(serialize = "targetConnectionId"))]
+    #[schema(rename = "targetConnectionId")]
+    pub target_connection_id: Option<String>,
     pub geographic: Option<Geographic>,
     pub address: Option<String>,
     pub phone: Option<String>,
@@ -62,7 +62,7 @@ impl CurrentUser {
             unread_count: None,
             country: None,
             access: Some(USER_ADMIN.to_string()),
-            target_session_id: None,
+            target_connection_id: None,
             geographic: None,
             address: None,
             phone: None,
@@ -79,8 +79,8 @@ impl BaseUser for CurrentUser {
         self.access.as_deref()
     }
 
-    fn get_target_session_id(&self) -> Option<&str> {
-        self.target_session_id.as_deref()
+    fn get_target_connection_id(&self) -> Option<&str> {
+        self.target_connection_id.as_deref()
     }
 }
 

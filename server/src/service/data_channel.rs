@@ -24,12 +24,12 @@ use crate::{
 };
 
 /// Handle data channel event
-/// session_id: from session id
+/// connection_id: from connection id
 pub async fn handle_data_channel_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
     whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
-    session_id: String,
+    connection_id: String,
     settings: actix_web::web::Data<SharedSettings>,
     security_approval_sender: Option<SecurityApprovalSender>,
 ) -> Result<(), DeskError> {
@@ -47,7 +47,7 @@ pub async fn handle_data_channel_event(
                 data_channel,
                 settings,
                 security_approval_sender,
-                session_id,
+                connection_id,
             )
             .await?;
             return Ok(());
@@ -62,7 +62,7 @@ pub async fn handle_data_channel_event(
                     signaling_state,
                     data_channel,
                     sender,
-                    session_id,
+                    connection_id,
                     settings,
                     security_approval_sender,
                 )

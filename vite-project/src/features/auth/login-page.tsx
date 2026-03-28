@@ -123,9 +123,9 @@ export default function LoginPage() {
                 await fetchUserInfo()
 
                 if (values.type === "device_code") {
-                    const targetSessionId = (response as any).targetSessionId;
-                    if (targetSessionId) {
-                        navigate(`/desk/${targetSessionId}`)
+                    const targetConnectionId = (response as any).targetConnectionId;
+                    if (targetConnectionId) {
+                        navigate(`/desk/${targetConnectionId}`)
                         return;
                     }
                 }

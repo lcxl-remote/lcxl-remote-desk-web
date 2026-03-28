@@ -5,7 +5,7 @@ use desk_signal_facade::model::{signal::RemoteDeskTypeEnum, version::VersionInfo
 use desk_turn::model::TurnApiState;
 use log::{error, info, warn};
 
-use crate::{model::SharedSessionMap, service::handle_signaling};
+use crate::{model::SharedConnectionMap, service::handle_signaling};
 
 #[utoipa::path(
     summary = "Open Device Signaling Handle for Server, return websocket stream.",
@@ -18,7 +18,7 @@ use crate::{model::SharedSessionMap, service::handle_signaling};
 pub async fn open_device_signaling_handle(
     req: HttpRequest,
     query: web::Query<VersionInfo>,
-    session_map: web::Data<SharedSessionMap>,
+    connection_map: web::Data<SharedConnectionMap>,
     _session: Session,
     stream: web::Payload,
     turn_api_state: web::Data<TurnApiState>,
@@ -67,7 +67,7 @@ pub async fn open_device_signaling_handle(
         let result = handle_signaling(
             version_info,
             stream,
-            session_map,
+            connection_map,
             actix_session,
             virtual_user,
             ip,

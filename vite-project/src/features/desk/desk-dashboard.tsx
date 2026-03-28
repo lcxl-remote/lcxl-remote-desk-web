@@ -4,7 +4,7 @@ import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Cpu, Globe, Serve
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
-import { useListSessions } from "@/services/hooks/undefinedController/useListSessions"
+import { useListConnections } from "@/services/hooks/undefinedController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 
@@ -12,9 +12,9 @@ export default function DeskDashboard() {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
-    const { data: sessions, isLoading } = useListSessions()
+    const { data: connections, isLoading } = useListConnections()
 
-    const session = sessions?.find((s: any) => s.session_id === deskId)
+    const connection = connections?.find((s: any) => s.connection_id === deskId)
 
     if (isLoading) {
         return (
@@ -29,7 +29,7 @@ export default function DeskDashboard() {
         )
     }
 
-    if (!session) {
+    if (!connection) {
         return (
             <div className="flex flex-col items-center justify-center h-[50vh] space-y-4">
                 <h2 className="text-2xl font-semibold">{t('pages.deskDashboard.notFound', 'Desk Not Found')}</h2>
@@ -50,12 +50,12 @@ export default function DeskDashboard() {
                     <div>
                         <div className="flex items-center gap-2">
                             <h2 className="text-3xl font-bold tracking-tight">
-                                {session.version_info?.display_name || t('pages.deskDashboard.unnamedSession', 'Unnamed Session')}
+                                {connection.version_info?.display_name || t('pages.deskDashboard.unnamedConnection', 'Unnamed Connection')}
                             </h2>
                             <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.deskDashboard.online', 'Online')}</Badge>
                         </div>
                         <p className="text-muted-foreground">
-                            {t('pages.deskDashboard.sessionId', 'Session ID: ')}{session.session_id}
+                            {t('pages.deskDashboard.connectionId', 'Connection ID: ')}{connection.connection_id}
                         </p>
                     </div>
                 </div>
@@ -69,7 +69,7 @@ export default function DeskDashboard() {
                         <Globe className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{session.ip || t('pages.deskDashboard.unknown', 'Unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.ip || t('pages.deskDashboard.unknown', 'Unknown')}</div>
                     </CardContent>
                 </Card>
                 <Card>
@@ -78,7 +78,7 @@ export default function DeskDashboard() {
                         <Server className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{session.version_info?.operation_system || t('pages.deskDashboard.unknown', 'Unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.version_info?.operation_system || t('pages.deskDashboard.unknown', 'Unknown')}</div>
                     </CardContent>
                 </Card>
                 <Card>
@@ -87,7 +87,7 @@ export default function DeskDashboard() {
                         <Monitor className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{session.version_info?.remote_desk_type || t('pages.deskDashboard.unknown', 'Unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.version_info?.remote_desk_type || t('pages.deskDashboard.unknown', 'Unknown')}</div>
                     </CardContent>
                 </Card>
             </div>

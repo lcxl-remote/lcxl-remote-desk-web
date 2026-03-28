@@ -73,10 +73,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         let dynamicItems: any[] = [];
 
         if (isDeviceUser) {
-            if (user.targetSessionId) {
+            if (user.targetConnectionId) {
                 dynamicItems.push({
                     title: "menu.desk_control",
-                    url: `/desk/${user.targetSessionId}/control`,
+                    url: `/desk/${user.targetConnectionId}/control`,
                     icon: Monitor,
                 });
             }

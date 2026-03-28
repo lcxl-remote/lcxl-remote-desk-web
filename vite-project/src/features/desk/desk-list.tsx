@@ -13,13 +13,13 @@ import {
     CardTitle,
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { useListSessions } from "@/services/hooks/undefinedController/useListSessions"
+import { useListConnections } from "@/services/hooks/undefinedController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
 
 export default function DeskList() {
     const { t } = useTranslation()
     const navigate = useNavigate()
-    const { data: sessions, isLoading, refetch } = useListSessions()
+    const { data: connections, isLoading, refetch } = useListConnections()
 
     // Helper to handle navigation to desk
     const handleConnect = (id: string) => {
@@ -48,21 +48,21 @@ export default function DeskList() {
             </div>
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {sessions?.length === 0 && (
+                {connections?.length === 0 && (
                     <div className="col-span-full text-center text-muted-foreground py-10">
-                        {t('pages.deskList.empty', 'No sessions found')}
+                        {t('pages.deskList.empty', 'No connections found')}
                     </div>
                 )}
-                {sessions?.map((session: any) => (
-                    <Card key={session.session_id} className="overflow-hidden">
+                {connections?.map((connection: any) => (
+                    <Card key={connection.connection_id} className="overflow-hidden">
                         <CardHeader className="flex flex-row items-start bg-muted/50">
                             <div className="grid gap-0.5">
                                 <CardTitle className="group flex items-center gap-2 text-lg">
-                                    {session.version_info?.display_name || t('pages.deskList.unnamedSession', 'Unnamed Session')}
+                                    {connection.version_info?.display_name || t('pages.deskList.unnamedConnection', 'Unnamed Connection')}
                                     <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.searchTable.nameStatus.online', 'Online')}</Badge>
                                 </CardTitle>
                                 <CardDescription>
-                                    {session.version_info?.operation_system} - {session.version_info?.remote_desk_type}
+                                    {connection.version_info?.operation_system} - {connection.version_info?.remote_desk_type}
                                 </CardDescription>
                             </div>
                         </CardHeader>
@@ -71,12 +71,12 @@ export default function DeskList() {
                                 <div className="font-semibold">{t('pages.searchTable.detail', 'Details')}</div>
                                 <ul className="grid gap-3">
                                     <li className="flex items-center justify-between">
-                                        <span className="text-muted-foreground">{t('pages.deskList.sessionId', 'ID')}</span>
-                                        <span className="font-mono text-xs">{session.session_id}</span>
+                                        <span className="text-muted-foreground">{t('pages.deskList.connectionId', 'Connection ID')}</span>
+                                        <span className="font-mono text-xs">{connection.connection_id}</span>
                                     </li>
                                     <li className="flex items-center justify-between">
                                         <span className="text-muted-foreground">{t('pages.deskList.ip', 'IP')}</span>
-                                        <span>{session.ip || t('pages.desk.unknown', 'Unknown')}</span>
+                                        <span>{connection.ip || t('pages.desk.unknown', 'Unknown')}</span>
                                     </li>
                                     <li className="flex items-center justify-between">
                                         <span className="text-muted-foreground">{t('pages.deskList.platform', 'Platform')}</span>
@@ -90,7 +90,7 @@ export default function DeskList() {
                                 Updated <time dateTime="2023-11-23">November 23, 2023</time>
                             </div>
                             <div className="ml-auto">
-                                <Button size="sm" onClick={() => handleConnect(session.session_id)}>
+                                <Button size="sm" onClick={() => handleConnect(connection.connection_id)}>
                                     <Power className="mr-2 h-4 w-4" /> {t('pages.deskList.connect', 'Connect')}
                                 </Button>
                             </div>

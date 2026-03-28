@@ -53,8 +53,8 @@ export default function DeskSession() {
 
     const handleConnect = useCallback(() => {
         if (deskId && !hasRequestedRef.current) {
-            console.log("WebSocket opened, requesting remote session directly:", deskId);
-            sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, { session_id: deskId }, deskId);
+            console.log("WebSocket opened, requesting remote connection directly:", deskId);
+            sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, { connection_id: deskId }, deskId);
             hasRequestedRef.current = true;
             setHasRequested(true);
         }
@@ -180,7 +180,7 @@ export default function DeskSession() {
     // Wait for INIT data and show the config dialog
     useEffect(() => {
         if (initData && !isRTCConnected && !document.getElementById("desk-config-dialog")) {
-            console.log("Showing config dialog for remote session");
+            console.log("Showing config dialog for remote connection");
             setIsConfigOpen(true);
         }
     }, [initData, isRTCConnected]);

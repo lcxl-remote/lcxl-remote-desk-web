@@ -15,7 +15,7 @@ pub async fn handle_whiteboard_event(
     _signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
     whiteboard_cmd_sender: std::sync::mpsc::Sender<WhiteboardCommand>,
-    session_id: String,
+    connection_id: String,
     settings: actix_web::web::Data<SharedSettings>,
     security_approval_sender: Option<SecurityApprovalSender>,
 ) -> Result<(), crate::error::DeskError> {
@@ -44,7 +44,7 @@ pub async fn handle_whiteboard_event(
         let sender_for_msg = sender_for_msg.clone();
         let settings = settings.clone();
         let sender = security_approval_sender.clone();
-        let session_id = session_id.clone();
+        let connection_id = connection_id.clone();
         let permission_cache = permission_cache.clone();
 
         Box::pin(async move {
@@ -66,7 +66,7 @@ pub async fn handle_whiteboard_event(
                             sender.as_ref(),
                             allow_whiteboard,
                             SecurityPermissionType::Whiteboard,
-                            Some(session_id.clone()),
+                            Some(connection_id.clone()),
                         )
                         .await;
                         *cache_write = Some(approved);
@@ -77,7 +77,7 @@ pub async fn handle_whiteboard_event(
             if !allowed {
                 log::warn!(
                     "Whiteboard message blocked by security settings or user for {}",
-                    session_id
+                    connection_id
                 );
                 return;
             }
@@ -92,7 +92,7 @@ pub async fn handle_whiteboard_event(
             log::trace!("Whiteboard message received: {}", msg_str);
 
             // First, ensure the window is shown
-            if let Err(e) = sender_for_msg.send(WhiteboardCommand::Show(session_id.clone())) {
+            if let Err(e) = sender_for_msg.send(WhiteboardCommand::Show(connection_id.clone())) {
                 log::error!("Failed to send whiteboard show command: {}", e);
             }
 

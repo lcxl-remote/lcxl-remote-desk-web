@@ -76,12 +76,12 @@ impl HostControlHelper for WindowsHostControlHelper {
         Ok(())
     }
 
-    fn enable_private_screen(&self, from_session_id: &str, enable: bool) -> Result<(), DeskError> {
+    fn enable_private_screen(&self, from_connection_id: &str, enable: bool) -> Result<(), DeskError> {
         if let Some(sender) = &self.cmd_sender {
             let cmd = if enable {
-                PrivateScreenCommand::Show(from_session_id.to_string())
+                PrivateScreenCommand::Show(from_connection_id.to_string())
             } else {
-                PrivateScreenCommand::Hide(from_session_id.to_string())
+                PrivateScreenCommand::Hide(from_connection_id.to_string())
             };
             if let Err(e) = sender.send(cmd) {
                 log::error!("Failed to send private screen command: {}", e);

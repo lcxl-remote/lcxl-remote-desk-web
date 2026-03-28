@@ -23,7 +23,7 @@ impl SecurityApprovalManager {
                         let payload = SecurityApprovalEventPayload {
                             req_id: req.req_id.clone(),
                             permission_type: format!("{:?}", req.permission_type),
-                            from_session_id: req.from_session_id.clone(),
+                            from_connection_id: req.from_connection_id.clone(),
                             i18n_key: req.permission_type.i18n_key().to_string(),
                         };
 

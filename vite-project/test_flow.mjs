@@ -135,7 +135,7 @@ async function runTests() {
         throw new Error('Device code login failed with unexpected status: ' + res.status);
     } else {
         if (res.data.data.access !== 'device_user') throw new Error('Expected access = device_user');
-        if (res.data.data.target_session_id !== testClientId) throw new Error('Expected target_session_id to be client_id');
+        if (res.data.data.target_connection_id !== testClientId) throw new Error('Expected target_connection_id to be client_id');
     }
 
     // 7. Test RBAC: device user cannot list device codes

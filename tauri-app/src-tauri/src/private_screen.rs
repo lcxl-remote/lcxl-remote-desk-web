@@ -6,7 +6,7 @@ use tauri::AppHandle;
 pub struct PrivateScreenManager {
     app_handle: AppHandle,
     frontend_url: String,
-    controlled_by_session_id: Option<String>,
+    controlled_by_connection_id: Option<String>,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -18,7 +18,7 @@ impl PrivateScreenManager {
         Self {
             app_handle,
             frontend_url,
-            controlled_by_session_id: None,
+            controlled_by_connection_id: None,
         }
     }
 
@@ -32,11 +32,11 @@ impl PrivateScreenManager {
             loop {
                 match cmd_receiver.recv() {
                     Ok(cmd) => match cmd {
-                        PrivateScreenCommand::Show(from_session_id) => {
-                            if let Some(controlled_by_session_id) = &self.controlled_by_session_id {
-                                if controlled_by_session_id != &from_session_id {
+                        PrivateScreenCommand::Show(from_connection_id) => {
+                            if let Some(controlled_by_connection_id) = &self.controlled_by_connection_id {
+                                if controlled_by_connection_id != &from_connection_id {
                                     log::warn!(
-                                        "Private screen is already controlled by another session"
+                                        "Private screen is already controlled by another connection"
                                     );
                                     continue;
                                 }
@@ -46,7 +46,7 @@ impl PrivateScreenManager {
                                 log::error!("Failed to show private screen: {}", e);
                                 let _ = state_sender.send(
                                     HostControlEventType::PrivateScreenUnknownError(
-                                        Some(from_session_id.clone()),
+                                        Some(from_connection_id.clone()),
                                         e.to_string(),
                                     ),
                                 );
@@ -54,17 +54,17 @@ impl PrivateScreenManager {
                             }
                             let _ = state_sender.send(
                                 HostControlEventType::PrivateScreenVisibleChanged(
-                                    from_session_id.clone(),
+                                    from_connection_id.clone(),
                                     true,
                                 ),
                             );
-                            self.controlled_by_session_id = Some(from_session_id);
+                            self.controlled_by_connection_id = Some(from_connection_id);
                         }
-                        PrivateScreenCommand::Hide(from_session_id) => {
-                            if let Some(controlled_by_session_id) = &self.controlled_by_session_id {
-                                if controlled_by_session_id != &from_session_id {
+                        PrivateScreenCommand::Hide(from_connection_id) => {
+                            if let Some(controlled_by_connection_id) = &self.controlled_by_connection_id {
+                                if controlled_by_connection_id != &from_connection_id {
                                     log::warn!(
-                                        "Private screen is already controlled by another session"
+                                        "Private screen is already controlled by another connection"
                                     );
                                     continue;
                                 }
@@ -74,11 +74,11 @@ impl PrivateScreenManager {
                             }
                             let _ = state_sender.send(
                                 HostControlEventType::PrivateScreenVisibleChanged(
-                                    from_session_id.clone(),
+                                    from_connection_id.clone(),
                                     false,
                                 ),
                             );
-                            self.controlled_by_session_id = None;
+                            self.controlled_by_connection_id = None;
                         }
                         PrivateScreenCommand::Quit => {
                             let _ = Self::hide_window(&handle);

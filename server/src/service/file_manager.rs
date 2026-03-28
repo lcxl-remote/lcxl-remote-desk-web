@@ -160,15 +160,15 @@ pub async fn handle_manager_file_list(
     desk_session: &mut DeskSession,
     signaling_model: &SignalingModel,
 ) -> Result<(), DeskError> {
-    // ManagerFileList is a request from the http api, so it may not have a from_session_id
-    let from_session_id = signaling_model.from_session_id.clone();
+    // ManagerFileList is a request from the http api, so it may not have a from_connection_id
+    let from_connection_id = signaling_model.from_connection_id.clone();
     let allow_file_browse = { desk_session.settings.read().await.security.allow_file_browse };
     let approved = check_security_permission(
         &desk_session.settings,
         desk_session.security_approval_sender.as_ref(),
         allow_file_browse,
         SecurityPermissionType::FileBrowse,
-        from_session_id.clone(),
+        from_connection_id.clone(),
     )
     .await;
 
@@ -177,7 +177,7 @@ pub async fn handle_manager_file_list(
             .send_error(
                 &signaling_model.request_id,
                 signaling_model.signaling_type.into(),
-                from_session_id.clone(),
+                from_connection_id.clone(),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File browse access denied",
             )
@@ -192,7 +192,7 @@ pub async fn handle_manager_file_list(
                 .send_response(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileList,
-                    from_session_id.clone(),
+                    from_connection_id.clone(),
                     &response,
                 )
                 .await?;
@@ -202,7 +202,7 @@ pub async fn handle_manager_file_list(
                 .send_error(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileList,
-                    from_session_id.clone(),
+                    from_connection_id.clone(),
                     e.to_error_code(),
                     &e.to_string(),
                 )
@@ -216,15 +216,15 @@ pub async fn handle_manager_file_delete(
     desk_session: &mut DeskSession,
     signaling_model: &SignalingModel,
 ) -> Result<(), DeskError> {
-    // ManagerFileList is a request from the http api, so it may not have a from_session_id
-    let from_session_id = signaling_model.from_session_id.clone();
+    // ManagerFileList is a request from the http api, so it may not have a from_connection_id
+    let from_connection_id = signaling_model.from_connection_id.clone();
     let allow_file_browse = { desk_session.settings.read().await.security.allow_file_browse };
     let approved = check_security_permission(
         &desk_session.settings,
         desk_session.security_approval_sender.as_ref(),
         allow_file_browse,
         SecurityPermissionType::FileBrowse,
-        from_session_id.clone(),
+        from_connection_id.clone(),
     )
     .await;
 
@@ -233,7 +233,7 @@ pub async fn handle_manager_file_delete(
             .send_error(
                 &signaling_model.request_id,
                 signaling_model.signaling_type.into(),
-                from_session_id.clone(),
+                from_connection_id.clone(),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File delete access denied",
             )
@@ -249,7 +249,7 @@ pub async fn handle_manager_file_delete(
                 .send_response(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileDelete,
-                    from_session_id,
+                    from_connection_id,
                     &serde_json::json!({}),
                 )
                 .await?;
@@ -259,7 +259,7 @@ pub async fn handle_manager_file_delete(
                 .send_error(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileDelete,
-                    from_session_id,
+                    from_connection_id,
                     e.to_error_code(),
                     &e.to_string(),
                 )

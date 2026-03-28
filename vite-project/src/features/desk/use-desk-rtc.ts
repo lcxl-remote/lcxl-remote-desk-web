@@ -12,7 +12,7 @@ import type { SignalingMessage } from './use-desk-signaling';
 type UseDeskRTCProps = {
     deskId: string | null;
     lastMessage: SignalingMessage | null;
-    sendMessage: (type: number, data: any, sessionId?: string) => void;
+    sendMessage: (type: number, data: any, connectionId?: string) => void;
 };
 
 export type RTCStatsData = {

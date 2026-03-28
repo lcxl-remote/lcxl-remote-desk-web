@@ -114,7 +114,7 @@ impl PeerSignalingSender for DeskSessionSender {
         &mut self,
         request_id: &str,
         signaling_type: SignalingType,
-        to_session_id: Option<String>,
+        to_connection_id: Option<String>,
         signaling_data: &T,
     ) -> Result<(), DeskSignalFacadeError>
     where
@@ -124,7 +124,7 @@ impl PeerSignalingSender for DeskSessionSender {
             request_id,
             signaling_type,
             None,
-            to_session_id,
+            to_connection_id,
             Some(signaling_data),
         )?;
         let text = serde_json::to_string(&signaling_model)?;
@@ -143,7 +143,7 @@ impl PeerSignalingSender for DeskSessionSender {
         &mut self,
         request_id: &str,
         signaling_type: SignalingType,
-        to_session_id: Option<String>,
+        to_connection_id: Option<String>,
         error_code: DeskErrorCode,
         error_message: &str,
     ) -> Result<(), DeskSignalFacadeError> {
@@ -151,7 +151,7 @@ impl PeerSignalingSender for DeskSessionSender {
             request_id,
             signaling_type,
             None,
-            to_session_id,
+            to_connection_id,
             error_code,
             error_message,
         )?;
@@ -171,7 +171,7 @@ impl PeerSignalingSender for DeskSessionSender {
         &mut self,
         request_id: &str,
         signaling_type: SignalingType,
-        to_session_id: &str,
+        to_connection_id: &str,
         data: T,
     ) -> Result<(), DeskSignalFacadeError>
     where
@@ -180,7 +180,7 @@ impl PeerSignalingSender for DeskSessionSender {
         self.send_response(
             request_id,
             signaling_type,
-            Some(to_session_id.to_owned()),
+            Some(to_connection_id.to_owned()),
             &data,
         )
         .await
@@ -206,11 +206,11 @@ async fn handle_incoming_ws_message(
                 let signaling_model = serde_json::from_str::<SignalingModel>(text_str)?;
                 if let Err(e) = desk_session.handle_message(&signaling_model).await {
                     log::warn!(
-                        "Error handling message, request_id: {}, signaling_type: {}, from_session_id: {:?}, to_session_id: {:?}, e: {}",
+                        "Error handling message, request_id: {}, signaling_type: {}, from_connection_id: {:?}, to_connection_id: {:?}, e: {}",
                         signaling_model.request_id,
                         signaling_model.signaling_type,
-                        signaling_model.from_session_id,
-                        signaling_model.to_session_id,
+                        signaling_model.from_connection_id,
+                        signaling_model.to_connection_id,
                         e
                     );
 
@@ -219,7 +219,7 @@ async fn handle_incoming_ws_message(
                         .send_error(
                             &signaling_model.request_id,
                             signaling_model.signaling_type.into(),
-                            signaling_model.from_session_id.clone(),
+                            signaling_model.from_connection_id.clone(),
                             DeskErrorCode::SYSTEM_ERROR,
                             &format!("Error handling message: {}", e),
                         )
@@ -290,14 +290,14 @@ where
             let _ = sink.close().await;
             return true;
         }
-        Some(DeskSessionMessage::WebRTCDropped(from_session_id)) => {
+        Some(DeskSessionMessage::WebRTCDropped(from_connection_id)) => {
             info!(
                 "Received WebRTCDropped from session {}, shutting down peer connection and private screen",
-                from_session_id
+                from_connection_id
             );
             if let Some(peer_connection) = desk_session
                 .rtc_peer_connection_map
-                .remove(&from_session_id)
+                .remove(&from_connection_id)
             {
                 let peer_connection = peer_connection.read().await;
                 if let Err(e) = peer_connection.shutdown().await {
@@ -306,7 +306,7 @@ where
             }
             let _ = desk_session
                 .host_control_helper
-                .enable_private_screen(&from_session_id, false);
+                .enable_private_screen(&from_connection_id, false);
         }
         None => return true,
     }
@@ -530,11 +530,11 @@ pub struct DeskSession {
     pub settings: web::Data<SharedSettings>,
     pub session: DeskSessionSender,
     pub user: CurrentUser,
-    /// RTC peer connection map, key is from_session_id
+    /// RTC peer connection map, key is from_connection_id
     pub rtc_peer_connection_map: HashMap<String, Arc<tokio::sync::RwLock<PeerConnection>>>,
     /// Tokio watch sender for WebRTConnectionState updates
     pub update_setting_sender: Option<tokio::sync::watch::Sender<WebRTConnectionState>>,
-    /// Terminal map: from_session_id -> RunningTerminal
+    /// Terminal map: from_connection_id -> RunningTerminal
     pub terminal_map: HashMap<String, RunningTerminal>,
     /// System setting helper
     pub host_control_helper: Box<dyn HostControlHelper + Send + Sync>,
@@ -632,7 +632,7 @@ impl DeskSession {
                 while let Some(event) = rx.recv().await {
                     match event {
                         HostControlEventType::PrivateScreenVisibleChanged(
-                            from_session_id,
+                            from_connection_id,
                             visible,
                         ) => {
                             let sender = session_clone.clone();
@@ -643,7 +643,7 @@ impl DeskSession {
                             };
                             if let Ok(model) = SignalingModel::new_request(
                                 SignalingType::PrivateScreenStateChanged,
-                                Some(from_session_id),
+                                Some(from_connection_id),
                                 Some(&data),
                             ) {
                                 if let Ok(text) = serde_json::to_string(&model) {
@@ -675,7 +675,7 @@ impl DeskSession {
                                 }
                             }
                         }
-                        HostControlEventType::PrivateScreenUnknownError(from_session_id_opt, e) => {
+                        HostControlEventType::PrivateScreenUnknownError(from_connection_id_opt, e) => {
                             log::error!("Private screen error: {}", e);
                             // We shouldn't send PrivateScreenStateChanged directly to the channel queue,
                             // Instead, we should construct a Modeling message if we want to send it to the frontend.
@@ -683,7 +683,7 @@ impl DeskSession {
                             // Let's add a method on DeskSessionMessage or handle in that loop.
                             // I'll just change send() to send a Text message with SignalingModel.
 
-                            if let Some(from_session_id) = from_session_id_opt {
+                            if let Some(from_connection_id) = from_connection_id_opt {
                                 let sender = session_clone.clone();
                                 let data = PrivateScreenStateChangedData {
                                     visible: false,
@@ -692,7 +692,7 @@ impl DeskSession {
                                 };
                                 if let Ok(model) = SignalingModel::new_request(
                                     SignalingType::PrivateScreenStateChanged,
-                                    Some(from_session_id),
+                                    Some(from_connection_id),
                                     Some(&data),
                                 ) {
                                     if let Ok(text) = serde_json::to_string(&model) {
@@ -733,10 +733,10 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
+        let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
         let request_remote_model = signaling_model.get_data::<RequestRemoteModel>()?;
 
-        if self.rtc_peer_connection_map.contains_key(from_session_id) {
+        if self.rtc_peer_connection_map.contains_key(from_connection_id) {
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 "Peer connection already exists",
@@ -835,14 +835,14 @@ impl DeskSession {
             .send_to_peer(
                 &signaling_model.request_id,
                 SignalingType::Init,
-                from_session_id,
+                from_connection_id,
                 init_signaling_data,
             )
             .await?;
         info!("Sent init signaling");
 
         self.rtc_peer_connection_map.insert(
-            from_session_id.to_owned(),
+            from_connection_id.to_owned(),
             Arc::new(tokio::sync::RwLock::new(PeerConnection {
                 rtc_peer_connection,
                 capture_screen_thread: None,
@@ -856,9 +856,9 @@ impl DeskSession {
     /// Get the RTC peer connection, if not initialized, return error
     pub fn get_rtc_peer_connection(
         &self,
-        from_session_id: &str,
+        from_connection_id: &str,
     ) -> Result<Arc<tokio::sync::RwLock<PeerConnection>>, DeskError> {
-        if let Some(rtc_peer_connection) = self.rtc_peer_connection_map.get(from_session_id) {
+        if let Some(rtc_peer_connection) = self.rtc_peer_connection_map.get(from_connection_id) {
             Ok(rtc_peer_connection.clone())
         } else {
             DeskError::custom_error(
@@ -872,7 +872,7 @@ impl DeskSession {
     pub async fn start_webrtc(
         &mut self,
         request_id: &str,
-        from_session_id: &str,
+        from_connection_id: &str,
         offer_model: &OfferModel,
         peer_connection: &mut PeerConnection,
     ) -> Result<(), DeskError> {
@@ -1071,7 +1071,7 @@ impl DeskSession {
         // Set the handler for Peer connection state
         // This will notify you when the peer has connected/disconnected
         let peer_state_change_sender_for_drop = self.session.clone();
-        let from_session_id_for_drop = from_session_id.to_string();
+        let from_connection_id_for_drop = from_connection_id.to_string();
         peer_connection
             .rtc_peer_connection
             .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
@@ -1088,7 +1088,7 @@ impl DeskSession {
                     || s == RTCPeerConnectionState::Disconnected
                 {
                     let _ = peer_state_change_sender_for_drop.sender.send(
-                        DeskSessionMessage::WebRTCDropped(from_session_id_for_drop.clone()),
+                        DeskSessionMessage::WebRTCDropped(from_connection_id_for_drop.clone()),
                     );
                 }
 
@@ -1107,14 +1107,14 @@ impl DeskSession {
         // Set the handler for ICE candidate
         let session_for_candidate = self.session.clone();
         let request_id_for_candidate = request_id.to_string();
-        let from_session_id_for_candidate = from_session_id.to_string();
+        let from_connection_id_for_candidate = from_connection_id.to_string();
 
         peer_connection
             .rtc_peer_connection
             .on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
                 let mut session_sender = session_for_candidate.clone();
                 let request_id = request_id_for_candidate.clone();
-                let from_session_id = from_session_id_for_candidate.clone();
+                let from_connection_id = from_connection_id_for_candidate.clone();
 
                 Box::pin(async move {
                     if let Some(candidate) = c {
@@ -1126,7 +1126,7 @@ impl DeskSession {
                                     .send_to_peer(
                                         &request_id,
                                         SignalingType::Canid,
-                                        &from_session_id,
+                                        &from_connection_id,
                                         json,
                                     )
                                     .await;
@@ -1146,7 +1146,7 @@ impl DeskSession {
         // Used for mouse event, keyboard event, clipboard manage, file copy, whiteboard, etc.
         let signaling_state_for_data_channel = peer_connection.signaling_state.clone();
         let whiteboard_sender_for_dc = self.whiteboard_cmd_sender.clone();
-        let from_session_id_for_dc = from_session_id.to_string();
+        let from_connection_id_for_dc = from_connection_id.to_string();
         let settings_for_dc = self.settings.clone();
         let security_sender_for_dc = self.security_approval_sender.clone();
         peer_connection
@@ -1157,7 +1157,7 @@ impl DeskSession {
                 log::info!("New DataChannel {d_label} {d_id}");
                 let signaling_state = signaling_state_for_data_channel.clone();
                 let wb_sender = whiteboard_sender_for_dc.clone();
-                let sid = from_session_id_for_dc.clone();
+                let sid = from_connection_id_for_dc.clone();
                 let settings = settings_for_dc.clone();
                 let security_sender = security_sender_for_dc.clone();
                 // Register channel opening handling
@@ -1180,7 +1180,7 @@ impl DeskSession {
         // Register track handler for incoming audio from browser
         let session_for_audio = self.session.clone();
         let request_id_for_audio = request_id.to_string();
-        let from_session_id_for_audio = from_session_id.to_string();
+        let from_connection_id_for_audio = from_connection_id.to_string();
 
         peer_connection.rtc_peer_connection.on_track(Box::new(
             move |track, _receiver, _transceiver| {
@@ -1196,7 +1196,7 @@ impl DeskSession {
                     log::info!("Starting audio playback for remote audio track");
                     let mut session_sender = session_for_audio.clone();
                     let req_id = request_id_for_audio.clone();
-                    let from_session = from_session_id_for_audio.clone();
+                    let from_connection = from_connection_id_for_audio.clone();
 
                     // Capture the tokio handle so we can spawn from the std::thread inside audio_playback
                     let handle = match tokio::runtime::Handle::try_current() {
@@ -1222,7 +1222,7 @@ impl DeskSession {
                                     .send_to_peer(
                                         &req_id,
                                         SignalingType::AudioPlaybackError,
-                                        &from_session,
+                                        &from_connection,
                                         error_data,
                                     )
                                     .await;
@@ -1256,12 +1256,12 @@ impl DeskSession {
     /// Shutdown the signaling context, including peer connection and capture tasks.
     pub async fn shutdown(self) -> Result<(), DeskError> {
         // shutdown rtc peer connection
-        for (session_id, peer_connection) in self.rtc_peer_connection_map.iter() {
+        for (connection_id, peer_connection) in self.rtc_peer_connection_map.iter() {
             let result = peer_connection.write().await.shutdown().await;
             info!("Signaling session ended, result={:?}", result);
             let _ = self
                 .host_control_helper
-                .enable_private_screen(session_id, false);
+                .enable_private_screen(connection_id, false);
         }
         // shutdown terminal
         for terminal in self.terminal_map.into_values() {
@@ -1534,19 +1534,19 @@ impl DeskSession {
             }
             SignalingType::Answer => {}
             SignalingType::Canid => {
-                let from_session_id = signaling_model.check_and_get_from_session_id()?;
-                let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
+                let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
+                let rtc_peer_connection = self.get_rtc_peer_connection(&from_connection_id)?;
 
                 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
                 if let Some(mut candidate_init) =
                     signaling_model.get_data_with_type::<RTCIceCandidateInit>()?
                 {
-                    let to_session_id =
-                        signaling_model.to_session_id.as_deref().unwrap_or("<none>");
+                    let to_connection_id =
+                        signaling_model.to_connection_id.as_deref().unwrap_or("<none>");
                     log::info!(
                         "Received ICE candidate from {} to {}: candidate=\"{}\" sdp_mid={:?} sdp_mline_index={:?} ufrag={:?}",
-                        from_session_id,
-                        to_session_id,
+                        from_connection_id,
+                        to_connection_id,
                         candidate_init.candidate,
                         candidate_init.sdp_mid,
                         candidate_init.sdp_mline_index,
@@ -1601,27 +1601,27 @@ impl DeskSession {
                 self.handle_request_control(&signaling_model).await?;
             }
             SignalingType::CloseControl => {
-                let from_session_id = signaling_model.check_and_get_from_session_id()?;
-                if let Some(peer_connection) = self.rtc_peer_connection_map.remove(from_session_id)
+                let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
+                if let Some(peer_connection) = self.rtc_peer_connection_map.remove(from_connection_id)
                 {
                     info!(
                         "Received CloseControl from session {}, shutting down peer connection",
-                        from_session_id
+                        from_connection_id
                     );
                     let peer_connection = peer_connection.read().await;
                     peer_connection.shutdown().await?;
                 } else {
                     warn!(
                         "Received CloseControl from session {} but no peer connection found",
-                        from_session_id
+                        from_connection_id
                     );
                 }
                 let _ = self
                     .host_control_helper
-                    .enable_private_screen(from_session_id, false);
+                    .enable_private_screen(from_connection_id, false);
             }
             SignalingType::EnablePrivateScreen => {
-                let from_session_id = signaling_model.check_and_get_from_session_id()?;
+                let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
                 if let Some(data) =
                     signaling_model.get_data_with_type::<EnablePrivateScreenData>()?
                 {
@@ -1633,20 +1633,20 @@ impl DeskSession {
                             self.security_approval_sender.as_ref(),
                             allow_private_screen,
                             SecurityPermissionType::PrivateScreen,
-                            Some(from_session_id.to_string()),
+                            Some(from_connection_id.to_string()),
                         )
                         .await;
 
                         if !approved {
                             log::warn!(
                                 "Enable private screen denied by security settings or user for {}",
-                                from_session_id
+                                from_connection_id
                             );
                             self.session
                                 .send_error(
                                     &signaling_model.request_id,
                                     signaling_model.signaling_type.into(),
-                                    Some(from_session_id.to_string()),
+                                    Some(from_connection_id.to_string()),
                                     DeskErrorCode::PERMISSION_ERROR,
                                     "Private screen access denied",
                                 )
@@ -1657,7 +1657,7 @@ impl DeskSession {
 
                     let _ = self
                         .host_control_helper
-                        .enable_private_screen(&from_session_id, data.enable);
+                        .enable_private_screen(&from_connection_id, data.enable);
                 }
             }
             SignalingType::ManagerFileList => {
@@ -1695,7 +1695,7 @@ impl DeskSession {
                     .send_error(
                         &signaling_model.request_id,
                         signaling_model.signaling_type.into(),
-                        signaling_model.from_session_id.clone(),
+                        signaling_model.from_connection_id.clone(),
                         DeskErrorCode::UNKNOWN_SIGNALING_TYPE,
                         &format!(
                             "Failed to handle signaling type: {}",
@@ -1724,8 +1724,8 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
+        let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
+        let rtc_peer_connection = self.get_rtc_peer_connection(&from_connection_id)?;
         let offer_model = signaling_model.get_data::<OfferModel>()?;
 
         // start webrtc first
@@ -1733,7 +1733,7 @@ impl DeskSession {
         let peer_connection = rwlock_peer_connection.deref_mut();
         self.start_webrtc(
             &signaling_model.request_id,
-            &from_session_id,
+            &from_connection_id,
             &offer_model,
             peer_connection,
         )
@@ -1763,7 +1763,7 @@ impl DeskSession {
                 .send_to_peer(
                     &signaling_model.request_id,
                     SignalingType::Answer,
-                    &from_session_id,
+                    &from_connection_id,
                     local_desc,
                 )
                 .await?;
@@ -1779,8 +1779,8 @@ impl DeskSession {
         let desk_settings = signaling_model.get_data::<DeskSettings>()?;
         info!("Receive update desk settings: {:?}", desk_settings);
 
-        if let Some(from_session_id) = &signaling_model.from_session_id {
-            if let Some(peer_connection) = self.rtc_peer_connection_map.get(from_session_id) {
+        if let Some(from_connection_id) = &signaling_model.from_connection_id {
+            if let Some(peer_connection) = self.rtc_peer_connection_map.get(from_connection_id) {
                 let peer_connection = peer_connection.read().await;
                 let mut signaling_state = peer_connection.signaling_state.write().await;
                 signaling_state.wayland_control_mode = desk_settings.wayland_control_mode.clone();
@@ -1801,13 +1801,13 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
-        let from_session_id = signaling_model.check_and_get_from_session_id()?;
-        let rtc_peer_connection = self.get_rtc_peer_connection(&from_session_id)?;
+        let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
+        let rtc_peer_connection = self.get_rtc_peer_connection(&from_connection_id)?;
 
         let control_data = signaling_model.get_data::<SignalRequestControlData>()?;
         log::info!(
             "Received RequireControl signaling from {}, control_data: {:?}",
-            from_session_id,
+            from_connection_id,
             control_data
         );
 
@@ -1820,20 +1820,20 @@ impl DeskSession {
             self.security_approval_sender.as_ref(),
             allow_control,
             SecurityPermissionType::RemoteControl,
-            Some(from_session_id.to_string()),
+            Some(from_connection_id.to_string()),
         )
         .await;
 
         if !control_approved {
             log::warn!(
                 "Remote control request denied by security settings or user for {}",
-                from_session_id
+                from_connection_id
             );
             self.session
                 .send_to_peer(
                     &signaling_model.request_id,
                     SignalingType::DenyControl,
-                    &from_session_id,
+                    &from_connection_id,
                     (),
                 )
                 .await?;
@@ -1846,7 +1846,7 @@ impl DeskSession {
                 self.security_approval_sender.as_ref(),
                 allow_clipboard,
                 SecurityPermissionType::ClipboardSync,
-                Some(from_session_id.to_string()),
+                Some(from_connection_id.to_string()),
             )
             .await
         } else {
@@ -1861,7 +1861,7 @@ impl DeskSession {
             signaling_state.accept_clipboard_sync = clipboard_approved;
             log::info!(
                 "Auto accepting control request from {}, sending AcceptControl signaling",
-                from_session_id
+                from_connection_id
             );
             SignalingType::AcceptControl
         } else {
@@ -1869,10 +1869,10 @@ impl DeskSession {
             signaling_state.accept_clipboard_sync = false;
             let _ = self
                 .host_control_helper
-                .enable_private_screen(from_session_id, false);
+                .enable_private_screen(from_connection_id, false);
             log::info!(
                 "Releasing control request from {}, sending CloseControl signaling (also disabling private screen if any)",
-                from_session_id
+                from_connection_id
             );
             SignalingType::CloseControl
         };
@@ -1881,7 +1881,7 @@ impl DeskSession {
             .send_to_peer(
                 &signaling_model.request_id,
                 reply_type,
-                &from_session_id,
+                &from_connection_id,
                 (),
             )
             .await?;

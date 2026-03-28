@@ -49,8 +49,8 @@ pub struct SecurityApprovalRequest {
     pub req_id: String,
     /// The type of permission being requested
     pub permission_type: SecurityPermissionType,
-    /// The session ID of the controller requesting access
-    pub from_session_id: Option<String>,
+    /// The connection ID of the controller requesting access
+    pub from_connection_id: Option<String>,
 }
 
 /// Used by Tauri to send security approval requests to the frontend
@@ -58,7 +58,7 @@ pub struct SecurityApprovalRequest {
 pub struct SecurityApprovalEventPayload {
     pub req_id: String,
     pub permission_type: String,
-    pub from_session_id: Option<String>,
+    pub from_connection_id: Option<String>,
     pub i18n_key: String,
 }
 
@@ -91,7 +91,7 @@ pub async fn check_security_permission(
     security_approval_sender: Option<&SecurityApprovalSender>,
     permission: Option<bool>,
     permission_type: SecurityPermissionType,
-    from_session_id: Option<String>,
+    from_connection_id: Option<String>,
 ) -> bool {
     match permission {
         Some(true) => true,
@@ -103,7 +103,7 @@ pub async fn check_security_permission(
                 let request = SecurityApprovalRequest {
                     req_id: req_id.clone(),
                     permission_type: permission_type.clone(),
-                    from_session_id,
+                    from_connection_id,
                 };
                 PENDING_APPROVALS
                     .lock()

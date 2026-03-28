@@ -10,19 +10,19 @@ import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../ty
 import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { listTerminal } from "../../clients.ts";
 
-export const listTerminalSuspenseQueryKey = (session_id: ListTerminalPathParams["session_id"]) => [{ url: '/api/desk/terminals/:session_id', params: {session_id:session_id} }] as const
+export const listTerminalSuspenseQueryKey = (connection_id: ListTerminalPathParams["connection_id"]) => [{ url: '/api/desk/terminals/:connection_id', params: {connection_id:connection_id} }] as const
 
 export type ListTerminalSuspenseQueryKey = ReturnType<typeof listTerminalSuspenseQueryKey>
 
-export function listTerminalSuspenseQueryOptions(session_id: ListTerminalPathParams["session_id"], config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function listTerminalSuspenseQueryOptions(connection_id: ListTerminalPathParams["connection_id"], config: Partial<RequestConfig> & { client?: Client } = {}) {
 
-        const queryKey = listTerminalSuspenseQueryKey(session_id)
+        const queryKey = listTerminalSuspenseQueryKey(connection_id)
         return queryOptions<ListTerminalQueryResponse, ResponseErrorConfig<Error>, ListTerminalQueryResponse, typeof queryKey>({
-         enabled: !!(session_id),
+         enabled: !!(connection_id),
          queryKey,
          queryFn: async ({ signal }) => {
             config.signal = signal
-            return listTerminal(session_id, config)
+            return listTerminal(connection_id, config)
          },
         })
 
@@ -30,9 +30,9 @@ export function listTerminalSuspenseQueryOptions(session_id: ListTerminalPathPar
 
 /**
  * @summary List terminal
- * {@link /api/desk/terminals/:session_id}
+ * {@link /api/desk/terminals/:connection_id}
  */
-export function useListTerminalSuspense<TData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalSuspenseQueryKey>(session_id: ListTerminalPathParams["session_id"], options: 
+export function useListTerminalSuspense<TData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalSuspenseQueryKey>(connection_id: ListTerminalPathParams["connection_id"], options: 
 {
   query?: Partial<UseSuspenseQueryOptions<ListTerminalQueryResponse, ResponseErrorConfig<Error>, TData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
@@ -41,11 +41,11 @@ export function useListTerminalSuspense<TData = ListTerminalQueryResponse, TQuer
 
          const { query: queryConfig = {}, client: config = {} } = options ?? {}
          const { client: queryClient, ...queryOptions } = queryConfig
-         const queryKey = queryOptions?.queryKey ?? listTerminalSuspenseQueryKey(session_id)
+         const queryKey = queryOptions?.queryKey ?? listTerminalSuspenseQueryKey(connection_id)
          
 
          const query = useSuspenseQuery({
-          ...listTerminalSuspenseQueryOptions(session_id, config),
+          ...listTerminalSuspenseQueryOptions(connection_id, config),
           queryKey,
           ...queryOptions
          } as unknown as UseSuspenseQueryOptions, queryClient) as UseSuspenseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }

@@ -2,8 +2,8 @@ use desk_signal::controller::device_code::{
     DeviceCodeBatchDeleteParams, DeviceCodeItem, DeviceCodeListResult,
 };
 use desk_signal_facade::model::{
+    connection::ConnectionList,
     desk_settings::DeskSettings,
-    session::SessionList,
     signal::{InitSignalingData, RequestRemoteModel, SignalingModel},
     terminal::{TerminalInputData, TerminalOutputData, TerminalResizeData},
 };
@@ -28,7 +28,7 @@ use crate::model::{
     KeyboardEventData,
     MouseEventData,
     SignalRequestControlData,
-    SessionList,
+    ConnectionList,
     TerminalInputData,
     TerminalOutputData,
     TerminalResizeData,

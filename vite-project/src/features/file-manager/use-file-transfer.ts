@@ -369,8 +369,8 @@ export function useFileTransfer(deskId: string | undefined) {
                 const msg = {
                     request_id: uuidv4(),
                     signaling_type: SIGNALING_TYPE_CODE_REQUEST_REMOTE,
-                    signaling_data: { session_id: deskId },
-                    to_session_id: deskId,
+                    signaling_data: { connection_id: deskId },
+                    to_connection_id: deskId,
                 };
                 ws.send(JSON.stringify(msg));
             };
@@ -423,7 +423,7 @@ export function useFileTransfer(deskId: string | undefined) {
                                     request_id: uuidv4(),
                                     signaling_type: SIGNALING_TYPE_CODE_OFFER,
                                     signaling_data: offerModel,
-                                    to_session_id: deskId,
+                                    to_connection_id: deskId,
                                 };
                                 ws.send(JSON.stringify(msg));
                             }
@@ -470,7 +470,7 @@ export function useFileTransfer(deskId: string | undefined) {
                     request_id: uuidv4(),
                     signaling_type: SIGNALING_TYPE_CODE_CLOSE_CONTROL,
                     signaling_data: null,
-                    to_session_id: deskId,
+                    to_connection_id: deskId,
                 };
                 wsRef.current.send(JSON.stringify(msg));
             }
@@ -705,7 +705,7 @@ export function useFileTransfer(deskId: string | undefined) {
         // Also clean up any associated state if necessary
         transferSpeedState.current.delete(transferId);
         downloadStates.current.delete(transferId);
-        cancelledTransfers.current.delete(transferId);
+        cancelledTransfers.current.add(transferId);
     }, []);
 
     return {

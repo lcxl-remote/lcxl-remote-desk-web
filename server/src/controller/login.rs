@@ -33,7 +33,7 @@ pub async fn login_account(
     req: actix_web::HttpRequest,
     requst_json: web::Json<LoginParams>,
     settings: web::Data<SharedSettings>,
-    session_map: web::Data<desk_signal::model::SharedSessionMap>,
+    connection_map: web::Data<desk_signal::model::SharedConnectionMap>,
     session: Session,
 ) -> Result<HttpResponse, AWError> {
     let params = requst_json.into_inner();
@@ -78,20 +78,20 @@ pub async fn login_account(
             )));
         }
 
-        let session_map_guard = session_map.read().await;
-        let mut target_session_id = None;
+        let connection_map_guard = connection_map.read().await;
+        let mut target_connection_id = None;
 
-        for (sid, sstate) in session_map_guard.iter() {
-            if sstate.device_code.as_ref() == Some(&device_code) {
-                target_session_id = Some(sid.clone());
+        for (cid, cstate) in connection_map_guard.iter() {
+            if cstate.device_code.as_ref() == Some(&device_code) {
+                target_connection_id = Some(cid.clone());
                 break;
             }
         }
 
-        if let Some(target_id) = target_session_id {
+        if let Some(target_id) = target_connection_id {
             let mut user_info = CurrentUser::new_admin("device_user");
             user_info.access = Some("device_user".to_string());
-            user_info.target_session_id = Some(target_id.clone());
+            user_info.target_connection_id = Some(target_id.clone());
             session.set_current_user(&user_info)?;
 
             let result = LoginResult {
@@ -99,7 +99,7 @@ pub async fn login_account(
                 login_type: params.login_type,
                 current_authority: String::from("device_user"),
                 api_version: SERVER_API_VERSION,
-                target_session_id: Some(target_id),
+                target_connection_id: Some(target_id),
                 startup_mode: Some(startup_mode),
             };
             info!("Device code login successful");
@@ -133,7 +133,7 @@ pub async fn login_account(
         login_type: params.login_type,
         current_authority: String::from("admin"),
         api_version: SERVER_API_VERSION,
-        target_session_id: None,
+        target_connection_id: None,
         startup_mode: Some(startup_mode),
     };
     let user_info = CurrentUser::new_admin(&params.username);
@@ -306,7 +306,7 @@ pub async fn login_tauri(
         login_type: String::from("tauri"),
         current_authority: String::from("admin"),
         api_version: SERVER_API_VERSION,
-        target_session_id: None,
+        target_connection_id: None,
         startup_mode: Some(startup_mode),
     };
 
@@ -346,13 +346,13 @@ mod tests {
     #[actix_web::test]
     async fn test_login_success() {
         let settings = create_test_settings();
-        let session_map = web::Data::new(desk_signal::model::SharedSessionMap::from(
+        let connection_map = web::Data::new(desk_signal::model::SharedConnectionMap::from(
             std::collections::BTreeMap::new(),
         ));
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
-                .app_data(session_map)
+                .app_data(connection_map)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),
@@ -382,13 +382,13 @@ mod tests {
     #[actix_web::test]
     async fn test_login_failure() {
         let settings = create_test_settings();
-        let session_map = web::Data::new(desk_signal::model::SharedSessionMap::from(
+        let connection_map = web::Data::new(desk_signal::model::SharedConnectionMap::from(
             std::collections::BTreeMap::new(),
         ));
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
-                .app_data(session_map)
+                .app_data(connection_map)
                 .wrap(SessionMiddleware::new(
                     CookieSessionStore::default(),
                     Key::generate(),

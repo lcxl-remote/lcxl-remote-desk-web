@@ -28,8 +28,8 @@ pub struct FileListParams {
     /// Optional time range filter for file modification.
     pub start_modified_time: Option<DateTime<Local>>,
     pub end_modified_time: Option<DateTime<Local>>,
-    /// Session ID for remote desk
-    pub session_id: Option<String>,
+    /// Connection ID for remote desk
+    pub connection_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema, Debug)]
@@ -146,5 +146,5 @@ pub struct DeleteFileRequest {
     pub file_path: String,
     /// Whether to delete permanently or move to trash
     pub delete_permanently: Option<bool>,
-    pub session_id: Option<String>,
+    pub connection_id: Option<String>,
 }

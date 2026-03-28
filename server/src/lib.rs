@@ -53,11 +53,11 @@ use desk_signal::{
             update_device_code,
         },
         files::{delete_file, list_files},
-        session::list_sessions,
+        connection::list_connections,
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
     },
-    model::SharedSessionMap,
+    model::SharedConnectionMap,
 };
 use desk_turn::service::startup_turn_server;
 use desk_utils::{error::DeskErrorCode, network::check_ipv6_available, rest::RestResponse};
@@ -200,7 +200,7 @@ pub async fn run_with_channels(
     let tauri_login_token: web::Data<Option<TauriLoginToken>> =
         web::Data::new(channels.tauri_login_token.clone().map(TauriLoginToken::new));
 
-    let session_map = web::Data::new(SharedSessionMap::from(BTreeMap::new()));
+    let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
 
     //start turn server if mode is Default or Signaling
     let turn_api_state =
@@ -213,7 +213,7 @@ pub async fn run_with_channels(
 
             let auth_handler = Arc::new(TurnAuthHandler::new(
                 turn_settings.clone(),
-                session_map.clone(),
+                connection_map.clone(),
             ));
             match startup_turn_server(turn_settings, auth_handler).await {
                 Ok(s) => Some(web::Data::from(s)),
@@ -252,7 +252,7 @@ pub async fn run_with_channels(
             .map(|app| app.wrap(Logger::default()))
             .app_data(shared_settings_data.clone())
             .app_data(tauri_login_token.clone())
-            .app_data(session_map.clone())
+            .app_data(connection_map.clone())
             .app_data(security_approval_sender.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
@@ -306,7 +306,7 @@ pub async fn run_with_channels(
                             .service(regenerate_turn_secret)
                             .service(query_telemetry_status)
                             .service(update_telemetry_consent)
-                            .service(list_sessions)
+                            .service(list_connections)
                             .service(list_terminal)
                             .service(open_terminal_session)
                             .service(query_sysinfo)

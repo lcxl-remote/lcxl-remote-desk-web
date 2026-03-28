@@ -137,7 +137,7 @@ export function SecurityApprovalDialog() {
           </AlertDialogTitle>
           <AlertDialogDescription>
             {t("security.dialog.description", "A controller with ID ")}
-            <strong className="text-primary">{currentRequest.from_session_id}</strong>
+            <strong className="text-primary">{currentRequest.from_connection_id}</strong>
             {t("security.dialog.description2", " is requesting permission to:")}
             <div className="mt-4 mb-4 p-4 bg-muted rounded-md text-foreground font-medium">
               {t(currentRequest.i18n_key, currentRequest.permission_type)}

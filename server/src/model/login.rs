@@ -40,9 +40,9 @@ pub struct LoginResult {
     pub current_authority: String,
     /// return api version of signal/desk/manage server
     pub api_version: i32,
-    #[serde(rename = "targetSessionId")]
-    #[schema(rename = "targetSessionId")]
-    pub target_session_id: Option<String>,
+    #[serde(rename = "targetConnectionId")]
+    #[schema(rename = "targetConnectionId")]
+    pub target_connection_id: Option<String>,
     pub startup_mode: Option<String>,
 }
 

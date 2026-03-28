@@ -10,19 +10,19 @@ import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../ty
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listTerminal } from "../../clients.ts";
 
-export const listTerminalQueryKey = (session_id: ListTerminalPathParams["session_id"]) => [{ url: '/api/desk/terminals/:session_id', params: {session_id:session_id} }] as const
+export const listTerminalQueryKey = (connection_id: ListTerminalPathParams["connection_id"]) => [{ url: '/api/desk/terminals/:connection_id', params: {connection_id:connection_id} }] as const
 
 export type ListTerminalQueryKey = ReturnType<typeof listTerminalQueryKey>
 
-export function listTerminalQueryOptions(session_id: ListTerminalPathParams["session_id"], config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function listTerminalQueryOptions(connection_id: ListTerminalPathParams["connection_id"], config: Partial<RequestConfig> & { client?: Client } = {}) {
 
-        const queryKey = listTerminalQueryKey(session_id)
+        const queryKey = listTerminalQueryKey(connection_id)
         return queryOptions<ListTerminalQueryResponse, ResponseErrorConfig<Error>, ListTerminalQueryResponse, typeof queryKey>({
-         enabled: !!(session_id),
+         enabled: !!(connection_id),
          queryKey,
          queryFn: async ({ signal }) => {
             config.signal = signal
-            return listTerminal(session_id, config)
+            return listTerminal(connection_id, config)
          },
         })
 
@@ -30,9 +30,9 @@ export function listTerminalQueryOptions(session_id: ListTerminalPathParams["ses
 
 /**
  * @summary List terminal
- * {@link /api/desk/terminals/:session_id}
+ * {@link /api/desk/terminals/:connection_id}
  */
-export function useListTerminal<TData = ListTerminalQueryResponse, TQueryData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalQueryKey>(session_id: ListTerminalPathParams["session_id"], options: 
+export function useListTerminal<TData = ListTerminalQueryResponse, TQueryData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalQueryKey>(connection_id: ListTerminalPathParams["connection_id"], options: 
 {
   query?: Partial<QueryObserverOptions<ListTerminalQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
@@ -41,11 +41,11 @@ export function useListTerminal<TData = ListTerminalQueryResponse, TQueryData = 
 
          const { query: queryConfig = {}, client: config = {} } = options ?? {}
          const { client: queryClient, ...queryOptions } = queryConfig
-         const queryKey = queryOptions?.queryKey ?? listTerminalQueryKey(session_id)
+         const queryKey = queryOptions?.queryKey ?? listTerminalQueryKey(connection_id)
          
 
          const query = useQuery({
-          ...listTerminalQueryOptions(session_id, config),
+          ...listTerminalQueryOptions(connection_id, config),
           queryKey,
           ...queryOptions
          } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }
