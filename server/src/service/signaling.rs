@@ -388,20 +388,29 @@ pub async fn start_desk_session(
 
         info!("Connecting to signaling server: {}", signaling_url);
         // Login first
-        let (username, password) = {
+        let (username, password, manager_api_token) = {
             let settings = settings.read().await;
             (
                 settings.user.login_user_name.clone(),
                 settings.user.login_password.clone(),
+                settings.system.manager_api_token.clone(),
             )
         };
 
-        let login_params = LoginParams {
-            username: username.clone(),
-            password: password.clone(),
-            login_type: "account".to_string(), // TODO: use enum
-            auto_login: true,
-            ..Default::default()
+        let login_params = if let Some(token) = manager_api_token {
+            LoginParams {
+                login_type: "api_token".to_string(),
+                token: Some(token),
+                ..Default::default()
+            }
+        } else {
+            LoginParams {
+                username: username.clone(),
+                password: password.clone(),
+                login_type: "account".to_string(),
+                auto_login: true,
+                ..Default::default()
+            }
         };
 
         let mut login_response = match client.post(&login_url).send_json(&login_params).await {

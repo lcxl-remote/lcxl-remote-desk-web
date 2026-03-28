@@ -83,6 +83,8 @@ pub struct SystemSettings {
     pub telemetry_consent: Option<bool>,
     /// Auto start the application on system login
     pub auto_start: Option<bool>,
+    /// API Token for connecting to manager's signaling server
+    pub manager_api_token: Option<String>,
 }
 
 impl SystemSettings {
@@ -126,6 +128,7 @@ impl Default for SystemSettings {
             client_id: None,
             telemetry_consent: None,
             auto_start: None,
+            manager_api_token: None,
         }
     }
 }
