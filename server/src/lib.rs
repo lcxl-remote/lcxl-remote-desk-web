@@ -315,7 +315,7 @@ pub async fn run_with_channels(
                                 if startup_mode == StartupMode::Default
                                     || startup_mode == StartupMode::Signaling
                                 {
-                                    log::info!("Registering signaling route at /signaling");
+                                    log::info!("Registering signaling route at /api/desk/signaling");
                                     cfg.service(open_signaling_handle)
                                         .service(delete_file)
                                         .service(list_files)

@@ -28,6 +28,7 @@ pub async fn open_signaling_handle(
     let user = if let Some(user) = user_opt {
         user
     } else {
+        log::warn!("User not logged in");
         return Err(actix_web::error::ErrorUnauthorized("User not logged in"));
     };
 

@@ -73,10 +73,10 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
             // Unless explicitly forced to use production build frontend via args
             if cfg!(debug_assertions) && !settings.args.prod_frontend {
                 log::info!("Debug build detected, using vite dev server url for webview. (Use --prod-frontend to override)");
-                frontend_host_port = "127.0.0.1:5173".to_string(); 
+                frontend_host_port = "127.0.0.1:5174".to_string(); 
             } else if settings.args.dev_frontend {
                 log::info!("--dev-frontend flag provided, using vite dev server url for webview.");
-                frontend_host_port = "127.0.0.1:5173".to_string(); 
+                frontend_host_port = "127.0.0.1:5174".to_string(); 
             }
 
             let frontend_url = format!("http://{}", frontend_host_port);
