@@ -1,57 +1,19 @@
-use crate::{error::DeskSignalError, model::SharedConnectionMap, service::SignalingContext, version};
+use crate::{model::SharedConnectionMap, service::SignalingContext, version};
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::{
     signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
-    terminal::{ListTerminalPath, StartTerminalPath, StartTerminalSession, TerminalList},
+    terminal::{StartTerminalPath, StartTerminalSession},
     version::VersionInfo,
 };
 use desk_turn::model::TurnApiState;
-use desk_utils::error::DeskErrorCode;
 use log::{error, info};
 
 use uuid::Uuid;
 
-#[utoipa::path(
-    summary = "List terminal",
-    params(ListTerminalPath),
-    responses(
-        (status = 200, description = "return terminal command list", body = TerminalList),
-
-    ),
-)]
-#[get("/terminals/{connection_id}")]
-pub async fn list_terminal(
-    connection_map: web::Data<SharedConnectionMap>,
-    path: web::Path<ListTerminalPath>,
-) -> Result<HttpResponse, DeskSignalError> {
-    let response = {
-        let connection_map = connection_map.read().await;
-        if let Some(connection) = connection_map.get(&path.connection_id) {
-            connection
-                .request_peer_with_callback::<()>(SignalingType::ListTerminal, None, None)
-                .await?
-        } else {
-            return DeskSignalError::custom_error(
-                DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Connection {} is not found to list terminal", path.connection_id),
-            );
-        }
-    };
-
-    if let Some(ref response_state) = response.response_state {
-        if response_state.error_code != 0 {
-            return DeskSignalError::custom_error(
-                DeskErrorCode::new(response_state.error_code),
-                &response_state.message.clone().unwrap_or_default(),
-            );
-        }
-    }
-
-    let terminal_list_response: TerminalList = response.get_data()?;
-    Ok(HttpResponse::Ok().json(terminal_list_response))
-}
+// Re-export list_terminal from signal-facade's shared controller.
+pub use desk_signal_facade::controller::terminal::list_terminal;
 
 #[utoipa::path(
     summary = "Open terminal connection",

@@ -1691,6 +1691,79 @@ impl DeskSession {
             SignalingType::ListTerminal => {
                 handle_list_terminals(self, signaling_model).await?;
             }
+            SignalingType::ManagerSystemInfo => {
+                // Respond with local system information
+                let mut sys = sysinfo::System::new_all();
+                sys.refresh_all();
+                let mut system_info = crate::model::info::SystemInfo::from(&sys);
+                let startup_mode = {
+                    self.settings.read().await.args.startup_mode.clone()
+                };
+                system_info.startup_mode = startup_mode.clone();
+                system_info.is_admin = if startup_mode != crate::model::settings::StartupMode::Signaling {
+                    Some(desk_utils::permission::is_admin())
+                } else {
+                    None
+                };
+                let facade_info = system_info.to_facade();
+                self.session
+                    .send_response(
+                        &signaling_model.request_id,
+                        SignalingType::ManagerSystemInfo,
+                        signaling_model.from_connection_id.clone(),
+                        &facade_info,
+                    )
+                    .await?;
+            }
+            SignalingType::ManagerQuerySettings => {
+                // Respond with remote-accessible system settings
+                let remote_settings = {
+                    let settings = self.settings.read().await;
+                    desk_signal_facade::model::system_settings::RemoteSystemSettings {
+                        enable_ipv6: settings.system.enable_ipv6,
+                        port: settings.system.port,
+                        listen_addr_ipv4: settings.system.listen_addr_ipv4.clone(),
+                        listen_addr_ipv6: settings.system.listen_addr_ipv6.clone(),
+                        locale: settings.system.locale.clone(),
+                        signaling_url: settings.system.signaling_url.clone(),
+                        auto_start: settings.system.auto_start,
+                        manager_api_token: settings.system.manager_api_token.clone(),
+                    }
+                };
+                self.session
+                    .send_response(
+                        &signaling_model.request_id,
+                        SignalingType::ManagerQuerySettings,
+                        signaling_model.from_connection_id.clone(),
+                        &remote_settings,
+                    )
+                    .await?;
+            }
+            SignalingType::ManagerUpdateSettings => {
+                // Update system settings from remote request
+                let remote_settings = signaling_model
+                    .get_data::<desk_signal_facade::model::system_settings::RemoteSystemSettings>()?;
+                {
+                    let mut settings = self.settings.write().await;
+                    settings.system.enable_ipv6 = remote_settings.enable_ipv6;
+                    settings.system.port = remote_settings.port;
+                    settings.system.listen_addr_ipv4 = remote_settings.listen_addr_ipv4;
+                    settings.system.listen_addr_ipv6 = remote_settings.listen_addr_ipv6;
+                    settings.system.locale = remote_settings.locale;
+                    settings.system.signaling_url = remote_settings.signaling_url;
+                    settings.system.auto_start = remote_settings.auto_start;
+                    settings.system.manager_api_token = remote_settings.manager_api_token;
+                    settings.save()?;
+                }
+                self.session
+                    .send_response(
+                        &signaling_model.request_id,
+                        SignalingType::ManagerUpdateSettings,
+                        signaling_model.from_connection_id.clone(),
+                        &(),
+                    )
+                    .await?;
+            }
             /*
             SignalingType::Version => {
                 // send back a message to client

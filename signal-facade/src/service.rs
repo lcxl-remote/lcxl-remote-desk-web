@@ -457,6 +457,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::ManagerFileDelete
             | SignalingType::ManagerSystemInfo
             | SignalingType::ManagerSystemStatue
+            | SignalingType::ManagerQuerySettings
+            | SignalingType::ManagerUpdateSettings
             | SignalingType::ListTerminal
             | SignalingType::EnablePrivateScreen
             | SignalingType::PrivateScreenStateChanged

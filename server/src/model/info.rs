@@ -3,22 +3,10 @@ use utoipa::ToSchema;
 
 use crate::model::settings::StartupMode;
 
-/// CPU information
-#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
-pub struct CpuInfo {
-    /// CPU name
-    pub name: String,
-    /// CPU frequency in MHz
-    pub frequency: u64,
-    /// CPU vendor ID
-    pub vendor_id: String,
-    /// CPU brand
-    pub brand: String,
-    /// CPU usage percentage
-    pub usage: f32,
-}
+// Re-export shared types from signal-facade
+pub use desk_signal_facade::model::system_info::{CpuInfo, SystemInfo as FacadeSystemInfo};
 
-/// System information
+/// System information — extends the facade's SystemInfo with server-specific fields.
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct SystemInfo {
     /// System name
@@ -43,6 +31,24 @@ pub struct SystemInfo {
     pub startup_mode: StartupMode,
     /// Whether the system is running with administrative privileges
     pub is_admin: Option<bool>,
+}
+
+impl SystemInfo {
+    /// Convert to the facade's shared SystemInfo (for signaling responses)
+    pub fn to_facade(&self) -> FacadeSystemInfo {
+        FacadeSystemInfo {
+            name: self.name.clone(),
+            kernel_version: self.kernel_version.clone(),
+            os_version: self.os_version.clone(),
+            host_name: self.host_name.clone(),
+            total_memory: self.total_memory,
+            used_memory: self.used_memory,
+            total_swap: self.total_swap,
+            used_swap: self.used_swap,
+            cpus: self.cpus.clone(),
+            is_admin: self.is_admin,
+        }
+    }
 }
 
 /// Server information

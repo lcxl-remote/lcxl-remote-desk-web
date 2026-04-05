@@ -10,4 +10,5 @@ pub mod terminal;
 pub mod version;
 pub mod whiteboard;
 pub mod security_settings;
-
+pub mod system_info;
+pub mod system_settings;

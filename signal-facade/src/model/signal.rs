@@ -84,6 +84,10 @@ pub enum SignalingType {
     TerminalStarted = 10013,
     /// Terminal closed
     TerminalClosed = 10014,
+    /// Query remote system settings via signaling
+    ManagerQuerySettings = 10015,
+    /// Update remote system settings via signaling
+    ManagerUpdateSettings = 10016,
 
     /// Error
     Error = -1,
