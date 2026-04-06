@@ -29,7 +29,7 @@ export function listTerminalQueryOptions(connection_id: ListTerminalPathParams["
 }
 
 /**
- * @summary List terminal
+ * @summary List terminal commands on remote desk
  * {@link /api/desk/terminals/:connection_id}
  */
 export function useListTerminal<TData = ListTerminalQueryResponse, TQueryData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalQueryKey>(connection_id: ListTerminalPathParams["connection_id"], options: 

@@ -29,7 +29,7 @@ export function listTerminalSuspenseQueryOptions(connection_id: ListTerminalPath
 }
 
 /**
- * @summary List terminal
+ * @summary List terminal commands on remote desk
  * {@link /api/desk/terminals/:connection_id}
  */
 export function useListTerminalSuspense<TData = ListTerminalQueryResponse, TQueryKey extends QueryKey = ListTerminalSuspenseQueryKey>(connection_id: ListTerminalPathParams["connection_id"], options: 

@@ -20,6 +20,8 @@ pub struct VersionInfo {
     pub display_name: Option<String>,
     /// Client ID of the server.
     pub client_id: Option<String>,
+    /// Authentication token for server nodes or API clients.
+    pub token: Option<String>,
 }
 
 impl VersionInfo {
@@ -39,6 +41,7 @@ impl VersionInfo {
             operation_system: OperationSystemEnum::default(),
             display_name,
             client_id,
+            token: None,
         }
     }
 }

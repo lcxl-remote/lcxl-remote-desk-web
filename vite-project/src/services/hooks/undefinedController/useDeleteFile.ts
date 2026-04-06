@@ -6,7 +6,7 @@
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501 } from "../../types.ts";
+import type { DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400 } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { deleteFile } from "../../clients.ts";
 
@@ -17,7 +17,7 @@ export type DeleteFileMutationKey = ReturnType<typeof deleteFileMutationKey>
 export function deleteFileMutationOptions<TContext = unknown>(config: Partial<RequestConfig<DeleteFileMutationRequest>> & { client?: Client } = {}) {
 
         const mutationKey = deleteFileMutationKey()
-        return mutationOptions<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400 | DeleteFile501>, {data: DeleteFileMutationRequest}, TContext>({
+        return mutationOptions<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400>, {data: DeleteFileMutationRequest}, TContext>({
           mutationKey,
           mutationFn: async({ data }) => {
             return deleteFile(data, config)
@@ -27,12 +27,12 @@ export function deleteFileMutationOptions<TContext = unknown>(config: Partial<Re
 }
 
 /**
- * @summary Delete a file
+ * @summary Delete a file on remote desk
  * {@link /api/desk/file}
  */
 export function useDeleteFile<TContext>(options: 
 {
-  mutation?: UseMutationOptions<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400 | DeleteFile501>, {data: DeleteFileMutationRequest}, TContext> & { client?: QueryClient },
+  mutation?: UseMutationOptions<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400>, {data: DeleteFileMutationRequest}, TContext> & { client?: QueryClient },
   client?: Partial<RequestConfig<DeleteFileMutationRequest>> & { client?: Client },
 }
  = {}) {
@@ -41,13 +41,13 @@ export function useDeleteFile<TContext>(options:
           const { client: queryClient, ...mutationOptions } = mutation;
           const mutationKey = mutationOptions.mutationKey ?? deleteFileMutationKey()
 
-          const baseOptions = deleteFileMutationOptions(config) as UseMutationOptions<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400 | DeleteFile501>, {data: DeleteFileMutationRequest}, TContext>
+          const baseOptions = deleteFileMutationOptions(config) as UseMutationOptions<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400>, {data: DeleteFileMutationRequest}, TContext>
           
 
-          return useMutation<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400 | DeleteFile501>, {data: DeleteFileMutationRequest}, TContext>({
+          return useMutation<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400>, {data: DeleteFileMutationRequest}, TContext>({
             ...baseOptions,
             mutationKey,
             ...mutationOptions,
-          }, queryClient) as UseMutationResult<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400 | DeleteFile501>, {data: DeleteFileMutationRequest}, TContext>
+          }, queryClient) as UseMutationResult<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400>, {data: DeleteFileMutationRequest}, TContext>
       
 }

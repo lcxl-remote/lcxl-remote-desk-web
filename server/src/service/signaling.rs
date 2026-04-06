@@ -31,7 +31,6 @@ use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio::time::Instant;
-use url::Url;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
@@ -58,7 +57,6 @@ use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::host_control::{HostControlEventType, HostControlHelper, WhiteboardCommand};
-use crate::model::login::{LoginParams, LoginResult};
 use crate::model::security_approval::{
     SecurityApprovalSender, SecurityPermissionType, check_security_permission,
 };
@@ -313,34 +311,166 @@ where
     false
 }
 
+use desk_signal_facade::service::NodeTokenValidator;
+
+pub struct LocalNodeTokenValidator {
+    pub settings: web::Data<SharedSettings>,
+    pub local_node_token: String,
+}
+
+impl NodeTokenValidator for LocalNodeTokenValidator {
+    fn validate_node_token<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        let token = token.to_string();
+        let settings = self.settings.clone();
+        let local_token = self.local_node_token.clone();
+        Box::pin(async move {
+            let manager_api_token = settings.read().await.system.manager_api_token.clone();
+            let is_valid = if let Some(m_token) = manager_api_token {
+                crate::constant_time_eq(m_token.as_bytes(), token.as_bytes())
+            } else {
+                false
+            } || crate::constant_time_eq(local_token.as_bytes(), token.as_bytes());
+            is_valid
+        })
+    }
+}
+
 pub async fn start_desk_session(
     settings: web::Data<SharedSettings>,
     mut channels: crate::ExternalChannels,
+    local_node_token: String,
 ) -> Result<(), DeskError> {
-    let signaling_url = {
-        let settings = settings.read().await;
-        if let Some(url) = &settings.system.signaling_url {
-            url.clone()
-        } else if settings.system.enable_ipv6 {
-            format!("ws://[::1]:{}/api/desk/signaling", settings.system.port)
-        } else {
-            format!("ws://127.0.0.1:{}/api/desk/signaling", settings.system.port)
-        }
-    };
-    // determine the root url from signaling url
-    let parsed_url = Url::parse(&signaling_url)?;
-    let root_url = parsed_url.origin().ascii_serialization();
-
-    let login_url = format!("{}/api/login/account", root_url);
-    // http => http, ws => http, wss => https
-    let login_url = if login_url.starts_with("ws://") {
-        login_url.replace("ws://", "http://")
-    } else if login_url.starts_with("wss://") {
-        login_url.replace("wss://", "https://")
+    // Take the Tauri privacy screen receiver and broadcast it
+    let broadcast_tx = if let Some(mut rx) = channels.private_screen_state_receiver.take() {
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let tx_clone = tx.clone();
+        actix_web::rt::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let _ = tx_clone.send(event);
+            }
+        });
+        Some(tx)
     } else {
-        login_url
+        None
     };
 
+    let local_channels = crate::ExternalChannels {
+        private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
+        private_screen_state_receiver: None,
+        tauri_login_token: channels.tauri_login_token.clone(),
+        whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
+        security_approval_sender: channels.security_approval_sender.clone(),
+    };
+    
+    let remote_channels = crate::ExternalChannels {
+        private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
+        private_screen_state_receiver: None,
+        tauri_login_token: channels.tauri_login_token.clone(),
+        whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
+        security_approval_sender: channels.security_approval_sender.clone(),
+    };
+
+    let local_settings = settings.clone();
+    let local_token_clone = local_node_token.clone();
+    let local_broadcast_tx = broadcast_tx.clone();
+    
+    // Local connection loop
+    actix_web::rt::spawn(async move {
+        loop {
+            let (port, enable_ipv6) = {
+                let s = local_settings.read().await;
+                (s.system.port, s.system.enable_ipv6)
+            };
+            let local_url = if enable_ipv6 {
+                format!("ws://[::1]:{}/api/desk/signaling", port)
+            } else {
+                format!("ws://127.0.0.1:{}/api/desk/signaling", port)
+            };
+            
+            // To pass receiver, we must create a new struct inside the loop, because it's consumed by `maintain_signaling_connection`
+            let mut channels_for_loop = crate::ExternalChannels {
+                private_screen_cmd_sender: local_channels.private_screen_cmd_sender.clone(),
+                private_screen_state_receiver: None, // Will use a channel adapter instead
+                tauri_login_token: local_channels.tauri_login_token.clone(),
+                whiteboard_cmd_sender: local_channels.whiteboard_cmd_sender.clone(),
+                security_approval_sender: local_channels.security_approval_sender.clone(),
+            };
+            
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            channels_for_loop.private_screen_state_receiver = Some(rx);
+            if let Some(btx) = &local_broadcast_tx {
+                let mut brx = btx.subscribe();
+                actix_web::rt::spawn(async move {
+                    while let Ok(event) = brx.recv().await {
+                        let _ = tx.send(event);
+                    }
+                });
+            }
+
+            let _ = maintain_signaling_connection(
+                local_settings.clone(),
+                channels_for_loop,
+                local_url,
+                local_token_clone.clone(),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+
+    // Remote manager connection loop
+    let remote_settings = settings.clone();
+    let remote_broadcast_tx = broadcast_tx.clone();
+    actix_web::rt::spawn(async move {
+        loop {
+            let (signaling_url, manager_api_token) = {
+                let s = remote_settings.read().await;
+                (s.system.signaling_url.clone(), s.system.manager_api_token.clone())
+            };
+            if let (Some(url), Some(token)) = (signaling_url, manager_api_token) {
+                let mut channels_for_loop = crate::ExternalChannels {
+                    private_screen_cmd_sender: remote_channels.private_screen_cmd_sender.clone(),
+                    private_screen_state_receiver: None,
+                    tauri_login_token: remote_channels.tauri_login_token.clone(),
+                    whiteboard_cmd_sender: remote_channels.whiteboard_cmd_sender.clone(),
+                    security_approval_sender: remote_channels.security_approval_sender.clone(),
+                };
+                
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                channels_for_loop.private_screen_state_receiver = Some(rx);
+                if let Some(btx) = &remote_broadcast_tx {
+                    let mut brx = btx.subscribe();
+                    actix_web::rt::spawn(async move {
+                        while let Ok(event) = brx.recv().await {
+                            let _ = tx.send(event);
+                        }
+                    });
+                }
+
+                let _ = maintain_signaling_connection(
+                    remote_settings.clone(),
+                    channels_for_loop,
+                    url,
+                    token,
+                )
+                .await;
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+
+    Ok(())
+}
+
+async fn maintain_signaling_connection(
+    settings: web::Data<SharedSettings>,
+    mut channels: crate::ExternalChannels,
+    signaling_url: String,
+    auth_token: String,
+) -> Result<(), DeskError> {
     let display_name = {
         let settings = settings.read().await;
         settings.desk.display_name.clone()
@@ -357,7 +487,7 @@ pub async fn start_desk_session(
         settings.system.get_client_id()?
     };
 
-    let version_info = VersionInfo::new(
+    let mut version_info = VersionInfo::new(
         desk_server_version::SERVER_API_VERSION,
         version::SERVER_BUILD_NUMBER,
         version::SERVER_COMMIT_HASH.to_string(),
@@ -365,152 +495,85 @@ pub async fn start_desk_session(
         display_name,
         Some(client_id),
     );
+    version_info.token = Some(auth_token.clone());
     let version_query = serde_urlencoded::to_string(&version_info).unwrap();
 
-    loop {
-        // Create awc client
-        let mut root_store = RootCertStore::empty();
-        for cert in load_native_certs().expect("could not load platform certs") {
-            root_store.add(cert).unwrap();
-        }
-
-        let client = Client::builder()
-            .connector(
-                Connector::new()
-                    .timeout(Duration::from_secs(10))
-                    .rustls_0_23(Arc::new(
-                        ClientConfig::builder()
-                            .with_root_certificates(Arc::new(root_store))
-                            .with_no_client_auth(),
-                    )),
-            )
-            .finish();
-
-        info!("Connecting to signaling server: {}", signaling_url);
-        // Login first
-        let (username, password, manager_api_token) = {
-            let settings = settings.read().await;
-            (
-                settings.user.login_user_name.clone(),
-                settings.user.login_password.clone(),
-                settings.system.manager_api_token.clone(),
-            )
-        };
-
-        let login_params = if let Some(token) = manager_api_token {
-            LoginParams {
-                login_type: "api_token".to_string(),
-                token: Some(token),
-                ..Default::default()
-            }
-        } else {
-            LoginParams {
-                username: username.clone(),
-                password: password.clone(),
-                login_type: "account".to_string(),
-                auto_login: true,
-                ..Default::default()
-            }
-        };
-
-        let mut login_response = match client.post(&login_url).send_json(&login_params).await {
-            Ok(res) => res,
-            Err(e) => {
-                error!("Failed to login: {}", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        if !login_response.status().is_success() {
-            error!("Login failed: {}", login_response.status());
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-
-        let cookie = if let Some(cookie) = login_response.cookie("id") {
-            cookie
-        } else {
-            error!("Login failed: no cookie");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        };
-
-        let login_result = login_response.json::<LoginResult>().await?;
-        if login_result.status != "ok" {
-            // it should not happen, just for safety
-            error!("Login failed: {}", login_result.status);
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-        if login_result.api_version < desk_server_version::SERVER_API_VERSION {
-            error!(
-                "Login failed: api version of signaling/manage server is too old, please upgrade server"
-            );
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-        // Connect to websocket
-        let connect_url = format!("{}?{}", signaling_url, version_query);
-        let (response, framed) = match client.ws(&connect_url).cookie(cookie).connect().await {
-            Ok(res) => res,
-            Err(e) => {
-                error!(
-                    "Failed to connect to signaling server: {:?}, url: {}",
-                    e, connect_url
-                );
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        info!("Connected to signaling server: {:?}", response);
-
-        let (mut sink, mut stream) = framed.split();
-
-        let (tx, mut rx) = mpsc::unbounded_channel::<DeskSessionMessage>();
-        let session_sender = DeskSessionSender { sender: tx.clone() };
-
-        let mut desk_session = match DeskSession::new(
-            settings.clone(),
-            session_sender,
-            CurrentUser::new_admin(&username),
-            &mut channels,
-        )
-        .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Failed to init desk session: {}", e);
-                break Ok(());
-            }
-        };
-
-        // Main loop
-        loop {
-            tokio::select! {
-                msg = stream.next() => {
-                    if handle_incoming_ws_message(msg, &mut desk_session, &tx).await? {
-                        break;
-                    }
-                }
-                msg = rx.recv() => {
-                     if handle_outgoing_channel_message(msg, &mut sink, &mut desk_session).await {
-                        break;
-                    }
-                }
-            }
-        }
-
-        info!("Desk session ended, cleaning up...");
-
-        if let Err(e) = desk_session.shutdown().await {
-            error!("Error shutdown desk session: {}", e);
-        }
-
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        info!("Reconnecting...");
+    let mut root_store = RootCertStore::empty();
+    for cert in load_native_certs().expect("could not load platform certs") {
+        root_store.add(cert).unwrap();
     }
+
+    let client = Client::builder()
+        .connector(
+            Connector::new()
+                .timeout(Duration::from_secs(10))
+                .rustls_0_23(Arc::new(
+                    ClientConfig::builder()
+                        .with_root_certificates(Arc::new(root_store))
+                        .with_no_client_auth(),
+                )),
+        )
+        .finish();
+
+    info!("Connecting to signaling server: {}", signaling_url);
+
+    let connect_url = format!("{}?{}", signaling_url, version_query);
+    let (response, framed) = match client.ws(&connect_url).connect().await {
+        Ok(res) => res,
+        Err(e) => {
+            error!(
+                "Failed to connect to signaling server: {:?}, url: {}",
+                e, connect_url
+            );
+            return Err(DeskError::AnyhowError(anyhow::anyhow!("Connection failed")));
+        }
+    };
+
+    info!("Connected to signaling server: {:?}", response);
+
+    let (mut sink, mut stream) = framed.split();
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<DeskSessionMessage>();
+    let session_sender = DeskSessionSender { sender: tx.clone() };
+
+    let mut desk_session = match DeskSession::new(
+        settings.clone(),
+        session_sender,
+        CurrentUser::new_admin("server_node"),
+        &mut channels,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to init desk session: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Main loop
+    loop {
+        tokio::select! {
+            msg = stream.next() => {
+                if handle_incoming_ws_message(msg, &mut desk_session, &tx).await? {
+                    break;
+                }
+            }
+            msg = rx.recv() => {
+                if handle_outgoing_channel_message(msg, &mut sink, &mut desk_session).await {
+                    break;
+                }
+            }
+        }
+    }
+
+    info!("Desk session ended, cleaning up...");
+
+    if let Err(e) = desk_session.shutdown().await {
+        error!("Error shutdown desk session: {}", e);
+    }
+
+    Ok(())
 }
 /// Peer connection for handling WebRTC connections.
 pub struct PeerConnection {

@@ -168,6 +168,11 @@ export type VersionInfo = {
      * @type string
     */
     remote_desk_type: RemoteDeskTypeEnum;
+    /**
+     * @description Authentication token for server nodes or API clients.
+     * @type string,null
+    */
+    token?: string | null;
 };
 
 /**
@@ -1221,6 +1226,10 @@ export type LoginParams = {
     */
     password: string;
     /**
+     * @type string,null
+    */
+    token?: string | null;
+    /**
      * @type string
     */
     type: string;
@@ -1596,7 +1605,7 @@ export type RestResponseSystemInfo = {
     */
     code: number;
     /**
-     * @description System information
+     * @description System information — extends the facade\'s SystemInfo with server-specific fields.
      * @type object | undefined
     */
     data?: {
@@ -1713,6 +1722,11 @@ export type RestResponseSystemSettings = {
          * @type string,null
         */
         locale?: string | null;
+        /**
+         * @description API Token for connecting to manager\'s signaling server
+         * @type string,null
+        */
+        manager_api_token?: string | null;
         /**
          * @description port number for the server to bind to
          * @minLength 0
@@ -2078,7 +2092,7 @@ export type SignalingModel = {
 };
 
 /**
- * @description System information
+ * @description System information — extends the facade\'s SystemInfo with server-specific fields.
 */
 export type SystemInfo = {
     /**
@@ -2180,6 +2194,11 @@ export type SystemSettings = {
     */
     locale?: string | null;
     /**
+     * @description API Token for connecting to manager\'s signaling server
+     * @type string,null
+    */
+    manager_api_token?: string | null;
+    /**
      * @description port number for the server to bind to
      * @minLength 0
      * @default 8081
@@ -2272,85 +2291,6 @@ export type TurnClientSettings = {
      * @type string
     */
     traversal_mode: TraversalMode;
-};
-
-export type TurnInfo = {
-    /**
-     * @type array
-    */
-    interfaces: TurnInterface[];
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    port_allocated: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    port_capacity: number;
-    /**
-     * @type string
-    */
-    software: string;
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    uptime: bigint;
-};
-
-export type TurnSession = {
-    /**
-     * @type array
-    */
-    channels: number[];
-    /**
-     * @minLength 0
-     * @type integer, int64
-    */
-    expires: bigint;
-    /**
-     * @type array
-    */
-    permissions: number[];
-    /**
-     * @minLength 0
-     * @type integer,null, int32
-    */
-    port?: number | null;
-    /**
-     * @type string
-    */
-    username: string;
-};
-
-export type TurnSessionStatistics = {
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    error_pkts: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    received_bytes: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    received_pkts: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    send_bytes: number;
-    /**
-     * @minLength 0
-     * @type integer
-    */
-    send_pkts: number;
 };
 
 /**
@@ -2688,11 +2628,6 @@ export type DeleteFile200 = any;
 */
 export type DeleteFile400 = any;
 
-/**
- * @description Not implemented
-*/
-export type DeleteFile501 = any;
-
 export type DeleteFileMutationRequest = DeleteFileRequest;
 
 export type DeleteFileMutationResponse = DeleteFile200;
@@ -2700,7 +2635,7 @@ export type DeleteFileMutationResponse = DeleteFile200;
 export type DeleteFileMutation = {
     Response: DeleteFile200;
     Request: DeleteFileMutationRequest;
-    Errors: DeleteFile400 | DeleteFile501;
+    Errors: DeleteFile400;
 };
 
 export type ListFilesQueryParams = {
@@ -2977,6 +2912,11 @@ export type OpenSignalingHandleQueryParams = {
      * @type string,null
     */
     client_id?: string | null;
+    /**
+     * @description Authentication token for server nodes or API clients.
+     * @type string,null
+    */
+    token?: string | null;
 };
 
 /**
@@ -3070,7 +3010,7 @@ export type ListTerminalPathParams = {
 };
 
 /**
- * @description return terminal command list
+ * @description Return terminal command list
 */
 export type ListTerminal200 = TerminalList;
 
@@ -3195,115 +3135,4 @@ export type QueryServerInfoQueryResponse = QueryServerInfo200;
 export type QueryServerInfoQuery = {
     Response: QueryServerInfo200;
     Errors: any;
-};
-
-/**
- * @description Turn server info
-*/
-export type GetTurnInfo200 = TurnInfo;
-
-export type GetTurnInfoQueryResponse = GetTurnInfo200;
-
-export type GetTurnInfoQuery = {
-    Response: GetTurnInfo200;
-    Errors: any;
-};
-
-/**
- * @description turn server metrics
-*/
-export type GetTurnMetrics200 = string;
-
-/**
- * @description Expectation failed
-*/
-export type GetTurnMetrics417 = any;
-
-export type GetTurnMetricsQueryResponse = GetTurnMetrics200;
-
-export type GetTurnMetricsQuery = {
-    Response: GetTurnMetrics200;
-    Errors: GetTurnMetrics417;
-};
-
-export type GetTurnSessionQueryParams = {
-    /**
-     * @type string
-    */
-    address: string;
-    /**
-     * @type string
-    */
-    interface: string;
-};
-
-/**
- * @description Turn server session
-*/
-export type GetTurnSession200 = TurnSession;
-
-export type GetTurnSessionQueryResponse = GetTurnSession200;
-
-export type GetTurnSessionQuery = {
-    Response: GetTurnSession200;
-    QueryParams: GetTurnSessionQueryParams;
-    Errors: any;
-};
-
-export type DeleteTurnSessionQueryParams = {
-    /**
-     * @type string
-    */
-    address: string;
-    /**
-     * @type string
-    */
-    interface: string;
-};
-
-/**
- * @description Deleted turn server session
-*/
-export type DeleteTurnSession200 = any;
-
-/**
- * @description Expectation failed
-*/
-export type DeleteTurnSession417 = any;
-
-export type DeleteTurnSessionMutationResponse = DeleteTurnSession200;
-
-export type DeleteTurnSessionMutation = {
-    Response: DeleteTurnSession200;
-    QueryParams: DeleteTurnSessionQueryParams;
-    Errors: DeleteTurnSession417;
-};
-
-export type GetTurnSessionStatisticsQueryParams = {
-    /**
-     * @type string
-    */
-    address: string;
-    /**
-     * @type string
-    */
-    interface: string;
-};
-
-/**
- * @description Turn server session statistics
-*/
-export type GetTurnSessionStatistics200 = TurnSessionStatistics;
-
-/**
- * @description Turn server session not found
-*/
-export type GetTurnSessionStatistics404 = any;
-
-export type GetTurnSessionStatisticsQueryResponse = GetTurnSessionStatistics200;
-
-export type GetTurnSessionStatisticsQuery = {
-    Response: GetTurnSessionStatistics200;
-    QueryParams: GetTurnSessionStatisticsQueryParams;
-    Errors: GetTurnSessionStatistics404;
 };

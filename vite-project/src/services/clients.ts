@@ -5,7 +5,7 @@
 
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, DeleteFile501, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "./types.ts";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -175,7 +175,7 @@ function getDeleteFileUrl() {
 }
 
 /**
- * @summary Delete a file
+ * @summary Delete a file on remote desk
  * {@link /api/desk/file}
  */
 export async function deleteFile(data: DeleteFileMutationRequest, config: Partial<RequestConfig<DeleteFileMutationRequest>> & { client?: Client } = {}) {
@@ -183,7 +183,7 @@ export async function deleteFile(data: DeleteFileMutationRequest, config: Partia
 
   const requestData = data
 
-  const res = await request<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400 | DeleteFile501>, DeleteFileMutationRequest>({ method : "DELETE", url : getDeleteFileUrl().url.toString(), data : requestData, ... requestConfig })
+  const res = await request<DeleteFileMutationResponse, ResponseErrorConfig<DeleteFile400>, DeleteFileMutationRequest>({ method : "DELETE", url : getDeleteFileUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
@@ -193,7 +193,7 @@ function getListFilesUrl() {
 }
 
 /**
- * @summary List files
+ * @summary List files on remote desk
  * {@link /api/desk/file/list}
  */
 export async function listFiles(params: ListFilesQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
@@ -517,7 +517,7 @@ function getListTerminalUrl(connection_id: ListTerminalPathParams["connection_id
 }
 
 /**
- * @summary List terminal
+ * @summary List terminal commands on remote desk
  * {@link /api/desk/terminals/:connection_id}
  */
 export async function listTerminal(connection_id: ListTerminalPathParams["connection_id"], config: Partial<RequestConfig> & { client?: Client } = {}) {
@@ -634,95 +634,5 @@ export async function queryServerInfo(config: Partial<RequestConfig> & { client?
 
 
   const res = await request<QueryServerInfoQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryServerInfoUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getGetTurnInfoUrl() {
-  const res = { method: 'GET', url: `/api/turn/info` as const }
-  return res
-}
-
-/**
- * @summary Get turn server info
- * {@link /api/turn/info}
- */
-export async function getTurnInfo(config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<GetTurnInfoQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetTurnInfoUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getGetTurnMetricsUrl() {
-  const res = { method: 'GET', url: `/api/turn/metrics` as const }
-  return res
-}
-
-/**
- * @summary Turn server metrics
- * {@link /api/turn/metrics}
- */
-export async function getTurnMetrics(config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<GetTurnMetricsQueryResponse, ResponseErrorConfig<GetTurnMetrics417>, unknown>({ method : "GET", url : getGetTurnMetricsUrl().url.toString(), ... requestConfig })
-  return res.data
-}
-
-function getGetTurnSessionUrl() {
-  const res = { method: 'GET', url: `/api/turn/session` as const }
-  return res
-}
-
-/**
- * @summary Get turn server session
- * {@link /api/turn/session}
- */
-export async function getTurnSession(params: GetTurnSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<GetTurnSessionQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetTurnSessionUrl().url.toString(), params, ... requestConfig })
-  return res.data
-}
-
-function getDeleteTurnSessionUrl() {
-  const res = { method: 'DELETE', url: `/api/turn/session` as const }
-  return res
-}
-
-/**
- * @summary Delete turn server session
- * {@link /api/turn/session}
- */
-export async function deleteTurnSession(params: DeleteTurnSessionQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<DeleteTurnSessionMutationResponse, ResponseErrorConfig<DeleteTurnSession417>, unknown>({ method : "DELETE", url : getDeleteTurnSessionUrl().url.toString(), params, ... requestConfig })
-  return res.data
-}
-
-function getGetTurnSessionStatisticsUrl() {
-  const res = { method: 'GET', url: `/api/turn/session/statistics` as const }
-  return res
-}
-
-/**
- * @summary Get turn server session statistics
- * {@link /api/turn/session/statistics}
- */
-export async function getTurnSessionStatistics(params: GetTurnSessionStatisticsQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<GetTurnSessionStatisticsQueryResponse, ResponseErrorConfig<GetTurnSessionStatistics404>, unknown>({ method : "GET", url : getGetTurnSessionStatisticsUrl().url.toString(), params, ... requestConfig })
   return res.data
 }

@@ -49,6 +49,16 @@ impl DeviceCodeService for NoOpDeviceCodeService {
     }
 }
 
+// ====== NodeTokenValidator trait ======
+
+/// Trait for validating node tokens (e.g. manager API tokens).
+pub trait NodeTokenValidator: Send + Sync {
+    fn validate_node_token<'a>(
+        &'a self,
+        token: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {

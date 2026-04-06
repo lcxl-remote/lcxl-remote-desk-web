@@ -29,7 +29,7 @@ export function listFilesSuspenseQueryOptions(params: ListFilesQueryParams, conf
 }
 
 /**
- * @summary List files
+ * @summary List files on remote desk
  * {@link /api/desk/file/list}
  */
 export function useListFilesSuspense<TData = ListFilesQueryResponse, TQueryKey extends QueryKey = ListFilesSuspenseQueryKey>(params: ListFilesQueryParams, options: 

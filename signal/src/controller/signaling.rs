@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
-use desk_signal_facade::model::version::VersionInfo;
+use desk_signal_facade::{model::version::VersionInfo, service::NodeTokenValidator};
 use desk_turn::model::TurnApiState;
 use log::{error, info};
 
@@ -22,14 +24,33 @@ pub async fn open_signaling_handle(
     session: Session,
     stream: web::Payload,
     turn_api_state: web::Data<TurnApiState>,
+    validator_opt: Option<web::Data<Arc<dyn NodeTokenValidator>>>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    let user_opt = session.get_current_user::<CurrentUser>()?;
+    let mut user = None;
 
-    let user = if let Some(user) = user_opt {
-        user
+    // Check token-based node authentication first
+    if let Some(token) = &query.0.token {
+        if let Some(validator) = &validator_opt {
+            if validator.validate_node_token(token).await {
+                user = Some(CurrentUser::new_admin("server_node"));
+                info!("Node token validated successfully");
+            } else {
+                log::warn!("Invalid node token provided");
+            }
+        }
+    }
+
+    // Fallback to session authentication if no valid token
+    let user = if let Some(u) = user {
+        u
     } else {
-        log::warn!("User not logged in");
-        return Err(actix_web::error::ErrorUnauthorized("User not logged in"));
+        let user_opt = session.get_current_user::<CurrentUser>()?;
+        if let Some(u) = user_opt {
+            u
+        } else {
+            log::warn!("User not logged in and no valid node token provided");
+            return Err(actix_web::error::ErrorUnauthorized("Unauthorized"));
+        }
     };
 
     info!("User {} is signaling", user.name);

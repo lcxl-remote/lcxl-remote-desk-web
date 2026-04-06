@@ -29,7 +29,7 @@ export function listFilesQueryOptions(params: ListFilesQueryParams, config: Part
 }
 
 /**
- * @summary List files
+ * @summary List files on remote desk
  * {@link /api/desk/file/list}
  */
 export function useListFiles<TData = ListFilesQueryResponse, TQueryData = ListFilesQueryResponse, TQueryKey extends QueryKey = ListFilesQueryKey>(params: ListFilesQueryParams, options: 

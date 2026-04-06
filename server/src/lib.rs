@@ -115,11 +115,11 @@ impl TauriLoginToken {
 }
 
 /// Constant-time byte comparison
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut result = 0u8;
+    let mut result = 0;
     for (x, y) in a.iter().zip(b.iter()) {
         result |= x ^ y;
     }
@@ -228,12 +228,21 @@ pub async fn run_with_channels(
 
     let security_approval_sender = web::Data::new(channels.security_approval_sender.clone());
 
+    let local_node_token = uuid::Uuid::new_v4().to_string();
+    let validator: Arc<dyn desk_signal_facade::service::NodeTokenValidator> = Arc::new(
+        crate::service::signaling::LocalNodeTokenValidator {
+            settings: shared_settings_data.clone(),
+            local_node_token: local_node_token.clone(),
+        }
+    );
+    let validator_data = web::Data::new(validator);
+
     // start desk session if mode is Default or DeskServer
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::DeskServer {
         info!("Starting desk session");
         let settings_clone = shared_settings_data.clone();
         actix_web::rt::spawn(async move {
-            if let Err(e) = start_desk_session(settings_clone, channels).await {
+            if let Err(e) = start_desk_session(settings_clone, channels, local_node_token).await {
                 error!("Desk session error: {}", e);
             }
         });
@@ -247,6 +256,7 @@ pub async fn run_with_channels(
         let startup_mode = startup_mode.clone();
         let tauri_login_token = tauri_login_token.clone();
         let security_approval_sender = security_approval_sender.clone();
+        let validator_data = validator_data.clone();
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
@@ -254,6 +264,7 @@ pub async fn run_with_channels(
             .app_data(tauri_login_token.clone())
             .app_data(connection_map.clone())
             .app_data(security_approval_sender.clone())
+            .app_data(validator_data.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
                     cfg.app_data(turn_api_state.clone());
