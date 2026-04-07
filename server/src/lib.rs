@@ -295,6 +295,20 @@ pub async fn run_with_channels(
             .service(get_captcha)
             .service(query_server_info)
             .service(init_system)
+            .service(
+                utoipa_actix_web::scope("/api/desk")
+                    .configure({
+                        let startup_mode = startup_mode.clone();
+                        move |cfg| {
+                            if startup_mode == StartupMode::Default
+                                || startup_mode == StartupMode::Signaling
+                            {
+                                log::info!("Registering signaling route at /api/desk/signaling");
+                                cfg.service(open_signaling_handle);
+                            }
+                        }
+                    })
+            )
             // TODO need to login for these routes
             .service(
                 // need to login for these routes
@@ -322,19 +336,20 @@ pub async fn run_with_channels(
                             .service(open_terminal_session)
                             .service(query_sysinfo)
                             .service(query_backend_info)
-                            .configure(move |cfg| {
-                                if startup_mode == StartupMode::Default
-                                    || startup_mode == StartupMode::Signaling
-                                {
-                                    log::info!("Registering signaling route at /api/desk/signaling");
-                                    cfg.service(open_signaling_handle)
-                                        .service(delete_file)
-                                        .service(list_files)
-                                        .service(create_device_code)
-                                        .service(list_device_codes)
-                                        .service(update_device_code)
-                                        .service(delete_device_code)
-                                        .service(batch_delete_device_codes);
+                            .configure({
+                                let startup_mode = startup_mode.clone();
+                                move |cfg| {
+                                    if startup_mode == StartupMode::Default
+                                        || startup_mode == StartupMode::Signaling
+                                    {
+                                        cfg.service(delete_file)
+                                            .service(list_files)
+                                            .service(create_device_code)
+                                            .service(list_device_codes)
+                                            .service(update_device_code)
+                                            .service(delete_device_code)
+                                            .service(batch_delete_device_codes);
+                                    }
                                 }
                             }),
                     )
@@ -349,7 +364,7 @@ pub async fn run_with_channels(
                                     .service(get_turn_metrics),
                             );
                         }
-                    }),
+                    })
             )
             .openapi_service(|mut api| {
                 api.merge(openapi::ExtraSchemas::openapi());
