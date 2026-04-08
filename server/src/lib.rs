@@ -386,6 +386,7 @@ pub async fn run_with_channels(
                         // support html5 history mode
                         let (http_req, _payload) = req.into_parts();
                         let path = default_static_file_path.clone().join("index.html");
+                        log::debug!("Default handler hit for path: {}, serving index.html", http_req.path());
                         async {
                             let response =
                                 actix_files::NamedFile::open(path)?.into_response(&http_req);

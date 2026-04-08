@@ -21,7 +21,7 @@ use desk_utils::error::{CustomDeskError, DeskErrorCode};
 
 use futures_util::{SinkExt, StreamExt};
 
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use once_cell::sync::OnceCell;
 use prometheus::{HistogramVec, register_histogram_vec};
 use rustls::{ClientConfig, RootCertStore};
@@ -521,6 +521,8 @@ async fn maintain_signaling_connection(
     let mut url = Url::parse(signaling_url.trim())?;
     url.set_query(Some(&version_query));
     let connect_url = url.to_string();
+
+    debug!("Full connection URL: {}", connect_url);
 
     let (response, framed) = match client.ws(&connect_url).connect().await {
         Ok(res) => res,
