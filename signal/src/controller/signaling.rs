@@ -19,13 +19,23 @@ use crate::{model::SharedConnectionMap, service::handle_signaling};
 #[get("/signaling")]
 pub async fn open_signaling_handle(
     req: HttpRequest,
-    query: web::Query<VersionInfo>,
+    query_res: Result<web::Query<VersionInfo>, actix_web::Error>,
     connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
     turn_api_state: web::Data<TurnApiState>,
     validator_opt: Option<web::Data<Arc<dyn NodeTokenValidator>>>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    info!("Incoming signaling request: {} {}", req.method(), req.uri());
+
+    let query = match query_res {
+        Ok(q) => q,
+        Err(e) => {
+            error!("Failed to parse signaling query params: {}", e);
+            return Err(e);
+        }
+    };
+
     let mut user = None;
 
     // Check token-based node authentication first

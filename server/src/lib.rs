@@ -365,7 +365,7 @@ pub async fn run_with_channels(
                             );
                         }
                     })
-            )
+                    )
             .openapi_service(|mut api| {
                 api.merge(openapi::ExtraSchemas::openapi());
                 SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api)

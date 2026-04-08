@@ -31,6 +31,7 @@ use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio::time::Instant;
+use url::Url;
 use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
@@ -517,7 +518,10 @@ async fn maintain_signaling_connection(
 
     info!("Connecting to signaling server: {}", signaling_url);
 
-    let connect_url = format!("{}?{}", signaling_url, version_query);
+    let mut url = Url::parse(signaling_url.trim())?;
+    url.set_query(Some(&version_query));
+    let connect_url = url.to_string();
+
     let (response, framed) = match client.ws(&connect_url).connect().await {
         Ok(res) => res,
         Err(e) => {
