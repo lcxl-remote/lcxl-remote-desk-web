@@ -518,9 +518,12 @@ async fn maintain_signaling_connection(
 
     info!("Connecting to signaling server: {}", signaling_url);
 
-    let mut url = Url::parse(signaling_url.trim())?;
-    url.set_query(Some(&version_query));
-    let connect_url = url.to_string();
+    let signaling_url_clean = signaling_url.trim().trim_matches(|c: char| c.is_control());
+    let connect_url = if signaling_url_clean.contains('?') {
+        format!("{}&{}", signaling_url_clean, version_query)
+    } else {
+        format!("{}?{}", signaling_url_clean, version_query)
+    };
 
     debug!("Full connection URL: {}", connect_url);
 
