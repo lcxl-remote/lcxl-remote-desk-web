@@ -18,6 +18,8 @@ import { LogSettings } from '@/features/settings/log-settings';
 import { SecuritySettings } from '@/features/settings/security-settings';
 import { UserSettings } from '@/features/settings/user-settings';
 import { DeviceCodeList } from '@/features/settings/device-code-list';
+import { SettingsLayout } from '@/features/settings/settings-layout';
+import { SettingsOverview } from '@/features/settings/settings-overview';
 
 export const router = createBrowserRouter([
     {
@@ -73,28 +75,38 @@ export const router = createBrowserRouter([
                 element: <TerminalSession />,
             },
             {
-                path: 'system/settings',
-                element: <SystemSettings />,
-            },
-            {
-                path: 'system/turn',
-                element: <TurnSettings />,
-            },
-            {
-                path: 'system/turn-client',
-                element: <TurnClientSettingsPage />,
-            },
-            {
-                path: 'system/log',
-                element: <LogSettings />,
-            },
-            {
-                path: 'system/security',
-                element: <SecuritySettings />,
-            },
-            {
-                path: 'system/device-codes',
-                element: <DeviceCodeList />,
+                path: 'system',
+                element: <SettingsLayout />,
+                children: [
+                    {
+                        index: true,
+                        element: <SettingsOverview />,
+                    },
+                    {
+                        path: 'settings',
+                        element: <SystemSettings />,
+                    },
+                    {
+                        path: 'turn',
+                        element: <TurnSettings />,
+                    },
+                    {
+                        path: 'turn-client',
+                        element: <TurnClientSettingsPage />,
+                    },
+                    {
+                        path: 'log',
+                        element: <LogSettings />,
+                    },
+                    {
+                        path: 'security',
+                        element: <SecuritySettings />,
+                    },
+                    {
+                        path: 'device-codes',
+                        element: <DeviceCodeList />,
+                    },
+                ]
             },
             {
                 path: 'user/settings',

@@ -450,4 +450,8 @@ export default {
   'security.dialog.rememberChoice': 'Remember my choice',
   'security.dialog.deny': 'Deny',
   'security.dialog.allow': 'Allow',
+  'pages.settings.category.general': 'General Settings',
+  'pages.settings.category.signal': 'Signal Server Settings',
+  'pages.settings.category.desk': 'Desk Server Settings',
+  'pages.settings.backToOverview': 'Back to Settings Overview',
 };

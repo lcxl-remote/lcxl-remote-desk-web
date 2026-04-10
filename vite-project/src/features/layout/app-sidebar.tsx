@@ -89,46 +89,10 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 });
             }
 
-            const settingsItems: any[] = [
-                {
-                    title: "menu.settings.system",
-                    url: "/system/settings",
-                },
-                {
-                    title: "menu.settings.log",
-                    url: "/system/log",
-                }
-            ];
-
-            const isDeskServer = serverInfo.startup_mode === "desk_server" || serverInfo.startup_mode === "desk-server";
-            const isSignaling = serverInfo.startup_mode === "signaling";
-
-            if (!isDeskServer) {
-                settingsItems.push({
-                    title: "menu.settings.turn",
-                    url: "/system/turn",
-                });
-                settingsItems.push({
-                    title: "menu.settings.deviceCode",
-                    url: "/system/device-codes",
-                });
-            }
-
-            if (!isSignaling) {
-                settingsItems.push({
-                    title: "menu.settings.turnClient",
-                    url: "/system/turn-client",
-                });
-                settingsItems.push({
-                    title: "menu.settings.security",
-                    url: "/system/security",
-                });
-            }
-
             dynamicItems.push({
                 title: "menu.settings",
+                url: "/system",
                 icon: Settings,
-                items: settingsItems,
             });
         }
 

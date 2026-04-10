@@ -448,4 +448,8 @@ export default {
   'security.dialog.rememberChoice': '记住此选项',
   'security.dialog.deny': '拒绝',
   'security.dialog.allow': '允许',
+  'pages.settings.category.general': '通用设置',
+  'pages.settings.category.signal': 'Signal 服务端设置',
+  'pages.settings.category.desk': 'Desk 服务端设置',
+  'pages.settings.backToOverview': '返回设置概览',
 };
