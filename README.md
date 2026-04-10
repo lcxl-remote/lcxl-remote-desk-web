@@ -68,10 +68,10 @@ graph LR
 3. **Start Frontend**:
    ```bash
    cd vite-project
-   pnpm install
-   pnpm dev
+   npm ci
+   npm run dev
    ```
-   Access `http://localhost:5173`.
+   Access `http://localhost:5174`.
 
 ### Option 2: Docker Deployment
 

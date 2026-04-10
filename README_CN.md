@@ -68,10 +68,10 @@ graph LR
 3. **启动前端**：
    ```bash
    cd vite-project
-   pnpm install
-   pnpm dev
+   npm ci
+   npm run dev
    ```
-   访问 `http://localhost:5173`。
+   访问 `http://localhost:5174`。
 
 ### 方式 2：Docker 部署
 

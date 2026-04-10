@@ -19,12 +19,13 @@ use crate::{
     controller::{
         info::{query_backend_info, query_server_info, query_sysinfo},
         init::init_system,
-        login::{change_password, get_captcha, login_account, logout_account},
+        login::{change_password, get_captcha, login_account, login_tauri, logout_account},
         settings::{
             query_log_settings, query_security_settings, query_settings, query_telemetry_status,
-            query_turn_settings, query_turn_client_settings, regenerate_turn_secret, submit_security_approval,
-            update_log_settings, update_security_settings, update_settings,
-            update_telemetry_consent, update_turn_settings, update_turn_client_settings,
+            query_turn_client_settings, query_turn_settings, regenerate_turn_secret,
+            submit_security_approval, update_log_settings, update_security_settings,
+            update_settings, update_telemetry_consent, update_turn_client_settings,
+            update_turn_settings,
         },
         turn::{
             delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
@@ -40,6 +41,7 @@ use actix_session::{SessionMiddleware, storage::CookieSessionStore};
 use actix_web::{
     App, HttpResponse, HttpServer,
     cookie::Key,
+    dev::Service as _,
     dev::{ServiceRequest, ServiceResponse},
     error::InternalError,
     middleware::{Logger, from_fn},
@@ -48,12 +50,12 @@ use actix_web::{
 use clap::Parser as _;
 use desk_signal::{
     controller::{
+        connection::list_connections,
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
             update_device_code,
         },
         files::{delete_file, list_files},
-        connection::list_connections,
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
     },
@@ -229,12 +231,11 @@ pub async fn run_with_channels(
     let security_approval_sender = web::Data::new(channels.security_approval_sender.clone());
 
     let local_node_token = uuid::Uuid::new_v4().to_string();
-    let validator: Arc<dyn desk_signal_facade::service::NodeTokenValidator> = Arc::new(
-        crate::service::signaling::LocalNodeTokenValidator {
+    let validator: Arc<dyn desk_signal_facade::service::NodeTokenValidator> =
+        Arc::new(crate::service::signaling::LocalNodeTokenValidator {
             settings: shared_settings_data.clone(),
             local_node_token: local_node_token.clone(),
-        }
-    );
+        });
     let validator_data = web::Data::new(validator);
 
     // start desk session if mode is Default or DeskServer
@@ -260,6 +261,37 @@ pub async fn run_with_channels(
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
+            .map(|app| {
+                app.wrap_fn(|req, srv| {
+                    let method = req.method().clone();
+                    let uri = req.uri().to_string();
+                    let peer = req.connection_info().realip_remote_addr().map(str::to_owned);
+                    let fut = srv.call(req);
+
+                    async move {
+                        let res = fut.await;
+                        match &res {
+                            Err(err) => {
+                                error!(
+                                    "HTTP request failed: method={}, uri={}, peer={:?}, error={}, debug={:?}",
+                                    method, uri, peer, err, err
+                                );
+                            }
+                            Ok(resp) if resp.status().is_server_error() => {
+                                error!(
+                                    "HTTP request returned server error: method={}, uri={}, peer={:?}, status={}",
+                                    method,
+                                    uri,
+                                    peer,
+                                    resp.status()
+                                );
+                            }
+                            _ => {}
+                        }
+                        res
+                    }
+                })
+            })
             .app_data(shared_settings_data.clone())
             .app_data(tauri_login_token.clone())
             .app_data(connection_map.clone())
@@ -289,26 +321,23 @@ pub async fn run_with_channels(
             ) // <- limit size of the payload (global configuration)
             // no need to login for these routes
             .service(login_account)
-            .service(crate::controller::login::login_tauri)
+            .service(login_tauri)
             .service(logout_account)
             .service(get_current_user)
             .service(get_captcha)
             .service(query_server_info)
             .service(init_system)
-            .service(
-                utoipa_actix_web::scope("/api/desk")
-                    .configure({
-                        let startup_mode = startup_mode.clone();
-                        move |cfg| {
-                            if startup_mode == StartupMode::Default
-                                || startup_mode == StartupMode::Signaling
-                            {
-                                log::info!("Registering signaling route at /api/desk/signaling");
-                                cfg.service(open_signaling_handle);
-                            }
-                        }
-                    })
-            )
+            .configure({
+                let startup_mode = startup_mode.clone();
+                move |cfg| {
+                    if startup_mode == StartupMode::Default
+                        || startup_mode == StartupMode::Signaling
+                    {
+                        log::info!("Registering signaling route at /api/desk/signaling");
+                        cfg.service(open_signaling_handle);
+                    }
+                }
+            })
             // TODO need to login for these routes
             .service(
                 // need to login for these routes
@@ -364,8 +393,8 @@ pub async fn run_with_channels(
                                     .service(get_turn_metrics),
                             );
                         }
-                    })
-                    )
+                    }),
+            )
             .openapi_service(|mut api| {
                 api.merge(openapi::ExtraSchemas::openapi());
                 SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api)
@@ -386,7 +415,10 @@ pub async fn run_with_channels(
                         // support html5 history mode
                         let (http_req, _payload) = req.into_parts();
                         let path = default_static_file_path.clone().join("index.html");
-                        log::debug!("Default handler hit for path: {}, serving index.html", http_req.path());
+                        log::debug!(
+                            "Default handler hit for path: {}, serving index.html",
+                            http_req.path()
+                        );
                         async {
                             let response =
                                 actix_files::NamedFile::open(path)?.into_response(&http_req);

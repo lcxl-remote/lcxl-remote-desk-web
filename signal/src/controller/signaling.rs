@@ -16,25 +16,17 @@ use crate::{model::SharedConnectionMap, service::handle_signaling};
         (status = 200, description = "return websocket stream"),
     ),
 )]
-#[get("/signaling")]
+#[get("/api/desk/signaling")]
 pub async fn open_signaling_handle(
     req: HttpRequest,
-    query_res: Result<web::Query<VersionInfo>, actix_web::Error>,
+    query: web::Query<VersionInfo>,
     connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
-    turn_api_state: web::Data<TurnApiState>,
+    turn_api_state: Option<web::Data<TurnApiState>>,
     validator_opt: Option<web::Data<Arc<dyn NodeTokenValidator>>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     info!("Incoming signaling request: {} {}", req.method(), req.uri());
-
-    let query = match query_res {
-        Ok(q) => q,
-        Err(e) => {
-            error!("Failed to parse signaling query params: {}", e);
-            return Err(e);
-        }
-    };
 
     let mut user = None;
 
@@ -77,6 +69,9 @@ pub async fn open_signaling_handle(
         .connection_info()
         .realip_remote_addr()
         .map(|s| s.to_string());
+    let turn_settings = turn_api_state
+        .as_ref()
+        .map(|state| state.as_ref().settings.clone());
 
     // start task but don't wait for it
     rt::spawn(async move {
@@ -88,7 +83,7 @@ pub async fn open_signaling_handle(
             session,
             user,
             ip,
-            turn_api_state.into_inner().as_ref().settings.clone(),
+            turn_settings,
         )
         .await;
         if let Err(e) = result {

@@ -34,7 +34,7 @@ LCXL Remote Desk Web 是一个基于 WebRTC 技术的高效现代远程桌面解
    npm ci
    npm run dev
    ```
-   *启动后访问 `http://localhost:5173`。*
+   *启动后访问 `http://localhost:5174`。*
 
 ### Tauri 桌面客户端
 适用于需要“隐私屏”或“白板”等高级功能的场景：

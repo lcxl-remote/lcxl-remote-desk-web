@@ -16,14 +16,19 @@
 - [x] 重构 `server::lib.rs`，注入 `LocalNodeTokenValidator` 并生成随机 `local_node_token`。
 - [x] 重构 `server::signaling.rs`，实现 `start_desk_session` 的多路并发连接与事件广播转发。
 - [x] 修复 `SharedSettings` 及其内部 `RwLock` 的克隆问题。
+- [x] 修复 401 错误：将信令路由移出 `reject_anonymous_users` 中间件范围。
 - [x] 同步更新 `openapi.json` 及前端类型钩子。
+- [x] 修复 500 错误：处理因 `turn` 服务启动失败导致的 `TurnApiState` 数据提取失败，使注入参数为 `Option` 类型。
 
 ## 4. 执行总结 (Walkthrough)
 1. **模型变更**：在 `signal-facade/src/model/version.rs` 中为 `VersionInfo` 增加了 `token` 属性。
 2. **服务端认证**：在 `signal/src/controller/signaling.rs` 中优先检查 `query.token`，若校验通过则直接创建系统管理员 User。
-3. **连接重构**：`start_desk_session` 不再阻塞于单一 URL，而是启动两个独立的异步 Task。本地 Task 默认连接 `127.0.0.1` 并附带随机生成的节点 Token；Manager Task 则根据配置连接。
-4. **编译修复**：解决了由于 `ExternalChannels` 包含不可 Clone 的 Receiver 导致的并发问题，通过 `broadcast` 机制实现了事件在多路连接间的共享。
-5. **验证**：通过 `cargo check` 确认代码逻辑完整，通过 `update_openapi.ps1` 同步了前端定义。
+3. **路由调整**：发现 `/api` 范围受 `reject_anonymous_users` 中间件保护导致 Token 无法通过握手。已将 `signaling` 路由移至独立的 `/api/desk` 作用域，确保 Token 逻辑能正常进入 Handler。
+4. **连接重构**：`start_desk_session` 不再阻塞于单一 URL，而是启动两个独立的异步 Task。本地 Task 默认连接 `127.0.0.1` 并附带随机生成的节点 Token；Manager Task 则根据配置连接。
+5. **编译修复**：解决了由于 `ExternalChannels` 包含不可 Clone 的 Receiver 导致的并发问题，通过 `broadcast` 机制实现了事件在多路连接间的共享。
+6. **验证**：通过 `cargo check` 确认代码逻辑完整，通过 `update_openapi.ps1` 同步了前端定义。
+7. **修复 500 错误 (URL 解析)**：使用 `url::Url` 解析 `ws://` 协议时，它将其视作不包含 query 的特殊格式从而移除了 `?` 导致访问了错误的路径并落入了 default_handler。已改用手动 `format!` 拼接解决该问题。
+8. **修复 500 错误 (依赖注入)**：修复了在没有可用 UDP 接口等情况下 `turn` 服务启动失败，导致 `TurnApiState` 没有被注入到 Actix app data 从而引发 Actix-Web `Extractor` 返回 500 的问题。将其改为 `Option<web::Data<TurnApiState>>` 允许优雅降级。
 
 ## 5. 结论 (Conclusion)
 该重构显著提升了系统的可扩展性与安全性。节点间的通讯不再依赖用户凭据，且支持了企业级场景下本地与云端双连接的并发需求。

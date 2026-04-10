@@ -69,7 +69,7 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
             let host = if enable_ipv6 { "[::1]" } else { "127.0.0.1" };
             let mut frontend_host_port = format!("{}:{}", host, server_port);
 
-            // Use Vite dev server (5173) automatically when running in debug mode (e.g. IDE Run/Debug)
+            // Use Vite dev server (5174) automatically when running in debug mode (e.g. IDE Run/Debug)
             // Unless explicitly forced to use production build frontend via args
             if cfg!(debug_assertions) && !settings.args.prod_frontend {
                 log::info!("Debug build detected, using vite dev server url for webview. (Use --prod-frontend to override)");

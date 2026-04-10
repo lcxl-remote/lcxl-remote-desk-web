@@ -21,7 +21,7 @@ pub async fn open_device_signaling_handle(
     connection_map: web::Data<SharedConnectionMap>,
     _session: Session,
     stream: web::Payload,
-    turn_api_state: web::Data<TurnApiState>,
+    turn_api_state: Option<web::Data<TurnApiState>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let version_info = query.0.clone();
 
@@ -61,6 +61,10 @@ pub async fn open_device_signaling_handle(
         .realip_remote_addr()
         .map(|s| s.to_string());
 
+    let turn_settings = turn_api_state
+        .as_ref()
+        .map(|state| state.as_ref().settings.clone());
+
     // start task but don't wait for it
     rt::spawn(async move {
         // receive messages from websocket
@@ -71,7 +75,7 @@ pub async fn open_device_signaling_handle(
             actix_session,
             virtual_user,
             ip,
-            turn_api_state.into_inner().as_ref().settings.clone(),
+            turn_settings,
         )
         .await;
         if let Err(e) = result {

@@ -3,7 +3,7 @@ use actix_session::Session;
 use actix_web::{HttpRequest, HttpResponse, get, rt, web};
 use desk_server_user::{model::CurrentUser, service::UserSessionAccessor};
 use desk_signal_facade::model::{
-    signal::{ForwardSignalingSender, RemoteDeskTypeEnum, SignalingModel, SignalingType},
+    signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType, TurnProvider},
     terminal::{StartTerminalPath, StartTerminalSession},
     version::VersionInfo,
 };
@@ -30,7 +30,7 @@ pub async fn open_terminal_session(
     connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
-    turn_api_state: web::Data<TurnApiState>,
+    turn_api_state: Option<web::Data<TurnApiState>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let user_opt = session.get_current_user::<CurrentUser>()?;
 
@@ -73,6 +73,11 @@ pub async fn open_terminal_session(
 
     let random_uuid = Uuid::new_v4();
     let connection_id = String::from(random_uuid);
+    let turn_provider = turn_api_state
+        .as_ref()
+        .map(|state| {
+            std::sync::Arc::new(state.as_ref().settings.clone()) as std::sync::Arc<dyn TurnProvider>
+        });
     // Handle signaling logic here
     let mut signaling_context = SignalingContext::init(
         connection_id,
@@ -81,7 +86,7 @@ pub async fn open_terminal_session(
         ws_session,
         user,
         ip,
-        std::sync::Arc::new(turn_api_state.into_inner().as_ref().settings.clone()),
+        turn_provider,
         None,
         desk_server_version::SERVER_API_VERSION,
     )

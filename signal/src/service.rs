@@ -5,7 +5,7 @@ use desk_signal_facade::{
     error::DeskSignalFacadeError,
     model::{
         connection::SharedConnectionMap,
-        signal::RemoteDeskTypeEnum,
+        signal::{RemoteDeskTypeEnum, TurnProvider},
         version::VersionInfo,
     },
     service::{DeviceCodeService, SignalingHandler},
@@ -64,7 +64,7 @@ pub async fn handle_signaling(
     ws_session: Session,
     user: CurrentUser,
     ip: Option<String>,
-    turn: TurnSettings,
+    turn: Option<TurnSettings>,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
     let random_uuid = Uuid::new_v4();
@@ -88,7 +88,7 @@ pub async fn handle_signaling(
         ws_session,
         user,
         ip,
-        std::sync::Arc::new(turn),
+        turn.map(|v| std::sync::Arc::new(v) as std::sync::Arc<dyn TurnProvider>),
         device_code,
         desk_server_version::SERVER_API_VERSION,
     )

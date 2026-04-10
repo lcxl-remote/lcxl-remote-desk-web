@@ -853,10 +853,12 @@ impl DeskSession {
                     }
                 }
                 None => {
-                    return DeskError::custom_error(
-                        DeskErrorCode::SYSTEM_ERROR,
-                        "Invalid ICE server transport",
+                    log::warn!(
+                        "Ignoring ICE server with invalid/empty transport for connection {}: {:?}",
+                        from_connection_id,
+                        ice_server
                     );
+                    continue;
                 }
             }
         }

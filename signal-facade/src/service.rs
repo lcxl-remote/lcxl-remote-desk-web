@@ -141,7 +141,7 @@ pub struct SignalingHandler<U: SignalingUser> {
     pub connection_state: ConnectionState,
     pub connection_map: web::Data<SharedConnectionMap>,
     pub user: U,
-    pub turn: Arc<dyn TurnProvider>,
+    pub turn: Option<Arc<dyn TurnProvider>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -185,7 +185,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
         ws_session: Session,
         user: U,
         ip: Option<String>,
-        turn: Arc<dyn TurnProvider>,
+        turn: Option<Arc<dyn TurnProvider>>,
         device_code: Option<String>,
         server_api_version: i32,
     ) -> Result<Self, DeskSignalFacadeError> {
@@ -411,11 +411,23 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 // password is client id
                 let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
-                    let ice_server = self
-                        .turn
-                        .get_ice_servers(&self.connection_state.model.connection_id, &client_id);
-
-                    data.ice_servers.push(ice_server);
+                    if let Some(turn) = &self.turn {
+                        let ice_server =
+                            turn.get_ice_servers(&self.connection_state.model.connection_id, &client_id);
+                        if !ice_server.urls.is_empty() {
+                            data.ice_servers.push(ice_server);
+                        } else {
+                            log::warn!(
+                                "Skipping empty TURN ICE servers for connection {}",
+                                self.connection_state.model.connection_id
+                            );
+                        }
+                    } else {
+                        log::warn!(
+                            "TURN settings unavailable, skip injecting TURN ICE for connection {}",
+                            self.connection_state.model.connection_id
+                        );
+                    }
                 }
                 let data = Some(serde_json::to_value(data)?);
                 let new_signaling_model = SignalingModel::new(
@@ -437,11 +449,23 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 // password is client id
                 let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
-                    let ice_server = self
-                        .turn
-                        .get_ice_servers(&self.connection_state.model.connection_id, &client_id);
-
-                    data.ice_servers.push(ice_server);
+                    if let Some(turn) = &self.turn {
+                        let ice_server =
+                            turn.get_ice_servers(&self.connection_state.model.connection_id, &client_id);
+                        if !ice_server.urls.is_empty() {
+                            data.ice_servers.push(ice_server);
+                        } else {
+                            log::warn!(
+                                "Skipping empty TURN ICE servers for connection {}",
+                                self.connection_state.model.connection_id
+                            );
+                        }
+                    } else {
+                        log::warn!(
+                            "TURN settings unavailable, skip injecting TURN ICE for connection {}",
+                            self.connection_state.model.connection_id
+                        );
+                    }
                 }
                 let data = Some(serde_json::to_value(data)?);
                 let new_signaling_model = SignalingModel::new(
