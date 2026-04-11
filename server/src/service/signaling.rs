@@ -316,7 +316,6 @@ use desk_signal_facade::service::NodeTokenValidator;
 
 pub struct LocalNodeTokenValidator {
     pub settings: web::Data<SharedSettings>,
-    pub local_node_token: String,
 }
 
 impl NodeTokenValidator for LocalNodeTokenValidator {
@@ -326,15 +325,18 @@ impl NodeTokenValidator for LocalNodeTokenValidator {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         let token = token.to_string();
         let settings = self.settings.clone();
-        let local_token = self.local_node_token.clone();
         Box::pin(async move {
-            let manager_api_token = settings.read().await.system.manager_api_token.clone();
-            let is_valid = if let Some(m_token) = manager_api_token {
-                crate::constant_time_eq(m_token.as_bytes(), token.as_bytes())
-            } else {
-                false
-            } || crate::constant_time_eq(local_token.as_bytes(), token.as_bytes());
-            is_valid
+            // Reject empty tokens immediately
+            if token.is_empty() {
+                return false;
+            }
+            let local_signaling_token = settings.read().await.system.local_signaling_token.clone();
+            if let Some(local_token) = local_signaling_token {
+                if !local_token.is_empty() {
+                    return crate::constant_time_eq(local_token.as_bytes(), token.as_bytes());
+                }
+            }
+            false
         })
     }
 }
@@ -342,7 +344,7 @@ impl NodeTokenValidator for LocalNodeTokenValidator {
 pub async fn start_desk_session(
     settings: web::Data<SharedSettings>,
     mut channels: crate::ExternalChannels,
-    local_node_token: String,
+    startup_mode: crate::model::settings::StartupMode,
 ) -> Result<(), DeskError> {
     // Take the Tauri privacy screen receiver and broadcast it
     let broadcast_tx = if let Some(mut rx) = channels.private_screen_state_receiver.take() {
@@ -358,110 +360,192 @@ pub async fn start_desk_session(
         None
     };
 
-    let local_channels = crate::ExternalChannels {
-        private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
-        private_screen_state_receiver: None,
-        tauri_login_token: channels.tauri_login_token.clone(),
-        whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
-        security_approval_sender: channels.security_approval_sender.clone(),
-    };
-    
-    let remote_channels = crate::ExternalChannels {
-        private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
-        private_screen_state_receiver: None,
-        tauri_login_token: channels.tauri_login_token.clone(),
-        whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
-        security_approval_sender: channels.security_approval_sender.clone(),
-    };
+    // ===== Loop 1: Local Signaling Connection =====
+    // Only in Default mode (signaling server and desk server co-exist in same process)
+    if startup_mode == crate::model::settings::StartupMode::Default {
+        let local_settings = settings.clone();
+        let local_broadcast_tx = broadcast_tx.clone();
+        let local_channels_clone = crate::ExternalChannels {
+            private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
+            private_screen_state_receiver: None,
+            tauri_login_token: channels.tauri_login_token.clone(),
+            whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
+            security_approval_sender: channels.security_approval_sender.clone(),
+        };
 
-    let local_settings = settings.clone();
-    let local_token_clone = local_node_token.clone();
-    let local_broadcast_tx = broadcast_tx.clone();
-    
-    // Local connection loop
-    actix_web::rt::spawn(async move {
-        loop {
-            let (port, enable_ipv6) = {
-                let s = local_settings.read().await;
-                (s.system.port, s.system.enable_ipv6)
-            };
-            let local_url = if enable_ipv6 {
-                format!("ws://[::1]:{}/api/desk/signaling", port)
-            } else {
-                format!("ws://127.0.0.1:{}/api/desk/signaling", port)
-            };
-            
-            // To pass receiver, we must create a new struct inside the loop, because it's consumed by `maintain_signaling_connection`
-            let mut channels_for_loop = crate::ExternalChannels {
-                private_screen_cmd_sender: local_channels.private_screen_cmd_sender.clone(),
-                private_screen_state_receiver: None, // Will use a channel adapter instead
-                tauri_login_token: local_channels.tauri_login_token.clone(),
-                whiteboard_cmd_sender: local_channels.whiteboard_cmd_sender.clone(),
-                security_approval_sender: local_channels.security_approval_sender.clone(),
-            };
-            
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            channels_for_loop.private_screen_state_receiver = Some(rx);
-            if let Some(btx) = &local_broadcast_tx {
-                let mut brx = btx.subscribe();
-                actix_web::rt::spawn(async move {
-                    while let Ok(event) = brx.recv().await {
-                        let _ = tx.send(event);
-                    }
-                });
-            }
-
-            let _ = maintain_signaling_connection(
-                local_settings.clone(),
-                channels_for_loop,
-                local_url,
-                local_token_clone.clone(),
-            )
-            .await;
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
-
-    // Remote manager connection loop
-    let remote_settings = settings.clone();
-    let remote_broadcast_tx = broadcast_tx.clone();
-    actix_web::rt::spawn(async move {
-        loop {
-            let (signaling_url, manager_api_token) = {
-                let s = remote_settings.read().await;
-                (s.system.signaling_url.clone(), s.system.manager_api_token.clone())
-            };
-            if let (Some(url), Some(token)) = (signaling_url, manager_api_token) {
-                let mut channels_for_loop = crate::ExternalChannels {
-                    private_screen_cmd_sender: remote_channels.private_screen_cmd_sender.clone(),
-                    private_screen_state_receiver: None,
-                    tauri_login_token: remote_channels.tauri_login_token.clone(),
-                    whiteboard_cmd_sender: remote_channels.whiteboard_cmd_sender.clone(),
-                    security_approval_sender: remote_channels.security_approval_sender.clone(),
+        actix_web::rt::spawn(async move {
+            loop {
+                let (port, enable_ipv6, local_token) = {
+                    let s = local_settings.read().await;
+                    (
+                        s.system.port,
+                        s.system.enable_ipv6,
+                        s.system.local_signaling_token.clone().unwrap_or_default(),
+                    )
                 };
-                
+
+                if local_token.is_empty() {
+                    log::warn!("local_signaling_token is not set, skipping local signaling connection");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+
+                let local_url = if enable_ipv6 {
+                    format!("ws://[::1]:{}/api/desk/signaling", port)
+                } else {
+                    format!("ws://127.0.0.1:{}/api/desk/signaling", port)
+                };
+
+                let mut channels_for_loop = crate::ExternalChannels {
+                    private_screen_cmd_sender: local_channels_clone.private_screen_cmd_sender.clone(),
+                    private_screen_state_receiver: None,
+                    tauri_login_token: local_channels_clone.tauri_login_token.clone(),
+                    whiteboard_cmd_sender: local_channels_clone.whiteboard_cmd_sender.clone(),
+                    security_approval_sender: local_channels_clone.security_approval_sender.clone(),
+                };
+
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
                 channels_for_loop.private_screen_state_receiver = Some(rx);
-                if let Some(btx) = &remote_broadcast_tx {
+                if let Some(btx) = &local_broadcast_tx {
                     let mut brx = btx.subscribe();
                     actix_web::rt::spawn(async move {
                         while let Ok(event) = brx.recv().await {
-                            let _ = tx.send(event);
+                            if tx.send(event).is_err() {
+                                break; // rx dropped, exit to prevent task leak
+                            }
                         }
                     });
                 }
 
                 let _ = maintain_signaling_connection(
-                    remote_settings.clone(),
+                    local_settings.clone(),
                     channels_for_loop,
-                    url,
-                    token,
+                    local_url,
+                    local_token,
                 )
                 .await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
+        });
+    }
+
+    // ===== Loop 2: Remote Signaling Server Connection =====
+    // In Default and DeskServer modes
+    {
+        let remote_sig_settings = settings.clone();
+        let remote_sig_broadcast_tx = broadcast_tx.clone();
+        let remote_sig_channels = crate::ExternalChannels {
+            private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
+            private_screen_state_receiver: None,
+            tauri_login_token: channels.tauri_login_token.clone(),
+            whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
+            security_approval_sender: channels.security_approval_sender.clone(),
+        };
+
+        actix_web::rt::spawn(async move {
+            loop {
+                let (signaling_url, signaling_token) = {
+                    let s = remote_sig_settings.read().await;
+                    (
+                        s.system.signaling_url.clone(),
+                        s.system.signaling_token.clone(),
+                    )
+                };
+                if let (Some(url), Some(token)) = (signaling_url, signaling_token) {
+                    if !url.is_empty() && !token.is_empty() {
+                        let mut channels_for_loop = crate::ExternalChannels {
+                            private_screen_cmd_sender: remote_sig_channels.private_screen_cmd_sender.clone(),
+                            private_screen_state_receiver: None,
+                            tauri_login_token: remote_sig_channels.tauri_login_token.clone(),
+                            whiteboard_cmd_sender: remote_sig_channels.whiteboard_cmd_sender.clone(),
+                            security_approval_sender: remote_sig_channels.security_approval_sender.clone(),
+                        };
+
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                        channels_for_loop.private_screen_state_receiver = Some(rx);
+                        if let Some(btx) = &remote_sig_broadcast_tx {
+                            let mut brx = btx.subscribe();
+                            actix_web::rt::spawn(async move {
+                                while let Ok(event) = brx.recv().await {
+                                    if tx.send(event).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+
+                        let _ = maintain_signaling_connection(
+                            remote_sig_settings.clone(),
+                            channels_for_loop,
+                            url,
+                            token,
+                        )
+                        .await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    // ===== Loop 3: Remote Manager Server Connection =====
+    // In Default and DeskServer modes
+    {
+        let remote_mgr_settings = settings.clone();
+        let remote_mgr_broadcast_tx = broadcast_tx.clone();
+        let remote_mgr_channels = crate::ExternalChannels {
+            private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
+            private_screen_state_receiver: None,
+            tauri_login_token: channels.tauri_login_token.clone(),
+            whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
+            security_approval_sender: channels.security_approval_sender.clone(),
+        };
+
+        actix_web::rt::spawn(async move {
+            loop {
+                let (manager_url, manager_api_token) = {
+                    let s = remote_mgr_settings.read().await;
+                    (
+                        s.system.manager_url.clone(),
+                        s.system.manager_api_token.clone(),
+                    )
+                };
+                if let (Some(url), Some(token)) = (manager_url, manager_api_token) {
+                    if !url.is_empty() && !token.is_empty() {
+                        let mut channels_for_loop = crate::ExternalChannels {
+                            private_screen_cmd_sender: remote_mgr_channels.private_screen_cmd_sender.clone(),
+                            private_screen_state_receiver: None,
+                            tauri_login_token: remote_mgr_channels.tauri_login_token.clone(),
+                            whiteboard_cmd_sender: remote_mgr_channels.whiteboard_cmd_sender.clone(),
+                            security_approval_sender: remote_mgr_channels.security_approval_sender.clone(),
+                        };
+
+                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                        channels_for_loop.private_screen_state_receiver = Some(rx);
+                        if let Some(btx) = &remote_mgr_broadcast_tx {
+                            let mut brx = btx.subscribe();
+                            actix_web::rt::spawn(async move {
+                                while let Ok(event) = brx.recv().await {
+                                    if tx.send(event).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+
+                        let _ = maintain_signaling_connection(
+                            remote_mgr_settings.clone(),
+                            channels_for_loop,
+                            url,
+                            token,
+                        )
+                        .await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
 
     Ok(())
 }
@@ -1800,6 +1884,8 @@ impl DeskSession {
                         listen_addr_ipv6: settings.system.listen_addr_ipv6.clone(),
                         locale: settings.system.locale.clone(),
                         signaling_url: settings.system.signaling_url.clone(),
+                        signaling_token: settings.system.signaling_token.clone(),
+                        manager_url: settings.system.manager_url.clone(),
                         auto_start: settings.system.auto_start,
                         manager_api_token: settings.system.manager_api_token.clone(),
                     }
@@ -1825,6 +1911,8 @@ impl DeskSession {
                     settings.system.listen_addr_ipv6 = remote_settings.listen_addr_ipv6;
                     settings.system.locale = remote_settings.locale;
                     settings.system.signaling_url = remote_settings.signaling_url;
+                    settings.system.signaling_token = remote_settings.signaling_token;
+                    settings.system.manager_url = remote_settings.manager_url;
                     settings.system.auto_start = remote_settings.auto_start;
                     settings.system.manager_api_token = remote_settings.manager_api_token;
                     settings.save()?;

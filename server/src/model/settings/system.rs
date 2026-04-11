@@ -75,8 +75,12 @@ pub struct SystemSettings {
 
     /// Optional locale setting (e.g., "en", "zh-CN")
     pub locale: Option<String>,
-    /// Signaling server url, if not set, it will be "ws://127.0.0.1:{port}/signaling"
+    /// Remote signaling server url for connecting to a standalone signaling server
     pub signaling_url: Option<String>,
+    /// Token for authenticating with the remote signaling server
+    pub signaling_token: Option<String>,
+    /// Remote manager server url for connecting to an enterprise manager
+    pub manager_url: Option<String>,
     /// Client ID for telemetry
     client_id: Option<String>,
     /// Telemetry consent status
@@ -85,6 +89,9 @@ pub struct SystemSettings {
     pub auto_start: Option<bool>,
     /// API Token for connecting to manager's signaling server
     pub manager_api_token: Option<String>,
+    /// Local signaling server token, auto-generated and persisted.
+    /// Used by the local desk server to authenticate with the co-located signaling server.
+    pub local_signaling_token: Option<String>,
 }
 
 impl SystemSettings {
@@ -125,10 +132,13 @@ impl Default for SystemSettings {
             listen_addr_ipv6: "::".to_string(),
             locale: None,
             signaling_url: None,
+            signaling_token: None,
+            manager_url: None,
             client_id: None,
             telemetry_consent: None,
             auto_start: None,
             manager_api_token: None,
+            local_signaling_token: None,
         }
     }
 }

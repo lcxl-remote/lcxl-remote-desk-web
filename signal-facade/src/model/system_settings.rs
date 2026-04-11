@@ -19,8 +19,12 @@ pub struct RemoteSystemSettings {
     pub listen_addr_ipv6: String,
     /// Optional locale setting (e.g., "en", "zh-CN")
     pub locale: Option<String>,
-    /// Signaling server url
+    /// Remote signaling server url
     pub signaling_url: Option<String>,
+    /// Token for authenticating with the remote signaling server
+    pub signaling_token: Option<String>,
+    /// Remote manager server url
+    pub manager_url: Option<String>,
     /// Auto start the application on system login
     pub auto_start: Option<bool>,
     /// API Token for connecting to manager's signaling server

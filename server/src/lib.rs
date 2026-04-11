@@ -230,11 +230,22 @@ pub async fn run_with_channels(
 
     let security_approval_sender = web::Data::new(channels.security_approval_sender.clone());
 
-    let local_node_token = uuid::Uuid::new_v4().to_string();
+    // If this instance runs signaling, ensure local_signaling_token is generated and persisted
+    if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
+        let mut s = shared_settings_data.write().await;
+        if s.system.local_signaling_token.is_none() {
+            let token = uuid::Uuid::new_v4().to_string();
+            info!("Generated new local_signaling_token: {}", token);
+            s.system.local_signaling_token = Some(token);
+            if let Err(e) = s.save() {
+                error!("Failed to save local_signaling_token: {}", e);
+            }
+        }
+    }
+
     let validator: Arc<dyn desk_signal_facade::service::NodeTokenValidator> =
         Arc::new(crate::service::signaling::LocalNodeTokenValidator {
             settings: shared_settings_data.clone(),
-            local_node_token: local_node_token.clone(),
         });
     let validator_data = web::Data::new(validator);
 
@@ -242,8 +253,9 @@ pub async fn run_with_channels(
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::DeskServer {
         info!("Starting desk session");
         let settings_clone = shared_settings_data.clone();
+        let startup_mode_clone = startup_mode.clone();
         actix_web::rt::spawn(async move {
-            if let Err(e) = start_desk_session(settings_clone, channels, local_node_token).await {
+            if let Err(e) = start_desk_session(settings_clone, channels, startup_mode_clone).await {
                 error!("Desk session error: {}", e);
             }
         });

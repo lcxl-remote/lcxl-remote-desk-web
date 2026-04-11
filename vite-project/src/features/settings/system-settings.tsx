@@ -26,6 +26,9 @@ const systemSettingsSchema = z.object({
     listen_addr_ipv4: z.string().min(1, "IPv4 address is required"),
     listen_addr_ipv6: z.string(),
     signaling_url: z.string().nullable(),
+    signaling_token: z.string().nullable(),
+    manager_url: z.string().nullable(),
+    manager_api_token: z.string().nullable(),
     port: z.number().min(1).max(65535),
 })
 
@@ -52,6 +55,9 @@ export function SystemSettings() {
             listen_addr_ipv4: "0.0.0.0",
             listen_addr_ipv6: "::",
             signaling_url: null,
+            signaling_token: null,
+            manager_url: null,
+            manager_api_token: null,
             port: 8081,
         },
     })
@@ -67,6 +73,9 @@ export function SystemSettings() {
                 listen_addr_ipv4: data.listen_addr_ipv4 || "0.0.0.0",
                 listen_addr_ipv6: data.listen_addr_ipv6 || "::",
                 signaling_url: data.signaling_url || null,
+                signaling_token: data.signaling_token || null,
+                manager_url: data.manager_url || null,
+                manager_api_token: data.manager_api_token || null,
                 port: data.port || 8081,
             })
         }
@@ -165,20 +174,62 @@ export function SystemSettings() {
                                 />
 
                                 {serverInfo?.startup_mode !== "signaling" && (
-                                    <FormField
-                                        control={form.control}
-                                        name="signaling_url"
-                                        render={({ field }) => (
-                                            <FormItem className="md:col-span-2">
-                                                <FormLabel>{t("pages.system.settings.signalingUrl", "Signaling Server URL")}</FormLabel>
-                                                <FormControl>
-                                                    <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://127.0.0.1:8081/signaling" />
-                                                </FormControl>
-                                                <FormDescription>{t("pages.system.settings.signalingUrl.description", "Leave blank to use the default internal signaling server.")}</FormDescription>
-                                                <FormMessage />
-                                            </FormItem>
-                                        )}
-                                    />
+                                    <>
+                                        <FormField
+                                            control={form.control}
+                                            name="signaling_url"
+                                            render={({ field }) => (
+                                                <FormItem className="md:col-span-2">
+                                                    <FormLabel>{t("pages.system.settings.signalingUrl", "Signaling Server URL")}</FormLabel>
+                                                    <FormControl>
+                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://127.0.0.1:8081/api/desk/signaling" />
+                                                    </FormControl>
+                                                    <FormDescription>{t("pages.system.settings.signalingUrl.description", "Leave blank to use the default internal signaling server.")}</FormDescription>
+                                                    <FormMessage />
+                                                </FormItem>
+                                            )}
+                                        />
+                                        <FormField
+                                            control={form.control}
+                                            name="signaling_token"
+                                            render={({ field }) => (
+                                                <FormItem className="md:col-span-2">
+                                                    <FormLabel>{t("pages.system.settings.signalingToken", "Signaling Access Token")}</FormLabel>
+                                                    <FormControl>
+                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Node access token for remote signaling..." />
+                                                    </FormControl>
+                                                    <FormMessage />
+                                                </FormItem>
+                                            )}
+                                        />
+                                        <FormField
+                                            control={form.control}
+                                            name="manager_url"
+                                            render={({ field }) => (
+                                                <FormItem className="md:col-span-2">
+                                                    <FormLabel>{t("pages.system.settings.managerUrl", "Manager Server URL")}</FormLabel>
+                                                    <FormControl>
+                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://manager.example.com/api/desk/signaling" />
+                                                    </FormControl>
+                                                    <FormDescription>{t("pages.system.settings.managerUrl.description", "If using a central manager server, enter its signaling URL here.")}</FormDescription>
+                                                    <FormMessage />
+                                                </FormItem>
+                                            )}
+                                        />
+                                        <FormField
+                                            control={form.control}
+                                            name="manager_api_token"
+                                            render={({ field }) => (
+                                                <FormItem className="md:col-span-2">
+                                                    <FormLabel>{t("pages.system.settings.managerApiToken", "Manager API Token")}</FormLabel>
+                                                    <FormControl>
+                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Access token for the manager server..." />
+                                                    </FormControl>
+                                                    <FormMessage />
+                                                </FormItem>
+                                            )}
+                                        />
+                                    </>
                                 )}
                             </div>
 

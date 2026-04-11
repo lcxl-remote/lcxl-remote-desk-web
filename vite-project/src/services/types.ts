@@ -1718,6 +1718,11 @@ export type RestResponseSystemSettings = {
         */
         listen_addr_ipv6?: string;
         /**
+         * @description Local signaling server token, auto-generated and persisted.\nUsed by the local desk server to authenticate with the co-located signaling server.
+         * @type string,null
+        */
+        local_signaling_token?: string | null;
+        /**
          * @description Optional locale setting (e.g., \"en\", \"zh-CN\")
          * @type string,null
         */
@@ -1728,6 +1733,11 @@ export type RestResponseSystemSettings = {
         */
         manager_api_token?: string | null;
         /**
+         * @description Remote manager server url for connecting to an enterprise manager
+         * @type string,null
+        */
+        manager_url?: string | null;
+        /**
          * @description port number for the server to bind to
          * @minLength 0
          * @default 8081
@@ -1735,7 +1745,12 @@ export type RestResponseSystemSettings = {
         */
         port?: number;
         /**
-         * @description Signaling server url, if not set, it will be \"ws://127.0.0.1:{port}/signaling\"
+         * @description Token for authenticating with the remote signaling server
+         * @type string,null
+        */
+        signaling_token?: string | null;
+        /**
+         * @description Remote signaling server url for connecting to a standalone signaling server
          * @type string,null
         */
         signaling_url?: string | null;
@@ -2189,6 +2204,11 @@ export type SystemSettings = {
     */
     listen_addr_ipv6?: string;
     /**
+     * @description Local signaling server token, auto-generated and persisted.\nUsed by the local desk server to authenticate with the co-located signaling server.
+     * @type string,null
+    */
+    local_signaling_token?: string | null;
+    /**
      * @description Optional locale setting (e.g., \"en\", \"zh-CN\")
      * @type string,null
     */
@@ -2199,6 +2219,11 @@ export type SystemSettings = {
     */
     manager_api_token?: string | null;
     /**
+     * @description Remote manager server url for connecting to an enterprise manager
+     * @type string,null
+    */
+    manager_url?: string | null;
+    /**
      * @description port number for the server to bind to
      * @minLength 0
      * @default 8081
@@ -2206,7 +2231,12 @@ export type SystemSettings = {
     */
     port?: number;
     /**
-     * @description Signaling server url, if not set, it will be \"ws://127.0.0.1:{port}/signaling\"
+     * @description Token for authenticating with the remote signaling server
+     * @type string,null
+    */
+    signaling_token?: string | null;
+    /**
+     * @description Remote signaling server url for connecting to a standalone signaling server
      * @type string,null
     */
     signaling_url?: string | null;
