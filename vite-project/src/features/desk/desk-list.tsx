@@ -85,15 +85,10 @@ export default function DeskList() {
                                 </ul>
                             </div>
                         </CardContent>
-                        <CardFooter className="flex flex-row items-center border-t bg-muted/50 px-6 py-3">
-                            <div className="text-xs text-muted-foreground">
-                                Updated <time dateTime="2023-11-23">November 23, 2023</time>
-                            </div>
-                            <div className="ml-auto">
-                                <Button size="sm" onClick={() => handleConnect(connection.connection_id)}>
-                                    <Power className="mr-2 h-4 w-4" /> {t('pages.deskList.connect', 'Connect')}
-                                </Button>
-                            </div>
+                        <CardFooter className="flex flex-row items-center justify-end border-t bg-muted/50 px-6 py-3">
+                            <Button size="sm" onClick={() => handleConnect(connection.connection_id)}>
+                                <Power className="mr-2 h-4 w-4" /> {t('pages.deskList.connect', 'Connect')}
+                            </Button>
                         </CardFooter>
                     </Card>
                 ))}

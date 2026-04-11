@@ -265,7 +265,7 @@ export default function LoginPage() {
             </Card>
             {/* Footer component placeholder */}
             <div className="fixed bottom-4 w-full text-center text-sm text-gray-500">
-                Antigravity Design
+                LCXL Remote Desk Design
             </div>
         </div>
     )
