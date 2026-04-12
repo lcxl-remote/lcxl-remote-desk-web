@@ -37,3 +37,8 @@
 - **i18n**：遵循 [.agents/rules/frontend-i18n.md](./rules/frontend-i18n.md)。
 - **信令协议**：遵循 [.agents/rules/signaling-protocol.md](./rules/signaling-protocol.md)。
 - **接口同步**：使用指令 `/update_openapi`。
+- **信令鉴权与多角色连接架构 (CRITICAL)**：本项目存在复杂的 4 条信令连接链路，处理相关逻辑时必须严格遵守以下双轨鉴权与传参规范：
+   - **Desk Server -> Local Signaling Server**: 仅在 `default` 模式下启动本地连接。通过自动生成并持久化的 `settings.system.local_signaling_token` 进行鉴权验证。
+   - **Desk Server -> Remote Signaling Server**: 通过 WebSocket URL 的 query 参数传递 `token` (`settings.system.signaling_token`) 进行身份验证。
+   - **Desk Server -> Manager Server**: 通过 WebSocket URL 的 query 参数传递 `token` (`settings.system.manager_api_token`)，并在 `manager` 数据库中验证有效性。
+   - **Browser -> Signaling / Manager Server**: 浏览器端连接信令时**不带任何 Token Query 参数**，**必须**回退通过 Cookie (Actix-Session) 进行会话认证。后端路由提取参数必须使用 `Option<web::Query<VersionInfo>>` 以兼容浏览器行为，且 `manager` 端的信令路由必须排除在全局 Session 拦截中间件之外。

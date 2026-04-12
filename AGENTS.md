@@ -39,3 +39,10 @@ Run commands from repo root unless noted.
 ## Security & Configuration Tips
 - Never commit real credentials; use `conf/config.toml` placeholders for local dev.
 - Review changes touching auth, signaling, TURN, or file-transfer paths with extra care.
+
+## Signaling Authentication & Multi-Role Connection Architecture (CRITICAL)
+This project features complex 4-way signaling connections. Handle logic strictly following this dual-track authentication spec:
+- **Desk Server -> Local Signaling Server:** Start local connection only in `default` mode. Authenticate using auto-generated and persisted `settings.system.local_signaling_token`.
+- **Desk Server -> Remote Signaling Server:** Authenticate by passing `token` (`settings.system.signaling_token`) as a WebSocket URL query parameter.
+- **Desk Server -> Manager Server:** Authenticate by passing `token` (`settings.system.manager_api_token`) via WebSocket URL query parameters (validates against the manager database).
+- **Browser -> Signaling / Manager Server:** Browsers connect to signaling **WITHOUT any Token query parameters**. They **MUST** fall back to Session (Actix-Session Cookie) authentication. Backend route extractors must use `Option<web::Query<VersionInfo>>` for compatibility, and manager signaling routes must be excluded from global Session interception middlewares.
