@@ -19,7 +19,7 @@ use crate::{model::SharedConnectionMap, service::handle_signaling};
 #[get("/api/desk/signaling")]
 pub async fn open_signaling_handle(
     req: HttpRequest,
-    query: web::Query<VersionInfo>,
+    query: Option<web::Query<VersionInfo>>,
     connection_map: web::Data<SharedConnectionMap>,
     session: Session,
     stream: web::Payload,
@@ -28,16 +28,19 @@ pub async fn open_signaling_handle(
 ) -> Result<HttpResponse, actix_web::Error> {
     info!("Incoming signaling request: {} {}", req.method(), req.uri());
 
+    let version_info_opt = query.map(|q| q.into_inner());
     let mut user = None;
 
     // Check token-based node authentication first
-    if let Some(token) = &query.0.token {
-        if let Some(validator) = &validator_opt {
-            if validator.validate_node_token(token).await {
-                user = Some(CurrentUser::new_admin("server_node"));
-                info!("Node token validated successfully");
-            } else {
-                log::warn!("Invalid node token provided");
+    if let Some(ref vi) = version_info_opt {
+        if let Some(token) = &vi.token {
+            if let Some(validator) = &validator_opt {
+                if validator.validate_node_token(token).await {
+                    user = Some(CurrentUser::new_admin("server_node"));
+                    info!("Node token validated successfully");
+                } else {
+                    log::warn!("Invalid node token provided");
+                }
             }
         }
     }
@@ -64,7 +67,17 @@ pub async fn open_signaling_handle(
         // aggregate continuation frames up to 1MiB
         .max_continuation_size(2_usize.pow(20));
 
-    let version_info = query.0.clone();
+    let version_info = version_info_opt.unwrap_or_else(|| VersionInfo {
+        api_version: desk_server_version::SERVER_API_VERSION,
+        build_number: crate::version::SIGNAL_BUILD_NUMBER,
+        commit_hash: crate::version::SIGNAL_COMMIT_HASH.to_string(),
+        remote_desk_type: desk_signal_facade::model::signal::RemoteDeskTypeEnum::Browser,
+        operation_system: desk_signal_facade::model::os::OperationSystemEnum::default(),
+        display_name: Some(user.name.clone()),
+        client_id: None,
+        token: None,
+    });
+
     let ip = req
         .connection_info()
         .realip_remote_addr()

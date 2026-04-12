@@ -180,11 +180,11 @@ export function SystemSettings() {
                                             name="signaling_url"
                                             render={({ field }) => (
                                                 <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.signalingUrl", "Signaling Server URL")}</FormLabel>
+                                                    <FormLabel>{t("pages.system.settings.signalingUrl", "Remote Signaling Server URL")}</FormLabel>
                                                     <FormControl>
                                                         <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://127.0.0.1:8081/api/desk/signaling" />
                                                     </FormControl>
-                                                    <FormDescription>{t("pages.system.settings.signalingUrl.description", "Leave blank to use the default internal signaling server.")}</FormDescription>
+                                                    <FormDescription>{t("pages.system.settings.signalingUrl.description", "Leave blank to only use the built-in signaling server.")}</FormDescription>
                                                     <FormMessage />
                                                 </FormItem>
                                             )}

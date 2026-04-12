@@ -23,25 +23,10 @@ const MAIN_WINDOW_LABEL: &str = "main";
 pub fn run()->Result<(), DeskTauriError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
-    // Parse startup mode
-    let startup_mode = settings.args.startup_mode.clone();
-
-    match startup_mode {
-        StartupMode::Signaling => {
-            // Pure signaling mode, no Tauri window needed
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            rt.block_on(async {
-                let server = lcxl_remote_desk_server::run().await.unwrap();
-                server.await.unwrap();
-            });
-        }
-        _ => {
-            // Default or DeskServer mode, start Tauri
-            run_tauri_app(&settings)?;
-        }
-    };
+    
+    // Always start Tauri regardless of startup_mode
+    run_tauri_app(&settings)?;
+    
     Ok(())
 }
 
