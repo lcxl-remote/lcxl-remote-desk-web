@@ -7,7 +7,8 @@ use crate::{
     error::DeskError,
     model::video_encoder::{VideoEncoder, VideoEncoderType, VideoEncoderTypeHelper},
     service::video_encoder::{
-        h264_encoder::H264Encoder, vpx_encoder::VpxEncoder, x264_encoder::X264Encoder,
+        av1_encoder::Av1Encoder, h264_encoder::H264Encoder, vpx_encoder::VpxEncoder,
+        x264_encoder::X264Encoder,
     },
 };
 
@@ -52,6 +53,10 @@ pub fn create_video_encoder(
         VideoEncoderType::VP9 => Box::new(VpxEncoder::new(
             vpx_encode::VideoCodecId::VP9,
             desk_setting.get_vp9_encoder_settings(),
+            display_info,
+        )?),
+        VideoEncoderType::AV1 => Box::new(Av1Encoder::new(
+            desk_setting.get_av1_encoder_settings(),
             display_info,
         )?),
     };

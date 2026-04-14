@@ -8,6 +8,9 @@ pub struct NalInfo {
 
 pub trait VideoEncoder {
     fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, DeskError>;
+    /// Request the encoder to produce a keyframe (IDR) on the next encode call.
+    /// Default implementation is a no-op for encoders that don't support native keyframe forcing.
+    fn request_keyframe(&mut self) {}
 }
 
 #[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
@@ -16,6 +19,7 @@ pub enum VideoEncoderType {
     VP8,
     VP9,
     H264,
+    AV1,
 }
 
 impl Default for VideoEncoderType {

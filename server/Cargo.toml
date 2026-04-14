@@ -56,6 +56,7 @@ webrtc = { workspace = true }
 webrtc-ice = { workspace = true }
 webrtc-media = { workspace = true }
 rtp = { workspace = true }
+rtcp = { workspace = true }
 webrtc-mdns = { workspace = true }
 
 strum = { workspace = true }
@@ -75,6 +76,7 @@ mime = "0.3"
 yuv = "0.8"
 x264 = { git = "https://github.com/lcxl/x264.git", tag = "v0.7.1" }
 openh264 = "0.9.3"
+rav1e = { version = "0.8"}
 
 opusic-c = "1.5"
 

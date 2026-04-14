@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::DerefMut;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, atomic::AtomicBool, LazyLock};
 use std::time::Duration;
 
 use actix_web::web;
@@ -31,8 +31,8 @@ use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
 use tokio::time::Instant;
-use url::Url;
-use webrtc::api::media_engine::{MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
+
+use webrtc::api::media_engine::{MIME_TYPE_AV1, MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9};
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::{
@@ -1069,11 +1069,14 @@ impl DeskSession {
         if is_desktop_mode {
             log::info!("SDP offer contains media tracks, setting up video/audio capture");
             let video_state_receiver = ice_connection_state_rx.clone();
+            // Shared flag for PLI/FIR keyframe requests (RTCP reader -> capture loop)
+            let keyframe_requested = Arc::new(AtomicBool::new(false));
             let audio_state_receiver = ice_connection_state_rx.clone();
             let video_mime_type = match offer_model.desk_settings.get_video_encoder_type()? {
                 VideoEncoderType::H264 | VideoEncoderType::X264 => MIME_TYPE_H264,
                 VideoEncoderType::VP8 => MIME_TYPE_VP8,
                 VideoEncoderType::VP9 => MIME_TYPE_VP9,
+                VideoEncoderType::AV1 => MIME_TYPE_AV1,
             };
             let video_track = Arc::new(TrackLocalStaticSample::new(
                 RTCRtpCodecCapability {
@@ -1089,13 +1092,31 @@ impl DeskSession {
                 .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
                 .await?;
 
-            // Read incoming RTCP packets
-            // Before these packets are returned they are processed by interceptors. For things
-            // like NACK this needs to be called.
+            // Read incoming RTCP packets, detect PLI/FIR for keyframe requests
+            let keyframe_flag_for_rtcp = keyframe_requested.clone();
             tokio::spawn(async move {
                 let mut rtcp_buf = vec![0u8; 1500];
                 log::info!("Start to read incoming video RTCP packets");
-                while let Ok((_, _)) = rtp_sender.read(&mut rtcp_buf).await {}
+                while let Ok((pkts, _)) = rtp_sender.read(&mut rtcp_buf).await {
+                    // Parse RTCP packets and detect Picture Loss Indication / Full Intra Request
+                    {
+                        for pkt in pkts {
+                            if pkt
+                                .as_any()
+                                .downcast_ref::<rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
+                                .is_some()
+                                || pkt
+                                    .as_any()
+                                    .downcast_ref::<rtcp::payload_feedbacks::full_intra_request::FullIntraRequest>()
+                                    .is_some()
+                            {
+                                log::info!("Received PLI/FIR, requesting keyframe");
+                                keyframe_flag_for_rtcp
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    }
+                }
                 log::info!("Finished to read incoming video RTCP packets");
                 Result::<(), DeskError>::Ok(())
             });
@@ -1148,6 +1169,7 @@ impl DeskSession {
                             desk_settings,
                             video_state_receiver,
                             video_track,
+                            keyframe_requested,
                         )
                         .await;
 
@@ -1451,6 +1473,7 @@ impl DeskSession {
         desk_settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
+        keyframe_requested: Arc<AtomicBool>,
     ) -> Result<(), DeskError> {
         let mut desk_settings = desk_settings;
         log::info!(
@@ -1552,6 +1575,23 @@ impl DeskSession {
                     continue;
                 }
             };
+
+            // Check if a keyframe was requested via RTCP PLI/FIR
+            if keyframe_requested.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                log::info!("Keyframe requested via PLI/FIR, recreating encoder");
+                // TODO: Implement native request_keyframe() for each encoder to avoid
+                // the overhead of full encoder recreation. Currently using recreation as
+                // a universal fallback since PLI is a low-frequency event.
+                // - H264 (OpenH264): use ForceIntraFrame(true) via raw API
+                // - VP8/VP9: extend vpx-encode fork to support VPX_EFLAG_FORCE_KF flag
+                // - X264: set x264_picture_t.i_type = X264_TYPE_IDR via raw API
+                // - AV1 (rav1e): flush + recreate Context (no native force-keyframe API)
+                let display_info = {
+                    let state = signaling_state.read().await;
+                    state.display_info.clone()
+                };
+                encoder = create_video_encoder(&desk_settings, &display_info)?;
+            }
 
             let nal_info_vec = encoder.encode(image_info.as_ref())?;
             for nal_info in nal_info_vec {

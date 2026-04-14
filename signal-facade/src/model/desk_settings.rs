@@ -61,6 +61,25 @@ impl Default for VpxEncoderSettings {
     }
 }
 
+/// AV1 encoder settings (rav1e)
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[serde(default)]
+pub struct Av1EncoderSettings {
+    /// Quality (Quantizer), 0-255, default is 100. Lower is better quality.
+    pub quality: u32,
+    /// Speed preset, 0-10, default is 10 (fastest). Lower is better quality but slower.
+    pub speed: u32,
+}
+
+impl Default for Av1EncoderSettings {
+    fn default() -> Self {
+        Self {
+            quality: 100,
+            speed: 10, // 远程桌面场景需要最快速度
+        }
+    }
+}
+
 /// Opus encoder settings
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
@@ -164,6 +183,8 @@ pub struct DeskSettings {
     pub vp9_encoder: Option<VpxEncoderSettings>,
     /// opus encoder settings
     pub opus_encoder: Option<OpusEncoderSettings>,
+    /// AV1 encoder settings
+    pub av1_encoder: Option<Av1EncoderSettings>,
 
     /// Private screen settings
     pub private_screen: PrivateScreenSettings,
@@ -249,6 +270,18 @@ impl DeskSettings {
         encoder_settings.quality = self.video_quality;
         encoder_settings
     }
+
+    pub fn get_av1_encoder_settings(&self) -> Av1EncoderSettings {
+        if let Some(ref av1_encoder) = self.av1_encoder {
+            return av1_encoder.clone();
+        }
+        // use video_quality to create a default av1 encoder settings
+        // video_quality: 0-63 (lower is better) -> rav1e quantizer: 0-255 (lower is better)
+        let mut encoder_settings = Av1EncoderSettings::default();
+        encoder_settings.quality =
+            (self.video_quality as f64 / 63.0 * 255.0).clamp(0.0, 255.0) as u32;
+        encoder_settings
+    }
 }
 
 impl Default for DeskSettings {
@@ -271,6 +304,7 @@ impl Default for DeskSettings {
             vp8_encoder: None,
             vp9_encoder: None,
             opus_encoder: None,
+            av1_encoder: None,
             private_screen: PrivateScreenSettings::default(),
             display_name: None,
             wayland_control_mode: None,
