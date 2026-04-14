@@ -26,7 +26,7 @@ The project is designed with modularity to meet various deployment requirements:
 
 ## ✨ Key Features
 
-- 🖥️ **High-Performance Desktop Connection**: Based on WebRTC video streams, supporting H264/VP8/VP9 hardware/software encoding for ultra-low latency.
+- 🖥️ **High-Performance Desktop Connection**: Based on WebRTC video streams, supporting AV1 (rav1e) / H264 / VP8 / VP9 hardware/software encoding for ultra-low latency.
 - ⌨️ **Full-Featured Terminal**: Built-in remote terminal powered by xterm.js, supporting full shell interaction.
 - 📂 **File Management System**: Supports file uploads, downloads, deletions, and a **Recycle Bin** mechanism to prevent accidental loss.
 - 📋 **Bidirectional Clipboard**: Synchronize text clipboards between local and remote.
@@ -58,6 +58,16 @@ graph LR
 1. **Prerequisites**:
    - Install [Rust](https://www.rust-lang.org/) (latest stable)
    - Install [Node.js](https://nodejs.org/) and [pnpm](https://pnpm.io/)
+   - **AV1 Support (Optional but Recommended)**: To use AV1 encoding, you need to install [nasm](https://www.nasm.us/). 
+     Windows installation example:
+     ```bash
+     $NASM_VERSION="2.15.05" # or newer
+     $LINK="https://www.nasm.us/pub/nasm/releasebuilds/$NASM_VERSION/win64"
+     curl --ssl-no-revoke -LO "$LINK/nasm-$NASM_VERSION-win64.zip"
+     7z e -y "nasm-$NASM_VERSION-win64.zip" -o "C:\nasm"
+     # set path for the current session
+     set PATH="%PATH%;C:\nasm"
+     ```
 
 2. **Start Backend**:
    ```bash

@@ -26,7 +26,7 @@ LCXL Remote Desk Web 是一个现代化的、基于 WebRTC 技术的远程桌面
 
 ## ✨ 核心功能
 
-- 🖥️ **高性能桌面连接**：基于 WebRTC 视频流，支持 H264/VP8/VP9 硬件/软件编码，极速低延迟。
+- 🖥️ **高性能桌面连接**：基于 WebRTC 视频流，支持 AV1 (rav1e) / H264 / VP8 / VP9 硬件/软件编码，极速低延迟。
 - ⌨️ **功能完备的终端**：内置基于 xterm.js 的远程终端，完美支持 shell 交互。
 - 📂 **文件管理系统**：支持文件的上传、下载、删除及**回收站**功能，轻松同步数据。
 - 📋 **双向剪贴板**：支持文本剪贴板同步。
@@ -58,6 +58,16 @@ graph LR
 1. **环境准备**：
    - 安装 [Rust](https://www.rust-lang.org/) (latest stable)
    - 安装 [Node.js](https://nodejs.org/) 和 [pnpm](https://pnpm.io/)
+   - **AV1 编码支持（可选但推荐）**: 使用 AV1 编码需要安装 [nasm](https://www.nasm.us/)。
+     Windows 下安装示例:
+     ```bash
+     $NASM_VERSION="2.15.05" # or newer
+     $LINK="https://www.nasm.us/pub/nasm/releasebuilds/$NASM_VERSION/win64"
+     curl --ssl-no-revoke -LO "$LINK/nasm-$NASM_VERSION-win64.zip"
+     7z e -y "nasm-$NASM_VERSION-win64.zip" -o "C:\nasm"
+     # 为当前会话设置环境变量
+     set PATH="%PATH%;C:\nasm"
+     ```
 
 2. **启动后端**：
    ```bash
