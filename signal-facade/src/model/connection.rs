@@ -25,14 +25,14 @@ pub struct ConnectionList {
     pub connection_map: BTreeMap<String, ConnectionModel>,
 }
 
+use crate::model::signal::SignalingModel;
+use actix_ws::Session;
 use std::{
     collections::{HashMap, HashSet},
     ops::Deref,
     sync::Arc,
 };
-use actix_ws::Session;
 use tokio::sync::{RwLock, oneshot};
-use crate::model::signal::SignalingModel;
 
 /// Connection state for a single WebSocket connection.
 /// Used by both signal server and manager.
@@ -48,8 +48,7 @@ pub struct ConnectionState {
     pub terminal_connection_ids: Arc<RwLock<HashSet<String>>>,
     /// request_id -> oneshot::Sender<SignalingModel>
     /// For request-response pattern over signaling
-    pub request_callback_map:
-        Arc<RwLock<HashMap<String, oneshot::Sender<SignalingModel>>>>,
+    pub request_callback_map: Arc<RwLock<HashMap<String, oneshot::Sender<SignalingModel>>>>,
     /// Device code assigned to this connection (if it's a Server type connection)
     pub device_code: Option<String>,
 }
@@ -73,10 +72,10 @@ impl Deref for SharedConnectionMap {
     }
 }
 
-use std::time::Duration;
 use crate::error::DeskSignalFacadeError;
-use crate::model::signal::{SignalingType, ForwardSignalingSender};
+use crate::model::signal::{ForwardSignalingSender, SignalingType};
 use desk_utils::error::DeskErrorCode;
+use std::time::Duration;
 
 impl ForwardSignalingSender for ConnectionState {
     async fn send_response(
@@ -130,8 +129,11 @@ impl ForwardSignalingSender for ConnectionState {
     where
         T: ?Sized + Serialize + Sync,
     {
-        let signaling_model =
-            SignalingModel::new_request(signaling_type, Some(self.model.connection_id.clone()), data)?;
+        let signaling_model = SignalingModel::new_request(
+            signaling_type,
+            Some(self.model.connection_id.clone()),
+            data,
+        )?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.session
             .write()

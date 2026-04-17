@@ -19,7 +19,7 @@ pub async fn get_turn_info(
         uptime: api_state.uptime.elapsed().as_secs(),
         interfaces: api_state.settings.interfaces.clone(),
         port_capacity: 65535, // Mock value
-        port_allocated: 0,   // Mock value
+        port_allocated: 0,    // Mock value
     };
 
     return Ok(HttpResponse::Ok().json(turn_info));
@@ -48,7 +48,7 @@ pub async fn get_turn_session_statistics(
             return Ok(HttpResponse::Ok().json(counts));
         }
     }
-    
+
     Ok(HttpResponse::NotFound().finish())
 }
 
@@ -61,10 +61,10 @@ pub async fn delete_turn_session(
 }
 
 pub async fn get_turn_metrics(
-    api_state: web::Data<TurnApiState>
+    api_state: web::Data<TurnApiState>,
 ) -> Result<HttpResponse, DeskTurnError> {
     let mut metrics = String::new();
-    
+
     if let Ok(stats) = api_state.statistics.read() {
         metrics.push_str(&format!(
             "turn_server_received_bytes_total {}\n",

@@ -594,4 +594,3 @@ pub trait SignalingUser: Send + Sync {
 pub trait TurnProvider: Send + Sync {
     fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer;
 }
-

@@ -32,11 +32,7 @@ pub async fn query_settings(
         let connection_map = connection_map.read().await;
         if let Some(connection) = connection_map.get(connection_id) {
             connection
-                .request_peer_with_callback::<()>(
-                    SignalingType::ManagerQuerySettings,
-                    None,
-                    None,
-                )
+                .request_peer_with_callback::<()>(SignalingType::ManagerQuerySettings, None, None)
                 .await?
         } else {
             return DeskSignalFacadeError::custom_error(

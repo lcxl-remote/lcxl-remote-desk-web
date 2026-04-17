@@ -34,11 +34,12 @@ impl SecurityApprovalManager {
                             let _ = window.set_always_on_top(true);
                             let _ = window.set_focus();
                             // Notify user of tray message (taskbar flashing)
-                            let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                            let _ = window
+                                .request_user_attention(Some(tauri::UserAttentionType::Critical));
 
                             // Send payload via dispatchEvent for external url scenarios without tauri injection
-                            let safe_json =
-                                serde_json::to_string(&payload).unwrap_or_else(|_| "\"\"".to_string());
+                            let safe_json = serde_json::to_string(&payload)
+                                .unwrap_or_else(|_| "\"\"".to_string());
                             let script = format!(
                                 "window.dispatchEvent(new CustomEvent('security-approval-request', {{ detail: {} }}));",
                                 safe_json
@@ -62,9 +63,11 @@ impl SecurityApprovalManager {
 
                         let permission_name = rust_i18n::t!(permission_key);
                         let title = rust_i18n::t!("security_approval_title");
-                        let msg = rust_i18n::t!("permission_requested", permission = permission_name);
+                        let msg =
+                            rust_i18n::t!("permission_requested", permission = permission_name);
 
-                        app_handle.notification()
+                        app_handle
+                            .notification()
                             .builder()
                             .title(title)
                             .body(msg)
@@ -77,7 +80,9 @@ impl SecurityApprovalManager {
                         }
                     }
                     SecurityApprovalCommand::Finish => {
-                        log::info!("Received SecurityApprovalCommand::Finish, unsetting always_on_top");
+                        log::info!(
+                            "Received SecurityApprovalCommand::Finish, unsetting always_on_top"
+                        );
                         if let Some(window) = app_handle.get_webview_window("main") {
                             let _ = window.set_always_on_top(false);
                         }

@@ -33,7 +33,9 @@ impl PrivateScreenManager {
                 match cmd_receiver.recv() {
                     Ok(cmd) => match cmd {
                         PrivateScreenCommand::Show(from_connection_id) => {
-                            if let Some(controlled_by_connection_id) = &self.controlled_by_connection_id {
+                            if let Some(controlled_by_connection_id) =
+                                &self.controlled_by_connection_id
+                            {
                                 if controlled_by_connection_id != &from_connection_id {
                                     log::warn!(
                                         "Private screen is already controlled by another connection"
@@ -61,7 +63,9 @@ impl PrivateScreenManager {
                             self.controlled_by_connection_id = Some(from_connection_id);
                         }
                         PrivateScreenCommand::Hide(from_connection_id) => {
-                            if let Some(controlled_by_connection_id) = &self.controlled_by_connection_id {
+                            if let Some(controlled_by_connection_id) =
+                                &self.controlled_by_connection_id
+                            {
                                 if controlled_by_connection_id != &from_connection_id {
                                     log::warn!(
                                         "Private screen is already controlled by another connection"

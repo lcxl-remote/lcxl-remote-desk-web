@@ -91,7 +91,10 @@ pub fn block_input(block: bool) -> Result<(), String> {
             }
             Ok(Err(e)) => {
                 // Best effort: do not fail private screen when local input interception fails.
-                log::warn!("macOS block_input enable failed, continue without blocking: {}", e);
+                log::warn!(
+                    "macOS block_input enable failed, continue without blocking: {}",
+                    e
+                );
             }
             Err(e) => {
                 log::warn!(

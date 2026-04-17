@@ -30,10 +30,12 @@ impl DeviceCodeService for SignalDeviceCodeService {
             .filter(device_code::Column::ClientId.eq(client_id.to_string()))
             .one(db)
             .await
-            .map_err(|e| DeskSignalFacadeError::new_custom_error(
-                desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
-                &e.to_string(),
-            ))?;
+            .map_err(|e| {
+                DeskSignalFacadeError::new_custom_error(
+                    desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
+                    &e.to_string(),
+                )
+            })?;
 
         if let Some(db_model) = db_model_opt {
             Ok(Some(db_model.device_code))
@@ -73,7 +75,9 @@ pub async fn handle_signaling(
     let device_code_service = SignalDeviceCodeService;
     let device_code = if client_version_info.remote_desk_type == RemoteDeskTypeEnum::Server {
         if let Some(client_id) = &client_version_info.client_id {
-            device_code_service.get_or_create_device_code(client_id).await?
+            device_code_service
+                .get_or_create_device_code(client_id)
+                .await?
         } else {
             None
         }

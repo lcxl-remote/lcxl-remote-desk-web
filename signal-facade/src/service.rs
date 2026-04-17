@@ -17,9 +17,8 @@ use crate::{
     model::{
         connection::{ConnectionList, ConnectionModel, ConnectionState, SharedConnectionMap},
         signal::{
-            ForwardSignalingSender, InitSignalingData,
-            RequestRemoteModel, SignalingModel, SignalingType, SignalingUser,
-            TurnProvider,
+            ForwardSignalingSender, InitSignalingData, RequestRemoteModel, SignalingModel,
+            SignalingType, SignalingUser, TurnProvider,
         },
         version::VersionInfo,
     },
@@ -189,7 +188,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
         device_code: Option<String>,
         server_api_version: i32,
     ) -> Result<Self, DeskSignalFacadeError> {
-        log::info!("Init new SignalingContext, connection id: {}", connection_id);
+        log::info!(
+            "Init new SignalingContext, connection id: {}",
+            connection_id
+        );
         if client_version_info.api_version > server_api_version {
             log::warn!(
                 "Client API version({}) is higher than server's({}). This may cause compatibility issues.",
@@ -263,25 +265,26 @@ impl<U: SignalingUser> SignalingHandler<U> {
         }
         let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
         let connection_map = self.connection_map.read().await;
-        let to_connection_state = if let Some(connection_state) = connection_map.get(to_connection_id) {
-            connection_state
-        } else {
-            if ignore_connection_not_found {
-                log::warn!(
-                    "Connection {} is not found to forward signaling, ignore it: {:?}",
-                    to_connection_id,
-                    signaling_model
+        let to_connection_state =
+            if let Some(connection_state) = connection_map.get(to_connection_id) {
+                connection_state
+            } else {
+                if ignore_connection_not_found {
+                    log::warn!(
+                        "Connection {} is not found to forward signaling, ignore it: {:?}",
+                        to_connection_id,
+                        signaling_model
+                    );
+                    return Ok(());
+                }
+                return DeskSignalFacadeError::custom_error(
+                    DeskErrorCode::SESSION_NOT_FOUND,
+                    &format!(
+                        "Connection {} is not found to forward signaling: {:?}",
+                        to_connection_id, signaling_model
+                    ),
                 );
-                return Ok(());
-            }
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::SESSION_NOT_FOUND,
-                &format!(
-                    "Connection {} is not found to forward signaling: {:?}",
-                    to_connection_id, signaling_model
-                ),
-            );
-        };
+            };
         to_connection_state
             .send_to_peer(&self.connection_state.model.connection_id, signaling_model)
             .await?;
@@ -412,8 +415,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
                     if let Some(turn) = &self.turn {
-                        let ice_server =
-                            turn.get_ice_servers(&self.connection_state.model.connection_id, &client_id);
+                        let ice_server = turn.get_ice_servers(
+                            &self.connection_state.model.connection_id,
+                            &client_id,
+                        );
                         if !ice_server.urls.is_empty() {
                             data.ice_servers.push(ice_server);
                         } else {
@@ -450,8 +455,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
                     if let Some(turn) = &self.turn {
-                        let ice_server =
-                            turn.get_ice_servers(&self.connection_state.model.connection_id, &client_id);
+                        let ice_server = turn.get_ice_servers(
+                            &self.connection_state.model.connection_id,
+                            &client_id,
+                        );
                         if !ice_server.urls.is_empty() {
                             data.ice_servers.push(ice_server);
                         } else {
@@ -525,7 +532,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
     }
 
     pub async fn ping(&mut self, bin: Bytes) -> Result<(), DeskSignalFacadeError> {
-        self.connection_state.session.write().await.pong(&bin).await?;
+        self.connection_state
+            .session
+            .write()
+            .await
+            .pong(&bin)
+            .await?;
         Ok(())
     }
 

@@ -1,8 +1,8 @@
+mod error;
 mod platform;
 mod private_screen;
-mod whiteboard;
-mod error;
 mod security_approval;
+mod whiteboard;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -11,8 +11,8 @@ static IS_EXITING: AtomicBool = AtomicBool::new(false);
 use clap::Parser as _;
 use lcxl_remote_desk_server::model::settings::{Args, Settings, StartupMode};
 use private_screen::PrivateScreenManager;
-use whiteboard::WhiteboardManager;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use whiteboard::WhiteboardManager;
 
 use crate::error::DeskTauriError;
 
@@ -20,21 +20,20 @@ rust_i18n::i18n!("locales");
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
-pub fn run()->Result<(), DeskTauriError> {
+pub fn run() -> Result<(), DeskTauriError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
-    
+
     // Always start Tauri regardless of startup_mode
     run_tauri_app(&settings)?;
-    
+
     Ok(())
 }
 
-
-pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
+pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
     let settings = settings.clone();
     let hidden_mode = settings.args.hidden;
-    
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
@@ -325,26 +324,30 @@ pub fn run_tauri_app(settings: &Settings)->Result<(), DeskTauriError> {
         })
         .build(tauri::generate_context!())?;
 
-        app.run(|app, event| {
-            // Intercept window close events to hide instead of quit
-            match event {
-                tauri::RunEvent::WindowEvent { label, event: window_event, .. } => {
-                    if label == MAIN_WINDOW_LABEL {
-                        if let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
-                            api.prevent_close();
-                            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                                let _ = window.hide();
-                            }
+    app.run(|app, event| {
+        // Intercept window close events to hide instead of quit
+        match event {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: window_event,
+                ..
+            } => {
+                if label == MAIN_WINDOW_LABEL {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
+                        api.prevent_close();
+                        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                            let _ = window.hide();
                         }
                     }
-                },
-                tauri::RunEvent::ExitRequested { api, .. } => {
-                    if !IS_EXITING.load(Ordering::SeqCst) {
-                        api.prevent_exit();
-                    }
-                },
-                _ => {}
+                }
             }
-        });
-        Ok(())
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if !IS_EXITING.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                }
+            }
+            _ => {}
+        }
+    });
+    Ok(())
 }

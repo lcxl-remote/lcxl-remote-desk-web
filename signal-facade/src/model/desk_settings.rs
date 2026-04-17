@@ -229,7 +229,11 @@ impl DeskSettings {
 
         let width = display_info.desktop_coordinates.width() as u64;
         let height = display_info.desktop_coordinates.height() as u64;
-        let fps = if self.video_fps == 0 { 60 } else { self.video_fps } as u64;
+        let fps = if self.video_fps == 0 {
+            60
+        } else {
+            self.video_fps
+        } as u64;
         let pixels_per_second = width * height * fps;
 
         // Linear interpolation for BPP

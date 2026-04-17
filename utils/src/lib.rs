@@ -1,6 +1,6 @@
 pub mod error;
 pub mod logs;
 pub mod network;
+pub mod permission;
 pub mod rest;
 pub mod string;
-pub mod permission;

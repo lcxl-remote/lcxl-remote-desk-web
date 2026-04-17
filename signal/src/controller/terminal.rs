@@ -73,11 +73,9 @@ pub async fn open_terminal_session(
 
     let random_uuid = Uuid::new_v4();
     let connection_id = String::from(random_uuid);
-    let turn_provider = turn_api_state
-        .as_ref()
-        .map(|state| {
-            std::sync::Arc::new(state.as_ref().settings.clone()) as std::sync::Arc<dyn TurnProvider>
-        });
+    let turn_provider = turn_api_state.as_ref().map(|state| {
+        std::sync::Arc::new(state.as_ref().settings.clone()) as std::sync::Arc<dyn TurnProvider>
+    });
     // Handle signaling logic here
     let mut signaling_context = SignalingContext::init(
         connection_id,
@@ -106,7 +104,13 @@ pub async fn open_terminal_session(
         .terminal_connection_ids
         .write()
         .await
-        .insert(signaling_context.connection_state.model.connection_id.clone());
+        .insert(
+            signaling_context
+                .connection_state
+                .model
+                .connection_id
+                .clone(),
+        );
 
     log::info!(
         "Sent start terminal command from {} to peer: {}",
