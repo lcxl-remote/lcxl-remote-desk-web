@@ -3,7 +3,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::{
     error::DeskError,
     model::image_capture::{
-        ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator, ImageType,
+        CaptureRequest, CaptureResult, ImageCapture, ImageCaptureType, ImageInfo,
+        ImageOutputEnumerator, ImageType,
     },
 };
 use desk_signal_facade::model::{
@@ -158,10 +159,7 @@ impl MacScreencaptureKitImageCapture {
 }
 
 impl ImageCapture for MacScreencaptureKitImageCapture {
-    fn capture(
-        &mut self,
-        _show_mouse: bool,
-    ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+    fn capture(&mut self, _request: CaptureRequest) -> Result<CaptureResult, DeskError> {
         if self.stream.is_none() {
             let content = SCShareableContent::try_current().map_err(|e| {
                 DeskError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, e.as_str())
@@ -216,7 +214,10 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
         }
 
         if let Some(info) = frame_guard.take() {
-            Ok(Box::new(info))
+            Ok(CaptureResult {
+                image: Box::new(info),
+                cursor_update: None,
+            })
         } else {
             // Spurious wakeup or empty after wait
             Err(DeskError::new_custom_error(

@@ -58,6 +58,7 @@ use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::host_control::{HostControlEventType, HostControlHelper, WhiteboardCommand};
+use crate::model::image_capture::{CaptureRequest, CursorCaptureMode};
 use crate::model::security_approval::{
     SecurityApprovalSender, SecurityPermissionType, check_security_permission,
 };
@@ -1564,7 +1565,7 @@ impl DeskSession {
         // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(desk_settings.get_duration_by_video_fps());
-        let mut last_cursor_shape_id: Option<u64> = None;
+        let mut pending_cursor_update = None;
         loop {
             //ticker = tokio::time::interval(Duration::from_millis(3));
             // check if the connection is still alive
@@ -1592,48 +1593,20 @@ impl DeskSession {
                 .with_label_values(&[image_capture_type])
                 .start_timer();
 
-            let supports_native_cursor = match capture.get_capture_type() {
-                crate::model::image_capture::ImageCaptureType::GDI => true,
-                crate::model::image_capture::ImageCaptureType::DXGI => true,
-                _ => false,
-            };
-
+            let supports_cursor_sync = capture.supports_cursor_sync();
             let is_controlling = signaling_state.read().await.accept_control;
-            let show_mouse = if desk_settings.show_mouse {
-                if supports_native_cursor {
-                    !is_controlling
-                } else {
-                    true
-                }
+            let cursor_mode = if !desk_settings.show_mouse {
+                CursorCaptureMode::Disable
+            } else if is_controlling && supports_cursor_sync {
+                CursorCaptureMode::SyncNative
             } else {
-                false
+                CursorCaptureMode::RenderInFrame
             };
-
-            let image_info_result = capture.capture(show_mouse);
-
-            if is_controlling && supports_native_cursor {
-                if let Ok(Some(cursor_data)) = capture.capture_cursor(last_cursor_shape_id) {
-                    if last_cursor_shape_id != Some(cursor_data.shape_id) {
-                        log::info!("Cursor update: visible={}, shape_id={}, screen_width={}, screen_height={}", cursor_data.visible, cursor_data.shape_id, cursor_data.screen_width, cursor_data.screen_height);
-                        last_cursor_shape_id = Some(cursor_data.shape_id);
-                        let channel_opt = cursor_data_channel.read().await.clone();
-                        if let Some(channel) = channel_opt {
-                            if channel.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
-                                if let Ok(json) = serde_json::to_string(&cursor_data) {
-                                    let _ = channel.send_text(json).await;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                last_cursor_shape_id = None;
-            }
-
-            let image_info = match image_info_result {
-                Ok(image_info) => {
+            let capture_result = capture.capture(CaptureRequest { cursor_mode });
+            let capture_result = match capture_result {
+                Ok(capture_result) => {
                     timer.stop_and_record();
-                    image_info
+                    capture_result
                 }
                 Err(err) => {
                     if let DeskError::CustomError(custom_error) = err {
@@ -1648,6 +1621,37 @@ impl DeskSession {
                     continue;
                 }
             };
+            if let Some(cursor_data) = capture_result.cursor_update {
+                pending_cursor_update = Some(cursor_data);
+            }
+
+            if matches!(cursor_mode, CursorCaptureMode::SyncNative) {
+                let channel_opt = cursor_data_channel.read().await.clone();
+                if let (Some(cursor_data), Some(channel)) =
+                    (pending_cursor_update.as_ref(), channel_opt)
+                {
+                    if channel.ready_state()
+                        == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+                    {
+                        if let Ok(json) = serde_json::to_string(cursor_data) {
+                            if channel.send_text(json).await.is_ok() {
+                                log::info!(
+                                    "Cursor update sent: visible={}, shape_id={}, screen_width={}, screen_height={}",
+                                    cursor_data.visible,
+                                    cursor_data.shape_id,
+                                    cursor_data.screen_width,
+                                    cursor_data.screen_height
+                                );
+                                pending_cursor_update = None;
+                            }
+                        }
+                    }
+                }
+            } else {
+                pending_cursor_update = None;
+            }
+
+            let image_info = capture_result.image;
 
             // Check if a keyframe was requested via RTCP PLI/FIR
             if keyframe_requested.swap(false, std::sync::atomic::Ordering::Relaxed) {

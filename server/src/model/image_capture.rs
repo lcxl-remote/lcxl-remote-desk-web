@@ -16,10 +16,27 @@ pub trait ImageInfo {
     fn get_height(&self) -> u32;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorCaptureMode {
+    RenderInFrame,
+    SyncNative,
+    Disable,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureRequest {
+    pub cursor_mode: CursorCaptureMode,
+}
+
+pub struct CaptureResult {
+    pub image: Box<dyn ImageInfo + Send + Sync>,
+    pub cursor_update: Option<CursorSyncData>,
+}
+
 pub trait ImageCapture {
-    fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError>;
-    fn capture_cursor(&mut self, last_shape_id: Option<u64>) -> Result<Option<CursorSyncData>, DeskError> {
-        Ok(None)
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureResult, DeskError>;
+    fn supports_cursor_sync(&self) -> bool {
+        false
     }
     fn get_capture_type(&self) -> ImageCaptureType;
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError>;

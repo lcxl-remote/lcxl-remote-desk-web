@@ -7,7 +7,10 @@ use desk_signal_facade::model::{
 
 use crate::{
     error::DeskError,
-    model::image_capture::{ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator},
+    model::image_capture::{
+        CaptureRequest, CaptureResult, CursorCaptureMode, ImageCapture, ImageCaptureType,
+        ImageOutputEnumerator,
+    },
     service::image_capture::{
         pipewire_capture::{PipewireImageCapture, PipewireSetup},
         pipewire_utils::get_zbus_connection,
@@ -103,8 +106,13 @@ impl WaylandPortalImageCapture {
 }
 
 impl ImageCapture for WaylandPortalImageCapture {
-    fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
-        self.inner.capture(show_mouse)
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureResult, DeskError> {
+        let show_mouse = matches!(request.cursor_mode, CursorCaptureMode::RenderInFrame);
+        let image = self.inner.capture(show_mouse)?;
+        Ok(CaptureResult {
+            image,
+            cursor_update: None,
+        })
     }
 
     fn get_capture_type(&self) -> ImageCaptureType {

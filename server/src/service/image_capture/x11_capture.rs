@@ -19,7 +19,8 @@ use x11rb::{
 use crate::{
     error::DeskError,
     model::image_capture::{
-        ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator, ImageType,
+        CaptureRequest, CaptureResult, ImageCapture, ImageCaptureType, ImageInfo,
+        ImageOutputEnumerator, ImageType,
     },
 };
 
@@ -113,15 +114,15 @@ impl ImageOutputEnumerator for X11ImageOutputEnumerator {
 /// X11 capture implementation for Linux systems.
 /// see https://github.com/klarity-app/captis/blob/master/src/linux.rs
 impl ImageCapture for X11ImageCapture {
-    fn capture(
-        &mut self,
-        _show_mouse: bool,
-    ) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+    fn capture(&mut self, _request: CaptureRequest) -> Result<CaptureResult, DeskError> {
         let image_info = match self.seg {
             Some(_) => self.capture_shm(self.index)?,
             None => self.capture_standard(self.index)?,
         };
-        Ok(image_info)
+        Ok(CaptureResult {
+            image: image_info,
+            cursor_update: None,
+        })
     }
 
     fn get_capture_type(&self) -> ImageCaptureType {

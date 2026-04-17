@@ -52,11 +52,19 @@ use windows_core::{Interface, PCWSTR, s};
 
 use crate::{
     error::DeskError,
+    model::data_channel::CursorSyncData,
     model::image_capture::{
-        ImageCapture, ImageCaptureType, ImageInfo, ImageOutputEnumerator, ImageType,
+        CaptureRequest, CaptureResult, CursorCaptureMode, ImageCapture, ImageCaptureType,
+        ImageInfo, ImageOutputEnumerator, ImageType,
     },
     service::image_capture::windows::enum_display_resolutions,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DxgiCursorFingerprint {
+    Hidden,
+    Shape(u64),
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -789,7 +797,10 @@ impl ScreenOutput {
         Ok(())
     }
 
-    pub fn update_mouse_info(&mut self, frame_info: &DXGI_OUTDUPL_FRAME_INFO) -> Result<(), DeskError> {
+    pub fn update_mouse_info(
+        &mut self,
+        frame_info: &DXGI_OUTDUPL_FRAME_INFO,
+    ) -> Result<(), DeskError> {
         let mut update_position = true;
         if frame_info.LastMouseUpdateTime == 0 {
             update_position = false;
@@ -1322,6 +1333,7 @@ pub struct DxgiImageCapture {
     pub manager: Arc<ScreenRecordManager>,
     pub output_index: u32,
     pub screen_output: Option<ScreenOutput>,
+    last_cursor_fingerprint: Option<DxgiCursorFingerprint>,
 }
 
 impl DxgiImageCapture {
@@ -1335,18 +1347,129 @@ impl DxgiImageCapture {
             manager,
             screen_output,
             output_index: settings.video_device_index,
+            last_cursor_fingerprint: None,
         })
+    }
+
+    fn capture_cursor_update(
+        screen_output: &ScreenOutput,
+    ) -> Result<Option<(DxgiCursorFingerprint, CursorSyncData)>, DeskError> {
+        if !screen_output.pointer_visible {
+            return Ok(Some((
+                DxgiCursorFingerprint::Hidden,
+                CursorSyncData {
+                    visible: false,
+                    ..Default::default()
+                },
+            )));
+        }
+
+        if screen_output.pointer_shape_buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let info = &screen_output.pointer_shape_info;
+        let mut rgba_buffer = Vec::new();
+        let width = info.Width;
+        let height = if info.Type == POINTER_SHAPE_TYPE_MONOCHROME {
+            info.Height / 2
+        } else {
+            info.Height
+        };
+
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        screen_output.pointer_shape_buffer.hash(&mut hasher);
+        let shape_id = hasher.finish();
+
+        if info.Type == POINTER_SHAPE_TYPE_COLOR || info.Type == POINTER_SHAPE_TYPE_MASKED_COLOR {
+            let src = &screen_output.pointer_shape_buffer;
+            for y in 0..height {
+                let row_start = (y * info.Pitch) as usize;
+                for x in 0..width {
+                    let pixel_start = row_start + (x * 4) as usize;
+                    if pixel_start + 3 < src.len() {
+                        let b = src[pixel_start];
+                        let g = src[pixel_start + 1];
+                        let r = src[pixel_start + 2];
+                        let a = src[pixel_start + 3];
+                        if info.Type == POINTER_SHAPE_TYPE_MASKED_COLOR {
+                            let a_val = if a != 0 { 255 } else { 0 };
+                            rgba_buffer.extend_from_slice(&[r, g, b, a_val]);
+                        } else {
+                            rgba_buffer.extend_from_slice(&[r, g, b, a]);
+                        }
+                    } else {
+                        rgba_buffer.extend_from_slice(&[0, 0, 0, 0]);
+                    }
+                }
+            }
+        } else {
+            let src = &screen_output.pointer_shape_buffer;
+            let pitch = info.Pitch as usize;
+            for y in 0..height {
+                let and_row = y as usize * pitch;
+                let xor_row = (y + height) as usize * pitch;
+                for x in 0..width {
+                    let bit_offset = x % 8;
+                    let byte_offset = (x / 8) as usize;
+                    let and_byte = src.get(and_row + byte_offset).copied().unwrap_or(0);
+                    let xor_byte = src.get(xor_row + byte_offset).copied().unwrap_or(0);
+                    let mask = 0x80 >> bit_offset;
+                    let and_bit = (and_byte & mask) != 0;
+                    let xor_bit = (xor_byte & mask) != 0;
+                    let (r, g, b, a) = match (and_bit, xor_bit) {
+                        (true, false) => (0, 0, 0, 0),
+                        (false, false) => (0, 0, 0, 255),
+                        (false, true) => (255, 255, 255, 255),
+                        (true, true) => (0, 0, 0, 255),
+                    };
+                    rgba_buffer.extend_from_slice(&[r, g, b, a]);
+                }
+            }
+        }
+
+        use image::{ImageBuffer, Rgba};
+        use std::io::Cursor;
+        let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba_buffer)
+            .unwrap_or_else(|| ImageBuffer::new(width, height));
+        let mut png_data = Cursor::new(Vec::new());
+        img.write_to(&mut png_data, image::ImageFormat::Png)
+            .map_err(|e| {
+                DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, &e.to_string())
+                    .unwrap_err()
+            })?;
+        use base64::Engine;
+        let base64_png = base64::engine::general_purpose::STANDARD.encode(png_data.into_inner());
+
+        let mut full_desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+        unsafe { screen_output.copy_buffer_texture_2d.GetDesc(&mut full_desc) };
+
+        Ok(Some((
+            DxgiCursorFingerprint::Shape(shape_id),
+            CursorSyncData {
+                base64_png,
+                hotspot_x: info.HotSpot.x as i32,
+                hotspot_y: info.HotSpot.y as i32,
+                visible: true,
+                shape_id,
+                screen_width: full_desc.Width,
+                screen_height: full_desc.Height,
+            },
+        )))
     }
 }
 
 impl ImageCapture for DxgiImageCapture {
-    fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureResult, DeskError> {
+        let draw_mouse = matches!(request.cursor_mode, CursorCaptureMode::RenderInFrame);
         log::trace!("Start to get screen output frame");
         if self.screen_output.is_none() {
             self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
         }
         let screen_output = self.screen_output.as_mut().unwrap();
-        let result = screen_output.get_frame(show_mouse);
+        let result = screen_output.get_frame(draw_mouse);
         if let Err(error) = result {
             if let DeskError::WindowsResultError(bt, err) = error {
                 if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
@@ -1380,138 +1503,34 @@ impl ImageCapture for DxgiImageCapture {
         }
 
         let screen_frame = result?;
-        Ok(Box::new(screen_frame))
-    }
-
-    fn capture_cursor(
-        &mut self,
-        last_shape_id: Option<u64>,
-    ) -> Result<Option<crate::model::data_channel::CursorSyncData>, DeskError> {
-        if self.screen_output.is_none() {
-            self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
-            // Must call get_frame at least once to populate pointer info
-            if let Some(screen_output) = self.screen_output.as_mut() {
-                let _ = screen_output.get_frame(false);
-            }
-        }
-        let screen_output = self.screen_output.as_mut().unwrap();
-        if !screen_output.pointer_visible {
-            if last_shape_id == Some(0) {
-                return Ok(None);
-            }
-            return Ok(Some(crate::model::data_channel::CursorSyncData {
-                visible: false,
-                ..Default::default()
-            }));
-        }
-
-        if screen_output.pointer_shape_buffer.is_empty() {
-            return Ok(None);
-        }
-
-        let info = &screen_output.pointer_shape_info;
-        let mut rgba_buffer = Vec::new();
-        let width = info.Width;
-        let height = if info.Type == POINTER_SHAPE_TYPE_MONOCHROME {
-            info.Height / 2
-        } else {
-            info.Height
-        };
-        // Use last_mouse_update_time or simple hash as shape_id
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        screen_output.pointer_shape_buffer.hash(&mut hasher);
-        let shape_id = hasher.finish();
-
-        if last_shape_id == Some(shape_id) {
-            return Ok(None);
-        }
-
-        if info.Type == POINTER_SHAPE_TYPE_COLOR || info.Type == POINTER_SHAPE_TYPE_MASKED_COLOR {
-            let src = &screen_output.pointer_shape_buffer;
-            for y in 0..height {
-                let row_start = (y * info.Pitch) as usize;
-                for x in 0..width {
-                    let pixel_start = row_start + (x * 4) as usize;
-                    if pixel_start + 3 < src.len() {
-                        let b = src[pixel_start];
-                        let g = src[pixel_start + 1];
-                        let r = src[pixel_start + 2];
-                        let a = src[pixel_start + 3];
-
-                        if info.Type == POINTER_SHAPE_TYPE_MASKED_COLOR {
-                            // If masked color, A is either 0 or 255 depending on mask
-                            let a_val = if a != 0 { 255 } else { 0 };
-                            rgba_buffer.push(r);
-                            rgba_buffer.push(g);
-                            rgba_buffer.push(b);
-                            rgba_buffer.push(a_val);
-                        } else {
-                            rgba_buffer.push(r);
-                            rgba_buffer.push(g);
-                            rgba_buffer.push(b);
-                            rgba_buffer.push(a);
+        let mut cursor_update = None;
+        if matches!(request.cursor_mode, CursorCaptureMode::SyncNative) {
+            if let Some(screen_output) = self.screen_output.as_ref() {
+                match Self::capture_cursor_update(screen_output) {
+                    Ok(Some((fingerprint, data))) => {
+                        if self.last_cursor_fingerprint != Some(fingerprint) {
+                            self.last_cursor_fingerprint = Some(fingerprint);
+                            cursor_update = Some(data);
                         }
-                    } else {
-                        rgba_buffer.extend_from_slice(&[0, 0, 0, 0]);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        log::warn!("Failed to capture cursor update in DXGI backend: {}", err);
                     }
                 }
             }
         } else {
-            // MONOCHROME
-            let src = &screen_output.pointer_shape_buffer;
-            let pitch = info.Pitch as usize;
-            for y in 0..height {
-                let and_row = y as usize * pitch;
-                let xor_row = (y + height) as usize * pitch;
-                for x in 0..width {
-                    let bit_offset = x % 8;
-                    let byte_offset = (x / 8) as usize;
-                    let and_byte = src.get(and_row + byte_offset).copied().unwrap_or(0);
-                    let xor_byte = src.get(xor_row + byte_offset).copied().unwrap_or(0);
-
-                    let mask = 0x80 >> bit_offset;
-                    let and_bit = (and_byte & mask) != 0;
-                    let xor_bit = (xor_byte & mask) != 0;
-
-                    let (r, g, b, a) = match (and_bit, xor_bit) {
-                        (true, false) => (0, 0, 0, 0),         // Transparent
-                        (false, false) => (0, 0, 0, 255),      // Black
-                        (false, true) => (255, 255, 255, 255), // White
-                        (true, true) => (0, 0, 0, 255), // Inverted, render as black for simplicity
-                    };
-                    rgba_buffer.push(r);
-                    rgba_buffer.push(g);
-                    rgba_buffer.push(b);
-                    rgba_buffer.push(a);
-                }
-            }
+            self.last_cursor_fingerprint = None;
         }
 
-        use image::{ImageBuffer, Rgba};
-        use std::io::Cursor;
-        let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba_buffer)
-            .unwrap_or_else(|| ImageBuffer::new(width, height));
+        Ok(CaptureResult {
+            image: Box::new(screen_frame),
+            cursor_update,
+        })
+    }
 
-        let mut png_data = Cursor::new(Vec::new());
-        img.write_to(&mut png_data, image::ImageFormat::Png)
-            .map_err(|e| DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, &e.to_string()).unwrap_err())?;
-        use base64::Engine;
-        let base64_png = base64::engine::general_purpose::STANDARD.encode(png_data.into_inner());
-
-        let mut full_desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
-        unsafe { screen_output.copy_buffer_texture_2d.GetDesc(&mut full_desc) };
-
-        Ok(Some(crate::model::data_channel::CursorSyncData {
-            base64_png,
-            hotspot_x: info.HotSpot.x as i32,
-            hotspot_y: info.HotSpot.y as i32,
-            visible: true,
-            shape_id,
-            screen_width: full_desc.Width,
-            screen_height: full_desc.Height,
-        }))
+    fn supports_cursor_sync(&self) -> bool {
+        true
     }
 
     fn get_capture_type(&self) -> ImageCaptureType {
@@ -1530,6 +1549,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::thread;
 
+    use crate::model::image_capture::{CaptureRequest, CursorCaptureMode};
     use desk_utils::logs::init_logs;
     use log::LevelFilter;
     use std::sync::{Barrier, Once};
@@ -1563,7 +1583,10 @@ mod tests {
         capture: &mut DxgiImageCapture,
         bmp_path: &Path,
     ) -> Result<(), DeskError> {
-        let frame = capture.capture(true)?;
+        let capture_result = capture.capture(CaptureRequest {
+            cursor_mode: CursorCaptureMode::RenderInFrame,
+        })?;
+        let frame = capture_result.image;
         log::info!("frame_buffer.len={}", frame.get_data().len());
         let mut rgb_data = vec![0u8; frame.get_data().len()];
         let rgb_data_array = rgb_data.as_mut_slice();
@@ -1696,7 +1719,11 @@ mod tests {
 
                 let mut capture = capture_result.unwrap();
                 // first frame is black, skip it
-                capture.capture(false).unwrap();
+                capture
+                    .capture(CaptureRequest {
+                        cursor_mode: CursorCaptureMode::Disable,
+                    })
+                    .unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
                 let name = tmp_dir.join(format!("screenshot_{}_{}.bmp", desktop_name, index));
@@ -1774,12 +1801,18 @@ mod tests {
             b.wait();
             thread::sleep(std::time::Duration::from_secs(5)); // wait
             log::info!("Start to capture screen");
-            let screent_output_result = capture.capture(true);
+            let screent_output_result = capture.capture(CaptureRequest {
+                cursor_mode: CursorCaptureMode::RenderInFrame,
+            });
             if let Err(e) = screent_output_result {
                 log::error!("Failed to get screen output: {}", e);
 
                 let mut capture = DxgiImageCapture::new(&settings).unwrap();
-                capture.capture(true).unwrap();
+                capture
+                    .capture(CaptureRequest {
+                        cursor_mode: CursorCaptureMode::RenderInFrame,
+                    })
+                    .unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
                 let name = tmp_dir.join(format!("switch_desktop_screenshot_retry.bmp"));
