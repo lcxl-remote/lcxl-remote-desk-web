@@ -21,6 +21,7 @@ import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskInput } from "./use-desk-input"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
+import { useCursorSync } from "./use-cursor-sync"
 import WhiteboardCanvas from "./whiteboard-canvas"
 import WhiteboardToolbar from "./whiteboard-toolbar"
 import { useDeskMicrophone } from "./use-desk-microphone"
@@ -88,11 +89,13 @@ export default function DeskSession() {
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
 
-    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
+    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         lastMessage,
         sendMessage
     });
+
+    const { cursorStyle } = useCursorSync(cursorSyncChannel, videoRef, isRTCConnected && hasControl);
 
     const {
         clipboardEnabled,
@@ -454,6 +457,7 @@ export default function DeskSession() {
                         <video
                             ref={videoRef}
                             className="videoElement h-full w-full object-contain"
+                            style={{ cursor: cursorStyle }}
                             autoPlay
                             playsInline
                             muted={isMuted}

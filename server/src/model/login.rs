@@ -15,7 +15,7 @@ pub struct LoginParams {
 
     // For device code login
     pub device_code: Option<String>,
-    
+
     // For API Token login
     pub token: Option<String>,
 }

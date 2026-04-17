@@ -6,7 +6,10 @@ use webrtc::data_channel::{RTCDataChannel, data_channel_message::DataChannelMess
 
 use crate::model::{
     host_control::WhiteboardCommand,
-    security_approval::{SecurityApprovalSender, SecurityPermissionType, check_security_permission}, settings::SharedSettings,
+    security_approval::{
+        SecurityApprovalSender, SecurityPermissionType, check_security_permission,
+    },
+    settings::SharedSettings,
 };
 
 /// Handle whiteboard events from the DataChannel.

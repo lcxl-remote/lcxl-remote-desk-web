@@ -77,9 +77,10 @@ impl VideoEncoder for X264Encoder {
 
         let image = Image::new(Colorspace::I420, width, height, &planes);
 
-        let (res, _out_picture) = self.encoder.encode(self.pts, image).map_err(|e| {
-            DeskError::AnyhowError(anyhow::anyhow!("x264 encode error: {:?}", e))
-        })?;
+        let (res, _out_picture) = self
+            .encoder
+            .encode(self.pts, image)
+            .map_err(|e| DeskError::AnyhowError(anyhow::anyhow!("x264 encode error: {:?}", e)))?;
 
         self.pts += 1;
 

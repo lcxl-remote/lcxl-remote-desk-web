@@ -352,8 +352,221 @@ impl ImageCapture for GdiImageCapture {
         }))
     }
 
+    fn capture_cursor(
+        &mut self,
+        last_shape_id: Option<u64>,
+    ) -> Result<Option<crate::model::data_channel::CursorSyncData>, DeskError> {
+        let mut cursor_info = CURSORINFO::default();
+        cursor_info.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+
+        let cursor_valid = unsafe {
+            GetCursorInfo(&mut cursor_info)?;
+            !cursor_info.hCursor.is_invalid()
+        };
+
+        let is_visible = cursor_valid && (cursor_info.flags == windows::Win32::UI::WindowsAndMessaging::CURSOR_SHOWING);
+
+        if !is_visible {
+            if last_shape_id == Some(0) {
+                return Ok(None);
+            }
+            return Ok(Some(crate::model::data_channel::CursorSyncData {
+                visible: false,
+                ..Default::default()
+            }));
+        }
+
+        let shape_id = cursor_info.hCursor.0 as u64;
+        if last_shape_id == Some(shape_id) {
+            return Ok(None);
+        }
+
+        let mut icon_info = ICONINFO::default();
+        unsafe {
+            GetIconInfo(cursor_info.hCursor.into(), &mut icon_info)?;
+        }
+
+        let screen_dc = GDIHDC::get_hdc(None);
+        let mut bmp = BITMAP::default();
+
+        let is_color = !icon_info.hbmColor.is_invalid();
+        let target_hbm = if is_color {
+            icon_info.hbmColor
+        } else {
+            icon_info.hbmMask
+        };
+
+        unsafe {
+            GetObjectW(
+                target_hbm.into(),
+                std::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bmp as *mut _ as _),
+            )
+        };
+
+        let width = bmp.bmWidth as u32;
+        let height = if is_color {
+            bmp.bmHeight as u32
+        } else {
+            (bmp.bmHeight / 2) as u32
+        };
+
+        if width == 0 || height == 0 {
+            if !icon_info.hbmMask.is_invalid() {
+                unsafe { DeleteObject(icon_info.hbmMask.into()) };
+            }
+            if !icon_info.hbmColor.is_invalid() {
+                unsafe { DeleteObject(icon_info.hbmColor.into()) };
+            }
+            return Ok(None);
+        }
+
+        let mut rgba_buffer = Vec::new();
+
+        if is_color {
+            let bi_bit_count = 32u16;
+            let mut color_buffer: Vec<u8> = vec![0u8; (width * height * 4) as usize];
+            let mut bi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(height as i32), // Top-down
+                    biPlanes: 1,
+                    biBitCount: bi_bit_count,
+                    biCompression: BI_RGB.0,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [RGBQUAD::default()],
+            };
+
+            unsafe {
+                GetDIBits(
+                    screen_dc.hdc,
+                    icon_info.hbmColor,
+                    0,
+                    height as u32,
+                    Some(color_buffer.as_mut_ptr() as *mut _),
+                    &mut bi,
+                    DIB_RGB_COLORS,
+                )
+            };
+
+            for chunk in color_buffer.chunks_exact(4) {
+                let b = chunk[0];
+                let g = chunk[1];
+                let r = chunk[2];
+                let a = chunk[3];
+                // Sometimes cursor bitmaps are premultiplied or just have 0 alpha for fully transparent.
+                rgba_buffer.push(r);
+                rgba_buffer.push(g);
+                rgba_buffer.push(b);
+                rgba_buffer.push(a);
+            }
+        } else {
+            let mask_height = bmp.bmHeight as u32;
+            let mask_buffer_size = ((width * 1 + 31) / 32) * 4 * mask_height; // 1bpp
+            let mut mask_buffer = vec![0u8; mask_buffer_size as usize];
+            let mut mask_bi = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width as i32,
+                    biHeight: -(mask_height as i32), // Top-down
+                    biPlanes: 1,
+                    biBitCount: 1,
+                    biCompression: BI_RGB.0,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                },
+                bmiColors: [RGBQUAD::default()],
+            };
+            unsafe {
+                GetDIBits(
+                    screen_dc.hdc,
+                    icon_info.hbmMask,
+                    0,
+                    mask_height,
+                    Some(mask_buffer.as_mut_ptr() as *mut _),
+                    &mut mask_bi,
+                    DIB_RGB_COLORS,
+                )
+            };
+
+            let pitch = ((width * 1 + 31) / 32) * 4;
+            for y in 0..height {
+                let and_row = y as usize * pitch as usize;
+                let xor_row = (y + height) as usize * pitch as usize;
+                for x in 0..width {
+                    let byte_offset = (x / 8) as usize;
+                    let bit_offset = x % 8;
+                    let mask = 0x80 >> bit_offset;
+
+                    let and_byte = mask_buffer.get(and_row + byte_offset).copied().unwrap_or(0);
+                    let xor_byte = mask_buffer.get(xor_row + byte_offset).copied().unwrap_or(0);
+
+                    let and_bit = (and_byte & mask) != 0;
+                    let xor_bit = (xor_byte & mask) != 0;
+
+                    let (r, g, b, a) = match (and_bit, xor_bit) {
+                        (true, false) => (0, 0, 0, 0),         // Transparent
+                        (false, false) => (0, 0, 0, 255),      // Black
+                        (false, true) => (255, 255, 255, 255), // White
+                        (true, true) => (0, 0, 0, 255),        // Invert -> black
+                    };
+                    rgba_buffer.push(r);
+                    rgba_buffer.push(g);
+                    rgba_buffer.push(b);
+                    rgba_buffer.push(a);
+                }
+            }
+        }
+
+        if !icon_info.hbmMask.is_invalid() {
+            let result = unsafe { DeleteObject(icon_info.hbmMask.into()) };
+            if !result.as_bool() {
+                log::error!("Failed to delete cursor mask bitmap");
+            }
+        }
+        if !icon_info.hbmColor.is_invalid() {
+            let result = unsafe { DeleteObject(icon_info.hbmColor.into()) };
+            if !result.as_bool() {
+                log::error!("Failed to delete cursor color bitmap");
+            }
+        }
+
+        use image::{ImageBuffer, Rgba};
+        use std::io::Cursor;
+        let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba_buffer)
+            .unwrap_or_else(|| ImageBuffer::new(width, height));
+
+        let mut png_data = Cursor::new(Vec::new());
+        img.write_to(&mut png_data, image::ImageFormat::Png)
+            .map_err(|e| DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, &e.to_string()).unwrap_err())?;
+        use base64::Engine;
+        let base64_png = base64::engine::general_purpose::STANDARD.encode(png_data.into_inner());
+
+        let screen_width = self.display_info.desktop_coordinates.width() as u32;
+        let screen_height = self.display_info.desktop_coordinates.height() as u32;
+
+        Ok(Some(crate::model::data_channel::CursorSyncData {
+            base64_png,
+            hotspot_x: icon_info.xHotspot as i32,
+            hotspot_y: icon_info.yHotspot as i32,
+            visible: true,
+            shape_id,
+            screen_width,
+            screen_height,
+        }))
+    }
+
     fn get_capture_type(&self) -> ImageCaptureType {
-        ImageCaptureType::DGI
+        ImageCaptureType::GDI
     }
 
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {

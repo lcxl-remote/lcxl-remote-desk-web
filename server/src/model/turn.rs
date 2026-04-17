@@ -16,7 +16,10 @@ pub struct TurnAuthHandler {
 }
 
 impl TurnAuthHandler {
-    pub fn new(turn_settings: TurnSettings, connection_map: web::Data<SharedConnectionMap>) -> Self {
+    pub fn new(
+        turn_settings: TurnSettings,
+        connection_map: web::Data<SharedConnectionMap>,
+    ) -> Self {
         Self {
             turn_settings,
             connection_map,
@@ -55,7 +58,10 @@ impl turn::auth::AuthHandler for TurnAuthHandler {
                 log::info!("auth_handle password success for username={}", username);
                 return Ok(key);
             } else {
-                log::warn!("auth_handle password failed for username={}, client_id is None", username);
+                log::warn!(
+                    "auth_handle password failed for username={}, client_id is None",
+                    username
+                );
             }
         }
 

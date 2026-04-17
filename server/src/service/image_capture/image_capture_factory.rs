@@ -9,7 +9,7 @@ use crate::service::image_capture::mac_screencapturekit::{
 };
 #[cfg(target_os = "windows")]
 use crate::service::image_capture::{
-    dxgi_capture::{DigxImageCapture, DigxImageOutputEnumerator},
+    dxgi_capture::{DxgiImageCapture, DxgiImageOutputEnumerator},
     gdi_capture::{GdiImageCapture, GdiImageOutputEnumerator},
 };
 #[cfg(target_os = "linux")]
@@ -51,9 +51,9 @@ pub fn create_image_capture(
     let image_capture_type = desk_settings.get_image_capture_type()?;
     let capture: Box<dyn ImageCapture + Send> = match image_capture_type {
         #[cfg(target_os = "windows")]
-        ImageCaptureType::DIGX => Box::new(DigxImageCapture::new(desk_settings)?),
+        ImageCaptureType::DXGI => Box::new(DxgiImageCapture::new(desk_settings)?),
         #[cfg(target_os = "windows")]
-        ImageCaptureType::DGI => Box::new(GdiImageCapture::new(desk_settings)?),
+        ImageCaptureType::GDI => Box::new(GdiImageCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageCapture::new(desk_settings)?),
         #[cfg(target_os = "linux")]
@@ -106,9 +106,9 @@ pub fn list_image_output(
 ) -> Result<Vec<DisplayInfo>, DeskError> {
     let capture: Box<dyn ImageOutputEnumerator + Send> = match image_capture_type {
         #[cfg(target_os = "windows")]
-        ImageCaptureType::DIGX => Box::new(DigxImageOutputEnumerator::new()),
+        ImageCaptureType::DXGI => Box::new(DxgiImageOutputEnumerator::new()),
         #[cfg(target_os = "windows")]
-        ImageCaptureType::DGI => Box::new(GdiImageOutputEnumerator::new()),
+        ImageCaptureType::GDI => Box::new(GdiImageOutputEnumerator::new()),
         #[cfg(target_os = "linux")]
         ImageCaptureType::X11 => Box::new(X11ImageOutputEnumerator::new()),
         #[cfg(target_os = "linux")]

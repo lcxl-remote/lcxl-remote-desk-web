@@ -1,11 +1,11 @@
 use crate::error::DeskError;
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::service::signaling::DeskSession;
 use desk_signal_facade::model::files::{
     DeleteFileRequest, FileInfo, FileListParams, FileListResponse,
 };
-use desk_signal_facade::model::signal::{SignalingModel, SignalingType, PeerSignalingSender};
+use desk_signal_facade::model::signal::{PeerSignalingSender, SignalingModel, SignalingType};
 use desk_utils::error::DeskErrorCode;
-use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
-use crate::service::signaling::DeskSession;
 
 use log::{debug, info, warn};
 use std::path::PathBuf;
@@ -162,7 +162,14 @@ pub async fn handle_manager_file_list(
 ) -> Result<(), DeskError> {
     // ManagerFileList is a request from the http api, so it may not have a from_connection_id
     let from_connection_id = signaling_model.from_connection_id.clone();
-    let allow_file_browse = { desk_session.settings.read().await.security.allow_file_browse };
+    let allow_file_browse = {
+        desk_session
+            .settings
+            .read()
+            .await
+            .security
+            .allow_file_browse
+    };
     let approved = check_security_permission(
         &desk_session.settings,
         desk_session.security_approval_sender.as_ref(),
@@ -173,7 +180,8 @@ pub async fn handle_manager_file_list(
     .await;
 
     if !approved {
-        desk_session.session
+        desk_session
+            .session
             .send_error(
                 &signaling_model.request_id,
                 signaling_model.signaling_type.into(),
@@ -188,7 +196,8 @@ pub async fn handle_manager_file_list(
     let params = signaling_model.get_data::<FileListParams>()?;
     match list_files(params).await {
         Ok(response) => {
-            desk_session.session
+            desk_session
+                .session
                 .send_response(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileList,
@@ -198,7 +207,8 @@ pub async fn handle_manager_file_list(
                 .await?;
         }
         Err(e) => {
-            desk_session.session
+            desk_session
+                .session
                 .send_error(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileList,
@@ -218,7 +228,14 @@ pub async fn handle_manager_file_delete(
 ) -> Result<(), DeskError> {
     // ManagerFileList is a request from the http api, so it may not have a from_connection_id
     let from_connection_id = signaling_model.from_connection_id.clone();
-    let allow_file_browse = { desk_session.settings.read().await.security.allow_file_browse };
+    let allow_file_browse = {
+        desk_session
+            .settings
+            .read()
+            .await
+            .security
+            .allow_file_browse
+    };
     let approved = check_security_permission(
         &desk_session.settings,
         desk_session.security_approval_sender.as_ref(),
@@ -229,7 +246,8 @@ pub async fn handle_manager_file_delete(
     .await;
 
     if !approved {
-        desk_session.session
+        desk_session
+            .session
             .send_error(
                 &signaling_model.request_id,
                 signaling_model.signaling_type.into(),
@@ -245,7 +263,8 @@ pub async fn handle_manager_file_delete(
 
     match delete_file(params).await {
         Ok(_) => {
-            desk_session.session
+            desk_session
+                .session
                 .send_response(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileDelete,
@@ -255,7 +274,8 @@ pub async fn handle_manager_file_delete(
                 .await?;
         }
         Err(e) => {
-            desk_session.session
+            desk_session
+                .session
                 .send_error(
                     &signaling_model.request_id,
                     SignalingType::ManagerFileDelete,

@@ -26,10 +26,7 @@ pub struct Av1Encoder {
 }
 
 impl Av1Encoder {
-    pub fn new(
-        setting: Av1EncoderSettings,
-        display_info: &DisplayInfo,
-    ) -> Result<Self, DeskError> {
+    pub fn new(setting: Av1EncoderSettings, display_info: &DisplayInfo) -> Result<Self, DeskError> {
         let width = display_info.desktop_coordinates.width() as usize;
         let height = display_info.desktop_coordinates.height() as usize;
 

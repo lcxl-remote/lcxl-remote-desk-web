@@ -12,9 +12,7 @@ use crate::error::DeskError;
     ),
 )]
 #[get("/info")]
-pub async fn get_turn_info(
-    api_state: web::Data<TurnApiState>,
-) -> Result<HttpResponse, DeskError> {
+pub async fn get_turn_info(api_state: web::Data<TurnApiState>) -> Result<HttpResponse, DeskError> {
     let response = desk_turn::controller::get_turn_info(api_state).await?;
     Ok(response)
 }

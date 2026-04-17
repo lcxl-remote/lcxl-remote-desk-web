@@ -1,15 +1,15 @@
-use std::io::Write;
-use std::sync::Arc;
-use std::time::Duration;
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::service::signaling::{DeskSession, DeskSessionMessage};
 use bytestring::ByteString;
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
-use desk_signal_facade::model::signal::{SignalingModel, SignalingType, PeerSignalingSender};
+use desk_signal_facade::model::signal::{PeerSignalingSender, SignalingModel, SignalingType};
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalOutputData, TerminalResizeData,
 };
 use desk_utils::error::DeskErrorCode;
-use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
-use crate::service::signaling::{DeskSession, DeskSessionMessage};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use std::io::Write;
+use std::sync::Arc;
+use std::time::Duration;
 
 use actix_web::web;
 use desk_signal_facade::model::terminal::TerminalList;
@@ -137,7 +137,8 @@ pub async fn handle_manager_terminal_start(
     .await;
 
     if !approved {
-        desk_session.session
+        desk_session
+            .session
             .send_error(
                 &signaling_model.request_id,
                 signaling_model.signaling_type.into(),
@@ -310,7 +311,8 @@ pub async fn handle_manager_terminal_start(
     );
     if let Ok(model) = model {
         if let Ok(text) = serde_json::to_string(&model) {
-            let _ = desk_session.session
+            let _ = desk_session
+                .session
                 .sender
                 .send(DeskSessionMessage::Text(ByteString::from(text)));
         }
@@ -323,12 +325,11 @@ pub async fn handle_manager_terminal_data(
     signaling_model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
-    let data_value =
-        if let Some(v) = signaling_model.get_data_with_type::<TerminalInputData>()? {
-            v
-        } else {
-            return Ok(()); // Ignore empty
-        };
+    let data_value = if let Some(v) = signaling_model.get_data_with_type::<TerminalInputData>()? {
+        v
+    } else {
+        return Ok(()); // Ignore empty
+    };
 
     if let Some(terminal) = desk_session.terminal_map.get_mut(from_connection_id) {
         let writer = &mut terminal.writer;
@@ -344,12 +345,11 @@ pub async fn handle_manager_terminal_resize(
     signaling_model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
-    let data_value =
-        if let Some(v) = signaling_model.get_data_with_type::<TerminalResizeData>()? {
-            v
-        } else {
-            return Ok(());
-        };
+    let data_value = if let Some(v) = signaling_model.get_data_with_type::<TerminalResizeData>()? {
+        v
+    } else {
+        return Ok(());
+    };
 
     if let Some(terminal) = desk_session.terminal_map.get_mut(from_connection_id) {
         let rows = data_value.rows;
@@ -394,7 +394,8 @@ pub async fn handle_list_terminals(
 ) -> Result<(), DeskError> {
     let from_connection_id = signaling_model.from_connection_id.clone();
     let terminals = fetch_terminal_list(desk_session.settings.clone()).await?;
-    desk_session.session
+    desk_session
+        .session
         .send_response(
             &signaling_model.request_id,
             signaling_model.signaling_type.into(),

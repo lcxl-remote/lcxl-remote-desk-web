@@ -15,7 +15,7 @@ use crate::model::{
     file_transfer::FileTransferMessage,
     info::BackendInfo,
     security_approval::SecurityApprovalEventPayload,
-    settings::{TurnClientSettings, TraversalMode},
+    settings::{TraversalMode, TurnClientSettings},
 };
 
 /// API version

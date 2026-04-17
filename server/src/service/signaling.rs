@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::DerefMut;
-use std::sync::{Arc, atomic::AtomicBool, LazyLock};
+use std::sync::{Arc, LazyLock, atomic::AtomicBool};
 use std::time::Duration;
 
 use actix_web::web;
@@ -385,7 +385,9 @@ pub async fn start_desk_session(
                 };
 
                 if local_token.is_empty() {
-                    log::warn!("local_signaling_token is not set, skipping local signaling connection");
+                    log::warn!(
+                        "local_signaling_token is not set, skipping local signaling connection"
+                    );
                     tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
@@ -397,7 +399,9 @@ pub async fn start_desk_session(
                 };
 
                 let mut channels_for_loop = crate::ExternalChannels {
-                    private_screen_cmd_sender: local_channels_clone.private_screen_cmd_sender.clone(),
+                    private_screen_cmd_sender: local_channels_clone
+                        .private_screen_cmd_sender
+                        .clone(),
                     private_screen_state_receiver: None,
                     tauri_login_token: local_channels_clone.tauri_login_token.clone(),
                     whiteboard_cmd_sender: local_channels_clone.whiteboard_cmd_sender.clone(),
@@ -454,11 +458,17 @@ pub async fn start_desk_session(
                 if let (Some(url), Some(token)) = (signaling_url, signaling_token) {
                     if !url.is_empty() && !token.is_empty() {
                         let mut channels_for_loop = crate::ExternalChannels {
-                            private_screen_cmd_sender: remote_sig_channels.private_screen_cmd_sender.clone(),
+                            private_screen_cmd_sender: remote_sig_channels
+                                .private_screen_cmd_sender
+                                .clone(),
                             private_screen_state_receiver: None,
                             tauri_login_token: remote_sig_channels.tauri_login_token.clone(),
-                            whiteboard_cmd_sender: remote_sig_channels.whiteboard_cmd_sender.clone(),
-                            security_approval_sender: remote_sig_channels.security_approval_sender.clone(),
+                            whiteboard_cmd_sender: remote_sig_channels
+                                .whiteboard_cmd_sender
+                                .clone(),
+                            security_approval_sender: remote_sig_channels
+                                .security_approval_sender
+                                .clone(),
                         };
 
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -513,11 +523,17 @@ pub async fn start_desk_session(
                 if let (Some(url), Some(token)) = (manager_url, manager_api_token) {
                     if !url.is_empty() && !token.is_empty() {
                         let mut channels_for_loop = crate::ExternalChannels {
-                            private_screen_cmd_sender: remote_mgr_channels.private_screen_cmd_sender.clone(),
+                            private_screen_cmd_sender: remote_mgr_channels
+                                .private_screen_cmd_sender
+                                .clone(),
                             private_screen_state_receiver: None,
                             tauri_login_token: remote_mgr_channels.tauri_login_token.clone(),
-                            whiteboard_cmd_sender: remote_mgr_channels.whiteboard_cmd_sender.clone(),
-                            security_approval_sender: remote_mgr_channels.security_approval_sender.clone(),
+                            whiteboard_cmd_sender: remote_mgr_channels
+                                .whiteboard_cmd_sender
+                                .clone(),
+                            security_approval_sender: remote_mgr_channels
+                                .security_approval_sender
+                                .clone(),
                         };
 
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -678,6 +694,8 @@ pub struct PeerConnection {
     pub capture_audio_thread: Option<std::thread::JoinHandle<()>>,
     /// Signaling state
     pub signaling_state: Arc<tokio::sync::RwLock<SignalingState>>,
+    /// Cursor data channel
+    pub cursor_data_channel: Arc<tokio::sync::RwLock<Option<Arc<RTCDataChannel>>>>,
 }
 
 impl PeerConnection {
@@ -840,7 +858,10 @@ impl DeskSession {
                                 }
                             }
                         }
-                        HostControlEventType::PrivateScreenUnknownError(from_connection_id_opt, e) => {
+                        HostControlEventType::PrivateScreenUnknownError(
+                            from_connection_id_opt,
+                            e,
+                        ) => {
                             log::error!("Private screen error: {}", e);
                             // We shouldn't send PrivateScreenStateChanged directly to the channel queue,
                             // Instead, we should construct a Modeling message if we want to send it to the frontend.
@@ -901,7 +922,10 @@ impl DeskSession {
         let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
         let request_remote_model = signaling_model.get_data::<RequestRemoteModel>()?;
 
-        if self.rtc_peer_connection_map.contains_key(from_connection_id) {
+        if self
+            .rtc_peer_connection_map
+            .contains_key(from_connection_id)
+        {
             return DeskError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 "Peer connection already exists",
@@ -1015,6 +1039,7 @@ impl DeskSession {
                 capture_screen_thread: None,
                 capture_audio_thread: None,
                 signaling_state: Arc::new(tokio::sync::RwLock::new(SignalingState::default())),
+                cursor_data_channel: Arc::new(tokio::sync::RwLock::new(None)),
             })),
         );
         Ok(())
@@ -1154,6 +1179,7 @@ impl DeskSession {
             // Spawn a blocking task to capture screen and send video
             let desk_settings = offer_model.desk_settings.clone();
             let signaling_state_for_screen = peer_connection.signaling_state.clone();
+            let cursor_data_channel_for_screen = peer_connection.cursor_data_channel.clone();
 
             if peer_connection.capture_screen_thread.is_none() {
                 let capture_screen_thread = std::thread::spawn(move || {
@@ -1166,6 +1192,7 @@ impl DeskSession {
                     local.spawn_local(async move {
                         let result = DeskSession::capture_screen_task(
                             signaling_state_for_screen,
+                            cursor_data_channel_for_screen,
                             desk_settings,
                             video_state_receiver,
                             video_track,
@@ -1338,6 +1365,7 @@ impl DeskSession {
         let from_connection_id_for_dc = from_connection_id.to_string();
         let settings_for_dc = self.settings.clone();
         let security_sender_for_dc = self.security_approval_sender.clone();
+        let cursor_data_channel_for_dc = peer_connection.cursor_data_channel.clone();
         peer_connection
             .rtc_peer_connection
             .on_data_channel(Box::new(move |d: Arc<RTCDataChannel>| {
@@ -1349,8 +1377,15 @@ impl DeskSession {
                 let sid = from_connection_id_for_dc.clone();
                 let settings = settings_for_dc.clone();
                 let security_sender = security_sender_for_dc.clone();
+                let cursor_data_channel = cursor_data_channel_for_dc.clone();
                 // Register channel opening handling
                 Box::pin(async move {
+                    if d_label == crate::model::data_channel::DATA_CHANNEL_LABEL_CURSOR_SYNC_EVENT {
+                        log::info!("Received CursorSyncDataChannel");
+                        let mut channel = cursor_data_channel.write().await;
+                        *channel = Some(d.clone());
+                        return;
+                    }
                     let result = handle_data_channel_event(
                         signaling_state,
                         d.clone(),
@@ -1470,6 +1505,7 @@ impl DeskSession {
     /// Start the screen capture task
     pub async fn capture_screen_task(
         signaling_state: Arc<tokio::sync::RwLock<SignalingState>>,
+        cursor_data_channel: Arc<tokio::sync::RwLock<Option<Arc<RTCDataChannel>>>>,
         desk_settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         video_track: Arc<TrackLocalStaticSample>,
@@ -1528,6 +1564,7 @@ impl DeskSession {
         // * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(desk_settings.get_duration_by_video_fps());
+        let mut last_cursor_shape_id: Option<u64> = None;
         loop {
             //ticker = tokio::time::interval(Duration::from_millis(3));
             // check if the connection is still alive
@@ -1555,7 +1592,43 @@ impl DeskSession {
                 .with_label_values(&[image_capture_type])
                 .start_timer();
 
-            let image_info_result = capture.capture(desk_settings.show_mouse);
+            let supports_native_cursor = match capture.get_capture_type() {
+                crate::model::image_capture::ImageCaptureType::GDI => true,
+                crate::model::image_capture::ImageCaptureType::DXGI => true,
+                _ => false,
+            };
+
+            let is_controlling = signaling_state.read().await.accept_control;
+            let show_mouse = if desk_settings.show_mouse {
+                if supports_native_cursor {
+                    !is_controlling
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+
+            let image_info_result = capture.capture(show_mouse);
+
+            if is_controlling && supports_native_cursor {
+                if let Ok(Some(cursor_data)) = capture.capture_cursor(last_cursor_shape_id) {
+                    if last_cursor_shape_id != Some(cursor_data.shape_id) {
+                        log::info!("Cursor update: visible={}, shape_id={}, screen_width={}, screen_height={}", cursor_data.visible, cursor_data.shape_id, cursor_data.screen_width, cursor_data.screen_height);
+                        last_cursor_shape_id = Some(cursor_data.shape_id);
+                        let channel_opt = cursor_data_channel.read().await.clone();
+                        if let Some(channel) = channel_opt {
+                            if channel.ready_state() == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+                                if let Ok(json) = serde_json::to_string(&cursor_data) {
+                                    let _ = channel.send_text(json).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                last_cursor_shape_id = None;
+            }
 
             let image_info = match image_info_result {
                 Ok(image_info) => {
@@ -1748,8 +1821,10 @@ impl DeskSession {
                 if let Some(mut candidate_init) =
                     signaling_model.get_data_with_type::<RTCIceCandidateInit>()?
                 {
-                    let to_connection_id =
-                        signaling_model.to_connection_id.as_deref().unwrap_or("<none>");
+                    let to_connection_id = signaling_model
+                        .to_connection_id
+                        .as_deref()
+                        .unwrap_or("<none>");
                     log::info!(
                         "Received ICE candidate from {} to {}: candidate=\"{}\" sdp_mid={:?} sdp_mline_index={:?} ufrag={:?}",
                         from_connection_id,
@@ -1809,7 +1884,8 @@ impl DeskSession {
             }
             SignalingType::CloseControl => {
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
-                if let Some(peer_connection) = self.rtc_peer_connection_map.remove(from_connection_id)
+                if let Some(peer_connection) =
+                    self.rtc_peer_connection_map.remove(from_connection_id)
                 {
                     info!(
                         "Received CloseControl from session {}, shutting down peer connection",
@@ -1894,15 +1970,14 @@ impl DeskSession {
                 let mut sys = sysinfo::System::new_all();
                 sys.refresh_all();
                 let mut system_info = crate::model::info::SystemInfo::from(&sys);
-                let startup_mode = {
-                    self.settings.read().await.args.startup_mode.clone()
-                };
+                let startup_mode = { self.settings.read().await.args.startup_mode.clone() };
                 system_info.startup_mode = startup_mode.clone();
-                system_info.is_admin = if startup_mode != crate::model::settings::StartupMode::Signaling {
-                    Some(desk_utils::permission::is_admin())
-                } else {
-                    None
-                };
+                system_info.is_admin =
+                    if startup_mode != crate::model::settings::StartupMode::Signaling {
+                        Some(desk_utils::permission::is_admin())
+                    } else {
+                        None
+                    };
                 let facade_info = system_info.to_facade();
                 self.session
                     .send_response(

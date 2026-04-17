@@ -78,7 +78,11 @@ impl HostControlHelper for LinuxHostControlHelper {
         DeskError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
     }
 
-    fn enable_private_screen(&self, from_connection_id: &str, enable: bool) -> Result<(), DeskError> {
+    fn enable_private_screen(
+        &self,
+        from_connection_id: &str,
+        enable: bool,
+    ) -> Result<(), DeskError> {
         if let Some(sender) = &self.cmd_sender {
             let cmd = if enable {
                 PrivateScreenCommand::Show(from_connection_id.to_string())

@@ -15,7 +15,9 @@ use windows_core::HSTRING;
 
 use crate::{
     error::DeskError,
-    model::host_control::{ClipboardImage, DisplaySettings, HostControlHelper, PrivateScreenCommand},
+    model::host_control::{
+        ClipboardImage, DisplaySettings, HostControlHelper, PrivateScreenCommand,
+    },
 };
 
 pub struct WindowsHostControlHelper {
@@ -76,7 +78,11 @@ impl HostControlHelper for WindowsHostControlHelper {
         Ok(())
     }
 
-    fn enable_private_screen(&self, from_connection_id: &str, enable: bool) -> Result<(), DeskError> {
+    fn enable_private_screen(
+        &self,
+        from_connection_id: &str,
+        enable: bool,
+    ) -> Result<(), DeskError> {
         if let Some(sender) = &self.cmd_sender {
             let cmd = if enable {
                 PrivateScreenCommand::Show(from_connection_id.to_string())
@@ -120,9 +126,7 @@ impl HostControlHelper for WindowsHostControlHelper {
         }
     }
 
-    fn get_image_from_clipboard(
-        &mut self,
-    ) -> Result<Option<ClipboardImage>, DeskError> {
+    fn get_image_from_clipboard(&mut self) -> Result<Option<ClipboardImage>, DeskError> {
         match self.clipboard.get_image() {
             Ok(img) => Ok(Some(ClipboardImage {
                 width: img.width,
@@ -134,10 +138,7 @@ impl HostControlHelper for WindowsHostControlHelper {
         }
     }
 
-    fn set_image_to_clipboard(
-        &mut self,
-        image: &ClipboardImage,
-    ) -> Result<(), DeskError> {
+    fn set_image_to_clipboard(&mut self, image: &ClipboardImage) -> Result<(), DeskError> {
         let img_data = arboard::ImageData {
             width: image.width,
             height: image.height,

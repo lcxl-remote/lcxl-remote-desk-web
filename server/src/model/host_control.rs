@@ -35,7 +35,11 @@ pub trait HostControlHelper {
     fn block_input(&self, block: bool) -> Result<(), DeskError>;
 
     /// Enable or disable private screen mode
-    fn enable_private_screen(&self, from_connection_id: &str, enable: bool) -> Result<(), DeskError>;
+    fn enable_private_screen(
+        &self,
+        from_connection_id: &str,
+        enable: bool,
+    ) -> Result<(), DeskError>;
 
     /// Control monitor power (turn on/off)
     fn control_monitor_power(&self, turn_off: bool) -> Result<(), DeskError>;

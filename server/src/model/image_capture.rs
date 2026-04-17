@@ -2,6 +2,7 @@ use desk_signal_facade::model::image_capture::DisplayInfo;
 use strum_macros::{EnumIter, EnumString, IntoStaticStr};
 
 use crate::error::DeskError;
+use crate::model::data_channel::CursorSyncData;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ImageType {
@@ -17,6 +18,9 @@ pub trait ImageInfo {
 
 pub trait ImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError>;
+    fn capture_cursor(&mut self, last_shape_id: Option<u64>) -> Result<Option<CursorSyncData>, DeskError> {
+        Ok(None)
+    }
     fn get_capture_type(&self) -> ImageCaptureType;
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError>;
 }
@@ -30,12 +34,12 @@ pub trait ImageOutputEnumerator {
 /// Image Capture Type Enum
 #[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
 pub enum ImageCaptureType {
-    /// Capture image from DIGX device
+    /// Capture image from DXGI device
     #[cfg(target_os = "windows")]
-    DIGX,
-    /// Capture image from DGI device
+    DXGI,
+    /// Capture image from GDI device
     #[cfg(target_os = "windows")]
-    DGI,
+    GDI,
     /// Capture image from X11 device
     /// Capture image from X11 device
     #[cfg(target_os = "linux")]
@@ -51,7 +55,7 @@ pub enum ImageCaptureType {
 impl Default for ImageCaptureType {
     fn default() -> Self {
         #[cfg(target_os = "windows")]
-        return ImageCaptureType::DIGX;
+        return ImageCaptureType::DXGI;
         #[cfg(target_os = "linux")]
         return ImageCaptureType::X11;
         #[cfg(target_os = "macos")]

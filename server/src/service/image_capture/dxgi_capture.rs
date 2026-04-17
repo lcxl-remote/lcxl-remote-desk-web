@@ -140,7 +140,7 @@ pub fn from_rect(rect: &RECT) -> DisplayRect {
     }
 }
 
-pub fn from_digx_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
+pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
     log::debug!(
         "Converting DXGI_OUTPUT_DESC to DisplayInfo, output_desc: {:?}",
         output_desc
@@ -547,7 +547,7 @@ impl ScreenOutput {
     ) -> Result<Self, DeskError> {
         let output = unsafe { screen_record_manager.dxgi_adapter.EnumOutputs(output_index) }?;
 
-        let digx_output_desc = unsafe { output.GetDesc() }?;
+        let dxgi_output_desc = unsafe { output.GetDesc() }?;
         let output1 = output.cast::<IDXGIOutput1>()?;
         // get the device from the manager and pass it to DuplicateOutput
         let pdevice = &screen_record_manager.device;
@@ -557,7 +557,7 @@ impl ScreenOutput {
         log::info!(
             "output_index {}, dxgi_output_desc {:?}, dup_output_desc {:?}",
             output_index,
-            digx_output_desc,
+            dxgi_output_desc,
             dup_output_desc
         );
 
@@ -635,9 +635,11 @@ impl ScreenOutput {
 
         self.draw_desktop(&acquired_desktop_image)?;
 
+        self.update_mouse_info(&frame_info)?;
+
         // draw mouse cursor if needed
         if draw_mouse {
-            self.draw_mouse(&frame_info, &acquired_desktop_image)?;
+            self.draw_mouse(&acquired_desktop_image)?;
         }
         // Copy render target texture to shared texture
         unsafe {
@@ -787,14 +789,7 @@ impl ScreenOutput {
         Ok(())
     }
 
-    /// Draw mouse cursor on the screen
-    pub fn draw_mouse(
-        &mut self,
-        frame_info: &DXGI_OUTDUPL_FRAME_INFO,
-        acquired_desktop_image: &ID3D11Texture2D,
-    ) -> Result<(), DeskError> {
-        // A non-zero mouse update timestamp indicates that there is a mouse position update and optionally a shape change
-
+    pub fn update_mouse_info(&mut self, frame_info: &DXGI_OUTDUPL_FRAME_INFO) -> Result<(), DeskError> {
         let mut update_position = true;
         if frame_info.LastMouseUpdateTime == 0 {
             update_position = false;
@@ -829,12 +824,16 @@ impl ScreenOutput {
                     }
                     log::trace!("Pointer shape info: {:?}", self.pointer_shape_info);
                 }
-            } else {
-                // mouse is not visible, clear the pointer shape buffer
-                self.pointer_shape_buffer = vec![];
             }
         }
+        Ok(())
+    }
 
+    /// Draw mouse cursor on the screen
+    pub fn draw_mouse(
+        &mut self,
+        acquired_desktop_image: &ID3D11Texture2D,
+    ) -> Result<(), DeskError> {
         if !self.pointer_visible {
             log::trace!("Pointer is not visible, skipping drawing pointer shape.");
             // If the pointer is not visible, we don't need to draw anything. Just return.
@@ -1278,15 +1277,15 @@ impl ImageInfo for SceenFrame<'_> {
     }
 }
 
-pub struct DigxImageOutputEnumerator {}
+pub struct DxgiImageOutputEnumerator {}
 
-impl DigxImageOutputEnumerator {
+impl DxgiImageOutputEnumerator {
     pub fn new() -> Self {
-        DigxImageOutputEnumerator {}
+        DxgiImageOutputEnumerator {}
     }
 }
 
-impl ImageOutputEnumerator for DigxImageOutputEnumerator {
+impl ImageOutputEnumerator for DxgiImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, DeskError> {
         let settings = DeskSettings::default();
         let manager = ScreenRecordManager::new(&settings)?;
@@ -1297,7 +1296,7 @@ impl ImageOutputEnumerator for DigxImageOutputEnumerator {
             if let Ok(output) = result {
                 let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
 
-                output_list.push(from_digx_output_desc(&output_desc));
+                output_list.push(from_dxgi_output_desc(&output_desc));
             } else if let Err(error) = result {
                 if error.code() != DXGI_ERROR_NOT_FOUND {
                     log::error!(
@@ -1319,20 +1318,20 @@ impl ImageOutputEnumerator for DigxImageOutputEnumerator {
     }
 }
 
-pub struct DigxImageCapture {
+pub struct DxgiImageCapture {
     pub manager: Arc<ScreenRecordManager>,
     pub output_index: u32,
     pub screen_output: Option<ScreenOutput>,
 }
 
-impl DigxImageCapture {
+impl DxgiImageCapture {
     pub fn new(settings: &DeskSettings) -> Result<Self, DeskError> {
         let manager = ScreenRecordManager::new(settings)?;
         let screen_output = Some(ScreenOutput::new(
             manager.clone(),
             settings.video_device_index,
         )?);
-        Ok(DigxImageCapture {
+        Ok(DxgiImageCapture {
             manager,
             screen_output,
             output_index: settings.video_device_index,
@@ -1340,7 +1339,7 @@ impl DigxImageCapture {
     }
 }
 
-impl ImageCapture for DigxImageCapture {
+impl ImageCapture for DxgiImageCapture {
     fn capture(&mut self, show_mouse: bool) -> Result<Box<dyn ImageInfo + Send + Sync>, DeskError> {
         log::trace!("Start to get screen output frame");
         if self.screen_output.is_none() {
@@ -1384,14 +1383,145 @@ impl ImageCapture for DigxImageCapture {
         Ok(Box::new(screen_frame))
     }
 
+    fn capture_cursor(
+        &mut self,
+        last_shape_id: Option<u64>,
+    ) -> Result<Option<crate::model::data_channel::CursorSyncData>, DeskError> {
+        if self.screen_output.is_none() {
+            self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
+            // Must call get_frame at least once to populate pointer info
+            if let Some(screen_output) = self.screen_output.as_mut() {
+                let _ = screen_output.get_frame(false);
+            }
+        }
+        let screen_output = self.screen_output.as_mut().unwrap();
+        if !screen_output.pointer_visible {
+            if last_shape_id == Some(0) {
+                return Ok(None);
+            }
+            return Ok(Some(crate::model::data_channel::CursorSyncData {
+                visible: false,
+                ..Default::default()
+            }));
+        }
+
+        if screen_output.pointer_shape_buffer.is_empty() {
+            return Ok(None);
+        }
+
+        let info = &screen_output.pointer_shape_info;
+        let mut rgba_buffer = Vec::new();
+        let width = info.Width;
+        let height = if info.Type == POINTER_SHAPE_TYPE_MONOCHROME {
+            info.Height / 2
+        } else {
+            info.Height
+        };
+        // Use last_mouse_update_time or simple hash as shape_id
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        screen_output.pointer_shape_buffer.hash(&mut hasher);
+        let shape_id = hasher.finish();
+
+        if last_shape_id == Some(shape_id) {
+            return Ok(None);
+        }
+
+        if info.Type == POINTER_SHAPE_TYPE_COLOR || info.Type == POINTER_SHAPE_TYPE_MASKED_COLOR {
+            let src = &screen_output.pointer_shape_buffer;
+            for y in 0..height {
+                let row_start = (y * info.Pitch) as usize;
+                for x in 0..width {
+                    let pixel_start = row_start + (x * 4) as usize;
+                    if pixel_start + 3 < src.len() {
+                        let b = src[pixel_start];
+                        let g = src[pixel_start + 1];
+                        let r = src[pixel_start + 2];
+                        let a = src[pixel_start + 3];
+
+                        if info.Type == POINTER_SHAPE_TYPE_MASKED_COLOR {
+                            // If masked color, A is either 0 or 255 depending on mask
+                            let a_val = if a != 0 { 255 } else { 0 };
+                            rgba_buffer.push(r);
+                            rgba_buffer.push(g);
+                            rgba_buffer.push(b);
+                            rgba_buffer.push(a_val);
+                        } else {
+                            rgba_buffer.push(r);
+                            rgba_buffer.push(g);
+                            rgba_buffer.push(b);
+                            rgba_buffer.push(a);
+                        }
+                    } else {
+                        rgba_buffer.extend_from_slice(&[0, 0, 0, 0]);
+                    }
+                }
+            }
+        } else {
+            // MONOCHROME
+            let src = &screen_output.pointer_shape_buffer;
+            let pitch = info.Pitch as usize;
+            for y in 0..height {
+                let and_row = y as usize * pitch;
+                let xor_row = (y + height) as usize * pitch;
+                for x in 0..width {
+                    let bit_offset = x % 8;
+                    let byte_offset = (x / 8) as usize;
+                    let and_byte = src.get(and_row + byte_offset).copied().unwrap_or(0);
+                    let xor_byte = src.get(xor_row + byte_offset).copied().unwrap_or(0);
+
+                    let mask = 0x80 >> bit_offset;
+                    let and_bit = (and_byte & mask) != 0;
+                    let xor_bit = (xor_byte & mask) != 0;
+
+                    let (r, g, b, a) = match (and_bit, xor_bit) {
+                        (true, false) => (0, 0, 0, 0),         // Transparent
+                        (false, false) => (0, 0, 0, 255),      // Black
+                        (false, true) => (255, 255, 255, 255), // White
+                        (true, true) => (0, 0, 0, 255), // Inverted, render as black for simplicity
+                    };
+                    rgba_buffer.push(r);
+                    rgba_buffer.push(g);
+                    rgba_buffer.push(b);
+                    rgba_buffer.push(a);
+                }
+            }
+        }
+
+        use image::{ImageBuffer, Rgba};
+        use std::io::Cursor;
+        let img = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba_buffer)
+            .unwrap_or_else(|| ImageBuffer::new(width, height));
+
+        let mut png_data = Cursor::new(Vec::new());
+        img.write_to(&mut png_data, image::ImageFormat::Png)
+            .map_err(|e| DeskError::custom_error::<()>(DeskErrorCode::SYSTEM_ERROR, &e.to_string()).unwrap_err())?;
+        use base64::Engine;
+        let base64_png = base64::engine::general_purpose::STANDARD.encode(png_data.into_inner());
+
+        let mut full_desc = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+        unsafe { screen_output.copy_buffer_texture_2d.GetDesc(&mut full_desc) };
+
+        Ok(Some(crate::model::data_channel::CursorSyncData {
+            base64_png,
+            hotspot_x: info.HotSpot.x as i32,
+            hotspot_y: info.HotSpot.y as i32,
+            visible: true,
+            shape_id,
+            screen_width: full_desc.Width,
+            screen_height: full_desc.Height,
+        }))
+    }
+
     fn get_capture_type(&self) -> ImageCaptureType {
-        ImageCaptureType::DIGX
+        ImageCaptureType::DXGI
     }
 
     fn get_current_output(&self) -> Result<DisplayInfo, DeskError> {
         let output = unsafe { self.manager.dxgi_adapter.EnumOutputs(self.output_index)? };
         let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
-        Ok(from_digx_output_desc(&output_desc))
+        Ok(from_dxgi_output_desc(&output_desc))
     }
 }
 
@@ -1430,7 +1560,7 @@ mod tests {
 
     /// Save screenshot to file
     fn save_screenshot_to_file(
-        capture: &mut DigxImageCapture,
+        capture: &mut DxgiImageCapture,
         bmp_path: &Path,
     ) -> Result<(), DeskError> {
         let frame = capture.capture(true)?;
@@ -1468,9 +1598,9 @@ mod tests {
     fn test_screen() -> Result<(), DeskError> {
         initialize();
         let settings = DeskSettings::default();
-        let mut capture = DigxImageCapture::new(&settings)?;
+        let mut capture = DxgiImageCapture::new(&settings)?;
 
-        let list = DigxImageOutputEnumerator::new().get_output_list()?;
+        let list = DxgiImageOutputEnumerator::new().get_output_list()?;
         assert!(!list.is_empty());
 
         let tmp_dir = PathBuf::from("sample/screenshot");
@@ -1542,7 +1672,7 @@ mod tests {
                 continue;
             }
 
-            let enumerator = DigxImageOutputEnumerator::new();
+            let enumerator = DxgiImageOutputEnumerator::new();
             let list_result = enumerator.get_output_list();
             if let Err(e) = list_result {
                 log::error!("Failed to get output list {}: {}", desktop_name, e);
@@ -1558,7 +1688,7 @@ mod tests {
             drop(enumerator);
             for index in 0..output_list.len() {
                 settings.video_device_index = index as u32;
-                let capture_result = DigxImageCapture::new(&settings);
+                let capture_result = DxgiImageCapture::new(&settings);
                 if let Err(e) = capture_result {
                     log::error!("Failed to get screen output {}: {}", desktop_name, e);
                     continue;
@@ -1638,7 +1768,7 @@ mod tests {
             );
             unsafe { SetThreadDesktop(h_old) }.unwrap();
             let settings = DeskSettings::default();
-            let mut capture = DigxImageCapture::new(&settings).unwrap();
+            let mut capture = DxgiImageCapture::new(&settings).unwrap();
 
             log::info!("Wait for barrier");
             b.wait();
@@ -1648,7 +1778,7 @@ mod tests {
             if let Err(e) = screent_output_result {
                 log::error!("Failed to get screen output: {}", e);
 
-                let mut capture = DigxImageCapture::new(&settings).unwrap();
+                let mut capture = DxgiImageCapture::new(&settings).unwrap();
                 capture.capture(true).unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
