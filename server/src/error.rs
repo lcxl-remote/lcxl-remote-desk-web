@@ -104,6 +104,10 @@ pub enum DeskError {
     DeskSignalFacadeError(desk_signal_facade::error::DeskSignalFacadeError),
     /// Desk Signal error
     DeskSignalError(desk_signal::error::DeskSignalError),
+    /// Capture engine error
+    CaptureError(desk_capture_engine::error::CaptureError),
+    /// Input injection error
+    InputError(desk_input_injection::error::InputError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -203,6 +207,8 @@ impl Display for DeskError {
             DeskError::DeskTurnError(error) => error.fmt(f),
             DeskError::DeskSignalFacadeError(error) => error.fmt(f),
             DeskError::DeskSignalError(error) => error.fmt(f),
+            DeskError::CaptureError(error) => error.fmt(f),
+            DeskError::InputError(error) => error.fmt(f),
         };
         if let Err(ref error) = err_fmt_result {
             log::error!("Failed to format error: {}", error)
@@ -478,6 +484,18 @@ impl From<desk_signal_facade::error::DeskSignalFacadeError> for DeskError {
 impl From<desk_signal::error::DeskSignalError> for DeskError {
     fn from(err: desk_signal::error::DeskSignalError) -> Self {
         DeskError::DeskSignalError(err)
+    }
+}
+
+impl From<desk_capture_engine::error::CaptureError> for DeskError {
+    fn from(err: desk_capture_engine::error::CaptureError) -> Self {
+        DeskError::CaptureError(err)
+    }
+}
+
+impl From<desk_input_injection::error::InputError> for DeskError {
+    fn from(err: desk_input_injection::error::InputError) -> Self {
+        DeskError::InputError(err)
     }
 }
 

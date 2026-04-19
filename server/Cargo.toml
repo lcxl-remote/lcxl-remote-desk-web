@@ -13,6 +13,8 @@ desk-signal-facade = { workspace = true }
 desk-signal = { workspace = true }
 desk-server-version = { workspace = true }
 desk-server-user = { workspace = true }
+desk-capture-engine = { workspace = true }
+desk-input-injection = { workspace = true }
 
 actix-web = { workspace = true }
 actix-ws = { workspace = true }

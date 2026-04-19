@@ -4775,6 +4775,8 @@ dependencies = [
  "core-audio-types",
  "core-graphics 0.23.2",
  "cpal",
+ "desk-capture-engine",
+ "desk-input-injection",
  "desk-server-user",
  "desk-server-version",
  "desk-signal",
