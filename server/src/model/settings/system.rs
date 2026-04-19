@@ -22,13 +22,17 @@ use crate::error::DeskError;
 #[serde(rename_all = "kebab-case")]
 #[strum(serialize_all = "kebab-case")]
 pub enum StartupMode {
-    /// Default mode, includes both signaling server and desk server
+    /// Default mode, includes both signaling server and desk server (Portable)
     #[default]
     Default,
     /// Signaling mode, include signaling server and turn server
     Signaling,
     /// Desk Server only
     DeskServer,
+    /// System service daemon (SYSTEM / root) - manages Worker lifecycle
+    ServiceDaemon,
+    /// Session worker process - launched by ServiceDaemon in target desktop
+    SessionWorker,
 }
 
 /// Command line arguments
@@ -58,6 +62,10 @@ pub struct Args {
     /// Start in hidden mode (used for auto-start)
     #[arg(long)]
     pub hidden: bool,
+
+    /// IPC pipe name for SessionWorker mode (provided by ServiceDaemon)
+    #[arg(long)]
+    pub pipe: Option<String>,
 }
 
 /// System settings for the application. This struct is used to load and save settings from a configuration file.
