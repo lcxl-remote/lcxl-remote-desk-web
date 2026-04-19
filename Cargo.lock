@@ -2494,6 +2494,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-capture-engine"
+version = "0.1.0"
+dependencies = [
+ "alsa",
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "core-audio-types",
+ "core-graphics 0.23.2",
+ "cpal",
+ "desk-signal-facade",
+ "desk-utils",
+ "hound",
+ "image",
+ "libc",
+ "log",
+ "objc2 0.5.2",
+ "objc2-foundation 0.2.2",
+ "openh264",
+ "opusic-c",
+ "pipewire",
+ "png 0.17.16",
+ "prometheus",
+ "rav1e",
+ "ringbuf",
+ "screencapturekit",
+ "screencapturekit-sys",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "tempfile",
+ "tokio",
+ "utoipa",
+ "vpx-encode",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+ "windows-numerics",
+ "windows-result 0.3.4",
+ "x11rb",
+ "x264",
+ "xcb",
+ "yuv",
+ "zbus",
+]
+
+[[package]]
+name = "desk-input-injection"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "core-graphics 0.23.2",
+ "desk-signal-facade",
+ "desk-utils",
+ "evdev 0.13.2",
+ "log",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "tokio",
+ "utoipa",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+ "windows-result 0.3.4",
+ "zbus",
+]
+
+[[package]]
 name = "desk-server-user"
 version = "0.1.0"
 dependencies = [

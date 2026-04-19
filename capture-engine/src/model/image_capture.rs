@@ -1,0 +1,104 @@
+use desk_signal_facade::model::image_capture::DisplayInfo;
+use serde::{Deserialize, Serialize};
+use strum_macros::{EnumIter, EnumString, IntoStaticStr};
+use utoipa::ToSchema;
+
+use crate::error::CaptureError;
+
+#[derive(Debug, Clone, Copy)]
+pub enum ImageType {
+    BGRA,
+    RGB,
+}
+pub trait ImageInfo {
+    fn get_type(&self) -> ImageType;
+    fn get_data(&self) -> &[u8];
+    fn get_width(&self) -> u32;
+    fn get_height(&self) -> u32;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorCaptureMode {
+    RenderInFrame,
+    SyncNative,
+    Disable,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureRequest {
+    pub cursor_mode: CursorCaptureMode,
+}
+
+/// Cursor sync data structure
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, Default)]
+pub struct CursorSyncData {
+    /// PNG image data (Base64)
+    pub base64_png: String,
+    /// Mouse hotspot X coordinate (offset within the image)
+    pub hotspot_x: i32,
+    /// Mouse hotspot Y coordinate (offset within the image)
+    pub hotspot_y: i32,
+    /// Whether the mouse is visible
+    pub visible: bool,
+    /// Graphic hash or ID, used to detect shape changes
+    pub shape_id: u64,
+    /// Remote screen width
+    pub screen_width: u32,
+    /// Remote screen height
+    pub screen_height: u32,
+}
+
+pub struct CaptureResult {
+    pub image: Box<dyn ImageInfo + Send + Sync>,
+    pub cursor_update: Option<CursorSyncData>,
+}
+
+pub trait ImageCapture {
+    fn capture(&mut self, request: CaptureRequest) -> Result<CaptureResult, CaptureError>;
+    fn supports_cursor_sync(&self) -> bool {
+        false
+    }
+    fn get_capture_type(&self) -> ImageCaptureType;
+    fn get_current_output(&self) -> Result<DisplayInfo, CaptureError>;
+}
+
+/// Image Output Enumerator Trait
+pub trait ImageOutputEnumerator {
+    /// Enumerates image output devices.
+    fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError>;
+}
+
+/// Image Capture Type Enum
+#[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
+pub enum ImageCaptureType {
+    /// Capture image from DXGI device
+    #[cfg(target_os = "windows")]
+    DXGI,
+    /// Capture image from GDI device
+    #[cfg(target_os = "windows")]
+    GDI,
+    /// Capture image from X11 device
+    #[cfg(target_os = "linux")]
+    X11,
+    /// Capture image via Wayland portal + PipeWire
+    #[cfg(target_os = "linux")]
+    WAYLANDPORTAL,
+    /// Capture image using ScreenCaptureKit
+    #[cfg(target_os = "macos")]
+    SCKIT,
+}
+
+impl Default for ImageCaptureType {
+    fn default() -> Self {
+        #[cfg(target_os = "windows")]
+        return ImageCaptureType::DXGI;
+        #[cfg(target_os = "linux")]
+        return ImageCaptureType::X11;
+        #[cfg(target_os = "macos")]
+        return ImageCaptureType::SCKIT;
+    }
+}
+
+pub trait ImageCaptureTypeHelper {
+    fn get_image_capture_type(&self) -> Result<ImageCaptureType, CaptureError>;
+}
