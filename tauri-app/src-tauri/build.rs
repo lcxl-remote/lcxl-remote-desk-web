@@ -3,7 +3,7 @@ fn main() {
     tauri_build::build();
 }
 
-/// Copy the compiled `desk-standalone` binary into `src-tauri/binaries/` with
+/// Copy the compiled `lcxl-remote-desk-server` binary into `src-tauri/binaries/` with
 /// the Tauri-required target-triple suffix so the bundler picks it up.
 fn copy_desk_standalone_sidecar() {
     let target_triple = std::env::var("TARGET").unwrap_or_default();
@@ -14,18 +14,17 @@ fn copy_desk_standalone_sidecar() {
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
     );
     // manifest_dir = .../web/tauri-app/src-tauri
-    // → workspace root = 3 parents up
+    // → web workspace root = 2 parents up (tauri-app → web)
     let workspace_root = manifest_dir
         .parent() // tauri-app
-        .and_then(|p| p.parent()) // web
-        .and_then(|p| p.parent()) // workspace root
+        .and_then(|p| p.parent()) // web (workspace root for lcxl-remote-desk-server)
         .expect("Could not determine workspace root");
 
     let mut src = workspace_root.join("target").join(&profile);
     #[cfg(target_os = "windows")]
-    src.push("desk-standalone.exe");
+    src.push("lcxl-remote-desk-server.exe");
     #[cfg(not(target_os = "windows"))]
-    src.push("desk-standalone");
+    src.push("lcxl-remote-desk-server");
 
     let dest_dir = manifest_dir.join("binaries");
     if let Err(e) = std::fs::create_dir_all(&dest_dir) {
@@ -34,9 +33,9 @@ fn copy_desk_standalone_sidecar() {
     }
 
     #[cfg(target_os = "windows")]
-    let dest = dest_dir.join(format!("desk-standalone-{}.exe", target_triple));
+    let dest = dest_dir.join(format!("lcxl-remote-desk-server-{}.exe", target_triple));
     #[cfg(not(target_os = "windows"))]
-    let dest = dest_dir.join(format!("desk-standalone-{}", target_triple));
+    let dest = dest_dir.join(format!("lcxl-remote-desk-server-{}", target_triple));
 
     if src.exists() {
         match std::fs::copy(&src, &dest) {
@@ -45,11 +44,11 @@ fn copy_desk_standalone_sidecar() {
                 src.display(),
                 dest.display()
             ),
-            Err(e) => println!("cargo:warning=Failed to copy desk-standalone sidecar: {e}"),
+            Err(e) => println!("cargo:warning=Failed to copy lcxl-remote-desk-server sidecar: {e}"),
         }
     } else {
         println!(
-            "cargo:warning=desk-standalone not found at {} (build it first)",
+            "cargo:warning=lcxl-remote-desk-server not found at {} (build it first)",
             src.display()
         );
     }

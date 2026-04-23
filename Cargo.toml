@@ -9,6 +9,7 @@ members = [
     "server-user",
     "capture-engine",
     "input-injection",
+    "ipc-protocol",
     "tauri-app/src-tauri",
 ]
 exclude = ["web", "third-deps"]
@@ -25,6 +26,7 @@ rust-version = "1.90"
 
 
 [workspace.dependencies]
+desk-ipc-protocol = { path = "ipc-protocol" }
 desk-utils = { path = "utils" }
 desk-turn = { path = "turn" }
 desk-signal-facade = { path = "signal-facade" }

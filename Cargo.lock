@@ -2563,6 +2563,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-ipc-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "desk-server-user"
 version = "0.1.0"
 dependencies = [
@@ -4777,6 +4786,7 @@ dependencies = [
  "cpal",
  "desk-capture-engine",
  "desk-input-injection",
+ "desk-ipc-protocol",
  "desk-server-user",
  "desk-server-version",
  "desk-signal",
@@ -4850,6 +4860,7 @@ dependencies = [
  "windows-core 0.61.2",
  "windows-numerics",
  "windows-result 0.3.4",
+ "windows-service",
  "x11rb",
  "x264",
  "xcb",
@@ -9686,7 +9697,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11249,6 +11260,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11497,6 +11514,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "193cae8e647981c35bc947fdd57ba7928b1fa0d4a79305f6dd2dc55221ac35ac"
+dependencies = [
+ "bitflags 2.11.0",
+ "widestring",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

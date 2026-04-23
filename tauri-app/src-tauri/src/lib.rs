@@ -44,14 +44,14 @@ pub fn run() -> Result<(), DeskTauriError> {
     Ok(())
 }
 
-/// Find the desk-standalone sidecar executable next to the Tauri app binary.
-fn find_desk_standalone() -> std::path::PathBuf {
+/// Find the lcxl-remote-desk-server sidecar executable next to the Tauri app binary.
+fn find_server_binary() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             #[cfg(target_os = "windows")]
-            let name = "desk-standalone.exe";
+            let name = "lcxl-remote-desk-server.exe";
             #[cfg(not(target_os = "windows"))]
-            let name = "desk-standalone";
+            let name = "lcxl-remote-desk-server";
 
             let candidate = dir.join(name);
             if candidate.exists() {
@@ -59,21 +59,20 @@ fn find_desk_standalone() -> std::path::PathBuf {
             }
         }
     }
-    // Fallback: rely on PATH
     #[cfg(target_os = "windows")]
-    return std::path::PathBuf::from("desk-standalone.exe");
+    return std::path::PathBuf::from("lcxl-remote-desk-server.exe");
     #[cfg(not(target_os = "windows"))]
-    return std::path::PathBuf::from("desk-standalone");
+    return std::path::PathBuf::from("lcxl-remote-desk-server");
 }
 
-/// Elevate and run `desk-standalone <arg>` to install or uninstall the OS service.
+/// Elevate and run `lcxl-remote-desk-server <arg>` to install or uninstall the OS service.
 fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
     let arg = match op {
         lcxl_remote_desk_server::ServiceOp::Install => "--install-service",
         lcxl_remote_desk_server::ServiceOp::Uninstall => "--uninstall-service",
     };
 
-    let sidecar = find_desk_standalone();
+    let sidecar = find_server_binary();
     log::info!(
         "Service op {:?}: running {} {}",
         arg,

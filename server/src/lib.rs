@@ -1,10 +1,12 @@
 pub mod controller;
+pub mod daemon;
 pub mod error;
 pub mod model;
 pub mod openapi;
 pub mod service;
 pub mod telemetry;
 pub mod version;
+pub mod worker;
 
 use std::{
     collections::BTreeMap,
