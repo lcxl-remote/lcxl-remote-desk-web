@@ -20,11 +20,25 @@ rust_i18n::i18n!("locales");
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// Windows service name registered by the install flow.
+const SERVICE_NAME: &str = "LcxlDeskService";
+
 pub fn run() -> Result<(), DeskTauriError> {
     let args = Args::parse();
-    let settings = Settings::new(&args)?;
+    let mut settings = Settings::new(&args)?;
 
-    // Always start Tauri regardless of startup_mode
+    // If the ServiceDaemon is already running as a system service, isolate the
+    // embedded server: clear all outbound signaling URLs so it does not compete
+    // with the daemon for remote connections.  The daemon owns the WebRTC path;
+    // Tauri's embedded server only serves the admin UI and REST API locally.
+    if desk_utils::permission::is_service_running(SERVICE_NAME) {
+        log::info!("ServiceDaemon is running — disabling signaling in embedded server");
+        settings.system.signaling_url = None;
+        settings.system.signaling_token = None;
+        settings.system.manager_url = None;
+        settings.system.manager_api_token = None;
+    }
+
     run_tauri_app(&settings)?;
 
     Ok(())

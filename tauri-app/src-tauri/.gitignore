@@ -1,2 +1,4 @@
 # ignore gen dir
 gen/
+# sidecar binaries copied by build.rs (platform-specific, not source-tracked)
+binaries/
