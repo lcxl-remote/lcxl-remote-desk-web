@@ -5,9 +5,19 @@ import {
     SIGNALING_TYPE_CODE_OFFER,
     SIGNALING_TYPE_CODE_ANSWER,
     SIGNALING_TYPE_CODE_CANID,
-    SIGNALING_TYPE_CODE_ERROR
+    SIGNALING_TYPE_CODE_ERROR,
+    SIGNALING_TYPE_CODE_DESKTOP_SWITCHING,
+    SIGNALING_TYPE_CODE_DESKTOP_READY,
 } from './constants';
 import type { SignalingMessage } from './use-desk-signaling';
+
+/** Connection lifecycle phase for desktop-switch reconnect support. */
+export type RTCConnectionPhase =
+    | 'idle'          // Not connected
+    | 'connected'     // WebRTC fully connected
+    | 'switching'     // DesktopSwitching received — waiting for DesktopReady
+    | 'reconnecting'  // DesktopReady received — reconnecting in progress
+    | 'failed';       // Unexpected ICE failure (not a desktop switch)
 
 type UseDeskRTCProps = {
     deskId: string | null;
@@ -39,6 +49,9 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
     const whiteboardChannel = useRef<RTCDataChannel | null>(null);
     const cursorSyncChannel = useRef<RTCDataChannel | null>(null);
     const [isRTCConnected, setIsRTCConnected] = useState(false);
+    const [connectionPhase, setConnectionPhase] = useState<RTCConnectionPhase>('idle');
+    // Tracks whether the current disconnection is an expected desktop switch
+    const isDesktopSwitchingRef = useRef(false);
 
     const [rtcStats, setRtcStats] = useState<RTCStatsData>({
         fps: 0, bitrate: 0, rtt: 0,
@@ -59,6 +72,26 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         const { signaling_type, signaling_data } = lastMessage;
 
         const handleSignaling = async () => {
+            if (signaling_type === SIGNALING_TYPE_CODE_DESKTOP_SWITCHING) {
+                console.log('[WebRTC] DesktopSwitching received — closing existing PeerConnection');
+                isDesktopSwitchingRef.current = true;
+                setConnectionPhase('switching');
+                if (peerConnection.current) {
+                    peerConnection.current.close();
+                    peerConnection.current = null;
+                }
+                setIsRTCConnected(false);
+                setRemoteStream(null);
+                return;
+            }
+
+            if (signaling_type === SIGNALING_TYPE_CODE_DESKTOP_READY) {
+                console.log('[WebRTC] DesktopReady received — triggering reconnect');
+                isDesktopSwitchingRef.current = false;
+                setConnectionPhase('reconnecting');
+                return;
+            }
+
             if (signaling_type === SIGNALING_TYPE_CODE_INIT) {
                 console.log('Received INIT', signaling_data);
                 setInitData(signaling_data);
@@ -128,8 +161,14 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
             console.log(`[WebRTC] ICE Connection State changed to: ${pc.iceConnectionState}`);
             if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                 setIsRTCConnected(true);
+                setConnectionPhase('connected');
+                isDesktopSwitchingRef.current = false;
             } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
                 setIsRTCConnected(false);
+                // Only mark as failed if this is NOT an expected desktop switch
+                if (!isDesktopSwitchingRef.current) {
+                    setConnectionPhase('failed');
+                }
             }
         }
 
@@ -345,15 +384,16 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         remoteStream,
         initData,
         connect,
-        closeRTC, // Kept closeRTC as it was not explicitly removed
+        closeRTC,
         mouseChannel,
         keyboardChannel,
         mouseMoveChannel,
-        clipboardChannel, // Exposed clipboardChannel
-        fileTransferChannel, // Exposed fileTransferChannel
+        clipboardChannel,
+        fileTransferChannel,
         whiteboardChannel,
         cursorSyncChannel,
         isRTCConnected,
+        connectionPhase,
         rtcStats
     };
 }

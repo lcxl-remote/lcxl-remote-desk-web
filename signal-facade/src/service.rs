@@ -504,7 +504,9 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::EnablePrivateScreen
             | SignalingType::PrivateScreenStateChanged
             | SignalingType::TerminalStarted
-            | SignalingType::AudioPlaybackError => {
+            | SignalingType::AudioPlaybackError
+            | SignalingType::DesktopSwitching
+            | SignalingType::DesktopReady => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
             }

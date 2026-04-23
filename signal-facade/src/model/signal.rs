@@ -89,6 +89,11 @@ pub enum SignalingType {
     /// Update remote system settings via signaling
     ManagerUpdateSettings = 10016,
 
+    /// ServiceDaemon → Browser: desktop is switching, WebRTC will drop shortly
+    DesktopSwitching = 500,
+    /// ServiceDaemon → Browser: new Worker is ready, reconnect now
+    DesktopReady = 501,
+
     /// Error
     Error = -1,
     /// Unrecognized signaling type will map to this
