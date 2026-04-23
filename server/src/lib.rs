@@ -18,6 +18,7 @@ use std::{
 use crate::{
     controller::{
         info::{query_backend_info, query_server_info, query_sysinfo},
+        service_mgmt::{install_service, uninstall_service},
         init::init_system,
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
         settings::{
@@ -79,6 +80,14 @@ use crate::model::host_control::{HostControlEventType, PrivateScreenCommand, Whi
 
 rust_i18n::i18n!("locales");
 
+/// Service management operations that can be requested by the embedded HTTP
+/// server and fulfilled by the Tauri host (which has UAC elevation ability).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceOp {
+    Install,
+    Uninstall,
+}
+
 pub struct ExternalChannels {
     pub private_screen_cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
     pub private_screen_state_receiver:
@@ -89,6 +98,10 @@ pub struct ExternalChannels {
     pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
     /// Channel for sending security approval requests to Tauri dialog
     pub security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
+    /// Channel for service install / uninstall operations (Tauri only).
+    /// When present, the REST endpoint `/api/service/{install,uninstall}` uses
+    /// this sender to delegate the operation to the Tauri host.
+    pub service_op_sender: Option<std::sync::mpsc::SyncSender<ServiceOp>>,
 }
 
 use std::sync::Mutex;
@@ -139,6 +152,7 @@ pub async fn run() -> Result<Server, DeskError> {
             tauri_login_token: None,
             whiteboard_cmd_sender: None,
             security_approval_sender: None,
+            service_op_sender: None,
         },
     )
     .await
@@ -229,6 +243,7 @@ pub async fn run_with_channels(
         };
 
     let security_approval_sender = web::Data::new(channels.security_approval_sender.clone());
+    let service_op_sender = web::Data::new(channels.service_op_sender.clone());
 
     // If this instance runs signaling, ensure local_signaling_token is generated and persisted
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
@@ -269,6 +284,7 @@ pub async fn run_with_channels(
         let startup_mode = startup_mode.clone();
         let tauri_login_token = tauri_login_token.clone();
         let security_approval_sender = security_approval_sender.clone();
+        let service_op_sender = service_op_sender.clone();
         let validator_data = validator_data.clone();
         App::new()
             .into_utoipa_app()
@@ -308,6 +324,7 @@ pub async fn run_with_channels(
             .app_data(tauri_login_token.clone())
             .app_data(connection_map.clone())
             .app_data(security_approval_sender.clone())
+            .app_data(service_op_sender.clone())
             .app_data(validator_data.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
@@ -338,6 +355,8 @@ pub async fn run_with_channels(
             .service(get_current_user)
             .service(get_captcha)
             .service(query_server_info)
+            .service(install_service)
+            .service(uninstall_service)
             .service(init_system)
             .configure({
                 let startup_mode = startup_mode.clone();

@@ -1578,6 +1578,16 @@ export type RestResponseServerInfo = {
          * @type string
         */
         startup_mode: string;
+        /**
+         * @description Whether the OS system service (LcxlDeskService) is installed
+         * @type boolean
+        */
+        service_installed?: boolean;
+        /**
+         * @description Whether the current process has admin/root privileges
+         * @type boolean
+        */
+        is_admin?: boolean;
     };
     /**
      * @type string,null
@@ -2034,6 +2044,16 @@ export type ServerInfo = {
      * @type string
     */
     startup_mode: string;
+    /**
+     * @description Whether the OS system service (LcxlDeskService) is installed
+     * @type boolean
+    */
+    service_installed?: boolean;
+    /**
+     * @description Whether the current process has admin/root privileges
+     * @type boolean
+    */
+    is_admin?: boolean;
 };
 
 /**

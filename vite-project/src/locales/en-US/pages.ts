@@ -458,4 +458,9 @@ export default {
   'pages.settings.category.signal': 'Signal Server Settings',
   'pages.settings.category.desk': 'Desk Server Settings',
   'pages.settings.backToOverview': 'Back to Settings Overview',
+
+  'pages.layout.serviceBanner.title': 'Unlock Full Remote Control',
+  'pages.layout.serviceBanner.description': 'Install as a Windows service to enable UAC / lock-screen penetration and unattended access.',
+  'pages.layout.serviceBanner.installButton': 'Install Service',
+  'pages.layout.serviceBanner.needsAdmin': 'Admin privileges required. Please re-launch with "Run as administrator".',
 };

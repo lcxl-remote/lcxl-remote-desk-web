@@ -372,6 +372,7 @@ pub async fn start_desk_session(
             tauri_login_token: channels.tauri_login_token.clone(),
             whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
             security_approval_sender: channels.security_approval_sender.clone(),
+            service_op_sender: None,
         };
 
         actix_web::rt::spawn(async move {
@@ -407,6 +408,7 @@ pub async fn start_desk_session(
                     tauri_login_token: local_channels_clone.tauri_login_token.clone(),
                     whiteboard_cmd_sender: local_channels_clone.whiteboard_cmd_sender.clone(),
                     security_approval_sender: local_channels_clone.security_approval_sender.clone(),
+                    service_op_sender: None,
                 };
 
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -445,6 +447,7 @@ pub async fn start_desk_session(
             tauri_login_token: channels.tauri_login_token.clone(),
             whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
             security_approval_sender: channels.security_approval_sender.clone(),
+            service_op_sender: None,
         };
 
         actix_web::rt::spawn(async move {
@@ -470,6 +473,7 @@ pub async fn start_desk_session(
                             security_approval_sender: remote_sig_channels
                                 .security_approval_sender
                                 .clone(),
+                            service_op_sender: None,
                         };
 
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -510,6 +514,7 @@ pub async fn start_desk_session(
             tauri_login_token: channels.tauri_login_token.clone(),
             whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
             security_approval_sender: channels.security_approval_sender.clone(),
+            service_op_sender: None,
         };
 
         actix_web::rt::spawn(async move {
@@ -535,6 +540,7 @@ pub async fn start_desk_session(
                             security_approval_sender: remote_mgr_channels
                                 .security_approval_sender
                                 .clone(),
+                            service_op_sender: None,
                         };
 
                         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

@@ -69,16 +69,20 @@ pub async fn query_server_info(
         let settings = settings.read().await;
         let mode = settings.args.startup_mode.clone();
         let mode_str = mode.as_ref().to_string();
-
         let init = !settings.user.login_password.is_empty();
-
         (mode_str, init)
     };
+
+    let service_installed =
+        desk_utils::permission::is_service_installed("LcxlDeskService");
+    let is_admin = desk_utils::permission::is_admin();
 
     let info = ServerInfo {
         startup_mode,
         api_version: SERVER_API_VERSION,
         initialized,
+        service_installed,
+        is_admin,
     };
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))

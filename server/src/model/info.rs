@@ -60,6 +60,10 @@ pub struct ServerInfo {
     pub api_version: i32,
     /// Indicates whether the system is initialized (e.g., admin password set)
     pub initialized: bool,
+    /// Whether the OS system service (LcxlDeskService) is installed
+    pub service_installed: bool,
+    /// Whether the current process has admin/root privileges
+    pub is_admin: bool,
 }
 
 /// Runtime backend diagnostics

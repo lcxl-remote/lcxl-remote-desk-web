@@ -30,6 +30,73 @@ pub fn run() -> Result<(), DeskTauriError> {
     Ok(())
 }
 
+/// Find the desk-standalone sidecar executable next to the Tauri app binary.
+fn find_desk_standalone() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            #[cfg(target_os = "windows")]
+            let name = "desk-standalone.exe";
+            #[cfg(not(target_os = "windows"))]
+            let name = "desk-standalone";
+
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    // Fallback: rely on PATH
+    #[cfg(target_os = "windows")]
+    return std::path::PathBuf::from("desk-standalone.exe");
+    #[cfg(not(target_os = "windows"))]
+    return std::path::PathBuf::from("desk-standalone");
+}
+
+/// Elevate and run `desk-standalone <arg>` to install or uninstall the OS service.
+fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
+    let arg = match op {
+        lcxl_remote_desk_server::ServiceOp::Install => "--install-service",
+        lcxl_remote_desk_server::ServiceOp::Uninstall => "--uninstall-service",
+    };
+
+    let sidecar = find_desk_standalone();
+    log::info!("Service op {:?}: running {} {}", arg, sidecar.display(), arg);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+        use windows::core::PCWSTR;
+
+        let path: Vec<u16> = sidecar.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let operation: Vec<u16> = "runas\0".encode_utf16().collect();
+        let params: Vec<u16> = arg.encode_utf16().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(path.as_ptr()),
+                PCWSTR(params.as_ptr()),
+                None,
+                SW_SHOW,
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let status = std::process::Command::new("pkexec")
+            .arg(&sidecar)
+            .arg(arg)
+            .status();
+        if let Err(e) = status {
+            log::error!("Service op failed: {e}");
+        }
+    }
+}
+
 pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
     let settings = settings.clone();
     let hidden_mode = settings.args.hidden;
@@ -106,6 +173,17 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             let sa_manager = crate::security_approval::SecurityApprovalManager::new(handle.clone());
             sa_manager.start(security_receiver);
 
+            // Service op channel: frontend → server → Tauri → ShellExecute(runas)
+            let (service_op_tx, service_op_rx) =
+                std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
+
+            // Spawn handler for Install / Uninstall operations
+            std::thread::spawn(move || {
+                while let Ok(op) = service_op_rx.recv() {
+                    handle_service_op(op);
+                }
+            });
+
             // Start actix-web server (in a separate thread)
             let channels = lcxl_remote_desk_server::ExternalChannels {
                 private_screen_cmd_sender: Some(cmd_sender),
@@ -113,6 +191,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 tauri_login_token: Some(tauri_token),
                 whiteboard_cmd_sender: Some(wb_cmd_sender),
                 security_approval_sender: Some(security_sender),
+                service_op_sender: Some(service_op_tx),
             };
             let startup_mode = settings.args.startup_mode.clone();
             // Start actix-web server (in a separate thread)

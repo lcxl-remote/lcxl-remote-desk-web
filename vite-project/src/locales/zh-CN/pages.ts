@@ -452,6 +452,11 @@ export default {
   'security.dialog.rememberChoice': '记住此选项',
   'security.dialog.deny': '拒绝',
   'security.dialog.allow': '允许',
+  'pages.layout.serviceBanner.title': '解锁完整远控能力',
+  'pages.layout.serviceBanner.description': '安装为 Windows 系统服务以启用 UAC / 锁屏穿透和无人值守访问。',
+  'pages.layout.serviceBanner.installButton': '安装服务',
+  'pages.layout.serviceBanner.needsAdmin': '需要管理员权限，请以「以管理员身份运行」重新启动。',
+
   'pages.settings.category.general': '通用设置',
   'pages.settings.category.signal': 'Signal 服务端设置',
   'pages.settings.category.desk': 'Desk 服务端设置',
