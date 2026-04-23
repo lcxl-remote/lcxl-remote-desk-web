@@ -18,9 +18,9 @@ use std::{
 use crate::{
     controller::{
         info::{query_backend_info, query_server_info, query_sysinfo},
-        service_mgmt::{install_service, uninstall_service},
         init::init_system,
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
+        service_mgmt::{install_service, uninstall_service},
         settings::{
             query_log_settings, query_security_settings, query_settings, query_telemetry_status,
             query_turn_client_settings, query_turn_settings, regenerate_turn_secret,

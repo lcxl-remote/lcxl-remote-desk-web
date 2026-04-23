@@ -7,14 +7,14 @@ use desk_signal_facade::model::{
 
 use crate::{
     error::CaptureError,
-    model::image_capture::{
-        CaptureRequest, CaptureResult, CursorCaptureMode, ImageCapture, ImageCaptureType,
-        ImageOutputEnumerator,
-    },
     image_capture::{
         pipewire_capture::{PipewireImageCapture, PipewireSetup},
         pipewire_utils::get_zbus_connection,
         portal_client::PortalClient,
+    },
+    model::image_capture::{
+        CaptureRequest, CaptureResult, CursorCaptureMode, ImageCapture, ImageCaptureType,
+        ImageOutputEnumerator,
     },
 };
 use zbus::blocking::Proxy;

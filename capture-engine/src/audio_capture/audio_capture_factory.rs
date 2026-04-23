@@ -4,9 +4,7 @@ use desk_signal_facade::model::{audio_capture::AudioDevice, desk_settings::DeskS
 use strum::IntoEnumIterator;
 
 #[cfg(target_os = "linux")]
-use crate::audio_capture::pipewire_capture::{
-    PipewireAudioCapture, PipewireAudioDeviceEnumerator,
-};
+use crate::audio_capture::pipewire_capture::{PipewireAudioCapture, PipewireAudioDeviceEnumerator};
 use crate::{
     error::CaptureError,
     model::audio_capture::{
@@ -19,9 +17,7 @@ use crate::audio_capture::mac_screencapturekit::{
     MacScreencaptureKitAudioCapture, MacScreencaptureKitAudioDeviceEnumerator,
 };
 #[cfg(target_os = "windows")]
-use crate::audio_capture::wasapi_capture::{
-    WasapiAudioCapture, WasapiAudioDeviceEnumerator,
-};
+use crate::audio_capture::wasapi_capture::{WasapiAudioCapture, WasapiAudioDeviceEnumerator};
 
 impl AudioCaptureTypeHelper for DeskSettings {
     /// Returns the appropriate EncoderType based on the settings.

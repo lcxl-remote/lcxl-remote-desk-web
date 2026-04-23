@@ -52,12 +52,12 @@ use windows_core::{Interface, PCWSTR, s};
 
 use crate::{
     error::CaptureError,
+    image_capture::windows::enum_display_resolutions,
     model::image_capture::CursorSyncData,
     model::image_capture::{
         CaptureRequest, CaptureResult, CursorCaptureMode, ImageCapture, ImageCaptureType,
         ImageInfo, ImageOutputEnumerator, ImageType,
     },
-    image_capture::windows::enum_display_resolutions,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

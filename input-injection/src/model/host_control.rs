@@ -29,7 +29,8 @@ pub struct ClipboardImage {
 
 pub trait HostControlHelper {
     /// Change display settings
-    fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), InputError>;
+    fn change_display_settings(&self, display_settings: &DisplaySettings)
+    -> Result<(), InputError>;
 
     /// Block or unblock user input (keyboard and mouse)
     fn block_input(&self, block: bool) -> Result<(), InputError>;

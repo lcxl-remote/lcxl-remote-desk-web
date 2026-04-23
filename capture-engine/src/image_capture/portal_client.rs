@@ -83,11 +83,11 @@ impl PortalClient<'_> {
         let response: ScreenCastCreateSessionResponse =
             wait_zbus_response(&request, response_stream)?;
 
-        let unique_name = conn
-            .unique_name()
-            .ok_or(CaptureError::ZbusError(zbus::Error::Failure(
-                "Failed to get dbus unique name".to_owned(),
-            )))?;
+        let unique_name =
+            conn.unique_name()
+                .ok_or(CaptureError::ZbusError(zbus::Error::Failure(
+                    "Failed to get dbus unique name".to_owned(),
+                )))?;
         let unique_identifier = unique_name.trim_start_matches(':').replace('.', "_");
         let expected = OwnedObjectPath::try_from(format!(
             "/org/freedesktop/portal/desktop/session/{unique_identifier}/{session_handle_token}"

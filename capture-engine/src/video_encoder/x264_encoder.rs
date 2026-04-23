@@ -10,9 +10,7 @@ use crate::{
         image_capture::ImageInfo,
         video_encoder::{NalInfo, VideoEncoder},
     },
-    video_encoder::{
-        encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420,
-    },
+    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420},
 };
 
 pub struct X264Encoder {
@@ -77,10 +75,9 @@ impl VideoEncoder for X264Encoder {
 
         let image = Image::new(Colorspace::I420, width, height, &planes);
 
-        let (res, _out_picture) = self
-            .encoder
-            .encode(self.pts, image)
-            .map_err(|e| CaptureError::AnyhowError(anyhow::anyhow!("x264 encode error: {:?}", e)))?;
+        let (res, _out_picture) = self.encoder.encode(self.pts, image).map_err(|e| {
+            CaptureError::AnyhowError(anyhow::anyhow!("x264 encode error: {:?}", e))
+        })?;
 
         self.pts += 1;
 

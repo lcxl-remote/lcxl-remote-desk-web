@@ -10,9 +10,7 @@ use crate::{
         image_capture::ImageInfo,
         video_encoder::{NalInfo, VideoEncoder},
     },
-    video_encoder::{
-        encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420,
-    },
+    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420},
 };
 
 pub static ENCODE_TO_AV1_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
@@ -26,7 +24,10 @@ pub struct Av1Encoder {
 }
 
 impl Av1Encoder {
-    pub fn new(setting: Av1EncoderSettings, display_info: &DisplayInfo) -> Result<Self, CaptureError> {
+    pub fn new(
+        setting: Av1EncoderSettings,
+        display_info: &DisplayInfo,
+    ) -> Result<Self, CaptureError> {
         let width = display_info.desktop_coordinates.width() as usize;
         let height = display_info.desktop_coordinates.height() as usize;
 

@@ -89,10 +89,13 @@ impl AudioCapture for MacScreencaptureKitAudioCapture {
         let content = SCShareableContent::try_current().map_err(|e| {
             CaptureError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, e.as_str())
         })?;
-        let display = content.displays.first().ok_or(CaptureError::new_custom_error(
-            DeskErrorCode::SYSTEM_ERROR,
-            "No display found",
-        ))?;
+        let display = content
+            .displays
+            .first()
+            .ok_or(CaptureError::new_custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "No display found",
+            ))?;
 
         let filter = SCContentFilter::new(InitParams::Display(display.clone()));
 

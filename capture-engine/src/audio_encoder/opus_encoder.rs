@@ -56,7 +56,10 @@ impl OpusAudioEncoder {
 }
 
 impl AudioEncoder for OpusAudioEncoder {
-    fn encode(&mut self, audio_buffer: &dyn AudioBuffer) -> Result<EncodedAudioBuffer, CaptureError> {
+    fn encode(
+        &mut self,
+        audio_buffer: &dyn AudioBuffer,
+    ) -> Result<EncodedAudioBuffer, CaptureError> {
         let frame_20ms_byte_len = SIZE_20MS * self.wave_format.bits_per_sample as usize / 8;
 
         self.buffer

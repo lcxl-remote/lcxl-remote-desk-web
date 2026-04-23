@@ -14,9 +14,7 @@ use crate::{
         image_capture::ImageInfo,
         video_encoder::{NalInfo, VideoEncoder},
     },
-    video_encoder::{
-        encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420,
-    },
+    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420},
 };
 use std::fmt::Debug;
 

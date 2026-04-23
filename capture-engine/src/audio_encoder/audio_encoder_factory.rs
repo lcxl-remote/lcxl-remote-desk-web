@@ -4,12 +4,12 @@ use desk_signal_facade::model::desk_settings::DeskSettings;
 use strum::IntoEnumIterator;
 
 use crate::{
+    audio_encoder::opus_encoder::OpusAudioEncoder,
     error::CaptureError,
     model::{
         audio_capture::WaveFormat,
         audio_encoder::{AudioEncoder, AudioEncoderType, AudioEncoderTypeHelper},
     },
-    audio_encoder::opus_encoder::OpusAudioEncoder,
 };
 
 impl AudioEncoderTypeHelper for DeskSettings {

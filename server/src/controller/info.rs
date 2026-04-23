@@ -73,8 +73,7 @@ pub async fn query_server_info(
         (mode_str, init)
     };
 
-    let service_installed =
-        desk_utils::permission::is_service_installed("LcxlDeskService");
+    let service_installed = desk_utils::permission::is_service_installed("LcxlDeskService");
     let is_admin = desk_utils::permission::is_admin();
 
     let info = ServerInfo {

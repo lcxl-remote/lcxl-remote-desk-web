@@ -29,10 +29,10 @@ use zbus::{
 
 use crate::{
     error::CaptureError,
-    model::image_capture::{ImageInfo, ImageOutputEnumerator, ImageType},
     image_capture::pipewire_utils::{
         get_zbus_connection, get_zbus_portal_request, wait_zbus_response,
     },
+    model::image_capture::{ImageInfo, ImageOutputEnumerator, ImageType},
 };
 
 #[allow(dead_code)]
@@ -121,11 +121,11 @@ impl ScreenCast<'_> {
         let response: ScreenCastCreateSessionResponse =
             wait_zbus_response(&portal_request, response_stream)?;
 
-        let unique_name = conn
-            .unique_name()
-            .ok_or(CaptureError::ZbusError(zbus::Error::Failure(
-                "Failed to get unique name".to_owned(),
-            )))?;
+        let unique_name =
+            conn.unique_name()
+                .ok_or(CaptureError::ZbusError(zbus::Error::Failure(
+                    "Failed to get unique name".to_owned(),
+                )))?;
         let unique_identifier = unique_name.trim_start_matches(':').replace('.', "_");
 
         let session = OwnedObjectPath::try_from(format!(
@@ -162,7 +162,10 @@ impl ScreenCast<'_> {
         Ok(())
     }
 
-    pub fn start(&self, session: &OwnedObjectPath) -> Result<ScreenCastStartResponse, CaptureError> {
+    pub fn start(
+        &self,
+        session: &OwnedObjectPath,
+    ) -> Result<ScreenCastStartResponse, CaptureError> {
         let conn = get_zbus_connection()?;
 
         let mut options = HashMap::new();

@@ -8,7 +8,10 @@ pub struct EncodedAudioBuffer {
 }
 
 pub trait AudioEncoder {
-    fn encode(&mut self, audio_buffer: &dyn AudioBuffer) -> Result<EncodedAudioBuffer, CaptureError>;
+    fn encode(
+        &mut self,
+        audio_buffer: &dyn AudioBuffer,
+    ) -> Result<EncodedAudioBuffer, CaptureError>;
 }
 
 /// Audio Encoder Type Enum

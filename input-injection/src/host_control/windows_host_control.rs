@@ -39,7 +39,10 @@ impl WindowsHostControlHelper {
 }
 
 impl HostControlHelper for WindowsHostControlHelper {
-    fn change_display_settings(&self, display_settings: &DisplaySettings) -> Result<(), InputError> {
+    fn change_display_settings(
+        &self,
+        display_settings: &DisplaySettings,
+    ) -> Result<(), InputError> {
         let mut devmode = DEVMODEW::default();
         devmode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
         devmode.dmPelsWidth = display_settings.width.unwrap_or(1920);

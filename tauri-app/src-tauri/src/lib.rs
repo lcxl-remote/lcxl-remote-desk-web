@@ -74,7 +74,12 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
     };
 
     let sidecar = find_desk_standalone();
-    log::info!("Service op {:?}: running {} {}", arg, sidecar.display(), arg);
+    log::info!(
+        "Service op {:?}: running {} {}",
+        arg,
+        sidecar.display(),
+        arg
+    );
 
     #[cfg(target_os = "windows")]
     {
@@ -83,7 +88,11 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
         use windows::core::PCWSTR;
 
-        let path: Vec<u16> = sidecar.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let path: Vec<u16> = sidecar
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
         let operation: Vec<u16> = "runas\0".encode_utf16().collect();
         let params: Vec<u16> = arg.encode_utf16().chain(std::iter::once(0)).collect();
 
