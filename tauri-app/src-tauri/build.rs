@@ -16,9 +16,9 @@ fn copy_desk_standalone_sidecar() {
     // manifest_dir = .../web/tauri-app/src-tauri
     // → workspace root = 3 parents up
     let workspace_root = manifest_dir
-        .parent()  // tauri-app
-        .and_then(|p| p.parent())  // web
-        .and_then(|p| p.parent())  // workspace root
+        .parent() // tauri-app
+        .and_then(|p| p.parent()) // web
+        .and_then(|p| p.parent()) // workspace root
         .expect("Could not determine workspace root");
 
     let mut src = workspace_root.join("target").join(&profile);
@@ -45,9 +45,7 @@ fn copy_desk_standalone_sidecar() {
                 src.display(),
                 dest.display()
             ),
-            Err(e) => println!(
-                "cargo:warning=Failed to copy desk-standalone sidecar: {e}"
-            ),
+            Err(e) => println!("cargo:warning=Failed to copy desk-standalone sidecar: {e}"),
         }
     } else {
         println!(
