@@ -15,6 +15,10 @@ pub struct LogSettings {
     pub log_cleanup_threshold_percent: u8,
     /// Interval in hours for the cleanup task (default 12)
     pub log_cleanup_interval_hours: u32,
+    /// Enable tokio-console subscriber (requires `tokio_unstable` build flag). Default false.
+    /// Each startup mode listens on a different port to avoid conflicts:
+    /// Default/Signaling/DeskServer → 6669, ServiceDaemon → 6670, SessionWorker → 6671.
+    pub tokio_console_enabled: bool,
 }
 
 impl Default for LogSettings {
@@ -25,6 +29,7 @@ impl Default for LogSettings {
             log_retention_days: 7,
             log_cleanup_threshold_percent: 90,
             log_cleanup_interval_hours: 12,
+            tokio_console_enabled: false,
         }
     }
 }

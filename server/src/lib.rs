@@ -185,11 +185,11 @@ pub async fn run_with_channels(
     // Initialize settings
     let shared_settings = Arc::new(SharedSettings::from(settings.clone()));
 
-    // Initialize telemetry
-    let _guard = telemetry::init_telemetry(shared_settings.clone()).await?;
-
     // determine startup mode
     let startup_mode = settings.args.startup_mode.clone();
+
+    // Initialize telemetry
+    let _guard = telemetry::init_telemetry(shared_settings.clone(), &startup_mode).await?;
 
     // init desk_signal db
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {

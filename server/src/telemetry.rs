@@ -17,12 +17,15 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use crate::model::settings::SharedSettings;
+use crate::model::settings::{SharedSettings, StartupMode};
 use crate::version::{SERVER_BUILD_NUMBER, SERVER_COMMIT_HASH};
 use std::sync::Arc;
 use tracing;
 
-pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Option<WorkerGuard>> {
+pub async fn init_telemetry(
+    shared_settings: Arc<SharedSettings>,
+    startup_mode: &StartupMode,
+) -> Result<Option<WorkerGuard>> {
     let (mut system_settings, log_settings) = {
         let settings_guard = shared_settings.read().await;
         (settings_guard.system.clone(), settings_guard.log.clone())
@@ -138,7 +141,35 @@ pub async fn init_telemetry(shared_settings: Arc<SharedSettings>) -> Result<Opti
         .with(otel_layer);
 
     #[cfg(tokio_unstable)]
-    let registry = registry.with(console_subscriber::spawn());
+    let registry = {
+        if log_settings.tokio_console_enabled {
+            let port: u16 = match startup_mode {
+                StartupMode::ServiceDaemon => 6670,
+                StartupMode::SessionWorker => 6671,
+                _ => 6669,
+            };
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            let (console_layer, server) = console_subscriber::ConsoleLayer::builder()
+                .server_addr(addr)
+                .build();
+            std::thread::Builder::new()
+                .name("console_subscriber".to_string())
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_io()
+                        .enable_time()
+                        .build()
+                        .expect("console subscriber runtime");
+                    if let Err(e) = rt.block_on(server.serve()) {
+                        log::warn!("tokio-console server failed on {}: {}", addr, e);
+                    }
+                })
+                .expect("spawn console subscriber thread");
+            registry.with(Some(console_layer))
+        } else {
+            registry.with(None::<console_subscriber::ConsoleLayer>)
+        }
+    };
 
     registry.init();
 
