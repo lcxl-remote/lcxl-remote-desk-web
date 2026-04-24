@@ -297,6 +297,83 @@ export function SystemSettings() {
                 </CardContent>
             </Card>
 
+            {serverInfo?.startup_mode === "default" && serverInfo.server_binary_available && (
+                <Card className="mt-6 border-amber-500/50 bg-amber-500/10 dark:border-amber-500/30 dark:bg-amber-500/10">
+                    <CardHeader>
+                        <CardTitle>{t("pages.system.settings.serviceManagement.title", "Windows Service")}</CardTitle>
+                        <CardDescription>{t("pages.system.settings.serviceManagement.description", "Manage the background system service for unattended access.")}</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h4 className="text-sm font-medium">{t("pages.system.settings.serviceManagement.status", "Service Status")}</h4>
+                                <p className="text-sm text-muted-foreground">
+                                    {serverInfo.service_installed 
+                                        ? t("pages.system.settings.serviceManagement.installed", "Installed and running") 
+                                        : t("pages.system.settings.serviceManagement.notInstalled", "Not installed")}
+                                </p>
+                            </div>
+                            {serverInfo.service_installed ? (
+                                <Button 
+                                    variant="destructive" 
+                                    onClick={async () => {
+                                        try {
+                                            const res = await fetch("/api/service/uninstall", { method: "POST" });
+                                            if (res.ok) {
+                                                toast({
+                                                    title: t("pages.system.settings.success", "Success"),
+                                                    description: t("pages.system.settings.serviceManagement.uninstallSuccess", "Service uninstall request submitted. Please wait a few seconds."),
+                                                });
+                                            } else {
+                                                throw new Error("Uninstall failed");
+                                            }
+                                        } catch (error) {
+                                            console.error(error);
+                                            toast({
+                                                variant: "destructive",
+                                                title: t("pages.system.settings.error", "Error"),
+                                                description: t("pages.system.settings.serviceManagement.uninstallError", "Failed to uninstall service."),
+                                            });
+                                        }
+                                    }}
+                                >
+                                    {t("pages.system.settings.serviceManagement.uninstall", "Uninstall Service")}
+                                </Button>
+                            ) : (
+                                <Button 
+                                    onClick={async () => {
+                                        try {
+                                            const res = await fetch("/api/service/install", { 
+                                                method: "POST",
+                                                headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify({ install_path: serverInfo.default_install_path })
+                                            });
+                                            if (res.ok) {
+                                                toast({
+                                                    title: t("pages.system.settings.success", "Success"),
+                                                    description: t("pages.system.settings.serviceManagement.installSuccess", "Service install request submitted. Please wait a few seconds."),
+                                                });
+                                            } else {
+                                                throw new Error("Install failed");
+                                            }
+                                        } catch (error) {
+                                            console.error(error);
+                                            toast({
+                                                variant: "destructive",
+                                                title: t("pages.system.settings.error", "Error"),
+                                                description: t("pages.system.settings.serviceManagement.installError", "Failed to install service."),
+                                            });
+                                        }
+                                    }}
+                                >
+                                    {t("pages.layout.serviceBanner.installButton", "Install Service")}
+                                </Button>
+                            )}
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
+
             <Card className="mt-6">
                 <CardHeader>
                     <CardTitle>{t("pages.system.settings.backendDiagnostics", "Backend Diagnostics")}</CardTitle>
