@@ -75,6 +75,7 @@ pub async fn query_server_info(
 
     let service_installed = desk_utils::permission::is_service_installed("LcxlDeskService");
     let is_admin = desk_utils::permission::is_admin();
+    let server_binary_available = server_binary_available();
 
     let info = ServerInfo {
         startup_mode,
@@ -82,9 +83,44 @@ pub async fn query_server_info(
         initialized,
         service_installed,
         is_admin,
+        server_binary_available,
     };
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))
+}
+
+/// Check whether the `lcxl-remote-desk-server` binary is available for service
+/// installation.
+///
+/// Returns `true` when:
+/// - The current executable IS `lcxl-remote-desk-server` (standalone mode), or
+/// - `lcxl-remote-desk-server(.exe)` exists in the same directory as the current
+///   executable (Tauri mode — both binaries share the same target/ directory).
+fn server_binary_available() -> bool {
+    let Ok(current_exe) = std::env::current_exe() else {
+        return false;
+    };
+
+    // Running as the server binary itself — can always self-install.
+    if current_exe
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s == "lcxl-remote-desk-server")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // Running inside Tauri (or another host) — look for the binary alongside.
+    let Some(dir) = current_exe.parent() else {
+        return false;
+    };
+    #[cfg(target_os = "windows")]
+    let name = "lcxl-remote-desk-server.exe";
+    #[cfg(not(target_os = "windows"))]
+    let name = "lcxl-remote-desk-server";
+
+    dir.join(name).exists()
 }
 
 #[utoipa::path(

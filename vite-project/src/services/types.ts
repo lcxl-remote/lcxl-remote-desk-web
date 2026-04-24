@@ -43,6 +43,26 @@ export type AudioDevice = {
 };
 
 /**
+ * @description AV1 encoder settings (rav1e)
+*/
+export type Av1EncoderSettings = {
+    /**
+     * @description Quality (Quantizer), 0-255, default is 100. Lower is better quality.
+     * @minLength 0
+     * @default 100
+     * @type integer | undefined, int32
+    */
+    quality?: number;
+    /**
+     * @description Speed preset, 0-10, default is 10 (fastest). Lower is better quality but slower.
+     * @minLength 0
+     * @default 10
+     * @type integer | undefined, int32
+    */
+    speed?: number;
+};
+
+/**
  * @description Runtime backend diagnostics
 */
 export type BackendInfo = {
@@ -520,6 +540,10 @@ export type DeskSettings = {
      * @type string,null
     */
     audio_encoder?: string | null;
+    /**
+     * @default null
+    */
+    av1_encoder?: (null | Av1EncoderSettings);
     /**
      * @description Display name
      * @type string,null
@@ -1574,20 +1598,25 @@ export type RestResponseServerInfo = {
         */
         initialized: boolean;
         /**
-         * @description Startup mode of the server
-         * @type string
+         * @description Whether the current process has admin/root privileges
+         * @type boolean
         */
-        startup_mode: string;
+        is_admin: boolean;
+        /**
+         * @description Whether the server binary is available for service installation.\nTrue when lcxl-remote-desk-server(.exe) exists alongside the current\nexecutable (both binaries share the same target directory in dev and\nthe same install directory in production).
+         * @type boolean
+        */
+        server_binary_available: boolean;
         /**
          * @description Whether the OS system service (LcxlDeskService) is installed
          * @type boolean
         */
-        service_installed?: boolean;
+        service_installed: boolean;
         /**
-         * @description Whether the current process has admin/root privileges
-         * @type boolean
+         * @description Startup mode of the server
+         * @type string
         */
-        is_admin?: boolean;
+        startup_mode: string;
     };
     /**
      * @type string,null
@@ -1602,7 +1631,9 @@ export type RestResponseServerInfo = {
 export const startupModeEnum = {
     default: "default",
     signaling: "signaling",
-    "desk-server": "desk-server"
+    "desk-server": "desk-server",
+    "service-daemon": "service-daemon",
+    "session-worker": "session-worker"
 } as const;
 
 export type StartupModeEnumKey = (typeof startupModeEnum)[keyof typeof startupModeEnum];
@@ -2040,20 +2071,25 @@ export type ServerInfo = {
     */
     initialized: boolean;
     /**
-     * @description Startup mode of the server
-     * @type string
+     * @description Whether the current process has admin/root privileges
+     * @type boolean
     */
-    startup_mode: string;
+    is_admin: boolean;
+    /**
+     * @description Whether the server binary is available for service installation.\nTrue when lcxl-remote-desk-server(.exe) exists alongside the current\nexecutable (both binaries share the same target directory in dev and\nthe same install directory in production).
+     * @type boolean
+    */
+    server_binary_available: boolean;
     /**
      * @description Whether the OS system service (LcxlDeskService) is installed
      * @type boolean
     */
-    service_installed?: boolean;
+    service_installed: boolean;
     /**
-     * @description Whether the current process has admin/root privileges
-     * @type boolean
+     * @description Startup mode of the server
+     * @type string
     */
-    is_admin?: boolean;
+    startup_mode: string;
 };
 
 /**
@@ -2926,7 +2962,7 @@ export type RegenerateTurnSecretMutation = {
     Errors: any;
 };
 
-export type OpenSignalingHandleQueryParams = {
+export type OpenSignalingHandlePathParams = {
     /**
      * @description The version of the API. This is a simple integer that increments when API is changed.
      * @type integer, int32
@@ -2956,17 +2992,17 @@ export type OpenSignalingHandleQueryParams = {
      * @description Display name of the remote desk.
      * @type string,null
     */
-    display_name?: string | null;
+    display_name: string | null;
     /**
      * @description Client ID of the server.
      * @type string,null
     */
-    client_id?: string | null;
+    client_id: string | null;
     /**
      * @description Authentication token for server nodes or API clients.
      * @type string,null
     */
-    token?: string | null;
+    token: string | null;
 };
 
 /**
@@ -2978,7 +3014,7 @@ export type OpenSignalingHandleQueryResponse = OpenSignalingHandle200;
 
 export type OpenSignalingHandleQuery = {
     Response: OpenSignalingHandle200;
-    QueryParams: OpenSignalingHandleQueryParams;
+    PathParams: OpenSignalingHandlePathParams;
     Errors: any;
 };
 
@@ -3185,4 +3221,38 @@ export type QueryServerInfoQueryResponse = QueryServerInfo200;
 export type QueryServerInfoQuery = {
     Response: QueryServerInfo200;
     Errors: any;
+};
+
+/**
+ * @description Install request accepted
+*/
+export type InstallService202 = any;
+
+/**
+ * @description Not running inside Tauri (no service op channel)
+*/
+export type InstallService503 = any;
+
+export type InstallServiceMutationResponse = InstallService202;
+
+export type InstallServiceMutation = {
+    Response: InstallService202;
+    Errors: InstallService503;
+};
+
+/**
+ * @description Uninstall request accepted
+*/
+export type UninstallService202 = any;
+
+/**
+ * @description Not running inside Tauri (no service op channel)
+*/
+export type UninstallService503 = any;
+
+export type UninstallServiceMutationResponse = UninstallService202;
+
+export type UninstallServiceMutation = {
+    Response: UninstallService202;
+    Errors: UninstallService503;
 };

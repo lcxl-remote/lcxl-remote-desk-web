@@ -4794,7 +4794,6 @@ dependencies = [
  "desk-turn",
  "desk-utils",
  "encoding_rs",
- "env_logger",
  "evdev 0.13.2",
  "futures",
  "futures-util",

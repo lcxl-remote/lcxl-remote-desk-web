@@ -6,23 +6,23 @@
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams } from "../../types.ts";
+import type { OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams } from "../../types.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { openSignalingHandle } from "../../clients.ts";
 
-export const openSignalingHandleQueryKey = (params: OpenSignalingHandleQueryParams) => [{ url: '/api/desk/signaling' }, ...(params ? [params] : [])] as const
+export const openSignalingHandleQueryKey = (api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"]) => [{ url: '/api/desk/signaling' }] as const
 
 export type OpenSignalingHandleQueryKey = ReturnType<typeof openSignalingHandleQueryKey>
 
-export function openSignalingHandleQueryOptions(params: OpenSignalingHandleQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function openSignalingHandleQueryOptions(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"], config: Partial<RequestConfig> & { client?: Client } = {}) {
 
-        const queryKey = openSignalingHandleQueryKey(params)
+        const queryKey = openSignalingHandleQueryKey(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token)
         return queryOptions<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, OpenSignalingHandleQueryResponse, typeof queryKey>({
-         enabled: !!(params),
+         enabled: !!(api_version&& build_number&& commit_hash&& remote_desk_type&& operation_system&& display_name&& client_id&& token),
          queryKey,
          queryFn: async ({ signal }) => {
             config.signal = signal
-            return openSignalingHandle(params, config)
+            return openSignalingHandle(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token, config)
          },
         })
 
@@ -32,7 +32,7 @@ export function openSignalingHandleQueryOptions(params: OpenSignalingHandleQuery
  * @summary Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.
  * {@link /api/desk/signaling}
  */
-export function useOpenSignalingHandle<TData = OpenSignalingHandleQueryResponse, TQueryData = OpenSignalingHandleQueryResponse, TQueryKey extends QueryKey = OpenSignalingHandleQueryKey>(params: OpenSignalingHandleQueryParams, options: 
+export function useOpenSignalingHandle<TData = OpenSignalingHandleQueryResponse, TQueryData = OpenSignalingHandleQueryResponse, TQueryKey extends QueryKey = OpenSignalingHandleQueryKey>(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"], options: 
 {
   query?: Partial<QueryObserverOptions<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
@@ -41,11 +41,11 @@ export function useOpenSignalingHandle<TData = OpenSignalingHandleQueryResponse,
 
          const { query: queryConfig = {}, client: config = {} } = options ?? {}
          const { client: queryClient, ...queryOptions } = queryConfig
-         const queryKey = queryOptions?.queryKey ?? openSignalingHandleQueryKey(params)
+         const queryKey = queryOptions?.queryKey ?? openSignalingHandleQueryKey(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token)
          
 
          const query = useQuery({
-          ...openSignalingHandleQueryOptions(params, config),
+          ...openSignalingHandleQueryOptions(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token, config),
           queryKey,
           ...queryOptions
          } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }

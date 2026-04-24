@@ -7,6 +7,7 @@ export type { GetCaptchaMutationKey } from "./undefinedController/useGetCaptcha.
 export type { GetCurrentUserQueryKey } from "./undefinedController/useGetCurrentUser.ts";
 export type { GetCurrentUserSuspenseQueryKey } from "./undefinedController/useGetCurrentUserSuspense.ts";
 export type { InitSystemMutationKey } from "./undefinedController/useInitSystem.ts";
+export type { InstallServiceMutationKey } from "./undefinedController/useInstallService.ts";
 export type { ListConnectionsQueryKey } from "./undefinedController/useListConnections.ts";
 export type { ListConnectionsSuspenseQueryKey } from "./undefinedController/useListConnectionsSuspense.ts";
 export type { ListDeviceCodesQueryKey } from "./undefinedController/useListDeviceCodes.ts";
@@ -42,6 +43,7 @@ export type { QueryTurnSettingsQueryKey } from "./undefinedController/useQueryTu
 export type { QueryTurnSettingsSuspenseQueryKey } from "./undefinedController/useQueryTurnSettingsSuspense.ts";
 export type { RegenerateTurnSecretMutationKey } from "./undefinedController/useRegenerateTurnSecret.ts";
 export type { SubmitSecurityApprovalMutationKey } from "./undefinedController/useSubmitSecurityApproval.ts";
+export type { UninstallServiceMutationKey } from "./undefinedController/useUninstallService.ts";
 export type { UpdateDeviceCodeMutationKey } from "./undefinedController/useUpdateDeviceCode.ts";
 export type { UpdateLogSettingsMutationKey } from "./undefinedController/useUpdateLogSettings.ts";
 export type { UpdateSecuritySettingsMutationKey } from "./undefinedController/useUpdateSecuritySettings.ts";
@@ -76,6 +78,9 @@ export { useGetCurrentUserSuspense } from "./undefinedController/useGetCurrentUs
 export { initSystemMutationKey } from "./undefinedController/useInitSystem.ts";
 export { initSystemMutationOptions } from "./undefinedController/useInitSystem.ts";
 export { useInitSystem } from "./undefinedController/useInitSystem.ts";
+export { installServiceMutationKey } from "./undefinedController/useInstallService.ts";
+export { installServiceMutationOptions } from "./undefinedController/useInstallService.ts";
+export { useInstallService } from "./undefinedController/useInstallService.ts";
 export { listConnectionsQueryKey } from "./undefinedController/useListConnections.ts";
 export { listConnectionsQueryOptions } from "./undefinedController/useListConnections.ts";
 export { useListConnections } from "./undefinedController/useListConnections.ts";
@@ -181,6 +186,9 @@ export { useRegenerateTurnSecret } from "./undefinedController/useRegenerateTurn
 export { submitSecurityApprovalMutationKey } from "./undefinedController/useSubmitSecurityApproval.ts";
 export { submitSecurityApprovalMutationOptions } from "./undefinedController/useSubmitSecurityApproval.ts";
 export { useSubmitSecurityApproval } from "./undefinedController/useSubmitSecurityApproval.ts";
+export { uninstallServiceMutationKey } from "./undefinedController/useUninstallService.ts";
+export { uninstallServiceMutationOptions } from "./undefinedController/useUninstallService.ts";
+export { useUninstallService } from "./undefinedController/useUninstallService.ts";
 export { updateDeviceCodeMutationKey } from "./undefinedController/useUpdateDeviceCode.ts";
 export { updateDeviceCodeMutationOptions } from "./undefinedController/useUpdateDeviceCode.ts";
 export { useUpdateDeviceCode } from "./undefinedController/useUpdateDeviceCode.ts";

@@ -5,7 +5,7 @@
 
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandleQueryParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse } from "./types.ts";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503 } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -421,7 +421,7 @@ export async function regenerateTurnSecret(config: Partial<RequestConfig> & { cl
   return res.data
 }
 
-function getOpenSignalingHandleUrl() {
+function getOpenSignalingHandleUrl(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"]) {
   const res = { method: 'GET', url: `/api/desk/signaling` as const }
   return res
 }
@@ -430,12 +430,12 @@ function getOpenSignalingHandleUrl() {
  * @summary Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.
  * {@link /api/desk/signaling}
  */
-export async function openSignalingHandle(params: OpenSignalingHandleQueryParams, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function openSignalingHandle(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"], config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getOpenSignalingHandleUrl().url.toString(), params, ... requestConfig })
+  const res = await request<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getOpenSignalingHandleUrl(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token).url.toString(), ... requestConfig })
   return res.data
 }
 
@@ -634,5 +634,44 @@ export async function queryServerInfo(config: Partial<RequestConfig> & { client?
 
 
   const res = await request<QueryServerInfoQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryServerInfoUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getInstallServiceUrl() {
+  const res = { method: 'POST', url: `/api/service/install` as const }
+  return res
+}
+
+/**
+ * @description The HTTP handler is stateless: it sends a command to Tauri via the
+ * `service_op_sender` channel and returns 202 Accepted immediately.
+ * The caller should poll `GET /api/server_info` to check `service_installed`.
+ * @summary Install OS system service
+ * {@link /api/service/install}
+ */
+export async function installService(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, unknown>({ method : "POST", url : getInstallServiceUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUninstallServiceUrl() {
+  const res = { method: 'POST', url: `/api/service/uninstall` as const }
+  return res
+}
+
+/**
+ * @summary Uninstall OS system service
+ * {@link /api/service/uninstall}
+ */
+export async function uninstallService(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<UninstallServiceMutationResponse, ResponseErrorConfig<UninstallService503>, unknown>({ method : "POST", url : getUninstallServiceUrl().url.toString(), ... requestConfig })
   return res.data
 }

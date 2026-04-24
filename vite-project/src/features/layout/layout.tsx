@@ -33,6 +33,16 @@ function ServiceInstallBanner() {
         return null
     }
 
+    // Server binary not found next to the current executable
+    if (!serverInfo.server_binary_available) {
+        return (
+            <Alert variant="destructive" className="rounded-none border-x-0 border-t-0">
+                <AlertTitle>{t("pages.layout.serviceBanner.title")}</AlertTitle>
+                <AlertDescription>{t("pages.layout.serviceBanner.binaryNotFound")}</AlertDescription>
+            </Alert>
+        )
+    }
+
     const handleInstall = () => {
         fetch("/api/service/install", { method: "POST" }).catch(console.error)
     }

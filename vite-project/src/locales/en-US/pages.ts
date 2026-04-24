@@ -466,4 +466,5 @@ export default {
   'pages.layout.serviceBanner.description': 'Install as a Windows service to enable UAC / lock-screen penetration and unattended access.',
   'pages.layout.serviceBanner.installButton': 'Install Service',
   'pages.layout.serviceBanner.needsAdmin': 'Admin privileges required. Please re-launch with "Run as administrator".',
+  'pages.layout.serviceBanner.binaryNotFound': 'Server binary not found alongside this executable. Service installation is unavailable.',
 };

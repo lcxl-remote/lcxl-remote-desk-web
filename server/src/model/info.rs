@@ -64,6 +64,11 @@ pub struct ServerInfo {
     pub service_installed: bool,
     /// Whether the current process has admin/root privileges
     pub is_admin: bool,
+    /// Whether the server binary is available for service installation.
+    /// True when lcxl-remote-desk-server(.exe) exists alongside the current
+    /// executable (both binaries share the same target directory in dev and
+    /// the same install directory in production).
+    pub server_binary_available: bool,
 }
 
 /// Runtime backend diagnostics

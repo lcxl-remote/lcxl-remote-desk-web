@@ -459,6 +459,7 @@ export default {
   'pages.layout.serviceBanner.description': '安装为 Windows 系统服务以启用 UAC / 锁屏穿透和无人值守访问。',
   'pages.layout.serviceBanner.installButton': '安装服务',
   'pages.layout.serviceBanner.needsAdmin': '需要管理员权限，请以「以管理员身份运行」重新启动。',
+  'pages.layout.serviceBanner.binaryNotFound': '未找到 lcxl-remote-desk-server 可执行文件，服务安装不可用。',
 
   'pages.settings.category.general': '通用设置',
   'pages.settings.category.signal': 'Signal 服务端设置',

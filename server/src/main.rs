@@ -1,6 +1,5 @@
 use clap::Parser as _;
 use lcxl_remote_desk_server::model::settings::{Args, StartupMode};
-use log::{error, info};
 
 /// Extra flags for install/uninstall — parsed before the main startup-mode dispatch.
 #[derive(clap::Parser, Debug, Default)]
@@ -17,57 +16,61 @@ struct ServerArgs {
     uninstall_service: bool,
 }
 
-fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_millis()
+fn init_simple_logger() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(tracing::Level::INFO.into()),
+        )
+        .with_target(false)
         .init();
+}
 
+fn main() {
     // Handle one-shot service management flags before entering any startup mode.
+    // Use plain println!/eprintln! — no logging framework is initialised yet.
     #[cfg(target_os = "windows")]
     {
         let server_args = ServerArgs::parse();
         if server_args.install_service {
             use lcxl_remote_desk_server::daemon::windows_service::install_service;
             if let Err(e) = install_service() {
-                error!("Failed to install service: {e}");
+                eprintln!("Failed to install service: {e}");
                 std::process::exit(1);
             }
+            println!("Service installed successfully");
             return;
         }
         if server_args.uninstall_service {
             use lcxl_remote_desk_server::daemon::windows_service::uninstall_service;
             if let Err(e) = uninstall_service() {
-                error!("Failed to uninstall service: {e}");
+                eprintln!("Failed to uninstall service: {e}");
                 std::process::exit(1);
             }
+            println!("Service uninstalled successfully");
             return;
         }
     }
 
     let args = Args::parse();
 
-    info!(
-        "lcxl-remote-desk-server starting, mode={:?}, pipe={:?}",
-        args.startup_mode, args.pipe
-    );
-
     match args.startup_mode {
         StartupMode::Default | StartupMode::Signaling | StartupMode::DeskServer => {
-            info!("Starting in Portable mode");
+            // telemetry::init_telemetry() inside run() owns all logging for this path.
+            // Do NOT initialise any logger here — it would conflict.
             let system = actix_web::rt::System::new();
             let exit_code = system.block_on(async {
                 match lcxl_remote_desk_server::run().await {
                     Ok(server) => {
-                        info!("Server started successfully");
                         if let Err(e) = server.await {
-                            error!("Server error: {e}");
+                            eprintln!("Server error: {e}");
                             1
                         } else {
                             0
                         }
                     }
                     Err(e) => {
-                        error!("Failed to start server: {e}");
+                        eprintln!("Failed to start server: {e}");
                         1
                     }
                 }
@@ -75,20 +78,22 @@ fn main() {
             std::process::exit(exit_code);
         }
         StartupMode::ServiceDaemon => {
-            info!("Starting in ServiceDaemon mode");
+            init_simple_logger();
+            tracing::info!("lcxl-remote-desk-server starting in ServiceDaemon mode");
             if let Err(e) = lcxl_remote_desk_server::daemon::run_service_daemon(args) {
-                error!("ServiceDaemon failed: {e}");
+                tracing::error!("ServiceDaemon failed: {e}");
                 std::process::exit(1);
             }
         }
         StartupMode::SessionWorker => {
-            info!("Starting in SessionWorker mode");
+            init_simple_logger();
+            tracing::info!("lcxl-remote-desk-server starting in SessionWorker mode");
             let pipe_name = args.pipe.clone().unwrap_or_else(|| {
-                error!("--pipe argument is required for SessionWorker mode");
+                tracing::error!("--pipe argument is required for SessionWorker mode");
                 std::process::exit(1);
             });
             if let Err(e) = lcxl_remote_desk_server::worker::run_session_worker(args, &pipe_name) {
-                error!("SessionWorker failed: {e}");
+                tracing::error!("SessionWorker failed: {e}");
                 std::process::exit(1);
             }
         }
