@@ -65,15 +65,10 @@ mod windows_impl {
             use crate::daemon::run_service_daemon_inner;
             use clap::Parser;
             let args = crate::model::settings::Args::parse();
-            tokio::select! {
-                res = run_service_daemon_inner(args) => {
-                    if let Err(e) = res {
-                        error!("[WindowsService] Daemon error: {e}");
-                    }
-                }
-                _ = async { stop_rx.await.ok(); } => {
-                    info!("[WindowsService] Stop signal received");
-                }
+            // Pass the shutdown receiver directly so the daemon can reach
+            // shutdown_all() before we set the Stopped status.
+            if let Err(e) = run_service_daemon_inner(args, Some(stop_rx)).await {
+                error!("[WindowsService] Daemon error: {e}");
             }
         });
 

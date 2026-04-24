@@ -4,7 +4,7 @@ use desk_ipc_protocol::{
 };
 use crate::{
     ExternalChannels,
-    model::settings::{Args, Settings, SharedSettings},
+    model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
 };
 
@@ -76,7 +76,14 @@ impl WorkerSession {
         };
 
         let settings = match serde_json::from_str::<Settings>(&init_payload.config_json) {
-            Ok(s) => s,
+            Ok(mut s) => {
+                // Args is #[serde(skip)] so it defaults to Args::default() after
+                // deserialization. SessionWorker always acts as a pure desk server,
+                // so set the mode explicitly to satisfy DeskServer-specific checks
+                // (e.g. TURN ICE server inclusion in signaling.rs).
+                s.args.startup_mode = StartupMode::DeskServer;
+                s
+            }
             Err(e) => {
                 error!("Failed to parse config from Init payload: {}", e);
                 let err_msg = WorkerToService::Error(desk_ipc_protocol::message::ErrorPayload {

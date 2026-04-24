@@ -71,11 +71,11 @@ async fn run_windows_session_monitor(
 }
 
 #[cfg(target_os = "windows")]
-fn get_current_desktop_name() -> Result<String, String> {
+pub fn get_current_desktop_name() -> Result<String, String> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::StationsAndDesktops::{
-        DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetUserObjectInformationW, OpenInputDesktop,
-        UOI_NAME,
+        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetUserObjectInformationW,
+        OpenInputDesktop, UOI_NAME,
     };
 
     unsafe {
@@ -97,6 +97,9 @@ fn get_current_desktop_name() -> Result<String, String> {
             (name_buf.len() * 2) as u32,
             Some(&mut needed),
         );
+
+        // Always close the desktop handle before returning.
+        let _ = CloseDesktop(desktop);
 
         if result.is_err() {
             return Err("GetUserObjectInformationW failed".to_string());

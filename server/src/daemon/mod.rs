@@ -8,6 +8,7 @@ use actix_web::web;
 use crate::model::settings::{Args, Settings, SharedSettings};
 use log::{error, info};
 use std::sync::Arc;
+use tokio::sync::oneshot;
 
 /// Entry point for `--startup-mode service-daemon`.
 ///
@@ -32,12 +33,19 @@ pub fn run_service_daemon(args: Args) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let system = actix_web::rt::System::new();
-    system.block_on(async { run_service_daemon_inner(args).await })
+    system.block_on(async { run_service_daemon_inner(args, None).await })
 }
 
 /// The actual async daemon logic, shared between the interactive path and the
 /// Windows Service path (called from `windows_service::run_service()`).
-pub async fn run_service_daemon_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `shutdown_signal`: when running as a Windows Service the SCM stop handler
+/// sends on this channel so that we can reach `shutdown_all()`.  The interactive
+/// path passes `None` and waits for Ctrl-C instead.
+pub async fn run_service_daemon_inner(
+    args: Args,
+    shutdown_signal: Option<oneshot::Receiver<()>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("ServiceDaemon starting");
 
     let settings = Settings::new(&args).map_err(|e| format!("Failed to load settings: {e}"))?;
@@ -51,8 +59,9 @@ pub async fn run_service_daemon_inner(args: Args) -> Result<(), Box<dyn std::err
     let (worker_mgr, worker_rx) = worker_manager::WorkerManager::new(shared_settings_data.clone());
 
     let initial_session = get_current_session_id();
+    let initial_desktop = get_initial_desktop_name();
     if let Err(e) = worker_mgr
-        .start_worker(initial_session, Some("Default".to_string()), Vec::new())
+        .start_worker(initial_session, initial_desktop, Vec::new())
         .await
     {
         error!("Failed to start initial worker: {e}");
@@ -89,7 +98,17 @@ pub async fn run_service_daemon_inner(args: Args) -> Result<(), Box<dyn std::err
     };
 
     info!("ServiceDaemon running. Press Ctrl+C to stop.");
-    tokio::signal::ctrl_c().await?;
+    match shutdown_signal {
+        Some(rx) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => { info!("Ctrl-C received"); }
+                _ = rx => { info!("SCM shutdown signal received"); }
+            }
+        }
+        None => {
+            tokio::signal::ctrl_c().await?;
+        }
+    }
     info!("ServiceDaemon shutting down…");
 
     worker_mgr.shutdown_all().await;
@@ -109,4 +128,24 @@ fn get_current_session_id() -> u32 {
 #[cfg(not(target_os = "windows"))]
 fn get_current_session_id() -> u32 {
     0
+}
+
+/// Returns the actual active input desktop name at startup so the initial
+/// worker is started on the correct desktop (e.g. "Winlogon" at the lock
+/// screen rather than always "Default").
+fn get_initial_desktop_name() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        match session_monitor::get_current_desktop_name() {
+            Ok(name) => Some(name),
+            Err(e) => {
+                info!("Could not query initial desktop name ({e}), defaulting to 'Default'");
+                Some("Default".to_string())
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
