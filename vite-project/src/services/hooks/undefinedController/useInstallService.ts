@@ -6,7 +6,7 @@
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { UseMutationOptions, UseMutationResult, QueryClient } from "@tanstack/react-query";
-import type { InstallServiceMutationResponse, InstallService503 } from "../../types.ts";
+import type { InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503 } from "../../types.ts";
 import { mutationOptions, useMutation } from "@tanstack/react-query";
 import { installService } from "../../clients.ts";
 
@@ -14,13 +14,13 @@ export const installServiceMutationKey = () => [{ url: '/api/service/install' }]
 
 export type InstallServiceMutationKey = ReturnType<typeof installServiceMutationKey>
 
-export function installServiceMutationOptions<TContext = unknown>(config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function installServiceMutationOptions<TContext = unknown>(config: Partial<RequestConfig<InstallServiceMutationRequest>> & { client?: Client } = {}) {
 
         const mutationKey = installServiceMutationKey()
-        return mutationOptions<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, void, TContext>({
+        return mutationOptions<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, {data?: InstallServiceMutationRequest}, TContext>({
           mutationKey,
-          mutationFn: async() => {
-            return installService(config)
+          mutationFn: async({ data }) => {
+            return installService(data, config)
           },
         })
 
@@ -35,8 +35,8 @@ export function installServiceMutationOptions<TContext = unknown>(config: Partia
  */
 export function useInstallService<TContext>(options: 
 {
-  mutation?: UseMutationOptions<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, void, TContext> & { client?: QueryClient },
-  client?: Partial<RequestConfig> & { client?: Client },
+  mutation?: UseMutationOptions<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, {data?: InstallServiceMutationRequest}, TContext> & { client?: QueryClient },
+  client?: Partial<RequestConfig<InstallServiceMutationRequest>> & { client?: Client },
 }
  = {}) {
 
@@ -44,13 +44,13 @@ export function useInstallService<TContext>(options:
           const { client: queryClient, ...mutationOptions } = mutation;
           const mutationKey = mutationOptions.mutationKey ?? installServiceMutationKey()
 
-          const baseOptions = installServiceMutationOptions(config) as UseMutationOptions<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, void, TContext>
+          const baseOptions = installServiceMutationOptions(config) as UseMutationOptions<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, {data?: InstallServiceMutationRequest}, TContext>
           
 
-          return useMutation<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, void, TContext>({
+          return useMutation<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, {data?: InstallServiceMutationRequest}, TContext>({
             ...baseOptions,
             mutationKey,
             ...mutationOptions,
-          }, queryClient) as UseMutationResult<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, void, TContext>
+          }, queryClient) as UseMutationResult<InstallServiceMutationResponse, ResponseErrorConfig<InstallService503>, {data?: InstallServiceMutationRequest}, TContext>
       
 }

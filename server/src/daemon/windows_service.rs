@@ -103,21 +103,49 @@ mod windows_impl {
         }
     }
 
-    /// Register this executable as a Windows Service in SCM.
-    pub fn install_service() -> WsResult<()> {
+    /// Copy the server binary to `install_dir` (skipped when source and
+    /// destination are in the same directory) and register it as a Windows
+    /// Service in SCM.
+    pub fn install_service(
+        install_dir: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let src_exe = std::env::current_exe()?;
+
+        let install_path = std::path::Path::new(install_dir);
+        std::fs::create_dir_all(install_path)?;
+
+        let file_name = src_exe
+            .file_name()
+            .ok_or("current exe has no file name")?;
+        let dst_exe = install_path.join(file_name);
+
+        // Skip copy when source is already inside the install directory.
+        let same_dir = src_exe
+            .parent()
+            .and_then(|p| p.canonicalize().ok())
+            .zip(install_path.canonicalize().ok())
+            .map(|(src_dir, dst_dir)| src_dir == dst_dir)
+            .unwrap_or(false);
+
+        if !same_dir {
+            std::fs::copy(&src_exe, &dst_exe)?;
+            info!("Copied binary to {}", dst_exe.display());
+        } else {
+            info!("Binary already in install directory, skipping copy");
+        }
+
         let manager = ServiceManager::local_computer(
             None::<&str>,
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
         )?;
 
-        let exe = std::env::current_exe().expect("current exe path");
         let info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
             display_name: OsString::from(SERVICE_DISPLAY_NAME),
             service_type: ServiceType::OWN_PROCESS,
             start_type: ServiceStartType::AutoStart,
             error_control: ServiceErrorControl::Normal,
-            executable_path: exe,
+            executable_path: dst_exe,
             launch_arguments: vec![
                 OsString::from("--startup-mode"),
                 OsString::from("service-daemon"),
@@ -128,7 +156,7 @@ mod windows_impl {
         };
 
         manager.create_service(&info, ServiceAccess::empty())?;
-        info!("Service '{SERVICE_NAME}' installed successfully");
+        info!("Service '{SERVICE_NAME}' installed at '{install_dir}'");
         Ok(())
     }
 
@@ -139,5 +167,19 @@ mod windows_impl {
         service.delete()?;
         info!("Service '{SERVICE_NAME}' uninstalled successfully");
         Ok(())
+    }
+}
+
+/// Returns the default service installation directory for this platform.
+pub fn default_install_dir() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let pf = std::env::var("PROGRAMFILES")
+            .unwrap_or_else(|_| "C:\\Program Files".to_string());
+        format!("{}\\LCXL Remote Desktop", pf)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "/opt/lcxl-remote-desk".to_string()
     }
 }

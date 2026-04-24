@@ -65,20 +65,9 @@ fn find_server_binary() -> std::path::PathBuf {
     return std::path::PathBuf::from("lcxl-remote-desk-server");
 }
 
-/// Elevate and run `lcxl-remote-desk-server <arg>` to install or uninstall the OS service.
+/// Elevate and run `lcxl-remote-desk-server <args>` to install or uninstall the OS service.
 fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
-    let arg = match op {
-        lcxl_remote_desk_server::ServiceOp::Install => "--install-service",
-        lcxl_remote_desk_server::ServiceOp::Uninstall => "--uninstall-service",
-    };
-
     let sidecar = find_server_binary();
-    log::info!(
-        "Service op {:?}: running {} {}",
-        arg,
-        sidecar.display(),
-        arg
-    );
 
     #[cfg(target_os = "windows")]
     {
@@ -87,13 +76,26 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
         use windows::core::PCWSTR;
 
+        let params_str = match &op {
+            lcxl_remote_desk_server::ServiceOp::Install { install_path } => {
+                format!("--install-service --install-path \"{}\"", install_path)
+            }
+            lcxl_remote_desk_server::ServiceOp::Uninstall => "--uninstall-service".to_string(),
+        };
+
+        log::info!(
+            "Service op: running {} {}",
+            sidecar.display(),
+            params_str
+        );
+
         let path: Vec<u16> = sidecar
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
         let operation: Vec<u16> = "runas\0".encode_utf16().collect();
-        let params: Vec<u16> = arg.encode_utf16().chain(std::iter::once(0)).collect();
+        let params: Vec<u16> = params_str.encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
             ShellExecuteW(
@@ -109,11 +111,19 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let status = std::process::Command::new("pkexec")
-            .arg(&sidecar)
-            .arg(arg)
-            .status();
-        if let Err(e) = status {
+        let mut cmd = std::process::Command::new("pkexec");
+        cmd.arg(&sidecar);
+        match &op {
+            lcxl_remote_desk_server::ServiceOp::Install { install_path } => {
+                cmd.arg("--install-service")
+                    .arg("--install-path")
+                    .arg(install_path);
+            }
+            lcxl_remote_desk_server::ServiceOp::Uninstall => {
+                cmd.arg("--uninstall-service");
+            }
+        }
+        if let Err(e) = cmd.status() {
             log::error!("Service op failed: {e}");
         }
     }

@@ -14,6 +14,11 @@ struct ServerArgs {
     #[cfg(target_os = "windows")]
     #[arg(long)]
     uninstall_service: bool,
+
+    /// Target installation directory for --install-service
+    #[cfg(target_os = "windows")]
+    #[arg(long)]
+    install_path: Option<String>,
 }
 
 fn init_simple_logger() {
@@ -33,8 +38,12 @@ fn main() {
     {
         let server_args = ServerArgs::parse();
         if server_args.install_service {
-            use lcxl_remote_desk_server::daemon::windows_service::install_service;
-            if let Err(e) = install_service() {
+            use lcxl_remote_desk_server::daemon::windows_service::{
+                default_install_dir, install_service,
+            };
+            let default_dir = default_install_dir();
+            let dir = server_args.install_path.as_deref().unwrap_or(&default_dir);
+            if let Err(e) = install_service(dir) {
                 eprintln!("Failed to install service: {e}");
                 std::process::exit(1);
             }

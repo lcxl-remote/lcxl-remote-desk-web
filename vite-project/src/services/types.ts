@@ -1133,6 +1133,17 @@ export type InitSignalingData = {
 };
 
 /**
+ * @description Request body for `POST /api/service/install`.
+*/
+export type InstallServiceRequest = {
+    /**
+     * @description Installation directory. Uses the platform default when absent.
+     * @type string,null
+    */
+    install_path?: string | null;
+};
+
+/**
  * @description Keyboard event data structure\nhttps://developer.mozilla.org/zh-CN/docs/Web/API/KeyboardEvent
 */
 export type KeyboardEventData = {
@@ -1592,6 +1603,11 @@ export type RestResponseServerInfo = {
          * @type integer, int32
         */
         api_version: number;
+        /**
+         * @description Default installation directory proposed to the user when installing the service.
+         * @type string
+        */
+        default_install_path: string;
         /**
          * @description Indicates whether the system is initialized (e.g., admin password set)
          * @type boolean
@@ -2065,6 +2081,11 @@ export type ServerInfo = {
      * @type integer, int32
     */
     api_version: number;
+    /**
+     * @description Default installation directory proposed to the user when installing the service.
+     * @type string
+    */
+    default_install_path: string;
     /**
      * @description Indicates whether the system is initialized (e.g., admin password set)
      * @type boolean
@@ -3233,10 +3254,13 @@ export type InstallService202 = any;
 */
 export type InstallService503 = any;
 
+export type InstallServiceMutationRequest = InstallServiceRequest;
+
 export type InstallServiceMutationResponse = InstallService202;
 
 export type InstallServiceMutation = {
     Response: InstallService202;
+    Request: InstallServiceMutationRequest;
     Errors: InstallService503;
 };
 

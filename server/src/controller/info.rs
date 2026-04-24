@@ -76,6 +76,7 @@ pub async fn query_server_info(
     let service_installed = desk_utils::permission::is_service_installed("LcxlDeskService");
     let is_admin = desk_utils::permission::is_admin();
     let server_binary_available = server_binary_available();
+    let default_install_path = crate::daemon::windows_service::default_install_dir();
 
     let info = ServerInfo {
         startup_mode,
@@ -84,6 +85,7 @@ pub async fn query_server_info(
         service_installed,
         is_admin,
         server_binary_available,
+        default_install_path,
     };
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))

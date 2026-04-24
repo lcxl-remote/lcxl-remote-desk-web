@@ -84,9 +84,9 @@ rust_i18n::i18n!("locales");
 
 /// Service management operations that can be requested by the embedded HTTP
 /// server and fulfilled by the Tauri host (which has UAC elevation ability).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceOp {
-    Install,
+    Install { install_path: String },
     Uninstall,
 }
 

@@ -69,6 +69,8 @@ pub struct ServerInfo {
     /// executable (both binaries share the same target directory in dev and
     /// the same install directory in production).
     pub server_binary_available: bool,
+    /// Default installation directory proposed to the user when installing the service.
+    pub default_install_path: String,
 }
 
 /// Runtime backend diagnostics

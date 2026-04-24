@@ -1,0 +1,1 @@
+{"type":"object","description":"Request body for `POST /api/service/install`.","properties":{"install_path":{"type":["string","null"],"description":"Installation directory. Uses the platform default when absent."}},"x-readme-ref-name":"InstallServiceRequest"}
