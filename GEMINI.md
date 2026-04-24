@@ -7,7 +7,8 @@ LCXL Remote Desk Web 是一个基于 WebRTC 技术的高效现代远程桌面解
 - **桌面客户端**: Tauri (Rust + 网页前端)
 
 ### 核心架构与模块
-- **`server`**: 运行于宿主机的核心远程桌面服务，负责屏幕采集、音频捕获、命令执行和文件管理。
+- **`server`**: 运行于宿主机的核心远程桌面服务。采用 Service Core + Session Worker 的跨平台多进程架构（支持 UAC 穿透），通过 IPC 通信。Service Core 负责信令代理和 Worker 生命周期管理；Session Worker 运行在用户会话中，独立持有 WebRTC 连接，并负责实际的媒体采集和指令执行。
+- **`capture-engine`** / **`input-injection`** / **`ipc-protocol`**: 分别为底层的屏幕音频捕获与编码引擎、鼠标键盘输入注入库以及跨进程通信协议库。
 - **`signal`**: 信令服务器模块（默认在 `server` 中启用，也可独立部署），使用 WebSocket 协调对等连接。
 - **`vite-project`**: Web 前端应用程序，用作管理仪表板和远程客户端。
 - **`tauri-app`**: 增强型带 GUI 的服务端程序，提供隐私屏和白板等依赖本地 UI 的高级功能。

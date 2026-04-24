@@ -1,48 +1,48 @@
-# Repository Guidelines
+# 仓库指南 (Repository Guidelines)
 
-## Project Structure & Module Organization
-This repository is a Rust workspace with a Vite frontend.
+## 项目结构与模块组织
+本代码仓库是一个包含 Vite 前端的 Rust 工作空间。
 
-- `server/`: main desktop service (Actix-Web, WebRTC, REST/OpenAPI) with integration tests in `server/tests/`.
-- `signal/`, `turn/`, `signal-facade/`, `server-user/`, `server-version/`, `utils/`: supporting Rust crates.
-- `vite-project/`: React + TypeScript UI (`src/features`, `src/components`, `src/services`).
-- `tauri-app/src-tauri/`: desktop shell for privacy-screen and whiteboard features.
-- `conf/config.toml`: runtime config; `openapi.json` + `vite-project/openapi.json`: API specs.
+- `server/`: 核心桌面服务 (Actix-Web, WebRTC, REST/OpenAPI)，集成测试位于 `server/tests/`。
+- `signal/`, `turn/`, `signal-facade/`, `server-user/`, `server-version/`, `utils/`, `capture-engine/`, `input-injection/`, `ipc-protocol/`: 辅助性的 Rust crates。
+- `vite-project/`: React + TypeScript 前端 UI (`src/features`, `src/components`, `src/services`)。
+- `tauri-app/src-tauri/`: 桌面端壳程序，用于隐私屏和白板功能。
+- `conf/config.toml`: 运行时配置文件；`openapi.json` + `vite-project/openapi.json`: API 规范文档。
 
-## Build, Test, and Development Commands
-Run commands from repo root unless noted.
+## 构建、测试与开发命令
+除非另有说明，请在仓库根目录下运行命令。
 
-- `cargo run -p lcxl-remote-desk-server`: start backend in default mode.
-- `cargo run -p lcxl-remote-desk-server -- --help`: view startup flags (`-m default|signaling|desk-server`).
-- `cargo build --workspace --release`: build all Rust crates.
-- `cargo test --workspace`: run Rust tests (including `server/tests/test_utils.rs`).
-- `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings`: format and lint backend.
-- `cd vite-project && npm ci && npm run dev`: start frontend at Vite dev server (default `5174`).
-- `cd vite-project && npm run build`: type-check and build frontend.
-- `cd vite-project && ./update_openapi.ps1`: refresh frontend API client from `http://localhost:8081/openapi.json`.
+- `cargo run -p lcxl-remote-desk-server`: 在默认模式下启动后端。
+- `cargo run -p lcxl-remote-desk-server -- --help`: 查看启动标志 (`-m default|signaling|desk-server|service-daemon|session-worker`)。
+- `cargo build --workspace --release`: 构建所有的 Rust crates。
+- `cargo test --workspace`: 运行 Rust 测试（包括 `server/tests/test_utils.rs`）。
+- `cargo fmt --all` 以及 `cargo clippy --workspace --all-targets -- -D warnings`: 格式化并检查（lint）后端代码。
+- `cd vite-project && npm ci && npm run dev`: 在 Vite 开发服务器启动前端（默认端口 `5174`）。
+- `cd vite-project && npm run build`: 类型检查并构建前端。
+- `cd vite-project && ./update_openapi.ps1`: 从 `http://localhost:8081/openapi.json` 刷新前端 API 客户端。
 
-## Coding Style & Naming Conventions
-- Rust: follow `rustfmt`, snake_case for modules/files/functions, PascalCase for types, `SCREAMING_SNAKE_CASE` for constants.
-- TypeScript/React: 4-space indentation in current code, PascalCase for components, `useXxx` for hooks, kebab-case filenames in `src/components/ui`.
-- Keep generated API artifacts under `vite-project/src/services/`; do not hand-edit generated hook/type files.
+## 代码风格与命名规范
+- Rust: 遵循 `rustfmt`，模块/文件/函数使用 `snake_case`，类型名使用 `PascalCase`，常量使用 `SCREAMING_SNAKE_CASE`。
+- TypeScript/React: 当前代码使用 4 个空格缩进，组件名使用 `PascalCase`，钩子使用 `useXxx`，`src/components/ui` 中的文件名使用 `kebab-case`。
+- 自动生成的 API 产物必须保留在 `vite-project/src/services/` 下；请勿手动编辑生成的 hook/type 文件。
 
-## Testing Guidelines
-- Prefer crate-local unit tests and integration tests under `server/tests/`.
-- Test names should describe behavior (example: `test_rejects_invalid_turn_secret`).
-- For frontend changes, at minimum validate with `npm run build` and manual flow checks (see `vite-project/test_flow.mjs` when relevant).
+## 测试指南
+- 优先在 `server/tests/` 下编写 crate 本地的单元测试和集成测试。
+- 测试名称应描述其行为（例如：`test_rejects_invalid_turn_secret`）。
+- 对于前端更改，至少要通过 `npm run build` 进行验证和手动流程检查（如果相关，请参阅 `vite-project/test_flow.mjs`）。
 
-## Commit & Pull Request Guidelines
-- Follow Conventional Commits (`feat:`, `fix:`, `chore:`), consistent with recent history.
-- Keep commits focused and functional; include config/schema updates in the same commit when required.
-- PRs should include: concise description, affected modules (e.g., `server/service/signaling`), test/verification steps, linked issues, and UI screenshots for frontend changes.
+## 提交与拉取请求 (PR) 指南
+- 遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)，与近期的提交历史保持一致。
+- 保持提交专注且功能独立；如果需要，请在同一次提交中包含配置/Schema的更新。
+- PR 应包含：简明扼要的描述、受影响的模块（如 `server/service/signaling`）、测试/验证步骤、关联的 Issue，以及前端更改的 UI 截图。
 
-## Security & Configuration Tips
-- Never commit real credentials; use `conf/config.toml` placeholders for local dev.
-- Review changes touching auth, signaling, TURN, or file-transfer paths with extra care.
+## 安全与配置提示
+- 绝不提交真实的凭证（credentials）；在本地开发时使用 `conf/config.toml` 中的占位符。
+- 在审查涉及鉴权、信令、TURN 或文件传输路径的变更时，需要格外小心。
 
-## Signaling Authentication & Multi-Role Connection Architecture (CRITICAL)
-This project features complex 4-way signaling connections. Handle logic strictly following this dual-track authentication spec:
-- **Desk Server -> Local Signaling Server:** Start local connection only in `default` mode. Authenticate using auto-generated and persisted `settings.system.local_signaling_token`.
-- **Desk Server -> Remote Signaling Server:** Authenticate by passing `token` (`settings.system.signaling_token`) as a WebSocket URL query parameter.
-- **Desk Server -> Manager Server:** Authenticate by passing `token` (`settings.system.manager_api_token`) via WebSocket URL query parameters (validates against the manager database).
-- **Browser -> Signaling / Manager Server:** Browsers connect to signaling **WITHOUT any Token query parameters**. They **MUST** fall back to Session (Actix-Session Cookie) authentication. Backend route extractors must use `Option<web::Query<VersionInfo>>` for compatibility, and manager signaling routes must be excluded from global Session interception middlewares.
+## 信令鉴权与多角色连接架构 (CRITICAL)
+本项目具备复杂的四向信令连接机制。在处理逻辑时，必须严格遵守以下双轨鉴权规范：
+- **Desk Server -> Local Signaling Server:** 仅在 `default` 模式下启动本地连接。通过自动生成并持久化的 `settings.system.local_signaling_token` 进行鉴权。
+- **Desk Server -> Remote Signaling Server:** 通过 WebSocket URL 的 query 参数传递 `token` (`settings.system.signaling_token`) 进行身份验证。
+- **Desk Server -> Manager Server:** 通过 WebSocket URL 的 query 参数传递 `token` (`settings.system.manager_api_token`) 进行身份验证（在 manager 数据库中验证其有效性）。
+- **Browser -> Signaling / Manager Server:** 浏览器端连接信令时**不带任何 Token Query 参数**。它们**必须**回退通过会话 (Actix-Session Cookie) 进行认证。后端路由提取参数必须使用 `Option<web::Query<VersionInfo>>` 以兼容浏览器行为，且 manager 端的信令路由必须排除在全局 Session 拦截中间件之外。

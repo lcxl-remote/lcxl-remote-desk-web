@@ -5,10 +5,14 @@
 ## 1. 核心模块说明
 
 - **`server/` (Desk Server)**:
-    - 运行在被控端。
-    - 提供 REST API (Actix-web)：用于管理设置、文件、终端和触发 WebRTC 连接。
+    - 运行在被控端。现采用 **Service Core + Desk Worker** 多进程架构，以实现 UAC/锁屏穿透。
+    - **Service Core** 模式 (`service-daemon`)：以 SYSTEM/root 权限运行，负责提供 REST API (Actix-web) 用于管理设置，与信令服务器保持连接，监控系统会话切换，并管理 Worker 生命周期。
+    - **Session Worker** 模式 (`session-worker`)：在具体用户桌面会话中启动，持有 WebRTC PeerConnection，负责实际的音视频捕获 (`capture-engine`)、输入注入 (`input-injection`)、文件与终端管理。
     - 持久化配置 (`conf/config.toml`)。
     - API 文档基于 Utoipa 自动生成。
+
+- **`capture-engine/`** & **`input-injection/`** & **`ipc-protocol/`**:
+    - 底层库拆分：提供屏幕/音频捕获、输入模拟以及 Service 与 Worker 之间的 IPC (命名管道/Unix Socket) 通信能力。
 
 - **`signal/` (Signaling & TURN)**:
     - 提供 WebSocket 信令服务：用于 WebRTC 的 Offer/Answer/ICE 交换及自定义控制指令转发。

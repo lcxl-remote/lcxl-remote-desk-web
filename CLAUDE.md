@@ -1,34 +1,34 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件旨在为 Claude Code (claude.ai/code) 在处理本仓库代码时提供指导。
 
-## Project Overview
+## 项目概述
 
-`lcxl-remote-desk` open-source WebRTC remote desktop solution. Backend in Rust (Actix-Web), frontend in React + TypeScript (Vite). The `server` binary can run in three modes: full (`default`), signaling-only (`signaling`), or desk-server-only (`desk-server`).
+`lcxl-remote-desk` 开源 WebRTC 远程桌面解决方案。后端使用 Rust (Actix-Web)，前端使用 React + TypeScript (Vite)。`server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`) 以及会话工作进程模式 (`session-worker`)。
 
-## Build & Run
+## 构建与运行
 
 ```bash
-# Backend
-cargo run -p lcxl-remote-desk-server                  # default (full) mode
-cargo run -p lcxl-remote-desk-server -- --help         # see all startup flags
+# 后端
+cargo run -p lcxl-remote-desk-server                  # default (完整) 模式
+cargo run -p lcxl-remote-desk-server -- --help         # 查看所有启动标志
 cargo build --workspace --release
 cargo test --workspace
 
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Frontend
-cd vite-project && npm ci && npm run dev               # dev server (default :5174)
-cd vite-project && npm run build                       # type-check + build
+# 前端
+cd vite-project && npm ci && npm run dev               # 开发服务器 (默认端口 :5174)
+cd vite-project && npm run build                       # 类型检查 + 构建
 
-# After backend API changes, regenerate frontend client
+# 后端 API 变更后，重新生成前端客户端代码
 # Windows: cd vite-project && .\update_openapi.ps1
 # Linux/macOS: cd vite-project && ./update_openapi.sh
-# (requires server running on :8081)
+# (需要 server 运行在 :8081 端口)
 ```
 
-### Linux system dependencies
+### Linux 系统依赖
 
 ```bash
 sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
@@ -36,59 +36,63 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
   clang libclang-dev cmake libvpx-dev
 ```
 
-### API docs (while server is running)
+### API 文档 (服务器运行时)
 
-Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI spec: `http://localhost:8081/openapi.json`
+Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI 规范: `http://localhost:8081/openapi.json`
 
-## Module Overview
+## 模块概览
 
-| Module | Role |
+| 模块 | 角色 |
 |---|---|
-| `server/` | Desk server: REST API (Actix-Web), WebRTC, settings, file/terminal management |
-| `signal/` | Signaling server + TURN (key file: `signal/src/service.rs`) |
-| `vite-project/` | React 19 + TanStack Query frontend — both admin UI and web control client |
-| `tauri-app/` | Tauri shell for privacy-screen / whiteboard features rendered locally on controlled machine |
-| `signal-facade/` | Shared signaling protocol models (used by both `signal` and `manager`) |
-| `utils/` | Common utilities |
-| `turn/` | TURN server (bundled with signaling) |
-| `server-version/` | API version constant |
+| `server/` | Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式） |
+| `signal/` | 信令服务器 + TURN (核心文件: `signal/src/service.rs`) |
+| `vite-project/` | React 19 + TanStack Query 前端 — 包含管理 UI 和 Web 控制端客户端 |
+| `tauri-app/` | Tauri 壳程序，用于在被控机本地渲染防窥屏/白板功能 |
+| `signal-facade/` | 共享的信令协议模型 (供 `signal` 和 `manager` 使用) |
+| `capture-engine/`| 屏幕/音频捕获与编码逻辑 |
+| `input-injection/`| 鼠标/键盘输入注入与剪贴板控制 |
+| `ipc-protocol/` | 用于 Service ↔ Worker 之间通信的 IPC 消息定义 |
+| `utils/` | 通用工具类 |
+| `turn/` | TURN 服务器 (与信令服务器捆绑) |
+| `server-version/` | API 版本常量 |
 
-## Adding a New API Endpoint
+## 添加新 API 接口的步骤
 
-1. Define models in `server/src/model/`
-2. Implement logic in `server/src/service/`
-3. Add route handler in `server/src/controller/` with `utoipa` annotations
-4. Register route in `server/src/main.rs`
-5. Run the OpenAPI update script to regenerate frontend client
+1. 在 `server/src/model/` 中定义模型
+2. 在 `server/src/service/` 中实现逻辑
+3. 在 `server/src/controller/` 中添加带 `utoipa` 注解的路由处理函数
+4. 在 `server/src/main.rs` 中注册路由
+5. 运行 OpenAPI 更新脚本以重新生成前端客户端代码
 
-## Adding a New Signaling Type
+## 添加新信令类型的步骤
 
-1. Add the new variant with a unique integer value to `SignalingType` in `signal-facade/src/model/signal.rs`.
-2. Handle it in `signal/src/service.rs` `handle_message` — add to forwarding union branch or write a dedicated match arm. **Never add a `_ =>` catch-all** (compiler enforces exhaustiveness).
-3. Update frontend: run `/update_openapi`, then add `onMessage` handler in `vite-project/src/features/desk/hooks/useDeskRTC.ts`.
+1. 在 `signal-facade/src/model/signal.rs` 的 `SignalingType` 中添加新的枚举变体（带唯一整数值）。
+2. 在 `signal/src/service.rs` 的 `handle_message` 函数中处理它 — 添加到转发分支或编写专用的匹配分支。**绝对不要添加 `_ =>` 兜底匹配**（由编译器强制检查穷尽性）。
+3. 更新前端：运行 `/update_openapi`，然后在 `vite-project/src/features/desk/hooks/useDeskRTC.ts` 中添加 `onMessage` 处理程序。
 
-## Signaling Authentication (CRITICAL)
+## 信令鉴权 (CRITICAL)
 
-| Connection | Auth method |
+| 连接 | 鉴权方法 |
 |---|---|
-| Desk Server → Local Signaling | `settings.system.local_signaling_token` (auto-generated, `default` mode only) |
-| Desk Server → Remote Signaling | `?token=<settings.system.signaling_token>` in WebSocket URL |
-| Desk Server → Manager | `?token=<settings.system.manager_api_token>` in WebSocket URL |
-| Browser → Signaling / Manager | **No token param.** Actix-Session Cookie only. Use `Option<web::Query<VersionInfo>>` in extractors; exclude manager signaling routes from global session middleware. |
+| Desk Server → Local Signaling | `settings.system.local_signaling_token` (自动生成，仅限 `default` 模式) |
+| Desk Server → Remote Signaling | WebSocket URL 中传递 `?token=<settings.system.signaling_token>` |
+| Desk Server → Manager | WebSocket URL 中传递 `?token=<settings.system.manager_api_token>` |
+| Browser → Signaling / Manager | **不带 token 参数。**仅使用 Actix-Session Cookie。路由提取器必须使用 `Option<web::Query<VersionInfo>>`；并将 manager 信令路由排除在全局 Session 中间件之外。 |
 
-## Frontend Rules
+## 前端规则
 
-- **i18n (mandatory):** All user-visible text must use `useTranslation()` / `t()` — no hardcoded strings. Every new key must be added simultaneously to `vite-project/src/locales/zh-CN/pages.ts` **and** `vite-project/src/locales/en-US/pages.ts`.
-- **Generated code:** Files under `vite-project/src/services/` (Kubb output) are auto-generated — do not hand-edit them.
-- **Tauri IPC:** Windows loaded via external HTTP URL lose `__TAURI_INTERNALS__`. Never call `invoke()` or `listen()` from frontend pages. Use REST API for frontend→Rust calls; use `window.eval()` + `dispatchEvent` for Rust→frontend events. Listen with native `window.addEventListener`.
+- **国际化 i18n (强制):** 所有用户可见的文本必须使用 `useTranslation()` / `t()` — 禁止硬编码字符串。每个新键必须同时添加到 `vite-project/src/locales/zh-CN/pages.ts` **和** `vite-project/src/locales/en-US/pages.ts`。
+- **自动生成代码:** `vite-project/src/services/` 下的文件（Kubb 输出）是自动生成的 — 请勿手动修改。
+- **Tauri IPC:** 通过外部 HTTP URL 加载的 Windows 失去 `__TAURI_INTERNALS__`。绝不能从前端页面调用 `invoke()` 或 `listen()`。前端调用 Rust 请使用 REST API；Rust 触发前端事件请使用 `window.eval()` + `dispatchEvent`。使用原生的 `window.addEventListener` 进行监听。
 
-## Code Style
+## 代码规范与规则
 
-- **Rust:** `rustfmt`, `snake_case` functions/modules, `PascalCase` types, `SCREAMING_SNAKE_CASE` constants.
-- **TypeScript/React:** 4-space indent, `PascalCase` components, `useXxx` hooks, kebab-case filenames in `src/components/ui`.
-- **Comments** must be written in **English**.
-- **Git commits** must be in **English**, following Conventional Commits (`feat:`, `fix:`, `chore:`).
+1. **工作语言规则：所有回复、思考过程及任务清单，均须使用中文。**
+2. **Rust:** 使用 `rustfmt` 格式化，函数/模块名使用 `snake_case`，类型名使用 `PascalCase`，常量使用 `SCREAMING_SNAKE_CASE`。
+3. **TypeScript/React:** 4 个空格缩进，组件名使用 `PascalCase`，钩子名使用 `useXxx`，`src/components/ui` 中的文件名使用 `kebab-case`。
+4. **代码注释**必须使用**英文 (English)**。
+5. **Git 提交信息**必须使用**英文 (English)**，并遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)。
 
-## Task Archival Workflow
+## 任务归档工作流
 
-After successfully completing a planned task, create an archive document in `agent_works/web/` with filename `yyyy-MM-dd_{kebab-case-title}.md`. Include: implementation plan, task list, execution summary. Strip any sensitive data.
+成功完成计划的任务后，在 `agent_works/web/` 下创建一个文件名为 `yyyy-MM-dd_{kebab-case-title}.md` 的归档文档。内容应包括：实现计划 (implementation plan)、任务清单 (task list) 及执行总结 (execution summary)。请删除任何敏感数据。
