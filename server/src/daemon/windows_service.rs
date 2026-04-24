@@ -60,8 +60,8 @@ mod windows_impl {
 
         info!("[WindowsService] Service Running");
 
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        rt.block_on(async {
+        let system = actix_web::rt::System::new();
+        system.block_on(async {
             use crate::daemon::run_service_daemon_inner;
             use clap::Parser;
             let args = crate::model::settings::Args::parse();
