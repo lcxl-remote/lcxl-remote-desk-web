@@ -21,7 +21,7 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 
 yuv = "0.8"
-x264 = { path = "../../../x264" }
+x264 = { git = "https://github.com/lcxl/x264.git", tag = "v0.7.2" }
 openh264 = "0.9.3"
 rav1e = { version = "0.8" }
 
