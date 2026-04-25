@@ -105,6 +105,10 @@ export default function DeskSession() {
     const autoReconnectRef = useRef(false);
     const switchTimeoutRef = useRef<number | null>(null);
 
+    // Adaptive quality state
+    const statsWindowRef = useRef<Array<{ packetLoss: number; rtt: number }>>([]);
+    const lastQualityAdjustRef = useRef<number>(0);
+
     const { cursorStyle } = useCursorSync(cursorSyncChannel, videoRef, isRTCConnected && hasControl);
 
     const {
@@ -248,6 +252,38 @@ export default function DeskSession() {
         }, 2000);
         return () => clearInterval(interval);
     }, [isConnected]);
+
+    // Adaptive quality: adjust video_quality based on packet loss and RTT
+    useEffect(() => {
+        if (!isRTCConnected || !deskId || !lastSettingsRef.current) return;
+
+        const win = statsWindowRef.current;
+        win.push({ packetLoss: rtcStats.packetLoss, rtt: rtcStats.rtt });
+        if (win.length > 10) win.shift();
+        if (win.length < 3) return;
+
+        const avgPacketLoss = win.reduce((s, x) => s + x.packetLoss, 0) / win.length;
+        const avgRtt = win.reduce((s, x) => s + x.rtt, 0) / win.length;
+        const now = Date.now();
+        const elapsed = now - lastQualityAdjustRef.current;
+        const currentQuality = lastSettingsRef.current.video_quality ?? 22;
+
+        let newQuality: number | null = null;
+        if ((avgPacketLoss > 3 || avgRtt > 200) && elapsed >= 3000) {
+            newQuality = Math.min(63, currentQuality + 5);
+        } else if (avgPacketLoss < 0.5 && avgRtt < 100 && elapsed >= 10000) {
+            newQuality = Math.max(0, currentQuality - 2);
+        }
+
+        if (newQuality !== null && newQuality !== currentQuality) {
+            const newSettings = { ...lastSettingsRef.current, video_quality: newQuality };
+            lastSettingsRef.current = newSettings;
+            sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, newSettings, deskId);
+            lastQualityAdjustRef.current = now;
+            statsWindowRef.current = [];
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [rtcStats]);
 
     const handleConfigSubmit = (settings: DeskSettings) => {
         lastSettingsRef.current = settings;
