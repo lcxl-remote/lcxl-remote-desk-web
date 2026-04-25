@@ -37,6 +37,9 @@ impl X264Encoder {
         // Use CRF for constant quality mode
         setup = setup.crf(setting.quality as f32);
         setup = setup.fps(fps.max(1), 1);
+        if setting.gop > 0 {
+            setup = setup.keyint(setting.gop);
+        }
 
         let encoder = setup
             .build(Colorspace::I420, width, height)
