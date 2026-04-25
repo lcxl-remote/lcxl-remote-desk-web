@@ -29,12 +29,22 @@ const SERVICE_NAME: &str = "LcxlDeskService";
 
 pub fn run() -> Result<(), DeskTauriError> {
     let args = Args::parse();
-    let settings = Settings::new(&args)?;
 
     if desk_utils::permission::is_service_running(SERVICE_NAME) {
         log::info!("ServiceDaemon is running — launching as service shell (no embedded server)");
-        run_tauri_service_shell(&settings)?;
+        // Load settings from the daemon's config file (absolute path stored in SCM).
+        // This ensures the IPC token matches the one the daemon generated and persisted.
+        let daemon_settings =
+            lcxl_remote_desk_server::daemon::windows_service::get_service_config_path()
+                .and_then(|p| {
+                    let mut a = args.clone();
+                    a.config_file_path = p.to_string_lossy().into_owned();
+                    Settings::new(&a).ok()
+                })
+                .unwrap_or_else(|| Settings::new(&args).unwrap_or_default());
+        run_tauri_service_shell(&daemon_settings)?;
     } else {
+        let settings = Settings::new(&args)?;
         run_tauri_app(&settings)?;
     }
 

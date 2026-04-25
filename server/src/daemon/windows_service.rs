@@ -149,6 +149,10 @@ mod windows_impl {
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
         )?;
 
+        // Use an absolute config path so the daemon is not sensitive to its
+        // working directory (Windows services default to System32).
+        let config_path = format!("{}\\conf\\config", install_dir);
+
         let info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
             display_name: OsString::from(SERVICE_DISPLAY_NAME),
@@ -159,6 +163,8 @@ mod windows_impl {
             launch_arguments: vec![
                 OsString::from("--startup-mode"),
                 OsString::from("service-daemon"),
+                OsString::from("--config-file-path"),
+                OsString::from(&config_path),
             ],
             dependencies: vec![],
             account_name: None,
@@ -222,12 +228,51 @@ mod windows_impl {
                 if std::fs::remove_dir_all(parent).is_ok() {
                     info!("Removed install directory {}", parent.display());
                 } else {
-                    log::warn!("Could not fully remove install directory {}", parent.display());
+                    log::warn!(
+                        "Could not fully remove install directory {}",
+                        parent.display()
+                    );
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Derive the daemon's config file path from the service's registered executable path.
+    ///
+    /// `ServiceConfig::executable_path` holds the full binary-path string (exe + args).
+    /// We extract just the exe component (stripping surrounding quotes when present),
+    /// take its parent directory, and append `conf/config` — matching the path written
+    /// into the launch arguments by `install_service`.
+    pub fn get_service_config_path() -> Option<std::path::PathBuf> {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
+        let service = manager
+            .open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG)
+            .ok()?;
+        let config = service.query_config().ok()?;
+
+        // The binary-path string looks like:
+        //   "C:\Program Files\LCXL Remote Desktop\server.exe" --startup-mode service-daemon ...
+        // or (unquoted, no spaces in path):
+        //   C:\tools\server.exe --startup-mode service-daemon ...
+        let full_cmd = config.executable_path.to_string_lossy();
+        let exe_str = if full_cmd.starts_with('"') {
+            // Quoted: take the content between the first pair of quotes.
+            full_cmd
+                .trim_start_matches('"')
+                .split('"')
+                .next()
+                .unwrap_or("")
+        } else {
+            // Unquoted: take up to the first space.
+            full_cmd.split_whitespace().next().unwrap_or("")
+        };
+
+        let exe_path = std::path::PathBuf::from(exe_str);
+        let install_dir = exe_path.parent()?;
+        Some(install_dir.join("conf").join("config"))
     }
 
     fn copy_dir_recursive(
@@ -247,6 +292,12 @@ mod windows_impl {
         }
         Ok(())
     }
+}
+
+/// Returns the config file path registered with the Windows service, or None on non-Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn get_service_config_path() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Returns the default service installation directory for this platform.
