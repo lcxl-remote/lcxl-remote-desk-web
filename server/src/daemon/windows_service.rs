@@ -165,8 +165,10 @@ mod windows_impl {
             account_password: None,
         };
 
-        manager.create_service(&info, ServiceAccess::empty())?;
+        let service = manager.create_service(&info, ServiceAccess::START)?;
         info!("Service '{SERVICE_NAME}' installed at '{install_dir}'");
+        service.start(&[] as &[&std::ffi::OsStr])?;
+        info!("Service '{SERVICE_NAME}' started");
         Ok(())
     }
 
