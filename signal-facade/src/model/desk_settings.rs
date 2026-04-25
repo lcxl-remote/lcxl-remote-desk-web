@@ -197,10 +197,10 @@ pub struct DeskSettings {
 impl DeskSettings {
     pub fn get_duration_by_video_fps(&self) -> Duration {
         let mut video_fps = self.video_fps;
-        if video_fps <= 0 {
+        if video_fps == 0 {
             video_fps = 1;
         }
-        Duration::from_micros((1000_000 as f32 / video_fps as f32) as u64)
+        Duration::from_micros((1_000_000 as f32 / video_fps as f32) as u64)
     }
 
     pub fn get_x264_encoder_settings(&self) -> X264EncoderSettings {
