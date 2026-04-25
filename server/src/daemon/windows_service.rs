@@ -209,19 +209,20 @@ mod windows_impl {
         if let Some(exe) = exe_path {
             let exe_path = std::path::PathBuf::from(exe);
 
-            // Wait up to 5 seconds for the file lock to be released
+            // Wait up to 5 seconds for the exe file lock to be released before
+            // removing the whole install directory.
             for _ in 0..10 {
-                if std::fs::remove_file(&exe_path).is_ok() {
-                    info!("Removed service executable {}", exe_path.display());
+                if !exe_path.exists() || std::fs::remove_file(&exe_path).is_ok() {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
 
             if let Some(parent) = exe_path.parent() {
-                // remove_dir will only succeed if the directory is empty
-                if std::fs::remove_dir(parent).is_ok() {
-                    info!("Removed empty install directory {}", parent.display());
+                if std::fs::remove_dir_all(parent).is_ok() {
+                    info!("Removed install directory {}", parent.display());
+                } else {
+                    log::warn!("Could not fully remove install directory {}", parent.display());
                 }
             }
         }
