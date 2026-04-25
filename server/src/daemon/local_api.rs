@@ -37,6 +37,15 @@ pub async fn run_local_api(
         })
         .unwrap_or_else(|_| std::path::PathBuf::from("static"));
 
+    if !static_file_path.exists() {
+        error!(
+            "Frontend static directory not found: {}. \
+             Build the vite project and place the output in a 'static/' directory \
+             alongside the server binary before installing the service.",
+            static_file_path.display()
+        );
+    }
+
     let settings_data = web::Data::from(settings.clone());
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
     let tauri_is_admin_data = web::Data::new(Arc::clone(&tauri_bridge.tauri_is_admin));
@@ -79,9 +88,25 @@ pub async fn run_local_api(
                         let (http_req, _) = req.into_parts();
                         let path = default_path.clone().join("index.html");
                         async move {
-                            let response =
-                                actix_files::NamedFile::open(path)?.into_response(&http_req);
-                            Ok(ServiceResponse::new(http_req, response))
+                            match actix_files::NamedFile::open(&path) {
+                                Ok(file) => {
+                                    let resp = file.into_response(&http_req);
+                                    Ok(ServiceResponse::new(http_req, resp))
+                                }
+                                Err(_) => {
+                                    let body = format!(
+                                        "Frontend assets not found (looked for: {}).\n\
+                                         Build the vite project and place the output in a \
+                                         'static/' directory alongside the server binary, \
+                                         then reinstall the service.",
+                                        path.display()
+                                    );
+                                    let resp = actix_web::HttpResponse::ServiceUnavailable()
+                                        .content_type("text/plain; charset=utf-8")
+                                        .body(body);
+                                    Ok(ServiceResponse::new(http_req, resp))
+                                }
+                            }
                         }
                     })),
             )

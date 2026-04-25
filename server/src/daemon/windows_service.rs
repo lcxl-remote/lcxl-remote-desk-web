@@ -127,22 +127,29 @@ mod windows_impl {
             info!("Binary already in install directory, skipping copy");
         }
 
-        // Always refresh static/ so a re-install picks up new frontend assets.
-        // Remove the old directory first to avoid stale versioned asset files.
-        if let Some(src_dir) = src_exe.parent() {
-            let src_static = src_dir.join("static");
-            let dst_static = install_path.join("static");
-            if src_static.exists() {
-                if dst_static.exists() {
-                    std::fs::remove_dir_all(&dst_static)?;
-                    info!("Removed old static directory at {}", dst_static.display());
-                }
-                copy_dir_recursive(&src_static, &dst_static)?;
-                info!("Copied static/ to {}", dst_static.display());
-            } else {
-                info!("No static/ directory found alongside binary, skipping");
-            }
+        // Copy static/ alongside the binary so the daemon can serve the frontend.
+        // Fail fast if the directory is missing — better to catch this at install
+        // time than to discover the frontend is broken after the service starts.
+        let src_static = src_exe
+            .parent()
+            .map(|d| d.join("static"))
+            .ok_or("could not determine source directory")?;
+        if !src_static.exists() {
+            return Err(format!(
+                "static/ directory not found at '{}'. \
+                 Build the vite project and place the output in a 'static/' directory \
+                 alongside the server binary before installing the service.",
+                src_static.display()
+            )
+            .into());
         }
+        let dst_static = install_path.join("static");
+        if dst_static.exists() {
+            std::fs::remove_dir_all(&dst_static)?;
+            info!("Removed old static directory at {}", dst_static.display());
+        }
+        copy_dir_recursive(&src_static, &dst_static)?;
+        info!("Copied static/ to {}", dst_static.display());
 
         let manager = ServiceManager::local_computer(
             None::<&str>,
