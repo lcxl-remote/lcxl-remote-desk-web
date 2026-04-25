@@ -149,9 +149,13 @@ mod windows_impl {
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
         )?;
 
-        // Use an absolute config path so the daemon is not sensitive to its
-        // working directory (Windows services default to System32).
-        let config_path = format!("{}\\conf\\config", install_dir);
+        // Store config in ProgramData (consistent with the log directory location)
+        // so the daemon is not sensitive to its working directory.
+        let config_path = service_data_dir()
+            .join("conf")
+            .join("config")
+            .to_string_lossy()
+            .into_owned();
 
         let info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
@@ -239,40 +243,21 @@ mod windows_impl {
         Ok(())
     }
 
-    /// Derive the daemon's config file path from the service's registered executable path.
+    /// Returns the canonical config file path used by the service daemon.
     ///
-    /// `ServiceConfig::executable_path` holds the full binary-path string (exe + args).
-    /// We extract just the exe component (stripping surrounding quotes when present),
-    /// take its parent directory, and append `conf/config` — matching the path written
-    /// into the launch arguments by `install_service`.
+    /// Both the daemon (via `--config-file-path` launch argument) and the Tauri app
+    /// use this function so they always agree on the same file.
     pub fn get_service_config_path() -> Option<std::path::PathBuf> {
-        let manager =
-            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT).ok()?;
-        let service = manager
-            .open_service(SERVICE_NAME, ServiceAccess::QUERY_CONFIG)
-            .ok()?;
-        let config = service.query_config().ok()?;
+        Some(service_data_dir().join("conf").join("config"))
+    }
 
-        // The binary-path string looks like:
-        //   "C:\Program Files\LCXL Remote Desktop\server.exe" --startup-mode service-daemon ...
-        // or (unquoted, no spaces in path):
-        //   C:\tools\server.exe --startup-mode service-daemon ...
-        let full_cmd = config.executable_path.to_string_lossy();
-        let exe_str = if full_cmd.starts_with('"') {
-            // Quoted: take the content between the first pair of quotes.
-            full_cmd
-                .trim_start_matches('"')
-                .split('"')
-                .next()
-                .unwrap_or("")
-        } else {
-            // Unquoted: take up to the first space.
-            full_cmd.split_whitespace().next().unwrap_or("")
-        };
-
-        let exe_path = std::path::PathBuf::from(exe_str);
-        let install_dir = exe_path.parent()?;
-        Some(install_dir.join("conf").join("config"))
+    /// Returns the service data directory: `%ProgramData%\LCXL Remote Desktop`.
+    /// Config and logs are stored here, consistent across service restarts and
+    /// independent of the working directory Windows assigns to the service process.
+    pub fn service_data_dir() -> std::path::PathBuf {
+        let program_data =
+            std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+        std::path::PathBuf::from(program_data).join("LCXL Remote Desktop")
     }
 
     fn copy_dir_recursive(
@@ -294,10 +279,15 @@ mod windows_impl {
     }
 }
 
-/// Returns the config file path registered with the Windows service, or None on non-Windows.
+/// Returns None on non-Windows (no service daemon concept).
 #[cfg(not(target_os = "windows"))]
 pub fn get_service_config_path() -> Option<std::path::PathBuf> {
     None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn service_data_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("/var/lib/lcxl-remote-desk")
 }
 
 /// Returns the default service installation directory for this platform.
