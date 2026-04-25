@@ -41,6 +41,7 @@ pub fn create_video_encoder(
         VideoEncoderType::X264 => Box::new(X264Encoder::new(
             desk_setting.get_x264_encoder_settings(),
             display_info,
+            desk_setting.video_fps,
         )?),
         VideoEncoderType::H264 => Box::new(H264Encoder::new(
             desk_setting.get_h264_encoder_settings(display_info),

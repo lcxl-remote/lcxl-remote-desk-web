@@ -26,6 +26,7 @@ impl X264Encoder {
     pub fn new(
         setting: X264EncoderSettings,
         display_info: &DisplayInfo,
+        fps: u32,
     ) -> Result<Self, CaptureError> {
         let width = display_info.desktop_coordinates.width() as i32;
         let height = display_info.desktop_coordinates.height() as i32;
@@ -35,7 +36,7 @@ impl X264Encoder {
 
         // Use CRF for constant quality mode
         setup = setup.crf(setting.quality as f32);
-        setup = setup.fps(60, 1);
+        setup = setup.fps(fps.max(1), 1);
 
         let encoder = setup
             .build(Colorspace::I420, width, height)

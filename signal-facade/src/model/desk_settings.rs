@@ -252,6 +252,9 @@ impl DeskSettings {
         }
 
         encoder_settings.bps = bps;
+        // Default to 30 frames between IDR keyframes; gop=0 means only the first frame
+        // is IDR, causing seek/recovery failures on packet loss
+        encoder_settings.gop = 30;
         encoder_settings
     }
 
