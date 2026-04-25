@@ -4872,6 +4872,7 @@ name = "lcxl-remote-desk-tauri"
 version = "0.1.0"
 dependencies = [
  "actix-rt",
+ "awc",
  "clap",
  "config 0.14.1",
  "core-foundation 0.9.4",
@@ -4879,6 +4880,7 @@ dependencies = [
  "desk-signal-facade",
  "desk-utils",
  "evdev 0.12.2",
+ "futures-util",
  "lcxl-remote-desk-server",
  "log",
  "raw-window-handle",

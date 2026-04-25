@@ -1,6 +1,7 @@
 pub mod local_api;
 pub mod session_monitor;
 pub mod signaling_proxy;
+pub mod tauri_ipc;
 pub mod windows_service;
 pub mod worker_manager;
 
@@ -8,6 +9,7 @@ use crate::model::settings::{Args, Settings, SharedSettings};
 use actix_web::web;
 use log::{error, info};
 use std::sync::Arc;
+use tauri_ipc::TauriIpcBridge;
 use tokio::sync::oneshot;
 
 /// Entry point for `--startup-mode service-daemon`.
@@ -91,10 +93,18 @@ pub async fn run_service_daemon_inner(
         })
     };
 
+    // Create TauriIpcBridge using the persisted IPC token
+    let ipc_token = {
+        let s = shared_settings.read().await;
+        s.system.tauri_ipc_token.clone().unwrap_or_default()
+    };
+    let (tauri_bridge, channels) = TauriIpcBridge::new(ipc_token);
+
     let api_handle = {
         let settings = Arc::clone(&shared_settings);
+        let bridge = Arc::clone(&tauri_bridge);
         tokio::spawn(async move {
-            if let Err(e) = local_api::run_local_api(settings).await {
+            if let Err(e) = local_api::run_local_api(settings, bridge, channels).await {
                 error!("Local API error: {e}");
             }
         })

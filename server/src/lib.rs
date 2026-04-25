@@ -82,6 +82,122 @@ use crate::model::host_control::{HostControlEventType, PrivateScreenCommand, Whi
 
 rust_i18n::i18n!("locales");
 
+/// Shared override for the `is_admin` field in `/api/server_info` and `/api/desk/sysinfo`.
+/// In ServiceDaemon mode the process runs as SYSTEM so `is_admin()` is always true.
+/// The Tauri shell reports its own admin status via the IPC WebSocket; that value is stored
+/// here and read by the info controllers so the frontend receives the correct elevation status.
+/// `None` = use platform `is_admin()` directly (portable / non-daemon modes).
+pub type TauriIsAdminOverride = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
+
+/// Parameters for registering the core HTTP API routes.
+/// All fields are `Clone` so this struct can be captured by `HttpServer::new` closures.
+#[derive(Clone)]
+pub struct ApiRouteConfig {
+    pub settings: web::Data<SharedSettings>,
+    pub tauri_login_token: web::Data<Option<TauriLoginToken>>,
+    pub connection_map: web::Data<desk_signal::model::SharedConnectionMap>,
+    pub security_approval_sender:
+        web::Data<Option<crate::model::security_approval::SecurityApprovalSender>>,
+    pub service_op_sender: web::Data<Option<std::sync::mpsc::SyncSender<ServiceOp>>>,
+    pub tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
+    pub startup_mode: StartupMode,
+}
+
+/// Register the core API routes onto `cfg` using plain actix-web (no utoipa).
+/// Used by the ServiceDaemon local API. The embedded portable server keeps its
+/// own utoipa-wrapped registration for OpenAPI doc generation.
+///
+/// Excluded in all modes: signaling WS, TURN management.
+/// Excluded in ServiceDaemon mode: terminal, file management, device codes.
+pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig) {
+    use crate::controller::{
+        info::{query_backend_info, query_server_info, query_sysinfo},
+        init::init_system,
+        login::{change_password, get_captcha, login_account, login_tauri, logout_account},
+        service_mgmt::{install_service, uninstall_service},
+        settings::{
+            query_log_settings, query_security_settings, query_settings, query_telemetry_status,
+            query_turn_client_settings, query_turn_settings, regenerate_turn_secret,
+            submit_security_approval, update_log_settings, update_security_settings,
+            update_settings, update_telemetry_consent, update_turn_client_settings,
+            update_turn_settings,
+        },
+        user::{get_current_user, reject_anonymous_users},
+    };
+    use desk_signal::controller::connection::list_connections;
+
+    let ApiRouteConfig {
+        settings,
+        tauri_login_token,
+        connection_map,
+        security_approval_sender,
+        service_op_sender,
+        tauri_is_admin,
+        startup_mode,
+    } = config;
+
+    cfg.app_data(settings)
+        .app_data(tauri_login_token)
+        .app_data(connection_map)
+        .app_data(security_approval_sender)
+        .app_data(service_op_sender)
+        .app_data(
+            web::JsonConfig::default()
+                .limit(4096 * 1024 << 2)
+                .error_handler(|err, req| {
+                    warn!("request {} json error: {}", req.path(), err);
+                    let msg = err.to_string();
+                    InternalError::from_response(
+                        err,
+                        HttpResponse::BadRequest().json(desk_utils::rest::RestResponse::failed(
+                            desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
+                            msg,
+                        )),
+                    )
+                    .into()
+                }),
+        )
+        .service(login_account)
+        .service(login_tauri)
+        .service(logout_account)
+        .service(get_current_user)
+        .service(get_captcha)
+        .service(query_server_info)
+        .service(install_service)
+        .service(uninstall_service)
+        .service(init_system)
+        .service(
+            web::scope("/api")
+                .wrap(actix_web::middleware::from_fn(reject_anonymous_users))
+                .service(
+                    web::scope("/desk")
+                        .service(change_password)
+                        .service(query_settings)
+                        .service(update_settings)
+                        .service(query_turn_settings)
+                        .service(update_turn_settings)
+                        .service(query_turn_client_settings)
+                        .service(update_turn_client_settings)
+                        .service(query_log_settings)
+                        .service(update_log_settings)
+                        .service(query_security_settings)
+                        .service(update_security_settings)
+                        .service(submit_security_approval)
+                        .service(regenerate_turn_secret)
+                        .service(query_telemetry_status)
+                        .service(update_telemetry_consent)
+                        .service(list_connections)
+                        .service(query_sysinfo)
+                        .service(query_backend_info),
+                ),
+        )
+        .configure(move |inner| {
+            if let Some(ref override_data) = tauri_is_admin {
+                inner.app_data(override_data.clone());
+            }
+        });
+}
+
 /// Service management operations that can be requested by the embedded HTTP
 /// server and fulfilled by the Tauri host (which has UAC elevation ability).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,11 +226,16 @@ use std::sync::Mutex;
 
 /// One-time token for Tauri auto-login.
 /// The token is consumed after the first successful use.
-pub struct TauriLoginToken(Mutex<Option<String>>);
+///
+/// The inner Mutex is Arc-wrapped so clones share the same state.
+/// This allows the daemon IPC bridge and the HTTP server to share one token
+/// instance and keep it in sync across Tauri reconnects.
+#[derive(Clone)]
+pub struct TauriLoginToken(Arc<Mutex<Option<String>>>);
 
 impl TauriLoginToken {
     pub fn new(token: String) -> Self {
-        TauriLoginToken(Mutex::new(Some(token)))
+        TauriLoginToken(Arc::new(Mutex::new(Some(token))))
     }
 
     /// Verify and consume the token. Returns true only once for the correct token.
@@ -128,6 +249,11 @@ impl TauriLoginToken {
             }
         }
         false
+    }
+
+    /// Replace the stored token (used by daemon IPC bridge on Tauri reconnect).
+    pub fn refresh(&self, token: String) {
+        *self.0.lock().unwrap() = Some(token);
     }
 }
 

@@ -127,6 +127,23 @@ mod windows_impl {
             info!("Binary already in install directory, skipping copy");
         }
 
+        // Always refresh static/ so a re-install picks up new frontend assets.
+        // Remove the old directory first to avoid stale versioned asset files.
+        if let Some(src_dir) = src_exe.parent() {
+            let src_static = src_dir.join("static");
+            let dst_static = install_path.join("static");
+            if src_static.exists() {
+                if dst_static.exists() {
+                    std::fs::remove_dir_all(&dst_static)?;
+                    info!("Removed old static directory at {}", dst_static.display());
+                }
+                copy_dir_recursive(&src_static, &dst_static)?;
+                info!("Copied static/ to {}", dst_static.display());
+            } else {
+                info!("No static/ directory found alongside binary, skipping");
+            }
+        }
+
         let manager = ServiceManager::local_computer(
             None::<&str>,
             ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE,
@@ -207,6 +224,24 @@ mod windows_impl {
             }
         }
 
+        Ok(())
+    }
+
+    fn copy_dir_recursive(
+        src: &std::path::Path,
+        dst: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let dst_path = dst.join(entry.file_name());
+            if ty.is_dir() {
+                copy_dir_recursive(&entry.path(), &dst_path)?;
+            } else {
+                std::fs::copy(entry.path(), &dst_path)?;
+            }
+        }
         Ok(())
     }
 }

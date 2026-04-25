@@ -1,10 +1,14 @@
 mod error;
+mod ipc_client;
 mod platform;
 mod private_screen;
 mod security_approval;
 mod whiteboard;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 static IS_EXITING: AtomicBool = AtomicBool::new(false);
 
@@ -25,21 +29,204 @@ const SERVICE_NAME: &str = "LcxlDeskService";
 
 pub fn run() -> Result<(), DeskTauriError> {
     let args = Args::parse();
-    let mut settings = Settings::new(&args)?;
+    let settings = Settings::new(&args)?;
 
-    // If the ServiceDaemon is already running as a system service, isolate the
-    // embedded server: clear all outbound signaling URLs so it does not compete
-    // with the daemon for remote connections.  The daemon owns the WebRTC path;
-    // Tauri's embedded server only serves the admin UI and REST API locally.
     if desk_utils::permission::is_service_running(SERVICE_NAME) {
-        log::info!("ServiceDaemon is running — disabling signaling in embedded server");
-        settings.system.signaling_url = None;
-        settings.system.signaling_token = None;
-        settings.system.manager_url = None;
-        settings.system.manager_api_token = None;
+        log::info!("ServiceDaemon is running — launching as service shell (no embedded server)");
+        run_tauri_service_shell(&settings)?;
+    } else {
+        run_tauri_app(&settings)?;
     }
 
-    run_tauri_app(&settings)?;
+    Ok(())
+}
+
+/// Service-shell mode: the daemon owns the HTTP server; Tauri is a pure UI shell
+/// that communicates with the daemon over a WebSocket IPC link.
+fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
+    let ipc_token = settings.system.tauri_ipc_token.clone().unwrap_or_default();
+
+    // Channels for GUI managers (same types as portable mode)
+    let (ps_cmd_tx, ps_cmd_rx) = std::sync::mpsc::channel::<
+        lcxl_remote_desk_server::model::host_control::PrivateScreenCommand,
+    >();
+    let (state_tx, state_rx) = tokio::sync::mpsc::unbounded_channel::<
+        lcxl_remote_desk_server::model::host_control::HostControlEventType,
+    >();
+    let (wb_cmd_tx, wb_cmd_rx) = std::sync::mpsc::channel::<
+        lcxl_remote_desk_server::model::host_control::WhiteboardCommand,
+    >();
+    let (sa_tx, sa_rx) = std::sync::mpsc::channel::<
+        lcxl_remote_desk_server::model::security_approval::SecurityApprovalCommand,
+    >();
+    let (svc_op_tx, svc_op_rx) =
+        std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
+
+    // Shared token holder: IPC client writes the first token; window thread reads it.
+    let token_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    // Start IPC client in an actix runtime thread.
+    let token_holder_ipc = Arc::clone(&token_holder);
+    let ipc_token_clone = ipc_token.clone();
+    std::thread::spawn(move || {
+        let system = actix_rt::System::new();
+        system.block_on(async move {
+            ipc_client::run_ipc_loop(
+                ipc_token_clone,
+                ps_cmd_tx,
+                wb_cmd_tx,
+                sa_tx,
+                svc_op_tx,
+                state_rx,
+                token_holder_ipc,
+            )
+            .await;
+        });
+    });
+
+    // Service-op handler (ShellExecute runas — does not need Tauri handle).
+    std::thread::spawn(move || {
+        while let Ok(op) = svc_op_rx.recv() {
+            handle_service_op(op);
+        }
+    });
+
+    let app = tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![])
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            let daemon_url = "http://127.0.0.1:8082".to_string();
+
+            // Start GUI managers (reuse existing implementations).
+            let ps_manager = PrivateScreenManager::new(handle.clone(), daemon_url.clone());
+            ps_manager.start(ps_cmd_rx, state_tx);
+
+            let wb_manager = WhiteboardManager::new(handle.clone(), daemon_url.clone());
+            wb_manager.start(wb_cmd_rx);
+
+            let sa_manager = crate::security_approval::SecurityApprovalManager::new(handle.clone());
+            sa_manager.start(sa_rx);
+
+            // Tray: show + quit only (no elevate in service-shell mode).
+            {
+                use tauri::menu::{Menu, MenuItem};
+                use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+
+                let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>).unwrap();
+                let show_i =
+                    MenuItem::with_id(app, "show", "Open Window", true, None::<&str>).unwrap();
+                let tray_menu = Menu::with_items(app, &[&show_i, &quit_i]).unwrap();
+                let default_icon = app.default_window_icon().unwrap().clone();
+                let _tray = TrayIconBuilder::new()
+                    .menu(&tray_menu)
+                    .icon(default_icon)
+                    .tooltip("LCXL Remote Desktop")
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "quit" => {
+                            IS_EXITING.store(true, Ordering::SeqCst);
+                            app.exit(0);
+                        }
+                        "show" => {
+                            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::DoubleClick { .. } = event {
+                            if let Some(window) =
+                                tray.app_handle().get_webview_window(MAIN_WINDOW_LABEL)
+                            {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                    })
+                    .build(app)
+                    .expect("Failed to create tray icon");
+            }
+
+            // Spawn a thread to wait for the IPC token then open the webview.
+            let handle_for_window = handle.clone();
+            let token_holder_win = Arc::clone(&token_holder);
+            std::thread::spawn(move || {
+                let start = std::time::Instant::now();
+                let timeout = std::time::Duration::from_secs(60);
+
+                loop {
+                    if start.elapsed() > timeout {
+                        log::error!("[ServiceShell] Timeout waiting for IPC token from daemon");
+                        return;
+                    }
+
+                    let token = token_holder_win.lock().unwrap().clone();
+                    if let Some(token) = token {
+                        let window_url = format!("http://127.0.0.1:8082?token={}", token);
+                        log::info!("[ServiceShell] Opening window at: {}", window_url);
+
+                        let handle_inner = handle_for_window.clone();
+                        let _ = handle_for_window.run_on_main_thread(move || {
+                            if handle_inner.get_webview_window(MAIN_WINDOW_LABEL).is_some() {
+                                return;
+                            }
+                            match WebviewWindowBuilder::new(
+                                &handle_inner,
+                                MAIN_WINDOW_LABEL,
+                                WebviewUrl::External(window_url.parse().unwrap()),
+                            )
+                            .title("LCXL Remote Desktop")
+                            .inner_size(1200.0, 800.0)
+                            .center()
+                            .visible(false)
+                            .on_page_load(|window, event| {
+                                if let tauri::webview::PageLoadEvent::Finished = event.event() {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            })
+                            .build()
+                            {
+                                Ok(_) => {}
+                                Err(e) => log::error!("[ServiceShell] Window build error: {e}"),
+                            }
+                        });
+                        return;
+                    }
+
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            });
+
+            Ok(())
+        })
+        .build(tauri::generate_context!())?;
+
+    app.run(|app, event| match event {
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: window_event,
+            ..
+        } => {
+            if label == MAIN_WINDOW_LABEL {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
+                    api.prevent_close();
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                        let _ = window.hide();
+                    }
+                }
+            }
+        }
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            if !IS_EXITING.load(Ordering::SeqCst) {
+                api.prevent_exit();
+            }
+        }
+        _ => {}
+    });
 
     Ok(())
 }
@@ -83,11 +270,7 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
             lcxl_remote_desk_server::ServiceOp::Uninstall => "--uninstall-service".to_string(),
         };
 
-        log::info!(
-            "Service op: running {} {}",
-            sidecar.display(),
-            params_str
-        );
+        log::info!("Service op: running {} {}", sidecar.display(), params_str);
 
         let path: Vec<u16> = sidecar
             .as_os_str()
@@ -95,7 +278,10 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
             .chain(std::iter::once(0))
             .collect();
         let operation: Vec<u16> = "runas\0".encode_utf16().collect();
-        let params: Vec<u16> = params_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let params: Vec<u16> = params_str
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
 
         unsafe {
             ShellExecuteW(
@@ -247,7 +433,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
 
             let quit_i = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>).unwrap();
             let show_i = MenuItem::with_id(app, "show", "Open Window", true, None::<&str>).unwrap();
-            
+
             let mut menu_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&show_i];
 
             let is_admin = desk_utils::permission::is_admin();
@@ -260,7 +446,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             menu_items.push(&quit_i);
             let tray_menu = Menu::with_items(app, &menu_items).unwrap();
             let default_icon = app.default_window_icon().unwrap().clone();
-            
+
             let _tray = TrayIconBuilder::new()
                 .menu(&tray_menu)
                 .icon(default_icon)
@@ -311,7 +497,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                                 } else {
                                     format!("pkexec \"{}\"", curr_exe.display())
                                 };
-                                
+
                                 std::process::Command::new("sh")
                                     .arg("-c")
                                     .arg(cmd)

@@ -100,6 +100,12 @@ pub struct SystemSettings {
     /// Local signaling server token, auto-generated and persisted.
     /// Used by the local desk server to authenticate with the co-located signaling server.
     pub local_signaling_token: Option<String>,
+    /// Token for authenticating the Tauri IPC WebSocket connection (/ws/tauri_ipc).
+    /// Auto-generated and persisted on first startup.
+    pub tauri_ipc_token: Option<String>,
+    /// Stable cookie signing key for session middleware (hex-encoded).
+    /// Auto-generated and persisted so sessions survive daemon restarts.
+    pub session_secret_key: Option<String>,
 }
 
 impl SystemSettings {
@@ -147,6 +153,8 @@ impl Default for SystemSettings {
             auto_start: None,
             manager_api_token: None,
             local_signaling_token: None,
+            tauri_ipc_token: None,
+            session_secret_key: None,
         }
     }
 }

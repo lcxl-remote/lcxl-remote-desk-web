@@ -3,6 +3,7 @@ use desk_utils::rest::RestResponse;
 use sysinfo::System;
 
 use crate::{
+    TauriIsAdminOverride,
     error::DeskError,
     model::{
         image_capture::ImageCaptureTypeHelper as _,
@@ -25,7 +26,10 @@ use crate::service::wayland_remote_desktop::WaylandRemoteDesktop;
     ),
 )]
 #[get("/sysinfo")]
-pub async fn query_sysinfo(settings: web::Data<SharedSettings>) -> Result<HttpResponse, DeskError> {
+pub async fn query_sysinfo(
+    settings: web::Data<SharedSettings>,
+    tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
+) -> Result<HttpResponse, DeskError> {
     let system_settings = {
         let settings = settings.read().await;
         settings.system.clone()
@@ -44,7 +48,8 @@ pub async fn query_sysinfo(settings: web::Data<SharedSettings>) -> Result<HttpRe
     };
     system_info.startup_mode = startup_mode.clone();
     system_info.is_admin = if startup_mode != StartupMode::Signaling {
-        Some(desk_utils::permission::is_admin())
+        let override_val = tauri_is_admin.as_ref().and_then(|a| *a.lock().unwrap());
+        Some(override_val.unwrap_or_else(desk_utils::permission::is_admin))
     } else {
         None
     };
@@ -64,6 +69,7 @@ pub async fn query_sysinfo(settings: web::Data<SharedSettings>) -> Result<HttpRe
 #[get("/api/server_info")]
 pub async fn query_server_info(
     settings: web::Data<SharedSettings>,
+    tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
 ) -> Result<HttpResponse, DeskError> {
     let (startup_mode, initialized) = {
         let settings = settings.read().await;
@@ -74,7 +80,12 @@ pub async fn query_server_info(
     };
 
     let service_installed = desk_utils::permission::is_service_installed("LcxlDeskService");
-    let is_admin = desk_utils::permission::is_admin();
+    // In ServiceDaemon mode the process runs as SYSTEM (is_admin always true).
+    // Use the override reported by the Tauri process when available.
+    let is_admin = tauri_is_admin
+        .as_ref()
+        .and_then(|a| *a.lock().unwrap())
+        .unwrap_or_else(desk_utils::permission::is_admin);
     let server_binary_available = server_binary_available();
     let default_install_path = crate::daemon::windows_service::default_install_dir();
 

@@ -76,6 +76,27 @@ impl Settings {
             settings.save()?;
         }
 
+        if settings.system.tauri_ipc_token.is_none() {
+            let token = Uuid::new_v4().to_string();
+            info!("Generated new tauri_ipc_token");
+            settings.system.tauri_ipc_token = Some(token);
+            settings.save()?;
+        }
+
+        if settings.system.session_secret_key.is_none() {
+            // Build 144+ bytes of entropy from 4 UUIDs; Key::derive_from handles the rest
+            let key_material = format!(
+                "{}{}{}{}",
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::new_v4()
+            );
+            info!("Generated new session_secret_key");
+            settings.system.session_secret_key = Some(key_material);
+            settings.save()?;
+        }
+
         if let Some(ref locale) = settings.system.locale {
             rust_i18n::set_locale(locale);
             info!("Locale set to: {}", locale);
