@@ -2534,7 +2534,7 @@ dependencies = [
  "windows-numerics",
  "windows-result 0.3.4",
  "x11rb",
- "x264 0.7.1 (git+https://github.com/lcxl/x264.git?tag=v0.7.2)",
+ "x264",
  "xcb",
  "yuv",
  "zbus",
@@ -4861,7 +4861,7 @@ dependencies = [
  "windows-result 0.3.4",
  "windows-service",
  "x11rb",
- "x264 0.7.1 (git+https://github.com/lcxl/x264.git?tag=v0.7.1)",
+ "x264",
  "xcb",
  "yuv",
  "zbus",
@@ -12118,15 +12118,6 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "zeroize",
-]
-
-[[package]]
-name = "x264"
-version = "0.7.1"
-source = "git+https://github.com/lcxl/x264.git?tag=v0.7.1#9703db7e16fabc3da4dc812f2bbd70f63569f2a8"
-dependencies = [
- "pkg-config",
- "x264-sys",
 ]
 
 [[package]]
