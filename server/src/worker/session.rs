@@ -1,11 +1,11 @@
-use desk_ipc_protocol::{
-    message::{HeartbeatPayload, ServiceToWorker, SignalingPayload, WorkerToService},
-    transport::{read_message, write_message},
-};
 use crate::{
     ExternalChannels,
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
+};
+use desk_ipc_protocol::{
+    message::{HeartbeatPayload, ServiceToWorker, SignalingPayload, WorkerToService},
+    transport::{read_message, write_message},
 };
 
 use actix_web::web;
@@ -97,7 +97,12 @@ impl WorkerSession {
         };
 
         let shared_settings = Arc::new(SharedSettings::from(settings));
-        let shared_settings_data = web::Data::from(shared_settings);
+        let shared_settings_data = web::Data::from(shared_settings.clone());
+
+        // Initialize telemetry for SessionWorker mode (using actual startup mode enum variable instead of args to ensure correct log naming)
+        let _guard =
+            crate::telemetry::init_telemetry(shared_settings.clone(), &StartupMode::SessionWorker)
+                .await?;
 
         let (desk_tx, mut desk_rx) = mpsc::unbounded_channel::<DeskSessionMessage>();
         let session_sender = DeskSessionSender {

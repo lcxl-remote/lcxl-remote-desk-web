@@ -21,16 +21,6 @@ struct ServerArgs {
     install_path: Option<String>,
 }
 
-fn init_simple_logger() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
-        .with_target(false)
-        .init();
-}
-
 fn main() {
     // Handle one-shot service management flags before entering any startup mode.
     // Use plain println!/eprintln! — no logging framework is initialised yet.
@@ -87,22 +77,18 @@ fn main() {
             std::process::exit(exit_code);
         }
         StartupMode::ServiceDaemon => {
-            init_simple_logger();
-            tracing::info!("lcxl-remote-desk-server starting in ServiceDaemon mode");
             if let Err(e) = lcxl_remote_desk_server::daemon::run_service_daemon(args) {
-                tracing::error!("ServiceDaemon failed: {e}");
+                eprintln!("ServiceDaemon failed: {e}");
                 std::process::exit(1);
             }
         }
         StartupMode::SessionWorker => {
-            init_simple_logger();
-            tracing::info!("lcxl-remote-desk-server starting in SessionWorker mode");
             let pipe_name = args.pipe.clone().unwrap_or_else(|| {
-                tracing::error!("--pipe argument is required for SessionWorker mode");
+                eprintln!("--pipe argument is required for SessionWorker mode");
                 std::process::exit(1);
             });
             if let Err(e) = lcxl_remote_desk_server::worker::run_session_worker(args, &pipe_name) {
-                tracing::error!("SessionWorker failed: {e}");
+                eprintln!("SessionWorker failed: {e}");
                 std::process::exit(1);
             }
         }

@@ -38,21 +38,25 @@ pub async fn install_service(
         .unwrap_or_else(default_install_dir);
 
     match sender.as_ref() {
-        Some(tx) => match tx.try_send(ServiceOp::Install { install_path }) {
-            Ok(_) => Ok(HttpResponse::Accepted().json(
-                RestResponse::<()>::succeed_with_message("Install request accepted".into()),
-            )),
-            Err(_) => Ok(HttpResponse::ServiceUnavailable().json(
-                RestResponse::<()>::failed(
-                    crate::error::DeskErrorCode::SYSTEM_ERROR,
-                    "Service op channel is unavailable".into(),
+        Some(tx) => {
+            match tx.try_send(ServiceOp::Install { install_path }) {
+                Ok(_) => Ok(HttpResponse::Accepted().json(
+                    RestResponse::<()>::succeed_with_message("Install request accepted".into()),
+                )),
+                Err(_) => Ok(
+                    HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
+                        crate::error::DeskErrorCode::SYSTEM_ERROR,
+                        "Service op channel is unavailable".into(),
+                    )),
                 ),
+            }
+        }
+        None => Ok(
+            HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
+                crate::error::DeskErrorCode::SYSTEM_ERROR,
+                "Not running in Tauri mode".into(),
             )),
-        },
-        None => Ok(HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
-            "Not running in Tauri mode".into(),
-        ))),
+        ),
     }
 }
 
@@ -69,20 +73,24 @@ pub async fn uninstall_service(
     sender: web::Data<Option<std::sync::mpsc::SyncSender<ServiceOp>>>,
 ) -> Result<HttpResponse, DeskError> {
     match sender.as_ref() {
-        Some(tx) => match tx.try_send(ServiceOp::Uninstall) {
-            Ok(_) => Ok(HttpResponse::Accepted().json(
-                RestResponse::<()>::succeed_with_message("Uninstall request accepted".into()),
-            )),
-            Err(_) => Ok(HttpResponse::ServiceUnavailable().json(
-                RestResponse::<()>::failed(
-                    crate::error::DeskErrorCode::SYSTEM_ERROR,
-                    "Service op channel is unavailable".into(),
+        Some(tx) => {
+            match tx.try_send(ServiceOp::Uninstall) {
+                Ok(_) => Ok(HttpResponse::Accepted().json(
+                    RestResponse::<()>::succeed_with_message("Uninstall request accepted".into()),
+                )),
+                Err(_) => Ok(
+                    HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
+                        crate::error::DeskErrorCode::SYSTEM_ERROR,
+                        "Service op channel is unavailable".into(),
+                    )),
                 ),
+            }
+        }
+        None => Ok(
+            HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
+                crate::error::DeskErrorCode::SYSTEM_ERROR,
+                "Not running in Tauri mode".into(),
             )),
-        },
-        None => Ok(HttpResponse::ServiceUnavailable().json(RestResponse::<()>::failed(
-            crate::error::DeskErrorCode::SYSTEM_ERROR,
-            "Not running in Tauri mode".into(),
-        ))),
+        ),
     }
 }

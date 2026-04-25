@@ -1,4 +1,5 @@
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
+use crate::model::settings::SharedSettings;
 use actix_web::web;
 use awc::{Client, Connector};
 use desk_ipc_protocol::message::{ServiceToWorker, SignalingPayload, WorkerToService};
@@ -7,7 +8,6 @@ use desk_signal_facade::model::{
     version::VersionInfo,
 };
 use futures_util::{SinkExt, StreamExt};
-use crate::model::settings::SharedSettings;
 use log::{debug, error, info, warn};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_native_certs::load_native_certs;

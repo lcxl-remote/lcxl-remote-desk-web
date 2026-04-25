@@ -1,6 +1,6 @@
+use crate::model::settings::SharedSettings;
 use actix_web::{App, HttpResponse, HttpServer, get, web};
 use desk_server_version::SERVER_API_VERSION;
-use crate::model::settings::SharedSettings;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

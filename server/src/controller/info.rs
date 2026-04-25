@@ -226,6 +226,7 @@ mod tests {
     use super::*;
     use crate::model::settings::Settings;
     use actix_web::{App, test};
+    use std::sync::Arc;
 
     #[actix_web::test]
     async fn test_query_sysinfo() {
@@ -233,6 +234,9 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
+                .app_data(web::Data::new(
+                    None::<std::sync::mpsc::SyncSender<crate::ServiceOp>>,
+                ))
                 .service(query_sysinfo),
         )
         .await;
@@ -240,10 +244,15 @@ mod tests {
         let req = test::TestRequest::get().uri("/sysinfo").to_request();
         let resp = test::call_service(&app, req).await;
 
-        assert!(resp.status().is_success());
+        let status = resp.status();
+        if !status.is_success() {
+            let body_bytes = test::read_body(resp).await;
+            let body_str = std::str::from_utf8(&body_bytes).unwrap_or("could not parse body");
+            panic!("Request failed with status: {}, body: {}", status, body_str);
+        }
 
         let body: RestResponse<SystemInfo> = test::read_body_json(resp).await;
-        assert_eq!(body.code, 200);
+        assert_eq!(body.code, 0);
         assert!(body.data.is_some());
     }
 

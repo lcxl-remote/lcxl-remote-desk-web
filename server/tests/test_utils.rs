@@ -7,10 +7,7 @@ static INIT: Once = Once::new();
 pub fn initialize_logs() {
     INIT.call_once(|| {
         // initialization code here
-        env_logger::builder()
-            .format_timestamp_micros()
-            .filter_level(LevelFilter::Debug)
-            .init();
+        let _ = desk_utils::logs::init_logs(LevelFilter::Debug);
 
         //let result = ScreenRecordManager::set_thread_input_desktop();
         //log::info!("set thread desktop result: {:?}", result);

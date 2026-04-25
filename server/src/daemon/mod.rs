@@ -4,8 +4,8 @@ pub mod signaling_proxy;
 pub mod windows_service;
 pub mod worker_manager;
 
-use actix_web::web;
 use crate::model::settings::{Args, Settings, SharedSettings};
+use actix_web::web;
 use log::{error, info};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -46,12 +46,15 @@ pub async fn run_service_daemon_inner(
     args: Args,
     shutdown_signal: Option<oneshot::Receiver<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!("ServiceDaemon starting");
-
     let settings = Settings::new(&args).map_err(|e| format!("Failed to load settings: {e}"))?;
     let shared_settings = Arc::new(SharedSettings::from(settings.clone()));
     let shared_settings_data = web::Data::from(shared_settings.clone());
 
+    // Initialize telemetry for ServiceDaemon mode
+    let _guard =
+        crate::telemetry::init_telemetry(shared_settings.clone(), &args.startup_mode).await?;
+
+    info!("ServiceDaemon starting");
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     info!("Settings loaded — starting worker manager");

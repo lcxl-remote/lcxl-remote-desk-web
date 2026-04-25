@@ -1,10 +1,10 @@
+use crate::model::settings::SharedSettings;
 use actix_web::web;
 use desk_ipc_protocol::{
     message::{ServiceToWorker, SignalingPayload, WorkerInitPayload, WorkerToService},
     transport::{read_message, write_message},
 };
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
-use crate::model::settings::SharedSettings;
 use log::{error, info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;

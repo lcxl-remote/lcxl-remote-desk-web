@@ -109,9 +109,7 @@ mod windows_impl {
         let install_path = std::path::Path::new(install_dir);
         std::fs::create_dir_all(install_path)?;
 
-        let file_name = src_exe
-            .file_name()
-            .ok_or("current exe has no file name")?;
+        let file_name = src_exe.file_name().ok_or("current exe has no file name")?;
         let dst_exe = install_path.join(file_name);
 
         // Skip copy when source is already inside the install directory.
@@ -158,7 +156,7 @@ mod windows_impl {
     /// Remove the Windows Service registration.
     pub fn uninstall_service() -> WsResult<()> {
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
-        
+
         // Open service with enough permissions to query config, stop it, and delete it.
         let service = match manager.open_service(
             SERVICE_NAME,
@@ -169,7 +167,10 @@ mod windows_impl {
         ) {
             Ok(s) => s,
             Err(e) => {
-                log::warn!("Could not open service with full access: {}. Trying with DELETE only.", e);
+                log::warn!(
+                    "Could not open service with full access: {}. Trying with DELETE only.",
+                    e
+                );
                 manager.open_service(SERVICE_NAME, ServiceAccess::DELETE)?
             }
         };
@@ -188,7 +189,7 @@ mod windows_impl {
 
         if let Some(exe) = exe_path {
             let exe_path = std::path::PathBuf::from(exe);
-            
+
             // Wait up to 5 seconds for the file lock to be released
             for _ in 0..10 {
                 if std::fs::remove_file(&exe_path).is_ok() {
@@ -214,8 +215,7 @@ mod windows_impl {
 pub fn default_install_dir() -> String {
     #[cfg(target_os = "windows")]
     {
-        let pf = std::env::var("PROGRAMFILES")
-            .unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let pf = std::env::var("PROGRAMFILES").unwrap_or_else(|_| "C:\\Program Files".to_string());
         format!("{}\\LCXL Remote Desktop", pf)
     }
     #[cfg(not(target_os = "windows"))]

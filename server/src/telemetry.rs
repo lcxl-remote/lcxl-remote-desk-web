@@ -79,8 +79,29 @@ pub async fn init_telemetry(
         .with_line_number(true)
         .with_filter(LevelFilter::ERROR);
 
+    // Determine log directory (absolute path)
+    #[cfg(target_os = "windows")]
+    let log_dir = {
+        let program_data =
+            std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+        std::path::PathBuf::from(program_data)
+            .join("LCXL Remote Desktop")
+            .join("logs")
+    };
+    #[cfg(not(target_os = "windows"))]
+    let log_dir = std::path::PathBuf::from("/var/log/lcxl-remote-desk");
+
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    // Determine log file name based on startup mode
+    let log_file_name = match startup_mode {
+        StartupMode::ServiceDaemon => "desk-daemon.log",
+        StartupMode::SessionWorker => "desk-worker.log",
+        _ => "desk-server.log",
+    };
+
     // File appender
-    let file_appender = tracing_appender::rolling::daily("logs", "desk-server.log");
+    let file_appender = tracing_appender::rolling::daily(log_dir, log_file_name);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let file_layer = fmt::layer()
         .with_ansi(false)
