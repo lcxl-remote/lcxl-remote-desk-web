@@ -5,27 +5,28 @@
 ## 1. 核心模块说明
 
 - **`server/` (Desk Server)**:
-    - 运行在被控端。现采用 **Service Core + Desk Worker** 多进程架构，以实现 UAC/锁屏穿透。
-    - **Service Core** 模式 (`service-daemon`)：以 SYSTEM/root 权限运行，负责提供 REST API (Actix-web) 用于管理设置，与信令服务器保持连接，监控系统会话切换，并管理 Worker 生命周期。
-    - **Session Worker** 模式 (`session-worker`)：在具体用户桌面会话中启动，持有 WebRTC PeerConnection，负责实际的音视频捕获 (`capture-engine`)、输入注入 (`input-injection`)、文件与终端管理。
-    - 持久化配置 (`conf/config.toml`)。
-    - API 文档基于 Utoipa 自动生成。
-
-- **`capture-engine/`** & **`input-injection/`** & **`ipc-protocol/`**:
-    - 底层库拆分：提供屏幕/音频捕获、输入模拟以及 Service 与 Worker 之间的 IPC (命名管道/Unix Socket) 通信能力。
+    - 运行在被控端。支持 REST API (Actix-Web), WebRTC, 设置, 文件/终端管理。
+    - 采用 **Service Daemon + Session Worker** 多进程架构，以实现 UAC/锁屏穿透。
+    - **Service Daemon** 模式：以 SYSTEM/root 权限运行，管理设置、监控会话并管理 Worker 生命周期。
+    - **Session Worker** 模式：在用户会话中运行，负责音视频捕获、输入注入及实际控制逻辑。
 
 - **`signal/` (Signaling & TURN)**:
-    - 提供 WebSocket 信令服务：用于 WebRTC 的 Offer/Answer/ICE 交换及自定义控制指令转发。
-    - 内置 TURN 服务（默认开启集成）。
-    - 关键文件：`signal/src/service.rs` 处理所有信令流。
+    - 提供 WebSocket 信令服务：用于 WebRTC 握手及自定义指令转发。
+    - **内嵌 TURN 服务**：与信令服务器捆绑（核心文件: `signal/src/service.rs`）。
 
 - **`vite-project/` (Frontend)**:
-    - 既是管理后台，也是 Web 控制端。
-    - 使用 React 19 + TanStack Query。
-    - **接口同步**：通过 Kubb 工具链从后端 OpenAPI JSON 自动生成前端 SDK。
+    - React 19 + TanStack Query 架构。
+    - 包含管理控制台 UI 以及 Web 控制端客户端。
+    - 通过 Kubb 自动生成接口 SDK。
 
 - **`tauri-app/`**:
-    - 被控端的 GUI 外壳，提供隐私屏、白板显示等需要在本地渲染画面的功能。
+    - 被控端 GUI 壳程序，用于本地渲染隐私屏、白板等功能。
+
+- **功能库 (Crates)**:
+    - `capture-engine/`: 屏幕/音频捕获与编码逻辑。
+    - `input-injection/`: 鼠标/键盘输入注入与剪贴板控制。
+    - `ipc-protocol/`: Service ↔ Worker 通信的 IPC 消息定义。
+    - `signal-facade/`: 共享的信令协议模型。
 
 ## 2. 通信流程
 

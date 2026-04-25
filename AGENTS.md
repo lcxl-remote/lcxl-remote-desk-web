@@ -3,10 +3,11 @@
 ## 项目结构与模块组织
 本代码仓库是一个包含 Vite 前端的 Rust 工作空间。
 
-- `server/`: 核心桌面服务 (Actix-Web, WebRTC, REST/OpenAPI)，集成测试位于 `server/tests/`。
-- `signal/`, `turn/`, `signal-facade/`, `server-user/`, `server-version/`, `utils/`, `capture-engine/`, `input-injection/`, `ipc-protocol/`: 辅助性的 Rust crates。
-- `vite-project/`: React + TypeScript 前端 UI (`src/features`, `src/components`, `src/services`)。
-- `tauri-app/src-tauri/`: 桌面端壳程序，用于隐私屏和白板功能。
+- `server/`: Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式）。
+- `signal/`: 信令服务器 + TURN (核心文件: `signal/src/service.rs`)。
+- `vite-project/`: React 19 + TanStack Query 前端 — 包含管理 UI 和 Web 控制端客户端。
+- `tauri-app/`: Tauri 壳程序，用于在被控机本地渲染防窥屏/白板功能。
+- `capture-engine/`, `input-injection/`, `ipc-protocol/`, `signal-facade/`, `server-version/`, `utils/`, `turn/`: 功能模块库，涵盖捕获编码、输入注入、IPC 协议、信令协议模型等。
 - `conf/config.toml`: 运行时配置文件；`openapi.json` + `vite-project/openapi.json`: API 规范文档。
 
 ## 构建、测试与开发命令

@@ -7,13 +7,12 @@ LCXL Remote Desk Web 是一个基于 WebRTC 技术的高效现代远程桌面解
 - **桌面客户端**: Tauri (Rust + 网页前端)
 
 ### 核心架构与模块
-- **`server`**: 运行于宿主机的核心远程桌面服务。采用 Service Core + Session Worker 的跨平台多进程架构（支持 UAC 穿透），通过 IPC 通信。Service Core 负责信令代理和 Worker 生命周期管理；Session Worker 运行在用户会话中，独立持有 WebRTC 连接，并负责实际的媒体采集和指令执行。
-- **`capture-engine`** / **`input-injection`** / **`ipc-protocol`**: 分别为底层的屏幕音频捕获与编码引擎、鼠标键盘输入注入库以及跨进程通信协议库。
-- **`signal`**: 信令服务器模块（默认在 `server` 中启用，也可独立部署），使用 WebSocket 协调对等连接。
-- **`vite-project`**: Web 前端应用程序，用作管理仪表板和远程客户端。
-- **`tauri-app`**: 增强型带 GUI 的服务端程序，提供隐私屏和白板等依赖本地 UI 的高级功能。
-- **`turn`**: 集成的 TURN/STUN 服务，确保复杂网络环境下的 NAT 穿透。
-- **`signal-facade`** / **`utils`**: 信令服务接口定义与通用工具包模块。
+- **`server`**: Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理。采用 Service Daemon + Session Worker 的跨平台多进程架构（支持 UAC 穿透）。Service Daemon 以 SYSTEM 权限运行，负责管理设置和监控会话；Session Worker 运行在用户会话中，负责实际的媒体采集和指令执行。
+- **`signal`**: 信令服务器 + TURN (核心文件: `signal/src/service.rs`)，使用 WebSocket 协调对等连接，且 TURN 服务与信令服务器捆绑。
+- **`vite-project`**: React 19 + TanStack Query 前端应用程序，包含管理 UI 和 Web 控制端客户端。
+- **`tauri-app`**: Tauri 壳程序，用于在被控机本地渲染防窥屏/白板功能。
+- **`capture-engine`** / **`input-injection`** / **`ipc-protocol`**: 底层功能库，提供屏幕音频捕获编码、鼠标键盘输入注入以及 Service ↔ Worker 通信协议。
+- **`signal-facade`** / **`utils`** / **`turn`** / **`server-version`**: 共享的信令协议模型、通用工具包、TURN 协议支持及 API 版本常量。
 
 ## 构建与运行指南
 
