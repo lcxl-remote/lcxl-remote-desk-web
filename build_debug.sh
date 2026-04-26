@@ -8,9 +8,10 @@ echo "Building Rust server (lcxl-remote-desk-server)..."
 cargo build -p lcxl-remote-desk-server
 
 echo "Building Vite project..."
-cd "$SCRIPT_DIR/vite-project"
+pushd "$SCRIPT_DIR/vite-project" > /dev/null
 npm install
-npm run build
+npm run ci
+popd > /dev/null
 
 echo "Copying static files to target directory..."
 TARGET_DIR="$SCRIPT_DIR/target/debug"

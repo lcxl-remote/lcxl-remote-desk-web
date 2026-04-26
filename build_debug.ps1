@@ -7,9 +7,10 @@ Write-Host "Building Rust server (lcxl-remote-desk-server)..."
 cargo build -p lcxl-remote-desk-server
 
 Write-Host "Building Vite project..."
-Set-Location "$ScriptDir\vite-project"
+Push-Location "$ScriptDir\vite-project"
 npm install
-npm run build
+npm run ci
+Pop-Location
 
 Write-Host "Copying static files to target directory..."
 $TargetDir = "$ScriptDir\target\debug"
