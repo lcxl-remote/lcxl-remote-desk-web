@@ -1572,6 +1572,7 @@ impl DeskSession {
         // * works around latency issues with Sleep
         let mut ticker = tokio::time::interval(desk_settings.get_duration_by_video_fps());
         let mut pending_cursor_update = None;
+        let mut last_send_time = std::time::Instant::now();
         loop {
             //ticker = tokio::time::interval(Duration::from_millis(3));
             // check if the connection is still alive
@@ -1657,6 +1658,29 @@ impl DeskSession {
                 pending_cursor_update = None;
             }
 
+            if !capture_result.content_changed {
+                // Desktop is static: send a heartbeat frame every second to keep the
+                // WebRTC stream alive (avoids receiver timeout / decoder stall).
+                if last_send_time.elapsed() > Duration::from_secs(1) {
+                    let nal_info_vec = encoder.encode_cached()?;
+                    for nal_info in nal_info_vec {
+                        let timer = WEBRTC_WRITE_SAMPLE_HISTOGRAM
+                            .with_label_values(&["video"])
+                            .start_timer();
+                        video_track
+                            .write_sample(&Sample {
+                                data: nal_info.nal_bytes,
+                                duration: Duration::from_secs(1),
+                                ..Default::default()
+                            })
+                            .await?;
+                        timer.stop_and_record();
+                    }
+                    last_send_time = std::time::Instant::now();
+                }
+                continue;
+            }
+
             let image_info = capture_result.image;
 
             // Check if a keyframe was requested via RTCP PLI/FIR
@@ -1690,6 +1714,7 @@ impl DeskSession {
                     .await?;
                 timer.stop_and_record();
             }
+            last_send_time = std::time::Instant::now();
         }
         Result::<(), DeskError>::Ok(())
     }

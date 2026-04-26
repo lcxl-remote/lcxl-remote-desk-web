@@ -34,7 +34,8 @@ use windows::Win32::{
             },
             DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL,
             DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
-            DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+            DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT,
+            DXGI_OUTDUPL_POINTER_SHAPE_INFO,
             DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
             DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
             DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
@@ -55,10 +56,48 @@ use crate::{
     image_capture::windows::enum_display_resolutions,
     model::image_capture::CursorSyncData,
     model::image_capture::{
-        CaptureRequest, CaptureResult, CursorCaptureMode, ImageCapture, ImageCaptureType,
+        CaptureRequest, CaptureResult, CursorCaptureMode, DirtyRect, ImageCapture, ImageCaptureType,
         ImageInfo, ImageOutputEnumerator, ImageType,
     },
 };
+
+/// Placeholder image returned when content_changed == false (Map was not called).
+struct EmptyImageInfo;
+
+impl ImageInfo for EmptyImageInfo {
+    fn get_type(&self) -> ImageType {
+        ImageType::BGRA
+    }
+    fn get_data(&self) -> &[u8] {
+        &[]
+    }
+    fn get_width(&self) -> u32 {
+        0
+    }
+    fn get_height(&self) -> u32 {
+        0
+    }
+}
+
+/// Aligns a dirty rect outward to even pixel boundaries (YUV420 chroma subsampling requirement)
+/// and clamps to the image dimensions.
+fn align_and_clamp(x: i32, y: i32, right: i32, bottom: i32, img_w: u32, img_h: u32) -> DirtyRect {
+    let ax = (x & !1).max(0) as u32;
+    let ay = (y & !1).max(0) as u32;
+    let ar = ((right + 1) & !1).min(img_w as i32).max(0) as u32;
+    let ab = ((bottom + 1) & !1).min(img_h as i32).max(0) as u32;
+    DirtyRect {
+        x: ax,
+        y: ay,
+        width: ar.saturating_sub(ax),
+        height: ab.saturating_sub(ay),
+    }
+}
+
+pub(crate) enum FrameAcquisitionResult<'a> {
+    ContentFrame(SceenFrame<'a>),
+    NoContentChange,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DxgiCursorFingerprint {
@@ -546,6 +585,7 @@ pub struct ScreenOutput {
     pub pointer_shape_info: DXGI_OUTDUPL_POINTER_SHAPE_INFO,
     pub render_target_texture_2d: ID3D11Texture2D,
     pub rtv: [Option<ID3D11RenderTargetView>; 1],
+    pub metadata_buffer: Vec<u8>,
 }
 
 impl ScreenOutput {
@@ -625,38 +665,143 @@ impl ScreenOutput {
             pointer_shape_info: DXGI_OUTDUPL_POINTER_SHAPE_INFO::default(),
             render_target_texture_2d,
             rtv,
+            metadata_buffer: vec![],
         })
     }
 
-    /// DXGI_ERROR_WAIT_TIMEOUT
-    pub fn get_frame<'a>(&mut self, draw_mouse: bool) -> Result<SceenFrame<'a>, CaptureError> {
+    pub(crate) fn get_frame<'a>(
+        &mut self,
+        draw_mouse: bool,
+    ) -> Result<FrameAcquisitionResult<'a>, CaptureError> {
         let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { std::mem::zeroed() };
         let mut desktop_resource: Option<IDXGIResource> = None;
 
-        unsafe {
+        let acquire_result = unsafe {
             self.dup_output
-                .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)?;
+                .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)
+        };
+
+        if let Err(ref err) = acquire_result {
+            if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                return Ok(FrameAcquisitionResult::NoContentChange);
+            }
         }
+        acquire_result?;
+
         let desktop_resource = desktop_resource.unwrap();
 
-        let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
+        // LastPresentTime == 0: compositor did not present a new desktop frame (cursor-only event).
+        let desktop_unchanged = frame_info.LastPresentTime == 0;
+        let cursor_moved = frame_info.LastMouseUpdateTime != 0
+            && frame_info.LastMouseUpdateTime != self.last_mouse_update_time;
+        // In RenderInFrame mode the cursor is baked into the video frame, so a cursor move with
+        // static desktop still requires encoding a new frame.
+        let content_changed = !desktop_unchanged || (draw_mouse && cursor_moved);
 
-        self.draw_desktop(&acquired_desktop_image)?;
-
+        // Always update mouse tracking so SyncNative cursor sync stays accurate.
         self.update_mouse_info(&frame_info)?;
 
-        // draw mouse cursor if needed
+        if !content_changed {
+            unsafe { self.dup_output.ReleaseFrame().ok() };
+            return Ok(FrameAcquisitionResult::NoContentChange);
+        }
+
+        // --- Dirty rect extraction ---
+        let frame_width = self.dup_output_desc.ModeDesc.Width;
+        let frame_height = self.dup_output_desc.ModeDesc.Height;
+        let dirty_rects_opt: Option<Vec<DirtyRect>> =
+            if frame_info.TotalMetadataBufferSize > 0 {
+                let buf_size = frame_info.TotalMetadataBufferSize as usize;
+                self.metadata_buffer.resize(buf_size, 0);
+
+                let mut dirty_rects: Vec<DirtyRect> = Vec::new();
+                let mut bytes_used = 0u32;
+
+                // Move rects: the destination rect of each move becomes dirty.
+                let meta_ptr = self.metadata_buffer.as_mut_ptr();
+                if unsafe {
+                    self.dup_output.GetFrameMoveRects(
+                        buf_size as u32,
+                        meta_ptr as *mut DXGI_OUTDUPL_MOVE_RECT,
+                        &mut bytes_used,
+                    )
+                }
+                .is_ok()
+                {
+                    let count =
+                        bytes_used as usize / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+                    let ptr = meta_ptr as *const DXGI_OUTDUPL_MOVE_RECT;
+                    for i in 0..count {
+                        let mr = unsafe { &*ptr.add(i) };
+                        let r = &mr.DestinationRect;
+                        dirty_rects.push(align_and_clamp(
+                            r.left,
+                            r.top,
+                            r.right,
+                            r.bottom,
+                            frame_width,
+                            frame_height,
+                        ));
+                    }
+                }
+
+                bytes_used = 0;
+                let meta_ptr = self.metadata_buffer.as_mut_ptr();
+                // Dirty rects reported by DXGI.
+                if unsafe {
+                    self.dup_output.GetFrameDirtyRects(
+                        buf_size as u32,
+                        meta_ptr as *mut RECT,
+                        &mut bytes_used,
+                    )
+                }
+                .is_ok()
+                {
+                    let count = bytes_used as usize / std::mem::size_of::<RECT>();
+                    let ptr = meta_ptr as *const RECT;
+                    for i in 0..count {
+                        let r = unsafe { &*ptr.add(i) };
+                        dirty_rects.push(align_and_clamp(
+                            r.left,
+                            r.top,
+                            r.right,
+                            r.bottom,
+                            frame_width,
+                            frame_height,
+                        ));
+                    }
+                }
+
+                // Fragmentation fallback: too many rects or covering most of the screen
+                // → fall back to full-frame YUV conversion.
+                let total_area: u64 = dirty_rects
+                    .iter()
+                    .map(|r| r.width as u64 * r.height as u64)
+                    .sum();
+                let screen_area = frame_width as u64 * frame_height as u64;
+                if dirty_rects.len() > 50
+                    || (screen_area > 0 && total_area > screen_area * 70 / 100)
+                {
+                    None // full update
+                } else {
+                    Some(dirty_rects)
+                }
+            } else {
+                None // no metadata available → full update
+            };
+
+        // --- Draw, copy, and map the frame ---
+        let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
+        self.draw_desktop(&acquired_desktop_image)?;
         if draw_mouse {
             self.draw_mouse(&acquired_desktop_image)?;
         }
-        // Copy render target texture to shared texture
         unsafe {
             self.manager
                 .device_context
                 .CopyResource(&self.copy_buffer_texture_2d, &self.render_target_texture_2d);
         };
         let mut locked_rect = DXGI_MAPPED_RECT::default();
-
         let frame_buffer = unsafe {
             self.copy_buffer_surface
                 .Map(&mut locked_rect, DXGI_MAP_READ)?;
@@ -666,13 +811,15 @@ impl ScreenOutput {
             )
         };
 
-        Ok(SceenFrame {
+        Ok(FrameAcquisitionResult::ContentFrame(SceenFrame {
             height: self.dup_output_desc.ModeDesc.Height,
             width: self.dup_output_desc.ModeDesc.Width,
+            pitch: locked_rect.Pitch as u32,
             frame_buffer,
             copy_buffer_surface: self.copy_buffer_surface.clone(),
             dup_output: self.dup_output.clone(),
-        })
+            dirty_rects: dirty_rects_opt,
+        }))
     }
 
     /// Create render target texture
@@ -1237,13 +1384,16 @@ impl ScreenOutput {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SceenFrame<'a> {
     pub height: u32,
     pub width: u32,
+    pub pitch: u32,
     pub frame_buffer: &'a [u8],
     pub copy_buffer_surface: IDXGISurface,
     pub dup_output: IDXGIOutputDuplication,
+    /// None = full update required; Some(rects) = only these regions changed
+    pub dirty_rects: Option<Vec<DirtyRect>>,
 }
 
 impl Drop for SceenFrame<'_> {
@@ -1285,6 +1435,14 @@ impl ImageInfo for SceenFrame<'_> {
 
     fn get_height(&self) -> u32 {
         self.height
+    }
+
+    fn get_stride(&self) -> u32 {
+        self.pitch
+    }
+
+    fn get_dirty_rects(&self) -> Option<&[DirtyRect]> {
+        self.dirty_rects.as_deref()
     }
 }
 
@@ -1469,64 +1627,75 @@ impl ImageCapture for DxgiImageCapture {
             self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
         }
         let screen_output = self.screen_output.as_mut().unwrap();
-        let result = screen_output.get_frame(draw_mouse);
-        if let Err(error) = result {
-            if let CaptureError::WindowsResultError(bt, err) = error {
-                if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
-                    log::warn!("capture frame timeout, will retry, error={}", err);
-
-                    return CaptureError::custom_error(
-                        DeskErrorCode::ACTION_NEED_RETRY,
-                        &format!("capture frame timeout, will retry, error={}", err),
-                    );
-                } else if err.code() == DXGI_ERROR_ACCESS_LOST
-                    || err.code() == DXGI_ERROR_INVALID_CALL
-                {
-                    self.screen_output = None;
-
-                    return CaptureError::custom_error(
-                        DeskErrorCode::ACTION_NEED_RETRY,
-                        &format!("capture frame is lost, will retry, error={}", err),
-                    );
-                } else {
-                    if err.code() == DXGI_ERROR_DEVICE_REMOVED {
-                        let removed_reason =
-                            unsafe { self.manager.device.GetDeviceRemovedReason() };
-                        log::error!("Device removed reason: {:?}", removed_reason);
-                        return Err(CaptureError::WindowsResultError(Backtrace::disabled(), err));
+        let acq_result = match screen_output.get_frame(draw_mouse) {
+            Ok(r) => r,
+            Err(error) => {
+                if let CaptureError::WindowsResultError(bt, err) = error {
+                    if err.code() == DXGI_ERROR_ACCESS_LOST
+                        || err.code() == DXGI_ERROR_INVALID_CALL
+                    {
+                        self.screen_output = None;
+                        return CaptureError::custom_error(
+                            DeskErrorCode::ACTION_NEED_RETRY,
+                            &format!("capture frame is lost, will retry, error={}", err),
+                        );
+                    } else {
+                        if err.code() == DXGI_ERROR_DEVICE_REMOVED {
+                            let removed_reason =
+                                unsafe { self.manager.device.GetDeviceRemovedReason() };
+                            log::error!("Device removed reason: {:?}", removed_reason);
+                            return Err(CaptureError::WindowsResultError(
+                                Backtrace::disabled(),
+                                err,
+                            ));
+                        }
+                        return Err(CaptureError::WindowsResultError(bt, err));
                     }
-                    return Err(CaptureError::WindowsResultError(bt, err));
+                } else {
+                    return Err(error);
                 }
-            } else {
-                return Err(error);
             }
-        }
+        };
 
-        let screen_frame = result?;
-        let mut cursor_update = None;
-        if matches!(request.cursor_mode, CursorCaptureMode::SyncNative) {
-            if let Some(screen_output) = self.screen_output.as_ref() {
-                match Self::capture_cursor_update(screen_output) {
-                    Ok(Some((fingerprint, data))) => {
-                        if self.last_cursor_fingerprint != Some(fingerprint) {
-                            self.last_cursor_fingerprint = Some(fingerprint);
-                            cursor_update = Some(data);
+        match acq_result {
+            FrameAcquisitionResult::NoContentChange => Ok(CaptureResult {
+                image: Box::new(EmptyImageInfo),
+                cursor_update: None,
+                content_changed: false,
+                dirty_rects: Some(vec![]),
+            }),
+            FrameAcquisitionResult::ContentFrame(screen_frame) => {
+                let mut cursor_update = None;
+                if matches!(request.cursor_mode, CursorCaptureMode::SyncNative) {
+                    if let Some(screen_output) = self.screen_output.as_ref() {
+                        match Self::capture_cursor_update(screen_output) {
+                            Ok(Some((fingerprint, data))) => {
+                                if self.last_cursor_fingerprint != Some(fingerprint) {
+                                    self.last_cursor_fingerprint = Some(fingerprint);
+                                    cursor_update = Some(data);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                log::warn!(
+                                    "Failed to capture cursor update in DXGI backend: {}",
+                                    err
+                                );
+                            }
                         }
                     }
-                    Ok(None) => {}
-                    Err(err) => {
-                        log::warn!("Failed to capture cursor update in DXGI backend: {}", err);
-                    }
+                } else {
+                    self.last_cursor_fingerprint = None;
                 }
-            }
-        } else {
-            self.last_cursor_fingerprint = None;
-        }
 
-        Ok(CaptureResult {
-            image: Box::new(screen_frame),
-            cursor_update,
-        })
+                Ok(CaptureResult {
+                    image: Box::new(screen_frame),
+                    cursor_update,
+                    content_changed: true,
+                    dirty_rects: None,
+                })
+            }
+        }
     }
 
     fn supports_cursor_sync(&self) -> bool {

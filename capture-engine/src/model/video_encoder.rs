@@ -9,6 +9,12 @@ pub struct NalInfo {
 
 pub trait VideoEncoder {
     fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError>;
+    /// Re-encode using the cached YUV buffer without consuming new frame data.
+    /// Used for heartbeat frames when the desktop is static.
+    /// Returns an empty vec if no YUV buffer has been populated yet.
+    fn encode_cached(&mut self) -> Result<Vec<NalInfo>, CaptureError> {
+        Ok(vec![])
+    }
     /// Request the encoder to produce a keyframe (IDR) on the next encode call.
     /// Default implementation is a no-op for encoders that don't support native keyframe forcing.
     fn request_keyframe(&mut self) {}

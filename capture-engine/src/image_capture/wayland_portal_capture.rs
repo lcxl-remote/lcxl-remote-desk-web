@@ -112,6 +112,8 @@ impl ImageCapture for WaylandPortalImageCapture {
         Ok(CaptureResult {
             image,
             cursor_update: None,
+            content_changed: true,
+            dirty_rects: None,
         })
     }
 

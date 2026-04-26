@@ -10,11 +10,34 @@ pub enum ImageType {
     BGRA,
     RGB,
 }
+/// A rectangular region of the screen that changed in the current frame.
+/// Coordinates are in pixels, top-left origin.  Width and height are always
+/// aligned to even numbers (required by YUV420 chroma subsampling).
+#[derive(Debug, Clone, Copy)]
+pub struct DirtyRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub trait ImageInfo {
     fn get_type(&self) -> ImageType;
     fn get_data(&self) -> &[u8];
     fn get_width(&self) -> u32;
     fn get_height(&self) -> u32;
+    /// Row stride in bytes.  May be larger than width * 4 (e.g. DXGI staging
+    /// texture pitch).  Defaults to tightly-packed layout.
+    fn get_stride(&self) -> u32 {
+        self.get_width() * 4
+    }
+    /// Which regions of the frame changed since the last captured frame.
+    /// - `None`           → no dirty-rect information; caller must do a full YUV conversion.
+    /// - `Some([])`       → nothing changed; caller may skip encoding entirely.
+    /// - `Some(rects)`    → only these regions changed; partial YUV conversion is possible.
+    fn get_dirty_rects(&self) -> Option<&[DirtyRect]> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +74,13 @@ pub struct CursorSyncData {
 pub struct CaptureResult {
     pub image: Box<dyn ImageInfo + Send + Sync>,
     pub cursor_update: Option<CursorSyncData>,
+    /// Whether the desktop content changed since the last captured frame.
+    /// When `false` the caller should skip YUV conversion and encoding.
+    pub content_changed: bool,
+    /// Dirty regions for this frame (see `ImageInfo::get_dirty_rects`).
+    /// `None` here means the image field carries full-frame data without
+    /// region annotations; encoders must do a full conversion.
+    pub dirty_rects: Option<Vec<DirtyRect>>,
 }
 
 pub trait ImageCapture {

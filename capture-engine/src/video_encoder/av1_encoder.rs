@@ -10,7 +10,7 @@ use crate::{
         image_capture::ImageInfo,
         video_encoder::{NalInfo, VideoEncoder},
     },
-    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420},
+    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::PersistentYuvBuffer},
 };
 
 pub static ENCODE_TO_AV1_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
@@ -21,6 +21,7 @@ pub struct Av1Encoder {
     pub ctx: Context<u8>,
     pub width: u32,
     pub height: u32,
+    yuv_buffer: Option<PersistentYuvBuffer>,
 }
 
 impl Av1Encoder {
@@ -50,37 +51,29 @@ impl Av1Encoder {
             ctx,
             width: width as u32,
             height: height as u32,
+            yuv_buffer: None,
         })
     }
 }
 
-impl VideoEncoder for Av1Encoder {
-    fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError> {
-        let planar_image = convert_image_to_yuv420(image_info)?;
-        let encode_timer = Instant::now();
+impl Av1Encoder {
+    fn encode_with_ctx(
+        ctx: &mut Context<u8>,
+        encode_timer: Instant,
+        yuv: &PersistentYuvBuffer,
+    ) -> Result<Vec<NalInfo>, CaptureError> {
+        let mut frame = ctx.new_frame();
+        frame.planes[0].copy_from_raw_u8(yuv.y_plane(), yuv.y_stride as usize, 1);
+        frame.planes[1].copy_from_raw_u8(yuv.u_plane(), yuv.u_stride as usize, 1);
+        frame.planes[2].copy_from_raw_u8(yuv.v_plane(), yuv.v_stride as usize, 1);
 
-        // Build rav1e Frame and copy YUV data into it
-        let mut frame = self.ctx.new_frame();
-
-        let y = planar_image.y_plane.borrow();
-        let u = planar_image.u_plane.borrow();
-        let v = planar_image.v_plane.borrow();
-
-        // Use copy_from_raw_u8 to import YUV data into Frame.
-        // The third argument (1) is val_size: each pixel channel is 1 byte (8-bit).
-        frame.planes[0].copy_from_raw_u8(&y, planar_image.y_stride as usize, 1);
-        frame.planes[1].copy_from_raw_u8(&u, planar_image.u_stride as usize, 1);
-        frame.planes[2].copy_from_raw_u8(&v, planar_image.v_stride as usize, 1);
-
-        // Send frame to encoder
-        self.ctx.send_frame(Arc::new(frame)).map_err(|e| {
+        ctx.send_frame(Arc::new(frame)).map_err(|e| {
             CaptureError::AnyhowError(anyhow::anyhow!("rav1e send_frame failed: {:?}", e))
         })?;
 
-        // Receive encoded packets
         let mut nal_infos = Vec::new();
         loop {
-            match self.ctx.receive_packet() {
+            match ctx.receive_packet() {
                 Ok(packet) => {
                     let frame_type_str = match packet.frame_type {
                         FrameType::KEY => "key",
@@ -105,9 +98,36 @@ impl VideoEncoder for Av1Encoder {
                 }
             }
         }
-
         log::trace!("Encoded to AV1 format, {} packets", nal_infos.len());
         Ok(nal_infos)
+    }
+}
+
+impl VideoEncoder for Av1Encoder {
+    fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError> {
+        if self.yuv_buffer.is_none() {
+            self.yuv_buffer = Some(PersistentYuvBuffer::new(
+                image_info.get_width(),
+                image_info.get_height(),
+            ));
+        }
+        self.yuv_buffer.as_mut().unwrap().update(image_info)?;
+        Av1Encoder::encode_with_ctx(
+            &mut self.ctx,
+            Instant::now(),
+            self.yuv_buffer.as_ref().unwrap(),
+        )
+    }
+
+    fn encode_cached(&mut self) -> Result<Vec<NalInfo>, CaptureError> {
+        let Some(_) = self.yuv_buffer.as_ref() else {
+            return Ok(vec![]);
+        };
+        Av1Encoder::encode_with_ctx(
+            &mut self.ctx,
+            Instant::now(),
+            self.yuv_buffer.as_ref().unwrap(),
+        )
     }
 
     fn request_keyframe(&mut self) {

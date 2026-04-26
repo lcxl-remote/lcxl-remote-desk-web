@@ -10,12 +10,13 @@ use crate::{
         image_capture::ImageInfo,
         video_encoder::{NalInfo, VideoEncoder},
     },
-    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::convert_image_to_yuv420},
+    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::PersistentYuvBuffer},
 };
 
 pub struct X264Encoder {
     pub encoder: Encoder,
     pub pts: i64,
+    yuv_buffer: Option<PersistentYuvBuffer>,
 }
 
 pub static ENCODE_TO_X264_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
@@ -31,10 +32,7 @@ impl X264Encoder {
         let width = display_info.desktop_coordinates.width() as i32;
         let height = display_info.desktop_coordinates.height() as i32;
 
-        // Use zerolatency by passing zero_latency=true to Setup::preset
         let mut setup = Setup::preset(Preset::Ultrafast, Tune::None, false, true);
-
-        // Use CRF for constant quality mode
         setup = setup.crf(setting.quality as f32);
         setup = setup.fps(fps.max(1), 1);
         if setting.gop > 0 {
@@ -45,59 +43,76 @@ impl X264Encoder {
             .build(Colorspace::I420, width, height)
             .map_err(|_| CaptureError::AnyhowError(anyhow::anyhow!("x264 build failed")))?;
 
-        Ok(Self { encoder, pts: 0 })
+        Ok(Self {
+            encoder,
+            pts: 0,
+            yuv_buffer: None,
+        })
+    }
+
+    fn encode_with_encoder(
+        encoder: &mut Encoder,
+        pts: &mut i64,
+        yuv: &PersistentYuvBuffer,
+    ) -> Result<Vec<NalInfo>, CaptureError> {
+        let encode_timer = Instant::now();
+        let width = yuv.width as i32;
+
+        let planes = [
+            Plane {
+                stride: width,
+                data: yuv.y_plane(),
+            },
+            Plane {
+                stride: width / 2,
+                data: yuv.u_plane(),
+            },
+            Plane {
+                stride: width / 2,
+                data: yuv.v_plane(),
+            },
+        ];
+
+        let image = Image::new(Colorspace::I420, width, yuv.height as i32, &planes);
+        let (res, _out_picture) = encoder.encode(*pts, image).map_err(|e| {
+            CaptureError::AnyhowError(anyhow::anyhow!("x264 encode error: {:?}", e))
+        })?;
+        *pts += 1;
+
+        let data = bytes::Bytes::copy_from_slice(res.entirety());
+        ENCODE_TO_X264_HISTOGRAM
+            .with_label_values(&["encoded"])
+            .observe(duration_to_seconds(
+                Instant::now().saturating_duration_since(encode_timer),
+            ));
+        Ok(vec![NalInfo { nal_bytes: data }])
     }
 }
 
 impl VideoEncoder for X264Encoder {
     fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError> {
-        let planar_image = convert_image_to_yuv420(image_info)?;
-
-        let encode_to_h264_timer = Instant::now();
-
-        let y = planar_image.y_plane.borrow();
-        let u = planar_image.u_plane.borrow();
-        let v = planar_image.v_plane.borrow();
-
-        let width = image_info.get_width() as i32;
-        let height = image_info.get_height() as i32;
-
-        let planes = [
-            Plane {
-                stride: width,
-                data: &y,
-            },
-            Plane {
-                stride: width / 2,
-                data: &u,
-            },
-            Plane {
-                stride: width / 2,
-                data: &v,
-            },
-        ];
-
-        let image = Image::new(Colorspace::I420, width, height, &planes);
-
-        let (res, _out_picture) = self.encoder.encode(self.pts, image).map_err(|e| {
-            CaptureError::AnyhowError(anyhow::anyhow!("x264 encode error: {:?}", e))
-        })?;
-
-        self.pts += 1;
-
-        let mut nal_infos = Vec::new();
-
-        // Use .entirety() to get the encoded byte slice from x264::Data
-        let data = bytes::Bytes::copy_from_slice(res.entirety());
-
-        nal_infos.push(NalInfo { nal_bytes: data });
-
-        ENCODE_TO_X264_HISTOGRAM
-            .with_label_values(&["encoded"])
-            .observe(duration_to_seconds(
-                Instant::now().saturating_duration_since(encode_to_h264_timer),
+        if self.yuv_buffer.is_none() {
+            self.yuv_buffer = Some(PersistentYuvBuffer::new(
+                image_info.get_width(),
+                image_info.get_height(),
             ));
+        }
+        self.yuv_buffer.as_mut().unwrap().update(image_info)?;
+        X264Encoder::encode_with_encoder(
+            &mut self.encoder,
+            &mut self.pts,
+            self.yuv_buffer.as_ref().unwrap(),
+        )
+    }
 
-        Ok(nal_infos)
+    fn encode_cached(&mut self) -> Result<Vec<NalInfo>, CaptureError> {
+        let Some(_) = self.yuv_buffer.as_ref() else {
+            return Ok(vec![]);
+        };
+        X264Encoder::encode_with_encoder(
+            &mut self.encoder,
+            &mut self.pts,
+            self.yuv_buffer.as_ref().unwrap(),
+        )
     }
 }

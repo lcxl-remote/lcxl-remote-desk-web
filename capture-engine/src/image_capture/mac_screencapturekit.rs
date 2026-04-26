@@ -220,6 +220,8 @@ impl ImageCapture for MacScreencaptureKitImageCapture {
             Ok(CaptureResult {
                 image: Box::new(info),
                 cursor_update: None,
+                content_changed: true,
+                dirty_rects: None,
             })
         } else {
             // Spurious wakeup or empty after wait

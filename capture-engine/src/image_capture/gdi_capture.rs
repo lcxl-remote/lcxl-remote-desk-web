@@ -582,6 +582,8 @@ impl ImageCapture for GdiImageCapture {
                 height: height as u32,
             }),
             cursor_update,
+            content_changed: true,
+            dirty_rects: None,
         })
     }
 

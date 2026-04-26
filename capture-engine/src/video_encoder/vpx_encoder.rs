@@ -10,7 +10,7 @@ use crate::{
         image_capture::ImageInfo,
         video_encoder::{NalInfo, VideoEncoder},
     },
-    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::argb_to_i420},
+    video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::PersistentYuvBuffer},
 };
 
 pub static ENCODE_TO_VPX_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
@@ -21,6 +21,7 @@ pub struct VpxEncoder {
     pub codec: String,
     pub encoder: vpx_encode::Encoder,
     pub start_time: Instant,
+    yuv_buffer: Option<PersistentYuvBuffer>,
 }
 
 impl VpxEncoder {
@@ -42,47 +43,64 @@ impl VpxEncoder {
             VideoCodecId::VP8 => "VP8",
             VideoCodecId::VP9 => "VP9",
         };
-        let vpx_encoder = VpxEncoder {
+        Ok(VpxEncoder {
             codec: codec.to_string(),
             encoder,
             start_time: Instant::now(),
-        };
-        Ok(vpx_encoder)
+            yuv_buffer: None,
+        })
+    }
+
+    fn encode_with_encoder(
+        encoder: &mut vpx_encode::Encoder,
+        start_time: Instant,
+        codec: &str,
+        yuv: &PersistentYuvBuffer,
+    ) -> Result<Vec<NalInfo>, CaptureError> {
+        let ms = (Instant::now() - start_time).as_millis() as i64;
+        let mut encoded = vec![];
+        for packet in encoder.encode(ms, yuv.as_i420_slice())? {
+            let encode_timer = Instant::now();
+            let frame_type_str = if packet.key { "key" } else { "non_key" };
+            encoded.push(NalInfo {
+                nal_bytes: bytes::Bytes::from(packet.data.to_vec()),
+            });
+            ENCODE_TO_VPX_HISTOGRAM
+                .with_label_values(&[codec, frame_type_str])
+                .observe(duration_to_seconds(
+                    Instant::now().saturating_duration_since(encode_timer),
+                ));
+        }
+        Ok(encoded)
     }
 }
 
 impl VideoEncoder for VpxEncoder {
     fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError> {
-        let mut yuv_data = vec![];
-        argb_to_i420(
-            image_info.get_width() as usize,
-            image_info.get_height() as usize,
-            image_info.get_data(),
-            &mut yuv_data,
-        );
-        let now = Instant::now();
-        let time = now - self.start_time;
-
-        let ms = time.as_secs() * 1000 + time.subsec_millis() as u64;
-
-        let mut encoded = vec![];
-        for packet in self.encoder.encode(ms as i64, yuv_data.as_slice())? {
-            let encode_to_vpx_timer = Instant::now();
-            let frame_type_str = match packet.key {
-                true => "key",
-                false => "non_key",
-            };
-
-            encoded.push(NalInfo {
-                nal_bytes: bytes::Bytes::from(packet.data.to_vec()),
-            });
-            ENCODE_TO_VPX_HISTOGRAM
-                .with_label_values(&[self.codec.as_str(), frame_type_str])
-                .observe(duration_to_seconds(
-                    Instant::now().saturating_duration_since(encode_to_vpx_timer),
-                ));
+        if self.yuv_buffer.is_none() {
+            self.yuv_buffer = Some(PersistentYuvBuffer::new(
+                image_info.get_width(),
+                image_info.get_height(),
+            ));
         }
+        self.yuv_buffer.as_mut().unwrap().update(image_info)?;
+        VpxEncoder::encode_with_encoder(
+            &mut self.encoder,
+            self.start_time,
+            &self.codec,
+            self.yuv_buffer.as_ref().unwrap(),
+        )
+    }
 
-        Ok(encoded)
+    fn encode_cached(&mut self) -> Result<Vec<NalInfo>, CaptureError> {
+        let Some(_) = self.yuv_buffer.as_ref() else {
+            return Ok(vec![]);
+        };
+        VpxEncoder::encode_with_encoder(
+            &mut self.encoder,
+            self.start_time,
+            &self.codec,
+            self.yuv_buffer.as_ref().unwrap(),
+        )
     }
 }

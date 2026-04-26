@@ -122,6 +122,8 @@ impl ImageCapture for X11ImageCapture {
         Ok(CaptureResult {
             image: image_info,
             cursor_update: None,
+            content_changed: true,
+            dirty_rects: None,
         })
     }
 
