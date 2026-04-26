@@ -7,11 +7,9 @@ use zbus::{
     zvariant::{DeserializeDict, OwnedObjectPath, OwnedValue, Type},
 };
 
-use crate::{
-    error::DeskError,
-    service::image_capture::pipewire_utils::{
-        get_zbus_connection, get_zbus_portal_request, wait_zbus_response,
-    },
+use crate::error::DeskError;
+use desk_capture_engine::image_capture::pipewire_utils::{
+    get_zbus_connection, get_zbus_portal_request, wait_zbus_response,
 };
 
 #[derive(DeserializeDict, Type, Debug)]

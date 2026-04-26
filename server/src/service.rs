@@ -1,5 +1,3 @@
-pub mod audio_capture;
-pub mod audio_encoder;
 pub mod audio_playback;
 pub mod auto_start;
 pub mod clipboard_event;
@@ -7,12 +5,10 @@ pub mod data_channel;
 pub mod file_manager;
 pub mod file_transfer;
 pub mod host_control;
-pub mod image_capture;
 pub mod keyboard_event;
 pub mod mouse_event;
 pub mod signaling;
 pub mod terminal;
-pub mod video_encoder;
 #[cfg(target_os = "linux")]
 pub mod wayland_remote_desktop;
 pub mod whiteboard_event;

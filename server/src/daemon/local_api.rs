@@ -2,12 +2,14 @@ use crate::{
     ApiRouteConfig, ExternalChannels,
     daemon::tauri_ipc::TauriIpcBridge,
     model::settings::{SharedSettings, StartupMode},
+    service::signaling::LocalNodeTokenValidator,
 };
 use actix_files;
 use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
 use actix_web::{App, HttpServer, cookie::Key, dev::ServiceResponse, middleware::Logger, web};
-use desk_signal::model::SharedConnectionMap;
+use desk_signal::{controller::signaling::open_signaling_handle, model::SharedConnectionMap};
+use desk_signal_facade::service::NodeTokenValidator;
 use log::{error, info};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -50,6 +52,11 @@ pub async fn run_local_api(
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
     let tauri_is_admin_data = web::Data::new(Arc::clone(&tauri_bridge.tauri_is_admin));
 
+    let validator: Arc<dyn NodeTokenValidator> = Arc::new(LocalNodeTokenValidator {
+        settings: settings_data.clone(),
+    });
+    let validator_data = web::Data::new(validator);
+
     // Share the bridge's TauriLoginToken clone with the HTTP server so that
     // refresh() calls from the WS handler are visible to the login controller.
     let login_token_data = web::Data::new(Some(tauri_bridge.tauri_login_token.clone()));
@@ -80,6 +87,8 @@ pub async fn run_local_api(
             )
             .configure(move |cfg| crate::configure_api_routes(cfg, rc.clone()))
             .app_data(bd.clone())
+            .app_data(validator_data.clone())
+            .service(open_signaling_handle)
             .route("/ws/tauri_ipc", web::get().to(TauriIpcBridge::ws_handler))
             .service(
                 actix_files::Files::new("/", static_file_path.clone())

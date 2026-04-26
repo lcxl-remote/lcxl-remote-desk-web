@@ -1,5 +1,5 @@
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
-use crate::model::settings::SharedSettings;
+use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
 use awc::{Client, Connector};
 use desk_ipc_protocol::message::{ServiceToWorker, SignalingPayload, WorkerToService};
@@ -39,10 +39,19 @@ pub async fn run_signaling_proxy(
                     )
                 };
 
-                if startup_mode != crate::model::settings::StartupMode::Default {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    continue;
-                }
+                // In Default mode connect to the embedded server port; in
+                // ServiceDaemon mode connect to the daemon's own HTTP server.
+                // All other modes have no local signaling endpoint.
+                let effective_port = match startup_mode {
+                    StartupMode::Default => port,
+                    StartupMode::ServiceDaemon => {
+                        crate::daemon::local_api::SERVICE_API_PORT
+                    }
+                    _ => {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                };
 
                 if local_token.is_empty() {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -50,9 +59,9 @@ pub async fn run_signaling_proxy(
                 }
 
                 let local_url = if enable_ipv6 {
-                    format!("ws://[::1]:{port}/api/desk/signaling")
+                    format!("ws://[::1]:{effective_port}/api/desk/signaling")
                 } else {
-                    format!("ws://127.0.0.1:{port}/api/desk/signaling")
+                    format!("ws://127.0.0.1:{effective_port}/api/desk/signaling")
                 };
 
                 let rx = outbound_tx.subscribe();

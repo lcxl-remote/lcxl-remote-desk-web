@@ -6,16 +6,16 @@ use crate::{
     TauriIsAdminOverride,
     error::DeskError,
     model::{
-        image_capture::ImageCaptureTypeHelper as _,
         info::{BackendInfo, ServerInfo, SystemInfo},
         settings::{SharedSettings, StartupMode},
     },
 };
+use desk_capture_engine::model::image_capture::ImageCaptureTypeHelper as _;
 use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
 #[cfg(target_os = "linux")]
-use crate::service::image_capture::portal_client::PortalClient;
+use desk_capture_engine::image_capture::portal_client::PortalClient;
 #[cfg(target_os = "linux")]
 use crate::service::wayland_remote_desktop::WaylandRemoteDesktop;
 

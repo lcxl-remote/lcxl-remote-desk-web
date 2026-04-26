@@ -59,6 +59,20 @@ pub async fn run_service_daemon_inner(
     info!("ServiceDaemon starting");
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    // Ensure local_signaling_token exists so the signaling proxy can authenticate
+    // as a desk node with the local HTTP server on SERVICE_API_PORT.
+    {
+        let mut s = shared_settings.write().await;
+        if s.system.local_signaling_token.is_none() {
+            let token = uuid::Uuid::new_v4().to_string();
+            info!("Generated new local_signaling_token for ServiceDaemon");
+            s.system.local_signaling_token = Some(token);
+            if let Err(e) = s.save() {
+                error!("Failed to save local_signaling_token: {e}");
+            }
+        }
+    }
+
     info!("Settings loaded — starting worker manager");
 
     let (worker_mgr, worker_rx) = worker_manager::WorkerManager::new(shared_settings_data.clone());

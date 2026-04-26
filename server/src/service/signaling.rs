@@ -58,23 +58,23 @@ use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::host_control::{HostControlEventType, HostControlHelper, WhiteboardCommand};
-use crate::model::image_capture::{CaptureRequest, CursorCaptureMode};
+use desk_capture_engine::model::image_capture::{CaptureRequest, CursorCaptureMode};
 use crate::model::security_approval::{
     SecurityApprovalSender, SecurityPermissionType, check_security_permission,
 };
 use crate::model::settings::{StartupMode, TraversalMode};
-use crate::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
-use crate::service::audio_capture::audio_capture_factory::{
+use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
+use desk_capture_engine::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
 };
-use crate::service::audio_encoder::audio_encoder_factory::{
+use desk_capture_engine::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
 use crate::service::audio_playback::start_audio_playback;
 use crate::service::data_channel::handle_data_channel_event;
 use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
 use crate::service::host_control::host_control_factory::create_host_control_helper;
-use crate::service::image_capture::image_capture_factory::{
+use desk_capture_engine::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture_async,
 };
 use crate::service::terminal::{
@@ -82,7 +82,7 @@ use crate::service::terminal::{
     handle_manager_terminal_close, handle_manager_terminal_data, handle_manager_terminal_resize,
     handle_manager_terminal_start,
 };
-use crate::service::video_encoder::video_encoder_factory::{
+use desk_capture_engine::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
 use crate::version;
@@ -1615,7 +1615,7 @@ impl DeskSession {
                     capture_result
                 }
                 Err(err) => {
-                    if let DeskError::CustomError(custom_error) = err {
+                    if let desk_capture_engine::error::CaptureError::CustomError(custom_error) = err {
                         if custom_error.error_code == DeskErrorCode::ACTION_NEED_RETRY {
                             timer.stop_and_discard();
                             continue;
@@ -1764,7 +1764,7 @@ impl DeskSession {
                 //let buffer = opus_audio_capture.get_buffer()?;
                 let result = capture.get_buffer();
                 if let Err(error) = &result {
-                    if let DeskError::CustomError(err) = error {
+                    if let desk_capture_engine::error::CaptureError::CustomError(err) = error {
                         if err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
                             // recreate audio capture
                             log::warn!("Failed to get audio buffer, recreate audio capture");
