@@ -4,12 +4,12 @@ use lcxl_remote_desk_server::{
     ServiceOp,
     daemon::tauri_ipc::{DaemonToTauriMsg, TauriToDaemonMsg},
     model::{
-        host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand},
         security_approval::{
             SecurityApprovalCommand, SecurityApprovalRequest, SecurityPermissionType,
         },
     },
 };
+use desk_input_injection::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedReceiver;
 

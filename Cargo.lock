@@ -4832,6 +4832,7 @@ dependencies = [
  "config",
  "core-foundation 0.9.4",
  "core-graphics 0.23.2",
+ "desk-input-injection",
  "desk-signal-facade",
  "desk-utils",
  "evdev",

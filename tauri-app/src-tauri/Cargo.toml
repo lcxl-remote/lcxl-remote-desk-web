@@ -8,6 +8,7 @@ rust-version.workspace = true
 lcxl-remote-desk-server = { workspace = true }
 desk-signal-facade = { workspace = true }
 desk-utils = { workspace = true }
+desk-input-injection = { workspace = true }
 
 clap = { workspace = true }
 

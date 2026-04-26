@@ -1,5 +1,5 @@
 use crate::platform;
-use lcxl_remote_desk_server::model::host_control::{HostControlEventType, PrivateScreenCommand};
+use desk_input_injection::model::host_control::{HostControlEventType, PrivateScreenCommand};
 use std::sync::mpsc;
 use tauri::AppHandle;
 

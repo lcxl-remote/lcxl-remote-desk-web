@@ -58,13 +58,13 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
 
     // Channels for GUI managers (same types as portable mode)
     let (ps_cmd_tx, ps_cmd_rx) = std::sync::mpsc::channel::<
-        lcxl_remote_desk_server::model::host_control::PrivateScreenCommand,
+        desk_input_injection::model::host_control::PrivateScreenCommand,
     >();
     let (state_tx, state_rx) = tokio::sync::mpsc::unbounded_channel::<
-        lcxl_remote_desk_server::model::host_control::HostControlEventType,
+        desk_input_injection::model::host_control::HostControlEventType,
     >();
     let (wb_cmd_tx, wb_cmd_rx) = std::sync::mpsc::channel::<
-        lcxl_remote_desk_server::model::host_control::WhiteboardCommand,
+        desk_input_injection::model::host_control::WhiteboardCommand,
     >();
     let (sa_tx, sa_rx) = std::sync::mpsc::channel::<
         lcxl_remote_desk_server::model::security_approval::SecurityApprovalCommand,

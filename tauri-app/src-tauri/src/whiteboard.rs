@@ -1,4 +1,4 @@
-use lcxl_remote_desk_server::model::host_control::WhiteboardCommand;
+use desk_input_injection::model::host_control::WhiteboardCommand;
 use std::sync::mpsc;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
