@@ -8,3 +8,5 @@ pub mod wayland_portal;
 
 #[cfg(target_os = "macos")]
 pub mod mac;
+
+pub mod mouse_event_factory;

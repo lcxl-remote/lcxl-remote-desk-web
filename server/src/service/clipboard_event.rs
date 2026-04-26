@@ -12,12 +12,10 @@ use webrtc::data_channel::RTCDataChannel;
 
 use crate::{
     error::DeskError,
-    model::{
-        data_channel::ClipboardEventData,
-        host_control::{ClipboardImage, HostControlHelper},
-    },
-    service::host_control::host_control_factory::create_host_control_helper,
+    model::data_channel::ClipboardEventData,
 };
+use desk_input_injection::model::host_control::{ClipboardImage, HostControlHelper};
+use desk_input_injection::host_control::host_control_factory::create_host_control_helper;
 
 // 1MB max for text
 const MAX_TEXT_SIZE: usize = 1024 * 1024;

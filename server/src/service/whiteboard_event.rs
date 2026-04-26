@@ -4,8 +4,9 @@ use desk_signal_facade::model::signal::SignalingState;
 use tokio::sync::RwLock;
 use webrtc::data_channel::{RTCDataChannel, data_channel_message::DataChannelMessage};
 
+use desk_input_injection::model::host_control::WhiteboardCommand;
+
 use crate::model::{
-    host_control::WhiteboardCommand,
     security_approval::{
         SecurityApprovalSender, SecurityPermissionType, check_security_permission,
     },

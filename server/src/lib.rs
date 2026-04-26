@@ -78,7 +78,7 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
+use desk_input_injection::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
 
 rust_i18n::i18n!("locales");
 

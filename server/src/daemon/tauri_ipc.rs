@@ -1,4 +1,4 @@
-use crate::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
+use desk_input_injection::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
 use crate::model::security_approval::{
     PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse,
 };

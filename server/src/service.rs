@@ -4,7 +4,6 @@ pub mod clipboard_event;
 pub mod data_channel;
 pub mod file_manager;
 pub mod file_transfer;
-pub mod host_control;
 pub mod keyboard_event;
 pub mod mouse_event;
 pub mod signaling;

@@ -11,12 +11,13 @@ use desk_turn::model::{TurnInterface, TurnSettings};
 use utoipa::OpenApi;
 
 use crate::model::{
-    data_channel::{KeyboardEventData, MouseEventData, SignalRequestControlData},
+    data_channel::SignalRequestControlData,
     file_transfer::FileTransferMessage,
     info::BackendInfo,
     security_approval::SecurityApprovalEventPayload,
     settings::{TraversalMode, TurnClientSettings},
 };
+use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventData};
 
 /// API version
 #[derive(OpenApi)]

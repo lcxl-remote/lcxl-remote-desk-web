@@ -15,16 +15,16 @@ use crate::{
             DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT,
             DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT, DATA_CHANNEL_LABEL_WHITEBOARD_EVENT,
         },
-        host_control::WhiteboardCommand,
         security_approval::SecurityApprovalSender,
         settings::SharedSettings,
     },
     service::{
         clipboard_event::handle_clipboard_event, file_transfer::handle_file_transfer_event,
-        keyboard_event::handle_keyboard_event, mouse_event::handle_mouse_event,
         whiteboard_event::handle_whiteboard_event,
+        mouse_event::handle_mouse_event, keyboard_event::handle_keyboard_event,
     },
 };
+use desk_input_injection::model::host_control::WhiteboardCommand;
 
 /// Handle data channel event
 /// connection_id: from connection id

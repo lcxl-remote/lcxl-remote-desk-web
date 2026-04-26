@@ -57,7 +57,7 @@ use webrtc::{
 use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
 use crate::model::data_channel::SignalRequestControlData;
-use crate::model::host_control::{HostControlEventType, HostControlHelper, WhiteboardCommand};
+use desk_input_injection::model::host_control::{HostControlEventType, HostControlHelper, WhiteboardCommand};
 use desk_capture_engine::model::image_capture::{CaptureRequest, CursorCaptureMode};
 use crate::model::security_approval::{
     SecurityApprovalSender, SecurityPermissionType, check_security_permission,
@@ -73,7 +73,7 @@ use desk_capture_engine::audio_encoder::audio_encoder_factory::{
 use crate::service::audio_playback::start_audio_playback;
 use crate::service::data_channel::handle_data_channel_event;
 use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
-use crate::service::host_control::host_control_factory::create_host_control_helper;
+use desk_input_injection::host_control::host_control_factory::create_host_control_helper;
 use desk_capture_engine::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture_async,
 };
