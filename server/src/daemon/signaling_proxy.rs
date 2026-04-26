@@ -58,7 +58,9 @@ pub async fn run_signaling_proxy(
                     continue;
                 }
 
-                let local_url = if enable_ipv6 {
+                // ServiceDaemon HTTP server always binds to 127.0.0.1 (IPv4 only),
+                // so ignore the enable_ipv6 setting for the local connection.
+                let local_url = if enable_ipv6 && startup_mode != StartupMode::ServiceDaemon {
                     format!("ws://[::1]:{effective_port}/api/desk/signaling")
                 } else {
                     format!("ws://127.0.0.1:{effective_port}/api/desk/signaling")

@@ -190,6 +190,27 @@ pub struct GdiImageCapture {
 impl GdiImageCapture {
     pub fn new(settings: &DeskSettings) -> Result<Self, CaptureError> {
         log::debug!("Creating GDIImageCapture with settings: {:?}", settings);
+        // When launched via CreateProcessAsUserW (ServiceDaemon → SessionWorker), Tokio
+        // worker threads are not automatically attached to the interactive desktop.
+        // Explicitly attach this thread to the input desktop so that GDI APIs
+        // (EnumDisplayDevicesW, GetDC, etc.) can access display objects.
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::System::StationsAndDesktops::{
+                DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, OpenInputDesktop, SetThreadDesktop,
+            };
+            unsafe {
+                if let Ok(hdesk) = OpenInputDesktop(
+                    DESKTOP_CONTROL_FLAGS(0),
+                    false,
+                    DESKTOP_ACCESS_FLAGS(0x00FF),
+                ) {
+                    let _ = SetThreadDesktop(hdesk);
+                    // Intentionally leak the handle: SetThreadDesktop requires the
+                    // handle to stay open for the thread's lifetime.
+                }
+            }
+        }
         let display_info_opt = GdiImageOutputEnumerator::get_output(settings.video_device_index)?;
         let display_info = if let Some(display_info) = display_info_opt {
             display_info

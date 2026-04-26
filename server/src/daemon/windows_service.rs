@@ -211,7 +211,18 @@ mod windows_impl {
             }
         };
 
-        let exe_path = service.query_config().ok().map(|cfg| cfg.executable_path);
+        // cfg.executable_path is the raw SCM command line: exe_path + launch args.
+        // Parse only the executable path from the first token.
+        let exe_path = service.query_config().ok().and_then(|cfg| {
+            let cmdline = cfg.executable_path.to_string_lossy();
+            let cmdline = cmdline.trim();
+            let path_str = if cmdline.starts_with('"') {
+                cmdline[1..].split('"').next()?.to_string()
+            } else {
+                cmdline.split_whitespace().next()?.to_string()
+            };
+            Some(std::path::PathBuf::from(path_str))
+        });
 
         if let Ok(status) = service.query_status() {
             if status.current_state != ServiceState::Stopped {
@@ -223,9 +234,7 @@ mod windows_impl {
         service.delete()?;
         info!("Service '{SERVICE_NAME}' uninstalled successfully");
 
-        if let Some(exe) = exe_path {
-            let exe_path = std::path::PathBuf::from(exe);
-
+        if let Some(exe_path) = exe_path {
             // Wait up to 5 seconds for the exe file lock to be released before
             // removing the whole install directory.
             for _ in 0..10 {

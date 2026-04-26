@@ -948,6 +948,10 @@ impl DeskSession {
         let mut setting_engine = SettingEngine::default();
         // Allow unbounded SCTP message size to improve throughput on localhost
         setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
+        // Include loopback (127.0.0.1) as a host ICE candidate so that local browser
+        // connections (e.g. Tauri WebView → 127.0.0.1:8082) can succeed via the
+        // loopback candidate pair without requiring cross-interface routing.
+        setting_engine.set_include_loopback_candidate(true);
 
         let mut ice_servers = Vec::new();
         for ice_server in request_remote_model.ice_servers.iter() {

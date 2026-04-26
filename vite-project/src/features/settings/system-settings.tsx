@@ -297,7 +297,7 @@ export function SystemSettings() {
                 </CardContent>
             </Card>
 
-            {serverInfo?.startup_mode === "default" && serverInfo.server_binary_available && (
+            {(serverInfo?.startup_mode === "default" || serverInfo?.startup_mode === "service-daemon") && serverInfo.server_binary_available && (
                 <Card className="mt-6 border-amber-500/50 bg-amber-500/10 dark:border-amber-500/30 dark:bg-amber-500/10">
                     <CardHeader>
                         <CardTitle>{t("pages.system.settings.serviceManagement.title", "Windows Service")}</CardTitle>

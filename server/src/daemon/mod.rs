@@ -8,7 +8,7 @@ pub mod worker_manager;
 use crate::model::settings::{Args, Settings, SharedSettings};
 use actix_web::web;
 use log::{error, info};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 use tauri_ipc::TauriIpcBridge;
 use tokio::sync::oneshot;
 
@@ -58,6 +58,19 @@ pub async fn run_service_daemon_inner(
 
     info!("ServiceDaemon starting");
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Initialize the signal database (same SQLite used by the Default/Signaling modes).
+    // Required because open_signaling_handle calls get_or_create_device_code() which
+    // calls get_db() and panics if the DB has not been initialized.
+    let signal_db_dir = Path::new(&settings.args.config_file_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_string_lossy()
+        .to_string();
+    desk_signal::db::init_db(&signal_db_dir)
+        .await
+        .map_err(|e| format!("Failed to init signal DB: {e}"))?;
+    info!("Signal database initialized at {signal_db_dir}");
 
     // Ensure local_signaling_token exists so the signaling proxy can authenticate
     // as a desk node with the local HTTP server on SERVICE_API_PORT.

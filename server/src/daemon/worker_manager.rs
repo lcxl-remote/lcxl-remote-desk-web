@@ -245,7 +245,10 @@ impl WorkerManager {
     pub fn handle_crash_recovery(&self, session_id: u32, desktop_name: Option<String>) {
         warn!("[WorkerManager] Worker exited unexpectedly — restarting (session={session_id})");
         let mgr = self.clone();
-        actix_web::rt::spawn(async move {
+        // Must use tokio::spawn (not actix_web::rt::spawn / spawn_local) because this
+        // is called from within a tokio::spawn task (run_pipe_server) which has no
+        // LocalSet; calling spawn_local there panics and silently kills the task.
+        tokio::spawn(async move {
             let browser_ids = mgr.notify_desktop_switch().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
             if let Err(e) = mgr
@@ -448,9 +451,22 @@ async fn run_pipe_server(
         .first_pipe_instance(true)
         .create(&pipe_path)?;
 
+    let desktop_name_copy = desktop_name.clone();
+
     info!("Waiting for Worker to connect on {pipe_path}...");
-    server.connect().await?;
-    info!("Worker connected");
+    match tokio::time::timeout(Duration::from_secs(15), server.connect()).await {
+        Ok(Ok(())) => info!("Worker connected"),
+        Ok(Err(e)) => {
+            error!("Pipe connection error for {pipe_path}: {e}");
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            return Ok(());
+        }
+        Err(_) => {
+            warn!("Timed out waiting for worker to connect on {pipe_path}; triggering recovery");
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            return Ok(());
+        }
+    }
 
     let (mut reader, mut writer) = tokio::io::split(server);
 
@@ -459,7 +475,6 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
-    let desktop_name_copy = desktop_name.clone();
 
     write_message(
         &mut writer,
@@ -511,9 +526,27 @@ async fn run_pipe_server(
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
 
+    let desktop_name_copy = desktop_name.clone();
+
     info!("Waiting for Worker to connect...");
-    let (stream, _) = listener.accept().await?;
-    info!("Worker connected");
+    let stream = match tokio::time::timeout(Duration::from_secs(15), listener.accept()).await {
+        Ok(Ok((stream, _))) => {
+            info!("Worker connected");
+            stream
+        }
+        Ok(Err(e)) => {
+            error!("Unix socket accept error for {socket_path}: {e}");
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            let _ = std::fs::remove_file(socket_path);
+            return Ok(());
+        }
+        Err(_) => {
+            warn!("Timed out waiting for worker to connect on {socket_path}; triggering recovery");
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            let _ = std::fs::remove_file(socket_path);
+            return Ok(());
+        }
+    };
 
     let (mut reader, mut writer) = tokio::io::split(stream);
 
@@ -522,7 +555,6 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
-    let desktop_name_copy = desktop_name.clone();
 
     write_message(
         &mut writer,

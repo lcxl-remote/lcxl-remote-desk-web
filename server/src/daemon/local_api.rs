@@ -85,11 +85,14 @@ pub async fn run_local_api(
                     .cookie_secure(false)
                     .build(),
             )
-            .configure(move |cfg| crate::configure_api_routes(cfg, rc.clone()))
-            .app_data(bd.clone())
+            // Register signaling and IPC routes BEFORE configure_api_routes so they
+            // are matched first and bypass the /api scope's reject_anonymous_users
+            // middleware (which would otherwise intercept /api/desk/signaling).
             .app_data(validator_data.clone())
             .service(open_signaling_handle)
             .route("/ws/tauri_ipc", web::get().to(TauriIpcBridge::ws_handler))
+            .configure(move |cfg| crate::configure_api_routes(cfg, rc.clone()))
+            .app_data(bd.clone())
             .service(
                 actix_files::Files::new("/", static_file_path.clone())
                     .index_file("index.html")
