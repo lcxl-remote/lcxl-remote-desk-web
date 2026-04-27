@@ -332,13 +332,16 @@ fn launch_worker_as_user(
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::{
         Foundation::{CloseHandle, HANDLE},
-        Security::{DuplicateTokenEx, SecurityIdentification, TOKEN_ALL_ACCESS, TokenPrimary},
+        Security::{
+            DuplicateTokenEx, SecurityIdentification, SecurityImpersonation,
+            SetTokenInformation, TOKEN_ALL_ACCESS, TokenPrimary, TokenSessionId,
+        },
         System::{
             Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
             RemoteDesktop::WTSQueryUserToken,
             Threading::{
                 CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
-                PROCESS_INFORMATION, STARTUPINFOW,
+                GetCurrentProcess, OpenProcessToken, PROCESS_INFORMATION, STARTUPINFOW,
             },
         },
     };
@@ -347,20 +350,54 @@ fn launch_worker_as_user(
 
     unsafe {
         let mut user_token = HANDLE::default();
-        WTSQueryUserToken(session_id, &mut user_token)
-            .map_err(|e| format!("WTSQueryUserToken(session={session_id}): {e}"))?;
+        let use_system_token = match WTSQueryUserToken(session_id, &mut user_token) {
+            Ok(()) => {
+                info!("WTSQueryUserToken succeeded for session {session_id}");
+                false
+            }
+            Err(e) => {
+                warn!(
+                    "WTSQueryUserToken failed (session={session_id}): {e}, \
+                     falling back to SYSTEM token with SessionId injection"
+                );
+                OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut user_token)
+                    .map_err(|e| format!("OpenProcessToken: {e}"))?;
+                true
+            }
+        };
 
         let mut dup_token = HANDLE::default();
         let dup_result = DuplicateTokenEx(
             user_token,
             TOKEN_ALL_ACCESS,
             None,
-            SecurityIdentification,
+            if use_system_token {
+                SecurityImpersonation
+            } else {
+                SecurityIdentification
+            },
             TokenPrimary,
             &mut dup_token,
         );
         let _ = CloseHandle(user_token);
         dup_result.map_err(|e| format!("DuplicateTokenEx: {e}"))?;
+
+        // When using SYSTEM token, inject the target Session ID so the worker
+        // process is associated with the correct user session / desktop.
+        if use_system_token {
+            let mut target_session_id = session_id;
+            let set_result = SetTokenInformation(
+                dup_token,
+                TokenSessionId,
+                &mut target_session_id as *mut _ as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+            if let Err(e) = set_result {
+                let _ = CloseHandle(dup_token);
+                return Err(format!("SetTokenInformation(TokenSessionId={session_id}): {e}").into());
+            }
+            info!("Set SYSTEM token SessionId to {session_id}");
+        }
 
         let mut env_block: *mut std::ffi::c_void = std::ptr::null_mut();
         let env_ok = CreateEnvironmentBlock(&mut env_block, Some(dup_token), false);
@@ -412,7 +449,7 @@ fn launch_worker_as_user(
         create_result.map_err(|e| format!("CreateProcessAsUserW: {e}"))?;
 
         info!(
-            "Worker process created: PID={}, desktop={desktop_str}",
+            "Worker process created: PID={}, desktop={desktop_str}, system_token_fallback={use_system_token}",
             pi.dwProcessId
         );
 
@@ -447,9 +484,38 @@ async fn run_pipe_server(
     let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
     info!("Creating Named Pipe server: {pipe_path}");
 
-    let server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_path)?;
+    let server = unsafe {
+        use std::ffi::c_void;
+        use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+        use windows::Win32::Security::{SECURITY_ATTRIBUTES, PSECURITY_DESCRIPTOR};
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows_core::w;
+
+        let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
+        // D:(A;;GA;;;WD) = Allow Generic All to Everyone
+        let sddl = w!("D:(A;;GA;;;WD)");
+        
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl,
+            1, // SDDL_REVISION_1
+            &mut sd,
+            None,
+        ).is_err() {
+            return Err("Failed to convert SDDL to Security Descriptor".into());
+        }
+
+        let mut sa = SECURITY_ATTRIBUTES::default();
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.lpSecurityDescriptor = sd.0 as *mut c_void;
+        sa.bInheritHandle = windows::Win32::Foundation::FALSE;
+
+        let srv_res = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create_with_security_attributes_raw(&pipe_path, &mut sa as *mut _ as *mut c_void);
+
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        srv_res?
+    };
 
     let desktop_name_copy = desktop_name.clone();
 

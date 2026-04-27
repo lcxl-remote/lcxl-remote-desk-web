@@ -162,7 +162,7 @@ pub async fn run_service_daemon_inner(
 
 #[cfg(target_os = "windows")]
 fn get_current_session_id() -> u32 {
-    unsafe { windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId() }
+    session_monitor::get_active_session_id()
 }
 
 #[cfg(not(target_os = "windows"))]

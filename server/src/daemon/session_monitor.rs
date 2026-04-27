@@ -112,6 +112,60 @@ pub fn get_current_desktop_name() -> Result<String, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn get_active_session_id() -> u32 {
-    unsafe { windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId() }
+pub fn get_active_session_id() -> u32 {
+    use windows::Win32::System::RemoteDesktop::{
+        WTSActive, WTSEnumerateSessionsW, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+        WTS_CURRENT_SERVER_HANDLE,
+    };
+
+    unsafe {
+        let mut session_info_ptr = std::ptr::null_mut();
+        let mut count: u32 = 0;
+
+        let result = WTSEnumerateSessionsW(
+            Some(WTS_CURRENT_SERVER_HANDLE),
+            0,
+            1,
+            &mut session_info_ptr,
+            &mut count,
+        );
+
+        if result.is_err() || session_info_ptr.is_null() {
+            log::warn!("WTSEnumerateSessionsW failed, falling back to console session");
+            return WTSGetActiveConsoleSessionId();
+        }
+
+        let sessions = std::slice::from_raw_parts(session_info_ptr, count as usize);
+        let mut active_session_id = None;
+
+        for session in sessions {
+            log::debug!(
+                "Session enumeration: id={}, state={:?}",
+                session.SessionId,
+                session.State
+            );
+            if session.State == WTSActive && session.SessionId != 0 {
+                // Session 0 是系统服务 Session，跳过
+                active_session_id = Some(session.SessionId);
+                break;
+            }
+        }
+
+        WTSFreeMemory(session_info_ptr as *mut _);
+
+        match active_session_id {
+            Some(id) => {
+                log::info!("Found active session via WTSEnumerateSessionsW: {}", id);
+                id
+            }
+            None => {
+                let fallback = WTSGetActiveConsoleSessionId();
+                log::warn!(
+                    "No active session found via enumeration, falling back to console session: {}",
+                    fallback
+                );
+                fallback
+            }
+        }
+    }
 }
