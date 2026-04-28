@@ -353,6 +353,25 @@ fn launch_worker_as_user(
         let use_system_token = match WTSQueryUserToken(session_id, &mut user_token) {
             Ok(()) => {
                 info!("WTSQueryUserToken succeeded for session {session_id}");
+                
+                use windows::Win32::Security::{GetTokenInformation, TokenLinkedToken, TOKEN_LINKED_TOKEN};
+                let mut linked_token = TOKEN_LINKED_TOKEN::default();
+                let mut return_length = 0;
+                let res = GetTokenInformation(
+                    user_token,
+                    TokenLinkedToken,
+                    Some(&mut linked_token as *mut _ as *mut std::ffi::c_void),
+                    std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
+                    &mut return_length,
+                );
+                if res.is_ok() && !linked_token.LinkedToken.is_invalid() {
+                    info!("Successfully retrieved LinkedToken (elevated token) for session {session_id}");
+                    let _ = CloseHandle(user_token);
+                    user_token = linked_token.LinkedToken;
+                } else {
+                    info!("Could not retrieve LinkedToken, using default user token");
+                }
+                
                 false
             }
             Err(e) => {

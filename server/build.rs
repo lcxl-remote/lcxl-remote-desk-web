@@ -23,7 +23,12 @@ fn main() {
         "/// The current build number (Git revision count).\n/// This constant is of type i32, suitable for direct integer arithmetic.\npub const SERVER_BUILD_NUMBER: i32 = {};",
         build_number
     );
-    fs::write(&dest_path, content).unwrap();
+    
+    // Only write if content changed to avoid unnecessary recompilation
+    let existing_content = fs::read_to_string(&dest_path).ok();
+    if existing_content.as_deref() != Some(&content) {
+        fs::write(&dest_path, content).unwrap();
+    }
 
     // 3. Get Git Commit Hash
     let output_hash = Command::new("git").args(&["rev-parse", "HEAD"]).output();
@@ -36,6 +41,17 @@ fn main() {
     println!("cargo:rustc-env=SERVER_COMMIT_HASH={}", commit_hash);
 
     // 5. Trigger rebuild condition
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/index");
+    // Dynamically resolve git directory to support submodules and different layouts
+    let git_dir_output = Command::new("git")
+        .args(&["rev-parse", "--git-dir"])
+        .output()
+        .ok();
+    
+    if let Some(output) = git_dir_output {
+        if output.status.success() {
+            let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            println!("cargo:rerun-if-changed={}/HEAD", git_dir);
+            println!("cargo:rerun-if-changed={}/index", git_dir);
+        }
+    }
 }
