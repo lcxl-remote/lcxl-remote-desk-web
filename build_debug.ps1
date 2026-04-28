@@ -8,8 +8,7 @@ cargo build -p lcxl-remote-desk-server
 
 Write-Host "Building Vite project..."
 Push-Location "$ScriptDir\vite-project"
-npm install
-npm run ci
+npm ci
 Pop-Location
 
 Write-Host "Copying static files to target directory..."

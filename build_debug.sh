@@ -9,8 +9,7 @@ cargo build -p lcxl-remote-desk-server
 
 echo "Building Vite project..."
 pushd "$SCRIPT_DIR/vite-project" > /dev/null
-npm install
-npm run ci
+npm ci
 popd > /dev/null
 
 echo "Copying static files to target directory..."
