@@ -58,8 +58,8 @@ pub async fn run_signaling_proxy(
                     continue;
                 }
 
-                // ServiceDaemon HTTP server always binds to 127.0.0.1 (IPv4 only),
-                // so ignore the enable_ipv6 setting for the local connection.
+                // The local proxy should keep using loopback even when the daemon
+                // API is exposed on all interfaces.
                 let local_url = if enable_ipv6 && startup_mode != StartupMode::ServiceDaemon {
                     format!("ws://[::1]:{effective_port}/api/desk/signaling")
                 } else {
