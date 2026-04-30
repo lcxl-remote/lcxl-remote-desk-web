@@ -257,6 +257,12 @@ export default function DeskSession() {
     useEffect(() => {
         if (!isRTCConnected || !deskId || !lastSettingsRef.current) return;
 
+        // Do not trigger adaptive quality if we haven't received any data yet or the stream is currently paused/stalled
+        if (rtcStats.fps === 0 && rtcStats.bitrate === 0) {
+            statsWindowRef.current = []; // reset window to avoid acting on stale/initial 0-stats
+            return;
+        }
+
         const win = statsWindowRef.current;
         win.push({ packetLoss: rtcStats.packetLoss, rtt: rtcStats.rtt });
         if (win.length > 10) win.shift();
