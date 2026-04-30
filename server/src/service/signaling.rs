@@ -1012,10 +1012,39 @@ impl DeskSession {
         let rtc_peer_connection = api.new_peer_connection(config).await?;
 
         // get audio device
-        let audio_device_list = list_audio_capture();
+        let audio_device_list = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(|| list_audio_capture()),
+        )
+        .await
+        {
+            Ok(Ok(list)) => list,
+            _ => {
+                log::error!("list_audio_capture timed out or failed");
+                return DeskError::custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "Failed to enumerate audio capture devices (timeout or internal error)",
+                );
+            }
+        };
+
         let audio_encoder_list = list_audio_encoder();
         // get video device
-        let video_device_list = list_image_capture_async().await;
+        let video_device_list = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            list_image_capture_async(),
+        )
+        .await
+        {
+            Ok(list) => list,
+            Err(_) => {
+                log::error!("list_image_capture_async timed out");
+                return DeskError::custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "Failed to enumerate image capture devices (timeout)",
+                );
+            }
+        };
 
         let video_encoder_list = list_video_encoder();
 
@@ -1559,6 +1588,13 @@ impl DeskSession {
                     log::info!("capture_screen_task: RTC is connected");
                     break;
                 }
+                WebRTConnectionState::UpdateSettings(new_settings) => {
+                    log::info!("Received UpdateSettings while waiting for connection");
+                    desk_settings = new_settings;
+                    image_capture_type = capture.get_capture_type().into();
+                    // Recreate encoder with new settings before connection starts
+                    encoder = create_video_encoder(&desk_settings, &display_info)?;
+                }
                 _ => {
                     log::error!("Unexcepted state {}, exit to capture screen", state);
                     return DeskError::custom_error(
@@ -1725,7 +1761,7 @@ impl DeskSession {
 
     /// Capture audio and send it to the remote peer
     pub async fn capture_audio_task(
-        desk_settings: DeskSettings,
+        mut desk_settings: DeskSettings,
         mut connection_state_rx: tokio::sync::watch::Receiver<WebRTConnectionState>,
         audio_track: Arc<TrackLocalStaticSample>,
     ) -> Result<(), DeskError> {
@@ -1738,15 +1774,20 @@ impl DeskSession {
         //let mut opus_audio_capture = OpusAudioCapture::new(audio_device)?;
 
         // Wait for connection established
-        while let Ok(_) = connection_state_rx.changed().await {
+        loop {
             let state = connection_state_rx.borrow_and_update().clone();
             match state {
-                WebRTConnectionState::Init => {
-                    log::info!("current state is {}, keep wait", state);
-                }
                 WebRTConnectionState::Connected => {
                     log::info!("capture_audio_task: RTC is connected");
                     break;
+                }
+                WebRTConnectionState::UpdateSettings(new_settings) => {
+                    log::info!("Received UpdateSettings while waiting for connection, updating audio settings");
+                    desk_settings = new_settings;
+                    // Note: Audio config changes aren't actively handled in the loop later, but we update the struct.
+                }
+                WebRTConnectionState::Init => {
+                    log::info!("current state is {}, keep wait", state);
                 }
                 _ => {
                     log::error!("Unexcepted state {}, exit to capture audio", state);
@@ -1755,6 +1796,13 @@ impl DeskSession {
                         &format!("Unexcepted state {}", state),
                     );
                 }
+            }
+            if connection_state_rx.changed().await.is_err() {
+                log::error!("connection_state_rx dropped");
+                return DeskError::custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "connection_state_rx dropped",
+                );
             }
         }
 
