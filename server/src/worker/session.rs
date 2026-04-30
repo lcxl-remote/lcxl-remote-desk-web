@@ -131,14 +131,27 @@ impl WorkerSession {
 
         let heartbeat_interval = tokio::time::Duration::from_secs(5);
         let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
+        let (service_msg_tx, mut service_msg_rx) =
+            mpsc::unbounded_channel::<io::Result<ServiceToWorker>>();
+
+        tokio::spawn(async move {
+            loop {
+                let result = read_message::<_, ServiceToWorker>(&mut reader).await;
+                let should_stop = result.is_err();
+                if service_msg_tx.send(result).is_err() || should_stop {
+                    break;
+                }
+            }
+        });
 
         loop {
             tokio::select! {
-                msg_result = read_message::<_, ServiceToWorker>(&mut reader) => {
+                msg_result = service_msg_rx.recv() => {
                     match msg_result {
-                        Ok(msg) => {
+                        Some(Ok(msg)) => {
                             match msg {
                                 ServiceToWorker::SignalingMessage(payload) => {
+                                    info!("Worker received SignalingMessage: {}", payload.message);
                                     match serde_json::from_str::<SignalingModel>(&payload.message) {
                                         Ok(signaling_model) => {
                                             if let Err(e) = desk_session.handle_message(&signaling_model).await {
@@ -172,12 +185,16 @@ impl WorkerSession {
                                 }
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             if e.kind() == io::ErrorKind::UnexpectedEof {
                                 info!("IPC connection closed by Service");
                             } else {
                                 error!("IPC read error: {}", e);
                             }
+                            break;
+                        }
+                        None => {
+                            info!("IPC reader task stopped");
                             break;
                         }
                     }
@@ -203,7 +220,18 @@ impl WorkerSession {
                             break;
                         }
                         Some(DeskSessionMessage::WebRTCDropped(connection_id)) => {
-                            info!("WebRTC dropped for connection: {}", connection_id);
+                            info!(
+                                "WebRTC dropped for connection {}, shutting down peer connection",
+                                connection_id
+                            );
+                            if let Some(peer_connection) =
+                                desk_session.rtc_peer_connection_map.remove(&connection_id)
+                            {
+                                let peer_connection = peer_connection.read().await;
+                                if let Err(e) = peer_connection.shutdown().await {
+                                    error!("Failed to shutdown peer connection: {}", e);
+                                }
+                            }
                         }
                         Some(DeskSessionMessage::Ping(_)) | Some(DeskSessionMessage::Pong(_)) => {}
                         None => {

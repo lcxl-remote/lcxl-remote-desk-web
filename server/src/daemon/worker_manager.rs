@@ -584,7 +584,7 @@ async fn run_pipe_server(
         }
     }
 
-    let expected = bridge_loop(&mut reader, &mut writer, &mut cmd_rx, &msg_tx, pipe_name).await;
+    let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, pipe_name).await;
     info!("Pipe server for {pipe_name} exiting");
 
     if !expected {
@@ -663,7 +663,7 @@ async fn run_pipe_server(
         }
     }
 
-    let expected = bridge_loop(&mut reader, &mut writer, &mut cmd_rx, &msg_tx, socket_path).await;
+    let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, socket_path).await;
     let _ = std::fs::remove_file(socket_path);
 
     if !expected {
@@ -674,16 +674,28 @@ async fn run_pipe_server(
 }
 
 async fn bridge_loop<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+    mut reader: R,
+    mut writer: W,
     cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: &mpsc::UnboundedSender<WorkerToService>,
     name: &str,
 ) -> bool
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    let (worker_msg_tx, mut worker_msg_rx) =
+        mpsc::unbounded_channel::<std::io::Result<WorkerToService>>();
+    tokio::spawn(async move {
+        loop {
+            let result = read_message::<_, WorkerToService>(&mut reader).await;
+            let should_stop = result.is_err();
+            if worker_msg_tx.send(result).is_err() || should_stop {
+                break;
+            }
+        }
+    });
+
     let mut daemon_initiated = false;
     loop {
         tokio::select! {
@@ -696,7 +708,7 @@ where
                         ) {
                             daemon_initiated = true;
                         }
-                        if let Err(e) = write_message(writer, &msg).await {
+                        if let Err(e) = write_message(&mut writer, &msg).await {
                             error!("Failed to write to Worker pipe [{name}]: {e}");
                             break;
                         }
@@ -708,20 +720,24 @@ where
                     }
                 }
             }
-            msg_result = read_message::<_, WorkerToService>(reader) => {
+            msg_result = worker_msg_rx.recv() => {
                 match msg_result {
-                    Ok(msg) => {
+                    Some(Ok(msg)) => {
                         if msg_tx.send(msg).is_err() {
                             error!("SignalingProxy receiver dropped for [{name}]");
                             break;
                         }
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         if e.kind() == std::io::ErrorKind::UnexpectedEof {
                             info!("Worker disconnected from [{name}]");
                         } else {
                             error!("Pipe read error [{name}]: {e}");
                         }
+                        break;
+                    }
+                    None => {
+                        info!("Worker pipe reader stopped for [{name}]");
                         break;
                     }
                 }
