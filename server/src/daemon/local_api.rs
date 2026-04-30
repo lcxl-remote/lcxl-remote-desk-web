@@ -21,7 +21,7 @@ pub async fn run_local_api(
     tauri_bridge: Arc<TauriIpcBridge>,
     channels: ExternalChannels,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!("ServiceDaemon HTTP server starting on 127.0.0.1:{SERVICE_API_PORT}");
+    info!("ServiceDaemon HTTP server starting on 0.0.0.0:{SERVICE_API_PORT}");
 
     // Stable cookie-signing key derived from persisted secret (survives daemon restarts)
     let session_key_material = {
@@ -123,7 +123,7 @@ pub async fn run_local_api(
                     })),
             )
     })
-    .bind(("127.0.0.1", SERVICE_API_PORT))
+    .bind(("0.0.0.0", SERVICE_API_PORT))
     .map_err(|e| format!("Failed to bind local API on port {SERVICE_API_PORT}: {e}"))?
     .run();
 
