@@ -27,12 +27,13 @@ impl WhiteboardManager {
                     Ok(cmd) => match cmd {
                         WhiteboardCommand::Show(from_connection_id) => {
                             if let Some(ref controlled) = self.controlled_by_connection_id
-                                && controlled != &from_connection_id {
-                                    log::warn!(
-                                        "Whiteboard is already controlled by another connection"
-                                    );
-                                    continue;
-                                }
+                                && controlled != &from_connection_id
+                            {
+                                log::warn!(
+                                    "Whiteboard is already controlled by another connection"
+                                );
+                                continue;
+                            }
                             if let Err(e) = self.show_window(&handle) {
                                 log::error!("Failed to show whiteboard window: {}", e);
                                 continue;
@@ -62,12 +63,13 @@ impl WhiteboardManager {
                         }
                         WhiteboardCommand::Hide(from_connection_id) => {
                             if let Some(ref controlled) = self.controlled_by_connection_id
-                                && controlled != &from_connection_id {
-                                    log::warn!(
-                                        "Whiteboard is already controlled by another connection"
-                                    );
-                                    continue;
-                                }
+                                && controlled != &from_connection_id
+                            {
+                                log::warn!(
+                                    "Whiteboard is already controlled by another connection"
+                                );
+                                continue;
+                            }
                             if let Err(e) = Self::hide_window(&handle) {
                                 log::error!("Failed to hide whiteboard window: {}", e);
                             }

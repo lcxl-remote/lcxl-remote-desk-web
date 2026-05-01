@@ -94,17 +94,14 @@ pub async fn run_signaling_proxy(
                 };
 
                 if let (Some(url), Some(token)) = (signaling_url, signaling_token)
-                    && !url.is_empty() && !token.is_empty() {
-                        let rx = outbound_tx.subscribe();
-                        let _ = maintain_proxy_connection(
-                            settings.clone(),
-                            &worker_mgr,
-                            url,
-                            token,
-                            rx,
-                        )
-                        .await;
-                    }
+                    && !url.is_empty()
+                    && !token.is_empty()
+                {
+                    let rx = outbound_tx.subscribe();
+                    let _ =
+                        maintain_proxy_connection(settings.clone(), &worker_mgr, url, token, rx)
+                            .await;
+                }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -126,17 +123,14 @@ pub async fn run_signaling_proxy(
                 };
 
                 if let (Some(url), Some(token)) = (manager_url, manager_api_token)
-                    && !url.is_empty() && !token.is_empty() {
-                        let rx = outbound_tx.subscribe();
-                        let _ = maintain_proxy_connection(
-                            settings.clone(),
-                            &worker_mgr,
-                            url,
-                            token,
-                            rx,
-                        )
-                        .await;
-                    }
+                    && !url.is_empty()
+                    && !token.is_empty()
+                {
+                    let rx = outbound_tx.subscribe();
+                    let _ =
+                        maintain_proxy_connection(settings.clone(), &worker_mgr, url, token, rx)
+                            .await;
+                }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }

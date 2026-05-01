@@ -241,6 +241,12 @@ impl TauriLoginToken {
         TauriLoginToken(Arc::new(Mutex::new(Some(token))))
     }
 
+    /// Construct in the empty (unset) state. Used when the Host Control Hub will
+    /// later push a fresh token over `/ws/tauri_ipc` on every Tauri reconnect.
+    pub fn empty() -> Self {
+        TauriLoginToken(Arc::new(Mutex::new(None)))
+    }
+
     /// Verify and consume the token. Returns true only once for the correct token.
     pub fn verify_and_consume(&self, candidate: &str) -> bool {
         let mut guard = self.0.lock().unwrap();
@@ -285,6 +291,7 @@ pub async fn run() -> Result<Server, DeskError> {
             security_approval_sender: None,
             service_op_sender: None,
         },
+        None,
     )
     .await
 }
@@ -292,6 +299,7 @@ pub async fn run() -> Result<Server, DeskError> {
 pub async fn run_with_channels(
     settings: &Settings,
     channels: ExternalChannels,
+    host_control_hub: Option<Arc<host_control::HostControlHub>>,
 ) -> Result<Server, DeskError> {
     // Create a lock file to prevent multiple instances of the server from running simultaneously.
     let lock_file_path = env::temp_dir().join("lcxl_remote_desk_server.lock");
@@ -344,8 +352,43 @@ pub async fn run_with_channels(
     let secret_key = Key::generate();
     let shared_settings_data = web::Data::from(shared_settings.clone());
 
+    // The TauriLoginToken is shared between the HTTP `/login_tauri` route (which
+    // verifies + consumes) and the host-control `/ws/tauri_ipc` endpoint (which
+    // refreshes the token on every Tauri reconnect). Cloning the struct shares
+    // the inner `Arc<Mutex<>>`.
+    let shared_tauri_login_token: TauriLoginToken = match channels.tauri_login_token.clone() {
+        Some(tok) => TauriLoginToken::new(tok),
+        // The hub will push a fresh token via ws Ready first frame; legacy mode
+        // without a hub leaves it empty (no Tauri client to receive one).
+        None => TauriLoginToken::empty(),
+    };
     let tauri_login_token: web::Data<Option<TauriLoginToken>> =
-        web::Data::new(channels.tauri_login_token.clone().map(TauriLoginToken::new));
+        web::Data::new(Some(shared_tauri_login_token.clone()));
+
+    // Build host-control endpoint state once, so portable + daemon can mount
+    // identical routes. The state is registered as actix Data inside
+    // `register_routes` for both the inline portable App below and any
+    // future caller of `configure_api_routes`.
+    let host_control_endpoint_state: Option<Arc<host_control::endpoint::EndpointState>> =
+        if let Some(hub) = host_control_hub.clone() {
+            let ipc_token = shared_settings_data
+                .read()
+                .await
+                .system
+                .tauri_ipc_token
+                .clone()
+                .unwrap_or_default();
+            if ipc_token.is_empty() {
+                warn!("tauri_ipc_token is empty; /ws/tauri_ipc will reject all connections");
+            }
+            Some(Arc::new(host_control::endpoint::EndpointState::new(
+                hub,
+                ipc_token,
+                shared_tauri_login_token.clone(),
+            )))
+        } else {
+            None
+        };
 
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
 
@@ -417,6 +460,7 @@ pub async fn run_with_channels(
         let security_approval_sender = security_approval_sender.clone();
         let service_op_sender = service_op_sender.clone();
         let validator_data = validator_data.clone();
+        let host_control_endpoint_state = host_control_endpoint_state.clone();
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
@@ -498,6 +542,23 @@ pub async fn run_with_channels(
                         log::info!("Registering signaling route at /api/desk/signaling");
                         cfg.service(open_signaling_handle);
                     }
+                }
+            })
+            .configure(|cfg| {
+                if let Some(state) = host_control_endpoint_state.clone() {
+                    log::info!(
+                        "Registering host control routes (mode={:?})",
+                        state.hub.mode()
+                    );
+                    cfg.app_data(web::Data::from(state))
+                        .route(
+                            "/ws/tauri_ipc",
+                            web::get().to(host_control::endpoint::ws_handler),
+                        )
+                        .route(
+                            "/ws/host_upstream",
+                            web::get().to(host_control::endpoint::ws_upstream_handler),
+                        );
                 }
             })
             // TODO need to login for these routes
@@ -608,4 +669,53 @@ pub async fn run_with_channels(
     }
     let server = http_server.run();
     Ok(server)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Constant-time eq is correct on equal slices.
+    #[test]
+    fn constant_time_eq_equal() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn constant_time_eq_unequal() {
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hellos")); // length mismatch
+    }
+
+    // TauriLoginToken::empty constructs in the unset state — verify always
+    // fails until a refresh sets a token.
+    #[test]
+    fn tauri_login_token_empty_never_validates() {
+        let token = TauriLoginToken::empty();
+        assert!(!token.verify_and_consume(""));
+        assert!(!token.verify_and_consume("anything"));
+    }
+
+    // After refresh, the empty token validates exactly once with the new value.
+    #[test]
+    fn tauri_login_token_empty_refresh_then_consume() {
+        let token = TauriLoginToken::empty();
+        token.refresh("new-tok".to_string());
+        assert!(!token.verify_and_consume("wrong"));
+        assert!(token.verify_and_consume("new-tok"));
+        // Already consumed.
+        assert!(!token.verify_and_consume("new-tok"));
+    }
+
+    // The shared inner Arc<Mutex> means cloning the struct gives a view onto
+    // the same state — required for the HTTP route + ws endpoint to stay in sync.
+    #[test]
+    fn tauri_login_token_clone_shares_state() {
+        let a = TauriLoginToken::empty();
+        let b = a.clone();
+        a.refresh("via-a".to_string());
+        assert!(b.verify_and_consume("via-a"));
+        // After consuming via b, a sees the consumed (empty) state too.
+        assert!(!a.verify_and_consume("via-a"));
+    }
 }

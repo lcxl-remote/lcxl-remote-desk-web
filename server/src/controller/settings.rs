@@ -58,9 +58,10 @@ pub async fn update_settings(
 
     // Check auto_start flag and update system registry/startup folder if needed
     if let Some(auto_start_enable) = params.auto_start
-        && let Err(e) = update_auto_start_status(auto_start_enable) {
-            log::error!("Failed to update auto start status: {:?}", e);
-        }
+        && let Err(e) = update_auto_start_status(auto_start_enable)
+    {
+        log::error!("Failed to update auto start status: {:?}", e);
+    }
 
     settings.system = params;
     // save new settings to file
@@ -283,10 +284,9 @@ pub async fn submit_security_approval(
         approvals.is_empty()
     };
 
-    if empty
-        && let Some(s) = &**sender {
-            let _ = s.send(SecurityApprovalCommand::Finish);
-        }
+    if empty && let Some(s) = &**sender {
+        let _ = s.send(SecurityApprovalCommand::Finish);
+    }
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true)))
 }
 

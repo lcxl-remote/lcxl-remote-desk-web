@@ -220,16 +220,16 @@ pub async fn handle_manager_terminal_start(
                 );
                 if let Ok(model) = model
                     && let Ok(text) = serde_json::to_string(&model)
-                        && let Err(e) = monitor_sender
-                            .sender
-                            .send(DeskSessionMessage::Text(ByteString::from(text)))
-                        {
-                            log::warn!(
-                                "Failed to send TerminalClosed to {}: {}",
-                                monitor_connection_id,
-                                e
-                            );
-                        }
+                    && let Err(e) = monitor_sender
+                        .sender
+                        .send(DeskSessionMessage::Text(ByteString::from(text)))
+                {
+                    log::warn!(
+                        "Failed to send TerminalClosed to {}: {}",
+                        monitor_connection_id,
+                        e
+                    );
+                }
                 break;
             }
         }
@@ -251,11 +251,12 @@ pub async fn handle_manager_terminal_start(
                         Some(&data),
                     );
                     if let Ok(model) = model
-                        && let Ok(text) = serde_json::to_string(&model) {
-                            let _ = session_sender
-                                .sender
-                                .send(DeskSessionMessage::Text(ByteString::from(text)));
-                        }
+                        && let Ok(text) = serde_json::to_string(&model)
+                    {
+                        let _ = session_sender
+                            .sender
+                            .send(DeskSessionMessage::Text(ByteString::from(text)));
+                    }
                 }
                 Err(e) => {
                     log::warn!(
@@ -279,11 +280,12 @@ pub async fn handle_manager_terminal_start(
         );
 
         if let Ok(model) = model
-            && let Ok(text) = serde_json::to_string(&model) {
-                let _ = session_sender
-                    .sender
-                    .send(DeskSessionMessage::Text(ByteString::from(text)));
-            }
+            && let Ok(text) = serde_json::to_string(&model)
+        {
+            let _ = session_sender
+                .sender
+                .send(DeskSessionMessage::Text(ByteString::from(text)));
+        }
     });
 
     let writer = pair.master.take_writer()?;
@@ -306,12 +308,13 @@ pub async fn handle_manager_terminal_start(
         None,
     );
     if let Ok(model) = model
-        && let Ok(text) = serde_json::to_string(&model) {
-            let _ = desk_session
-                .session
-                .sender
-                .send(DeskSessionMessage::Text(ByteString::from(text)));
-        }
+        && let Ok(text) = serde_json::to_string(&model)
+    {
+        let _ = desk_session
+            .session
+            .sender
+            .send(DeskSessionMessage::Text(ByteString::from(text)));
+    }
     Ok(())
 }
 

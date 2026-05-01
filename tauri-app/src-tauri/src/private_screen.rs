@@ -35,12 +35,13 @@ impl PrivateScreenManager {
                         PrivateScreenCommand::Show(from_connection_id) => {
                             if let Some(controlled_by_connection_id) =
                                 &self.controlled_by_connection_id
-                                && controlled_by_connection_id != &from_connection_id {
-                                    log::warn!(
-                                        "Private screen is already controlled by another connection"
-                                    );
-                                    continue;
-                                }
+                                && controlled_by_connection_id != &from_connection_id
+                            {
+                                log::warn!(
+                                    "Private screen is already controlled by another connection"
+                                );
+                                continue;
+                            }
 
                             if let Err(e) = self.show_window(&handle, &state_sender) {
                                 log::error!("Failed to show private screen: {}", e);
@@ -63,12 +64,13 @@ impl PrivateScreenManager {
                         PrivateScreenCommand::Hide(from_connection_id) => {
                             if let Some(controlled_by_connection_id) =
                                 &self.controlled_by_connection_id
-                                && controlled_by_connection_id != &from_connection_id {
-                                    log::warn!(
-                                        "Private screen is already controlled by another connection"
-                                    );
-                                    continue;
-                                }
+                                && controlled_by_connection_id != &from_connection_id
+                            {
+                                log::warn!(
+                                    "Private screen is already controlled by another connection"
+                                );
+                                continue;
+                            }
                             if let Err(e) = Self::hide_window(&handle) {
                                 log::error!("Failed to hide private screen: {}", e);
                             }

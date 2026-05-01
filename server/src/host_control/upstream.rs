@@ -164,14 +164,14 @@ pub fn spawn_upstream_ws_task(
                             .send(awc::ws::Message::Text(json.into()))
                             .await
                             .is_err()
-                        {
-                            warn!("[Upstream] failed to send Ready");
-                            forwarder.mark_disconnected();
-                            forwarder_drain_pending_inbound(&forwarder);
-                            tokio::time::sleep(backoff).await;
-                            backoff = next_backoff(backoff);
-                            continue;
-                        }
+                    {
+                        warn!("[Upstream] failed to send Ready");
+                        forwarder.mark_disconnected();
+                        forwarder_drain_pending_inbound(&forwarder);
+                        tokio::time::sleep(backoff).await;
+                        backoff = next_backoff(backoff);
+                        continue;
+                    }
 
                     'session: loop {
                         tokio::select! {

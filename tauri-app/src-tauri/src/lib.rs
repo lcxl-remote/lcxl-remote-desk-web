@@ -77,16 +77,18 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
     // Start IPC client in an actix runtime thread.
     let token_holder_ipc = Arc::clone(&token_holder);
     let ipc_token_clone = ipc_token.clone();
+    let daemon_ws_url = "ws://127.0.0.1:8082/ws/tauri_ipc".to_string();
     std::thread::spawn(move || {
         let system = actix_rt::System::new();
         system.block_on(async move {
             ipc_client::run_ipc_loop(
+                daemon_ws_url,
                 ipc_token_clone,
                 ps_cmd_tx,
                 wb_cmd_tx,
                 sa_tx,
                 svc_op_tx,
-                state_rx,
+                Some(state_rx),
                 token_holder_ipc,
             )
             .await;
@@ -149,10 +151,10 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                         if let TrayIconEvent::DoubleClick { .. } = event
                             && let Some(window) =
                                 tray.app_handle().get_webview_window(MAIN_WINDOW_LABEL)
-                            {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                        {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
                     })
                     .build(app)
                     .expect("Failed to create tray icon");
@@ -220,12 +222,13 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
             ..
         } => {
             if label == MAIN_WINDOW_LABEL
-                && let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
-                    api.prevent_close();
-                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                        let _ = window.hide();
-                    }
+                && let tauri::WindowEvent::CloseRequested { api, .. } = window_event
+            {
+                api.prevent_close();
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                    let _ = window.hide();
                 }
+            }
         }
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !IS_EXITING.load(Ordering::SeqCst) {
@@ -241,17 +244,18 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
 /// Find the lcxl-remote-desk-server sidecar executable next to the Tauri app binary.
 fn find_server_binary() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent() {
-            #[cfg(target_os = "windows")]
-            let name = "lcxl-remote-desk-server.exe";
-            #[cfg(not(target_os = "windows"))]
-            let name = "lcxl-remote-desk-server";
+        && let Some(dir) = exe.parent()
+    {
+        #[cfg(target_os = "windows")]
+        let name = "lcxl-remote-desk-server.exe";
+        #[cfg(not(target_os = "windows"))]
+        let name = "lcxl-remote-desk-server";
 
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return candidate;
-            }
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return candidate;
         }
+    }
     #[cfg(target_os = "windows")]
     return std::path::PathBuf::from("lcxl-remote-desk-server.exe");
     #[cfg(not(target_os = "windows"))]
@@ -332,10 +336,24 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
         .setup(move |app| {
             let handle = app.handle().clone();
 
-            // Create server → tauri private screen command channel
-            let (cmd_sender, cmd_receiver) = std::sync::mpsc::channel();
-            // Create tauri → server private screen state channel
-            let (state_sender, state_receiver) = tokio::sync::mpsc::unbounded_channel();
+            // Channels for GUI managers — same pattern as service-shell mode.
+            // Senders are cloned: one set for the embedded server (legacy direct
+            // mpsc path; will be removed in Step 6) and one set for ipc_client
+            // which receives broadcast commands from the host control hub.
+            let (ps_cmd_tx, ps_cmd_rx) = std::sync::mpsc::channel::<
+                desk_input_injection::model::host_control::PrivateScreenCommand,
+            >();
+            let (state_tx, state_rx) = tokio::sync::mpsc::unbounded_channel::<
+                desk_input_injection::model::host_control::HostControlEventType,
+            >();
+            let (wb_cmd_tx, wb_cmd_rx) = std::sync::mpsc::channel::<
+                desk_input_injection::model::host_control::WhiteboardCommand,
+            >();
+            let (sa_tx, sa_rx) = std::sync::mpsc::channel::<
+                lcxl_remote_desk_server::model::security_approval::SecurityApprovalCommand,
+            >();
+            let (svc_op_tx, svc_op_rx) =
+                std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
 
             // Read server port from settings before starting server thread
             let server_port = settings.system.port;
@@ -348,81 +366,60 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             // Unless explicitly forced to use production build frontend via args
             if cfg!(debug_assertions) && !settings.args.prod_frontend {
                 log::info!("Debug build detected, using vite dev server url for webview. (Use --prod-frontend to override)");
-                frontend_host_port = "127.0.0.1:5174".to_string(); 
+                frontend_host_port = "127.0.0.1:5174".to_string();
             } else if settings.args.dev_frontend {
                 log::info!("--dev-frontend flag provided, using vite dev server url for webview.");
-                frontend_host_port = "127.0.0.1:5174".to_string(); 
+                frontend_host_port = "127.0.0.1:5174".to_string();
             }
 
             let frontend_url = format!("http://{}", frontend_host_port);
 
-            // Start private screen manager (listen to commands from server)
+            // Start GUI managers (own the receivers).
             let ps_manager = PrivateScreenManager::new(handle.clone(), frontend_url.clone());
+            ps_manager.start(ps_cmd_rx, state_tx);
 
-            // Send command to tauri which from server
-            let (tauri_cmd_sender, tauri_cmd_receiver) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                loop {
-                    match cmd_receiver.recv() {
-                        Ok(server_cmd) => {
-                            if tauri_cmd_sender.send(server_cmd).is_err() {
-                                log::warn!("Tauri private screen command channel closed");
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            log::warn!("Server private screen command channel closed");
-                            break;
-                        }
-                    }
-                }
-            });
-
-            // Start private screen manager
-            ps_manager.start(tauri_cmd_receiver, state_sender);
-
-            // Create whiteboard command channel
-            let (wb_cmd_sender, wb_cmd_receiver) = std::sync::mpsc::channel();
-
-            // Start whiteboard manager
             let wb_manager = WhiteboardManager::new(handle.clone(), frontend_url.clone());
-            wb_manager.start(wb_cmd_receiver);
+            wb_manager.start(wb_cmd_rx);
 
-            // Generate a one-time login token
-            let tauri_token = uuid::Uuid::new_v4().to_string();
-            let tauri_token_for_window = tauri_token.clone();
-
-            // Set up Security Approval Manager
-            let (security_sender, security_receiver) = std::sync::mpsc::channel();
             let sa_manager = crate::security_approval::SecurityApprovalManager::new(handle.clone());
-            sa_manager.start(security_receiver);
+            sa_manager.start(sa_rx);
 
-            // Service op channel: frontend → server → Tauri → ShellExecute(runas)
-            let (service_op_tx, service_op_rx) =
-                std::sync::mpsc::sync_channel::<lcxl_remote_desk_server::ServiceOp>(8);
-
-            // Spawn handler for Install / Uninstall operations
+            // Spawn handler for Install / Uninstall operations.
             std::thread::spawn(move || {
-                while let Ok(op) = service_op_rx.recv() {
+                while let Ok(op) = svc_op_rx.recv() {
                     handle_service_op(op);
                 }
             });
 
-            // Start actix-web server (in a separate thread)
+            // The auto-login token is now delivered via the ws Ready first frame
+            // so the embedded server doesn't need a pre-generated one.
+            // The hub Local owns the broadcast channels for `/ws/tauri_ipc`.
+            let host_control_hub =
+                std::sync::Arc::new(lcxl_remote_desk_server::host_control::HostControlHub::new_local());
+
+            // Direct-mpsc path remains so legacy business code (Step 3 will
+            // migrate it to call the hub) keeps working unchanged.
             let channels = lcxl_remote_desk_server::ExternalChannels {
-                private_screen_cmd_sender: Some(cmd_sender),
-                private_screen_state_receiver: Some(state_receiver),
-                tauri_login_token: Some(tauri_token),
-                whiteboard_cmd_sender: Some(wb_cmd_sender),
-                security_approval_sender: Some(security_sender),
-                service_op_sender: Some(service_op_tx),
+                private_screen_cmd_sender: Some(ps_cmd_tx.clone()),
+                private_screen_state_receiver: Some(state_rx),
+                tauri_login_token: None,
+                whiteboard_cmd_sender: Some(wb_cmd_tx.clone()),
+                security_approval_sender: Some(sa_tx.clone()),
+                service_op_sender: Some(svc_op_tx.clone()),
             };
             let startup_mode = settings.args.startup_mode.clone();
-            // Start actix-web server (in a separate thread)
+            let server_settings = settings.clone();
+            let hub_for_server = host_control_hub.clone();
             std::thread::spawn(move || {
                 let system = actix_rt::System::new();
                 system.block_on(async {
-                    match lcxl_remote_desk_server::run_with_channels(&settings, channels).await {
+                    match lcxl_remote_desk_server::run_with_channels(
+                        &server_settings,
+                        channels,
+                        Some(hub_for_server),
+                    )
+                    .await
+                    {
                         Ok(server) => {
                             if let Err(e) = server.await {
                                 log::error!("Server error: {}", e);
@@ -430,6 +427,35 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         }
                         Err(e) => log::error!("Failed to start server: {}", e),
                     }
+                });
+            });
+
+            // Token holder: ipc_client writes the token after ws Ready, the
+            // window-spawn thread reads it to construct the auto-login URL.
+            let token_holder: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+            // ipc_client connects to the embedded server's `/ws/tauri_ipc` over
+            // loopback. In Step 2 the hub only emits the TauriToken first frame;
+            // Step 3 will route business commands here as well.
+            let ipc_token = settings.system.tauri_ipc_token.clone().unwrap_or_default();
+            let ipc_host = if enable_ipv6 { "[::1]" } else { "127.0.0.1" };
+            let daemon_ws_url = format!("ws://{}:{}/ws/tauri_ipc", ipc_host, server_port);
+            let token_holder_ipc = Arc::clone(&token_holder);
+            std::thread::spawn(move || {
+                let system = actix_rt::System::new();
+                system.block_on(async move {
+                    ipc_client::run_ipc_loop(
+                        daemon_ws_url,
+                        ipc_token,
+                        ps_cmd_tx,
+                        wb_cmd_tx,
+                        sa_tx,
+                        svc_op_tx,
+                        // state_rx is owned by the embedded server in Step 2.
+                        None,
+                        token_holder_ipc,
+                    )
+                    .await;
                 });
             });
 
@@ -525,8 +551,10 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 .build(app)
                 .expect("Failed to create tray icon");
 
-            // Spawn a thread to wait for server readiness and open the main window
+            // Spawn a thread to wait for server readiness + an auto-login token
+            // (delivered via the ws Ready first frame), then open the main window.
             let handle_for_window = handle.clone();
+            let token_holder_win = Arc::clone(&token_holder);
             std::thread::spawn(move || {
                 let server_url = format!("http://{}:{}", host, server_port);
                 let check_url = format!("{}/api/server_info", server_url);
@@ -569,15 +597,30 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                     }
                 }
 
+                // Wait for the auto-login token from ipc_client (60s budget after
+                // server readiness). Service-shell mode uses the same pattern.
+                let token_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                let auto_token: Option<String> = loop {
+                    if std::time::Instant::now() > token_deadline {
+                        log::error!(
+                            "Timeout waiting for auto-login token from /ws/tauri_ipc; opening window without auto-login"
+                        );
+                        break None;
+                    }
+                    if let Some(t) = token_holder_win.lock().unwrap().clone() {
+                        break Some(t);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                };
+
                 // If system is not initialized, go directly to /init to avoid losing the token in redirection
                 // If it is initialized, load main app with token for auto login
-                let window_url = if system_initialized {
-                    format!(
-                        "http://{}?token={}",
-                        frontend_host_port, tauri_token_for_window
-                    )
-                } else {
+                let window_url = if !system_initialized {
                     format!("http://{}/init?tauri=1", frontend_host_port)
+                } else if let Some(token) = auto_token {
+                    format!("http://{}?token={}", frontend_host_port, token)
+                } else {
+                    format!("http://{}", frontend_host_port)
                 };
 
                 log::info!("Opening main window at: {}", window_url);
@@ -634,12 +677,13 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 ..
             } => {
                 if label == MAIN_WINDOW_LABEL
-                    && let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
-                        api.prevent_close();
-                        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                            let _ = window.hide();
-                        }
+                    && let tauri::WindowEvent::CloseRequested { api, .. } = window_event
+                {
+                    api.prevent_close();
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                        let _ = window.hide();
                     }
+                }
             }
             tauri::RunEvent::ExitRequested { api, .. } => {
                 if !IS_EXITING.load(Ordering::SeqCst) {

@@ -211,19 +211,21 @@ pub async fn change_password(
     }
 
     if let Some(new_username) = params.new_username
-        && !new_username.is_empty() {
-            info!(
-                "Change username from {} to {}",
-                settings.user.login_user_name, new_username
-            );
-            settings.user.login_user_name = new_username;
-        }
+        && !new_username.is_empty()
+    {
+        info!(
+            "Change username from {} to {}",
+            settings.user.login_user_name, new_username
+        );
+        settings.user.login_user_name = new_username;
+    }
 
     if let Some(new_password) = params.new_password
-        && !new_password.is_empty() {
-            info!("Change password successfully");
-            settings.user.login_password = new_password;
-        }
+        && !new_password.is_empty()
+    {
+        info!("Change password successfully");
+        settings.user.login_password = new_password;
+    }
 
     // save new settings to file
     settings.save()?;

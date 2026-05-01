@@ -309,43 +309,42 @@ pub async fn handle_clipboard_event(
                     }
                     "image_end" => {
                         if let Some(state) = img_state_arc.lock().await.take()
-                            && state.chunks_received == state.total_chunks {
-                                // Decode base64
-                                if let Ok(png_bytes) = BASE64_STANDARD.decode(&state.data) {
-                                    // Parse PNG to get raw RGBA
-                                    let cursor = std::io::Cursor::new(png_bytes);
-                                    let decoder = png::Decoder::new(cursor);
-                                    if let Ok(mut reader) = decoder.read_info() {
-                                        let mut buf = vec![0; reader.output_buffer_size()];
-                                        let info = reader.next_frame(&mut buf).unwrap();
-                                        let img0 = ClipboardImage {
-                                            width: info.width as usize,
-                                            height: info.height as usize,
-                                            bytes: std::borrow::Cow::Owned(
-                                                buf[..info.buffer_size()].to_vec(),
-                                            ),
-                                        };
-                                        if let Err(e) = helper.set_image_to_clipboard(&img0) {
-                                            log::error!(
-                                                "Failed to set image to local clipboard: {}",
-                                                e
-                                            );
-                                        } else {
-                                            let mut hasher = DefaultHasher::new();
-                                            img0.bytes.hash(&mut hasher);
-                                            hasher.write_usize(img0.width);
-                                            hasher.write_usize(img0.height);
-                                            *w_hash.lock().await = Some(hasher.finish());
-                                        }
-                                    } else {
+                            && state.chunks_received == state.total_chunks
+                        {
+                            // Decode base64
+                            if let Ok(png_bytes) = BASE64_STANDARD.decode(&state.data) {
+                                // Parse PNG to get raw RGBA
+                                let cursor = std::io::Cursor::new(png_bytes);
+                                let decoder = png::Decoder::new(cursor);
+                                if let Ok(mut reader) = decoder.read_info() {
+                                    let mut buf = vec![0; reader.output_buffer_size()];
+                                    let info = reader.next_frame(&mut buf).unwrap();
+                                    let img0 = ClipboardImage {
+                                        width: info.width as usize,
+                                        height: info.height as usize,
+                                        bytes: std::borrow::Cow::Owned(
+                                            buf[..info.buffer_size()].to_vec(),
+                                        ),
+                                    };
+                                    if let Err(e) = helper.set_image_to_clipboard(&img0) {
                                         log::error!(
-                                            "Failed to read PNG info from incoming chunks."
+                                            "Failed to set image to local clipboard: {}",
+                                            e
                                         );
+                                    } else {
+                                        let mut hasher = DefaultHasher::new();
+                                        img0.bytes.hash(&mut hasher);
+                                        hasher.write_usize(img0.width);
+                                        hasher.write_usize(img0.height);
+                                        *w_hash.lock().await = Some(hasher.finish());
                                     }
                                 } else {
-                                    log::error!("Failed to decode base64 clipboard image.");
+                                    log::error!("Failed to read PNG info from incoming chunks.");
                                 }
+                            } else {
+                                log::error!("Failed to decode base64 clipboard image.");
                             }
+                        }
                     }
                     _ => {}
                 }

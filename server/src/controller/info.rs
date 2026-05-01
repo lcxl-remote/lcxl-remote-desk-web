@@ -237,7 +237,6 @@ mod tests {
     use super::*;
     use crate::model::settings::Settings;
     use actix_web::{App, test};
-    
 
     #[actix_web::test]
     async fn test_query_sysinfo() {

@@ -38,9 +38,10 @@ mod windows_impl {
             service_control_handler::register(SERVICE_NAME, move |ctrl| match ctrl {
                 ServiceControl::Stop | ServiceControl::Shutdown => {
                     if let Ok(mut guard) = stop_tx.lock()
-                        && let Some(tx) = guard.take() {
-                            let _ = tx.send(());
-                        }
+                        && let Some(tx) = guard.take()
+                    {
+                        let _ = tx.send(());
+                    }
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -224,10 +225,11 @@ mod windows_impl {
         });
 
         if let Ok(status) = service.query_status()
-            && status.current_state != ServiceState::Stopped {
-                let _ = service.stop();
-                std::thread::sleep(Duration::from_secs(1));
-            }
+            && status.current_state != ServiceState::Stopped
+        {
+            let _ = service.stop();
+            std::thread::sleep(Duration::from_secs(1));
+        }
 
         service.delete()?;
         info!("Service '{SERVICE_NAME}' uninstalled successfully");

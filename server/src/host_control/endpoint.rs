@@ -19,6 +19,7 @@ use tokio::sync::broadcast;
 
 use super::protocol::{ClientRole, HostControlMessage};
 use super::{HostControlEvent, HostControlHub, HubMode, UpstreamSessionId};
+use crate::TauriLoginToken;
 
 /// Constant-time byte comparison for query-string tokens. Returns `false` on
 /// length mismatch and never short-circuits on the first differing byte.
@@ -66,18 +67,23 @@ pub fn check_query_token(
 pub struct EndpointState {
     pub hub: Arc<HostControlHub>,
     pub ipc_token: String,
-    /// Static auto-login token issued to Tauri shells; refresh on each connection.
-    pub tauri_login_token: Arc<std::sync::Mutex<Option<String>>>,
+    /// Auto-login token shared with the HTTP `/login_tauri` route; refreshed on
+    /// every Tauri ws connect so the next webview load can auto-authenticate.
+    pub tauri_login_token: TauriLoginToken,
     /// Used to assign monotonically increasing UpstreamSessionId values.
     pub next_session_id: Arc<AtomicU64>,
 }
 
 impl EndpointState {
-    pub fn new(hub: Arc<HostControlHub>, ipc_token: String) -> Self {
+    pub fn new(
+        hub: Arc<HostControlHub>,
+        ipc_token: String,
+        tauri_login_token: TauriLoginToken,
+    ) -> Self {
         Self {
             hub,
             ipc_token,
-            tauri_login_token: Arc::new(std::sync::Mutex::new(None)),
+            tauri_login_token,
             next_session_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -85,6 +91,18 @@ impl EndpointState {
     fn alloc_session_id(&self) -> UpstreamSessionId {
         self.next_session_id.fetch_add(1, Ordering::AcqRel)
     }
+}
+
+/// Register the host-control WebSocket routes on `cfg`. Both portable and
+/// daemon embed this so the wire surface is identical regardless of mode.
+///
+/// `/ws/tauri_ipc` always accepts Tauri shells. `/ws/host_upstream` is mounted
+/// in all modes for routing simplicity but rejects connections (404) from any
+/// non-Aggregator hub — see `ws_upstream_handler`.
+pub fn register_routes(cfg: &mut web::ServiceConfig, state: Arc<EndpointState>) {
+    cfg.app_data(web::Data::from(state))
+        .route("/ws/tauri_ipc", web::get().to(ws_handler))
+        .route("/ws/host_upstream", web::get().to(ws_upstream_handler));
 }
 
 /// Actix handler for `/ws/tauri_ipc`.
@@ -135,13 +153,14 @@ async fn run_ws_session(
 
     // Issue a fresh tauri_login_token for this session and immediately push it.
     let new_token = uuid::Uuid::new_v4().to_string();
-    *state.tauri_login_token.lock().unwrap() = Some(new_token.clone());
+    state.tauri_login_token.refresh(new_token.clone());
     let token_msg = HostControlMessage::TauriToken { token: new_token };
     if let Ok(json) = serde_json::to_string(&token_msg)
-        && session.text(json).await.is_err() {
-            info!("[HostCtrl/WS] failed to send TauriToken; closing");
-            return;
-        }
+        && session.text(json).await.is_err()
+    {
+        info!("[HostCtrl/WS] failed to send TauriToken; closing");
+        return;
+    }
 
     let mut role: Option<ClientRole> = None;
     let session_id: UpstreamSessionId = state.alloc_session_id();
@@ -450,5 +469,72 @@ mod tests {
             },
             role
         ));
+    }
+
+    // U-15 (extra): bad token rejects with 401 on /ws/tauri_ipc.
+    #[actix_web::test]
+    async fn ws_handler_rejects_bad_token() {
+        use actix_web::{App, test};
+        let hub = Arc::new(HostControlHub::new_local());
+        let state = Arc::new(EndpointState::new(
+            hub,
+            "secret".to_string(),
+            TauriLoginToken::empty(),
+        ));
+        let app =
+            test::init_service(App::new().configure(|cfg| register_routes(cfg, state.clone())))
+                .await;
+
+        // Plain GET (not ws upgrade) — auth runs before upgrade so missing token
+        // is the first failure.
+        let req = test::TestRequest::get()
+            .uri("/ws/tauri_ipc?token=wrong")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 401);
+    }
+
+    // /ws/host_upstream returns 404 on Local hubs (only valid on Aggregator).
+    #[actix_web::test]
+    async fn ws_upstream_handler_404_on_non_aggregator() {
+        use actix_web::{App, test};
+        let hub = Arc::new(HostControlHub::new_local());
+        let state = Arc::new(EndpointState::new(
+            hub,
+            "secret".to_string(),
+            TauriLoginToken::empty(),
+        ));
+        let app =
+            test::init_service(App::new().configure(|cfg| register_routes(cfg, state.clone())))
+                .await;
+        let req = test::TestRequest::get()
+            .uri("/ws/host_upstream?token=secret")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 404);
+    }
+
+    // /ws/host_upstream is reachable on Aggregator (auth runs to completion;
+    // missing ws upgrade headers will then short-circuit, but the route itself
+    // is mounted and not 404).
+    #[actix_web::test]
+    async fn ws_upstream_handler_reachable_on_aggregator() {
+        use actix_web::{App, test};
+        let hub = Arc::new(HostControlHub::new_aggregator());
+        let state = Arc::new(EndpointState::new(
+            hub,
+            "secret".to_string(),
+            TauriLoginToken::empty(),
+        ));
+        let app =
+            test::init_service(App::new().configure(|cfg| register_routes(cfg, state.clone())))
+                .await;
+        let req = test::TestRequest::get()
+            .uri("/ws/host_upstream?token=secret")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        // Without proper ws upgrade headers we expect 400 (Bad Request) rather
+        // than 404 — proves the route exists and the aggregator-mode check passed.
+        assert_ne!(resp.status(), 404);
     }
 }

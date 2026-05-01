@@ -335,9 +335,10 @@ impl NodeTokenValidator for LocalNodeTokenValidator {
             }
             let local_signaling_token = settings.read().await.system.local_signaling_token.clone();
             if let Some(local_token) = local_signaling_token
-                && !local_token.is_empty() {
-                    return crate::constant_time_eq(local_token.as_bytes(), token.as_bytes());
-                }
+                && !local_token.is_empty()
+            {
+                return crate::constant_time_eq(local_token.as_bytes(), token.as_bytes());
+            }
             false
         })
     }
@@ -461,43 +462,43 @@ pub async fn start_desk_session(
                     )
                 };
                 if let (Some(url), Some(token)) = (signaling_url, signaling_token)
-                    && !url.is_empty() && !token.is_empty() {
-                        let mut channels_for_loop = crate::ExternalChannels {
-                            private_screen_cmd_sender: remote_sig_channels
-                                .private_screen_cmd_sender
-                                .clone(),
-                            private_screen_state_receiver: None,
-                            tauri_login_token: remote_sig_channels.tauri_login_token.clone(),
-                            whiteboard_cmd_sender: remote_sig_channels
-                                .whiteboard_cmd_sender
-                                .clone(),
-                            security_approval_sender: remote_sig_channels
-                                .security_approval_sender
-                                .clone(),
-                            service_op_sender: None,
-                        };
+                    && !url.is_empty()
+                    && !token.is_empty()
+                {
+                    let mut channels_for_loop = crate::ExternalChannels {
+                        private_screen_cmd_sender: remote_sig_channels
+                            .private_screen_cmd_sender
+                            .clone(),
+                        private_screen_state_receiver: None,
+                        tauri_login_token: remote_sig_channels.tauri_login_token.clone(),
+                        whiteboard_cmd_sender: remote_sig_channels.whiteboard_cmd_sender.clone(),
+                        security_approval_sender: remote_sig_channels
+                            .security_approval_sender
+                            .clone(),
+                        service_op_sender: None,
+                    };
 
-                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                        channels_for_loop.private_screen_state_receiver = Some(rx);
-                        if let Some(btx) = &remote_sig_broadcast_tx {
-                            let mut brx = btx.subscribe();
-                            actix_web::rt::spawn(async move {
-                                while let Ok(event) = brx.recv().await {
-                                    if tx.send(event).is_err() {
-                                        break;
-                                    }
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    channels_for_loop.private_screen_state_receiver = Some(rx);
+                    if let Some(btx) = &remote_sig_broadcast_tx {
+                        let mut brx = btx.subscribe();
+                        actix_web::rt::spawn(async move {
+                            while let Ok(event) = brx.recv().await {
+                                if tx.send(event).is_err() {
+                                    break;
                                 }
-                            });
-                        }
-
-                        let _ = maintain_signaling_connection(
-                            remote_sig_settings.clone(),
-                            channels_for_loop,
-                            url,
-                            token,
-                        )
-                        .await;
+                            }
+                        });
                     }
+
+                    let _ = maintain_signaling_connection(
+                        remote_sig_settings.clone(),
+                        channels_for_loop,
+                        url,
+                        token,
+                    )
+                    .await;
+                }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
@@ -527,43 +528,43 @@ pub async fn start_desk_session(
                     )
                 };
                 if let (Some(url), Some(token)) = (manager_url, manager_api_token)
-                    && !url.is_empty() && !token.is_empty() {
-                        let mut channels_for_loop = crate::ExternalChannels {
-                            private_screen_cmd_sender: remote_mgr_channels
-                                .private_screen_cmd_sender
-                                .clone(),
-                            private_screen_state_receiver: None,
-                            tauri_login_token: remote_mgr_channels.tauri_login_token.clone(),
-                            whiteboard_cmd_sender: remote_mgr_channels
-                                .whiteboard_cmd_sender
-                                .clone(),
-                            security_approval_sender: remote_mgr_channels
-                                .security_approval_sender
-                                .clone(),
-                            service_op_sender: None,
-                        };
+                    && !url.is_empty()
+                    && !token.is_empty()
+                {
+                    let mut channels_for_loop = crate::ExternalChannels {
+                        private_screen_cmd_sender: remote_mgr_channels
+                            .private_screen_cmd_sender
+                            .clone(),
+                        private_screen_state_receiver: None,
+                        tauri_login_token: remote_mgr_channels.tauri_login_token.clone(),
+                        whiteboard_cmd_sender: remote_mgr_channels.whiteboard_cmd_sender.clone(),
+                        security_approval_sender: remote_mgr_channels
+                            .security_approval_sender
+                            .clone(),
+                        service_op_sender: None,
+                    };
 
-                        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                        channels_for_loop.private_screen_state_receiver = Some(rx);
-                        if let Some(btx) = &remote_mgr_broadcast_tx {
-                            let mut brx = btx.subscribe();
-                            actix_web::rt::spawn(async move {
-                                while let Ok(event) = brx.recv().await {
-                                    if tx.send(event).is_err() {
-                                        break;
-                                    }
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    channels_for_loop.private_screen_state_receiver = Some(rx);
+                    if let Some(btx) = &remote_mgr_broadcast_tx {
+                        let mut brx = btx.subscribe();
+                        actix_web::rt::spawn(async move {
+                            while let Ok(event) = brx.recv().await {
+                                if tx.send(event).is_err() {
+                                    break;
                                 }
-                            });
-                        }
-
-                        let _ = maintain_signaling_connection(
-                            remote_mgr_settings.clone(),
-                            channels_for_loop,
-                            url,
-                            token,
-                        )
-                        .await;
+                            }
+                        });
                     }
+
+                    let _ = maintain_signaling_connection(
+                        remote_mgr_settings.clone(),
+                        channels_for_loop,
+                        url,
+                        token,
+                    )
+                    .await;
+                }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
@@ -834,12 +835,12 @@ impl DeskSession {
                                 SignalingType::PrivateScreenStateChanged,
                                 Some(from_connection_id),
                                 Some(&data),
-                            )
-                                && let Ok(text) = serde_json::to_string(&model) {
-                                    let _ = sender.sender.send(DeskSessionMessage::Text(
-                                        bytestring::ByteString::from(text),
-                                    ));
-                                }
+                            ) && let Ok(text) = serde_json::to_string(&model)
+                            {
+                                let _ = sender.sender.send(DeskSessionMessage::Text(
+                                    bytestring::ByteString::from(text),
+                                ));
+                            }
                         }
                         HostControlEventType::PrivateScreenInited(_) => {
                             // Ignored or handle appropriately
@@ -855,12 +856,12 @@ impl DeskSession {
                                 SignalingType::PrivateScreenStateChanged,
                                 None,
                                 Some(&data),
-                            )
-                                && let Ok(text) = serde_json::to_string(&model) {
-                                    let _ = sender.sender.send(DeskSessionMessage::Text(
-                                        bytestring::ByteString::from(text),
-                                    ));
-                                }
+                            ) && let Ok(text) = serde_json::to_string(&model)
+                            {
+                                let _ = sender.sender.send(DeskSessionMessage::Text(
+                                    bytestring::ByteString::from(text),
+                                ));
+                            }
                         }
                         HostControlEventType::PrivateScreenUnknownError(
                             from_connection_id_opt,
@@ -884,12 +885,12 @@ impl DeskSession {
                                     SignalingType::PrivateScreenStateChanged,
                                     Some(from_connection_id),
                                     Some(&data),
-                                )
-                                    && let Ok(text) = serde_json::to_string(&model) {
-                                        let _ = sender.sender.send(DeskSessionMessage::Text(
-                                            bytestring::ByteString::from(text),
-                                        ));
-                                    }
+                                ) && let Ok(text) = serde_json::to_string(&model)
+                                {
+                                    let _ = sender.sender.send(DeskSessionMessage::Text(
+                                        bytestring::ByteString::from(text),
+                                    ));
+                                }
                             }
                         }
                         HostControlEventType::PrivateScreenHotkeyRegisterError => {
@@ -1311,9 +1312,10 @@ impl DeskSession {
                     log::info!("RTC ice connection state has changed {connection_state}");
                     let state = WebRTConnectionState::from(&connection_state);
                     if state != WebRTConnectionState::Init
-                        && let Err(error) = ice_state_change_sender.send(state) {
-                            log::error!("Failed to send connection state: {}", error);
-                        }
+                        && let Err(error) = ice_state_change_sender.send(state)
+                    {
+                        log::error!("Failed to send connection state: {}", error);
+                    }
 
                     Box::pin(async {})
                 },
@@ -1329,9 +1331,10 @@ impl DeskSession {
                 log::info!("Peer connection state has changed: {s}");
                 let state = WebRTConnectionState::from(&s);
                 if state == WebRTConnectionState::Closed
-                    && let Err(error) = peer_state_change_sender.send(state.clone()) {
-                        log::error!("Failed to send connection state: {}", error);
-                    }
+                    && let Err(error) = peer_state_change_sender.send(state.clone())
+                {
+                    log::error!("Failed to send connection state: {}", error);
+                }
 
                 if s == RTCPeerConnectionState::Closed
                     || s == RTCPeerConnectionState::Failed
@@ -1673,17 +1676,18 @@ impl DeskSession {
                     (pending_cursor_update.as_ref(), channel_opt)
                     && channel.ready_state()
                         == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-                        && let Ok(json) = serde_json::to_string(cursor_data)
-                            && channel.send_text(json).await.is_ok() {
-                                log::info!(
-                                    "Cursor update sent: visible={}, shape_id={}, screen_width={}, screen_height={}",
-                                    cursor_data.visible,
-                                    cursor_data.shape_id,
-                                    cursor_data.screen_width,
-                                    cursor_data.screen_height
-                                );
-                                pending_cursor_update = None;
-                            }
+                    && let Ok(json) = serde_json::to_string(cursor_data)
+                    && channel.send_text(json).await.is_ok()
+                {
+                    log::info!(
+                        "Cursor update sent: visible={}, shape_id={}, screen_width={}, screen_height={}",
+                        cursor_data.visible,
+                        cursor_data.shape_id,
+                        cursor_data.screen_width,
+                        cursor_data.screen_height
+                    );
+                    pending_cursor_update = None;
+                }
             } else {
                 pending_cursor_update = None;
             }
@@ -1834,13 +1838,14 @@ impl DeskSession {
                 let result = capture.get_buffer();
                 if let Err(error) = &result {
                     if let desk_capture_engine::error::CaptureError::CustomError(err) = error
-                        && err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
-                            // recreate audio capture
-                            log::warn!("Failed to get audio buffer, recreate audio capture");
-                            capture = create_audio_capture(&desk_settings)?;
-                            capture.start()?;
-                            continue;
-                        }
+                        && err.error_code == DeskErrorCode::ACTION_NEED_RETRY
+                    {
+                        // recreate audio capture
+                        log::warn!("Failed to get audio buffer, recreate audio capture");
+                        capture = create_audio_capture(&desk_settings)?;
+                        capture.start()?;
+                        continue;
+                    }
                     log::error!("Failed to get audio buffer, error: {}", error);
                     break;
                 }
@@ -2217,17 +2222,19 @@ impl DeskSession {
         info!("Receive update desk settings: {:?}", desk_settings);
 
         if let Some(from_connection_id) = &signaling_model.from_connection_id
-            && let Some(peer_connection) = self.rtc_peer_connection_map.get(from_connection_id) {
-                let peer_connection = peer_connection.read().await;
-                let mut signaling_state = peer_connection.signaling_state.write().await;
-                signaling_state.wayland_control_mode = desk_settings.wayland_control_mode.clone();
-            }
+            && let Some(peer_connection) = self.rtc_peer_connection_map.get(from_connection_id)
+        {
+            let peer_connection = peer_connection.read().await;
+            let mut signaling_state = peer_connection.signaling_state.write().await;
+            signaling_state.wayland_control_mode = desk_settings.wayland_control_mode.clone();
+        }
 
         // notify the new desk settings to the capture screen task
         if let Some(sender) = &self.update_setting_sender
-            && let Err(e) = sender.send(WebRTConnectionState::UpdateSettings(desk_settings)) {
-                error!("Failed to send update settings: {}", e);
-            }
+            && let Err(e) = sender.send(WebRTConnectionState::UpdateSettings(desk_settings))
+        {
+            error!("Failed to send update settings: {}", e);
+        }
 
         Ok(())
     }

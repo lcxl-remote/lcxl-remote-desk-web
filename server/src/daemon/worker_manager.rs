@@ -86,9 +86,8 @@ impl NativeWindowsChild {
     fn kill(&self) -> std::io::Result<()> {
         use windows::Win32::System::Threading::TerminateProcess;
         unsafe {
-            TerminateProcess(self.raw_handle(), 1).map_err(|e| {
-                std::io::Error::other(format!("TerminateProcess: {e}"))
-            })
+            TerminateProcess(self.raw_handle(), 1)
+                .map_err(|e| std::io::Error::other(format!("TerminateProcess: {e}")))
         }
     }
 

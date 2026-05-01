@@ -228,11 +228,12 @@ async fn run_ws_session(
     bridge.tauri_login_token.refresh(new_token.clone());
     let token_msg = DaemonToTauriMsg::TauriToken { token: new_token };
     if let Ok(json) = serde_json::to_string(&token_msg)
-        && session.text(json).await.is_err() {
-            info!("[TauriIpc] Failed to send TauriToken, closing");
-            on_disconnect(&bridge);
-            return;
-        }
+        && session.text(json).await.is_err()
+    {
+        info!("[TauriIpc] Failed to send TauriToken, closing");
+        on_disconnect(&bridge);
+        return;
+    }
 
     let mut ws_rx = bridge.ws_tx.subscribe();
 
