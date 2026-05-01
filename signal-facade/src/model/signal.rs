@@ -173,9 +173,7 @@ impl SignalingModel {
             signaling_type,
             None,
             to_connection_id,
-            signaling_data
-                .map(serde_json::to_value)
-                .transpose()?,
+            signaling_data.map(serde_json::to_value).transpose()?,
             None,
         ))
     }
@@ -197,9 +195,7 @@ impl SignalingModel {
             signaling_type,
             from_connection_id,
             to_connection_id,
-            signaling_data
-                .map(serde_json::to_value)
-                .transpose()?,
+            signaling_data.map(serde_json::to_value).transpose()?,
             Some(response_state),
         ))
     }

@@ -46,12 +46,13 @@ pub async fn list_files(
     };
 
     if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0 {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::new(response_state.error_code),
-                &response_state.message.clone().unwrap_or_default(),
-            );
-        }
+        && response_state.error_code != 0
+    {
+        return DeskSignalFacadeError::custom_error(
+            DeskErrorCode::new(response_state.error_code),
+            &response_state.message.clone().unwrap_or_default(),
+        );
+    }
 
     let file_list_response: FileListResponse = response.get_data()?;
     Ok(HttpResponse::Ok().json(file_list_response))
@@ -99,12 +100,13 @@ pub async fn delete_file(
     };
 
     if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0 {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::new(response_state.error_code),
-                &response_state.message.clone().unwrap_or_default(),
-            );
-        }
+        && response_state.error_code != 0
+    {
+        return DeskSignalFacadeError::custom_error(
+            DeskErrorCode::new(response_state.error_code),
+            &response_state.message.clone().unwrap_or_default(),
+        );
+    }
 
     Ok(HttpResponse::Ok().finish())
 }

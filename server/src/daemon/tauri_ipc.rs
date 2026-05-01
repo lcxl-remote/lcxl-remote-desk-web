@@ -1,6 +1,4 @@
-use crate::model::security_approval::{
-    PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse,
-};
+use crate::model::security_approval::SecurityApprovalCommand;
 use crate::{ExternalChannels, ServiceOp, TauriIsAdminOverride, TauriLoginToken};
 use actix_web::{HttpRequest, HttpResponse, web};
 use desk_input_injection::model::host_control::{
@@ -304,25 +302,12 @@ async fn run_ws_session(
 
 fn on_disconnect(bridge: &TauriIpcBridge) {
     *bridge.tauri_is_admin.lock().unwrap() = None;
-    deny_all_pending_approvals();
+    // Approval lifecycle is now owned by `HostControlHub`. Per-disconnect denial
+    // happens in the hub itself once the daemon switches to Aggregator mode
+    // (Step 4). For Step 3, the legacy mpsc forwarder threads above still pump
+    // private-screen / whiteboard / service-op traffic; they are torn down with
+    // the bridge in Step 6.
     info!("[TauriIpc] Tauri shell disconnected");
-}
-
-/// Deny all outstanding security approval requests so callers are not left blocked.
-fn deny_all_pending_approvals() {
-    let mut pending = PENDING_APPROVALS.lock().unwrap();
-    if !pending.is_empty() {
-        warn!(
-            "[TauriIpc] Denying {} pending approval(s) due to Tauri disconnect",
-            pending.len()
-        );
-        for (_, tx) in pending.drain() {
-            let _ = tx.send(SecurityApprovalResponse {
-                approved: false,
-                remember: false,
-            });
-        }
-    }
 }
 
 fn forward_to_ws(tx: &broadcast::Sender<String>, msg: &DaemonToTauriMsg) {

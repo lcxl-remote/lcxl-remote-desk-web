@@ -99,8 +99,9 @@ pub struct ApiRouteConfig {
     pub settings: web::Data<SharedSettings>,
     pub tauri_login_token: web::Data<Option<TauriLoginToken>>,
     pub connection_map: web::Data<desk_signal::model::SharedConnectionMap>,
-    pub security_approval_sender:
-        web::Data<Option<crate::model::security_approval::SecurityApprovalSender>>,
+    /// Optional unified host-control hub. Wired into the security-approval submit
+    /// endpoint and (in Aggregator mode) the host-control ws routes.
+    pub host_control_hub: web::Data<Option<Arc<host_control::HostControlHub>>>,
     pub service_op_sender: web::Data<Option<std::sync::mpsc::SyncSender<ServiceOp>>>,
     pub tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
     pub startup_mode: StartupMode,
@@ -133,7 +134,7 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
         settings,
         tauri_login_token,
         connection_map,
-        security_approval_sender,
+        host_control_hub,
         service_op_sender,
         tauri_is_admin,
         startup_mode,
@@ -142,7 +143,7 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
     cfg.app_data(settings)
         .app_data(tauri_login_token)
         .app_data(connection_map)
-        .app_data(security_approval_sender)
+        .app_data(host_control_hub)
         .app_data(service_op_sender)
         .app_data(
             web::JsonConfig::default()
@@ -416,7 +417,15 @@ pub async fn run_with_channels(
             None
         };
 
-    let security_approval_sender = web::Data::new(channels.security_approval_sender.clone());
+    // For Default / DeskServer modes that don't yet have a hub injected, fall back
+    // to a Local hub so business code never sees a None. Approvals deny-fast when
+    // no Tauri shell is connected (intended fallback for headless DeskServer).
+    let host_control_hub_arc: Arc<host_control::HostControlHub> = match host_control_hub.clone() {
+        Some(h) => h,
+        None => Arc::new(host_control::HostControlHub::new_local()),
+    };
+    let host_control_hub_data: web::Data<Option<Arc<host_control::HostControlHub>>> =
+        web::Data::new(Some(host_control_hub_arc.clone()));
     let service_op_sender = web::Data::new(channels.service_op_sender.clone());
 
     // If this instance runs signaling, ensure local_signaling_token is generated and persisted
@@ -443,8 +452,11 @@ pub async fn run_with_channels(
         info!("Starting desk session");
         let settings_clone = shared_settings_data.clone();
         let startup_mode_clone = startup_mode.clone();
+        let session_hub = host_control_hub_arc.clone();
         actix_web::rt::spawn(async move {
-            if let Err(e) = start_desk_session(settings_clone, channels, startup_mode_clone).await {
+            if let Err(e) =
+                start_desk_session(settings_clone, channels, startup_mode_clone, session_hub).await
+            {
                 error!("Desk session error: {}", e);
             }
         });
@@ -457,7 +469,7 @@ pub async fn run_with_channels(
         let turn_api_state = turn_api_state.clone();
         let startup_mode = startup_mode.clone();
         let tauri_login_token = tauri_login_token.clone();
-        let security_approval_sender = security_approval_sender.clone();
+        let host_control_hub_data = host_control_hub_data.clone();
         let service_op_sender = service_op_sender.clone();
         let validator_data = validator_data.clone();
         let host_control_endpoint_state = host_control_endpoint_state.clone();
@@ -498,7 +510,7 @@ pub async fn run_with_channels(
             .app_data(shared_settings_data.clone())
             .app_data(tauri_login_token.clone())
             .app_data(connection_map.clone())
-            .app_data(security_approval_sender.clone())
+            .app_data(host_control_hub_data.clone())
             .app_data(service_op_sender.clone())
             .app_data(validator_data.clone())
             .configure(|cfg| {

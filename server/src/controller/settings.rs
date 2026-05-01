@@ -5,9 +5,9 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::model::security_approval::{
-    PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse, SecurityApprovalSender,
-};
+use std::sync::Arc;
+
+use crate::host_control::{ApprovalResponse, HostControlHub};
 use crate::model::settings::{LogSettings, SharedSettings, SystemSettings, TurnClientSettings};
 use crate::service::auto_start::update_auto_start_status;
 use desk_signal_facade::model::security_settings::SecuritySettings;
@@ -270,23 +270,27 @@ pub struct SecurityApprovalSubmitParams {
 #[post("/security-settings/approval/submit")]
 pub async fn submit_security_approval(
     request_json: web::Json<SecurityApprovalSubmitParams>,
-    sender: web::Data<Option<SecurityApprovalSender>>,
+    hub: web::Data<Option<Arc<HostControlHub>>>,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
-    let empty = {
-        let mut approvals = PENDING_APPROVALS.lock().unwrap();
-        if let Some(sender) = approvals.remove(&params.req_id) {
-            let _ = sender.send(SecurityApprovalResponse {
-                approved: params.approved,
-                remember: params.remember,
-            });
-        }
-        approvals.is_empty()
+    let response = ApprovalResponse {
+        approved: params.approved,
+        remember: params.remember,
     };
 
-    if empty && let Some(s) = &**sender {
-        let _ = s.send(SecurityApprovalCommand::Finish);
+    let dispatched = match hub.as_ref() {
+        Some(hub) => hub.submit_approval(&params.req_id, response),
+        None => false,
+    };
+
+    if !dispatched {
+        log::debug!(
+            "submit_security_approval: req_id={} not found locally (hub mode={:?})",
+            params.req_id,
+            hub.as_ref().as_ref().map(|h| h.mode())
+        );
     }
+
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true)))
 }
 

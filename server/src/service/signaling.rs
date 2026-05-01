@@ -56,10 +56,9 @@ use webrtc::{
 };
 use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
+use crate::host_control::HostControlHub;
 use crate::model::data_channel::SignalRequestControlData;
-use crate::model::security_approval::{
-    SecurityApprovalSender, SecurityPermissionType, check_security_permission,
-};
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
 use crate::model::settings::{StartupMode, TraversalMode};
 use crate::service::audio_playback::start_audio_playback;
 use crate::service::data_channel::handle_data_channel_event;
@@ -348,6 +347,7 @@ pub async fn start_desk_session(
     settings: web::Data<SharedSettings>,
     mut channels: crate::ExternalChannels,
     startup_mode: crate::model::settings::StartupMode,
+    host_control_hub: Arc<HostControlHub>,
 ) -> Result<(), DeskError> {
     // Take the Tauri privacy screen receiver and broadcast it
     let broadcast_tx = if let Some(mut rx) = channels.private_screen_state_receiver.take() {
@@ -368,6 +368,7 @@ pub async fn start_desk_session(
     if startup_mode == crate::model::settings::StartupMode::Default {
         let local_settings = settings.clone();
         let local_broadcast_tx = broadcast_tx.clone();
+        let local_hub = host_control_hub.clone();
         let local_channels_clone = crate::ExternalChannels {
             private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
             private_screen_state_receiver: None,
@@ -431,6 +432,7 @@ pub async fn start_desk_session(
                     channels_for_loop,
                     local_url,
                     local_token,
+                    local_hub.clone(),
                 )
                 .await;
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -443,6 +445,7 @@ pub async fn start_desk_session(
     {
         let remote_sig_settings = settings.clone();
         let remote_sig_broadcast_tx = broadcast_tx.clone();
+        let remote_sig_hub = host_control_hub.clone();
         let remote_sig_channels = crate::ExternalChannels {
             private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
             private_screen_state_receiver: None,
@@ -496,6 +499,7 @@ pub async fn start_desk_session(
                         channels_for_loop,
                         url,
                         token,
+                        remote_sig_hub.clone(),
                     )
                     .await;
                 }
@@ -509,6 +513,7 @@ pub async fn start_desk_session(
     {
         let remote_mgr_settings = settings.clone();
         let remote_mgr_broadcast_tx = broadcast_tx.clone();
+        let remote_mgr_hub = host_control_hub.clone();
         let remote_mgr_channels = crate::ExternalChannels {
             private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
             private_screen_state_receiver: None,
@@ -562,6 +567,7 @@ pub async fn start_desk_session(
                         channels_for_loop,
                         url,
                         token,
+                        remote_mgr_hub.clone(),
                     )
                     .await;
                 }
@@ -578,6 +584,7 @@ async fn maintain_signaling_connection(
     mut channels: crate::ExternalChannels,
     signaling_url: String,
     auth_token: String,
+    host_control_hub: Arc<HostControlHub>,
 ) -> Result<(), DeskError> {
     let display_name = {
         let settings = settings.read().await;
@@ -657,6 +664,7 @@ async fn maintain_signaling_connection(
         session_sender,
         CurrentUser::new_admin("server_node"),
         &mut channels,
+        host_control_hub.clone(),
     )
     .await
     {
@@ -730,8 +738,9 @@ pub struct DeskSession {
     pub host_control_helper: Box<dyn HostControlHelper + Send + Sync>,
     /// Whiteboard command sender (available when Tauri is present)
     pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
-    /// Security approval channel sender (available when Tauri is present)
-    pub security_approval_sender: Option<SecurityApprovalSender>,
+    /// Unified host-control hub for approval prompts and (eventually) overlay
+    /// commands. All approval flow now routes through here.
+    pub host_control_hub: Arc<HostControlHub>,
 }
 
 static MDNS_CONN: OnceCell<std::sync::Arc<DnsConn>> = OnceCell::new();
@@ -808,6 +817,7 @@ impl DeskSession {
         session: DeskSessionSender,
         user: CurrentUser,
         channels: &mut crate::ExternalChannels,
+        host_control_hub: Arc<HostControlHub>,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
 
@@ -902,7 +912,6 @@ impl DeskSession {
         }
 
         let whiteboard_cmd_sender = channels.whiteboard_cmd_sender.clone();
-        let security_approval_sender = channels.security_approval_sender.clone();
 
         Ok(Self {
             settings,
@@ -913,7 +922,7 @@ impl DeskSession {
             terminal_map: HashMap::new(),
             host_control_helper: helper,
             whiteboard_cmd_sender,
-            security_approval_sender,
+            host_control_hub,
         })
     }
 }
@@ -1401,7 +1410,7 @@ impl DeskSession {
         let whiteboard_sender_for_dc = self.whiteboard_cmd_sender.clone();
         let from_connection_id_for_dc = from_connection_id.to_string();
         let settings_for_dc = self.settings.clone();
-        let security_sender_for_dc = self.security_approval_sender.clone();
+        let hub_for_dc = self.host_control_hub.clone();
         let cursor_data_channel_for_dc = peer_connection.cursor_data_channel.clone();
         peer_connection
             .rtc_peer_connection
@@ -1413,7 +1422,7 @@ impl DeskSession {
                 let wb_sender = whiteboard_sender_for_dc.clone();
                 let sid = from_connection_id_for_dc.clone();
                 let settings = settings_for_dc.clone();
-                let security_sender = security_sender_for_dc.clone();
+                let hub = hub_for_dc.clone();
                 let cursor_data_channel = cursor_data_channel_for_dc.clone();
                 // Register channel opening handling
                 Box::pin(async move {
@@ -1429,7 +1438,7 @@ impl DeskSession {
                         wb_sender,
                         sid,
                         settings,
-                        security_sender,
+                        hub,
                     )
                     .await;
                     if let Err(error) = result {
@@ -1996,7 +2005,7 @@ impl DeskSession {
                             { self.settings.read().await.security.allow_private_screen };
                         let approved = check_security_permission(
                             &self.settings,
-                            self.security_approval_sender.as_ref(),
+                            &self.host_control_hub,
                             allow_private_screen,
                             SecurityPermissionType::PrivateScreen,
                             Some(from_connection_id.to_string()),
@@ -2259,7 +2268,7 @@ impl DeskSession {
 
         let control_approved = check_security_permission(
             &self.settings,
-            self.security_approval_sender.as_ref(),
+            &self.host_control_hub,
             allow_control,
             SecurityPermissionType::RemoteControl,
             Some(from_connection_id.to_string()),
@@ -2285,7 +2294,7 @@ impl DeskSession {
         let clipboard_approved = if control_data.accept_clipboard_sync {
             check_security_permission(
                 &self.settings,
-                self.security_approval_sender.as_ref(),
+                &self.host_control_hub,
                 allow_clipboard,
                 SecurityPermissionType::ClipboardSync,
                 Some(from_connection_id.to_string()),

@@ -63,11 +63,16 @@ pub async fn run_local_api(
 
     let bridge_data: web::Data<Arc<TauriIpcBridge>> = web::Data::new(Arc::clone(&tauri_bridge));
 
+    // The daemon's ApiRouteConfig does not yet wire the host-control hub: that is
+    // introduced in Step 4 when the daemon switches to Aggregator mode. For now,
+    // the HTTP submit endpoint sees `None` and returns success without dispatch
+    // (the legacy mpsc bridge in tauri_ipc.rs is still authoritative until Step 6).
+    let _ = channels.security_approval_sender;
     let route_config = ApiRouteConfig {
         settings: settings_data.clone(),
         tauri_login_token: login_token_data,
         connection_map,
-        security_approval_sender: web::Data::new(channels.security_approval_sender),
+        host_control_hub: web::Data::new(None),
         service_op_sender: web::Data::new(channels.service_op_sender),
         tauri_is_admin: Some(tauri_is_admin_data),
         startup_mode: StartupMode::ServiceDaemon,

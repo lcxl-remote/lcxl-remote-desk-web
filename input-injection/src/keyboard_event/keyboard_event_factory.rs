@@ -1,7 +1,4 @@
-use crate::{
-    error::InputError,
-    model::data_channel::KeyboardEventHandler,
-};
+use crate::{error::InputError, model::data_channel::KeyboardEventHandler};
 
 #[cfg(target_os = "linux")]
 use crate::keyboard_event::linux;

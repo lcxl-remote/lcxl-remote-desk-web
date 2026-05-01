@@ -134,7 +134,6 @@ pub struct PrivateScreenSettings {
     pub enabled: bool,
 }
 
-
 /// Desk settings
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
 #[serde(default)]

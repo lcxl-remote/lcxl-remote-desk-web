@@ -222,13 +222,14 @@ impl AudioCapture for WasapiAudioCapture {
             let result = self.get_one_buffer();
             if let Err(error) = result {
                 if let CaptureError::WindowsResultError(ref _backtrace, ref windows_error) = error
-                    && windows_error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
-                        log::warn!("audio device is invalidated");
-                        return CaptureError::custom_error(
-                            DeskErrorCode::ACTION_NEED_RETRY,
-                            "Audio device is invalidated, please retry",
-                        );
-                    }
+                    && windows_error.code() == AUDCLNT_E_DEVICE_INVALIDATED
+                {
+                    log::warn!("audio device is invalidated");
+                    return CaptureError::custom_error(
+                        DeskErrorCode::ACTION_NEED_RETRY,
+                        "Audio device is invalidated, please retry",
+                    );
+                }
                 return Err(error);
             }
             let one_buffer = result?;
@@ -389,8 +390,8 @@ impl WasapiAudioCapture {
         unsafe { CoTaskMemFree(Some(p_mix_format as *mut _)) };
         let buffer_frame_count = unsafe { audio_client.GetBufferSize() }?;
 
-        let hns_actual_duration = REFTIMES_PER_SEC * buffer_frame_count as u64
-            / format.Format.nSamplesPerSec as u64;
+        let hns_actual_duration =
+            REFTIMES_PER_SEC * buffer_frame_count as u64 / format.Format.nSamplesPerSec as u64;
 
         let audio_capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }?;
         Ok(WasapiAudioCapture {
@@ -505,7 +506,7 @@ mod tests {
         };
         let mut writer = hound::WavWriter::create("sample/sine.wav", spec).unwrap();
         let dur = time::Duration::from_millis(
-            ((audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2)),
+            (audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2),
         );
         log::info!("sleep for {:?} every time", dur);
         for i in 0..30 {

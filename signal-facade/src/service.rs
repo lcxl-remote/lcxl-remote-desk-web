@@ -229,18 +229,19 @@ impl<U: SignalingUser> SignalingHandler<U> {
     ) -> Result<(), DeskSignalFacadeError> {
         // Device user restriction logic
         if self.user.get_access() == Some("device_user")
-            && let Some(target_connection) = self.user.get_target_connection_id() {
-                let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
-                if to_connection_id != target_connection {
-                    return DeskSignalFacadeError::custom_error(
-                        DeskErrorCode::SYSTEM_ERROR,
-                        &format!(
-                            "Permission denied: cannot send message to {}",
-                            to_connection_id
-                        ),
-                    );
-                }
+            && let Some(target_connection) = self.user.get_target_connection_id()
+        {
+            let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
+            if to_connection_id != target_connection {
+                return DeskSignalFacadeError::custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    &format!(
+                        "Permission denied: cannot send message to {}",
+                        to_connection_id
+                    ),
+                );
             }
+        }
 
         if let Some(tx) = self
             .connection_state
@@ -340,15 +341,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .read()
                         .await
                         .contains(from_connection_id)
-                    {
-                        return DeskSignalFacadeError::custom_error(
-                            DeskErrorCode::SYSTEM_ERROR,
-                            &format!(
-                                "Connection {} is not a terminal, can not send data to terminal",
-                                from_connection_id
-                            ),
-                        );
-                    }
+                {
+                    return DeskSignalFacadeError::custom_error(
+                        DeskErrorCode::SYSTEM_ERROR,
+                        &format!(
+                            "Connection {} is not a terminal, can not send data to terminal",
+                            from_connection_id
+                        ),
+                    );
+                }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
             SignalingType::ResizeTerminal => {
@@ -360,15 +361,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .read()
                         .await
                         .contains(from_connection_id)
-                    {
-                        return DeskSignalFacadeError::custom_error(
-                            DeskErrorCode::SYSTEM_ERROR,
-                            &format!(
-                                "Connection {} is not a terminal, can not resize terminal",
-                                from_connection_id
-                            ),
-                        );
-                    }
+                {
+                    return DeskSignalFacadeError::custom_error(
+                        DeskErrorCode::SYSTEM_ERROR,
+                        &format!(
+                            "Connection {} is not a terminal, can not resize terminal",
+                            from_connection_id
+                        ),
+                    );
+                }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
 
@@ -389,11 +390,11 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     } else {
                         ip
                     }
-                })
-                    && let Some(rewritten) = rewrite_mdns_candidate_with_ip(&signaling_model, ip) {
-                        self.forward_to_peer(&rewritten, false).await?;
-                        return Ok(());
-                    }
+                }) && let Some(rewritten) = rewrite_mdns_candidate_with_ip(&signaling_model, ip)
+                {
+                    self.forward_to_peer(&rewritten, false).await?;
+                    return Ok(());
+                }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
 

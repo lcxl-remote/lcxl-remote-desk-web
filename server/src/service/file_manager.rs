@@ -170,7 +170,7 @@ pub async fn handle_manager_file_list(
     };
     let approved = check_security_permission(
         &desk_session.settings,
-        desk_session.security_approval_sender.as_ref(),
+        &desk_session.host_control_hub,
         allow_file_browse,
         SecurityPermissionType::FileBrowse,
         from_connection_id.clone(),
@@ -236,7 +236,7 @@ pub async fn handle_manager_file_delete(
     };
     let approved = check_security_permission(
         &desk_session.settings,
-        desk_session.security_approval_sender.as_ref(),
+        &desk_session.host_control_hub,
         allow_file_browse,
         SecurityPermissionType::FileBrowse,
         from_connection_id.clone(),

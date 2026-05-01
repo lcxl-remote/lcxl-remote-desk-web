@@ -129,7 +129,7 @@ pub async fn handle_manager_terminal_start(
     let allow_terminal = { desk_session.settings.read().await.security.allow_terminal };
     let approved = check_security_permission(
         &desk_session.settings,
-        desk_session.security_approval_sender.as_ref(),
+        &desk_session.host_control_hub,
         allow_terminal,
         SecurityPermissionType::Terminal,
         Some(from_connection_id.to_string()),

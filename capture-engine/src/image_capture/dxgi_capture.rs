@@ -353,18 +353,19 @@ impl ScreenRecordManager {
             )
         };
         if let Err(complie_error) = compile_result
-            && let Some(blob) = error_msg {
-                // ansi format string?
-                let blob_array = unsafe {
-                    core::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    )
-                };
-                let error_message = String::from_utf8_lossy(blob_array);
-                log::error!("Vertex Shader Compile Error: {}", error_message);
-                return Err(CaptureError::from(complie_error));
-            }
+            && let Some(blob) = error_msg
+        {
+            // ansi format string?
+            let blob_array = unsafe {
+                core::slice::from_raw_parts(
+                    blob.GetBufferPointer() as *const u8,
+                    blob.GetBufferSize(),
+                )
+            };
+            let error_message = String::from_utf8_lossy(blob_array);
+            log::error!("Vertex Shader Compile Error: {}", error_message);
+            return Err(CaptureError::from(complie_error));
+        }
 
         let mut pixel_shader = None;
         let mut error_msg = None;
@@ -384,18 +385,19 @@ impl ScreenRecordManager {
             )
         };
         if let Err(complie_error) = compile_result
-            && let Some(blob) = error_msg {
-                // ansi format string?
-                let blob_array = unsafe {
-                    core::slice::from_raw_parts(
-                        blob.GetBufferPointer() as *const u8,
-                        blob.GetBufferSize(),
-                    )
-                };
-                let error_message = String::from_utf8_lossy(blob_array);
-                log::error!("Pixel Shader Compile Error: {}", error_message);
-                return Err(CaptureError::from(complie_error));
-            }
+            && let Some(blob) = error_msg
+        {
+            // ansi format string?
+            let blob_array = unsafe {
+                core::slice::from_raw_parts(
+                    blob.GetBufferPointer() as *const u8,
+                    blob.GetBufferSize(),
+                )
+            };
+            let error_message = String::from_utf8_lossy(blob_array);
+            log::error!("Pixel Shader Compile Error: {}", error_message);
+            return Err(CaptureError::from(complie_error));
+        }
         let vertex_shader = vertex_shader.unwrap();
         let vertex_shader_blob = unsafe {
             core::slice::from_raw_parts(
@@ -680,9 +682,10 @@ impl ScreenOutput {
         };
 
         if let Err(ref err) = acquire_result
-            && err.code() == DXGI_ERROR_WAIT_TIMEOUT {
-                return Ok(FrameAcquisitionResult::NoContentChange);
-            }
+            && err.code() == DXGI_ERROR_WAIT_TIMEOUT
+        {
+            return Ok(FrameAcquisitionResult::NoContentChange);
+        }
         acquire_result?;
 
         let desktop_resource = desktop_resource.unwrap();
@@ -1284,11 +1287,7 @@ impl ScreenOutput {
         } else {
             0
         };
-        let skip_y = if given_top < 0 {
-            -given_top as u32
-        } else {
-            0
-        };
+        let skip_y = if given_top < 0 { -given_top as u32 } else { 0 };
 
         if is_mono {
             for row in 0..ptr_height {
@@ -1777,10 +1776,7 @@ mod tests {
             image::ExtendedColorType::Rgba8,
         )
         .unwrap();
-        log::info!(
-            "saved screenshot to {}",
-            bmp_path.to_string_lossy()
-        );
+        log::info!("saved screenshot to {}", bmp_path.to_string_lossy());
         Ok(())
     }
 

@@ -10,10 +10,9 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 
 use crate::error::DeskError;
+use crate::host_control::HostControlHub;
 use crate::model::file_transfer::*;
-use crate::model::security_approval::{
-    SecurityApprovalSender, SecurityPermissionType, check_security_permission,
-};
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
 use crate::model::settings::SharedSettings;
 
 /// State for an active upload transfer
@@ -29,7 +28,7 @@ struct UploadState {
 pub async fn handle_file_transfer_event(
     data_channel: Arc<RTCDataChannel>,
     settings: actix_web::web::Data<SharedSettings>,
-    security_approval_sender: Option<SecurityApprovalSender>,
+    host_control_hub: Arc<HostControlHub>,
     connection_id: String,
 ) -> Result<(), DeskError> {
     let d_label = data_channel.label().to_owned();
@@ -67,7 +66,7 @@ pub async fn handle_file_transfer_event(
         let cancelled = cancelled_for_msg.clone();
 
         let settings = settings.clone();
-        let sender = security_approval_sender.clone();
+        let hub = host_control_hub.clone();
         let connection_id = connection_id.clone();
         let permission_cache = permission_cache.clone();
 
@@ -88,7 +87,7 @@ pub async fn handle_file_transfer_event(
                         let allow_transfer = { settings.read().await.security.allow_file_transfer };
                         let approved = check_security_permission(
                             &settings,
-                            sender.as_ref(),
+                            &hub,
                             allow_transfer,
                             SecurityPermissionType::FileTransfer,
                             Some(connection_id),

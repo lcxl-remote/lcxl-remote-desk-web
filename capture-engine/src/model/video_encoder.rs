@@ -20,8 +20,7 @@ pub trait VideoEncoder {
     fn request_keyframe(&mut self) {}
 }
 
-#[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
-#[derive(Default)]
+#[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy, Default)]
 pub enum VideoEncoderType {
     #[default]
     X264,

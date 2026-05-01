@@ -44,9 +44,10 @@ pub async fn get_turn_session_statistics(
         .map_err(|_| DeskTurnError::IllegalTransport("Invalid address".to_string()))?;
 
     if let Ok(stats) = api_state.statistics.read()
-        && let Some(counts) = stats.sessions.get(&address) {
-            return Ok(HttpResponse::Ok().json(counts));
-        }
+        && let Some(counts) = stats.sessions.get(&address)
+    {
+        return Ok(HttpResponse::Ok().json(counts));
+    }
 
     Ok(HttpResponse::NotFound().finish())
 }

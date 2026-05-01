@@ -1,7 +1,4 @@
-use crate::{
-    error::InputError,
-    model::data_channel::MouseEventHandler,
-};
+use crate::{error::InputError, model::data_channel::MouseEventHandler};
 
 #[cfg(target_os = "windows")]
 use crate::mouse_event::windows;

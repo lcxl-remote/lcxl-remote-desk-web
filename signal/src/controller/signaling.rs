@@ -34,14 +34,15 @@ pub async fn open_signaling_handle(
     // Check token-based node authentication first
     if let Some(ref vi) = version_info_opt
         && let Some(token) = &vi.token
-            && let Some(validator) = &validator_opt {
-                if validator.validate_node_token(token).await {
-                    user = Some(CurrentUser::new_admin("server_node"));
-                    info!("Node token validated successfully");
-                } else {
-                    log::warn!("Invalid node token provided");
-                }
-            }
+        && let Some(validator) = &validator_opt
+    {
+        if validator.validate_node_token(token).await {
+            user = Some(CurrentUser::new_admin("server_node"));
+            info!("Node token validated successfully");
+        } else {
+            log::warn!("Invalid node token provided");
+        }
+    }
 
     // Fallback to session authentication if no valid token
     let user = if let Some(u) = user {

@@ -18,8 +18,7 @@ pub struct CpuInfo {
 
 /// System information (shared between signal-facade consumers).
 /// Used for remote system info queries via signaling.
-#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
-#[derive(Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema, Default)]
 pub struct SystemInfo {
     /// System name
     pub name: Option<String>,
@@ -42,4 +41,3 @@ pub struct SystemInfo {
     /// Whether the system is running with administrative privileges
     pub is_admin: Option<bool>,
 }
-

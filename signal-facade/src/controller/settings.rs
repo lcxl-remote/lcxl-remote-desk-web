@@ -43,12 +43,13 @@ pub async fn query_settings(
     };
 
     if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0 {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::new(response_state.error_code),
-                &response_state.message.clone().unwrap_or_default(),
-            );
-        }
+        && response_state.error_code != 0
+    {
+        return DeskSignalFacadeError::custom_error(
+            DeskErrorCode::new(response_state.error_code),
+            &response_state.message.clone().unwrap_or_default(),
+        );
+    }
 
     let settings: RemoteSystemSettings = response.get_data()?;
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(settings)))
@@ -90,12 +91,13 @@ pub async fn update_settings(
     };
 
     if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0 {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::new(response_state.error_code),
-                &response_state.message.clone().unwrap_or_default(),
-            );
-        }
+        && response_state.error_code != 0
+    {
+        return DeskSignalFacadeError::custom_error(
+            DeskErrorCode::new(response_state.error_code),
+            &response_state.message.clone().unwrap_or_default(),
+        );
+    }
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed()))
 }

@@ -25,7 +25,6 @@ pub struct TerminalSettings {
     pub current_terminal: Option<Vec<String>>,
 }
 
-
 /// List terminal query path
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct ListTerminalPath {

@@ -36,12 +36,13 @@ pub async fn list_terminal(
     };
 
     if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0 {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::new(response_state.error_code),
-                &response_state.message.clone().unwrap_or_default(),
-            );
-        }
+        && response_state.error_code != 0
+    {
+        return DeskSignalFacadeError::custom_error(
+            DeskErrorCode::new(response_state.error_code),
+            &response_state.message.clone().unwrap_or_default(),
+        );
+    }
 
     let terminal_list_response: TerminalList = response.get_data()?;
     Ok(HttpResponse::Ok().json(terminal_list_response))

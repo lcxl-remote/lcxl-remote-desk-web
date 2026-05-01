@@ -6,10 +6,9 @@ use webrtc::data_channel::{RTCDataChannel, data_channel_message::DataChannelMess
 
 use desk_input_injection::model::host_control::WhiteboardCommand;
 
+use crate::host_control::HostControlHub;
 use crate::model::{
-    security_approval::{
-        SecurityApprovalSender, SecurityPermissionType, check_security_permission,
-    },
+    security_approval::{SecurityPermissionType, check_security_permission},
     settings::SharedSettings,
 };
 
@@ -21,7 +20,7 @@ pub async fn handle_whiteboard_event(
     whiteboard_cmd_sender: std::sync::mpsc::Sender<WhiteboardCommand>,
     connection_id: String,
     settings: actix_web::web::Data<SharedSettings>,
-    security_approval_sender: Option<SecurityApprovalSender>,
+    host_control_hub: Arc<HostControlHub>,
 ) -> Result<(), crate::error::DeskError> {
     let d_label = data_channel.label().to_owned();
     let d_id = data_channel.id();
@@ -47,7 +46,7 @@ pub async fn handle_whiteboard_event(
     data_channel.on_message(Box::new(move |msg: DataChannelMessage| {
         let sender_for_msg = sender_for_msg.clone();
         let settings = settings.clone();
-        let sender = security_approval_sender.clone();
+        let hub = host_control_hub.clone();
         let connection_id = connection_id.clone();
         let permission_cache = permission_cache.clone();
 
@@ -67,7 +66,7 @@ pub async fn handle_whiteboard_event(
                         let allow_whiteboard = { settings.read().await.security.allow_whiteboard };
                         let approved = check_security_permission(
                             &settings,
-                            sender.as_ref(),
+                            &hub,
                             allow_whiteboard,
                             SecurityPermissionType::Whiteboard,
                             Some(connection_id.clone()),

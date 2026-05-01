@@ -15,14 +15,12 @@ pub trait AudioEncoder {
 }
 
 /// Audio Encoder Type Enum
-#[derive(EnumIter, IntoStaticStr, EnumString)]
-#[derive(Default)]
+#[derive(EnumIter, IntoStaticStr, EnumString, Default)]
 pub enum AudioEncoderType {
     /// Opus encoder
     #[default]
     OPUS,
 }
-
 
 pub trait AudioEncoderTypeHelper {
     fn get_audio_encoder_type(&self) -> Result<AudioEncoderType, CaptureError>;

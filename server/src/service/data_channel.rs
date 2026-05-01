@@ -9,13 +9,13 @@ use webrtc::{
 
 use crate::{
     error::DeskError,
+    host_control::HostControlHub,
     model::{
         data_channel::{
             DATA_CHANNEL_LABEL_CLIPBOARD_EVENT, DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT,
             DATA_CHANNEL_LABEL_KEYBOARD_EVENT, DATA_CHANNEL_LABEL_MOUSE_EVENT,
             DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT, DATA_CHANNEL_LABEL_WHITEBOARD_EVENT,
         },
-        security_approval::SecurityApprovalSender,
         settings::SharedSettings,
     },
     service::{
@@ -34,7 +34,7 @@ pub async fn handle_data_channel_event(
     whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
     connection_id: String,
     settings: actix_web::web::Data<SharedSettings>,
-    security_approval_sender: Option<SecurityApprovalSender>,
+    host_control_hub: Arc<HostControlHub>,
 ) -> Result<(), DeskError> {
     match data_channel.label() {
         DATA_CHANNEL_LABEL_MOUSE_EVENT | DATA_CHANNEL_LABEL_MOUSE_MOVE_EVENT => {
@@ -46,13 +46,8 @@ pub async fn handle_data_channel_event(
             return Ok(());
         }
         DATA_CHANNEL_LABEL_FILE_TRANSFER_EVENT => {
-            handle_file_transfer_event(
-                data_channel,
-                settings,
-                security_approval_sender,
-                connection_id,
-            )
-            .await?;
+            handle_file_transfer_event(data_channel, settings, host_control_hub, connection_id)
+                .await?;
             return Ok(());
         }
         DATA_CHANNEL_LABEL_CLIPBOARD_EVENT => {
@@ -67,7 +62,7 @@ pub async fn handle_data_channel_event(
                     sender,
                     connection_id,
                     settings,
-                    security_approval_sender,
+                    host_control_hub,
                 )
                 .await?;
             } else {

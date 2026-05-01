@@ -1,5 +1,6 @@
 use crate::{
     ExternalChannels,
+    host_control::HostControlHub,
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
 };
@@ -118,11 +119,17 @@ impl WorkerSession {
             service_op_sender: None,
         };
 
+        // Step 3 stop-gap: a Local hub means approvals deny-fast (no Tauri client
+        // is ever connected to the worker's own ws endpoint). Step 5 swaps this for
+        // a Forwarder hub that talks to the daemon's `/ws/host_upstream`.
+        let host_control_hub = Arc::new(HostControlHub::new_local());
+
         let mut desk_session = DeskSession::new(
             shared_settings_data,
             session_sender,
             CurrentUser::new_admin("worker_node"),
             &mut channels,
+            host_control_hub,
         )
         .await
         .map_err(|e| format!("Failed to create DeskSession: {}", e))?;
