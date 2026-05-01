@@ -392,21 +392,32 @@ fn on_disconnect(
     info!("[HostCtrl/WS] client disconnected (role={role:?} session_id={session_id})");
     match (role, state.hub.mode()) {
         (Some(ClientRole::Tauri), HubMode::Local) => {
-            state.hub.mark_tauri_disconnected();
-            if let Some(override_data) = state.tauri_is_admin.as_ref() {
-                *override_data.lock().unwrap() = None;
+            let remaining = state.hub.mark_tauri_disconnected();
+            if remaining == 0 {
+                if let Some(override_data) = state.tauri_is_admin.as_ref() {
+                    *override_data.lock().unwrap() = None;
+                }
+                // Local hub: no surviving UI means in-flight approvals must deny
+                // so business doesn't hang.
+                state.hub.deny_all_pending();
             }
-            // Local hub: no surviving UI means in-flight approvals must deny so
-            // business doesn't hang. (Aggregator handles its own cleanup elsewhere.)
-            state.hub.deny_all_pending();
         }
         (Some(ClientRole::Tauri), HubMode::Aggregator) => {
-            state.hub.mark_tauri_disconnected();
-            if let Some(override_data) = state.tauri_is_admin.as_ref() {
-                *override_data.lock().unwrap() = None;
+            let remaining = state.hub.mark_tauri_disconnected();
+            if remaining == 0 {
+                if let Some(override_data) = state.tauri_is_admin.as_ref() {
+                    *override_data.lock().unwrap() = None;
+                }
+                // Last Tauri client gone: cancel every in-flight approval so
+                // the workers don't sit blocked on an unanswerable dialog.
+                let cancelled = state.hub.cancel_all_for_tauri_loss();
+                if !cancelled.is_empty() {
+                    debug!(
+                        "[HostCtrl/WS] Tauri lost; cancelled {} pending req(s): {cancelled:?}",
+                        cancelled.len()
+                    );
+                }
             }
-            // Tauri-side cleanup of in-flight approvals (notifying surviving
-            // forwarders) is exception-handling territory — see Step 7.
         }
         (Some(ClientRole::Forwarder), HubMode::Aggregator) => {
             // drain_upstream_pending also unregisters the forwarder mpsc so any

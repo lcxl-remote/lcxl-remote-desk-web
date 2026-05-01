@@ -19,7 +19,7 @@ pub mod upstream;
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -108,9 +108,10 @@ struct HubInner {
         Mutex<HashMap<UpstreamSessionId, mpsc::UnboundedSender<HostControlMessage>>>,
     /// Forwarder-only: connection to the daemon aggregator.
     upstream: Option<Arc<UpstreamForwarder>>,
-    /// Tracks whether at least one Tauri ws client is currently connected. Used by
-    /// Local mode `request_approval` to fail-fast when no UI is available.
-    has_tauri_subscriber: AtomicBool,
+    /// Number of Tauri ws clients currently connected (each `mark_tauri_connected`
+    /// increments, each `mark_tauri_disconnected` decrements). Used by Local /
+    /// Aggregator hubs to fail-fast or trigger Tauri-loss cleanup precisely.
+    tauri_client_count: AtomicUsize,
 }
 
 /// The unified host control hub.
@@ -151,7 +152,7 @@ impl HostControlHub {
             pending_routes: Mutex::new(HashMap::new()),
             forwarder_sessions: Mutex::new(HashMap::new()),
             upstream,
-            has_tauri_subscriber: AtomicBool::new(false),
+            tauri_client_count: AtomicUsize::new(0),
         };
         let hub = Self {
             inner: Arc::new(inner),
@@ -159,6 +160,7 @@ impl HostControlHub {
 
         if hub.inner.mode == HubMode::Forwarder {
             hub.spawn_forwarder_inbound_task();
+            hub.spawn_forwarder_disconnect_watcher();
         }
 
         hub
@@ -181,16 +183,26 @@ impl HostControlHub {
 
     /// Mark that a Tauri client has connected. Called by the ws endpoint on Ready.
     pub fn mark_tauri_connected(&self) {
-        self.inner
-            .has_tauri_subscriber
-            .store(true, Ordering::Release);
+        self.inner.tauri_client_count.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Mark Tauri disconnected (last client). Called by the ws endpoint on close.
-    pub fn mark_tauri_disconnected(&self) {
-        self.inner
-            .has_tauri_subscriber
-            .store(false, Ordering::Release);
+    /// Mark a Tauri client as disconnected. Returns the post-decrement count so
+    /// the caller can decide whether to trigger Tauri-loss cleanup.
+    pub fn mark_tauri_disconnected(&self) -> usize {
+        // Saturating decrement protects against any stray double-disconnect.
+        let prev = self
+            .inner
+            .tauri_client_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                if v == 0 { None } else { Some(v - 1) }
+            })
+            .unwrap_or(0);
+        prev.saturating_sub(1)
+    }
+
+    /// Current number of connected Tauri ws clients.
+    pub fn tauri_client_count(&self) -> usize {
+        self.inner.tauri_client_count.load(Ordering::Acquire)
     }
 
     /// Best-effort indicator of whether a Tauri shell can currently consume
@@ -205,8 +217,7 @@ impl HostControlHub {
     pub fn has_tauri_ui(&self) -> bool {
         match self.inner.mode {
             HubMode::Local | HubMode::Aggregator => {
-                self.inner.has_tauri_subscriber.load(Ordering::Acquire)
-                    || self.inner.cmd_tx.receiver_count() > 0
+                self.inner.tauri_client_count.load(Ordering::Acquire) > 0
             }
             HubMode::Forwarder => self
                 .inner
@@ -522,6 +533,42 @@ impl HostControlHub {
         self.inner.pending_replay.lock().unwrap().len()
     }
 
+    /// Aggregator-only: cancel every in-flight approval because the last Tauri
+    /// shell has disconnected. For each pending request a directional
+    /// `SecurityApprovalCancel` is delivered to its originating forwarder, and
+    /// the routing / replay tables are cleared. Returns the list of req_ids that
+    /// were cancelled.
+    ///
+    /// Idempotent: subsequent calls with empty pending tables are no-ops.
+    pub fn cancel_all_for_tauri_loss(&self) -> Vec<String> {
+        if self.inner.mode != HubMode::Aggregator {
+            return Vec::new();
+        }
+        let routes: Vec<(String, UpstreamSessionId)> = {
+            let mut r = self.inner.pending_routes.lock().unwrap();
+            let snapshot = r.iter().map(|(k, v)| (k.clone(), *v)).collect::<Vec<_>>();
+            r.clear();
+            snapshot
+        };
+        self.inner.pending_replay.lock().unwrap().clear();
+
+        let mut cancelled = Vec::with_capacity(routes.len());
+        for (req_id, session_id) in routes {
+            let msg = HostControlMessage::SecurityApprovalCancel {
+                req_id: req_id.clone(),
+            };
+            self.route_to_forwarder(session_id, msg);
+            cancelled.push(req_id);
+        }
+        if !cancelled.is_empty() {
+            warn!(
+                "[Hub/Aggregator] Tauri lost — cancelled {} in-flight approval(s)",
+                cancelled.len()
+            );
+        }
+        cancelled
+    }
+
     /// Publish a state event from the GUI to all server-side subscribers.
     pub fn publish_state(&self, event: HostControlEvent) {
         let _ = self.inner.state_tx.send(event);
@@ -551,6 +598,36 @@ impl HostControlHub {
                         break;
                     }
                 }
+            }
+        });
+    }
+
+    /// Forwarder-only: spawn a task that watches the upstream connection-state
+    /// and denies every locally-held pending oneshot whenever the upstream link
+    /// transitions from connected → disconnected. Critical for plan section
+    /// "阶段 6 链路异常兜底" — without this, ws drops would leave business code
+    /// blocked on `request_approval` until the next reconnect.
+    fn spawn_forwarder_disconnect_watcher(&self) {
+        let Some(upstream) = self.inner.upstream.clone() else {
+            return;
+        };
+        let mut state_rx = upstream.subscribe_connection_state();
+        // Snapshot `prev` synchronously so a tokio task scheduled after a
+        // mark_disconnected() race still sees the pre-disconnect value.
+        let mut prev = *state_rx.borrow();
+        let hub = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if state_rx.changed().await.is_err() {
+                    debug!("[Hub/Forwarder] connection-state watcher stopping");
+                    break;
+                }
+                let cur = *state_rx.borrow_and_update();
+                if prev && !cur {
+                    info!("[Hub/Forwarder] upstream disconnected — denying pending approvals");
+                    hub.deny_all_pending();
+                }
+                prev = cur;
             }
         });
     }
@@ -1091,6 +1168,125 @@ mod tests {
             },
         );
         assert!(!routed);
+    }
+
+    // mark_tauri_disconnected returns the post-decrement count and saturates at
+    // zero so a stray double-disconnect never wraps around.
+    #[test]
+    fn tauri_client_count_saturates_at_zero() {
+        let hub = HostControlHub::new_local();
+        assert_eq!(hub.tauri_client_count(), 0);
+        hub.mark_tauri_connected();
+        hub.mark_tauri_connected();
+        assert_eq!(hub.tauri_client_count(), 2);
+        assert_eq!(hub.mark_tauri_disconnected(), 1);
+        assert_eq!(hub.mark_tauri_disconnected(), 0);
+        // Saturating: an extra decrement must not underflow.
+        assert_eq!(hub.mark_tauri_disconnected(), 0);
+        assert_eq!(hub.tauri_client_count(), 0);
+    }
+
+    // Plan §6 兜底: Forwarder upstream lost — every in-flight approval is
+    // resolved as deny without business code observing a hang.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forwarder_upstream_disconnect_denies_pending() {
+        let upstream = UpstreamForwarder::new_for_test(true);
+        let upstream_clone = Arc::clone(&upstream);
+        let hub = HostControlHub::new_forwarder(upstream);
+
+        let h1 = hub.clone();
+        let h2 = hub.clone();
+        let t1 = tokio::spawn(async move { h1.request_approval(approval_req("a")).await });
+        let t2 = tokio::spawn(async move { h2.request_approval(approval_req("b")).await });
+        // Wait until both requests parked in pending_approvals.
+        for _ in 0..50 {
+            if hub.inner.pending_approvals.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(hub.inner.pending_approvals.lock().unwrap().len(), 2);
+
+        upstream_clone.mark_disconnected();
+
+        let r1 = tokio::time::timeout(Duration::from_millis(2000), t1)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        let r2 = tokio::time::timeout(Duration::from_millis(2000), t2)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(!r1.approved && !r2.approved);
+        assert!(hub.inner.pending_approvals.lock().unwrap().is_empty());
+    }
+
+    // Plan §6 兜底: Aggregator's cancel_all_for_tauri_loss routes a
+    // SecurityApprovalCancel to each owning forwarder and clears the tables.
+    #[tokio::test]
+    async fn aggregator_cancel_all_for_tauri_loss_routes_directionally() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(1, tx_a);
+        hub.register_forwarder_session(2, tx_b);
+
+        hub.register_upstream_request(
+            "r1".to_string(),
+            1,
+            SecurityPermissionType::RemoteControl,
+            None,
+        );
+        hub.register_upstream_request("r2".to_string(), 1, SecurityPermissionType::Terminal, None);
+        hub.register_upstream_request(
+            "r3".to_string(),
+            2,
+            SecurityPermissionType::Whiteboard,
+            None,
+        );
+
+        let mut cancelled = hub.cancel_all_for_tauri_loss();
+        cancelled.sort();
+        assert_eq!(
+            cancelled,
+            vec!["r1".to_string(), "r2".to_string(), "r3".to_string()]
+        );
+        assert_eq!(hub.pending_replay_count(), 0);
+
+        // Forwarder 1 receives Cancel for r1 and r2 (in some order).
+        let mut got_a = Vec::new();
+        for _ in 0..2 {
+            let m = tokio::time::timeout(Duration::from_millis(100), rx_a.recv())
+                .await
+                .expect("session 1 must receive")
+                .expect("mpsc closed");
+            match m {
+                HostControlMessage::SecurityApprovalCancel { req_id } => got_a.push(req_id),
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+        got_a.sort();
+        assert_eq!(got_a, vec!["r1".to_string(), "r2".to_string()]);
+
+        // Forwarder 2 receives Cancel for r3 only.
+        let m = tokio::time::timeout(Duration::from_millis(100), rx_b.recv())
+            .await
+            .expect("session 2 must receive")
+            .expect("mpsc closed");
+        match m {
+            HostControlMessage::SecurityApprovalCancel { req_id } => assert_eq!(req_id, "r3"),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Idempotent: a second call has nothing to do.
+        assert!(hub.cancel_all_for_tauri_loss().is_empty());
+    }
+
+    // cancel_all_for_tauri_loss is a no-op on Local/Forwarder hubs.
+    #[test]
+    fn cancel_all_for_tauri_loss_only_aggregator() {
+        let hub = HostControlHub::new_local();
+        assert!(hub.cancel_all_for_tauri_loss().is_empty());
     }
 
     // deny_all_pending resolves every outstanding oneshot with deny.
