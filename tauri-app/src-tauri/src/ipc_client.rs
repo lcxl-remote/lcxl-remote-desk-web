@@ -1,15 +1,15 @@
 use awc::Client;
+use desk_input_injection::model::host_control::{
+    HostControlEventType, PrivateScreenCommand, WhiteboardCommand,
+};
 use futures_util::{SinkExt, StreamExt};
 use lcxl_remote_desk_server::{
     ServiceOp,
     daemon::tauri_ipc::{DaemonToTauriMsg, TauriToDaemonMsg},
-    model::{
-        security_approval::{
-            SecurityApprovalCommand, SecurityApprovalRequest, SecurityPermissionType,
-        },
+    model::security_approval::{
+        SecurityApprovalCommand, SecurityApprovalRequest, SecurityPermissionType,
     },
 };
-use desk_input_injection::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -96,16 +96,13 @@ pub async fn run_ipc_loop(
                             }
                         }
                         state_event = state_rx.recv() => {
-                            if let Some(event) = state_event {
-                                if let Some(msg) = map_state_event(event) {
-                                    if let Ok(json) = serde_json::to_string(&msg) {
-                                        if sink.send(awc::ws::Message::Text(json.into())).await.is_err() {
+                            if let Some(event) = state_event
+                                && let Some(msg) = map_state_event(event)
+                                    && let Ok(json) = serde_json::to_string(&msg)
+                                        && sink.send(awc::ws::Message::Text(json.into())).await.is_err() {
                                             log::warn!("[IpcClient] Failed to send state event");
                                             break 'session;
                                         }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -171,11 +168,10 @@ fn handle_daemon_msg(
                     None
                 }
             };
-            if let Some(svc_op) = svc_op {
-                if let Err(e) = svc_op_tx.try_send(svc_op) {
+            if let Some(svc_op) = svc_op
+                && let Err(e) = svc_op_tx.try_send(svc_op) {
                     log::warn!("[IpcClient] ServiceOp channel full: {e}");
                 }
-            }
         }
     }
 }

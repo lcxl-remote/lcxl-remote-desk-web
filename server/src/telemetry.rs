@@ -243,9 +243,8 @@ async fn perform_log_cleanup(retention_days: u32, threshold_percent: u8) -> Resu
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().into_owned();
         // Expected format: desk-server.log.YYYY-MM-DD
-        if file_name.starts_with("desk-server.log.") {
-            let date_str = &file_name["desk-server.log.".len()..];
-            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+        if let Some(date_str) = file_name.strip_prefix("desk-server.log.")
+            && let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
                 if date < expiration_date {
                     tracing::info!("Deleting expired log file: {}", file_name);
                     let _ = std::fs::remove_file(entry.path());
@@ -254,7 +253,6 @@ async fn perform_log_cleanup(retention_days: u32, threshold_percent: u8) -> Resu
                     log_files.push((date, entry.path()));
                 }
             }
-        }
     }
 
     // Sort by date (oldest first)

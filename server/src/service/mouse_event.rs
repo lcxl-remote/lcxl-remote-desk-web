@@ -42,8 +42,8 @@ pub async fn handle_mouse_event(
             }
             match serde_json::from_str::<MouseEventData>(&msg_str) {
                 Ok(event) => {
-                    if let Some(seq) = event.sequence_number {
-                        if seq > 0 {
+                    if let Some(seq) = event.sequence_number
+                        && seq > 0 {
                             let mut last_seq = last_sequence_num.lock().await;
                             if seq < *last_seq {
                                 // Discard late/expired out-of-order packets
@@ -51,7 +51,6 @@ pub async fn handle_mouse_event(
                             }
                             *last_seq = seq;
                         }
-                    }
                     if let Err(e) = handler.lock().await.handle_mouse_event(&event) {
                         log::error!("Failed to handle mouse event: {}", e);
                     }

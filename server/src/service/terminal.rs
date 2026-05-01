@@ -32,7 +32,7 @@ pub async fn inner_fetch_terminal_list(
     }
 
     for regex in shell_regexe_list {
-        if let Ok(paths) = which::which_re(Regex::new(*regex)?) {
+        if let Ok(paths) = which::which_re(Regex::new(regex)?) {
             for path in paths {
                 terminal_list.push(vec![path.to_string_lossy().into_owned()]);
             }
@@ -60,10 +60,10 @@ pub async fn inner_fetch_terminal_list(
         }
     }
 
-    return Ok(TerminalList {
+    Ok(TerminalList {
         commands: terminal_list,
         current,
-    });
+    })
 }
 
 /// Fetches the list of available terminals on a Windows
@@ -141,7 +141,7 @@ pub async fn handle_manager_terminal_start(
             .session
             .send_error(
                 &signaling_model.request_id,
-                signaling_model.signaling_type.into(),
+                signaling_model.signaling_type,
                 Some(from_connection_id.to_string()),
                 DeskErrorCode::PERMISSION_ERROR,
                 "Terminal access denied by security settings or user",
@@ -218,9 +218,9 @@ pub async fn handle_manager_terminal_start(
                     Some(monitor_connection_id.to_string()),
                     None,
                 );
-                if let Ok(model) = model {
-                    if let Ok(text) = serde_json::to_string(&model) {
-                        if let Err(e) = monitor_sender
+                if let Ok(model) = model
+                    && let Ok(text) = serde_json::to_string(&model)
+                        && let Err(e) = monitor_sender
                             .sender
                             .send(DeskSessionMessage::Text(ByteString::from(text)))
                         {
@@ -230,8 +230,6 @@ pub async fn handle_manager_terminal_start(
                                 e
                             );
                         }
-                    }
-                }
                 break;
             }
         }
@@ -252,13 +250,12 @@ pub async fn handle_manager_terminal_start(
                         Some(terminal_connection_id.to_owned()),
                         Some(&data),
                     );
-                    if let Ok(model) = model {
-                        if let Ok(text) = serde_json::to_string(&model) {
+                    if let Ok(model) = model
+                        && let Ok(text) = serde_json::to_string(&model) {
                             let _ = session_sender
                                 .sender
                                 .send(DeskSessionMessage::Text(ByteString::from(text)));
                         }
-                    }
                 }
                 Err(e) => {
                     log::warn!(
@@ -281,13 +278,12 @@ pub async fn handle_manager_terminal_start(
             Some(&data),
         );
 
-        if let Ok(model) = model {
-            if let Ok(text) = serde_json::to_string(&model) {
+        if let Ok(model) = model
+            && let Ok(text) = serde_json::to_string(&model) {
                 let _ = session_sender
                     .sender
                     .send(DeskSessionMessage::Text(ByteString::from(text)));
             }
-        }
     });
 
     let writer = pair.master.take_writer()?;
@@ -309,14 +305,13 @@ pub async fn handle_manager_terminal_start(
         Some(from_connection_id.to_owned()),
         None,
     );
-    if let Ok(model) = model {
-        if let Ok(text) = serde_json::to_string(&model) {
+    if let Ok(model) = model
+        && let Ok(text) = serde_json::to_string(&model) {
             let _ = desk_session
                 .session
                 .sender
                 .send(DeskSessionMessage::Text(ByteString::from(text)));
         }
-    }
     Ok(())
 }
 
@@ -398,7 +393,7 @@ pub async fn handle_list_terminals(
         .session
         .send_response(
             &signaling_model.request_id,
-            signaling_model.signaling_type.into(),
+            signaling_model.signaling_type,
             from_connection_id,
             &terminals,
         )

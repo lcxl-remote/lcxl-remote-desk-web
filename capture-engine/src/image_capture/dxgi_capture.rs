@@ -35,8 +35,8 @@ use windows::Win32::{
             DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL,
             DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
             DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT,
-            DXGI_OUTDUPL_POINTER_SHAPE_INFO,
-            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+            DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
             DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
             DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
             IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
@@ -56,8 +56,8 @@ use crate::{
     image_capture::windows::enum_display_resolutions,
     model::image_capture::CursorSyncData,
     model::image_capture::{
-        CaptureRequest, CaptureResult, CursorCaptureMode, DirtyRect, ImageCapture, ImageCaptureType,
-        ImageInfo, ImageOutputEnumerator, ImageType,
+        CaptureRequest, CaptureResult, CursorCaptureMode, DirtyRect, ImageCapture,
+        ImageCaptureType, ImageInfo, ImageOutputEnumerator, ImageType,
     },
 };
 
@@ -247,7 +247,7 @@ pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
         rotation
     );
 
-    let resolutions = enum_display_resolutions(&device_name).unwrap_or(vec![]);
+    let resolutions = enum_display_resolutions(&device_name).unwrap_or_default();
 
     DisplayInfo {
         device_name,
@@ -311,7 +311,7 @@ impl ScreenRecordManager {
             self.device_context.OMSetRenderTargets(Some(&rtv), None);
             rtv
         };
-        return Ok(rtv);
+        Ok(rtv)
     }
 
     /// Set new viewport
@@ -352,8 +352,8 @@ impl ScreenRecordManager {
                 Some(&mut error_msg),
             )
         };
-        if let Err(complie_error) = compile_result {
-            if let Some(blob) = error_msg {
+        if let Err(complie_error) = compile_result
+            && let Some(blob) = error_msg {
                 // ansi format string?
                 let blob_array = unsafe {
                     core::slice::from_raw_parts(
@@ -365,7 +365,6 @@ impl ScreenRecordManager {
                 log::error!("Vertex Shader Compile Error: {}", error_message);
                 return Err(CaptureError::from(complie_error));
             }
-        }
 
         let mut pixel_shader = None;
         let mut error_msg = None;
@@ -384,8 +383,8 @@ impl ScreenRecordManager {
                 Some(&mut error_msg),
             )
         };
-        if let Err(complie_error) = compile_result {
-            if let Some(blob) = error_msg {
+        if let Err(complie_error) = compile_result
+            && let Some(blob) = error_msg {
                 // ansi format string?
                 let blob_array = unsafe {
                     core::slice::from_raw_parts(
@@ -397,7 +396,6 @@ impl ScreenRecordManager {
                 log::error!("Pixel Shader Compile Error: {}", error_message);
                 return Err(CaptureError::from(complie_error));
             }
-        }
         let vertex_shader = vertex_shader.unwrap();
         let vertex_shader_blob = unsafe {
             core::slice::from_raw_parts(
@@ -681,11 +679,10 @@ impl ScreenOutput {
                 .AcquireNextFrame(500, &mut frame_info, &mut desktop_resource)
         };
 
-        if let Err(ref err) = acquire_result {
-            if err.code() == DXGI_ERROR_WAIT_TIMEOUT {
+        if let Err(ref err) = acquire_result
+            && err.code() == DXGI_ERROR_WAIT_TIMEOUT {
                 return Ok(FrameAcquisitionResult::NoContentChange);
             }
-        }
         acquire_result?;
 
         let desktop_resource = desktop_resource.unwrap();
@@ -709,86 +706,82 @@ impl ScreenOutput {
         // --- Dirty rect extraction ---
         let frame_width = self.dup_output_desc.ModeDesc.Width;
         let frame_height = self.dup_output_desc.ModeDesc.Height;
-        let dirty_rects_opt: Option<Vec<DirtyRect>> =
-            if frame_info.TotalMetadataBufferSize > 0 {
-                let buf_size = frame_info.TotalMetadataBufferSize as usize;
-                self.metadata_buffer.resize(buf_size, 0);
+        let dirty_rects_opt: Option<Vec<DirtyRect>> = if frame_info.TotalMetadataBufferSize > 0 {
+            let buf_size = frame_info.TotalMetadataBufferSize as usize;
+            self.metadata_buffer.resize(buf_size, 0);
 
-                let mut dirty_rects: Vec<DirtyRect> = Vec::new();
-                let mut bytes_used = 0u32;
+            let mut dirty_rects: Vec<DirtyRect> = Vec::new();
+            let mut bytes_used = 0u32;
 
-                // Move rects: the destination rect of each move becomes dirty.
-                let meta_ptr = self.metadata_buffer.as_mut_ptr();
-                if unsafe {
-                    self.dup_output.GetFrameMoveRects(
-                        buf_size as u32,
-                        meta_ptr as *mut DXGI_OUTDUPL_MOVE_RECT,
-                        &mut bytes_used,
-                    )
+            // Move rects: the destination rect of each move becomes dirty.
+            let meta_ptr = self.metadata_buffer.as_mut_ptr();
+            if unsafe {
+                self.dup_output.GetFrameMoveRects(
+                    buf_size as u32,
+                    meta_ptr as *mut DXGI_OUTDUPL_MOVE_RECT,
+                    &mut bytes_used,
+                )
+            }
+            .is_ok()
+            {
+                let count = bytes_used as usize / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+                let ptr = meta_ptr as *const DXGI_OUTDUPL_MOVE_RECT;
+                for i in 0..count {
+                    let mr = unsafe { &*ptr.add(i) };
+                    let r = &mr.DestinationRect;
+                    dirty_rects.push(align_and_clamp(
+                        r.left,
+                        r.top,
+                        r.right,
+                        r.bottom,
+                        frame_width,
+                        frame_height,
+                    ));
                 }
-                .is_ok()
-                {
-                    let count =
-                        bytes_used as usize / std::mem::size_of::<DXGI_OUTDUPL_MOVE_RECT>();
-                    let ptr = meta_ptr as *const DXGI_OUTDUPL_MOVE_RECT;
-                    for i in 0..count {
-                        let mr = unsafe { &*ptr.add(i) };
-                        let r = &mr.DestinationRect;
-                        dirty_rects.push(align_and_clamp(
-                            r.left,
-                            r.top,
-                            r.right,
-                            r.bottom,
-                            frame_width,
-                            frame_height,
-                        ));
-                    }
-                }
+            }
 
-                bytes_used = 0;
-                let meta_ptr = self.metadata_buffer.as_mut_ptr();
-                // Dirty rects reported by DXGI.
-                if unsafe {
-                    self.dup_output.GetFrameDirtyRects(
-                        buf_size as u32,
-                        meta_ptr as *mut RECT,
-                        &mut bytes_used,
-                    )
+            bytes_used = 0;
+            let meta_ptr = self.metadata_buffer.as_mut_ptr();
+            // Dirty rects reported by DXGI.
+            if unsafe {
+                self.dup_output.GetFrameDirtyRects(
+                    buf_size as u32,
+                    meta_ptr as *mut RECT,
+                    &mut bytes_used,
+                )
+            }
+            .is_ok()
+            {
+                let count = bytes_used as usize / std::mem::size_of::<RECT>();
+                let ptr = meta_ptr as *const RECT;
+                for i in 0..count {
+                    let r = unsafe { &*ptr.add(i) };
+                    dirty_rects.push(align_and_clamp(
+                        r.left,
+                        r.top,
+                        r.right,
+                        r.bottom,
+                        frame_width,
+                        frame_height,
+                    ));
                 }
-                .is_ok()
-                {
-                    let count = bytes_used as usize / std::mem::size_of::<RECT>();
-                    let ptr = meta_ptr as *const RECT;
-                    for i in 0..count {
-                        let r = unsafe { &*ptr.add(i) };
-                        dirty_rects.push(align_and_clamp(
-                            r.left,
-                            r.top,
-                            r.right,
-                            r.bottom,
-                            frame_width,
-                            frame_height,
-                        ));
-                    }
-                }
+            }
 
-                // Fragmentation fallback: too many rects or covering most of the screen
-                // → fall back to full-frame YUV conversion.
-                let total_area: u64 = dirty_rects
-                    .iter()
-                    .map(|r| r.width as u64 * r.height as u64)
-                    .sum();
-                let screen_area = frame_width as u64 * frame_height as u64;
-                if dirty_rects.len() > 50
-                    || (screen_area > 0 && total_area > screen_area * 70 / 100)
-                {
-                    None // full update
-                } else {
-                    Some(dirty_rects)
-                }
+            // Fragmentation fallback: too many rects or covering most of the screen
+            // → fall back to full-frame YUV conversion.
+            let total_area: u64 = dirty_rects
+                .iter()
+                .map(|r| r.width as u64 * r.height as u64)
+                .sum();
+            let screen_area = frame_width as u64 * frame_height as u64;
+            if dirty_rects.len() > 50 || (screen_area > 0 && total_area > screen_area * 70 / 100) {
+                None // full update
             } else {
-                None // no metadata available → full update
-            };
+                Some(dirty_rects)
+            }
+        } else {
+            None // no metadata available → full update
+        };
 
         // --- Draw, copy, and map the frame ---
         let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
@@ -1015,26 +1008,26 @@ impl ScreenOutput {
         // Figure out if any adjustment is needed for out of bound positions
         let ptr_width = if given_left < 0 {
             given_left + self.pointer_shape_info.Width as i32
-        } else if (given_left + self.pointer_shape_info.Width as i32) > desktop_width as i32 {
-            desktop_width as i32 - given_left
+        } else if (given_left + self.pointer_shape_info.Width as i32) > desktop_width {
+            desktop_width - given_left
         } else {
             self.pointer_shape_info.Width as i32
         };
 
         if is_mono {
-            self.pointer_shape_info.Height = self.pointer_shape_info.Height / 2;
+            self.pointer_shape_info.Height /= 2;
         }
 
         let ptr_height = if given_top < 0 {
             given_top + self.pointer_shape_info.Height as i32
-        } else if (given_top + self.pointer_shape_info.Height as i32) > desktop_height as i32 {
-            desktop_height as i32 - given_top
+        } else if (given_top + self.pointer_shape_info.Height as i32) > desktop_height {
+            desktop_height - given_top
         } else {
             self.pointer_shape_info.Height as i32
         };
 
         if is_mono {
-            self.pointer_shape_info.Height = self.pointer_shape_info.Height * 2;
+            self.pointer_shape_info.Height *= 2;
         }
 
         let ptr_left = if given_left < 0 { 0 } else { given_left };
@@ -1128,17 +1121,17 @@ impl ScreenOutput {
 
         // VERTEX creation
         vertices[0].pos.x = (ptr_left - center_x) as f32 / center_x as f32;
-        vertices[0].pos.y = -1.0 * ((ptr_top + ptr_height) - center_y) as f32 / center_y as f32;
+        vertices[0].pos.y = -(((ptr_top + ptr_height) - center_y) as f32) / center_y as f32;
         vertices[1].pos.x = (ptr_left - center_x) as f32 / center_x as f32;
-        vertices[1].pos.y = -1.0 * (ptr_top - center_y) as f32 / center_y as f32;
+        vertices[1].pos.y = -((ptr_top - center_y) as f32) / center_y as f32;
         vertices[2].pos.x = ((ptr_left + ptr_width) - center_x) as f32 / center_x as f32;
-        vertices[2].pos.y = -1.0 * ((ptr_top + ptr_height) - center_y) as f32 / center_y as f32;
+        vertices[2].pos.y = -(((ptr_top + ptr_height) - center_y) as f32) / center_y as f32;
         vertices[3].pos.x = vertices[2].pos.x;
         vertices[3].pos.y = vertices[2].pos.y;
         vertices[4].pos.x = vertices[1].pos.x;
         vertices[4].pos.y = vertices[1].pos.y;
         vertices[5].pos.x = ((ptr_left + ptr_width) - center_x) as f32 / center_x as f32;
-        vertices[5].pos.y = -1.0 * (ptr_top - center_y) as f32 / center_y as f32;
+        vertices[5].pos.y = -((ptr_top - center_y) as f32) / center_y as f32;
 
         let mut shader_res = None;
         // Create shader resource from texture
@@ -1287,12 +1280,12 @@ impl ScreenOutput {
 
         // What to skip (pixel offset)
         let skip_x = if given_left < 0 {
-            (-1 * given_left) as u32
+            -given_left as u32
         } else {
             0
         };
         let skip_y = if given_top < 0 {
-            (-1 * given_top) as u32
+            -given_top as u32
         } else {
             0
         };
@@ -1301,7 +1294,7 @@ impl ScreenOutput {
             for row in 0..ptr_height {
                 // Set mask
                 let mut mask = 0x80u8;
-                mask = mask >> (skip_x % 8);
+                mask >>= skip_x % 8;
                 for col in 0..ptr_width {
                     // Get masks using appropriate offsets
                     let and_mask = self.pointer_shape_buffer[((col + skip_x as i32) / 8
@@ -1314,12 +1307,12 @@ impl ScreenOutput {
                         as usize]
                         & mask;
                     let and_mask_32 = if and_mask != 0 {
-                        0xFFFFFFFF as u32
+                        0xFFFFFFFF_u32
                     } else {
                         0xFF000000
                     };
                     let xor_mask_32 = if xor_mask != 0 {
-                        0x00FFFFFF as u32
+                        0x00FFFFFF_u32
                     } else {
                         0x00000000
                     };
@@ -1335,7 +1328,7 @@ impl ScreenOutput {
                     if mask == 0x01 {
                         mask = 0x80;
                     } else {
-                        mask = mask >> 1;
+                        mask >>= 1;
                     }
                 }
             }
@@ -1447,6 +1440,12 @@ impl ImageInfo for SceenFrame<'_> {
 }
 
 pub struct DxgiImageOutputEnumerator {}
+
+impl Default for DxgiImageOutputEnumerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl DxgiImageOutputEnumerator {
     pub fn new() -> Self {
@@ -1608,8 +1607,8 @@ impl DxgiImageCapture {
             DxgiCursorFingerprint::Shape(shape_id),
             CursorSyncData {
                 base64_png,
-                hotspot_x: info.HotSpot.x as i32,
-                hotspot_y: info.HotSpot.y as i32,
+                hotspot_x: info.HotSpot.x,
+                hotspot_y: info.HotSpot.y,
                 visible: true,
                 shape_id,
                 screen_width: full_desc.Width,
@@ -1631,8 +1630,7 @@ impl ImageCapture for DxgiImageCapture {
             Ok(r) => r,
             Err(error) => {
                 if let CaptureError::WindowsResultError(bt, err) = error {
-                    if err.code() == DXGI_ERROR_ACCESS_LOST
-                        || err.code() == DXGI_ERROR_INVALID_CALL
+                    if err.code() == DXGI_ERROR_ACCESS_LOST || err.code() == DXGI_ERROR_INVALID_CALL
                     {
                         self.screen_output = None;
                         return CaptureError::custom_error(
@@ -1781,7 +1779,7 @@ mod tests {
         .unwrap();
         log::info!(
             "saved screenshot to {}",
-            bmp_path.to_string_lossy().to_string()
+            bmp_path.to_string_lossy()
         );
         Ok(())
     }
@@ -1821,7 +1819,7 @@ mod tests {
             log::error!("failed to add: {}", e);
         }
 
-        return windows_core::BOOL::from(true);
+        windows_core::BOOL::from(true)
     }
 
     fn list_desktop_by_station_handle(handle: HWINSTA) {
@@ -1984,7 +1982,7 @@ mod tests {
                     .unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
-                let name = tmp_dir.join(format!("switch_desktop_screenshot_retry.bmp"));
+                let name = tmp_dir.join("switch_desktop_screenshot_retry.bmp".to_string());
 
                 save_screenshot_to_file(&mut capture, name.as_path()).unwrap();
                 return;
@@ -1992,7 +1990,7 @@ mod tests {
             screent_output_result.unwrap();
 
             let tmp_dir = PathBuf::from("sample");
-            let name = tmp_dir.join(format!("switch_desktop_screenshot.bmp"));
+            let name = tmp_dir.join("switch_desktop_screenshot.bmp".to_string());
 
             save_screenshot_to_file(&mut capture, name.as_path()).unwrap();
         });

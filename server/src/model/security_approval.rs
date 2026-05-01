@@ -7,7 +7,7 @@ use utoipa::ToSchema;
 use crate::model::settings::SharedSettings;
 
 /// Type of security permission being requested
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub enum SecurityPermissionType {
     RemoteControl,
     ClipboardSync,

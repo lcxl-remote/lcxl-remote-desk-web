@@ -21,7 +21,9 @@ pub trait VideoEncoder {
 }
 
 #[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
+#[derive(Default)]
 pub enum VideoEncoderType {
+    #[default]
     X264,
     VP8,
     VP9,
@@ -29,11 +31,6 @@ pub enum VideoEncoderType {
     AV1,
 }
 
-impl Default for VideoEncoderType {
-    fn default() -> Self {
-        return VideoEncoderType::X264;
-    }
-}
 pub trait VideoEncoderTypeHelper {
     fn get_video_encoder_type(&self) -> Result<VideoEncoderType, CaptureError>;
 }

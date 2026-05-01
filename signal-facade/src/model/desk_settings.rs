@@ -120,6 +120,7 @@ impl Default for HotkeySettings {
 /// Private screen settings
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
 #[serde(default)]
+#[derive(Default)]
 pub struct PrivateScreenSettings {
     /// Optional image path for the private screen background
     pub image_path: Option<String>,
@@ -133,17 +134,6 @@ pub struct PrivateScreenSettings {
     pub enabled: bool,
 }
 
-impl Default for PrivateScreenSettings {
-    fn default() -> Self {
-        Self {
-            image_path: None,
-            window_style: None,
-            window_ex_style: None,
-            hotkey: None,
-            enabled: false,
-        }
-    }
-}
 
 /// Desk settings
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
@@ -200,7 +190,7 @@ impl DeskSettings {
         if video_fps == 0 {
             video_fps = 1;
         }
-        Duration::from_micros((1_000_000 as f32 / video_fps as f32) as u64)
+        Duration::from_micros((1_000_000_f32 / video_fps as f32) as u64)
     }
 
     pub fn get_x264_encoder_settings(&self) -> X264EncoderSettings {
@@ -208,9 +198,10 @@ impl DeskSettings {
             return x264_encoder.clone();
         }
         // use video_quality to create a default x264 encoder settings
-        let mut encoder_settings = X264EncoderSettings::default();
-        encoder_settings.quality = self.video_quality;
-        encoder_settings
+        X264EncoderSettings {
+            quality: self.video_quality,
+            ..Default::default()
+        }
     }
 
     pub fn get_h264_encoder_settings(&self, display_info: &DisplayInfo) -> H264EncoderSettings {
@@ -263,9 +254,10 @@ impl DeskSettings {
             return vp8_encoder.clone();
         }
         // use video_quality to create a default vp8 encoder settings
-        let mut encoder_settings = VpxEncoderSettings::default();
-        encoder_settings.quality = self.video_quality;
-        encoder_settings
+        VpxEncoderSettings {
+            quality: self.video_quality,
+            ..Default::default()
+        }
     }
 
     pub fn get_vp9_encoder_settings(&self) -> VpxEncoderSettings {
@@ -273,9 +265,10 @@ impl DeskSettings {
             return vp9_encoder.clone();
         }
         // use video_quality to create a default vp9 encoder settings
-        let mut encoder_settings = VpxEncoderSettings::default();
-        encoder_settings.quality = self.video_quality;
-        encoder_settings
+        VpxEncoderSettings {
+            quality: self.video_quality,
+            ..Default::default()
+        }
     }
 
     pub fn get_av1_encoder_settings(&self) -> Av1EncoderSettings {
@@ -284,10 +277,10 @@ impl DeskSettings {
         }
         // use video_quality to create a default av1 encoder settings
         // video_quality: 0-63 (lower is better) -> rav1e quantizer: 0-255 (lower is better)
-        let mut encoder_settings = Av1EncoderSettings::default();
-        encoder_settings.quality =
-            (self.video_quality as f64 / 63.0 * 255.0).clamp(0.0, 255.0) as u32;
-        encoder_settings
+        Av1EncoderSettings {
+            quality: (self.video_quality as f64 / 63.0 * 255.0).clamp(0.0, 255.0) as u32,
+            ..Default::default()
+        }
     }
 }
 
@@ -328,12 +321,14 @@ mod tests {
     #[test]
     fn test_get_h264_encoder_settings() {
         let mut settings = DeskSettings::default();
-        let mut display_info = DisplayInfo::default();
-        display_info.desktop_coordinates = DisplayRect {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
+        let mut display_info = DisplayInfo {
+            desktop_coordinates: DisplayRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            ..Default::default()
         };
         settings.video_fps = 60;
 

@@ -114,8 +114,8 @@ pub fn get_current_desktop_name() -> Result<String, String> {
 #[cfg(target_os = "windows")]
 pub fn get_active_session_id() -> u32 {
     use windows::Win32::System::RemoteDesktop::{
-        WTSActive, WTSEnumerateSessionsW, WTSFreeMemory, WTSGetActiveConsoleSessionId,
-        WTS_CURRENT_SERVER_HANDLE,
+        WTS_CURRENT_SERVER_HANDLE, WTSActive, WTSEnumerateSessionsW, WTSFreeMemory,
+        WTSGetActiveConsoleSessionId,
     };
 
     unsafe {

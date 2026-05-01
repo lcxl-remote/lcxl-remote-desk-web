@@ -130,10 +130,10 @@ impl DeskError {
         unsafe {
             let last_error = GetLastError();
             //TODO use FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM)
-            return DeskError::custom_error(
+            DeskError::custom_error(
                 DeskErrorCode::WINDOWS_ERROR,
                 &format!("windows error code: {:?}", last_error),
-            );
+            )
         }
     }
 

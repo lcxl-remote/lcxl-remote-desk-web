@@ -130,7 +130,11 @@ impl H264Encoder {
         };
         log::trace!("Encoded to H.264 format");
         let encoded_bit_bytes = bytes::Bytes::from(encoded_bit_stream.to_vec());
-        log::trace!("frame_type={:?}, num_layers={:?}", encoded_bit_stream.frame_type(), encoded_bit_stream.num_layers());
+        log::trace!(
+            "frame_type={:?}, num_layers={:?}",
+            encoded_bit_stream.frame_type(),
+            encoded_bit_stream.num_layers()
+        );
         ENCODE_TO_H264_HISTOGRAM
             .with_label_values(&[frame_type_str])
             .observe(duration_to_seconds(
@@ -152,19 +156,13 @@ impl VideoEncoder for H264Encoder {
         }
         self.yuv_buffer.as_mut().unwrap().update(image_info)?;
         // Split borrow: self.encoder (mut) and self.yuv_buffer (shared) are different fields.
-        H264Encoder::encode_with_encoder(
-            &mut self.encoder,
-            self.yuv_buffer.as_ref().unwrap(),
-        )
+        H264Encoder::encode_with_encoder(&mut self.encoder, self.yuv_buffer.as_ref().unwrap())
     }
 
     fn encode_cached(&mut self) -> Result<Vec<NalInfo>, CaptureError> {
         let Some(_) = self.yuv_buffer.as_ref() else {
             return Ok(vec![]);
         };
-        H264Encoder::encode_with_encoder(
-            &mut self.encoder,
-            self.yuv_buffer.as_ref().unwrap(),
-        )
+        H264Encoder::encode_with_encoder(&mut self.encoder, self.yuv_buffer.as_ref().unwrap())
     }
 }

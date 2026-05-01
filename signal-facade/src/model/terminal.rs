@@ -20,17 +20,11 @@ pub struct TerminalList {
 /// Terminal settings
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct TerminalSettings {
     pub current_terminal: Option<Vec<String>>,
 }
 
-impl Default for TerminalSettings {
-    fn default() -> Self {
-        Self {
-            current_terminal: None,
-        }
-    }
-}
 
 /// List terminal query path
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]

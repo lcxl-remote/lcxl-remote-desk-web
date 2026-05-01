@@ -24,7 +24,7 @@ pub fn convert_image_to_yuv420(
 
     let src_stride = width * 4;
     let mut planar_image =
-        YuvPlanarImageMut::<u8>::alloc(width as u32, height as u32, YuvChromaSubsampling::Yuv420);
+        YuvPlanarImageMut::<u8>::alloc(width, height, YuvChromaSubsampling::Yuv420);
     match image_info.get_type() {
         ImageType::BGRA => bgra_to_yuv420(
             &mut planar_image,
@@ -154,11 +154,8 @@ impl PersistentYuvBuffer {
     pub fn update_full(&mut self, image_info: &dyn ImageInfo) -> Result<(), CaptureError> {
         let convert_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
         let src_stride = image_info.get_stride();
-        let mut temp = YuvPlanarImageMut::<u8>::alloc(
-            self.width,
-            self.height,
-            YuvChromaSubsampling::Yuv420,
-        );
+        let mut temp =
+            YuvPlanarImageMut::<u8>::alloc(self.width, self.height, YuvChromaSubsampling::Yuv420);
         match image_info.get_type() {
             ImageType::BGRA => bgra_to_yuv420(
                 &mut temp,

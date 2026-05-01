@@ -31,6 +31,7 @@
 - 优先在 `server/tests/` 下编写 crate 本地的单元测试和集成测试。
 - 测试名称应描述其行为（例如：`test_rejects_invalid_turn_secret`）。
 - 对于前端更改，至少要通过 `npm run build` 进行验证和手动流程检查（如果相关，请参阅 `vite-project/test_flow.mjs`）。
+- **测试用例 (CRITICAL)**：更改代码必须要增加测试用例。
 
 ## 提交与拉取请求 (PR) 指南
 - 遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)，与近期的提交历史保持一致。

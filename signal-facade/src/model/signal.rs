@@ -174,7 +174,7 @@ impl SignalingModel {
             None,
             to_connection_id,
             signaling_data
-                .map(|data| serde_json::to_value(data))
+                .map(serde_json::to_value)
                 .transpose()?,
             None,
         ))
@@ -198,7 +198,7 @@ impl SignalingModel {
             from_connection_id,
             to_connection_id,
             signaling_data
-                .map(|data| serde_json::to_value(data))
+                .map(serde_json::to_value)
                 .transpose()?,
             Some(response_state),
         ))
@@ -238,14 +238,14 @@ impl SignalingModel {
             error_code: error_code.code(),
             message: Some(message.to_string()),
         };
-        Ok(Self::new_response::<()>(
+        Self::new_response::<()>(
             request_id,
             signaling_type,
             from_connection_id,
             to_connection_id,
             None,
             error_data,
-        )?)
+        )
     }
 
     pub fn custom_desk_error(
@@ -298,12 +298,12 @@ impl SignalingModel {
     {
         let data_opt = self.get_data_with_type::<T>()?;
         if let Some(data) = data_opt {
-            return Ok(data);
+            Ok(data)
         } else {
-            return DeskSignalFacadeError::custom_error(
+            DeskSignalFacadeError::custom_error(
                 DeskErrorCode::BLANK_SIGNALING_DATA,
                 &format!("Data can't be none, signal type: {}", self.signaling_type),
-            );
+            )
         }
     }
 
@@ -313,29 +313,29 @@ impl SignalingModel {
 
     pub fn check_and_get_from_connection_id(&self) -> Result<&str, DeskSignalFacadeError> {
         if let Some(from_connection_id) = &self.from_connection_id {
-            return Ok(from_connection_id.as_str());
+            Ok(from_connection_id.as_str())
         } else {
-            return DeskSignalFacadeError::custom_error(
+            DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 &format!(
                     "From connection id can't be none, signal type: {}",
                     self.signaling_type
                 ),
-            );
+            )
         }
     }
 
     pub fn check_and_get_to_connection_id(&self) -> Result<&str, DeskSignalFacadeError> {
         if let Some(to_connection_id) = &self.to_connection_id {
-            return Ok(to_connection_id.as_str());
+            Ok(to_connection_id.as_str())
         } else {
-            return DeskSignalFacadeError::custom_error(
+            DeskSignalFacadeError::custom_error(
                 DeskErrorCode::SYSTEM_ERROR,
                 &format!(
                     "To connection id can't be none, signal type: {}",
                     self.signaling_type
                 ),
-            );
+            )
         }
     }
 
@@ -437,11 +437,11 @@ impl LcxlRTCIceServer {
         }
         let url = self.urls[0].clone();
         if url.starts_with("stun:") {
-            return Some(TurnTransport::Stun);
+            Some(TurnTransport::Stun)
         } else if url.starts_with("turn:") {
-            return Some(TurnTransport::Turn);
+            Some(TurnTransport::Turn)
         } else {
-            return None;
+            None
         }
     }
 }
@@ -456,12 +456,12 @@ impl From<RTCIceServer> for LcxlRTCIceServer {
     }
 }
 
-impl Into<RTCIceServer> for &LcxlRTCIceServer {
-    fn into(self) -> RTCIceServer {
+impl From<&LcxlRTCIceServer> for RTCIceServer {
+    fn from(val: &LcxlRTCIceServer) -> Self {
         RTCIceServer {
-            urls: self.urls.clone(),
-            username: self.username.clone(),
-            credential: self.credential.clone(),
+            urls: val.urls.clone(),
+            username: val.username.clone(),
+            credential: val.credential.clone(),
         }
     }
 }
@@ -501,6 +501,10 @@ pub struct InitSignalingData {
 }
 
 /// WebRTC Connection State
+// `UpdateSettings` carries a full `DeskSettings` payload which dwarfs the other
+// variants. Boxing it would ripple through every `match` site without a real
+// runtime gain on this rarely-cloned enum, so we accept the size delta.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum WebRTConnectionState {
     Init,

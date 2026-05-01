@@ -92,6 +92,7 @@ Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI 规范: `http://localh
 3. **TypeScript/React:** 4 个空格缩进，组件名使用 `PascalCase`，钩子名使用 `useXxx`，`src/components/ui` 中的文件名使用 `kebab-case`。
 4. **代码注释**必须使用**英文 (English)**。
 5. **Git 提交信息**必须使用**英文 (English)**，并遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)。
+6. **测试用例 (CRITICAL)**：更改代码必须要增加测试用例。
 
 ## 任务归档工作流
 

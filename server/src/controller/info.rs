@@ -15,9 +15,9 @@ use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
 #[cfg(target_os = "linux")]
-use desk_capture_engine::image_capture::portal_client::PortalClient;
-#[cfg(target_os = "linux")]
 use crate::service::wayland_remote_desktop::WaylandRemoteDesktop;
+#[cfg(target_os = "linux")]
+use desk_capture_engine::image_capture::portal_client::PortalClient;
 
 #[utoipa::path(
     summary = "Get system information",
@@ -152,7 +152,7 @@ pub async fn query_backend_info(
     };
 
     let resolved = desk_settings.get_image_capture_type()?;
-    let mut backend_info = BackendInfo {
+    let backend_info = BackendInfo {
         os: std::env::consts::OS.to_string(),
         wayland_env: std::env::var("WAYLAND_DISPLAY").is_ok(),
         x11_env: std::env::var("DISPLAY").is_ok(),
@@ -237,7 +237,7 @@ mod tests {
     use super::*;
     use crate::model::settings::Settings;
     use actix_web::{App, test};
-    use std::sync::Arc;
+    
 
     #[actix_web::test]
     async fn test_query_sysinfo() {

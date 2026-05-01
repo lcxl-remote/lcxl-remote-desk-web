@@ -92,6 +92,12 @@ impl Drop for GDIHBITMAP {
 
 pub struct GdiImageOutputEnumerator {}
 
+impl Default for GdiImageOutputEnumerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GdiImageOutputEnumerator {
     pub fn new() -> Self {
         GdiImageOutputEnumerator {}
@@ -334,7 +340,7 @@ impl GdiImageCapture {
             }
         } else {
             let mask_height = bmp.bmHeight as u32;
-            let mask_buffer_size = ((width + 31) / 32) * 4 * mask_height;
+            let mask_buffer_size = width.div_ceil(32) * 4 * mask_height;
             let mut mask_buffer = vec![0u8; mask_buffer_size as usize];
             let mut mask_bi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -365,7 +371,7 @@ impl GdiImageCapture {
                 )
             };
 
-            let pitch = ((width + 31) / 32) * 4;
+            let pitch = width.div_ceil(32) * 4;
             for y in 0..height {
                 let and_row = y as usize * pitch as usize;
                 let xor_row = (y + height) as usize * pitch as usize;
@@ -665,7 +671,7 @@ mod tests {
         if !tmp_dir.exists() {
             std::fs::create_dir_all(&tmp_dir).unwrap();
         }
-        let bmp_path = tmp_dir.join(format!("screenshot_gdi.bmp"));
+        let bmp_path = tmp_dir.join("screenshot_gdi.bmp".to_string());
 
         let src_stride = image_info.get_width() * 4;
         let dst_stride = image_info.get_width() * 4;

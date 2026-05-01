@@ -1,6 +1,7 @@
 pub mod controller;
 pub mod daemon;
 pub mod error;
+pub mod host_control;
 pub mod model;
 pub mod openapi;
 pub mod service;
@@ -78,7 +79,9 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
-use desk_input_injection::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
+use desk_input_injection::model::host_control::{
+    HostControlEventType, PrivateScreenCommand, WhiteboardCommand,
+};
 
 rust_i18n::i18n!("locales");
 
@@ -143,7 +146,7 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
         .app_data(service_op_sender)
         .app_data(
             web::JsonConfig::default()
-                .limit(4096 * 1024 << 2)
+                .limit((4096 * 1024) << 2)
                 .error_handler(|err, req| {
                     warn!("request {} json error: {}", req.path(), err);
                     let msg = err.to_string();
@@ -461,19 +464,19 @@ pub async fn run_with_channels(
             })
             .app_data(
                 web::JsonConfig::default()
-                    .limit(4096 * 1024 << 2)
+                    .limit((4096 * 1024) << 2)
                     .error_handler(|err, req| {
                         // <- create custom error response
                         warn!("progress request {} err: {}", req.path(), err);
                         let err_message = err.to_string();
-                        return InternalError::from_response(
+                        InternalError::from_response(
                             err,
                             HttpResponse::BadRequest().json(RestResponse::failed(
                                 DeskErrorCode::SYSTEM_ERROR,
                                 err_message,
                             )),
                         )
-                        .into();
+                        .into()
                     }),
             ) // <- limit size of the payload (global configuration)
             // no need to login for these routes
@@ -542,7 +545,7 @@ pub async fn run_with_channels(
                             }),
                     )
                     .configure(|cfg| {
-                        if let Some(_) = &turn_api_state {
+                        if turn_api_state.is_some() {
                             cfg.service(
                                 utoipa_actix_web::scope("/turn")
                                     .service(get_turn_info)

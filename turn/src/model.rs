@@ -137,13 +137,13 @@ impl TurnSettings {
                 }
             ));
         }
-        let ice_server = LcxlRTCIceServer {
-            urls: urls,
+        
+
+        LcxlRTCIceServer {
+            urls,
             username: username.to_owned(),
             credential: credential.to_owned(),
-        };
-
-        ice_server
+        }
     }
 }
 

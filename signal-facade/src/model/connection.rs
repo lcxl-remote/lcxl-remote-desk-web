@@ -56,6 +56,12 @@ pub struct ConnectionState {
 /// Shared connection map: connection_id -> ConnectionState
 pub struct SharedConnectionMap(pub RwLock<BTreeMap<String, ConnectionState>>);
 
+impl Default for SharedConnectionMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SharedConnectionMap {
     pub fn new() -> Self {
         SharedConnectionMap(RwLock::new(BTreeMap::new()))

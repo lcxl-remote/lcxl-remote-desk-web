@@ -87,7 +87,7 @@ impl NativeWindowsChild {
         use windows::Win32::System::Threading::TerminateProcess;
         unsafe {
             TerminateProcess(self.raw_handle(), 1).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("TerminateProcess: {e}"))
+                std::io::Error::other(format!("TerminateProcess: {e}"))
             })
         }
     }
@@ -103,7 +103,7 @@ impl NativeWindowsChild {
             unsafe { WaitForSingleObject(h, INFINITE) };
         })
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 
@@ -333,8 +333,8 @@ fn launch_worker_as_user(
     use windows::Win32::{
         Foundation::{CloseHandle, HANDLE},
         Security::{
-            DuplicateTokenEx, SecurityIdentification, SecurityImpersonation,
-            SetTokenInformation, TOKEN_ALL_ACCESS, TokenPrimary, TokenSessionId,
+            DuplicateTokenEx, SecurityIdentification, SecurityImpersonation, SetTokenInformation,
+            TOKEN_ALL_ACCESS, TokenPrimary, TokenSessionId,
         },
         System::{
             Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock},
@@ -353,8 +353,10 @@ fn launch_worker_as_user(
         let use_system_token = match WTSQueryUserToken(session_id, &mut user_token) {
             Ok(()) => {
                 info!("WTSQueryUserToken succeeded for session {session_id}");
-                
-                use windows::Win32::Security::{GetTokenInformation, TokenLinkedToken, TOKEN_LINKED_TOKEN};
+
+                use windows::Win32::Security::{
+                    GetTokenInformation, TOKEN_LINKED_TOKEN, TokenLinkedToken,
+                };
                 let mut linked_token = TOKEN_LINKED_TOKEN::default();
                 let mut return_length = 0;
                 let res = GetTokenInformation(
@@ -365,13 +367,15 @@ fn launch_worker_as_user(
                     &mut return_length,
                 );
                 if res.is_ok() && !linked_token.LinkedToken.is_invalid() {
-                    info!("Successfully retrieved LinkedToken (elevated token) for session {session_id}");
+                    info!(
+                        "Successfully retrieved LinkedToken (elevated token) for session {session_id}"
+                    );
                     let _ = CloseHandle(user_token);
                     user_token = linked_token.LinkedToken;
                 } else {
                     info!("Could not retrieve LinkedToken, using default user token");
                 }
-                
+
                 false
             }
             Err(e) => {
@@ -413,7 +417,9 @@ fn launch_worker_as_user(
             );
             if let Err(e) = set_result {
                 let _ = CloseHandle(dup_token);
-                return Err(format!("SetTokenInformation(TokenSessionId={session_id}): {e}").into());
+                return Err(
+                    format!("SetTokenInformation(TokenSessionId={session_id}): {e}").into(),
+                );
             }
             info!("Set SYSTEM token SessionId to {session_id}");
         }
@@ -505,21 +511,21 @@ async fn run_pipe_server(
 
     let server = unsafe {
         use std::ffi::c_void;
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-        use windows::Win32::Security::{SECURITY_ATTRIBUTES, PSECURITY_DESCRIPTOR};
-        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
         use windows_core::w;
 
         let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
         // D:(A;;GA;;;WD) = Allow Generic All to Everyone
         let sddl = w!("D:(A;;GA;;;WD)");
-        
+
         if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl,
-            1, // SDDL_REVISION_1
-            &mut sd,
-            None,
-        ).is_err() {
+            sddl, 1, // SDDL_REVISION_1
+            &mut sd, None,
+        )
+        .is_err()
+        {
             return Err("Failed to convert SDDL to Security Descriptor".into());
         }
 
@@ -559,7 +565,6 @@ async fn run_pipe_server(
         WorkerToService::Ready => info!("Worker reported Ready"),
         other => warn!("Expected Ready, got: {other:?}"),
     }
-
 
     write_message(
         &mut writer,
@@ -639,7 +644,6 @@ async fn run_pipe_server(
         WorkerToService::Ready => info!("Worker reported Ready"),
         other => warn!("Expected Ready, got: {other:?}"),
     }
-
 
     write_message(
         &mut writer,

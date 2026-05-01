@@ -63,9 +63,8 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
     let (state_tx, state_rx) = tokio::sync::mpsc::unbounded_channel::<
         desk_input_injection::model::host_control::HostControlEventType,
     >();
-    let (wb_cmd_tx, wb_cmd_rx) = std::sync::mpsc::channel::<
-        desk_input_injection::model::host_control::WhiteboardCommand,
-    >();
+    let (wb_cmd_tx, wb_cmd_rx) =
+        std::sync::mpsc::channel::<desk_input_injection::model::host_control::WhiteboardCommand>();
     let (sa_tx, sa_rx) = std::sync::mpsc::channel::<
         lcxl_remote_desk_server::model::security_approval::SecurityApprovalCommand,
     >();
@@ -147,14 +146,13 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                         _ => {}
                     })
                     .on_tray_icon_event(|tray, event| {
-                        if let TrayIconEvent::DoubleClick { .. } = event {
-                            if let Some(window) =
+                        if let TrayIconEvent::DoubleClick { .. } = event
+                            && let Some(window) =
                                 tray.app_handle().get_webview_window(MAIN_WINDOW_LABEL)
                             {
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
-                        }
                     })
                     .build(app)
                     .expect("Failed to create tray icon");
@@ -221,14 +219,13 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
             event: window_event,
             ..
         } => {
-            if label == MAIN_WINDOW_LABEL {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
+            if label == MAIN_WINDOW_LABEL
+                && let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
                     api.prevent_close();
                     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                         let _ = window.hide();
                     }
                 }
-            }
         }
         tauri::RunEvent::ExitRequested { api, .. } => {
             if !IS_EXITING.load(Ordering::SeqCst) {
@@ -243,8 +240,8 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
 
 /// Find the lcxl-remote-desk-server sidecar executable next to the Tauri app binary.
 fn find_server_binary() -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             #[cfg(target_os = "windows")]
             let name = "lcxl-remote-desk-server.exe";
             #[cfg(not(target_os = "windows"))]
@@ -255,7 +252,6 @@ fn find_server_binary() -> std::path::PathBuf {
                 return candidate;
             }
         }
-    }
     #[cfg(target_os = "windows")]
     return std::path::PathBuf::from("lcxl-remote-desk-server.exe");
     #[cfg(not(target_os = "windows"))]
@@ -520,12 +516,11 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::DoubleClick { .. } = event {
-                        if let Some(window) = tray.app_handle().get_webview_window(MAIN_WINDOW_LABEL) {
+                    if let TrayIconEvent::DoubleClick { .. } = event
+                        && let Some(window) = tray.app_handle().get_webview_window(MAIN_WINDOW_LABEL) {
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
-                    }
                 })
                 .build(app)
                 .expect("Failed to create tray icon");
@@ -557,15 +552,14 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         Ok(response) => {
                             log::info!("Server is ready");
                             // Parse JSON response to check initialized status
-                            if let Ok(json) = response.into_json::<serde_json::Value>() {
-                                if let Some(init) = json
+                            if let Ok(json) = response.into_json::<serde_json::Value>()
+                                && let Some(init) = json
                                     .get("data")
                                     .and_then(|d| d.get("initialized"))
                                     .and_then(|i| i.as_bool())
                                 {
                                     system_initialized = init;
                                 }
-                            }
                             break;
                         }
                         Err(e) => {
@@ -639,14 +633,13 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 event: window_event,
                 ..
             } => {
-                if label == MAIN_WINDOW_LABEL {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
+                if label == MAIN_WINDOW_LABEL
+                    && let tauri::WindowEvent::CloseRequested { api, .. } = window_event {
                         api.prevent_close();
                         if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                             let _ = window.hide();
                         }
                     }
-                }
             }
             tauri::RunEvent::ExitRequested { api, .. } => {
                 if !IS_EXITING.load(Ordering::SeqCst) {

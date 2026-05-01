@@ -47,7 +47,7 @@ pub async fn get_current_user(req: HttpRequest, session: Session) -> Result<Http
         error_message: String::from("User is not logged in."),
         success: true,
     };
-    return Ok(HttpResponse::Unauthorized().json(user_response));
+    Ok(HttpResponse::Unauthorized().json(user_response))
 }
 
 /// Middleware to reject anonymous users.

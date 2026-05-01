@@ -67,7 +67,7 @@ impl FileInfo {
     }
 
     pub fn add_err_msg(&mut self, err_msg: String) {
-        if self.err_msg == None {
+        if self.err_msg.is_none() {
             self.err_msg = Some(err_msg)
         } else {
             let origin_err_msg = self.err_msg.clone().unwrap();

@@ -19,6 +19,7 @@ pub struct CpuInfo {
 /// System information (shared between signal-facade consumers).
 /// Used for remote system info queries via signaling.
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
+#[derive(Default)]
 pub struct SystemInfo {
     /// System name
     pub name: Option<String>,
@@ -42,19 +43,3 @@ pub struct SystemInfo {
     pub is_admin: Option<bool>,
 }
 
-impl Default for SystemInfo {
-    fn default() -> Self {
-        Self {
-            name: None,
-            kernel_version: None,
-            os_version: None,
-            host_name: None,
-            total_memory: 0,
-            used_memory: 0,
-            total_swap: 0,
-            used_swap: 0,
-            cpus: Vec::new(),
-            is_admin: None,
-        }
-    }
-}

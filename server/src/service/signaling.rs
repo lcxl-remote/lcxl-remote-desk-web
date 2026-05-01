@@ -57,36 +57,38 @@ use webrtc::{
 use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 
 use crate::model::data_channel::SignalRequestControlData;
-use desk_input_injection::model::host_control::{HostControlEventType, HostControlHelper, WhiteboardCommand};
-use desk_capture_engine::model::image_capture::{CaptureRequest, CursorCaptureMode};
 use crate::model::security_approval::{
     SecurityApprovalSender, SecurityPermissionType, check_security_permission,
 };
 use crate::model::settings::{StartupMode, TraversalMode};
-use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
+use crate::service::audio_playback::start_audio_playback;
+use crate::service::data_channel::handle_data_channel_event;
+use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
+use crate::service::terminal::{
+    RunningTerminal, force_kill_terminal_process, handle_list_terminals,
+    handle_manager_terminal_close, handle_manager_terminal_data, handle_manager_terminal_resize,
+    handle_manager_terminal_start,
+};
+use crate::version;
+use crate::{error::DeskError, model::settings::SharedSettings};
 use desk_capture_engine::audio_capture::audio_capture_factory::{
     create_audio_capture, list_audio_capture,
 };
 use desk_capture_engine::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
-use crate::service::audio_playback::start_audio_playback;
-use crate::service::data_channel::handle_data_channel_event;
-use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
-use desk_input_injection::host_control::host_control_factory::create_host_control_helper;
 use desk_capture_engine::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture_async,
 };
-use crate::service::terminal::{
-    RunningTerminal, force_kill_terminal_process, handle_list_terminals,
-    handle_manager_terminal_close, handle_manager_terminal_data, handle_manager_terminal_resize,
-    handle_manager_terminal_start,
-};
+use desk_capture_engine::model::image_capture::{CaptureRequest, CursorCaptureMode};
+use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use desk_capture_engine::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
-use crate::version;
-use crate::{error::DeskError, model::settings::SharedSettings};
+use desk_input_injection::host_control::host_control_factory::create_host_control_helper;
+use desk_input_injection::model::host_control::{
+    HostControlEventType, HostControlHelper, WhiteboardCommand,
+};
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("capture_screen_histogram", "help", &["type"]).unwrap()
 });
@@ -218,7 +220,7 @@ async fn handle_incoming_ws_message(
                         .session
                         .send_error(
                             &signaling_model.request_id,
-                            signaling_model.signaling_type.into(),
+                            signaling_model.signaling_type,
                             signaling_model.from_connection_id.clone(),
                             DeskErrorCode::SYSTEM_ERROR,
                             &format!("Error handling message: {}", e),
@@ -332,11 +334,10 @@ impl NodeTokenValidator for LocalNodeTokenValidator {
                 return false;
             }
             let local_signaling_token = settings.read().await.system.local_signaling_token.clone();
-            if let Some(local_token) = local_signaling_token {
-                if !local_token.is_empty() {
+            if let Some(local_token) = local_signaling_token
+                && !local_token.is_empty() {
                     return crate::constant_time_eq(local_token.as_bytes(), token.as_bytes());
                 }
-            }
             false
         })
     }
@@ -459,8 +460,8 @@ pub async fn start_desk_session(
                         s.system.signaling_token.clone(),
                     )
                 };
-                if let (Some(url), Some(token)) = (signaling_url, signaling_token) {
-                    if !url.is_empty() && !token.is_empty() {
+                if let (Some(url), Some(token)) = (signaling_url, signaling_token)
+                    && !url.is_empty() && !token.is_empty() {
                         let mut channels_for_loop = crate::ExternalChannels {
                             private_screen_cmd_sender: remote_sig_channels
                                 .private_screen_cmd_sender
@@ -497,7 +498,6 @@ pub async fn start_desk_session(
                         )
                         .await;
                     }
-                }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
@@ -526,8 +526,8 @@ pub async fn start_desk_session(
                         s.system.manager_api_token.clone(),
                     )
                 };
-                if let (Some(url), Some(token)) = (manager_url, manager_api_token) {
-                    if !url.is_empty() && !token.is_empty() {
+                if let (Some(url), Some(token)) = (manager_url, manager_api_token)
+                    && !url.is_empty() && !token.is_empty() {
                         let mut channels_for_loop = crate::ExternalChannels {
                             private_screen_cmd_sender: remote_mgr_channels
                                 .private_screen_cmd_sender
@@ -564,7 +564,6 @@ pub async fn start_desk_session(
                         )
                         .await;
                     }
-                }
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
@@ -835,13 +834,12 @@ impl DeskSession {
                                 SignalingType::PrivateScreenStateChanged,
                                 Some(from_connection_id),
                                 Some(&data),
-                            ) {
-                                if let Ok(text) = serde_json::to_string(&model) {
+                            )
+                                && let Ok(text) = serde_json::to_string(&model) {
                                     let _ = sender.sender.send(DeskSessionMessage::Text(
                                         bytestring::ByteString::from(text),
                                     ));
                                 }
-                            }
                         }
                         HostControlEventType::PrivateScreenInited(_) => {
                             // Ignored or handle appropriately
@@ -857,13 +855,12 @@ impl DeskSession {
                                 SignalingType::PrivateScreenStateChanged,
                                 None,
                                 Some(&data),
-                            ) {
-                                if let Ok(text) = serde_json::to_string(&model) {
+                            )
+                                && let Ok(text) = serde_json::to_string(&model) {
                                     let _ = sender.sender.send(DeskSessionMessage::Text(
                                         bytestring::ByteString::from(text),
                                     ));
                                 }
-                            }
                         }
                         HostControlEventType::PrivateScreenUnknownError(
                             from_connection_id_opt,
@@ -887,13 +884,12 @@ impl DeskSession {
                                     SignalingType::PrivateScreenStateChanged,
                                     Some(from_connection_id),
                                     Some(&data),
-                                ) {
-                                    if let Ok(text) = serde_json::to_string(&model) {
+                                )
+                                    && let Ok(text) = serde_json::to_string(&model) {
                                         let _ = sender.sender.send(DeskSessionMessage::Text(
                                             bytestring::ByteString::from(text),
                                         ));
                                     }
-                                }
                             }
                         }
                         HostControlEventType::PrivateScreenHotkeyRegisterError => {
@@ -1014,7 +1010,7 @@ impl DeskSession {
         // get audio device
         let audio_device_list = match tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            tokio::task::spawn_blocking(|| list_audio_capture()),
+            tokio::task::spawn_blocking(list_audio_capture),
         )
         .await
         {
@@ -1246,7 +1242,7 @@ impl DeskSession {
                             return Err(error);
                         }
                         log::info!("Capture screen task completed successfully");
-                        return result;
+                        result
                     });
 
                     // This will return once all senders are dropped and all
@@ -1287,7 +1283,7 @@ impl DeskSession {
                                 return Err(error);
                             }
                             log::info!("Capture audio task completed");
-                            return result;
+                            result
                         });
 
                         // This will return once all senders are dropped and all
@@ -1314,11 +1310,10 @@ impl DeskSession {
                 move |connection_state: RTCIceConnectionState| {
                     log::info!("RTC ice connection state has changed {connection_state}");
                     let state = WebRTConnectionState::from(&connection_state);
-                    if state != WebRTConnectionState::Init {
-                        if let Err(error) = ice_state_change_sender.send(state) {
+                    if state != WebRTConnectionState::Init
+                        && let Err(error) = ice_state_change_sender.send(state) {
                             log::error!("Failed to send connection state: {}", error);
                         }
-                    }
 
                     Box::pin(async {})
                 },
@@ -1333,11 +1328,10 @@ impl DeskSession {
             .on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
                 log::info!("Peer connection state has changed: {s}");
                 let state = WebRTConnectionState::from(&s);
-                if state == WebRTConnectionState::Closed {
-                    if let Err(error) = peer_state_change_sender.send(state.clone()) {
+                if state == WebRTConnectionState::Closed
+                    && let Err(error) = peer_state_change_sender.send(state.clone()) {
                         log::error!("Failed to send connection state: {}", error);
                     }
-                }
 
                 if s == RTCPeerConnectionState::Closed
                     || s == RTCPeerConnectionState::Failed
@@ -1656,7 +1650,8 @@ impl DeskSession {
                     capture_result
                 }
                 Err(err) => {
-                    if let desk_capture_engine::error::CaptureError::CustomError(custom_error) = err {
+                    if let desk_capture_engine::error::CaptureError::CustomError(custom_error) = err
+                    {
                         if custom_error.error_code == DeskErrorCode::ACTION_NEED_RETRY {
                             timer.stop_and_discard();
                             continue;
@@ -1676,12 +1671,10 @@ impl DeskSession {
                 let channel_opt = cursor_data_channel.read().await.clone();
                 if let (Some(cursor_data), Some(channel)) =
                     (pending_cursor_update.as_ref(), channel_opt)
-                {
-                    if channel.ready_state()
+                    && channel.ready_state()
                         == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
-                    {
-                        if let Ok(json) = serde_json::to_string(cursor_data) {
-                            if channel.send_text(json).await.is_ok() {
+                        && let Ok(json) = serde_json::to_string(cursor_data)
+                            && channel.send_text(json).await.is_ok() {
                                 log::info!(
                                     "Cursor update sent: visible={}, shape_id={}, screen_width={}, screen_height={}",
                                     cursor_data.visible,
@@ -1691,9 +1684,6 @@ impl DeskSession {
                                 );
                                 pending_cursor_update = None;
                             }
-                        }
-                    }
-                }
             } else {
                 pending_cursor_update = None;
             }
@@ -1782,7 +1772,9 @@ impl DeskSession {
                     break;
                 }
                 WebRTConnectionState::UpdateSettings(new_settings) => {
-                    log::info!("Received UpdateSettings while waiting for connection, updating audio settings");
+                    log::info!(
+                        "Received UpdateSettings while waiting for connection, updating audio settings"
+                    );
                     desk_settings = new_settings;
                     // Note: Audio config changes aren't actively handled in the loop later, but we update the struct.
                 }
@@ -1841,15 +1833,14 @@ impl DeskSession {
                 //let buffer = opus_audio_capture.get_buffer()?;
                 let result = capture.get_buffer();
                 if let Err(error) = &result {
-                    if let desk_capture_engine::error::CaptureError::CustomError(err) = error {
-                        if err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
+                    if let desk_capture_engine::error::CaptureError::CustomError(err) = error
+                        && err.error_code == DeskErrorCode::ACTION_NEED_RETRY {
                             // recreate audio capture
                             log::warn!("Failed to get audio buffer, recreate audio capture");
                             capture = create_audio_capture(&desk_settings)?;
                             capture.start()?;
                             continue;
                         }
-                    }
                     log::error!("Failed to get audio buffer, error: {}", error);
                     break;
                 }
@@ -1894,15 +1885,15 @@ impl DeskSession {
         match signaling_model.signaling_type {
             SignalingType::RequestRemote => {
                 // Init PTC peer connection
-                self.init_ptc_peer_connection(&signaling_model).await?;
+                self.init_ptc_peer_connection(signaling_model).await?;
             }
             SignalingType::Offer => {
-                self.handle_offer(&signaling_model).await?;
+                self.handle_offer(signaling_model).await?;
             }
             SignalingType::Answer => {}
             SignalingType::Canid => {
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
-                let rtc_peer_connection = self.get_rtc_peer_connection(&from_connection_id)?;
+                let rtc_peer_connection = self.get_rtc_peer_connection(from_connection_id)?;
 
                 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
                 if let Some(mut candidate_init) =
@@ -1963,11 +1954,11 @@ impl DeskSession {
                 }
             }
             SignalingType::UpdateDeskSettings => {
-                self.handle_update_desk_settings(&signaling_model).await?;
+                self.handle_update_desk_settings(signaling_model).await?;
             }
             SignalingType::RequireControl => {
                 // send back a message to client
-                self.handle_request_control(&signaling_model).await?;
+                self.handle_request_control(signaling_model).await?;
             }
             SignalingType::CloseControl => {
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
@@ -2015,7 +2006,7 @@ impl DeskSession {
                             self.session
                                 .send_error(
                                     &signaling_model.request_id,
-                                    signaling_model.signaling_type.into(),
+                                    signaling_model.signaling_type,
                                     Some(from_connection_id.to_string()),
                                     DeskErrorCode::PERMISSION_ERROR,
                                     "Private screen access denied",
@@ -2027,7 +2018,7 @@ impl DeskSession {
 
                     let _ = self
                         .host_control_helper
-                        .enable_private_screen(&from_connection_id, data.enable);
+                        .enable_private_screen(from_connection_id, data.enable);
                 }
             }
             SignalingType::ManagerFileList => {
@@ -2140,7 +2131,7 @@ impl DeskSession {
                 self.session
                     .send_error(
                         &signaling_model.request_id,
-                        signaling_model.signaling_type.into(),
+                        signaling_model.signaling_type,
                         signaling_model.from_connection_id.clone(),
                         DeskErrorCode::UNKNOWN_SIGNALING_TYPE,
                         &format!(
@@ -2171,7 +2162,7 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
-        let rtc_peer_connection = self.get_rtc_peer_connection(&from_connection_id)?;
+        let rtc_peer_connection = self.get_rtc_peer_connection(from_connection_id)?;
         let offer_model = signaling_model.get_data::<OfferModel>()?;
 
         // start webrtc first
@@ -2179,7 +2170,7 @@ impl DeskSession {
         let peer_connection = rwlock_peer_connection.deref_mut();
         self.start_webrtc(
             &signaling_model.request_id,
-            &from_connection_id,
+            from_connection_id,
             &offer_model,
             peer_connection,
         )
@@ -2209,7 +2200,7 @@ impl DeskSession {
                 .send_to_peer(
                     &signaling_model.request_id,
                     SignalingType::Answer,
-                    &from_connection_id,
+                    from_connection_id,
                     local_desc,
                 )
                 .await?;
@@ -2225,20 +2216,18 @@ impl DeskSession {
         let desk_settings = signaling_model.get_data::<DeskSettings>()?;
         info!("Receive update desk settings: {:?}", desk_settings);
 
-        if let Some(from_connection_id) = &signaling_model.from_connection_id {
-            if let Some(peer_connection) = self.rtc_peer_connection_map.get(from_connection_id) {
+        if let Some(from_connection_id) = &signaling_model.from_connection_id
+            && let Some(peer_connection) = self.rtc_peer_connection_map.get(from_connection_id) {
                 let peer_connection = peer_connection.read().await;
                 let mut signaling_state = peer_connection.signaling_state.write().await;
                 signaling_state.wayland_control_mode = desk_settings.wayland_control_mode.clone();
             }
-        }
 
         // notify the new desk settings to the capture screen task
-        if let Some(sender) = &self.update_setting_sender {
-            if let Err(e) = sender.send(WebRTConnectionState::UpdateSettings(desk_settings)) {
+        if let Some(sender) = &self.update_setting_sender
+            && let Err(e) = sender.send(WebRTConnectionState::UpdateSettings(desk_settings)) {
                 error!("Failed to send update settings: {}", e);
             }
-        }
 
         Ok(())
     }
@@ -2248,7 +2237,7 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
-        let rtc_peer_connection = self.get_rtc_peer_connection(&from_connection_id)?;
+        let rtc_peer_connection = self.get_rtc_peer_connection(from_connection_id)?;
 
         let control_data = signaling_model.get_data::<SignalRequestControlData>()?;
         log::info!(
@@ -2279,7 +2268,7 @@ impl DeskSession {
                 .send_to_peer(
                     &signaling_model.request_id,
                     SignalingType::DenyControl,
-                    &from_connection_id,
+                    from_connection_id,
                     (),
                 )
                 .await?;
@@ -2327,7 +2316,7 @@ impl DeskSession {
             .send_to_peer(
                 &signaling_model.request_id,
                 reply_type,
-                &from_connection_id,
+                from_connection_id,
                 (),
             )
             .await?;

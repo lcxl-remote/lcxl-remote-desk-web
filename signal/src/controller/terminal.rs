@@ -146,5 +146,5 @@ pub async fn open_terminal_session(
         }
     });
 
-    return Ok(res);
+    Ok(res)
 }

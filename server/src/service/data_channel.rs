@@ -20,8 +20,8 @@ use crate::{
     },
     service::{
         clipboard_event::handle_clipboard_event, file_transfer::handle_file_transfer_event,
+        keyboard_event::handle_keyboard_event, mouse_event::handle_mouse_event,
         whiteboard_event::handle_whiteboard_event,
-        mouse_event::handle_mouse_event, keyboard_event::handle_keyboard_event,
     },
 };
 use desk_input_injection::model::host_control::WhiteboardCommand;
@@ -104,7 +104,7 @@ pub async fn handle_data_channel_event(
                                 _ = timeout.as_mut() =>{
                                     let message = math_rand_alpha(15);
                                     log::info!("Sending '{message}'");
-                                    result = data_channel_sender.send_text(message).await.map_err(Into::into);
+                                    result = data_channel_sender.send_text(message).await;
                                 }
                             };
                         }
@@ -117,13 +117,12 @@ pub async fn handle_data_channel_event(
         let msg_str = String::from_utf8(msg.data.to_vec()).unwrap();
         log::debug!("Message from DataChannel '{d_label}': '{msg_str}'");
         let d_label3 = d_label.clone();
-        let d_id3 = d_id.clone();
+        let d_id3 = d_id;
         Box::pin({
             let value = signaling_state2.clone();
             async move {
                 if !value.read().await.accept_control {
                     log::warn!("Data channel '{d_label3}'-'{d_id3}' rejected");
-                    return;
                 }
             }
         })

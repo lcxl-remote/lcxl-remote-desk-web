@@ -6,7 +6,7 @@ use std::process::Command;
 fn main() {
     // 1. Get Git Version
     let output = Command::new("git")
-        .args(&["rev-list", "--count", "HEAD"])
+        .args(["rev-list", "--count", "HEAD"])
         .output();
     let build_number = match output {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap().trim().to_string(),
@@ -23,7 +23,7 @@ fn main() {
         "/// The current build number (Git revision count).\n/// This constant is of type i32, suitable for direct integer arithmetic.\npub const SIGNAL_BUILD_NUMBER: i32 = {};",
         build_number
     );
-    
+
     // Only write if content changed to avoid unnecessary recompilation
     let existing_content = fs::read_to_string(&dest_path).ok();
     if existing_content.as_deref() != Some(&content) {
@@ -31,7 +31,7 @@ fn main() {
     }
 
     // 3. Get Git Commit Hash
-    let output_hash = Command::new("git").args(&["rev-parse", "HEAD"]).output();
+    let output_hash = Command::new("git").args(["rev-parse", "HEAD"]).output();
     let commit_hash = match output_hash {
         Ok(o) if o.status.success() => String::from_utf8(o.stdout).unwrap().trim().to_string(),
         _ => "unknown".to_string(),
@@ -43,15 +43,15 @@ fn main() {
     // 5. Trigger rebuild condition
     // Dynamically resolve git directory to support submodules and different layouts
     let git_dir_output = Command::new("git")
-        .args(&["rev-parse", "--git-dir"])
+        .args(["rev-parse", "--git-dir"])
         .output()
         .ok();
-    
-    if let Some(output) = git_dir_output {
-        if output.status.success() {
-            let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("cargo:rerun-if-changed={}/HEAD", git_dir);
-            println!("cargo:rerun-if-changed={}/index", git_dir);
-        }
+
+    if let Some(output) = git_dir_output
+        && output.status.success()
+    {
+        let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("cargo:rerun-if-changed={}/HEAD", git_dir);
+        println!("cargo:rerun-if-changed={}/index", git_dir);
     }
 }

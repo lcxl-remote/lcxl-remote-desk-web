@@ -277,7 +277,7 @@ async fn handle_download_request(
         .to_string();
     const FILE_TRANSFER_CHUNK_SIZE: usize = 60 * 1024; // 60KB for better SCTP throughput
     let chunk_size = FILE_TRANSFER_CHUNK_SIZE;
-    let total_chunks = (file_size + chunk_size as u64 - 1) / chunk_size as u64;
+    let total_chunks = file_size.div_ceil(chunk_size as u64);
 
     // Send download response with metadata
     let response = FileTransferMessage::DownloadResponse(DownloadResponse {
@@ -328,11 +328,11 @@ async fn handle_download_request(
         let chunk_bytes = build_binary_chunk(&req.transfer_id, chunk_index, &buf[..n]);
 
         // Backpressure & Debug Sampling: Check every 10 chunks
-        if chunk_index % 10 == 0 {
+        if chunk_index.is_multiple_of(10) {
             let current_buffered = dc.buffered_amount().await;
 
             // Periodic debug logging to see actual congestion
-            if chunk_index % 100 == 0 {
+            if chunk_index.is_multiple_of(100) {
                 log::info!(
                     "Download transfer {}: current buffered_amount={} bytes",
                     req.transfer_id,
@@ -358,7 +358,7 @@ async fn handle_download_request(
         let send_duration = send_start.elapsed();
 
         // Performance monitoring & yield to allow SCTP stack to process ACKs
-        if chunk_index % 100 == 0 {
+        if chunk_index.is_multiple_of(100) {
             let current_buffered = dc.buffered_amount().await;
             log::info!(
                 "Download performance sampling {}: send_took={:?}, buffered_amount={} bytes",

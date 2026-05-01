@@ -7,12 +7,7 @@ use log::warn;
 
 pub fn _check_ipv6_available() -> bool {
     let addr = "::1"; // Loopback IPv6 address
-
-    match IpAddr::from_str(addr) {
-        Ok(IpAddr::V6(_)) => true,
-
-        _ => false,
-    }
+    matches!(IpAddr::from_str(addr), Ok(IpAddr::V6(_)))
 }
 
 pub fn check_ipv6_available() -> bool {

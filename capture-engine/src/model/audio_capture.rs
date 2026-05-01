@@ -24,7 +24,7 @@ pub trait AudioBuffer {
 
 pub fn align_slice_byte<T>(data: &[u8]) -> &[T] {
     let type_size = std::mem::size_of::<T>();
-    if data.len() % type_size != 0 {
+    if !data.len().is_multiple_of(type_size) {
         panic!("Data length is not aligned with type size");
     }
     let num_t = data.len() / type_size;

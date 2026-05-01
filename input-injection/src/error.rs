@@ -37,10 +37,10 @@ impl InputError {
         use windows::Win32::Foundation::GetLastError;
         unsafe {
             let last_error = GetLastError();
-            return InputError::custom_error(
+            InputError::custom_error(
                 DeskErrorCode::WINDOWS_ERROR,
                 &format!("windows error code: {:?}", last_error),
-            );
+            )
         }
     }
 

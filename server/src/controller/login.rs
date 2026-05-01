@@ -160,7 +160,7 @@ pub async fn get_captcha(
     if params.phone.is_none() {
         return Ok(HttpResponse::BadRequest().body("Phone is null"));
     }
-    return Ok(HttpResponse::NotImplemented().body("Not implemented"));
+    Ok(HttpResponse::NotImplemented().body("Not implemented"))
 }
 
 #[utoipa::path(
@@ -210,22 +210,20 @@ pub async fn change_password(
         return Ok(HttpResponse::Forbidden().body("Illegal username or password"));
     }
 
-    if let Some(new_username) = params.new_username {
-        if !new_username.is_empty() {
+    if let Some(new_username) = params.new_username
+        && !new_username.is_empty() {
             info!(
                 "Change username from {} to {}",
                 settings.user.login_user_name, new_username
             );
             settings.user.login_user_name = new_username;
         }
-    }
 
-    if let Some(new_password) = params.new_password {
-        if !new_password.is_empty() {
+    if let Some(new_password) = params.new_password
+        && !new_password.is_empty() {
             info!("Change password successfully");
             settings.user.login_password = new_password;
         }
-    }
 
     // save new settings to file
     settings.save()?;

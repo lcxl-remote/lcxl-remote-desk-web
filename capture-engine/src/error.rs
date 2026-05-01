@@ -70,10 +70,10 @@ impl CaptureError {
         use windows::Win32::Foundation::GetLastError;
         unsafe {
             let last_error = GetLastError();
-            return CaptureError::custom_error(
+            CaptureError::custom_error(
                 DeskErrorCode::WINDOWS_ERROR,
                 &format!("windows error code: {:?}", last_error),
-            );
+            )
         }
     }
 

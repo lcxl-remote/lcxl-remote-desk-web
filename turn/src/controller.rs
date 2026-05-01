@@ -22,7 +22,7 @@ pub async fn get_turn_info(
         port_allocated: 0,    // Mock value
     };
 
-    return Ok(HttpResponse::Ok().json(turn_info));
+    Ok(HttpResponse::Ok().json(turn_info))
 }
 
 pub async fn get_turn_session(
@@ -43,11 +43,10 @@ pub async fn get_turn_session_statistics(
         .parse()
         .map_err(|_| DeskTurnError::IllegalTransport("Invalid address".to_string()))?;
 
-    if let Ok(stats) = api_state.statistics.read() {
-        if let Some(counts) = stats.sessions.get(&address) {
+    if let Ok(stats) = api_state.statistics.read()
+        && let Some(counts) = stats.sessions.get(&address) {
             return Ok(HttpResponse::Ok().json(counts));
         }
-    }
 
     Ok(HttpResponse::NotFound().finish())
 }

@@ -10,12 +10,9 @@ use desk_signal_facade::model::signal::SignalingState;
 use tokio::sync::{Mutex, RwLock};
 use webrtc::data_channel::RTCDataChannel;
 
-use crate::{
-    error::DeskError,
-    model::data_channel::ClipboardEventData,
-};
-use desk_input_injection::model::host_control::{ClipboardImage, HostControlHelper};
+use crate::{error::DeskError, model::data_channel::ClipboardEventData};
 use desk_input_injection::host_control::host_control_factory::create_host_control_helper;
+use desk_input_injection::model::host_control::{ClipboardImage, HostControlHelper};
 
 // 1MB max for text
 const MAX_TEXT_SIZE: usize = 1024 * 1024;
@@ -311,8 +308,8 @@ pub async fn handle_clipboard_event(
                         }
                     }
                     "image_end" => {
-                        if let Some(state) = img_state_arc.lock().await.take() {
-                            if state.chunks_received == state.total_chunks {
+                        if let Some(state) = img_state_arc.lock().await.take()
+                            && state.chunks_received == state.total_chunks {
                                 // Decode base64
                                 if let Ok(png_bytes) = BASE64_STANDARD.decode(&state.data) {
                                     // Parse PNG to get raw RGBA
@@ -349,7 +346,6 @@ pub async fn handle_clipboard_event(
                                     log::error!("Failed to decode base64 clipboard image.");
                                 }
                             }
-                        }
                     }
                     _ => {}
                 }

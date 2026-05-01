@@ -86,13 +86,13 @@ impl From<WAVEFORMATEX> for WaveFormat {
 fn log_wave_format(format: &WAVEFORMATEXTENSIBLE) {
     let mut log_str = format!(
         "Audio format: cbSize={}, nAvgBytesPerSec={}, nBlockAlign={}, nChannels={}, nSamplesPerSec={}, wBitsPerSample={}, wFormatTag={}",
-        format.Format.cbSize as u16,
-        format.Format.nAvgBytesPerSec as u32,
-        format.Format.nBlockAlign as u16,
-        format.Format.nChannels as u16,
-        format.Format.nSamplesPerSec as u32,
-        format.Format.wBitsPerSample as u16,
-        format.Format.wFormatTag as u16
+        { format.Format.cbSize },
+        { format.Format.nAvgBytesPerSec },
+        { format.Format.nBlockAlign },
+        { format.Format.nChannels },
+        { format.Format.nSamplesPerSec },
+        { format.Format.wBitsPerSample },
+        { format.Format.wFormatTag }
     );
     if format.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE as u16 {
         let dw_channel_mask = format.dwChannelMask;
@@ -197,7 +197,7 @@ impl AudioDeviceEnumerator for WasapiAudioDeviceEnumerator {
             }
             devices.push(AudioDevice {
                 id: device_id,
-                firendly_name: firendly_name,
+                firendly_name,
                 data_flow: audio_data_flow,
                 default: default_device,
             });
@@ -221,15 +221,14 @@ impl AudioCapture for WasapiAudioCapture {
         loop {
             let result = self.get_one_buffer();
             if let Err(error) = result {
-                if let CaptureError::WindowsResultError(ref _backtrace, ref windows_error) = error {
-                    if windows_error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
+                if let CaptureError::WindowsResultError(ref _backtrace, ref windows_error) = error
+                    && windows_error.code() == AUDCLNT_E_DEVICE_INVALIDATED {
                         log::warn!("audio device is invalidated");
                         return CaptureError::custom_error(
                             DeskErrorCode::ACTION_NEED_RETRY,
                             "Audio device is invalidated, please retry",
                         );
                     }
-                }
                 return Err(error);
             }
             let one_buffer = result?;
@@ -296,7 +295,7 @@ impl WasapiAudioCapture {
         let device_id_ptr = unsafe { device.GetId() }?;
         let device_id = unsafe { device_id_ptr.to_string() }?;
         unsafe { CoTaskMemFree(Some(device_id_ptr.as_ptr() as *const _)) };
-        return Ok(device_id);
+        Ok(device_id)
     }
 
     /// Create a new instance of AudioRecord. Initializes COM
@@ -390,7 +389,7 @@ impl WasapiAudioCapture {
         unsafe { CoTaskMemFree(Some(p_mix_format as *mut _)) };
         let buffer_frame_count = unsafe { audio_client.GetBufferSize() }?;
 
-        let hns_actual_duration = REFTIMES_PER_SEC as u64 * buffer_frame_count as u64
+        let hns_actual_duration = REFTIMES_PER_SEC * buffer_frame_count as u64
             / format.Format.nSamplesPerSec as u64;
 
         let audio_capture_client: IAudioCaptureClient = unsafe { audio_client.GetService() }?;
@@ -447,13 +446,11 @@ impl WasapiAudioCapture {
 
         let buffer_vec = if pdata.is_null() || numframestoread <= 0 {
             vec![]
+        } else if dwflags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
+            vec![0; pdata_len]
         } else {
-            if dwflags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 {
-                vec![0; pdata_len]
-            } else {
-                let buffer = unsafe { std::slice::from_raw_parts(pdata, pdata_len) };
-                buffer.to_vec()
-            }
+            let buffer = unsafe { std::slice::from_raw_parts(pdata, pdata_len) };
+            buffer.to_vec()
         };
 
         unsafe {
@@ -508,7 +505,7 @@ mod tests {
         };
         let mut writer = hound::WavWriter::create("sample/sine.wav", spec).unwrap();
         let dur = time::Duration::from_millis(
-            (audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2) as u64,
+            ((audio_record.hns_actual_duration / REFTIMES_PER_MILLISEC / 2)),
         );
         log::info!("sleep for {:?} every time", dur);
         for i in 0..30 {

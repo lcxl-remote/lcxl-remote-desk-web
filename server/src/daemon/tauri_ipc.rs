@@ -1,9 +1,11 @@
-use desk_input_injection::model::host_control::{HostControlEventType, PrivateScreenCommand, WhiteboardCommand};
 use crate::model::security_approval::{
     PENDING_APPROVALS, SecurityApprovalCommand, SecurityApprovalResponse,
 };
 use crate::{ExternalChannels, ServiceOp, TauriIsAdminOverride, TauriLoginToken};
 use actix_web::{HttpRequest, HttpResponse, web};
+use desk_input_injection::model::host_control::{
+    HostControlEventType, PrivateScreenCommand, WhiteboardCommand,
+};
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -225,13 +227,12 @@ async fn run_ws_session(
     let new_token = Uuid::new_v4().to_string();
     bridge.tauri_login_token.refresh(new_token.clone());
     let token_msg = DaemonToTauriMsg::TauriToken { token: new_token };
-    if let Ok(json) = serde_json::to_string(&token_msg) {
-        if session.text(json).await.is_err() {
+    if let Ok(json) = serde_json::to_string(&token_msg)
+        && session.text(json).await.is_err() {
             info!("[TauriIpc] Failed to send TauriToken, closing");
             on_disconnect(&bridge);
             return;
         }
-    }
 
     let mut ws_rx = bridge.ws_tx.subscribe();
 

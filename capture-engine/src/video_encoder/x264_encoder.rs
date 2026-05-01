@@ -29,8 +29,8 @@ impl X264Encoder {
         display_info: &DisplayInfo,
         fps: u32,
     ) -> Result<Self, CaptureError> {
-        let width = display_info.desktop_coordinates.width() as i32;
-        let height = display_info.desktop_coordinates.height() as i32;
+        let width = display_info.desktop_coordinates.width();
+        let height = display_info.desktop_coordinates.height();
 
         let mut setup = Setup::preset(Preset::Ultrafast, Tune::None, false, true);
         setup = setup.crf(setting.quality as f32);

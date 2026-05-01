@@ -83,14 +83,8 @@ pub fn rewrite_mdns_candidate_with_ip(
         None => return None,
     };
 
-    let candidate_value = match obj.get("candidate") {
-        Some(v) => v,
-        None => return None,
-    };
-    let candidate_str = match candidate_value.as_str() {
-        Some(s) => s,
-        None => return None,
-    };
+    let candidate_value = obj.get("candidate")?;
+    let candidate_str = candidate_value.as_str()?;
 
     if !candidate_str.contains(".local") {
         return None;
@@ -177,6 +171,7 @@ impl<U: SignalingUser> Drop for SignalingHandler<U> {
 
 impl<U: SignalingUser> SignalingHandler<U> {
     /// Initialize a new SignalingHandler.
+    #[allow(clippy::too_many_arguments)]
     pub async fn init(
         connection_id: String,
         client_version_info: VersionInfo,
@@ -233,8 +228,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
         ignore_connection_not_found: bool,
     ) -> Result<(), DeskSignalFacadeError> {
         // Device user restriction logic
-        if self.user.get_access() == Some("device_user") {
-            if let Some(target_connection) = self.user.get_target_connection_id() {
+        if self.user.get_access() == Some("device_user")
+            && let Some(target_connection) = self.user.get_target_connection_id() {
                 let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
                 if to_connection_id != target_connection {
                     return DeskSignalFacadeError::custom_error(
@@ -246,7 +241,6 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     );
                 }
             }
-        }
 
         if let Some(tx) = self
             .connection_state
@@ -339,8 +333,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             }
             SignalingType::SendDataToTerminal => {
                 let from_connection_id = &self.connection_state.model.connection_id;
-                if signaling_model.is_request() {
-                    if !self
+                if signaling_model.is_request()
+                    && !self
                         .connection_state
                         .terminal_connection_ids
                         .read()
@@ -355,13 +349,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                             ),
                         );
                     }
-                }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
             SignalingType::ResizeTerminal => {
                 let from_connection_id = &self.connection_state.model.connection_id;
-                if signaling_model.is_request() {
-                    if !self
+                if signaling_model.is_request()
+                    && !self
                         .connection_state
                         .terminal_connection_ids
                         .read()
@@ -376,7 +369,6 @@ impl<U: SignalingUser> SignalingHandler<U> {
                             ),
                         );
                     }
-                }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
 
@@ -397,12 +389,11 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     } else {
                         ip
                     }
-                }) {
-                    if let Some(rewritten) = rewrite_mdns_candidate_with_ip(&signaling_model, ip) {
+                })
+                    && let Some(rewritten) = rewrite_mdns_candidate_with_ip(&signaling_model, ip) {
                         self.forward_to_peer(&rewritten, false).await?;
                         return Ok(());
                     }
-                }
                 self.forward_to_peer(&signaling_model, false).await?;
             }
 

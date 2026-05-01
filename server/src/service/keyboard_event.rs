@@ -5,8 +5,8 @@ use tokio::sync::{Mutex, RwLock};
 use webrtc::data_channel::RTCDataChannel;
 
 use crate::error::DeskError;
-use desk_input_injection::model::data_channel::KeyboardEventData;
 use desk_input_injection::keyboard_event::keyboard_event_factory::create_keyboard_event_handler;
+use desk_input_injection::model::data_channel::KeyboardEventData;
 
 pub async fn handle_keyboard_event(
     signaling_state: Arc<RwLock<SignalingState>>,

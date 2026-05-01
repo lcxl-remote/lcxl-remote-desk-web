@@ -44,9 +44,7 @@ pub async fn run_signaling_proxy(
                 // All other modes have no local signaling endpoint.
                 let effective_port = match startup_mode {
                     StartupMode::Default => port,
-                    StartupMode::ServiceDaemon => {
-                        crate::daemon::local_api::SERVICE_API_PORT
-                    }
+                    StartupMode::ServiceDaemon => crate::daemon::local_api::SERVICE_API_PORT,
                     _ => {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         continue;
@@ -95,8 +93,8 @@ pub async fn run_signaling_proxy(
                     )
                 };
 
-                if let (Some(url), Some(token)) = (signaling_url, signaling_token) {
-                    if !url.is_empty() && !token.is_empty() {
+                if let (Some(url), Some(token)) = (signaling_url, signaling_token)
+                    && !url.is_empty() && !token.is_empty() {
                         let rx = outbound_tx.subscribe();
                         let _ = maintain_proxy_connection(
                             settings.clone(),
@@ -107,7 +105,6 @@ pub async fn run_signaling_proxy(
                         )
                         .await;
                     }
-                }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -128,8 +125,8 @@ pub async fn run_signaling_proxy(
                     )
                 };
 
-                if let (Some(url), Some(token)) = (manager_url, manager_api_token) {
-                    if !url.is_empty() && !token.is_empty() {
+                if let (Some(url), Some(token)) = (manager_url, manager_api_token)
+                    && !url.is_empty() && !token.is_empty() {
                         let rx = outbound_tx.subscribe();
                         let _ = maintain_proxy_connection(
                             settings.clone(),
@@ -140,7 +137,6 @@ pub async fn run_signaling_proxy(
                         )
                         .await;
                     }
-                }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -197,7 +193,7 @@ async fn maintain_proxy_connection(
         let s = settings.read().await;
         s.desk.display_name.clone()
     };
-    let display_name = display_name.or_else(|| sysinfo::System::host_name());
+    let display_name = display_name.or_else(sysinfo::System::host_name);
 
     let client_id = {
         let s = settings.read().await;
@@ -268,18 +264,15 @@ async fn maintain_proxy_connection(
                                 };
                                 if let Ok(parsed) =
                                     serde_json::from_str::<SignalingModel>(&text_str)
-                                {
-                                    if matches!(
+                                    && matches!(
                                         parsed.signaling_type,
                                         SignalingType::RequestRemote
-                                    ) {
-                                        if let Some(from_id) = parsed.from_connection_id {
+                                    )
+                                        && let Some(from_id) = parsed.from_connection_id {
                                             worker_mgr
                                                 .track_browser_connection(from_id)
                                                 .await;
                                         }
-                                    }
-                                }
                                 let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
                                     message: text_str,
                                     connection_id: None,

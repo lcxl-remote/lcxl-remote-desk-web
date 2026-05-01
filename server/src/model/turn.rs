@@ -73,7 +73,7 @@ impl turn::auth::AuthHandler for TurnAuthHandler {
             mac.update(username.as_bytes());
             let result = mac.finalize();
             let password_bytes = result.into_bytes();
-            let password = BASE64_STANDARD.encode(&password_bytes);
+            let password = BASE64_STANDARD.encode(password_bytes);
 
             let key = turn::auth::generate_auth_key(username, realm, &password);
             log::info!(

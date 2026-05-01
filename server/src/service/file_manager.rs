@@ -37,15 +37,14 @@ pub fn get_logical_driver_list() -> Result<Vec<FileInfo>, DeskError> {
     let mut start_index = 0;
     let mut end_index = 0;
     for item in lp_buffer.iter() {
-        if *item == 0 {
-            if end_index > start_index {
+        if *item == 0
+            && end_index > start_index {
                 let driver = String::from_utf16_lossy(&lp_buffer[start_index..end_index]);
                 info!("driver: {}", driver);
                 let driver_path_buf = PathBuf::from(driver.as_str());
                 file_info_list.push(FileInfo::new(driver_path_buf)?);
                 start_index = end_index + 1;
             }
-        }
         end_index += 1;
     }
     Ok(file_info_list)
@@ -184,7 +183,7 @@ pub async fn handle_manager_file_list(
             .session
             .send_error(
                 &signaling_model.request_id,
-                signaling_model.signaling_type.into(),
+                signaling_model.signaling_type,
                 from_connection_id.clone(),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File browse access denied",
@@ -250,7 +249,7 @@ pub async fn handle_manager_file_delete(
             .session
             .send_error(
                 &signaling_model.request_id,
-                signaling_model.signaling_type.into(),
+                signaling_model.signaling_type,
                 from_connection_id.clone(),
                 DeskErrorCode::PERMISSION_ERROR,
                 "File delete access denied",
