@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use actix_web::{HttpRequest, HttpResponse, web};
 use log::{debug, info, warn};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 use super::protocol::{ClientRole, HostControlMessage};
 use super::{HostControlEvent, HostControlHub, HubMode, UpstreamSessionId};
-use crate::TauriLoginToken;
+use crate::{TauriIsAdminOverride, TauriLoginToken};
 
 /// Constant-time byte comparison for query-string tokens. Returns `false` on
 /// length mismatch and never short-circuits on the first differing byte.
@@ -72,6 +72,10 @@ pub struct EndpointState {
     pub tauri_login_token: TauriLoginToken,
     /// Used to assign monotonically increasing UpstreamSessionId values.
     pub next_session_id: Arc<AtomicU64>,
+    /// Optional override populated from Tauri's `Ready { is_admin }` so HTTP
+    /// handlers can report the elevation status of the Tauri process. Only
+    /// wired by the daemon (Aggregator); portable / DeskServer leave it None.
+    pub tauri_is_admin: Option<TauriIsAdminOverride>,
 }
 
 impl EndpointState {
@@ -85,7 +89,13 @@ impl EndpointState {
             ipc_token,
             tauri_login_token,
             next_session_id: Arc::new(AtomicU64::new(1)),
+            tauri_is_admin: None,
         }
+    }
+
+    pub fn with_tauri_is_admin(mut self, override_data: TauriIsAdminOverride) -> Self {
+        self.tauri_is_admin = Some(override_data);
+        self
     }
 
     fn alloc_session_id(&self) -> UpstreamSessionId {
@@ -165,6 +175,10 @@ async fn run_ws_session(
     let mut role: Option<ClientRole> = None;
     let session_id: UpstreamSessionId = state.alloc_session_id();
     let mut outbound_rx = state.hub.subscribe_outbound();
+    // Per-session directional mpsc — the hub writes here when it needs to address
+    // a specific forwarder (e.g. SecurityApprovalSubmit routed via pending_routes).
+    // For Tauri sessions the receiver is created but never written to.
+    let (session_tx, mut session_rx) = mpsc::unbounded_channel::<HostControlMessage>();
 
     loop {
         tokio::select! {
@@ -192,13 +206,35 @@ async fn run_ws_session(
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+            // Hub → ws sink (directional). Used by Aggregator for SubmitApproval
+            // routed to a specific forwarder via `route_to_forwarder`.
+            direct = session_rx.recv() => {
+                let Some(msg) = direct else { break };
+                let json = match serde_json::to_string(&msg) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        warn!("[HostCtrl/WS] serialize (direct): {e}");
+                        continue;
+                    }
+                };
+                if session.text(json).await.is_err() {
+                    break;
+                }
+            }
             // ws stream → hub state.
             msg = msg_stream.recv() => {
                 match msg {
                     Some(Ok(actix_ws::Message::Text(text))) => {
                         match serde_json::from_str::<HostControlMessage>(&text) {
                             Ok(parsed) => {
-                                handle_client_message(&state, &mut role, session_id, parsed).await;
+                                handle_client_message(
+                                    &state,
+                                    &mut role,
+                                    session_id,
+                                    &session_tx,
+                                    parsed,
+                                )
+                                .await;
                             }
                             Err(e) => warn!("[HostCtrl/WS] parse: {e} ({text})"),
                         }
@@ -243,11 +279,12 @@ fn is_outbound_for_role(msg: &HostControlMessage, role: Option<ClientRole>) -> b
             | HostControlMessage::SecurityApprovalRequest { .. }
             | HostControlMessage::ServiceOp { .. },
         ) => true,
-        // Forwarder-bound messages.
+        // Forwarder-bound broadcast: only Cancel + state changes.
+        // SecurityApprovalSubmit is dispatched via per-session mpsc (directional)
+        // so it never reaches the broadcast path — see `Hub::route_to_forwarder`.
         (
             ClientRole::Forwarder,
-            HostControlMessage::SecurityApprovalSubmit { .. }
-            | HostControlMessage::SecurityApprovalCancel { .. }
+            HostControlMessage::SecurityApprovalCancel { .. }
             | HostControlMessage::PrivateScreenStateChangedToWorker { .. },
         ) => true,
         _ => false,
@@ -258,22 +295,35 @@ async fn handle_client_message(
     state: &Arc<EndpointState>,
     role: &mut Option<ClientRole>,
     session_id: UpstreamSessionId,
+    session_tx: &mpsc::UnboundedSender<HostControlMessage>,
     msg: HostControlMessage,
 ) {
     match msg {
         HostControlMessage::Ready { role: r, is_admin } => {
             info!("[HostCtrl/WS] Ready role={r:?} is_admin={is_admin:?} session_id={session_id}");
             *role = Some(r);
-            if r == ClientRole::Tauri {
-                state.hub.mark_tauri_connected();
-                // Replay any pending approvals that arrived before this client connected.
-                for replay in state.hub.replay_messages_for_tauri() {
-                    if let Ok(_json) = serde_json::to_string(&replay) {
-                        // We don't have direct session access here; the broadcast
-                        // path will deliver to this client (since it subscribed).
-                        // Pump it through the hub's broadcast so all current Tauri
-                        // clients see consistent state.
-                        let _ = state.hub.send_command(replay);
+            match r {
+                ClientRole::Tauri => {
+                    state.hub.mark_tauri_connected();
+                    if let Some(override_data) = state.tauri_is_admin.as_ref() {
+                        *override_data.lock().unwrap() = is_admin;
+                    }
+                    // Replay any pending approvals that arrived before this client connected.
+                    for replay in state.hub.replay_messages_for_tauri() {
+                        if let Ok(_json) = serde_json::to_string(&replay) {
+                            // We don't have direct session access here; the broadcast
+                            // path will deliver to this client (since it subscribed).
+                            // Pump it through the hub's broadcast so all current Tauri
+                            // clients see consistent state.
+                            let _ = state.hub.send_command(replay);
+                        }
+                    }
+                }
+                ClientRole::Forwarder => {
+                    if state.hub.mode() == HubMode::Aggregator {
+                        state
+                            .hub
+                            .register_forwarder_session(session_id, session_tx.clone());
                     }
                 }
             }
@@ -341,25 +391,36 @@ fn on_disconnect(
     match (role, state.hub.mode()) {
         (Some(ClientRole::Tauri), HubMode::Local) => {
             state.hub.mark_tauri_disconnected();
+            if let Some(override_data) = state.tauri_is_admin.as_ref() {
+                *override_data.lock().unwrap() = None;
+            }
             // Local hub: no surviving UI means in-flight approvals must deny so
             // business doesn't hang. (Aggregator handles its own cleanup elsewhere.)
             state.hub.deny_all_pending();
         }
         (Some(ClientRole::Tauri), HubMode::Aggregator) => {
             state.hub.mark_tauri_disconnected();
+            if let Some(override_data) = state.tauri_is_admin.as_ref() {
+                *override_data.lock().unwrap() = None;
+            }
+            // Tauri-side cleanup of in-flight approvals (notifying surviving
+            // forwarders) is exception-handling territory — see Step 7.
         }
         (Some(ClientRole::Forwarder), HubMode::Aggregator) => {
-            // Drain all approvals that this forwarder owned — and broadcast a
-            // synthetic Cancel to any Tauri clients watching, so they close
-            // their dialogs.
+            // drain_upstream_pending also unregisters the forwarder mpsc so any
+            // race-condition late submit returns false instead of dispatching.
             let drained = state.hub.drain_upstream_pending(session_id);
-            for req_id in drained {
-                let _ = state
-                    .hub
-                    .send_command(HostControlMessage::SecurityApprovalCancel { req_id });
+            if !drained.is_empty() {
+                debug!(
+                    "[HostCtrl/WS] forwarder session_id={session_id} drained {} pending req(s): {drained:?}",
+                    drained.len()
+                );
             }
         }
-        _ => {}
+        _ => {
+            // Pre-Ready disconnects or forwarders on a non-Aggregator hub: nothing
+            // to clean up (forwarder sessions are only registered on Aggregator).
+        }
     }
 }
 
@@ -444,11 +505,20 @@ mod tests {
     #[test]
     fn role_filter_forwarder() {
         let role = Some(ClientRole::Forwarder);
-        assert!(is_outbound_for_role(
+        // SecurityApprovalSubmit is directional (per-session mpsc); it must NOT
+        // be delivered via the broadcast path.
+        assert!(!is_outbound_for_role(
             &HostControlMessage::SecurityApprovalSubmit {
                 req_id: "r1".into(),
                 approved: true,
                 remember: false,
+            },
+            role
+        ));
+        // Cancel and state changes are still legitimate broadcast traffic.
+        assert!(is_outbound_for_role(
+            &HostControlMessage::SecurityApprovalCancel {
+                req_id: "r1".into()
             },
             role
         ));
@@ -512,6 +582,23 @@ mod tests {
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 404);
+    }
+
+    // EndpointState::with_tauri_is_admin attaches the override and propagates it.
+    #[test]
+    fn endpoint_state_with_tauri_is_admin_sets_field() {
+        use std::sync::{Arc, Mutex};
+        let hub = Arc::new(HostControlHub::new_aggregator());
+        let override_data: TauriIsAdminOverride = Arc::new(Mutex::new(None));
+        let state = EndpointState::new(hub, "secret".to_string(), TauriLoginToken::empty())
+            .with_tauri_is_admin(override_data.clone());
+        assert!(state.tauri_is_admin.is_some());
+        // Mutating via the original Arc is visible through the state's clone.
+        *override_data.lock().unwrap() = Some(true);
+        assert_eq!(
+            *state.tauri_is_admin.as_ref().unwrap().lock().unwrap(),
+            Some(true)
+        );
     }
 
     // /ws/host_upstream is reachable on Aggregator (auth runs to completion;

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use log::{debug, info, warn};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::model::security_approval::SecurityPermissionType;
@@ -100,6 +100,11 @@ struct HubInner {
     pending_replay: Mutex<HashMap<String, ReplaySnapshot>>,
     /// Aggregator-only: req_id → which upstream forwarder session originated it.
     pending_routes: Mutex<HashMap<String, UpstreamSessionId>>,
+    /// Aggregator-only: per-forwarder-session outbound mpsc, used for directional
+    /// dispatch (e.g. SecurityApprovalSubmit → exactly the originating worker).
+    /// Populated by `endpoint::run_ws_session` on `Ready { role: Forwarder }`.
+    forwarder_sessions:
+        Mutex<HashMap<UpstreamSessionId, mpsc::UnboundedSender<HostControlMessage>>>,
     /// Forwarder-only: connection to the daemon aggregator.
     upstream: Option<Arc<UpstreamForwarder>>,
     /// Tracks whether at least one Tauri ws client is currently connected. Used by
@@ -143,6 +148,7 @@ impl HostControlHub {
             pending_approvals: Mutex::new(HashMap::new()),
             pending_replay: Mutex::new(HashMap::new()),
             pending_routes: Mutex::new(HashMap::new()),
+            forwarder_sessions: Mutex::new(HashMap::new()),
             upstream,
             has_tauri_subscriber: AtomicBool::new(false),
         };
@@ -317,11 +323,30 @@ impl HostControlHub {
 
     /// Resolve an approval. The dispatch depends on hub mode:
     /// - Local / Forwarder: look up local oneshot and send the response.
-    /// - Aggregator: route to the originating forwarder via ws (handled in endpoint).
+    /// - Aggregator: pop the upstream route for `req_id` and send a directional
+    ///   `SecurityApprovalSubmit` to that forwarder's session — never broadcast.
     ///
-    /// Returns `true` if the approval was found locally (for Aggregator this is
-    /// always `false` — the controller will then call `route_submit_to_upstream`).
+    /// Returns `true` if the response was successfully dispatched (oneshot
+    /// resolved locally, or directional message handed to a registered forwarder
+    /// session). Returns `false` if `req_id` is unknown or the routed forwarder
+    /// has already disconnected.
     pub fn submit_approval(&self, req_id: &str, response: ApprovalResponse) -> bool {
+        if self.inner.mode == HubMode::Aggregator {
+            // Plan review #6/#7: Aggregator must route directionally via
+            // pending_routes — never broadcast SecurityApprovalSubmit.
+            let Some(session_id) = self.pop_upstream_for_req(req_id) else {
+                debug!("[Hub/Aggregator] submit_approval: unknown req_id={req_id} (no route)");
+                return false;
+            };
+            let msg = HostControlMessage::SecurityApprovalSubmit {
+                req_id: req_id.to_string(),
+                approved: response.approved,
+                remember: response.remember,
+            };
+            return self.route_to_forwarder(session_id, msg);
+        }
+
+        // Local / Forwarder: resolve the locally held oneshot.
         let entry = self.inner.pending_approvals.lock().unwrap().remove(req_id);
         match entry {
             Some(PendingEntry { response_tx, .. }) => {
@@ -330,6 +355,56 @@ impl HostControlHub {
                 true
             }
             None => false,
+        }
+    }
+
+    /// Aggregator-only: register the outbound mpsc for a freshly-handshaken
+    /// forwarder session. The endpoint passes the matching receiver into the ws
+    /// sink loop so messages routed via `route_to_forwarder` reach exactly that
+    /// connection.
+    pub fn register_forwarder_session(
+        &self,
+        session_id: UpstreamSessionId,
+        tx: mpsc::UnboundedSender<HostControlMessage>,
+    ) {
+        debug_assert_eq!(self.inner.mode, HubMode::Aggregator);
+        self.inner
+            .forwarder_sessions
+            .lock()
+            .unwrap()
+            .insert(session_id, tx);
+    }
+
+    /// Aggregator-only: drop the outbound mpsc for a disconnecting forwarder.
+    pub fn unregister_forwarder_session(&self, session_id: UpstreamSessionId) {
+        self.inner
+            .forwarder_sessions
+            .lock()
+            .unwrap()
+            .remove(&session_id);
+    }
+
+    /// Aggregator-only: send a single host-control message to the forwarder
+    /// identified by `session_id`. Returns `false` if the session is not (or
+    /// no longer) registered, or if the mpsc receiver has been dropped.
+    pub fn route_to_forwarder(
+        &self,
+        session_id: UpstreamSessionId,
+        msg: HostControlMessage,
+    ) -> bool {
+        let sessions = self.inner.forwarder_sessions.lock().unwrap();
+        let Some(tx) = sessions.get(&session_id) else {
+            debug!("[Hub/Aggregator] route_to_forwarder: session_id={session_id} not registered");
+            return false;
+        };
+        match tx.send(msg) {
+            Ok(()) => true,
+            Err(_) => {
+                debug!(
+                    "[Hub/Aggregator] route_to_forwarder: mpsc closed for session_id={session_id}"
+                );
+                false
+            }
         }
     }
 
@@ -365,22 +440,30 @@ impl HostControlHub {
         );
     }
 
-    /// Aggregator-only: drain all pending approvals belonging to `upstream_id`.
-    /// Returns the list of req_ids that were drained, so the caller can notify
-    /// the Tauri shell to close those dialogs.
+    /// Aggregator-only: drain all pending approvals belonging to `upstream_id`,
+    /// and drop the forwarder session's outbound mpsc registration. Returns the
+    /// list of req_ids that were drained, so the caller can notify the Tauri
+    /// shell to close those dialogs.
     pub fn drain_upstream_pending(&self, upstream_id: UpstreamSessionId) -> Vec<String> {
         let mut out = Vec::new();
-        let mut routes = self.inner.pending_routes.lock().unwrap();
-        let mut replay = self.inner.pending_replay.lock().unwrap();
-        routes.retain(|req_id, owner| {
-            if *owner == upstream_id {
-                replay.remove(req_id);
-                out.push(req_id.clone());
-                false
-            } else {
-                true
-            }
-        });
+        {
+            let mut routes = self.inner.pending_routes.lock().unwrap();
+            let mut replay = self.inner.pending_replay.lock().unwrap();
+            routes.retain(|req_id, owner| {
+                if *owner == upstream_id {
+                    replay.remove(req_id);
+                    out.push(req_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        self.inner
+            .forwarder_sessions
+            .lock()
+            .unwrap()
+            .remove(&upstream_id);
         out
     }
 
@@ -868,6 +951,126 @@ mod tests {
         let hub = HostControlHub::new_aggregator();
         let resp = hub.request_approval(approval_req("r1")).await;
         assert!(!resp.approved);
+    }
+
+    // U-14b: Aggregator submit_approval routes the response directionally to
+    // the originating forwarder session via its registered mpsc — never the
+    // outbound broadcast (a second forwarder session must not see the message).
+    #[tokio::test]
+    async fn u14b_aggregator_submit_directional_only() {
+        let hub = HostControlHub::new_aggregator();
+
+        // Two forwarder sessions registered with their own mpsc receivers.
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(1, tx_a);
+        hub.register_forwarder_session(2, tx_b);
+
+        // Track outbound broadcast — submit must not appear here.
+        let mut outbound_rx = hub.subscribe_outbound();
+
+        hub.register_upstream_request(
+            "r1".to_string(),
+            1,
+            SecurityPermissionType::RemoteControl,
+            None,
+        );
+        hub.register_upstream_request("r2".to_string(), 2, SecurityPermissionType::Terminal, None);
+
+        let dispatched = hub.submit_approval(
+            "r1",
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            },
+        );
+        assert!(dispatched, "directional submit must succeed");
+
+        // Forwarder #1 receives the SubmitApproval.
+        let got = tokio::time::timeout(Duration::from_millis(100), rx_a.recv())
+            .await
+            .expect("session 1 must receive")
+            .expect("mpsc closed");
+        match got {
+            HostControlMessage::SecurityApprovalSubmit {
+                req_id,
+                approved,
+                remember,
+            } => {
+                assert_eq!(req_id, "r1");
+                assert!(approved);
+                assert!(!remember);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Forwarder #2 must NOT have received it.
+        let other = tokio::time::timeout(Duration::from_millis(50), rx_b.recv()).await;
+        assert!(other.is_err(), "session 2 must not receive r1's submit");
+
+        // Outbound broadcast must NOT carry SubmitApproval either.
+        let bcast = tokio::time::timeout(Duration::from_millis(50), outbound_rx.recv()).await;
+        assert!(
+            bcast.is_err(),
+            "broadcast must stay quiet for directional submit"
+        );
+
+        // Replay/route entries for r1 are removed.
+        assert_eq!(hub.pending_replay_count(), 1);
+    }
+
+    // U-14d: Aggregator submit for an unknown req_id returns false.
+    #[tokio::test]
+    async fn u14d_aggregator_submit_unknown_returns_false() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(7, tx);
+
+        let dispatched = hub.submit_approval("does-not-exist", ApprovalResponse::deny());
+        assert!(!dispatched);
+    }
+
+    // Aggregator drain_upstream_pending also removes the forwarder session entry.
+    #[tokio::test]
+    async fn aggregator_drain_unregisters_session() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(42, tx);
+        hub.register_upstream_request(
+            "r1".to_string(),
+            42,
+            SecurityPermissionType::RemoteControl,
+            None,
+        );
+
+        let drained = hub.drain_upstream_pending(42);
+        assert_eq!(drained, vec!["r1".to_string()]);
+
+        // After drain, route_to_forwarder fails for the same session_id.
+        let routed = hub.route_to_forwarder(
+            42,
+            HostControlMessage::SecurityApprovalCancel {
+                req_id: "r1".to_string(),
+            },
+        );
+        assert!(!routed, "drained session must be unregistered");
+    }
+
+    // route_to_forwarder fails silently when the receiver was already dropped.
+    #[tokio::test]
+    async fn route_to_forwarder_handles_closed_receiver() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx, rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(5, tx);
+        drop(rx); // simulate ws task gone
+
+        let routed = hub.route_to_forwarder(
+            5,
+            HostControlMessage::SecurityApprovalCancel {
+                req_id: "r-x".to_string(),
+            },
+        );
+        assert!(!routed);
     }
 
     // deny_all_pending resolves every outstanding oneshot with deny.

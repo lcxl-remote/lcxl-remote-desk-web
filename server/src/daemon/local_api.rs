@@ -1,6 +1,7 @@
 use crate::{
     ApiRouteConfig, ExternalChannels,
     daemon::tauri_ipc::TauriIpcBridge,
+    host_control,
     model::settings::{SharedSettings, StartupMode},
     service::signaling::LocalNodeTokenValidator,
 };
@@ -13,13 +14,26 @@ use desk_signal_facade::service::NodeTokenValidator;
 use log::{error, info};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::oneshot;
 
 pub const SERVICE_API_PORT: u16 = 8082;
 
+/// Run the daemon's local HTTP API.
+///
+/// `host_control_hub` is the Aggregator-mode hub shared between this server and
+/// the rest of the daemon. It owns the `/ws/tauri_ipc` (Tauri shell) and
+/// `/ws/host_upstream` (worker forwarder) endpoints.
+///
+/// `ready_tx`, when supplied, is fired exactly once after the HTTP server has
+/// successfully bound its listening socket. Workers should not be spawned until
+/// the signal arrives so their forwarder ws clients connect on the first try
+/// (plan review #5).
 pub async fn run_local_api(
     settings: Arc<SharedSettings>,
     tauri_bridge: Arc<TauriIpcBridge>,
     channels: ExternalChannels,
+    host_control_hub: Arc<host_control::HostControlHub>,
+    ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("ServiceDaemon HTTP server starting on 0.0.0.0:{SERVICE_API_PORT}");
 
@@ -61,18 +75,31 @@ pub async fn run_local_api(
     // refresh() calls from the WS handler are visible to the login controller.
     let login_token_data = web::Data::new(Some(tauri_bridge.tauri_login_token.clone()));
 
-    let bridge_data: web::Data<Arc<TauriIpcBridge>> = web::Data::new(Arc::clone(&tauri_bridge));
+    // Build the host-control endpoint state. The Aggregator hub routes between
+    // forwarder upstream sessions and the connected Tauri shell.
+    let ipc_token = {
+        let s = settings.read().await;
+        s.system.tauri_ipc_token.clone().unwrap_or_default()
+    };
+    let endpoint_state = Arc::new(
+        host_control::endpoint::EndpointState::new(
+            Arc::clone(&host_control_hub),
+            ipc_token,
+            tauri_bridge.tauri_login_token.clone(),
+        )
+        .with_tauri_is_admin(Arc::clone(&tauri_bridge.tauri_is_admin)),
+    );
 
-    // The daemon's ApiRouteConfig does not yet wire the host-control hub: that is
-    // introduced in Step 4 when the daemon switches to Aggregator mode. For now,
-    // the HTTP submit endpoint sees `None` and returns success without dispatch
-    // (the legacy mpsc bridge in tauri_ipc.rs is still authoritative until Step 6).
+    // The legacy mpsc security_approval_sender is no longer in use — Step 3 moved
+    // approvals onto HostControlHub. Drop it explicitly so the unused-field lint
+    // is satisfied while Step 6 finishes deleting the bridge.
     let _ = channels.security_approval_sender;
+
     let route_config = ApiRouteConfig {
         settings: settings_data.clone(),
         tauri_login_token: login_token_data,
         connection_map,
-        host_control_hub: web::Data::new(None),
+        host_control_hub: web::Data::new(Some(Arc::clone(&host_control_hub))),
         service_op_sender: web::Data::new(channels.service_op_sender),
         tauri_is_admin: Some(tauri_is_admin_data),
         startup_mode: StartupMode::ServiceDaemon,
@@ -81,7 +108,8 @@ pub async fn run_local_api(
     let server = HttpServer::new(move || {
         let default_path = static_file_path.clone();
         let rc = route_config.clone();
-        let bd = bridge_data.clone();
+        let endpoint_state_data: web::Data<Arc<host_control::endpoint::EndpointState>> =
+            web::Data::new(Arc::clone(&endpoint_state));
 
         App::new()
             .wrap(Logger::default())
@@ -95,9 +123,19 @@ pub async fn run_local_api(
             // middleware (which would otherwise intercept /api/desk/signaling).
             .app_data(validator_data.clone())
             .service(open_signaling_handle)
-            .route("/ws/tauri_ipc", web::get().to(TauriIpcBridge::ws_handler))
+            // Host-control hub endpoints replace the legacy `TauriIpcBridge`
+            // ws handler. Tauri shells connect to /ws/tauri_ipc; worker
+            // forwarders connect to /ws/host_upstream.
+            .app_data(endpoint_state_data)
+            .route(
+                "/ws/tauri_ipc",
+                web::get().to(host_control::endpoint::ws_handler),
+            )
+            .route(
+                "/ws/host_upstream",
+                web::get().to(host_control::endpoint::ws_upstream_handler),
+            )
             .configure(move |cfg| crate::configure_api_routes(cfg, rc.clone()))
-            .app_data(bd.clone())
             .service(
                 actix_files::Files::new("/", static_file_path.clone())
                     .index_file("index.html")
@@ -131,6 +169,11 @@ pub async fn run_local_api(
     .bind(("0.0.0.0", SERVICE_API_PORT))
     .map_err(|e| format!("Failed to bind local API on port {SERVICE_API_PORT}: {e}"))?
     .run();
+
+    // Bind succeeded — release any waiter (workers can now connect upstream).
+    if let Some(tx) = ready_tx {
+        let _ = tx.send(());
+    }
 
     server.await.map_err(|e| {
         error!("Local API server error: {e}");
