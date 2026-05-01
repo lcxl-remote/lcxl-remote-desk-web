@@ -1,5 +1,4 @@
 use crate::{
-    ExternalChannels,
     host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
@@ -132,15 +131,6 @@ impl WorkerSession {
             sender: desk_tx.clone(),
         };
 
-        let mut channels = ExternalChannels {
-            private_screen_cmd_sender: None,
-            private_screen_state_receiver: None,
-            tauri_login_token: None,
-            whiteboard_cmd_sender: None,
-            security_approval_sender: None,
-            service_op_sender: None,
-        };
-
         // Build the host-control hub. When the daemon supplied a host_upstream_url
         // we run as a Forwarder and bridge approval / private-screen / whiteboard
         // traffic over ws to the daemon's aggregator. Without an upstream URL
@@ -163,7 +153,6 @@ impl WorkerSession {
             shared_settings_data,
             session_sender,
             CurrentUser::new_admin("worker_node"),
-            &mut channels,
             host_control_hub,
         )
         .await

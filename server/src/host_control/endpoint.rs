@@ -276,6 +276,7 @@ fn is_outbound_for_role(msg: &HostControlMessage, role: Option<ClientRole>) -> b
             | HostControlMessage::PrivateScreenHide { .. }
             | HostControlMessage::WhiteboardShow { .. }
             | HostControlMessage::WhiteboardDraw { .. }
+            | HostControlMessage::WhiteboardHide { .. }
             | HostControlMessage::SecurityApprovalRequest { .. }
             | HostControlMessage::ServiceOp { .. },
         ) => true,
@@ -371,6 +372,7 @@ async fn handle_client_message(
         | HostControlMessage::PrivateScreenHide { .. }
         | HostControlMessage::WhiteboardShow { .. }
         | HostControlMessage::WhiteboardDraw { .. }
+        | HostControlMessage::WhiteboardHide { .. }
         | HostControlMessage::ServiceOp { .. })
             if state.hub.mode() == HubMode::Aggregator =>
         {

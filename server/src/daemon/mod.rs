@@ -92,14 +92,10 @@ pub async fn run_service_daemon_inner(
     // Aggregator hub: routes between worker forwarders and the Tauri shell.
     let host_control_hub = Arc::new(HostControlHub::new_aggregator());
 
-    // Create TauriIpcBridge using the persisted IPC token. The bridge is now a
-    // thin holder for `tauri_is_admin` + `tauri_login_token` (the legacy mpsc
-    // forwarder threads remain until Step 6).
-    let ipc_token = {
-        let s = shared_settings.read().await;
-        s.system.tauri_ipc_token.clone().unwrap_or_default()
-    };
-    let (tauri_bridge, channels) = TauriIpcBridge::new(ipc_token);
+    // The bridge is now a tiny holder for `tauri_is_admin` + `tauri_login_token`.
+    // The host control endpoint owns `/ws/tauri_ipc` and `/ws/host_upstream` and
+    // refreshes `tauri_login_token` on every Tauri ws connect.
+    let tauri_bridge = TauriIpcBridge::new();
 
     // Spawn local_api FIRST so /ws/host_upstream is reachable before any
     // forwarder starts trying to connect (plan review #5).
@@ -110,7 +106,7 @@ pub async fn run_service_daemon_inner(
         let hub = Arc::clone(&host_control_hub);
         tokio::spawn(async move {
             if let Err(e) =
-                local_api::run_local_api(settings, bridge, channels, hub, Some(api_ready_tx)).await
+                local_api::run_local_api(settings, bridge, hub, Some(api_ready_tx)).await
             {
                 error!("Local API error: {e}");
             }

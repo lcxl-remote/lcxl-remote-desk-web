@@ -12,6 +12,7 @@
 //!
 //! Business code talks to a single `HostControlHub` API regardless of mode.
 
+pub mod bridge;
 pub mod endpoint;
 pub mod protocol;
 pub mod upstream;
@@ -192,9 +193,28 @@ impl HostControlHub {
             .store(false, Ordering::Release);
     }
 
-    fn has_tauri_ui(&self) -> bool {
-        self.inner.has_tauri_subscriber.load(Ordering::Acquire)
-            || self.inner.cmd_tx.receiver_count() > 0
+    /// Best-effort indicator of whether a Tauri shell can currently consume
+    /// commands sent via this hub.
+    ///
+    /// - **Local / Aggregator**: true when at least one ws subscriber has
+    ///   completed `Ready { role: Tauri }` or is mid-handshake (the broadcast
+    ///   receiver count is non-zero).
+    /// - **Forwarder**: returns true iff the upstream ws is connected. The
+    ///   aggregator is responsible for tracking real Tauri presence end-to-end;
+    ///   from the worker's perspective an online upstream is the closest signal.
+    pub fn has_tauri_ui(&self) -> bool {
+        match self.inner.mode {
+            HubMode::Local | HubMode::Aggregator => {
+                self.inner.has_tauri_subscriber.load(Ordering::Acquire)
+                    || self.inner.cmd_tx.receiver_count() > 0
+            }
+            HubMode::Forwarder => self
+                .inner
+                .upstream
+                .as_ref()
+                .map(|u| u.is_connected())
+                .unwrap_or(false),
+        }
     }
 
     /// Send a command to all subscribed clients (or the upstream forwarder).

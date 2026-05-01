@@ -85,9 +85,7 @@ use desk_capture_engine::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
 };
 use desk_input_injection::host_control::host_control_factory::create_host_control_helper;
-use desk_input_injection::model::host_control::{
-    HostControlEventType, HostControlHelper, WhiteboardCommand,
-};
+use desk_input_injection::model::host_control::{HostControlHelper, WhiteboardCommand};
 pub static CAPTURE_SCREEN_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("capture_screen_histogram", "help", &["type"]).unwrap()
 });
@@ -345,38 +343,14 @@ impl NodeTokenValidator for LocalNodeTokenValidator {
 
 pub async fn start_desk_session(
     settings: web::Data<SharedSettings>,
-    mut channels: crate::ExternalChannels,
     startup_mode: crate::model::settings::StartupMode,
     host_control_hub: Arc<HostControlHub>,
 ) -> Result<(), DeskError> {
-    // Take the Tauri privacy screen receiver and broadcast it
-    let broadcast_tx = if let Some(mut rx) = channels.private_screen_state_receiver.take() {
-        let (tx, _) = tokio::sync::broadcast::channel(16);
-        let tx_clone = tx.clone();
-        actix_web::rt::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                let _ = tx_clone.send(event);
-            }
-        });
-        Some(tx)
-    } else {
-        None
-    };
-
     // ===== Loop 1: Local Signaling Connection =====
     // Only in Default mode (signaling server and desk server co-exist in same process)
     if startup_mode == crate::model::settings::StartupMode::Default {
         let local_settings = settings.clone();
-        let local_broadcast_tx = broadcast_tx.clone();
         let local_hub = host_control_hub.clone();
-        let local_channels_clone = crate::ExternalChannels {
-            private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
-            private_screen_state_receiver: None,
-            tauri_login_token: channels.tauri_login_token.clone(),
-            whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
-            security_approval_sender: channels.security_approval_sender.clone(),
-            service_op_sender: None,
-        };
 
         actix_web::rt::spawn(async move {
             loop {
@@ -403,33 +377,8 @@ pub async fn start_desk_session(
                     format!("ws://127.0.0.1:{}/api/desk/signaling", port)
                 };
 
-                let mut channels_for_loop = crate::ExternalChannels {
-                    private_screen_cmd_sender: local_channels_clone
-                        .private_screen_cmd_sender
-                        .clone(),
-                    private_screen_state_receiver: None,
-                    tauri_login_token: local_channels_clone.tauri_login_token.clone(),
-                    whiteboard_cmd_sender: local_channels_clone.whiteboard_cmd_sender.clone(),
-                    security_approval_sender: local_channels_clone.security_approval_sender.clone(),
-                    service_op_sender: None,
-                };
-
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                channels_for_loop.private_screen_state_receiver = Some(rx);
-                if let Some(btx) = &local_broadcast_tx {
-                    let mut brx = btx.subscribe();
-                    actix_web::rt::spawn(async move {
-                        while let Ok(event) = brx.recv().await {
-                            if tx.send(event).is_err() {
-                                break; // rx dropped, exit to prevent task leak
-                            }
-                        }
-                    });
-                }
-
                 let _ = maintain_signaling_connection(
                     local_settings.clone(),
-                    channels_for_loop,
                     local_url,
                     local_token,
                     local_hub.clone(),
@@ -444,16 +393,7 @@ pub async fn start_desk_session(
     // In Default and DeskServer modes
     {
         let remote_sig_settings = settings.clone();
-        let remote_sig_broadcast_tx = broadcast_tx.clone();
         let remote_sig_hub = host_control_hub.clone();
-        let remote_sig_channels = crate::ExternalChannels {
-            private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
-            private_screen_state_receiver: None,
-            tauri_login_token: channels.tauri_login_token.clone(),
-            whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
-            security_approval_sender: channels.security_approval_sender.clone(),
-            service_op_sender: None,
-        };
 
         actix_web::rt::spawn(async move {
             loop {
@@ -468,35 +408,8 @@ pub async fn start_desk_session(
                     && !url.is_empty()
                     && !token.is_empty()
                 {
-                    let mut channels_for_loop = crate::ExternalChannels {
-                        private_screen_cmd_sender: remote_sig_channels
-                            .private_screen_cmd_sender
-                            .clone(),
-                        private_screen_state_receiver: None,
-                        tauri_login_token: remote_sig_channels.tauri_login_token.clone(),
-                        whiteboard_cmd_sender: remote_sig_channels.whiteboard_cmd_sender.clone(),
-                        security_approval_sender: remote_sig_channels
-                            .security_approval_sender
-                            .clone(),
-                        service_op_sender: None,
-                    };
-
-                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                    channels_for_loop.private_screen_state_receiver = Some(rx);
-                    if let Some(btx) = &remote_sig_broadcast_tx {
-                        let mut brx = btx.subscribe();
-                        actix_web::rt::spawn(async move {
-                            while let Ok(event) = brx.recv().await {
-                                if tx.send(event).is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                    }
-
                     let _ = maintain_signaling_connection(
                         remote_sig_settings.clone(),
-                        channels_for_loop,
                         url,
                         token,
                         remote_sig_hub.clone(),
@@ -512,16 +425,7 @@ pub async fn start_desk_session(
     // In Default and DeskServer modes
     {
         let remote_mgr_settings = settings.clone();
-        let remote_mgr_broadcast_tx = broadcast_tx.clone();
         let remote_mgr_hub = host_control_hub.clone();
-        let remote_mgr_channels = crate::ExternalChannels {
-            private_screen_cmd_sender: channels.private_screen_cmd_sender.clone(),
-            private_screen_state_receiver: None,
-            tauri_login_token: channels.tauri_login_token.clone(),
-            whiteboard_cmd_sender: channels.whiteboard_cmd_sender.clone(),
-            security_approval_sender: channels.security_approval_sender.clone(),
-            service_op_sender: None,
-        };
 
         actix_web::rt::spawn(async move {
             loop {
@@ -536,35 +440,8 @@ pub async fn start_desk_session(
                     && !url.is_empty()
                     && !token.is_empty()
                 {
-                    let mut channels_for_loop = crate::ExternalChannels {
-                        private_screen_cmd_sender: remote_mgr_channels
-                            .private_screen_cmd_sender
-                            .clone(),
-                        private_screen_state_receiver: None,
-                        tauri_login_token: remote_mgr_channels.tauri_login_token.clone(),
-                        whiteboard_cmd_sender: remote_mgr_channels.whiteboard_cmd_sender.clone(),
-                        security_approval_sender: remote_mgr_channels
-                            .security_approval_sender
-                            .clone(),
-                        service_op_sender: None,
-                    };
-
-                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-                    channels_for_loop.private_screen_state_receiver = Some(rx);
-                    if let Some(btx) = &remote_mgr_broadcast_tx {
-                        let mut brx = btx.subscribe();
-                        actix_web::rt::spawn(async move {
-                            while let Ok(event) = brx.recv().await {
-                                if tx.send(event).is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                    }
-
                     let _ = maintain_signaling_connection(
                         remote_mgr_settings.clone(),
-                        channels_for_loop,
                         url,
                         token,
                         remote_mgr_hub.clone(),
@@ -581,7 +458,6 @@ pub async fn start_desk_session(
 
 async fn maintain_signaling_connection(
     settings: web::Data<SharedSettings>,
-    mut channels: crate::ExternalChannels,
     signaling_url: String,
     auth_token: String,
     host_control_hub: Arc<HostControlHub>,
@@ -663,7 +539,6 @@ async fn maintain_signaling_connection(
         settings.clone(),
         session_sender,
         CurrentUser::new_admin("server_node"),
-        &mut channels,
         host_control_hub.clone(),
     )
     .await
@@ -736,10 +611,13 @@ pub struct DeskSession {
     pub terminal_map: HashMap<String, RunningTerminal>,
     /// System setting helper
     pub host_control_helper: Box<dyn HostControlHelper + Send + Sync>,
-    /// Whiteboard command sender (available when Tauri is present)
-    pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
-    /// Unified host-control hub for approval prompts and (eventually) overlay
-    /// commands. All approval flow now routes through here.
+    /// Whiteboard command sender bridged onto the host control hub. Always
+    /// present after the Step 6 unification — the bridge thread silently drops
+    /// messages when no Tauri client is connected.
+    pub whiteboard_cmd_sender: std::sync::mpsc::Sender<WhiteboardCommand>,
+    /// Unified host-control hub for approval prompts and overlay commands.
+    /// All approval flow + private-screen / whiteboard / service-op traffic
+    /// routes through here.
     pub host_control_hub: Arc<HostControlHub>,
 }
 
@@ -816,26 +694,36 @@ impl DeskSession {
         settings: web::Data<SharedSettings>,
         session: DeskSessionSender,
         user: CurrentUser,
-        channels: &mut crate::ExternalChannels,
         host_control_hub: Arc<HostControlHub>,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
 
-        let cmd_sender = channels.private_screen_cmd_sender.clone();
-        let helper = create_host_control_helper(&desk_settings, cmd_sender)?;
+        // Bridge senders adapt the legacy `desk_input_injection` mpsc API onto
+        // the unified host control hub.
+        let ps_cmd_sender = crate::host_control::bridge::bridge_private_screen_to_hub(Arc::clone(
+            &host_control_hub,
+        ));
+        let helper = create_host_control_helper(&desk_settings, Some(ps_cmd_sender))?;
 
-        // If started by Tauri, there might be a state_receiver we need to listen to
+        let whiteboard_cmd_sender =
+            crate::host_control::bridge::bridge_whiteboard_to_hub(Arc::clone(&host_control_hub));
 
-        if let Some(mut rx) = channels.private_screen_state_receiver.take() {
+        // Forward private-screen visibility changes from the Tauri shell back into
+        // the WebRTC signaling stream as `PrivateScreenStateChanged` messages.
+        // The hub's state broadcast is the single source of truth across all
+        // deployment modes (Local / Forwarder).
+        let mut state_rx = host_control_hub.subscribe_state();
+        {
             let session_clone = session.clone();
             tokio::spawn(async move {
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        HostControlEventType::PrivateScreenVisibleChanged(
-                            from_connection_id,
+                use crate::host_control::HostControlEvent;
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match state_rx.recv().await {
+                        Ok(HostControlEvent::PrivateScreenVisibilityChanged {
+                            connection_id,
                             visible,
-                        ) => {
-                            let sender = session_clone.clone();
+                        }) => {
                             let data = PrivateScreenStateChangedData {
                                 visible,
                                 is_supported: true,
@@ -843,75 +731,23 @@ impl DeskSession {
                             };
                             if let Ok(model) = SignalingModel::new_request(
                                 SignalingType::PrivateScreenStateChanged,
-                                Some(from_connection_id),
+                                Some(connection_id),
                                 Some(&data),
                             ) && let Ok(text) = serde_json::to_string(&model)
                             {
-                                let _ = sender.sender.send(DeskSessionMessage::Text(
+                                let _ = session_clone.sender.send(DeskSessionMessage::Text(
                                     bytestring::ByteString::from(text),
                                 ));
                             }
                         }
-                        HostControlEventType::PrivateScreenInited(_) => {
-                            // Ignored or handle appropriately
+                        Err(RecvError::Lagged(n)) => {
+                            log::warn!("[DeskSession] state subscription lagged by {n}");
                         }
-                        HostControlEventType::PrivateScreenClosed => {
-                            let sender = session_clone.clone();
-                            let data = PrivateScreenStateChangedData {
-                                visible: false,
-                                is_supported: true,
-                                error_msg: None,
-                            };
-                            if let Ok(model) = SignalingModel::new_request(
-                                SignalingType::PrivateScreenStateChanged,
-                                None,
-                                Some(&data),
-                            ) && let Ok(text) = serde_json::to_string(&model)
-                            {
-                                let _ = sender.sender.send(DeskSessionMessage::Text(
-                                    bytestring::ByteString::from(text),
-                                ));
-                            }
-                        }
-                        HostControlEventType::PrivateScreenUnknownError(
-                            from_connection_id_opt,
-                            e,
-                        ) => {
-                            log::error!("Private screen error: {}", e);
-                            // We shouldn't send PrivateScreenStateChanged directly to the channel queue,
-                            // Instead, we should construct a Modeling message if we want to send it to the frontend.
-                            // But here we only have session_clone which is DeskSessionSender.
-                            // Let's add a method on DeskSessionMessage or handle in that loop.
-                            // I'll just change send() to send a Text message with SignalingModel.
-
-                            if let Some(from_connection_id) = from_connection_id_opt {
-                                let sender = session_clone.clone();
-                                let data = PrivateScreenStateChangedData {
-                                    visible: false,
-                                    is_supported: true, // or whatever
-                                    error_msg: Some(e),
-                                };
-                                if let Ok(model) = SignalingModel::new_request(
-                                    SignalingType::PrivateScreenStateChanged,
-                                    Some(from_connection_id),
-                                    Some(&data),
-                                ) && let Ok(text) = serde_json::to_string(&model)
-                                {
-                                    let _ = sender.sender.send(DeskSessionMessage::Text(
-                                        bytestring::ByteString::from(text),
-                                    ));
-                                }
-                            }
-                        }
-                        HostControlEventType::PrivateScreenHotkeyRegisterError => {
-                            log::error!("Private screen hotkey register error");
-                        }
+                        Err(RecvError::Closed) => break,
                     }
                 }
             });
         }
-
-        let whiteboard_cmd_sender = channels.whiteboard_cmd_sender.clone();
 
         Ok(Self {
             settings,
@@ -1063,7 +899,7 @@ impl DeskSession {
             video_device_list,
             video_encoder_list,
             desk_settings: local_settings.desk,
-            has_tauri: self.whiteboard_cmd_sender.is_some(),
+            has_tauri: self.host_control_hub.has_tauri_ui(),
             is_admin: desk_utils::permission::is_admin(),
         };
 

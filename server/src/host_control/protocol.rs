@@ -82,6 +82,9 @@ pub enum HostControlMessage {
         message: serde_json::Value,
     },
 
+    /// Hide whiteboard overlay (data channel closed).
+    WhiteboardHide { connection_id: String },
+
     /// Request the user to approve a security-sensitive operation.
     SecurityApprovalRequest {
         req_id: String,
@@ -184,6 +187,9 @@ mod tests {
             HostControlMessage::WhiteboardDraw {
                 connection_id: "c1".to_string(),
                 message: serde_json::json!({"action": "stroke", "points": [1, 2, 3]}),
+            },
+            HostControlMessage::WhiteboardHide {
+                connection_id: "c1".to_string(),
             },
             HostControlMessage::SecurityApprovalRequest {
                 req_id: "r1".to_string(),

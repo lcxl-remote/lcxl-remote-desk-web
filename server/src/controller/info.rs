@@ -244,9 +244,6 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(settings))
-                .app_data(web::Data::new(
-                    None::<std::sync::mpsc::SyncSender<crate::ServiceOp>>,
-                ))
                 .service(query_sysinfo),
         )
         .await;

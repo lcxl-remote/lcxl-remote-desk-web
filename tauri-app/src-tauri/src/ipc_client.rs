@@ -161,6 +161,9 @@ fn handle_server_msg(
             let json_str = serde_json::to_string(&message).unwrap_or_default();
             let _ = wb_cmd_tx.send(WhiteboardCommand::DrawMessage(json_str));
         }
+        HostControlMessage::WhiteboardHide { connection_id } => {
+            let _ = wb_cmd_tx.send(WhiteboardCommand::Hide(connection_id));
+        }
         HostControlMessage::SecurityApprovalRequest {
             req_id,
             permission_type,

@@ -31,7 +31,7 @@ use desk_input_injection::model::host_control::WhiteboardCommand;
 pub async fn handle_data_channel_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
-    whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
+    whiteboard_cmd_sender: std::sync::mpsc::Sender<WhiteboardCommand>,
     connection_id: String,
     settings: actix_web::web::Data<SharedSettings>,
     host_control_hub: Arc<HostControlHub>,
@@ -55,19 +55,15 @@ pub async fn handle_data_channel_event(
             return Ok(());
         }
         DATA_CHANNEL_LABEL_WHITEBOARD_EVENT => {
-            if let Some(sender) = whiteboard_cmd_sender {
-                handle_whiteboard_event(
-                    signaling_state,
-                    data_channel,
-                    sender,
-                    connection_id,
-                    settings,
-                    host_control_hub,
-                )
-                .await?;
-            } else {
-                log::warn!("Whiteboard data channel received but no tauri whiteboard support");
-            }
+            handle_whiteboard_event(
+                signaling_state,
+                data_channel,
+                whiteboard_cmd_sender,
+                connection_id,
+                settings,
+                host_control_hub,
+            )
+            .await?;
             return Ok(());
         }
         label => {

@@ -1,9 +1,6 @@
 use crate::{
-    ApiRouteConfig, ExternalChannels,
-    daemon::tauri_ipc::TauriIpcBridge,
-    host_control,
-    model::settings::{SharedSettings, StartupMode},
-    service::signaling::LocalNodeTokenValidator,
+    ApiRouteConfig, daemon::tauri_ipc::TauriIpcBridge, host_control,
+    model::settings::SharedSettings, service::signaling::LocalNodeTokenValidator,
 };
 use actix_files;
 use actix_service::fn_service;
@@ -31,7 +28,6 @@ pub const SERVICE_API_PORT: u16 = 8082;
 pub async fn run_local_api(
     settings: Arc<SharedSettings>,
     tauri_bridge: Arc<TauriIpcBridge>,
-    channels: ExternalChannels,
     host_control_hub: Arc<host_control::HostControlHub>,
     ready_tx: Option<oneshot::Sender<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -90,19 +86,12 @@ pub async fn run_local_api(
         .with_tauri_is_admin(Arc::clone(&tauri_bridge.tauri_is_admin)),
     );
 
-    // The legacy mpsc security_approval_sender is no longer in use — Step 3 moved
-    // approvals onto HostControlHub. Drop it explicitly so the unused-field lint
-    // is satisfied while Step 6 finishes deleting the bridge.
-    let _ = channels.security_approval_sender;
-
     let route_config = ApiRouteConfig {
         settings: settings_data.clone(),
         tauri_login_token: login_token_data,
         connection_map,
         host_control_hub: web::Data::new(Some(Arc::clone(&host_control_hub))),
-        service_op_sender: web::Data::new(channels.service_op_sender),
         tauri_is_admin: Some(tauri_is_admin_data),
-        startup_mode: StartupMode::ServiceDaemon,
     };
 
     let server = HttpServer::new(move || {

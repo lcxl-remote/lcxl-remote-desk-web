@@ -391,31 +391,21 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 }
             });
 
-            // The auto-login token is now delivered via the ws Ready first frame
-            // so the embedded server doesn't need a pre-generated one.
             // The hub Local owns the broadcast channels for `/ws/tauri_ipc`.
+            // All overlay / approval / service-op traffic now flows through the
+            // hub: the embedded server is the producer, ipc_client below is the
+            // consumer that fans out into the GUI managers' mpsc channels.
             let host_control_hub =
                 std::sync::Arc::new(lcxl_remote_desk_server::host_control::HostControlHub::new_local());
 
-            // Direct-mpsc path remains so legacy business code (Step 3 will
-            // migrate it to call the hub) keeps working unchanged.
-            let channels = lcxl_remote_desk_server::ExternalChannels {
-                private_screen_cmd_sender: Some(ps_cmd_tx.clone()),
-                private_screen_state_receiver: Some(state_rx),
-                tauri_login_token: None,
-                whiteboard_cmd_sender: Some(wb_cmd_tx.clone()),
-                security_approval_sender: Some(sa_tx.clone()),
-                service_op_sender: Some(svc_op_tx.clone()),
-            };
             let startup_mode = settings.args.startup_mode.clone();
             let server_settings = settings.clone();
             let hub_for_server = host_control_hub.clone();
             std::thread::spawn(move || {
                 let system = actix_rt::System::new();
                 system.block_on(async {
-                    match lcxl_remote_desk_server::run_with_channels(
+                    match lcxl_remote_desk_server::run_with_hub(
                         &server_settings,
-                        channels,
                         Some(hub_for_server),
                     )
                     .await
@@ -451,8 +441,11 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                         wb_cmd_tx,
                         sa_tx,
                         svc_op_tx,
-                        // state_rx is owned by the embedded server in Step 2.
-                        None,
+                        // After Step 6 the hub is the single source of truth for
+                        // private-screen state changes, so the manager-owned
+                        // state_rx is plumbed through ipc_client which forwards
+                        // each event back into the hub via ws.
+                        Some(state_rx),
                         token_holder_ipc,
                     )
                     .await;

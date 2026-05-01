@@ -79,10 +79,6 @@ use utoipa_redoc::{Redoc, Servable as _};
 use utoipa_scalar::{Scalar, Servable as _};
 use utoipa_swagger_ui::SwaggerUi;
 
-use desk_input_injection::model::host_control::{
-    HostControlEventType, PrivateScreenCommand, WhiteboardCommand,
-};
-
 rust_i18n::i18n!("locales");
 
 /// Shared override for the `is_admin` field in `/api/server_info` and `/api/desk/sysinfo`.
@@ -102,9 +98,7 @@ pub struct ApiRouteConfig {
     /// Optional unified host-control hub. Wired into the security-approval submit
     /// endpoint and (in Aggregator mode) the host-control ws routes.
     pub host_control_hub: web::Data<Option<Arc<host_control::HostControlHub>>>,
-    pub service_op_sender: web::Data<Option<std::sync::mpsc::SyncSender<ServiceOp>>>,
     pub tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
-    pub startup_mode: StartupMode,
 }
 
 /// Register the core API routes onto `cfg` using plain actix-web (no utoipa).
@@ -135,16 +129,13 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
         tauri_login_token,
         connection_map,
         host_control_hub,
-        service_op_sender,
         tauri_is_admin,
-        startup_mode,
     } = config;
 
     cfg.app_data(settings)
         .app_data(tauri_login_token)
         .app_data(connection_map)
         .app_data(host_control_hub)
-        .app_data(service_op_sender)
         .app_data(
             web::JsonConfig::default()
                 .limit((4096 * 1024) << 2)
@@ -210,22 +201,6 @@ pub enum ServiceOp {
     Uninstall,
 }
 
-pub struct ExternalChannels {
-    pub private_screen_cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
-    pub private_screen_state_receiver:
-        Option<tokio::sync::mpsc::UnboundedReceiver<HostControlEventType>>,
-    /// One-time token for Tauri WebView auto-login
-    pub tauri_login_token: Option<String>,
-    /// Command sender for whiteboard overlay (available when Tauri is present)
-    pub whiteboard_cmd_sender: Option<std::sync::mpsc::Sender<WhiteboardCommand>>,
-    /// Channel for sending security approval requests to Tauri dialog
-    pub security_approval_sender: Option<crate::model::security_approval::SecurityApprovalSender>,
-    /// Channel for service install / uninstall operations (Tauri only).
-    /// When present, the REST endpoint `/api/service/{install,uninstall}` uses
-    /// this sender to delegate the operation to the Tauri host.
-    pub service_op_sender: Option<std::sync::mpsc::SyncSender<ServiceOp>>,
-}
-
 use std::sync::Mutex;
 
 /// One-time token for Tauri auto-login.
@@ -282,24 +257,19 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub async fn run() -> Result<Server, DeskError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
-    run_with_channels(
-        &settings,
-        ExternalChannels {
-            private_screen_cmd_sender: None,
-            private_screen_state_receiver: None,
-            tauri_login_token: None,
-            whiteboard_cmd_sender: None,
-            security_approval_sender: None,
-            service_op_sender: None,
-        },
-        None,
-    )
-    .await
+    run_with_hub(&settings, None).await
 }
 
-pub async fn run_with_channels(
+/// Run the embedded server with an optional caller-supplied
+/// [`host_control::HostControlHub`].
+///
+/// Pass `Some(hub)` from the Tauri portable shell so business code, the embedded
+/// `/ws/tauri_ipc` endpoint, and the Tauri ws client all share a single hub
+/// instance. Pass `None` for headless / desk-server / signaling modes — a
+/// `Local` hub is constructed internally and approval prompts deny-fast when no
+/// Tauri shell is connected.
+pub async fn run_with_hub(
     settings: &Settings,
-    channels: ExternalChannels,
     host_control_hub: Option<Arc<host_control::HostControlHub>>,
 ) -> Result<Server, DeskError> {
     // Create a lock file to prevent multiple instances of the server from running simultaneously.
@@ -356,13 +326,9 @@ pub async fn run_with_channels(
     // The TauriLoginToken is shared between the HTTP `/login_tauri` route (which
     // verifies + consumes) and the host-control `/ws/tauri_ipc` endpoint (which
     // refreshes the token on every Tauri reconnect). Cloning the struct shares
-    // the inner `Arc<Mutex<>>`.
-    let shared_tauri_login_token: TauriLoginToken = match channels.tauri_login_token.clone() {
-        Some(tok) => TauriLoginToken::new(tok),
-        // The hub will push a fresh token via ws Ready first frame; legacy mode
-        // without a hub leaves it empty (no Tauri client to receive one).
-        None => TauriLoginToken::empty(),
-    };
+    // the inner `Arc<Mutex<>>`. We always start empty — the hub endpoint pushes
+    // a fresh token via the ws Ready first frame on every Tauri reconnect.
+    let shared_tauri_login_token: TauriLoginToken = TauriLoginToken::empty();
     let tauri_login_token: web::Data<Option<TauriLoginToken>> =
         web::Data::new(Some(shared_tauri_login_token.clone()));
 
@@ -426,7 +392,6 @@ pub async fn run_with_channels(
     };
     let host_control_hub_data: web::Data<Option<Arc<host_control::HostControlHub>>> =
         web::Data::new(Some(host_control_hub_arc.clone()));
-    let service_op_sender = web::Data::new(channels.service_op_sender.clone());
 
     // If this instance runs signaling, ensure local_signaling_token is generated and persisted
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
@@ -455,7 +420,7 @@ pub async fn run_with_channels(
         let session_hub = host_control_hub_arc.clone();
         actix_web::rt::spawn(async move {
             if let Err(e) =
-                start_desk_session(settings_clone, channels, startup_mode_clone, session_hub).await
+                start_desk_session(settings_clone, startup_mode_clone, session_hub).await
             {
                 error!("Desk session error: {}", e);
             }
@@ -470,7 +435,6 @@ pub async fn run_with_channels(
         let startup_mode = startup_mode.clone();
         let tauri_login_token = tauri_login_token.clone();
         let host_control_hub_data = host_control_hub_data.clone();
-        let service_op_sender = service_op_sender.clone();
         let validator_data = validator_data.clone();
         let host_control_endpoint_state = host_control_endpoint_state.clone();
         App::new()
@@ -511,7 +475,6 @@ pub async fn run_with_channels(
             .app_data(tauri_login_token.clone())
             .app_data(connection_map.clone())
             .app_data(host_control_hub_data.clone())
-            .app_data(service_op_sender.clone())
             .app_data(validator_data.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
