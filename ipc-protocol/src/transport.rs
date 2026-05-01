@@ -82,6 +82,7 @@ mod tests {
             config_json: "{}".to_string(),
             signaling_url: None,
             auth_token: None,
+            host_upstream_url: None,
         });
 
         let mut buf = Vec::new();

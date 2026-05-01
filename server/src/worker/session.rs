@@ -1,15 +1,16 @@
 use crate::{
     ExternalChannels,
-    host_control::HostControlHub,
+    host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
 };
+use actix_web::web;
 use desk_ipc_protocol::{
-    message::{HeartbeatPayload, ServiceToWorker, SignalingPayload, WorkerToService},
+    message::{
+        HeartbeatPayload, ServiceToWorker, SignalingPayload, WorkerInitPayload, WorkerToService,
+    },
     transport::{read_message, write_message},
 };
-
-use actix_web::web;
 use desk_server_user::model::CurrentUser;
 use desk_signal_facade::model::signal::SignalingModel;
 use log::{error, info, warn};
@@ -21,6 +22,27 @@ use tokio::{
     io::{self, AsyncRead, AsyncWrite},
     sync::mpsc,
 };
+
+/// Decide which `HostControlHub` flavour to construct from an Init payload.
+/// Returns the hub and, when running in Forwarder mode, the spec needed for the
+/// caller to spawn the ws-client task. Split out from `ipc_loop` so the
+/// decision can be unit-tested without an actix runtime.
+fn build_hub_from_init(
+    payload: &WorkerInitPayload,
+) -> (
+    Arc<HostControlHub>,
+    Option<(Arc<UpstreamForwarder>, String, String)>,
+) {
+    match payload.host_upstream_url.clone() {
+        Some(url) => {
+            let upstream = UpstreamForwarder::new();
+            let token = payload.auth_token.clone().unwrap_or_default();
+            let hub = Arc::new(HostControlHub::new_forwarder(Arc::clone(&upstream)));
+            (hub, Some((upstream, url, token)))
+        }
+        None => (Arc::new(HostControlHub::new_local()), None),
+    }
+}
 
 pub struct WorkerSession {
     args: Args,
@@ -119,10 +141,23 @@ impl WorkerSession {
             service_op_sender: None,
         };
 
-        // Step 3 stop-gap: a Local hub means approvals deny-fast (no Tauri client
-        // is ever connected to the worker's own ws endpoint). Step 5 swaps this for
-        // a Forwarder hub that talks to the daemon's `/ws/host_upstream`.
-        let host_control_hub = Arc::new(HostControlHub::new_local());
+        // Build the host-control hub. When the daemon supplied a host_upstream_url
+        // we run as a Forwarder and bridge approval / private-screen / whiteboard
+        // traffic over ws to the daemon's aggregator. Without an upstream URL
+        // (standalone or test runs) fall back to a Local hub — its approvals
+        // deny-fast because nothing connects to the worker's own ws endpoint.
+        let (host_control_hub, upstream_spec) = build_hub_from_init(&init_payload);
+        match upstream_spec {
+            Some((upstream, url, token)) => {
+                spawn_upstream_ws_task(upstream, url, token);
+            }
+            None => {
+                warn!(
+                    "Init payload missing host_upstream_url; falling back to Local hub \
+                     (approvals will deny-fast)."
+                );
+            }
+        }
 
         let mut desk_session = DeskSession::new(
             shared_settings_data,
@@ -331,5 +366,64 @@ impl WorkerSession {
         let stream = UnixStream::connect(socket_path).await?;
         let (reader, writer) = tokio::io::split(stream);
         Ok((reader, writer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_control::HubMode;
+
+    fn payload_with(
+        host_upstream_url: Option<String>,
+        auth_token: Option<String>,
+    ) -> WorkerInitPayload {
+        WorkerInitPayload {
+            session_id: "session-1".into(),
+            os_session_id: 1,
+            desktop_name: None,
+            config_json: "{}".into(),
+            signaling_url: None,
+            auth_token,
+            host_upstream_url,
+        }
+    }
+
+    /// When the daemon supplies a host_upstream_url the worker constructs a
+    /// Forwarder hub and emits a spec the caller can spawn the ws task with.
+    #[tokio::test]
+    async fn build_hub_forwarder_when_url_present() {
+        let payload = payload_with(
+            Some("ws://127.0.0.1:8082/ws/host_upstream".into()),
+            Some("ipc-token".into()),
+        );
+        let (hub, spec) = build_hub_from_init(&payload);
+        assert_eq!(hub.mode(), HubMode::Forwarder);
+        let (upstream, url, token) = spec.expect("Forwarder must yield an upstream spec");
+        assert_eq!(url, "ws://127.0.0.1:8082/ws/host_upstream");
+        assert_eq!(token, "ipc-token");
+        // Upstream starts disconnected; hub should mirror that until the ws
+        // task connects (which the test doesn't exercise).
+        assert!(!upstream.is_connected());
+    }
+
+    /// Missing host_upstream_url falls back to a Local hub and yields no spec.
+    #[test]
+    fn build_hub_local_when_url_absent() {
+        let payload = payload_with(None, None);
+        let (hub, spec) = build_hub_from_init(&payload);
+        assert_eq!(hub.mode(), HubMode::Local);
+        assert!(spec.is_none());
+    }
+
+    /// Forwarder hub built without an auth token still works (passes empty
+    /// string to ws task — daemon will reject the handshake, which is the
+    /// intended fail-fast behaviour).
+    #[tokio::test]
+    async fn build_hub_forwarder_empty_token_when_auth_token_none() {
+        let payload = payload_with(Some("ws://127.0.0.1:8082/ws/host_upstream".into()), None);
+        let (_hub, spec) = build_hub_from_init(&payload);
+        let (_, _, token) = spec.expect("spec must be present");
+        assert_eq!(token, "");
     }
 }

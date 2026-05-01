@@ -80,8 +80,17 @@ pub struct WorkerInitPayload {
     pub config_json: String,
     /// Signaling server URL to connect to (or proxy through service)
     pub signaling_url: Option<String>,
-    /// Authentication token for signaling
+    /// Authentication token. In daemon-spawned workers this is the
+    /// `tauri_ipc_token` used to authenticate the worker's host-control
+    /// upstream ws connection back to the daemon.
     pub auth_token: Option<String>,
+    /// URL of the daemon's `/ws/host_upstream` endpoint. When `Some`, the
+    /// worker constructs a Forwarder-mode `HostControlHub` that bridges
+    /// approval / private-screen / whiteboard traffic through the daemon to
+    /// the connected Tauri shell. When `None`, the worker falls back to a
+    /// Local hub (used by tests / standalone runs).
+    #[serde(default)]
+    pub host_upstream_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +151,48 @@ pub struct DesktopSwitchPayload {
     pub to_desktop: Option<String>,
     /// Phase of the switch
     pub phase: DesktopSwitchPhase,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// New `host_upstream_url` + repurposed `auth_token` fields round-trip cleanly.
+    #[test]
+    fn worker_init_payload_round_trip_with_host_upstream_fields() {
+        let original = WorkerInitPayload {
+            session_id: "session-1".to_string(),
+            os_session_id: 7,
+            desktop_name: Some("Default".to_string()),
+            config_json: "{}".to_string(),
+            signaling_url: None,
+            auth_token: Some("ipc-token".to_string()),
+            host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.session_id, original.session_id);
+        assert_eq!(decoded.os_session_id, original.os_session_id);
+        assert_eq!(decoded.auth_token, original.auth_token);
+        assert_eq!(decoded.host_upstream_url, original.host_upstream_url);
+    }
+
+    /// Older daemons that don't yet emit `host_upstream_url` must still be
+    /// accepted by newer workers (the field carries `#[serde(default)]`).
+    #[test]
+    fn worker_init_payload_accepts_missing_host_upstream_url() {
+        let legacy = serde_json::json!({
+            "session_id": "session-1",
+            "os_session_id": 7,
+            "desktop_name": null,
+            "config_json": "{}",
+            "signaling_url": null,
+            "auth_token": null,
+        });
+        let decoded: WorkerInitPayload = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.host_upstream_url.is_none());
+        assert!(decoded.auth_token.is_none());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -158,16 +158,27 @@ impl WorkerManager {
 
         let (ipc_cmd_tx, ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
 
-        let config_json = {
+        let (config_json, ipc_token) = {
             let settings = self.settings.read().await;
-            serde_json::to_string(&*settings)
-                .map_err(|e| format!("Failed to serialize settings: {e}"))?
+            let json = serde_json::to_string(&*settings)
+                .map_err(|e| format!("Failed to serialize settings: {e}"))?;
+            let token = settings.system.tauri_ipc_token.clone();
+            (json, token)
         };
+
+        // Daemon-side host-upstream endpoint that the worker's Forwarder hub
+        // will dial back into. Loopback is fine — workers run on the same host.
+        let host_upstream_url = format!(
+            "ws://127.0.0.1:{}/ws/host_upstream",
+            crate::daemon::local_api::SERVICE_API_PORT
+        );
 
         let worker_msg_tx = Arc::clone(&self.worker_msg_tx);
         let pipe_name_c = pipe_name.clone();
         let desktop_c = desktop_name.clone();
         let config_c = config_json.clone();
+        let host_upstream_url_c = host_upstream_url.clone();
+        let ipc_token_c = ipc_token.clone();
         let mgr_c = self.clone();
         tokio::spawn(async move {
             if let Err(e) = run_pipe_server(
@@ -179,6 +190,8 @@ impl WorkerManager {
                 (*worker_msg_tx).clone(),
                 reconnect_ids,
                 mgr_c,
+                host_upstream_url_c,
+                ipc_token_c,
             )
             .await
             {
@@ -493,6 +506,7 @@ fn build_signaling_event_json(
 }
 
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
 async fn run_pipe_server(
     pipe_name: &str,
     session_id: u32,
@@ -502,6 +516,8 @@ async fn run_pipe_server(
     msg_tx: mpsc::UnboundedSender<WorkerToService>,
     reconnect_ids: Vec<String>,
     worker_mgr: WorkerManager,
+    host_upstream_url: String,
+    ipc_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
@@ -573,7 +589,8 @@ async fn run_pipe_server(
             desktop_name,
             config_json,
             signaling_url: None,
-            auth_token: None,
+            auth_token: ipc_token,
+            host_upstream_url: Some(host_upstream_url),
         }),
     )
     .await?;
@@ -599,6 +616,7 @@ async fn run_pipe_server(
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
 async fn run_pipe_server(
     socket_path: &str,
     session_id: u32,
@@ -608,6 +626,8 @@ async fn run_pipe_server(
     msg_tx: mpsc::UnboundedSender<WorkerToService>,
     reconnect_ids: Vec<String>,
     worker_mgr: WorkerManager,
+    host_upstream_url: String,
+    ipc_token: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::net::UnixListener;
 
@@ -652,7 +672,8 @@ async fn run_pipe_server(
             desktop_name,
             config_json,
             signaling_url: None,
-            auth_token: None,
+            auth_token: ipc_token,
+            host_upstream_url: Some(host_upstream_url),
         }),
     )
     .await?;
