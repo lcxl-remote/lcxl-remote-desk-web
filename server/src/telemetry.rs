@@ -63,21 +63,39 @@ pub async fn init_telemetry(
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
-    let stdout_general = fmt::layer()
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_target(true)
-        .with_line_number(true)
-        .with_filter(filter_fn(|metadata| {
-            LevelFilter::from_level(*metadata.level()) != LevelFilter::ERROR
-        }));
+    // ServiceDaemon and SessionWorker are launched without an
+    // interactive console (SCM / `CreateProcessAsUserW` from the
+    // daemon). Their stdout is bound to a console that may stop
+    // responding when the user session locks (Win+L → conhost stops
+    // servicing console requests for inactive desktops); a `WriteFile`
+    // to stdout then blocks indefinitely, and because tracing's `fmt`
+    // layer holds the global stdio Mutex across the write, every
+    // subsequent `log::*!` call from any thread deadlocks in
+    // `Mutex::lock_contended` inside `std::io::stdio::write_all`.
+    // Skip the stdout layers in those modes — the file appender
+    // (and OTel, when enabled) cover all the logging we need from a
+    // headless service.
+    let headless_mode = is_headless_startup_mode(startup_mode);
 
-    let stdout_error = fmt::layer()
-        .with_thread_ids(false)
-        .with_thread_names(false)
-        .with_target(true)
-        .with_line_number(true)
-        .with_filter(LevelFilter::ERROR);
+    let stdout_general = (!headless_mode).then(|| {
+        fmt::layer()
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_target(true)
+            .with_line_number(true)
+            .with_filter(filter_fn(|metadata| {
+                LevelFilter::from_level(*metadata.level()) != LevelFilter::ERROR
+            }))
+    });
+
+    let stdout_error = (!headless_mode).then(|| {
+        fmt::layer()
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_target(true)
+            .with_line_number(true)
+            .with_filter(LevelFilter::ERROR)
+    });
 
     let log_dir = log_directory();
     let _ = std::fs::create_dir_all(&log_dir);
@@ -212,6 +230,18 @@ pub fn log_file_name_for(startup_mode: &StartupMode) -> &'static str {
         StartupMode::SessionWorker => "desk-worker.log",
         _ => "desk-server.log",
     }
+}
+
+/// Returns true for startup modes that run without an interactive
+/// console — `ServiceDaemon` (SCM-spawned) and `SessionWorker`
+/// (daemon-spawned via `CreateProcessAsUserW`). In those modes the
+/// stdout fmt layer is unsafe to attach: see the comment in
+/// [`init_telemetry`] for the lock-screen deadlock it causes.
+pub fn is_headless_startup_mode(startup_mode: &StartupMode) -> bool {
+    matches!(
+        startup_mode,
+        StartupMode::ServiceDaemon | StartupMode::SessionWorker
+    )
 }
 
 /// Lightweight tracing init for the Tauri service-shell.
@@ -397,5 +427,22 @@ mod tests {
             log_file_name_for(&StartupMode::Signaling),
             "desk-server.log"
         );
+    }
+
+    /// `is_headless_startup_mode` controls whether `init_telemetry`
+    /// attaches the stdout fmt layer. Misclassifying a mode as
+    /// headless silently loses interactive logging; misclassifying a
+    /// service mode as non-headless re-introduces the lock-screen
+    /// deadlock we hit (worker thread blocked in
+    /// `std::io::stdio::write_all` → global stdio Mutex held forever
+    /// → every subsequent `log::*!` call deadlocks). Lock the
+    /// classification down with an explicit per-mode test.
+    #[test]
+    fn headless_modes_are_only_service_daemon_and_session_worker() {
+        assert!(is_headless_startup_mode(&StartupMode::ServiceDaemon));
+        assert!(is_headless_startup_mode(&StartupMode::SessionWorker));
+        assert!(!is_headless_startup_mode(&StartupMode::Default));
+        assert!(!is_headless_startup_mode(&StartupMode::DeskServer));
+        assert!(!is_headless_startup_mode(&StartupMode::Signaling));
     }
 }
