@@ -97,8 +97,7 @@ pub async fn run_local_api(
     let server = HttpServer::new(move || {
         let default_path = static_file_path.clone();
         let rc = route_config.clone();
-        let endpoint_state_data: web::Data<Arc<host_control::endpoint::EndpointState>> =
-            web::Data::new(Arc::clone(&endpoint_state));
+        let endpoint_state_for_routes = Arc::clone(&endpoint_state);
 
         App::new()
             .wrap(Logger::default())
@@ -113,17 +112,14 @@ pub async fn run_local_api(
             .app_data(validator_data.clone())
             .service(open_signaling_handle)
             // Host-control hub endpoints replace the legacy `TauriIpcBridge`
-            // ws handler. Tauri shells connect to /ws/tauri_ipc; worker
-            // forwarders connect to /ws/host_upstream.
-            .app_data(endpoint_state_data)
-            .route(
-                "/ws/tauri_ipc",
-                web::get().to(host_control::endpoint::ws_handler),
-            )
-            .route(
-                "/ws/host_upstream",
-                web::get().to(host_control::endpoint::ws_upstream_handler),
-            )
+            // ws handler. Always go through `register_routes` so the
+            // `web::Data` wrapping (`Data::from(Arc<T>)` → `Data<T>`) is
+            // identical to what the unit tests exercise. Inline registration
+            // with `web::Data::new(Arc::clone(...))` produced
+            // `Data<Arc<EndpointState>>` and made every ws request 500.
+            .configure(move |cfg| {
+                host_control::endpoint::register_routes(cfg, Arc::clone(&endpoint_state_for_routes))
+            })
             .configure(move |cfg| crate::configure_api_routes(cfg, rc.clone()))
             .service(
                 actix_files::Files::new("/", static_file_path.clone())

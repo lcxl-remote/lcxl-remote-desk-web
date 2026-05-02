@@ -525,6 +525,13 @@ pub async fn run_with_hub(
                         "Registering host control routes (mode={:?})",
                         state.hub.mode()
                     );
+                    // The portable App is built on `utoipa_actix_web`, whose
+                    // `ServiceConfig` is a distinct type from
+                    // `actix_web::web::ServiceConfig`, so we can't delegate
+                    // to `host_control::endpoint::register_routes` here.
+                    // Mirror its body verbatim instead — `Data::from(Arc<T>)`
+                    // yields `Data<T>`, matching the handler signature
+                    // `state: web::Data<EndpointState>`.
                     cfg.app_data(web::Data::from(state))
                         .route(
                             "/ws/tauri_ipc",

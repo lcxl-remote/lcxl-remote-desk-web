@@ -53,8 +53,36 @@ pub fn run() -> Result<(), DeskTauriError> {
 
 /// Service-shell mode: the daemon owns the HTTP server; Tauri is a pure UI shell
 /// that communicates with the daemon over a WebSocket IPC link.
+///
+/// Logging note: portable mode (`run_tauri_app`) launches the embedded server
+/// in-process, which calls `init_telemetry` and installs a global tracing
+/// subscriber that already captures every `log::*` macro from this crate.
+/// Service-shell mode does NOT launch that server, so we install a slim
+/// tracing subscriber here via [`telemetry::init_tauri_shell_telemetry`]
+/// instead. The two paths are mutually exclusive at runtime, so neither can
+/// shadow the other.
 fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
+    // Hold the WorkerGuard alive for the full process lifetime — dropping it
+    // early would close the non-blocking writer thread mid-run.
+    let _telemetry_guard = match lcxl_remote_desk_server::telemetry::init_tauri_shell_telemetry(
+        &settings.log.log_level,
+    ) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            // No subscriber installed: fall through to a silent run. Surface
+            // the reason on stderr so a debug build still shows it.
+            eprintln!("[ServiceShell] telemetry init failed: {e}");
+            None
+        }
+    };
+
+    log::info!("[ServiceShell] starting; daemon ws endpoint = ws://127.0.0.1:8082/ws/tauri_ipc");
     let ipc_token = settings.system.tauri_ipc_token.clone().unwrap_or_default();
+    log::info!(
+        "[ServiceShell] ipc_token len={} (empty={})",
+        ipc_token.len(),
+        ipc_token.is_empty()
+    );
 
     // Channels for GUI managers (same types as portable mode)
     let (ps_cmd_tx, ps_cmd_rx) = std::sync::mpsc::channel::<

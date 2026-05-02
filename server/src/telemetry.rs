@@ -79,26 +79,11 @@ pub async fn init_telemetry(
         .with_line_number(true)
         .with_filter(LevelFilter::ERROR);
 
-    // Determine log directory (absolute path)
-    #[cfg(target_os = "windows")]
-    let log_dir = {
-        let program_data =
-            std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-        std::path::PathBuf::from(program_data)
-            .join("LCXL Remote Desktop")
-            .join("logs")
-    };
-    #[cfg(not(target_os = "windows"))]
-    let log_dir = std::path::PathBuf::from("/var/log/lcxl-remote-desk");
-
+    let log_dir = log_directory();
     let _ = std::fs::create_dir_all(&log_dir);
 
     // Determine log file name based on startup mode
-    let log_file_name = match startup_mode {
-        StartupMode::ServiceDaemon => "desk-daemon.log",
-        StartupMode::SessionWorker => "desk-worker.log",
-        _ => "desk-server.log",
-    };
+    let log_file_name = log_file_name_for(startup_mode);
 
     // File appender
     let file_appender = tracing_appender::rolling::daily(log_dir, log_file_name);
@@ -200,6 +185,77 @@ pub async fn init_telemetry(
     Ok(Some(guard))
 }
 
+/// Returns the canonical log directory used by every component (daemon,
+/// embedded server, session worker, Tauri shell). Centralised so the
+/// install / uninstall flow can clean every component's logs in one place
+/// and so callers can't drift apart on the path layout.
+pub fn log_directory() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let program_data =
+            std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+        std::path::PathBuf::from(program_data)
+            .join("LCXL Remote Desktop")
+            .join("logs")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::path::PathBuf::from("/var/log/lcxl-remote-desk")
+    }
+}
+
+/// Standard log file name for a given startup mode. Kept beside `log_directory`
+/// so the rotation appender uses identical naming everywhere.
+pub fn log_file_name_for(startup_mode: &StartupMode) -> &'static str {
+    match startup_mode {
+        StartupMode::ServiceDaemon => "desk-daemon.log",
+        StartupMode::SessionWorker => "desk-worker.log",
+        _ => "desk-server.log",
+    }
+}
+
+/// Lightweight tracing init for the Tauri service-shell.
+///
+/// The full [`init_telemetry`] pulls in OTLP exporters, stdout layers, and the
+/// periodic cleanup task — none of which fit a UI shell that has no console
+/// (Windows `windows_subsystem = "windows"`) and no need to export traces.
+/// This routine sets up just the daily-rolling file appender plus a tracing
+/// `Registry`, writing to `desk-tauri.log` under [`log_directory`] so the
+/// daemon's existing cleanup task scrubs them alongside `desk-daemon.log`.
+///
+/// The returned [`WorkerGuard`] must be kept alive for the lifetime of the
+/// Tauri process; dropping it flushes pending log lines to disk and shuts
+/// down the non-blocking writer thread.
+///
+/// Returns `Err` if the global subscriber has already been installed (e.g. a
+/// caller mistakenly invoked this from portable mode where the embedded
+/// server's `init_telemetry` runs first). Service-shell mode never launches
+/// the embedded server in-process, so the conflict is structurally
+/// impossible there — but the error is propagated rather than swallowed so
+/// integration regressions surface immediately.
+pub fn init_tauri_shell_telemetry(log_level: &str) -> Result<WorkerGuard> {
+    let log_dir = log_directory();
+    std::fs::create_dir_all(&log_dir)?;
+
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+
+    let file_appender = tracing_appender::rolling::daily(log_dir, "desk-tauri.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let file_layer = fmt::layer()
+        .with_ansi(false)
+        .with_line_number(true)
+        .with_writer(non_blocking);
+
+    Registry::default()
+        .with(env_filter)
+        .with(file_layer)
+        .try_init()
+        .map_err(|e| anyhow::anyhow!("install tracing subscriber: {e}"))?;
+
+    Ok(guard)
+}
+
 fn spawn_log_cleanup_task(shared_settings: Arc<SharedSettings>) {
     tokio::spawn(async move {
         loop {
@@ -296,4 +352,50 @@ async fn perform_log_cleanup(retention_days: u32, threshold_percent: u8) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every component (daemon, embedded server, worker, Tauri shell) must
+    /// agree on the log root so the daemon's cleanup task can prune them all.
+    #[test]
+    fn log_directory_resolves_to_program_data_subtree_on_windows() {
+        let dir = log_directory();
+        #[cfg(target_os = "windows")]
+        {
+            assert!(
+                dir.ends_with(std::path::Path::new("LCXL Remote Desktop").join("logs")),
+                "unexpected log dir: {dir:?}"
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(dir, std::path::PathBuf::from("/var/log/lcxl-remote-desk"));
+        }
+    }
+
+    /// Mode-to-file-name mapping is part of the install-time contract: the
+    /// uninstall flow looks for these exact names when wiping logs.
+    #[test]
+    fn log_file_name_for_each_startup_mode() {
+        assert_eq!(
+            log_file_name_for(&StartupMode::ServiceDaemon),
+            "desk-daemon.log"
+        );
+        assert_eq!(
+            log_file_name_for(&StartupMode::SessionWorker),
+            "desk-worker.log"
+        );
+        assert_eq!(log_file_name_for(&StartupMode::Default), "desk-server.log");
+        assert_eq!(
+            log_file_name_for(&StartupMode::DeskServer),
+            "desk-server.log"
+        );
+        assert_eq!(
+            log_file_name_for(&StartupMode::Signaling),
+            "desk-server.log"
+        );
+    }
 }

@@ -637,4 +637,38 @@ mod tests {
         // than 404 — proves the route exists and the aggregator-mode check passed.
         assert_ne!(resp.status(), 404);
     }
+
+    /// Regression: when the daemon hand-rolled `/ws/tauri_ipc` registration as
+    /// `web::Data::new(Arc::clone(&endpoint_state))`, the `Data` wrapper had
+    /// type `Data<Arc<EndpointState>>` while the handler extractor expected
+    /// `Data<EndpointState>` — a TypeId mismatch that made every request
+    /// short-circuit with a 500 ("Failed to extract `Data<EndpointState>`").
+    /// `register_routes` uses `Data::from(Arc<T>)` (which yields `Data<T>`),
+    /// so anyone going through the helper is safe. This test asserts the helper
+    /// stays correct: a request that reaches the handler with a good token
+    /// must NOT collapse to 500.
+    #[actix_web::test]
+    async fn ws_handler_extracts_endpoint_state_through_register_routes() {
+        use actix_web::{App, test};
+        let hub = Arc::new(HostControlHub::new_local());
+        let state = Arc::new(EndpointState::new(
+            hub,
+            "secret".to_string(),
+            TauriLoginToken::empty(),
+        ));
+        let app =
+            test::init_service(App::new().configure(|cfg| register_routes(cfg, state.clone())))
+                .await;
+        // Token is correct so auth passes; no ws upgrade headers will then
+        // short-circuit. Either way the response must not be a 500.
+        let req = test::TestRequest::get()
+            .uri("/ws/tauri_ipc?token=secret")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_ne!(
+            resp.status(),
+            500,
+            "endpoint state extraction failed — Data<T> wrapping likely drifted"
+        );
+    }
 }

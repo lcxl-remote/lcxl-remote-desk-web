@@ -1,3 +1,4 @@
+pub mod desktop_monitor;
 pub mod session;
 
 use crate::model::settings::Args;
@@ -13,11 +14,17 @@ pub fn run_session_worker(args: Args, pipe_name: &str) -> Result<(), Box<dyn std
     // ServiceDaemon entry points already do this; SessionWorker must too.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-
-    rt.block_on(async {
+    // Use actix-rt's System (the same runtime flavour used by every other
+    // startup mode). It installs a `tokio::task::LocalSet`, which is required
+    // by `actix_web::rt::spawn` / `awc::Client` calls reachable from the
+    // signaling and host-control upstream paths. Spawning the worker on a
+    // plain `tokio::runtime::Builder::new_multi_thread()` runtime panics those
+    // call sites with "spawn_local called from outside of a `task::LocalSet`",
+    // which aborts the whole worker process before the telemetry guard can
+    // flush — leaving daemon-side restart loops with no diagnostic in the
+    // worker log.
+    let system = actix_web::rt::System::new();
+    system.block_on(async {
         match session::WorkerSession::run(args, pipe_name).await {
             Ok(()) => {
                 info!("SessionWorker exited normally");
@@ -29,4 +36,27 @@ pub fn run_session_worker(args: Args, pipe_name: &str) -> Result<(), Box<dyn std
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Regression: the worker runtime must run inside a `tokio::task::LocalSet`
+    /// so that `actix_web::rt::spawn` (used by the host-control upstream task
+    /// and by signaling-side request handling) does not panic with
+    /// "spawn_local called from outside of a `task::LocalSet`". Building a
+    /// plain `tokio::runtime::Builder::new_multi_thread()` runtime, as the
+    /// worker did before this fix, would crash with that exact message and
+    /// abort the whole process before the telemetry guard could flush.
+    #[test]
+    fn worker_runtime_supports_actix_local_spawn() {
+        let system = actix_web::rt::System::new();
+        let outcome = system.block_on(async {
+            let (tx, rx) = tokio::sync::oneshot::channel::<u32>();
+            actix_web::rt::spawn(async move {
+                let _ = tx.send(42);
+            });
+            rx.await.expect("spawn_local task must run to completion")
+        });
+        assert_eq!(outcome, 42);
+    }
 }
