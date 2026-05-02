@@ -8,8 +8,18 @@ use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use log::{error, info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
+
+/// Default heartbeat-watchdog grace period when settings don't override
+/// it. Worker heartbeats every 5s, so 30s ≈ 6 missed beats — wide
+/// enough that transient stalls don't trigger restarts but tight
+/// enough that a real hang gets cleared in well under a minute.
+const DEFAULT_WORKER_HEARTBEAT_TIMEOUT_SECS: u64 = 30;
+/// How often the watchdog re-checks staleness. Independent of the
+/// timeout itself — finer granularity costs nothing meaningful and
+/// keeps recovery latency bounded.
+const WORKER_HEARTBEAT_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct WorkerManager {
@@ -27,6 +37,15 @@ struct WorkerHandle {
     pipe_name: String,
     ipc_tx: mpsc::UnboundedSender<ServiceToWorker>,
     process_handle: Option<ProcessHandle>,
+    /// Last instant the daemon received any IPC message from this
+    /// worker (initialised to spawn time). Used by the heartbeat
+    /// watchdog — if no heartbeat (or any other message) shows up
+    /// within the configured timeout the worker is presumed stuck.
+    last_heartbeat_at: Instant,
+    /// Stored so the heartbeat watchdog can hand them back to
+    /// `handle_crash_recovery` when it triggers a restart.
+    session_id: u32,
+    desktop_name: Option<String>,
 }
 
 enum ProcessHandle {
@@ -207,6 +226,9 @@ impl WorkerManager {
             pipe_name,
             ipc_tx: ipc_cmd_tx,
             process_handle: Some(process),
+            last_heartbeat_at: Instant::now(),
+            session_id,
+            desktop_name: desktop_name.clone(),
         });
 
         info!("Worker started for session {session_id}");
@@ -227,6 +249,73 @@ impl WorkerManager {
 
     pub async fn track_browser_connection(&self, connection_id: String) {
         self.active_browser_ids.lock().await.insert(connection_id);
+    }
+
+    /// Record that the daemon just received an IPC message from the
+    /// active worker. The watchdog uses this to detect when a worker
+    /// has stopped responding (every IPC message — heartbeat or
+    /// otherwise — counts as a sign of life).
+    pub async fn note_heartbeat(&self) {
+        let mut inner = self.inner.lock().await;
+        if let Some(worker) = inner.active_worker.as_mut() {
+            worker.last_heartbeat_at = Instant::now();
+        }
+    }
+
+    /// Take a snapshot of the active worker's identity + last
+    /// heartbeat — separated out so the watchdog can decide whether
+    /// to fire without holding the manager lock during the kill /
+    /// restart path.
+    async fn active_worker_snapshot(&self) -> Option<(u32, Option<String>, Instant)> {
+        let inner = self.inner.lock().await;
+        inner
+            .active_worker
+            .as_ref()
+            .map(|w| (w.session_id, w.desktop_name.clone(), w.last_heartbeat_at))
+    }
+
+    /// Spawn the heartbeat watchdog. Returns the join handle so the
+    /// caller can abort it on shutdown. Re-reads settings each tick
+    /// so toggling the flag at runtime takes effect immediately.
+    pub fn spawn_heartbeat_watchdog(&self) -> tokio::task::JoinHandle<()> {
+        let mgr = self.clone();
+        tokio::spawn(async move {
+            info!(
+                "[WorkerWatchdog] starting (check every {:?})",
+                WORKER_HEARTBEAT_CHECK_INTERVAL
+            );
+            loop {
+                tokio::time::sleep(WORKER_HEARTBEAT_CHECK_INTERVAL).await;
+
+                let (enabled, timeout) = {
+                    let s = mgr.settings.read().await;
+                    (
+                        s.system.worker_heartbeat_watchdog_enabled.unwrap_or(true),
+                        Duration::from_secs(
+                            s.system
+                                .worker_heartbeat_timeout_secs
+                                .unwrap_or(DEFAULT_WORKER_HEARTBEAT_TIMEOUT_SECS),
+                        ),
+                    )
+                };
+
+                let Some((session_id, desktop_name, last)) = mgr.active_worker_snapshot().await
+                else {
+                    continue;
+                };
+                let elapsed = Instant::now().saturating_duration_since(last);
+                if !worker_is_stale(enabled, timeout, elapsed) {
+                    continue;
+                }
+
+                warn!(
+                    "[WorkerWatchdog] no IPC traffic for {:?} (timeout={:?}, session={session_id}, \
+                     desktop={desktop_name:?}) — declaring worker stuck and restarting",
+                    elapsed, timeout
+                );
+                mgr.handle_crash_recovery(session_id, desktop_name);
+            }
+        })
     }
 
     pub async fn notify_desktop_switch(&self) -> Vec<String> {
@@ -349,6 +438,24 @@ fn desktop_requires_system_token(desktop_name: Option<&str>) -> bool {
         desktop_name,
         Some(name) if name == crate::worker::desktop_monitor::RESTRICTED_DESKTOP_NAME
     )
+}
+
+/// Watchdog decision: should we declare the worker stuck and trigger
+/// a restart? Pulled into a free function so the timing semantics
+/// can be exercised without spawning a real watchdog task.
+///
+/// Returns `false` when the watchdog is disabled (operator-controlled
+/// debug aid: hung worker stays alive long enough to capture a
+/// stack trace) or when the elapsed time hasn't yet exceeded the
+/// configured timeout. The strict `>` (not `>=`) keeps boundary
+/// behaviour predictable when timeout is set to a round number
+/// equal to the heartbeat interval.
+pub(crate) fn worker_is_stale(
+    enabled: bool,
+    timeout: Duration,
+    elapsed_since_heartbeat: Duration,
+) -> bool {
+    enabled && elapsed_since_heartbeat > timeout
 }
 
 #[cfg(target_os = "windows")]
@@ -836,5 +943,71 @@ mod tests {
     fn winlogon_check_is_case_sensitive() {
         assert!(!desktop_requires_system_token(Some("winlogon")));
         assert!(!desktop_requires_system_token(Some("WINLOGON")));
+    }
+
+    /// When the operator disabled the watchdog (debug aid), even an
+    /// indefinitely-stale heartbeat must not trigger a restart — that's
+    /// the entire point of the toggle.
+    #[test]
+    fn disabled_watchdog_never_fires() {
+        assert!(!worker_is_stale(
+            false,
+            Duration::from_secs(30),
+            Duration::from_secs(0),
+        ));
+        assert!(!worker_is_stale(
+            false,
+            Duration::from_secs(30),
+            Duration::from_secs(3600),
+        ));
+    }
+
+    /// Heartbeats are 5s apart and timeout defaults to 30s; healthy
+    /// elapsed values should not trip the watchdog.
+    #[test]
+    fn fresh_heartbeat_does_not_fire() {
+        assert!(!worker_is_stale(
+            true,
+            Duration::from_secs(30),
+            Duration::from_secs(0),
+        ));
+        assert!(!worker_is_stale(
+            true,
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        ));
+        assert!(!worker_is_stale(
+            true,
+            Duration::from_secs(30),
+            Duration::from_secs(29),
+        ));
+    }
+
+    /// Boundary: strictly greater than. Setting timeout exactly equal
+    /// to a round multiple of the heartbeat interval shouldn't cause
+    /// jitter-driven false fires.
+    #[test]
+    fn heartbeat_at_exactly_timeout_does_not_fire() {
+        assert!(!worker_is_stale(
+            true,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        ));
+    }
+
+    /// Once elapsed exceeds the timeout the watchdog must report
+    /// stuck — this is the entire reason the watchdog exists.
+    #[test]
+    fn stale_heartbeat_fires_when_enabled() {
+        assert!(worker_is_stale(
+            true,
+            Duration::from_secs(30),
+            Duration::from_secs(31),
+        ));
+        assert!(worker_is_stale(
+            true,
+            Duration::from_secs(30),
+            Duration::from_secs(120),
+        ));
     }
 }

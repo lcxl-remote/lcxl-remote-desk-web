@@ -158,6 +158,11 @@ pub async fn run_service_daemon_inner(
         })
     };
 
+    // Watchdog kicks the worker if it stops sending IPC traffic.
+    // Settings can disable it at runtime (debug aid: a hung worker
+    // stays alive for stack capture instead of being respawned).
+    let watchdog_handle = worker_mgr.spawn_heartbeat_watchdog();
+
     info!("ServiceDaemon running. Press Ctrl+C to stop.");
     match shutdown_signal {
         Some(rx) => {
@@ -175,6 +180,7 @@ pub async fn run_service_daemon_inner(
     worker_mgr.shutdown_all().await;
     monitor_handle.abort();
     proxy_handle.abort();
+    watchdog_handle.abort();
     api_handle.abort();
 
     info!("ServiceDaemon stopped");

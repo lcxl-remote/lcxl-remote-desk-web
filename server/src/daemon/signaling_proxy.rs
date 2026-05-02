@@ -138,6 +138,13 @@ pub async fn run_signaling_proxy(
     };
 
     while let Some(msg) = worker_rx.recv().await {
+        // Every IPC message — heartbeat, signaling, desktop change —
+        // counts as a sign of life for the watchdog. Updating before
+        // the match keeps the bookkeeping in one place and avoids the
+        // watchdog firing on a worker that's actively talking but
+        // hasn't happened to send a Heartbeat in the last interval.
+        worker_mgr.note_heartbeat().await;
+
         match msg {
             WorkerToService::Ready => {
                 info!("[SignalingProxy] Worker is Ready");

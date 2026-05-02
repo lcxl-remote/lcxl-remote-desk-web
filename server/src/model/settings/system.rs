@@ -106,6 +106,19 @@ pub struct SystemSettings {
     /// Stable cookie signing key for session middleware (hex-encoded).
     /// Auto-generated and persisted so sessions survive daemon restarts.
     pub session_secret_key: Option<String>,
+
+    /// Whether the daemon should kill+restart a session worker that
+    /// stops sending heartbeats. Defaults to enabled. Set to `false`
+    /// when investigating worker hangs so the stuck process stays
+    /// alive long enough to attach a debugger / capture a stack dump.
+    pub worker_heartbeat_watchdog_enabled: Option<bool>,
+
+    /// Number of seconds without a worker heartbeat before the
+    /// watchdog declares the worker stuck and triggers a restart.
+    /// Workers send heartbeats every 5s; the default of 30s gives
+    /// roughly 6 missed beats of slack so transient spikes don't
+    /// trigger spurious restarts.
+    pub worker_heartbeat_timeout_secs: Option<u64>,
 }
 
 impl SystemSettings {
@@ -155,6 +168,8 @@ impl Default for SystemSettings {
             local_signaling_token: None,
             tauri_ipc_token: None,
             session_secret_key: None,
+            worker_heartbeat_watchdog_enabled: None,
+            worker_heartbeat_timeout_secs: None,
         }
     }
 }
