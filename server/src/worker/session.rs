@@ -2,11 +2,13 @@ use crate::{
     host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
+    worker::desktop_monitor,
 };
 use actix_web::web;
 use desk_ipc_protocol::{
     message::{
-        HeartbeatPayload, ServiceToWorker, SignalingPayload, WorkerInitPayload, WorkerToService,
+        DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, SignalingPayload,
+        WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -175,6 +177,15 @@ impl WorkerSession {
             }
         });
 
+        // Watch for the user-input desktop drifting away from the one we
+        // were launched on (UAC, lock screen, etc.). The watcher emits one
+        // notification per *transition* — repeated reads of the same
+        // drifted state are suppressed inside the monitor so we don't
+        // flood the IPC, and a return to the bound desktop re-arms it for
+        // the next drift.
+        let (desktop_change_tx, mut desktop_change_rx) = mpsc::unbounded_channel::<String>();
+        desktop_monitor::spawn(init_payload.desktop_name.clone(), desktop_change_tx);
+
         loop {
             tokio::select! {
                 msg_result = service_msg_rx.recv() => {
@@ -286,6 +297,22 @@ impl WorkerSession {
                         warn!("Failed to send heartbeat: {}", e);
                         break;
                     }
+                }
+
+                Some(new_desktop) = desktop_change_rx.recv() => {
+                    info!("Reporting desktop drift to daemon: '{}'", new_desktop);
+                    let payload = WorkerToService::DesktopChanged(DesktopChangedPayload {
+                        name: new_desktop,
+                    });
+                    if let Err(e) = write_message(&mut writer, &payload).await {
+                        warn!("Failed to forward DesktopChanged to Service: {}", e);
+                        break;
+                    }
+                    // Stay in the loop. If the daemon decides to switch
+                    // workers it will send `DesktopSwitching` back, which
+                    // is handled by the service_msg_rx arm above.
+                    // For Winlogon (UAC) the daemon currently keeps us
+                    // alive — see signaling_proxy::run_signaling_proxy.
                 }
             }
         }

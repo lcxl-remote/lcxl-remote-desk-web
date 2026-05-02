@@ -34,6 +34,15 @@ pub enum WorkerToService {
     /// Worker reports a desktop switch is complete and it's ready to resume
     DesktopReady,
 
+    /// Worker detected the user-input desktop changed (e.g. user invoked UAC
+    /// → secure desktop "Winlogon", switched to lock screen "ScreenSaver",
+    /// etc.). The daemon's session-monitor running in session 0 cannot see
+    /// across-window-station desktop changes — only a process living in
+    /// the user's WinSta0 (i.e. the worker) can. The daemon reacts by
+    /// shutting down this worker and launching a fresh one bound to the
+    /// new desktop.
+    DesktopChanged(DesktopChangedPayload),
+
     /// Worker reports an error
     Error(ErrorPayload),
 }
@@ -144,6 +153,15 @@ pub struct ConnectionStatePayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopChangedPayload {
+    /// New input desktop name as returned by `OpenInputDesktop` +
+    /// `GetUserObjectInformationW(UOI_NAME)`. Examples: "Default", "Winlogon",
+    /// "Screen-saver". The daemon launches the next worker with this name as
+    /// the `lpDesktop` argument to `CreateProcessAsUserW`.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DesktopSwitchPayload {
     /// Previous desktop name
     pub from_desktop: Option<String>,
@@ -175,6 +193,21 @@ mod tests {
         assert_eq!(decoded.os_session_id, original.os_session_id);
         assert_eq!(decoded.auth_token, original.auth_token);
         assert_eq!(decoded.host_upstream_url, original.host_upstream_url);
+    }
+
+    /// `DesktopChanged` round-trips with the same JSON shape the IPC reader
+    /// expects (tag = "type", content = "payload").
+    #[test]
+    fn desktop_changed_round_trips() {
+        let msg = WorkerToService::DesktopChanged(DesktopChangedPayload {
+            name: "Winlogon".to_string(),
+        });
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: WorkerToService = serde_json::from_str(&json).unwrap();
+        match decoded {
+            WorkerToService::DesktopChanged(payload) => assert_eq!(payload.name, "Winlogon"),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     /// Older daemons that don't yet emit `host_upstream_url` must still be

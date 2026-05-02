@@ -111,6 +111,11 @@ pub fn get_current_desktop_name() -> Result<String, String> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+pub fn get_active_session_id() -> u32 {
+    0
+}
+
 #[cfg(target_os = "windows")]
 pub fn get_active_session_id() -> u32 {
     use windows::Win32::System::RemoteDesktop::{
