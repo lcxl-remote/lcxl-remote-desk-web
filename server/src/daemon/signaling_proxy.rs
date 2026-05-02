@@ -160,24 +160,6 @@ pub async fn run_signaling_proxy(
                 info!("[SignalingProxy] Worker desktop ready after switch");
             }
             WorkerToService::DesktopChanged(payload) => {
-                if is_unsupported_capture_desktop(&payload.name) {
-                    // UAC's secure desktop is owned by SYSTEM; capturing
-                    // it requires a SYSTEM-token worker with explicit
-                    // Winlogon ACL access (not yet wired up). Tearing
-                    // down the user-token worker here would just leave
-                    // us with no capture for the duration of UAC since
-                    // `CreateProcessAsUserW(lpDesktop="WinSta0\\Winlogon")`
-                    // with the user token fails with ERROR_ACCESS_DENIED.
-                    // Keep the existing worker alive instead — when the
-                    // user dismisses UAC the input desktop returns to
-                    // Default and the worker simply resumes.
-                    info!(
-                        "[SignalingProxy] Worker reported drift to '{}' (restricted desktop); \
-                         keeping current worker — Winlogon capture is not yet supported",
-                        payload.name
-                    );
-                    continue;
-                }
                 info!(
                     "[SignalingProxy] Worker reported desktop drift -> '{}'; restarting worker",
                     payload.name
@@ -218,15 +200,6 @@ pub async fn run_signaling_proxy(
 
     info!("Signaling proxy stopped");
     Ok(())
-}
-
-/// Returns true when launching a worker on `desktop_name` would fail with
-/// the user-token launch path the daemon currently uses. Right now that's
-/// only Windows' secure desktop `Winlogon` (UAC, lock-screen elevation
-/// prompts) — capturing it requires SYSTEM impersonation + explicit
-/// desktop ACL grant which the worker manager doesn't do yet.
-fn is_unsupported_capture_desktop(desktop_name: &str) -> bool {
-    desktop_name == crate::worker::desktop_monitor::RESTRICTED_DESKTOP_NAME
 }
 
 async fn maintain_proxy_connection(
@@ -372,22 +345,4 @@ async fn maintain_proxy_connection(
 
     info!("[Proxy] Connection to {signaling_url} ended");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Locks down the gating used by the `DesktopChanged` handler: only
-    /// `Winlogon` is currently filtered out. Any future name we add to
-    /// the restricted set must come with the SYSTEM-token launch path
-    /// in `WorkerManager::launch_worker_process` so the runtime
-    /// guarantee actually holds.
-    #[test]
-    fn unsupported_desktops_are_only_winlogon() {
-        assert!(is_unsupported_capture_desktop("Winlogon"));
-        assert!(!is_unsupported_capture_desktop("Default"));
-        assert!(!is_unsupported_capture_desktop("Screen-saver"));
-        assert!(!is_unsupported_capture_desktop("winlogon")); // case-sensitive
-    }
 }

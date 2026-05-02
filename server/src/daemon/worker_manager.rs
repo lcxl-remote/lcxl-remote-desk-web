@@ -304,7 +304,13 @@ impl WorkerManager {
                 exe_path.display(),
                 pipe_name
             );
-            match launch_worker_as_user(session_id, desktop_name, &cmd_line) {
+            // Winlogon's DACL only grants access to SYSTEM by default, so a
+            // user-token worker can't open the secure desktop at all. Force
+            // the SYSTEM-token launch path for restricted desktops; for
+            // everything else keep the user token (richer profile, narrower
+            // privileges).
+            let force_system_token = desktop_requires_system_token(desktop_name);
+            match launch_worker_as_user(session_id, desktop_name, &cmd_line, force_system_token) {
                 Ok(child) => {
                     info!(
                         "Worker launched via CreateProcessAsUserW (PID {})",
@@ -334,11 +340,23 @@ impl WorkerManager {
     }
 }
 
+/// Restricted desktops whose DACL refuses ordinary user tokens; capturing
+/// them needs the daemon's own SYSTEM token re-targeted to the user's
+/// session. Right now only Windows' UAC secure desktop qualifies.
+#[cfg(target_os = "windows")]
+fn desktop_requires_system_token(desktop_name: Option<&str>) -> bool {
+    matches!(
+        desktop_name,
+        Some(name) if name == crate::worker::desktop_monitor::RESTRICTED_DESKTOP_NAME
+    )
+}
+
 #[cfg(target_os = "windows")]
 fn launch_worker_as_user(
     session_id: u32,
     desktop_name: Option<&str>,
     cmd_line: &str,
+    force_system_token: bool,
 ) -> Result<NativeWindowsChild, Box<dyn std::error::Error + Send + Sync>> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -358,46 +376,62 @@ fn launch_worker_as_user(
         },
     };
 
-    info!("CreateProcessAsUserW: session={session_id}, desktop={desktop_name:?}");
+    info!(
+        "CreateProcessAsUserW: session={session_id}, desktop={desktop_name:?}, \
+         force_system_token={force_system_token}"
+    );
 
     unsafe {
         let mut user_token = HANDLE::default();
-        let use_system_token = match WTSQueryUserToken(session_id, &mut user_token) {
-            Ok(()) => {
-                info!("WTSQueryUserToken succeeded for session {session_id}");
+        let use_system_token = if force_system_token {
+            // Skip WTSQueryUserToken entirely — even a successful user
+            // token cannot open Winlogon, so the only viable path is the
+            // SYSTEM token with `SetTokenInformation(TokenSessionId)`.
+            info!(
+                "Forcing SYSTEM token launch path for desktop={desktop_name:?} \
+                 (user-token DACL would deny access)"
+            );
+            OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut user_token)
+                .map_err(|e| format!("OpenProcessToken: {e}"))?;
+            true
+        } else {
+            match WTSQueryUserToken(session_id, &mut user_token) {
+                Ok(()) => {
+                    info!("WTSQueryUserToken succeeded for session {session_id}");
 
-                use windows::Win32::Security::{
-                    GetTokenInformation, TOKEN_LINKED_TOKEN, TokenLinkedToken,
-                };
-                let mut linked_token = TOKEN_LINKED_TOKEN::default();
-                let mut return_length = 0;
-                let res = GetTokenInformation(
-                    user_token,
-                    TokenLinkedToken,
-                    Some(&mut linked_token as *mut _ as *mut std::ffi::c_void),
-                    std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
-                    &mut return_length,
-                );
-                if res.is_ok() && !linked_token.LinkedToken.is_invalid() {
-                    info!(
-                        "Successfully retrieved LinkedToken (elevated token) for session {session_id}"
+                    use windows::Win32::Security::{
+                        GetTokenInformation, TOKEN_LINKED_TOKEN, TokenLinkedToken,
+                    };
+                    let mut linked_token = TOKEN_LINKED_TOKEN::default();
+                    let mut return_length = 0;
+                    let res = GetTokenInformation(
+                        user_token,
+                        TokenLinkedToken,
+                        Some(&mut linked_token as *mut _ as *mut std::ffi::c_void),
+                        std::mem::size_of::<TOKEN_LINKED_TOKEN>() as u32,
+                        &mut return_length,
                     );
-                    let _ = CloseHandle(user_token);
-                    user_token = linked_token.LinkedToken;
-                } else {
-                    info!("Could not retrieve LinkedToken, using default user token");
-                }
+                    if res.is_ok() && !linked_token.LinkedToken.is_invalid() {
+                        info!(
+                            "Successfully retrieved LinkedToken (elevated token) for session {session_id}"
+                        );
+                        let _ = CloseHandle(user_token);
+                        user_token = linked_token.LinkedToken;
+                    } else {
+                        info!("Could not retrieve LinkedToken, using default user token");
+                    }
 
-                false
-            }
-            Err(e) => {
-                warn!(
-                    "WTSQueryUserToken failed (session={session_id}): {e}, \
-                     falling back to SYSTEM token with SessionId injection"
-                );
-                OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut user_token)
-                    .map_err(|e| format!("OpenProcessToken: {e}"))?;
-                true
+                    false
+                }
+                Err(e) => {
+                    warn!(
+                        "WTSQueryUserToken failed (session={session_id}): {e}, \
+                         falling back to SYSTEM token with SessionId injection"
+                    );
+                    OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &mut user_token)
+                        .map_err(|e| format!("OpenProcessToken: {e}"))?;
+                    true
+                }
             }
         };
 
@@ -769,4 +803,38 @@ where
         }
     }
     daemon_initiated
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    /// `desktop_requires_system_token` is the gate the launch path uses to
+    /// pick between user-token (`WTSQueryUserToken`) and SYSTEM-token
+    /// (`OpenProcessToken` + `SetTokenInformation(TokenSessionId)`) paths.
+    /// The classification has to stay tight: any false positive would
+    /// downgrade an ordinary worker to SYSTEM (loses user profile / network
+    /// drives); any false negative would route a Winlogon launch through
+    /// the user token and `CreateProcessAsUserW` would fail with
+    /// ERROR_ACCESS_DENIED.
+    #[test]
+    fn winlogon_requires_system_token() {
+        assert!(desktop_requires_system_token(Some("Winlogon")));
+    }
+
+    #[test]
+    fn ordinary_desktops_do_not_require_system_token() {
+        assert!(!desktop_requires_system_token(Some("Default")));
+        assert!(!desktop_requires_system_token(Some("Screen-saver")));
+        assert!(!desktop_requires_system_token(None));
+    }
+
+    /// Case-sensitive: Windows desktop names are conventionally fixed-case
+    /// and our `desktop_monitor::names_equal` is strict. Aligning with that
+    /// keeps the routing decision consistent with the detection side.
+    #[test]
+    fn winlogon_check_is_case_sensitive() {
+        assert!(!desktop_requires_system_token(Some("winlogon")));
+        assert!(!desktop_requires_system_token(Some("WINLOGON")));
+    }
 }
