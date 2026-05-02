@@ -82,6 +82,14 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
                 }
                 setIsRTCConnected(false);
                 setRemoteStream(null);
+                // Drop the old worker's INIT payload too. desk-session.tsx
+                // gates "auto-reconnect vs show config dialog" on
+                // (initData && !isRTCConnected); without clearing initData,
+                // the `setIsRTCConnected(false)` above would re-fire that
+                // useEffect on the *previous* INIT before DESKTOP_READY
+                // arrives to set autoReconnectRef = true, causing the
+                // config dialog to flash open on every desktop switch.
+                setInitData(null);
                 return;
             }
 
