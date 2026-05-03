@@ -178,11 +178,11 @@ pub async fn run_signaling_proxy(
                 // mailbox flushes; bridge_loop pushes more messages while
                 // we wait).
                 actix_web::rt::spawn(async move {
-                    let browser_ids = worker_mgr.notify_desktop_switch().await;
+                    let preapproved = worker_mgr.notify_desktop_switch().await;
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     let session_id = crate::daemon::session_monitor::get_active_session_id();
                     if let Err(e) = worker_mgr
-                        .start_worker(session_id, Some(new_desktop.clone()), browser_ids)
+                        .start_worker(session_id, Some(new_desktop.clone()), preapproved)
                         .await
                     {
                         error!(
@@ -191,6 +191,21 @@ pub async fn run_signaling_proxy(
                         );
                     }
                 });
+            }
+            WorkerToService::ConnectionAcceptStateChanged {
+                connection_id,
+                state,
+            } => {
+                debug!(
+                    "[SignalingProxy] Worker reported accept-state for {connection_id}: \
+                     control={} clipboard={}",
+                    state.accept_control, state.accept_clipboard_sync
+                );
+                worker_mgr.update_connection_accept(&connection_id, state);
+            }
+            WorkerToService::ConnectionClosed { connection_id } => {
+                debug!("[SignalingProxy] Worker reported connection closed: {connection_id}");
+                worker_mgr.remove_connection(&connection_id);
             }
             WorkerToService::Error(err) => {
                 error!(
@@ -296,9 +311,7 @@ async fn maintain_proxy_connection(
                                         SignalingType::RequestRemote
                                     )
                                         && let Some(from_id) = parsed.from_connection_id {
-                                            worker_mgr
-                                                .track_browser_connection(from_id)
-                                                .await;
+                                            worker_mgr.track_browser_connection(from_id);
                                         }
                                 let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
                                     message: text_str,

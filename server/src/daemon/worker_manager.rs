@@ -1,13 +1,16 @@
 use crate::model::settings::SharedSettings;
 use actix_web::web;
 use desk_ipc_protocol::{
-    message::{ServiceToWorker, SignalingPayload, WorkerInitPayload, WorkerToService},
+    message::{
+        ConnectionAcceptState, ServiceToWorker, SignalingPayload, WorkerInitPayload,
+        WorkerToService,
+    },
     transport::{read_message, write_message},
 };
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use log::{error, info, warn};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
 
@@ -26,7 +29,17 @@ pub struct WorkerManager {
     settings: web::Data<SharedSettings>,
     inner: Arc<Mutex<WorkerManagerInner>>,
     worker_msg_tx: Arc<mpsc::UnboundedSender<WorkerToService>>,
-    active_browser_ids: Arc<Mutex<HashSet<String>>>,
+    /// Per-connection accept-state cache. The daemon is a durable cache for
+    /// the worker's authoritative state — entries are inserted on first
+    /// `RequestRemote`, updated when the worker emits
+    /// `ConnectionAcceptStateChanged`, removed when the worker emits
+    /// `ConnectionClosed`, and drained into the next worker's
+    /// `WorkerInitPayload.preapproved_connections` on desktop / session
+    /// switch + crash recovery.
+    ///
+    /// Uses `std::sync::Mutex` because every critical section is a short,
+    /// synchronous map op with no `.await` inside the guard.
+    active_connections: Arc<StdMutex<HashMap<String, ConnectionAcceptState>>>,
 }
 
 struct WorkerManagerInner {
@@ -146,7 +159,7 @@ impl WorkerManager {
                 active_worker: None,
             })),
             worker_msg_tx: Arc::new(tx),
-            active_browser_ids: Arc::new(Mutex::new(HashSet::new())),
+            active_connections: Arc::new(StdMutex::new(HashMap::new())),
         };
         (mgr, rx)
     }
@@ -155,7 +168,7 @@ impl WorkerManager {
         &self,
         session_id: u32,
         desktop_name: Option<String>,
-        reconnect_ids: Vec<String>,
+        preapproved: Vec<(String, ConnectionAcceptState)>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut inner = self.inner.lock().await;
 
@@ -207,7 +220,7 @@ impl WorkerManager {
                 config_c,
                 ipc_cmd_rx,
                 (*worker_msg_tx).clone(),
-                reconnect_ids,
+                preapproved,
                 mgr_c,
                 host_upstream_url_c,
                 ipc_token_c,
@@ -247,8 +260,47 @@ impl WorkerManager {
         }
     }
 
-    pub async fn track_browser_connection(&self, connection_id: String) {
-        self.active_browser_ids.lock().await.insert(connection_id);
+    /// Insert a fresh entry on first `RequestRemote` observation. Idempotent
+    /// — re-observing a known id keeps the existing accept-state, so a
+    /// browser that drops then re-issues `RequestRemote` mid-session does
+    /// not silently lose its prior approvals.
+    pub fn track_browser_connection(&self, connection_id: String) {
+        self.active_connections
+            .lock()
+            .unwrap()
+            .entry(connection_id)
+            .or_default();
+    }
+
+    /// Replace the cached accept-state for a connection. No-op if the id is
+    /// unknown (race with browser drop / unrelated worker chatter).
+    pub fn update_connection_accept(
+        &self,
+        connection_id: &str,
+        state: ConnectionAcceptState,
+    ) {
+        let mut map = self.active_connections.lock().unwrap();
+        if let Some(slot) = map.get_mut(connection_id) {
+            *slot = state;
+        }
+    }
+
+    /// Drop the cached entry for a connection. Called when the worker
+    /// reports `WorkerToService::ConnectionClosed`. Bounds memory growth on
+    /// long-running daemons across many connect/disconnect cycles.
+    pub fn remove_connection(&self, connection_id: &str) {
+        self.active_connections.lock().unwrap().remove(connection_id);
+    }
+
+    /// Aggregator-only test seam — read the current accept-state without
+    /// mutating. Production code should not need this.
+    #[cfg(test)]
+    pub fn connection_accept_state(&self, connection_id: &str) -> Option<ConnectionAcceptState> {
+        self.active_connections
+            .lock()
+            .unwrap()
+            .get(connection_id)
+            .copied()
     }
 
     /// Record that the daemon just received an IPC message from the
@@ -318,13 +370,17 @@ impl WorkerManager {
         })
     }
 
-    pub async fn notify_desktop_switch(&self) -> Vec<String> {
-        let browser_ids: Vec<String> = {
-            let mut ids = self.active_browser_ids.lock().await;
-            ids.drain().collect()
+    /// Drain the per-connection cache, push `DesktopSwitching` to each
+    /// browser, and tell the active worker to begin shutdown. Returns the
+    /// drained `(connection_id, accept_state)` tuples so the caller can
+    /// hand them to the next worker via `start_worker(..., preapproved)`.
+    pub async fn notify_desktop_switch(&self) -> Vec<(String, ConnectionAcceptState)> {
+        let preapproved: Vec<(String, ConnectionAcceptState)> = {
+            let mut map = self.active_connections.lock().unwrap();
+            map.drain().collect()
         };
 
-        for id in &browser_ids {
+        for (id, _) in &preapproved {
             if let Some(json) = build_signaling_event_json(SignalingType::DesktopSwitching, id) {
                 let _ =
                     self.worker_msg_tx
@@ -340,7 +396,7 @@ impl WorkerManager {
             let _ = worker.ipc_tx.send(ServiceToWorker::DesktopSwitching);
         }
 
-        browser_ids
+        preapproved
     }
 
     pub fn handle_crash_recovery(&self, session_id: u32, desktop_name: Option<String>) {
@@ -350,10 +406,10 @@ impl WorkerManager {
         // is called from within a tokio::spawn task (run_pipe_server) which has no
         // LocalSet; calling spawn_local there panics and silently kills the task.
         tokio::spawn(async move {
-            let browser_ids = mgr.notify_desktop_switch().await;
+            let preapproved = mgr.notify_desktop_switch().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
             if let Err(e) = mgr
-                .start_worker(session_id, desktop_name, browser_ids)
+                .start_worker(session_id, desktop_name, preapproved)
                 .await
             {
                 error!("[WorkerManager] Failed to restart Worker after crash: {e}");
@@ -655,7 +711,7 @@ async fn run_pipe_server(
     config_json: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: mpsc::UnboundedSender<WorkerToService>,
-    reconnect_ids: Vec<String>,
+    preapproved: Vec<(String, ConnectionAcceptState)>,
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
@@ -722,6 +778,20 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
+    // Re-seed the daemon's per-connection cache from `preapproved` BEFORE
+    // sending Init. The new worker will emit `ConnectionAcceptStateChanged`
+    // for each restored connection during PC creation, which arrives over
+    // IPC and updates the cache to the worker's new (post-restart)
+    // authoritative state — but we still want the cache to be populated in
+    // the meantime so a quick desktop re-switch right after restart still
+    // ships state forward.
+    {
+        let mut map = worker_mgr.active_connections.lock().unwrap();
+        for (id, state) in &preapproved {
+            map.insert(id.clone(), *state);
+        }
+    }
+
     write_message(
         &mut writer,
         &ServiceToWorker::Init(WorkerInitPayload {
@@ -732,12 +802,13 @@ async fn run_pipe_server(
             signaling_url: None,
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
+            preapproved_connections: preapproved.clone(),
         }),
     )
     .await?;
     info!("Sent Init to Worker");
 
-    for id in &reconnect_ids {
+    for (id, _) in &preapproved {
         if let Some(json) = build_signaling_event_json(SignalingType::DesktopReady, id) {
             let _ = msg_tx.send(WorkerToService::SignalingMessage(SignalingPayload {
                 message: json,
@@ -765,7 +836,7 @@ async fn run_pipe_server(
     config_json: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: mpsc::UnboundedSender<WorkerToService>,
-    reconnect_ids: Vec<String>,
+    preapproved: Vec<(String, ConnectionAcceptState)>,
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
@@ -805,6 +876,13 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
+    {
+        let mut map = worker_mgr.active_connections.lock().unwrap();
+        for (id, state) in &preapproved {
+            map.insert(id.clone(), *state);
+        }
+    }
+
     write_message(
         &mut writer,
         &ServiceToWorker::Init(WorkerInitPayload {
@@ -815,11 +893,12 @@ async fn run_pipe_server(
             signaling_url: None,
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
+            preapproved_connections: preapproved.clone(),
         }),
     )
     .await?;
 
-    for id in &reconnect_ids {
+    for (id, _) in &preapproved {
         if let Some(json) = build_signaling_event_json(SignalingType::DesktopReady, id) {
             let _ = msg_tx.send(WorkerToService::SignalingMessage(SignalingPayload {
                 message: json,
@@ -981,6 +1060,102 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(29),
         ));
+    }
+
+    /// Construct a bare WorkerManager for unit testing the connection-state
+    /// API. Settings are defaulted (none of these tests touch the watchdog
+    /// or settings hot-reread).
+    fn test_manager() -> (WorkerManager, WorkerMessageReceiver) {
+        let settings = web::Data::from(Arc::new(crate::model::settings::SharedSettings::from(
+            crate::model::settings::Settings::default(),
+        )));
+        WorkerManager::new(settings)
+    }
+
+    /// Track-then-update-then-drain round trip — the path used by
+    /// `signaling_proxy` (track on RequestRemote, update on
+    /// ConnectionAcceptStateChanged, drain on desktop switch).
+    #[tokio::test]
+    async fn track_update_drain_round_trip() {
+        let (mgr, _rx) = test_manager();
+
+        mgr.track_browser_connection("conn-1".to_string());
+        mgr.update_connection_accept(
+            "conn-1",
+            ConnectionAcceptState {
+                accept_control: true,
+                accept_clipboard_sync: true,
+            },
+        );
+
+        let drained = mgr.notify_desktop_switch().await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, "conn-1");
+        assert!(drained[0].1.accept_control);
+        assert!(drained[0].1.accept_clipboard_sync);
+
+        // Second drain after first must be empty — `notify_desktop_switch`
+        // owns the drain side-effect.
+        let drained_again = mgr.notify_desktop_switch().await;
+        assert!(drained_again.is_empty());
+    }
+
+    /// `update_connection_accept` on an unknown id is a silent no-op (race
+    /// against browser disconnect / unrelated worker chatter).
+    #[test]
+    fn update_unknown_id_is_noop() {
+        let (mgr, _rx) = test_manager();
+        mgr.update_connection_accept(
+            "ghost",
+            ConnectionAcceptState {
+                accept_control: true,
+                accept_clipboard_sync: true,
+            },
+        );
+        assert!(mgr.connection_accept_state("ghost").is_none());
+    }
+
+    /// `track_browser_connection` is idempotent: re-tracking a known id
+    /// must NOT clobber the existing accept-state. This guards against a
+    /// browser quickly disconnecting and re-issuing RequestRemote within
+    /// the same worker lifetime — its prior approvals would otherwise be
+    /// silently downgraded.
+    #[test]
+    fn track_is_idempotent_keeps_existing_state() {
+        let (mgr, _rx) = test_manager();
+        mgr.track_browser_connection("conn-1".to_string());
+        mgr.update_connection_accept(
+            "conn-1",
+            ConnectionAcceptState {
+                accept_control: true,
+                accept_clipboard_sync: false,
+            },
+        );
+
+        // Re-track with the same id.
+        mgr.track_browser_connection("conn-1".to_string());
+
+        let after = mgr
+            .connection_accept_state("conn-1")
+            .expect("entry must still exist");
+        assert!(after.accept_control, "accept_control must not be reset");
+        assert!(!after.accept_clipboard_sync);
+    }
+
+    /// `remove_connection` drops the entry. Subsequent `notify_desktop_switch`
+    /// does not include it. This is the path used by
+    /// `WorkerToService::ConnectionClosed` to bound memory growth.
+    #[tokio::test]
+    async fn remove_drops_entry_from_drain() {
+        let (mgr, _rx) = test_manager();
+        mgr.track_browser_connection("alive".to_string());
+        mgr.track_browser_connection("doomed".to_string());
+
+        mgr.remove_connection("doomed");
+
+        let drained = mgr.notify_desktop_switch().await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, "alive");
     }
 
     /// Boundary: strictly greater than. Setting timeout exactly equal
