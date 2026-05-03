@@ -352,20 +352,12 @@ async fn handle_client_message(
             permission_type,
             from_connection_id,
         } if state.hub.mode() == HubMode::Aggregator => {
-            state.hub.register_upstream_request(
-                req_id.clone(),
+            state.hub.handle_upstream_approval_request(
+                req_id,
                 session_id,
-                permission_type.clone(),
-                from_connection_id.clone(),
+                permission_type,
+                from_connection_id,
             );
-            // Re-publish to Tauri-facing broadcast.
-            let _ = state
-                .hub
-                .send_command(HostControlMessage::SecurityApprovalRequest {
-                    req_id,
-                    permission_type,
-                    from_connection_id,
-                });
         }
         // Generic forwarder commands re-broadcast on aggregator.
         msg @ (HostControlMessage::PrivateScreenShow { .. }

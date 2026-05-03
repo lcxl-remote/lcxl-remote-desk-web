@@ -471,6 +471,51 @@ impl HostControlHub {
         );
     }
 
+    /// Aggregator-only: process an approval request just received from a worker
+    /// forwarder. When at least one Tauri shell is connected, registers the
+    /// request and broadcasts it for review. When no Tauri shell is connected,
+    /// immediately routes a deny response back to the originating forwarder so
+    /// the worker doesn't sit blocked waiting for a UI that will never arrive
+    /// (and ultimately get killed by the heartbeat watchdog).
+    ///
+    /// Returns `true` if the request was queued for Tauri review, `false` if
+    /// it was denied immediately.
+    pub fn handle_upstream_approval_request(
+        &self,
+        req_id: String,
+        upstream_id: UpstreamSessionId,
+        permission_type: SecurityPermissionType,
+        from_connection_id: Option<String>,
+    ) -> bool {
+        debug_assert_eq!(self.inner.mode, HubMode::Aggregator);
+        if !self.has_tauri_ui() {
+            warn!(
+                "[Hub/Aggregator] No Tauri client connected; denying req_id={req_id} immediately"
+            );
+            self.route_to_forwarder(
+                upstream_id,
+                HostControlMessage::SecurityApprovalSubmit {
+                    req_id,
+                    approved: false,
+                    remember: false,
+                },
+            );
+            return false;
+        }
+        self.register_upstream_request(
+            req_id.clone(),
+            upstream_id,
+            permission_type.clone(),
+            from_connection_id.clone(),
+        );
+        let _ = self.send_command(HostControlMessage::SecurityApprovalRequest {
+            req_id,
+            permission_type,
+            from_connection_id,
+        });
+        true
+    }
+
     /// Aggregator-only: drain all pending approvals belonging to `upstream_id`,
     /// and drop the forwarder session's outbound mpsc registration. Returns the
     /// list of req_ids that were drained, so the caller can notify the Tauri
@@ -1125,6 +1170,82 @@ mod tests {
 
         let dispatched = hub.submit_approval("does-not-exist", ApprovalResponse::deny());
         assert!(!dispatched);
+    }
+
+    // Aggregator immediately denies an upstream approval request when no Tauri
+    // shell is connected — prevents the worker from blocking until the heartbeat
+    // watchdog kills it.
+    #[tokio::test]
+    async fn aggregator_handle_upstream_request_denies_without_tauri() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(1, tx);
+
+        // No mark_tauri_connected — UI is offline.
+        let accepted = hub.handle_upstream_approval_request(
+            "r1".to_string(),
+            1,
+            SecurityPermissionType::RemoteControl,
+            None,
+        );
+        assert!(!accepted, "must report denied");
+        assert_eq!(
+            hub.pending_replay_count(),
+            0,
+            "denied request must not be registered for replay"
+        );
+
+        let msg = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("forwarder must receive a deny submit")
+            .expect("mpsc closed");
+        match msg {
+            HostControlMessage::SecurityApprovalSubmit {
+                req_id,
+                approved,
+                remember,
+            } => {
+                assert_eq!(req_id, "r1");
+                assert!(!approved);
+                assert!(!remember);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // Aggregator registers the request and broadcasts it when a Tauri shell is
+    // connected. No deny is routed back to the forwarder.
+    #[tokio::test]
+    async fn aggregator_handle_upstream_request_broadcasts_when_tauri_present() {
+        let hub = HostControlHub::new_aggregator();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(1, tx);
+
+        let accepted = hub.handle_upstream_approval_request(
+            "r1".to_string(),
+            1,
+            SecurityPermissionType::RemoteControl,
+            None,
+        );
+        assert!(accepted);
+        assert_eq!(hub.pending_replay_count(), 1);
+
+        let bcast = tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+            .await
+            .expect("broadcast must fire")
+            .expect("channel closed");
+        match bcast {
+            HostControlMessage::SecurityApprovalRequest { req_id, .. } => {
+                assert_eq!(req_id, "r1");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Forwarder must NOT receive an immediate deny.
+        let nothing = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
+        assert!(nothing.is_err(), "forwarder must not get a deny submit");
     }
 
     // Aggregator drain_upstream_pending also removes the forwarder session entry.
