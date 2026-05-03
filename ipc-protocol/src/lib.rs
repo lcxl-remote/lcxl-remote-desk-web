@@ -16,5 +16,6 @@
 //! Wire format: length-prefixed bincode v2 (`bincode::config::standard()`).
 //! See [`transport`] for the framing details.
 
+pub mod dual_transport;
 pub mod message;
 pub mod transport;
