@@ -583,14 +583,8 @@ mod tests {
         let (tx, mut rx) = inprocess::make_media();
         tx.send_frame(make_video_p(0, 10)).await.unwrap();
         tx.send_frame(make_video_i(1, 10)).await.unwrap();
-        assert_eq!(
-            rx.recv_frame().await.unwrap().kind,
-            MediaFrameKind::VideoP
-        );
-        assert_eq!(
-            rx.recv_frame().await.unwrap().kind,
-            MediaFrameKind::VideoI
-        );
+        assert_eq!(rx.recv_frame().await.unwrap().kind, MediaFrameKind::VideoP);
+        assert_eq!(rx.recv_frame().await.unwrap().kind, MediaFrameKind::VideoI);
     }
 
     // ---------------- In-process event ----------------
@@ -670,6 +664,9 @@ mod tests {
         let mut receiver = framed::make_event_receiver::<_, ServiceToWorker>(b);
 
         sender.send(ServiceToWorker::Shutdown).await.unwrap();
-        assert!(matches!(receiver.recv().await, Some(ServiceToWorker::Shutdown)));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(ServiceToWorker::Shutdown)
+        ));
     }
 }

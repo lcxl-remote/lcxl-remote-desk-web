@@ -546,7 +546,10 @@ mod tests {
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.preapproved_connections, original.preapproved_connections);
+        assert_eq!(
+            decoded.preapproved_connections,
+            original.preapproved_connections
+        );
     }
 
     /// `ConnectionAcceptState` defaults to all-false (the safe initial state

@@ -167,8 +167,11 @@ impl WorkerSession {
 
         // Drain init's preapproved Vec into the HashMap the worker uses for
         // O(1) lookup at PC-creation time.
-        let preapproved: std::collections::HashMap<_, _> =
-            init_payload.preapproved_connections.iter().cloned().collect();
+        let preapproved: std::collections::HashMap<_, _> = init_payload
+            .preapproved_connections
+            .iter()
+            .cloned()
+            .collect();
 
         let mut desk_session = DeskSession::new(
             shared_settings_data,

@@ -159,7 +159,10 @@ mod tests {
         let mut buf = Vec::new();
         let err = write_message(&mut buf, &msg).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        assert!(buf.is_empty(), "no bytes should be written on oversized frame");
+        assert!(
+            buf.is_empty(),
+            "no bytes should be written on oversized frame"
+        );
     }
 
     /// A length prefix that exceeds `MAX_MESSAGE_SIZE` is rejected at read
@@ -170,7 +173,9 @@ mod tests {
         let mut wire = bad_len.to_le_bytes().to_vec();
         // Body intentionally absent — read should fail on length check, not EOF.
         let mut cursor = std::io::Cursor::new(wire.clone());
-        let err = read_message::<_, WorkerToService>(&mut cursor).await.unwrap_err();
+        let err = read_message::<_, WorkerToService>(&mut cursor)
+            .await
+            .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         // No bytes beyond the prefix should have been consumed.
         wire.clear();

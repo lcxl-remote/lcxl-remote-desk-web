@@ -132,8 +132,14 @@ mod tests {
             "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;S-1-5-21-1234567890-1-2-1001)"
         );
         assert!(!sddl.contains("WD"), "Everyone SID must not appear");
-        assert!(!sddl.contains("AU"), "Authenticated Users SID must not appear");
-        assert!(!sddl.contains("IU"), "Interactive Users SID must not appear");
+        assert!(
+            !sddl.contains("AU"),
+            "Authenticated Users SID must not appear"
+        );
+        assert!(
+            !sddl.contains("IU"),
+            "Interactive Users SID must not appear"
+        );
     }
 
     /// Without a user SID the ACL collapses to SY+BA — not to a
@@ -153,9 +159,6 @@ mod tests {
     /// would reject anyway, but failing earlier is better).
     #[test]
     fn sddl_with_empty_user_sid_treated_as_none() {
-        assert_eq!(
-            build_pipe_sddl(Some("")),
-            build_pipe_sddl(None)
-        );
+        assert_eq!(build_pipe_sddl(Some("")), build_pipe_sddl(None));
     }
 }

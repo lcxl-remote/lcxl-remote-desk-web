@@ -624,8 +624,7 @@ pub struct DeskSession {
     /// IPC channel back to the daemon for per-connection accept-state updates
     /// (`ConnectionAcceptStateChanged` / `ConnectionClosed`). `None` in
     /// embedded / portable mode where there is no daemon to inform.
-    pub daemon_event_tx:
-        Option<mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>>,
+    pub daemon_event_tx: Option<mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>>,
     /// Per-connection accept state the daemon shipped at worker init.
     /// Consumed (drained) at PC creation in `init_ptc_peer_connection` so a
     /// connection that survives a worker restart skips the Tauri prompt
@@ -707,9 +706,7 @@ impl DeskSession {
         session: DeskSessionSender,
         user: CurrentUser,
         host_control_hub: Arc<HostControlHub>,
-        daemon_event_tx: Option<
-            mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>,
-        >,
+        daemon_event_tx: Option<mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>>,
         preapproved: HashMap<String, desk_ipc_protocol::message::ConnectionAcceptState>,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
@@ -803,9 +800,11 @@ impl DeskSession {
     /// cached accept-state for that id. No-op in portable mode.
     pub fn notify_daemon_connection_closed(&self, connection_id: &str) {
         if let Some(tx) = &self.daemon_event_tx {
-            let _ = tx.send(desk_ipc_protocol::message::WorkerToService::ConnectionClosed {
-                connection_id: connection_id.to_string(),
-            });
+            let _ = tx.send(
+                desk_ipc_protocol::message::WorkerToService::ConnectionClosed {
+                    connection_id: connection_id.to_string(),
+                },
+            );
         }
     }
 }
@@ -2216,25 +2215,23 @@ impl DeskSession {
         let allow_control = { self.settings.read().await.security.allow_remote_control };
         let allow_clipboard = { self.settings.read().await.security.allow_clipboard_sync };
 
-        let control_approved = if should_short_circuit_control(
-            control_data.accept,
-            currently_has_control,
-        ) {
-            log::info!(
-                "Short-circuit RemoteControl approval for {} (already accepted)",
-                from_connection_id
-            );
-            true
-        } else {
-            check_security_permission(
-                &self.settings,
-                &self.host_control_hub,
-                allow_control,
-                SecurityPermissionType::RemoteControl,
-                Some(from_connection_id.to_string()),
-            )
-            .await
-        };
+        let control_approved =
+            if should_short_circuit_control(control_data.accept, currently_has_control) {
+                log::info!(
+                    "Short-circuit RemoteControl approval for {} (already accepted)",
+                    from_connection_id
+                );
+                true
+            } else {
+                check_security_permission(
+                    &self.settings,
+                    &self.host_control_hub,
+                    allow_control,
+                    SecurityPermissionType::RemoteControl,
+                    Some(from_connection_id.to_string()),
+                )
+                .await
+            };
 
         if !control_approved {
             log::warn!(

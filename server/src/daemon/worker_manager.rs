@@ -274,11 +274,7 @@ impl WorkerManager {
 
     /// Replace the cached accept-state for a connection. No-op if the id is
     /// unknown (race with browser drop / unrelated worker chatter).
-    pub fn update_connection_accept(
-        &self,
-        connection_id: &str,
-        state: ConnectionAcceptState,
-    ) {
+    pub fn update_connection_accept(&self, connection_id: &str, state: ConnectionAcceptState) {
         let mut map = self.active_connections.lock().unwrap();
         if let Some(slot) = map.get_mut(connection_id) {
             *slot = state;
@@ -289,7 +285,10 @@ impl WorkerManager {
     /// reports `WorkerToService::ConnectionClosed`. Bounds memory growth on
     /// long-running daemons across many connect/disconnect cycles.
     pub fn remove_connection(&self, connection_id: &str) {
-        self.active_connections.lock().unwrap().remove(connection_id);
+        self.active_connections
+            .lock()
+            .unwrap()
+            .remove(connection_id);
     }
 
     /// Aggregator-only test seam — read the current accept-state without
