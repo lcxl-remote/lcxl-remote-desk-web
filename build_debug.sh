@@ -9,7 +9,7 @@ cargo build -p lcxl-remote-desk-server
 
 echo "Building Vite project..."
 pushd "$SCRIPT_DIR/vite-project" > /dev/null
-npm ci
+# npm ci
 npm run build
 popd > /dev/null
 
