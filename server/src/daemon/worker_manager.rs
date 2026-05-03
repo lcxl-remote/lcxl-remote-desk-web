@@ -825,6 +825,9 @@ async fn run_pipe_server(
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
             preapproved_connections: preapproved.clone(),
+            // Arch IV media pipe wiring lands in PR 2 cut 4. Until then
+            // the worker stays single-pipe (Arch III).
+            media_pipe_name: None,
         }),
     )
     .await?;
@@ -916,6 +919,9 @@ async fn run_pipe_server(
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
             preapproved_connections: preapproved.clone(),
+            // Arch IV media pipe wiring lands in PR 2 cut 4. Until then
+            // the worker stays single-pipe (Arch III).
+            media_pipe_name: None,
         }),
     )
     .await?;

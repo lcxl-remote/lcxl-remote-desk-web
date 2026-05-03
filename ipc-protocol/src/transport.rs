@@ -98,6 +98,7 @@ mod tests {
             auth_token: None,
             host_upstream_url: None,
             preapproved_connections: Vec::new(),
+            media_pipe_name: None,
         });
 
         let mut buf = Vec::new();
@@ -155,6 +156,7 @@ mod tests {
             auth_token: None,
             host_upstream_url: None,
             preapproved_connections: Vec::new(),
+            media_pipe_name: None,
         });
         let mut buf = Vec::new();
         let err = write_message(&mut buf, &msg).await.unwrap_err();

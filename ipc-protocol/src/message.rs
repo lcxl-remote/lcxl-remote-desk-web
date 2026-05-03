@@ -217,6 +217,16 @@ pub struct WorkerInitPayload {
     #[serde(default)]
     pub host_upstream_url: Option<String>,
 
+    /// Arch IV media pipe name. The worker connects to this pipe *in
+    /// addition* to the event pipe (the `--pipe` CLI arg) so encoded
+    /// video / audio frames travel over a dedicated transport
+    /// independent of the event traffic. `None` on Arch III workers
+    /// and on portable / standalone runs that do not need a separate
+    /// media pipe — the worker treats this as "fall back to single-pipe
+    /// mode" until the cut that wires media_producer (PR 2 / cut 4).
+    #[serde(default)]
+    pub media_pipe_name: Option<String>,
+
     /// **Deprecated (Arch IV)**: PC lifetime moves into the daemon, so
     /// the daemon owns `SignalingState` and never has to ship per-connection
     /// accept state across worker restarts. PR 7 will remove this field.
@@ -473,6 +483,7 @@ mod tests {
             auth_token: Some("ipc-token".to_string()),
             host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
             preapproved_connections: Vec::new(),
+            media_pipe_name: Some(r"\\.\pipe\lcxl-desk-ipc-7-uuid-media".to_string()),
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
@@ -480,6 +491,7 @@ mod tests {
         assert_eq!(decoded.os_session_id, original.os_session_id);
         assert_eq!(decoded.auth_token, original.auth_token);
         assert_eq!(decoded.host_upstream_url, original.host_upstream_url);
+        assert_eq!(decoded.media_pipe_name, original.media_pipe_name);
     }
 
     /// `DesktopChanged` round-trips with the same JSON shape the IPC reader
@@ -497,10 +509,11 @@ mod tests {
         }
     }
 
-    /// Older daemons that don't yet emit `host_upstream_url` must still be
-    /// accepted by newer workers (the field carries `#[serde(default)]`).
+    /// Older daemons that don't yet emit `host_upstream_url` /
+    /// `media_pipe_name` must still be accepted by newer workers (both
+    /// fields carry `#[serde(default)]`).
     #[test]
-    fn worker_init_payload_accepts_missing_host_upstream_url() {
+    fn worker_init_payload_accepts_missing_optional_fields() {
         let legacy = serde_json::json!({
             "session_id": "session-1",
             "os_session_id": 7,
@@ -513,6 +526,7 @@ mod tests {
         assert!(decoded.host_upstream_url.is_none());
         assert!(decoded.auth_token.is_none());
         assert!(decoded.preapproved_connections.is_empty());
+        assert!(decoded.media_pipe_name.is_none());
     }
 
     /// `preapproved_connections` round-trips and carries the per-connection
@@ -543,6 +557,7 @@ mod tests {
                     },
                 ),
             ],
+            media_pipe_name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();

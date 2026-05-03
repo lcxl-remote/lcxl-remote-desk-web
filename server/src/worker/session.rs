@@ -487,6 +487,7 @@ mod tests {
             auth_token,
             host_upstream_url,
             preapproved_connections: Vec::new(),
+            media_pipe_name: None,
         }
     }
 

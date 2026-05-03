@@ -1,8 +1,10 @@
 pub mod local_api;
+pub mod pc_manager;
 #[cfg(target_os = "windows")]
 pub mod pipe_security;
 pub mod session_monitor;
 pub mod signaling_proxy;
+pub mod signaling_router;
 pub mod tauri_ipc;
 pub mod windows_service;
 pub mod worker_manager;

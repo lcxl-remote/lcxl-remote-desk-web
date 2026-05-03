@@ -1,4 +1,5 @@
 pub mod desktop_monitor;
+pub mod media_producer;
 pub mod session;
 
 use crate::model::settings::Args;
