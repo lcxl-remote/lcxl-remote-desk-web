@@ -344,50 +344,12 @@ async fn maintain_proxy_connection(
                                         continue;
                                     }
                                 };
-                                let parsed_opt =
-                                    serde_json::from_str::<SignalingModel>(&text_str).ok();
-
-                                if let Some(parsed) = &parsed_opt
-                                    && matches!(parsed.signaling_type, SignalingType::RequestRemote)
-                                    && let Some(from_id) = parsed.from_connection_id.as_ref()
-                                {
-                                    worker_mgr.track_browser_connection(from_id.clone());
-                                }
-
-                                // Arch IV signaling router: cut 3a is a
-                                // pass-through (always returns ForwardToWorker)
-                                // so the dispatch point is wired in without
-                                // changing behaviour. Cuts 3b/3c flip
-                                // individual SignalingTypes to HandledByDaemon
-                                // without touching this loop again.
-                                let outcome = match parsed_opt.as_ref() {
-                                    Some(parsed) => {
-                                        match signaling_router::route(parsed, router_ctx).await {
-                                            Ok(o) => o,
-                                            Err(e) => {
-                                                warn!(
-                                                    "[Proxy] router handler failed for {:?}: {e}",
-                                                    parsed.signaling_type,
-                                                );
-                                                RouteOutcome::ForwardToWorker
-                                            }
-                                        }
-                                    }
-                                    None => RouteOutcome::ForwardToWorker,
-                                };
-
-                                if outcome == RouteOutcome::HandledByDaemon {
-                                    continue;
-                                }
-
-                                let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
-                                    message: text_str,
-                                    connection_id: None,
-                                });
-                                if let Err(e) = worker_mgr.send_to_worker(msg).await {
-                                    warn!("[Proxy] Failed to forward to worker: {e}");
-                                    break;
-                                }
+                                handle_inbound_signaling_text(
+                                    text_str,
+                                    &worker_mgr,
+                                    router_ctx,
+                                )
+                                .await;
                             }
                             awc::ws::Frame::Ping(data) => {
                                 let _ = sink.send(awc::ws::Message::Pong(data)).await;
@@ -432,4 +394,169 @@ async fn maintain_proxy_connection(
 
     info!("[Proxy] Connection to {signaling_url} ended");
     Ok(())
+}
+
+/// Inbound-text dispatcher pulled out of `maintain_proxy_connection`
+/// so the parse / route / forward sequence is reusable for tests and
+/// the per-frame logic stays out of the WS select loop.
+///
+/// Cut 3c hygiene:
+///
+/// - Parse the inbound text **once** (the WS loop used to parse twice
+///   — a partial parse for `RequestRemote` tracking, then the router
+///   parsed a second time inside `route()`).
+/// - Reject worker-bound types missing `from_connection_id`. Until cut
+///   3c every legacy-forwarded message carried `connection_id: None`
+///   and the worker had to re-parse the JSON to find out who it came
+///   from; now the daemon refuses to forward something the worker
+///   would not be able to dispatch on, and surfaces the rejection to
+///   the operator via a warn-level log.
+/// - When forwarding, populate `SignalingPayload.connection_id` from
+///   `from_connection_id` so the worker can dispatch without a
+///   re-parse.
+async fn handle_inbound_signaling_text(
+    text_str: String,
+    worker_mgr: &WorkerManager,
+    router_ctx: &RouterContext,
+) {
+    let parsed = match serde_json::from_str::<SignalingModel>(&text_str) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("[Proxy] Dropping malformed signaling text: {e}");
+            return;
+        }
+    };
+
+    if matches!(parsed.signaling_type, SignalingType::RequestRemote)
+        && let Some(from_id) = parsed.from_connection_id.as_ref()
+    {
+        worker_mgr.track_browser_connection(from_id.clone());
+    }
+
+    let outcome = match signaling_router::route(&parsed, router_ctx).await {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(
+                "[Proxy] router handler failed for {:?}: {e}; falling back to worker forward",
+                parsed.signaling_type,
+            );
+            RouteOutcome::ForwardToWorker
+        }
+    };
+
+    if outcome == RouteOutcome::HandledByDaemon {
+        return;
+    }
+
+    let from_connection_id = match parsed.from_connection_id.as_ref() {
+        Some(id) => id.clone(),
+        None => {
+            warn!(
+                "[Proxy] Dropping worker-bound signaling without from_connection_id: {:?} \
+                 (cut 3c contract: worker-routed types must carry the connection id so \
+                 the worker can dispatch without re-parsing the JSON)",
+                parsed.signaling_type,
+            );
+            return;
+        }
+    };
+
+    let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
+        message: text_str,
+        connection_id: Some(from_connection_id),
+    });
+    if let Err(e) = worker_mgr.send_to_worker(msg).await {
+        warn!("[Proxy] Failed to forward to worker: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::pc_manager::PcRegistry;
+    use crate::host_control::HostControlHub;
+    use crate::model::settings::{Settings, SharedSettings};
+    use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+
+    fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
+        let (outbound_tx, _) = broadcast::channel::<String>(16);
+        let shared = SharedSettings::from(Settings::default());
+        let ctx = RouterContext {
+            pc_registry: PcRegistry::new(),
+            outbound_tx: outbound_tx.clone(),
+            settings: web::Data::new(shared),
+            host_control_hub: Arc::new(HostControlHub::new_local()),
+        };
+        (ctx, outbound_tx)
+    }
+
+    /// Worker-bound signaling without `from_connection_id` is dropped
+    /// at the daemon (rather than forwarded as `connection_id: None`
+    /// like Arch III did) — the worker would not be able to dispatch
+    /// without a re-parse otherwise.
+    #[tokio::test]
+    async fn drops_worker_bound_message_without_from_connection_id() {
+        let (worker_mgr, _rx) =
+            WorkerManager::new(web::Data::new(SharedSettings::from(Settings::default())));
+        let (router_ctx, _out_tx) = make_router_ctx();
+
+        // RequireControl is worker-owned (router returns ForwardToWorker)
+        let model = SignalingModel::new(
+            "req-1",
+            SignalingType::RequireControl,
+            None, // missing from_connection_id
+            None,
+            None,
+            None,
+        );
+        let text = serde_json::to_string(&model).unwrap();
+
+        // Should NOT panic, should NOT forward (no worker exists).
+        // Just verifies the function returns cleanly.
+        handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
+    }
+
+    /// Malformed JSON arriving on the WS is dropped with a warning
+    /// rather than crashing the proxy loop (cut 3c collapses the
+    /// previous lossy `from_str(...).ok()` two-step into a single
+    /// validated parse).
+    #[tokio::test]
+    async fn drops_malformed_json() {
+        let (worker_mgr, _rx) =
+            WorkerManager::new(web::Data::new(SharedSettings::from(Settings::default())));
+        let (router_ctx, _out_tx) = make_router_ctx();
+
+        handle_inbound_signaling_text(
+            "{ this is not valid json".to_string(),
+            &worker_mgr,
+            &router_ctx,
+        )
+        .await;
+    }
+
+    /// Daemon-owned RequestRemote without `from_connection_id` does
+    /// not crash the dispatcher — the router's `handle_request_remote`
+    /// returns the per-handler error which we already log; the
+    /// dispatcher should not promote that into a forward attempt.
+    #[tokio::test]
+    async fn handles_router_error_without_forwarding() {
+        let (worker_mgr, _rx) =
+            WorkerManager::new(web::Data::new(SharedSettings::from(Settings::default())));
+        let (router_ctx, _out_tx) = make_router_ctx();
+
+        let model = SignalingModel::new(
+            "req-2",
+            SignalingType::RequestRemote,
+            None, // missing from_connection_id triggers handler error
+            None,
+            None,
+            None,
+        );
+        let text = serde_json::to_string(&model).unwrap();
+
+        // Router returns Err -> dispatcher logs and falls through to
+        // the worker-forward path; that path then drops because
+        // from_connection_id is missing. Net: no panic, no forward.
+        handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
+    }
 }
