@@ -162,8 +162,6 @@ impl WorkerSession {
 
         info!("DeskSession created successfully, entering main loop");
 
-        let heartbeat_interval = tokio::time::Duration::from_secs(5);
-        let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
         let (service_msg_tx, mut service_msg_rx) =
             mpsc::unbounded_channel::<io::Result<ServiceToWorker>>();
 
@@ -176,6 +174,27 @@ impl WorkerSession {
                 }
             }
         });
+
+        // Outbound IPC: a dedicated writer task owns `writer` and drains an
+        // unbounded mpsc. Decoupling the writer from the main `select!` loop
+        // means heartbeats (and other queued messages) keep flowing even when
+        // the main loop is blocked awaiting a long-running handler — e.g.
+        // `request_approval` waiting for the user to click the Tauri dialog.
+        // Without this split the heartbeat-timer arm of `select!` would never
+        // be polled while a handler `await`ed, causing the daemon's watchdog
+        // to declare the worker stuck and kill it after 30 s.
+        let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let writer_task = spawn_ipc_writer_task(writer, writer_rx);
+
+        // Independent heartbeat task: pushes `Heartbeat` to the writer queue
+        // every 5 s regardless of what the main loop is doing.
+        // active_connections is reported as 0 here because the count lives in
+        // `desk_session.rtc_peer_connection_map` which the main loop owns;
+        // surfacing it to this task would require an Arc<AtomicU32> updated
+        // at every map mutation. The daemon only logs the field at trace
+        // level — its watchdog cares about IPC freshness, not the count.
+        let heartbeat_task =
+            spawn_heartbeat_task(writer_tx.clone(), tokio::time::Duration::from_secs(5));
 
         // Watch for the user-input desktop drifting away from the one we
         // were launched on (UAC, lock screen, etc.). The watcher emits one
@@ -249,8 +268,8 @@ impl WorkerSession {
                                 message: text.to_string(),
                                 connection_id: None,
                             });
-                            if let Err(e) = write_message(&mut writer, &payload).await {
-                                error!("Failed to forward signaling to Service: {}", e);
+                            if writer_tx.send(payload).is_err() {
+                                error!("IPC writer task died; exiting main loop");
                                 break;
                             }
                         }
@@ -283,29 +302,13 @@ impl WorkerSession {
                     }
                 }
 
-                _ = heartbeat_timer.tick() => {
-                    let heartbeat = WorkerToService::Heartbeat(HeartbeatPayload {
-                        timestamp_ms: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                        active_connections: desk_session.rtc_peer_connection_map.len() as u32,
-                        cpu_usage: None,
-                        memory_usage: None,
-                    });
-                    if let Err(e) = write_message(&mut writer, &heartbeat).await {
-                        warn!("Failed to send heartbeat: {}", e);
-                        break;
-                    }
-                }
-
                 Some(new_desktop) = desktop_change_rx.recv() => {
                     info!("Reporting desktop drift to daemon: '{}'", new_desktop);
                     let payload = WorkerToService::DesktopChanged(DesktopChangedPayload {
                         name: new_desktop,
                     });
-                    if let Err(e) = write_message(&mut writer, &payload).await {
-                        warn!("Failed to forward DesktopChanged to Service: {}", e);
+                    if writer_tx.send(payload).is_err() {
+                        error!("IPC writer task died; exiting main loop");
                         break;
                     }
                     // Stay in the loop. If the daemon decides to switch
@@ -316,6 +319,13 @@ impl WorkerSession {
                 }
             }
         }
+
+        // Order matters: stop the heartbeat task first so it doesn't keep
+        // pushing into writer_tx, then drop our own writer_tx so the writer
+        // task observes "all senders gone" and drains + exits cleanly.
+        heartbeat_task.abort();
+        drop(writer_tx);
+        let _ = writer_task.await;
 
         info!("WorkerSession IPC loop exiting");
         Ok(())
@@ -385,6 +395,55 @@ impl WorkerSession {
     }
 }
 
+/// Spawn a task that owns `writer` and drains `rx`, writing each message to
+/// the IPC. Decoupled from the main `select!` so a long-running handler can't
+/// block outbound traffic. The task exits when all senders are dropped or a
+/// write fails.
+fn spawn_ipc_writer_task<W>(
+    mut writer: W,
+    mut rx: mpsc::UnboundedReceiver<WorkerToService>,
+) -> tokio::task::JoinHandle<()>
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let Err(e) = write_message(&mut writer, &msg).await {
+                warn!("Failed to write IPC message: {}", e);
+                break;
+            }
+        }
+    })
+}
+
+/// Spawn an independent heartbeat task that pushes `Heartbeat` to the writer
+/// queue every `interval`. Runs in its own task so it stays alive even when
+/// the main `select!` is blocked awaiting a long handler. The task exits when
+/// the writer queue is closed (writer task gone) or it is aborted.
+fn spawn_heartbeat_task(
+    writer_tx: mpsc::UnboundedSender<WorkerToService>,
+    interval: tokio::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(interval);
+        loop {
+            timer.tick().await;
+            let hb = WorkerToService::Heartbeat(HeartbeatPayload {
+                timestamp_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                active_connections: 0,
+                cpu_usage: None,
+                memory_usage: None,
+            });
+            if writer_tx.send(hb).is_err() {
+                break;
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +500,65 @@ mod tests {
         let (_hub, spec) = build_hub_from_init(&payload);
         let (_, _, token) = spec.expect("spec must be present");
         assert_eq!(token, "");
+    }
+
+    /// Heartbeat task fires on every interval tick and stops when the writer
+    /// queue is closed. Uses a 50 ms real interval to keep the test fast while
+    /// still exercising the timing path (`tokio::time::advance` would require
+    /// the test-util feature which isn't enabled in regular dependencies).
+    #[tokio::test]
+    async fn heartbeat_task_emits_on_interval_until_queue_closed() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let interval = tokio::time::Duration::from_millis(50);
+        let task = spawn_heartbeat_task(tx, interval);
+
+        // First two ticks must arrive within ~3 intervals worth of slack.
+        let first = tokio::time::timeout(interval * 3, rx.recv())
+            .await
+            .expect("first heartbeat must arrive")
+            .expect("queue closed unexpectedly");
+        assert!(matches!(first, WorkerToService::Heartbeat(_)));
+
+        let second = tokio::time::timeout(interval * 3, rx.recv())
+            .await
+            .expect("second heartbeat must arrive")
+            .expect("queue closed unexpectedly");
+        assert!(matches!(second, WorkerToService::Heartbeat(_)));
+
+        // Closing the receiver causes the task to detect Err on send and exit.
+        drop(rx);
+        tokio::time::timeout(interval * 5, task)
+            .await
+            .expect("heartbeat task must exit after queue closes")
+            .expect("task panicked");
+    }
+
+    /// Writer task drains the queue in order and exits when all senders are
+    /// dropped. Uses an in-memory duplex stream so we can read back the bytes.
+    #[tokio::test]
+    async fn writer_task_drains_queue_and_exits_when_senders_dropped() {
+        let (server_side, mut client_side) = tokio::io::duplex(64 * 1024);
+        let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let task = spawn_ipc_writer_task(server_side, rx);
+
+        tx.send(WorkerToService::Ready).expect("send Ready");
+        tx.send(WorkerToService::DesktopReady)
+            .expect("send DesktopReady");
+        drop(tx);
+
+        // Both messages must have been written and decodable in order.
+        let m1: WorkerToService = read_message(&mut client_side)
+            .await
+            .expect("read first message");
+        assert!(matches!(m1, WorkerToService::Ready));
+        let m2: WorkerToService = read_message(&mut client_side)
+            .await
+            .expect("read second message");
+        assert!(matches!(m2, WorkerToService::DesktopReady));
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), task)
+            .await
+            .expect("writer task must exit after senders drop")
+            .expect("task panicked");
     }
 }
