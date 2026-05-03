@@ -1,7 +1,8 @@
+use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 /// Messages sent from Service Core to Worker process
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "type", content = "payload")]
 pub enum ServiceToWorker {
     /// Initialize the worker with session and configuration info
@@ -19,7 +20,7 @@ pub enum ServiceToWorker {
 }
 
 /// Messages sent from Worker process to Service Core
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "type", content = "payload")]
 pub enum WorkerToService {
     /// Worker has started and is ready to accept connections
@@ -69,7 +70,7 @@ pub enum WorkerToService {
 }
 
 /// Messages sent from Service Core to Tauri UI
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "type", content = "payload")]
 pub enum ServiceToUI {
     /// Service status update
@@ -83,7 +84,7 @@ pub enum ServiceToUI {
 }
 
 /// Messages sent from Tauri UI to Service Core
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 #[serde(tag = "type", content = "payload")]
 pub enum UIToService {
     /// Request service status
@@ -98,7 +99,7 @@ pub enum UIToService {
 
 // ==================== Payload Types ====================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct WorkerInitPayload {
     /// Session ID for this worker instance
     pub session_id: String,
@@ -138,7 +139,7 @@ pub struct WorkerInitPayload {
 ///
 /// Each `bool` corresponds 1:1 to a field on the worker's
 /// `desk_signal_facade::SignalingState`. Both default to `false`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
 pub struct ConnectionAcceptState {
     /// Remote peer was granted mouse / keyboard input.
     pub accept_control: bool,
@@ -148,7 +149,7 @@ pub struct ConnectionAcceptState {
     pub accept_clipboard_sync: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct SignalingPayload {
     /// The raw signaling message (SDP, ICE, etc.) as JSON
     pub message: String,
@@ -156,7 +157,7 @@ pub struct SignalingPayload {
     pub connection_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct HeartbeatPayload {
     /// Current timestamp
     pub timestamp_ms: u64,
@@ -168,7 +169,7 @@ pub struct HeartbeatPayload {
     pub memory_usage: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ErrorPayload {
     /// Error code
     pub code: i32,
@@ -178,7 +179,7 @@ pub struct ErrorPayload {
     pub recoverable: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ServiceStatus {
     /// Whether the service is running as a Windows service
     pub is_service_mode: bool,
@@ -190,7 +191,7 @@ pub struct ServiceStatus {
     pub current_desktop: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ConnectionStatePayload {
     /// Connection ID
     pub connection_id: String,
@@ -198,7 +199,7 @@ pub struct ConnectionStatePayload {
     pub state: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct DesktopChangedPayload {
     /// New input desktop name as returned by `OpenInputDesktop` +
     /// `GetUserObjectInformationW(UOI_NAME)`. Examples: "Default", "Winlogon",
@@ -207,7 +208,7 @@ pub struct DesktopChangedPayload {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct DesktopSwitchPayload {
     /// Previous desktop name
     pub from_desktop: Option<String>,
@@ -362,7 +363,7 @@ mod tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub enum DesktopSwitchPhase {
     /// Switch is starting, worker may disconnect
     Starting,
