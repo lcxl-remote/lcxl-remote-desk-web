@@ -1,47 +1,60 @@
 use std::io;
 
-use serde::{Deserialize, Serialize};
+use bincode::{Decode, Encode};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Maximum message size: 16 MB
 const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
-/// Write a length-prefixed JSON message to an async writer.
+fn bincode_config() -> bincode::config::Configuration {
+    bincode::config::standard()
+}
+
+/// Write a length-prefixed bincode v2 message to an async writer.
+///
+/// Wire format: little-endian `u32` length, followed by `length` bytes of
+/// bincode-v2-encoded payload (`bincode::config::standard()` — fixed-int +
+/// little-endian + no length-limit).
+///
+/// Frame size cap: `MAX_MESSAGE_SIZE` (16 MB).
 pub async fn write_message<W, M>(writer: &mut W, message: &M) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
-    M: Serialize,
+    M: Encode,
 {
-    let json = serde_json::to_vec(message).map_err(|e| {
+    let bytes = bincode::encode_to_vec(message, bincode_config()).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to serialize message: {}", e),
+            format!("Failed to encode message (bincode): {e}"),
         )
     })?;
 
-    let len = json.len() as u32;
-    if len > MAX_MESSAGE_SIZE {
+    if bytes.len() > MAX_MESSAGE_SIZE as usize {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "Message too large: {} bytes (max {})",
-                len, MAX_MESSAGE_SIZE
+                bytes.len(),
+                MAX_MESSAGE_SIZE
             ),
         ));
     }
+    let len = bytes.len() as u32;
 
     writer.write_all(&len.to_le_bytes()).await?;
-    writer.write_all(&json).await?;
+    writer.write_all(&bytes).await?;
     writer.flush().await?;
 
     Ok(())
 }
 
-/// Read a length-prefixed JSON message from an async reader.
+/// Read a length-prefixed bincode v2 message from an async reader.
+///
+/// See [`write_message`] for the wire format.
 pub async fn read_message<R, M>(reader: &mut R) -> io::Result<M>
 where
     R: AsyncRead + Unpin,
-    M: for<'de> Deserialize<'de>,
+    M: Decode<()>,
 {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
@@ -60,21 +73,22 @@ where
     let mut buf = vec![0u8; len as usize];
     reader.read_exact(&mut buf).await?;
 
-    serde_json::from_slice(&buf).map_err(|e| {
+    let (msg, _) = bincode::decode_from_slice(&buf, bincode_config()).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to deserialize message: {}", e),
+            format!("Failed to decode message (bincode): {e}"),
         )
-    })
+    })?;
+    Ok(msg)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ServiceToWorker, WorkerInitPayload};
+    use crate::message::{ServiceToWorker, WorkerInitPayload, WorkerToService};
 
     #[tokio::test]
-    async fn test_roundtrip() {
+    async fn roundtrip_init() {
         let msg = ServiceToWorker::Init(WorkerInitPayload {
             session_id: "test-session".to_string(),
             os_session_id: 1,
@@ -100,5 +114,65 @@ mod tests {
             }
             _ => panic!("Expected Init message"),
         }
+    }
+
+    /// Worker-to-service path round-trips correctly.
+    #[tokio::test]
+    async fn roundtrip_ready() {
+        let msg = WorkerToService::Ready;
+        let mut buf = Vec::new();
+        write_message(&mut buf, &msg).await.unwrap();
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let decoded: WorkerToService = read_message(&mut cursor).await.unwrap();
+        assert!(matches!(decoded, WorkerToService::Ready));
+    }
+
+    /// Length prefix is little-endian and reflects the encoded payload size,
+    /// not the raw struct size.
+    #[tokio::test]
+    async fn length_prefix_is_le_u32() {
+        let msg = WorkerToService::Ready;
+        let mut buf = Vec::new();
+        write_message(&mut buf, &msg).await.unwrap();
+        assert!(buf.len() >= 4);
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        assert_eq!(len, buf.len() - 4);
+    }
+
+    /// Frames larger than `MAX_MESSAGE_SIZE` (16 MB) are rejected at write
+    /// time, before any bytes go on the wire.
+    #[tokio::test]
+    async fn write_rejects_oversized_frame() {
+        // Construct a payload that, after bincode encoding, exceeds 16 MB.
+        let huge_blob = "x".repeat(20 * 1024 * 1024);
+        let msg = ServiceToWorker::Init(WorkerInitPayload {
+            session_id: "s".to_string(),
+            os_session_id: 1,
+            desktop_name: None,
+            config_json: huge_blob,
+            signaling_url: None,
+            auth_token: None,
+            host_upstream_url: None,
+            preapproved_connections: Vec::new(),
+        });
+        let mut buf = Vec::new();
+        let err = write_message(&mut buf, &msg).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(buf.is_empty(), "no bytes should be written on oversized frame");
+    }
+
+    /// A length prefix that exceeds `MAX_MESSAGE_SIZE` is rejected at read
+    /// time, before the body is read into memory.
+    #[tokio::test]
+    async fn read_rejects_oversized_length_prefix() {
+        let bad_len: u32 = MAX_MESSAGE_SIZE + 1;
+        let mut wire = bad_len.to_le_bytes().to_vec();
+        // Body intentionally absent — read should fail on length check, not EOF.
+        let mut cursor = std::io::Cursor::new(wire.clone());
+        let err = read_message::<_, WorkerToService>(&mut cursor).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // No bytes beyond the prefix should have been consumed.
+        wire.clear();
     }
 }

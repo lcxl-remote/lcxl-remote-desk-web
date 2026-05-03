@@ -12,8 +12,9 @@
 //!   WorkerToService                   ServiceToWorker
 //! ```
 //!
-//! Communication uses named pipes (Windows) or Unix domain sockets (Linux/macOS),
-//! with length-prefixed JSON messages.
+//! Communication uses named pipes (Windows) or Unix domain sockets (Linux/macOS).
+//! Wire format: length-prefixed bincode v2 (`bincode::config::standard()`).
+//! See [`transport`] for the framing details.
 
 pub mod message;
 pub mod transport;
