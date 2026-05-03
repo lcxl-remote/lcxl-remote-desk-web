@@ -1,4 +1,6 @@
 pub mod local_api;
+#[cfg(target_os = "windows")]
+pub mod pipe_security;
 pub mod session_monitor;
 pub mod signaling_proxy;
 pub mod tauri_ipc;

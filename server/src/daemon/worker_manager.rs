@@ -721,20 +721,43 @@ async fn run_pipe_server(
     let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
     info!("Creating Named Pipe server: {pipe_path}");
 
+    // Look up the SID owning the target session so the pipe ACL grants
+    // access only to SYSTEM + Administrators + that user. A failure to
+    // resolve falls back to SY+BA only (never to "Everyone") — see
+    // `pipe_security::query_session_user_sid` for the contract.
+    let allowed_user_sid = match crate::daemon::pipe_security::query_session_user_sid(session_id) {
+        Ok(sid) => sid,
+        Err(e) => {
+            warn!(
+                "Failed to query user SID for session {session_id}: {e}; \
+                 falling back to SY+BA-only pipe ACL"
+            );
+            None
+        }
+    };
+    let sddl_str = crate::daemon::pipe_security::build_pipe_sddl(allowed_user_sid.as_deref());
+    info!("Pipe ACL SDDL = '{sddl_str}'");
+
     let server = unsafe {
         use std::ffi::c_void;
+        use std::os::windows::ffi::OsStrExt;
         use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
         use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-        use windows_core::w;
+        use windows_core::PCWSTR;
+
+        // SDDL must be a UTF-16 NUL-terminated buffer.
+        let sddl_w: Vec<u16> = std::ffi::OsStr::new(&sddl_str)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
         let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
-        // D:(A;;GA;;;WD) = Allow Generic All to Everyone
-        let sddl = w!("D:(A;;GA;;;WD)");
-
         if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl, 1, // SDDL_REVISION_1
-            &mut sd, None,
+            PCWSTR(sddl_w.as_ptr()),
+            1, // SDDL_REVISION_1
+            &mut sd,
+            None,
         )
         .is_err()
         {
