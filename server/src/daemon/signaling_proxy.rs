@@ -213,6 +213,14 @@ pub async fn run_signaling_proxy(
                     err.code, err.message, err.recoverable
                 );
             }
+            // Arch IV variants — daemon's PR 2 event-pipe handler will
+            // own these. The current Arch III signaling_proxy never sees
+            // them because no Arch III worker emits them.
+            other => {
+                debug!(
+                    "[SignalingProxy] Ignoring Arch IV variant in Arch III proxy: {other:?}"
+                );
+            }
         }
     }
 

@@ -254,6 +254,14 @@ impl WorkerSession {
                                 ServiceToWorker::Init(_) => {
                                     warn!("Received duplicate Init, ignoring");
                                 }
+                                // Arch IV variants — daemon does not emit them
+                                // against an Arch III worker; the dedicated
+                                // event-pipe handler lands in PR 2.
+                                other => {
+                                    warn!(
+                                        "Worker received unhandled Arch IV variant: {other:?}; ignoring"
+                                    );
+                                }
                             }
                         }
                         Some(Err(e)) => {
