@@ -151,11 +151,32 @@ impl WorkerSession {
             }
         }
 
+        // Outbound IPC: a dedicated writer task owns `writer` and drains an
+        // unbounded mpsc. Decoupling the writer from the main `select!` loop
+        // means heartbeats (and other queued messages) keep flowing even when
+        // the main loop is blocked awaiting a long-running handler — e.g.
+        // `request_approval` waiting for the user to click the Tauri dialog.
+        // Without this split the heartbeat-timer arm of `select!` would never
+        // be polled while a handler `await`ed, causing the daemon's watchdog
+        // to declare the worker stuck and kill it after 30 s.
+        //
+        // Created before `DeskSession::new` so the session can hold a clone
+        // for `ConnectionAcceptStateChanged` / `ConnectionClosed` emissions.
+        let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let writer_task = spawn_ipc_writer_task(writer, writer_rx);
+
+        // Drain init's preapproved Vec into the HashMap the worker uses for
+        // O(1) lookup at PC-creation time.
+        let preapproved: std::collections::HashMap<_, _> =
+            init_payload.preapproved_connections.iter().cloned().collect();
+
         let mut desk_session = DeskSession::new(
             shared_settings_data,
             session_sender,
             CurrentUser::new_admin("worker_node"),
             host_control_hub,
+            Some(writer_tx.clone()),
+            preapproved,
         )
         .await
         .map_err(|e| format!("Failed to create DeskSession: {}", e))?;
@@ -174,17 +195,6 @@ impl WorkerSession {
                 }
             }
         });
-
-        // Outbound IPC: a dedicated writer task owns `writer` and drains an
-        // unbounded mpsc. Decoupling the writer from the main `select!` loop
-        // means heartbeats (and other queued messages) keep flowing even when
-        // the main loop is blocked awaiting a long-running handler — e.g.
-        // `request_approval` waiting for the user to click the Tauri dialog.
-        // Without this split the heartbeat-timer arm of `select!` would never
-        // be polled while a handler `await`ed, causing the daemon's watchdog
-        // to declare the worker stuck and kill it after 30 s.
-        let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
-        let writer_task = spawn_ipc_writer_task(writer, writer_rx);
 
         // Independent heartbeat task: pushes `Heartbeat` to the writer queue
         // every 5 s regardless of what the main loop is doing.
@@ -293,6 +303,10 @@ impl WorkerSession {
                                     error!("Failed to shutdown peer connection: {}", e);
                                 }
                             }
+                            // Tell the daemon this connection is gone so it
+                            // drops the cached accept-state. Bounds memory
+                            // growth on long-running daemons.
+                            desk_session.notify_daemon_connection_closed(&connection_id);
                         }
                         Some(DeskSessionMessage::Ping(_)) | Some(DeskSessionMessage::Pong(_)) => {}
                         None => {
@@ -461,6 +475,7 @@ mod tests {
             signaling_url: None,
             auth_token,
             host_upstream_url,
+            preapproved_connections: Vec::new(),
         }
     }
 

@@ -540,6 +540,8 @@ async fn maintain_signaling_connection(
         session_sender,
         CurrentUser::new_admin("server_node"),
         host_control_hub.clone(),
+        None,
+        HashMap::new(),
     )
     .await
     {
@@ -619,6 +621,16 @@ pub struct DeskSession {
     /// All approval flow + private-screen / whiteboard / service-op traffic
     /// routes through here.
     pub host_control_hub: Arc<HostControlHub>,
+    /// IPC channel back to the daemon for per-connection accept-state updates
+    /// (`ConnectionAcceptStateChanged` / `ConnectionClosed`). `None` in
+    /// embedded / portable mode where there is no daemon to inform.
+    pub daemon_event_tx:
+        Option<mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>>,
+    /// Per-connection accept state the daemon shipped at worker init.
+    /// Consumed (drained) at PC creation in `init_ptc_peer_connection` so a
+    /// connection that survives a worker restart skips the Tauri prompt
+    /// and resumes immediately. Empty on first launch and in portable mode.
+    pub preapproved: HashMap<String, desk_ipc_protocol::message::ConnectionAcceptState>,
 }
 
 static MDNS_CONN: OnceCell<std::sync::Arc<DnsConn>> = OnceCell::new();
@@ -695,6 +707,10 @@ impl DeskSession {
         session: DeskSessionSender,
         user: CurrentUser,
         host_control_hub: Arc<HostControlHub>,
+        daemon_event_tx: Option<
+            mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>,
+        >,
+        preapproved: HashMap<String, desk_ipc_protocol::message::ConnectionAcceptState>,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
 
@@ -759,7 +775,38 @@ impl DeskSession {
             host_control_helper: helper,
             whiteboard_cmd_sender,
             host_control_hub,
+            daemon_event_tx,
+            preapproved,
         })
+    }
+
+    /// Push an authoritative `ConnectionAcceptState` to the daemon. No-op in
+    /// portable mode (no daemon connected). Called whenever the worker's
+    /// `SignalingState` for a peer is mutated for control / clipboard, so
+    /// the daemon's cache stays in lock-step with the worker's truth.
+    pub fn notify_daemon_accept_state(
+        &self,
+        connection_id: &str,
+        state: desk_ipc_protocol::message::ConnectionAcceptState,
+    ) {
+        if let Some(tx) = &self.daemon_event_tx {
+            let _ = tx.send(
+                desk_ipc_protocol::message::WorkerToService::ConnectionAcceptStateChanged {
+                    connection_id: connection_id.to_string(),
+                    state,
+                },
+            );
+        }
+    }
+
+    /// Tell the daemon a peer connection is gone so the daemon can drop its
+    /// cached accept-state for that id. No-op in portable mode.
+    pub fn notify_daemon_connection_closed(&self, connection_id: &str) {
+        if let Some(tx) = &self.daemon_event_tx {
+            let _ = tx.send(desk_ipc_protocol::message::WorkerToService::ConnectionClosed {
+                connection_id: connection_id.to_string(),
+            });
+        }
     }
 }
 
@@ -914,16 +961,66 @@ impl DeskSession {
             .await?;
         info!("Sent init signaling");
 
+        // If the daemon shipped a preapproved entry for this peer (worker
+        // restart on UAC / lock screen / OS-session change / crash recovery),
+        // restore SignalingState from it so the user is not re-prompted.
+        // Drained on consumption — restoration is one-shot per worker
+        // lifetime; subsequent reconnects within the same worker go through
+        // the normal RequireControl path.
+        let initial_state = match self.preapproved.remove(from_connection_id) {
+            Some(restored) => {
+                info!(
+                    "Restoring SignalingState for {from_connection_id} from preapproved \
+                     (control={}, clipboard={})",
+                    restored.accept_control, restored.accept_clipboard_sync
+                );
+                SignalingState {
+                    accept_control: restored.accept_control,
+                    accept_clipboard_sync: restored.accept_clipboard_sync,
+                    ..SignalingState::default()
+                }
+            }
+            None => SignalingState::default(),
+        };
+
+        let restored_accept_control = initial_state.accept_control;
+        let restored_accept_clipboard = initial_state.accept_clipboard_sync;
+
         self.rtc_peer_connection_map.insert(
             from_connection_id.to_owned(),
             Arc::new(tokio::sync::RwLock::new(PeerConnection {
                 rtc_peer_connection,
                 capture_screen_thread: None,
                 capture_audio_thread: None,
-                signaling_state: Arc::new(tokio::sync::RwLock::new(SignalingState::default())),
+                signaling_state: Arc::new(tokio::sync::RwLock::new(initial_state)),
                 cursor_data_channel: Arc::new(tokio::sync::RwLock::new(None)),
             })),
         );
+
+        // After restoration: proactively notify the browser so its
+        // `hasControl` state stays coherent (it never lost the React state on
+        // its side — the AcceptControl confirms it). And re-emit
+        // `ConnectionAcceptStateChanged` so the daemon's cache reflects this
+        // worker's authoritative state, not the pre-restart snapshot.
+        if restored_accept_control {
+            let _ = self
+                .session
+                .send_to_peer(
+                    &signaling_model.request_id,
+                    SignalingType::AcceptControl,
+                    from_connection_id,
+                    (),
+                )
+                .await;
+            self.notify_daemon_accept_state(
+                from_connection_id,
+                desk_ipc_protocol::message::ConnectionAcceptState {
+                    accept_control: true,
+                    accept_clipboard_sync: restored_accept_clipboard,
+                },
+            );
+        }
+
         Ok(())
     }
 
@@ -1830,6 +1927,10 @@ impl DeskSession {
                 let _ = self
                     .host_control_helper
                     .enable_private_screen(from_connection_id, false);
+                // PC is gone; tell the daemon to drop the cached
+                // accept-state so a later desktop switch doesn't ship a
+                // stale preapproved entry to the next worker.
+                self.notify_daemon_connection_closed(from_connection_id);
             }
             SignalingType::EnablePrivateScreen => {
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
@@ -2088,6 +2189,8 @@ impl DeskSession {
         &mut self,
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
+        // (Pure helpers extracted as `should_short_circuit_control` and
+        // `should_short_circuit_clipboard` below; tested independently.)
         let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
         let rtc_peer_connection = self.get_rtc_peer_connection(from_connection_id)?;
 
@@ -2098,18 +2201,40 @@ impl DeskSession {
             control_data
         );
 
+        // Snapshot the current state BEFORE any mutation. We use it to
+        // short-circuit `check_security_permission` for the narrow case
+        // "browser re-issues a grant for a peer that's already approved".
+        // Acquiring the read lock in its own scope so the later write lock
+        // can take exclusive access cleanly.
+        let (currently_has_control, currently_has_clipboard) = {
+            let pc = rtc_peer_connection.read().await;
+            let s = pc.signaling_state.read().await;
+            (s.accept_control, s.accept_clipboard_sync)
+        };
+
         // check security permission!
         let allow_control = { self.settings.read().await.security.allow_remote_control };
         let allow_clipboard = { self.settings.read().await.security.allow_clipboard_sync };
 
-        let control_approved = check_security_permission(
-            &self.settings,
-            &self.host_control_hub,
-            allow_control,
-            SecurityPermissionType::RemoteControl,
-            Some(from_connection_id.to_string()),
-        )
-        .await;
+        let control_approved = if should_short_circuit_control(
+            control_data.accept,
+            currently_has_control,
+        ) {
+            log::info!(
+                "Short-circuit RemoteControl approval for {} (already accepted)",
+                from_connection_id
+            );
+            true
+        } else {
+            check_security_permission(
+                &self.settings,
+                &self.host_control_hub,
+                allow_control,
+                SecurityPermissionType::RemoteControl,
+                Some(from_connection_id.to_string()),
+            )
+            .await
+        };
 
         if !control_approved {
             log::warn!(
@@ -2124,10 +2249,35 @@ impl DeskSession {
                     (),
                 )
                 .await?;
+            // Persist authoritative deny so the daemon's cache matches.
+            let new_state = desk_ipc_protocol::message::ConnectionAcceptState {
+                accept_control: false,
+                accept_clipboard_sync: false,
+            };
+            // Lock briefly to write the deny into SignalingState too (so the
+            // worker's gating layer agrees with what we told the peer).
+            {
+                let pc = rtc_peer_connection.read().await;
+                let mut s = pc.signaling_state.write().await;
+                s.accept_control = false;
+                s.accept_clipboard_sync = false;
+            }
+            self.notify_daemon_accept_state(from_connection_id, new_state);
             return Ok(());
         }
 
-        let clipboard_approved = if control_data.accept_clipboard_sync {
+        let clipboard_approved = if !control_data.accept_clipboard_sync {
+            false
+        } else if should_short_circuit_clipboard(
+            control_data.accept_clipboard_sync,
+            currently_has_clipboard,
+        ) {
+            log::info!(
+                "Short-circuit ClipboardSync approval for {} (already accepted)",
+                from_connection_id
+            );
+            true
+        } else {
             check_security_permission(
                 &self.settings,
                 &self.host_control_hub,
@@ -2136,31 +2286,39 @@ impl DeskSession {
                 Some(from_connection_id.to_string()),
             )
             .await
-        } else {
-            false
         };
 
-        let peer_connection = rtc_peer_connection.read().await;
-        let mut signaling_state = peer_connection.signaling_state.write().await;
+        let new_state = {
+            let peer_connection = rtc_peer_connection.read().await;
+            let mut signaling_state = peer_connection.signaling_state.write().await;
+
+            if control_data.accept {
+                signaling_state.accept_control = true;
+                signaling_state.accept_clipboard_sync = clipboard_approved;
+                log::info!(
+                    "Auto accepting control request from {}, sending AcceptControl signaling",
+                    from_connection_id
+                );
+            } else {
+                signaling_state.accept_control = false;
+                signaling_state.accept_clipboard_sync = false;
+                let _ = self
+                    .host_control_helper
+                    .enable_private_screen(from_connection_id, false);
+                log::info!(
+                    "Releasing control request from {}, sending CloseControl signaling (also disabling private screen if any)",
+                    from_connection_id
+                );
+            }
+            desk_ipc_protocol::message::ConnectionAcceptState {
+                accept_control: signaling_state.accept_control,
+                accept_clipboard_sync: signaling_state.accept_clipboard_sync,
+            }
+        };
 
         let reply_type = if control_data.accept {
-            signaling_state.accept_control = true;
-            signaling_state.accept_clipboard_sync = clipboard_approved;
-            log::info!(
-                "Auto accepting control request from {}, sending AcceptControl signaling",
-                from_connection_id
-            );
             SignalingType::AcceptControl
         } else {
-            signaling_state.accept_control = false;
-            signaling_state.accept_clipboard_sync = false;
-            let _ = self
-                .host_control_helper
-                .enable_private_screen(from_connection_id, false);
-            log::info!(
-                "Releasing control request from {}, sending CloseControl signaling (also disabling private screen if any)",
-                from_connection_id
-            );
             SignalingType::CloseControl
         };
 
@@ -2173,6 +2331,83 @@ impl DeskSession {
             )
             .await?;
 
+        // Push the post-decision state to the daemon so its cache is in
+        // lock-step with the worker's authoritative SignalingState.
+        self.notify_daemon_accept_state(from_connection_id, new_state);
+
         Ok(())
+    }
+}
+
+/// `RequireControl` short-circuit decision for the control permission.
+/// Returns `true` only when the browser is asking to GRANT control
+/// (`asked == true`) AND control is already approved on the worker side.
+///
+/// Critically returns `false` for the release path (`asked == false`) so
+/// `CloseControl` keeps clearing state: short-circuiting on release would
+/// silently turn a "release control" request into a no-op.
+pub fn should_short_circuit_control(asked: bool, currently_accepted: bool) -> bool {
+    asked && currently_accepted
+}
+
+/// `RequireControl` short-circuit decision for the clipboard permission.
+/// Independent of control — returns `true` only when the browser is asking
+/// for clipboard AND clipboard is already approved on the worker side. We
+/// never upgrade clipboard from `false` → `true` via short-circuit alone:
+/// clipboard is a separate permission and the user must be re-prompted if
+/// it was previously denied.
+pub fn should_short_circuit_clipboard(asked: bool, currently_accepted: bool) -> bool {
+    asked && currently_accepted
+}
+
+#[cfg(test)]
+mod handle_request_control_tests {
+    use super::*;
+
+    /// Grant + already accepted ⇒ short-circuit.
+    #[test]
+    fn control_short_circuit_when_accepted_and_asked_to_grant() {
+        assert!(should_short_circuit_control(true, true));
+    }
+
+    /// Grant + not yet accepted ⇒ MUST NOT short-circuit (need real
+    /// permission check / Tauri prompt).
+    #[test]
+    fn control_no_short_circuit_when_not_yet_accepted() {
+        assert!(!should_short_circuit_control(true, false));
+    }
+
+    /// Release path ⇒ MUST NOT short-circuit even when currently accepted.
+    /// Short-circuiting here would turn a CloseControl into a no-op and
+    /// the worker would stay in `accept_control = true`.
+    #[test]
+    fn control_no_short_circuit_on_release_even_if_accepted() {
+        assert!(!should_short_circuit_control(false, true));
+    }
+
+    /// Release path + not accepted ⇒ no short-circuit (idempotent release
+    /// path goes through normal flow which is also a no-op).
+    #[test]
+    fn control_no_short_circuit_on_release_when_not_accepted() {
+        assert!(!should_short_circuit_control(false, false));
+    }
+
+    /// Clipboard short-circuit ONLY when asked AND already accepted —
+    /// independent of control. The asymmetric case "control already
+    /// accepted, clipboard not" must NOT auto-approve clipboard.
+    #[test]
+    fn clipboard_short_circuit_when_accepted_and_asked() {
+        assert!(should_short_circuit_clipboard(true, true));
+    }
+
+    #[test]
+    fn clipboard_no_short_circuit_when_not_yet_accepted() {
+        assert!(!should_short_circuit_clipboard(true, false));
+    }
+
+    #[test]
+    fn clipboard_no_short_circuit_when_not_asked() {
+        assert!(!should_short_circuit_clipboard(false, true));
+        assert!(!should_short_circuit_clipboard(false, false));
     }
 }
