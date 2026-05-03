@@ -14,7 +14,7 @@ use desk_signal_facade::model::private_screen::{
 };
 use desk_signal_facade::model::signal::{
     InitSignalingData, OfferModel, PeerSignalingSender, RemoteDeskTypeEnum, RequestRemoteModel,
-    SignalingModel, SignalingState, SignalingType, TurnTransport, WebRTConnectionState,
+    SignalingModel, SignalingState, SignalingType, WebRTConnectionState,
 };
 use desk_signal_facade::{error::DeskSignalFacadeError, model::version::VersionInfo};
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
@@ -36,21 +36,12 @@ use webrtc::api::media_engine::{MIME_TYPE_AV1, MIME_TYPE_OPUS, MIME_TYPE_VP8, MI
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::{
-    api::{
-        APIBuilder,
-        interceptor_registry::register_default_interceptors,
-        media_engine::{MIME_TYPE_H264, MediaEngine},
-        setting_engine::{SctpMaxMessageSize, SettingEngine},
-    },
+    api::media_engine::MIME_TYPE_H264,
     ice_transport::{
         ice_connection_state::RTCIceConnectionState, ice_gatherer_state::RTCIceGathererState,
     },
-    interceptor::registry::Registry,
     media::Sample,
-    peer_connection::{
-        RTCPeerConnection, configuration::RTCConfiguration,
-        peer_connection_state::RTCPeerConnectionState,
-    },
+    peer_connection::{RTCPeerConnection, peer_connection_state::RTCPeerConnectionState},
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{TrackLocal, track_local_static_sample::TrackLocalStaticSample},
 };
@@ -59,7 +50,6 @@ use webrtc_mdns::{config::Config as MdnsConfig, conn::DnsConn};
 use crate::host_control::HostControlHub;
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
-use crate::model::settings::{StartupMode, TraversalMode};
 use crate::service::audio_playback::start_audio_playback;
 use crate::service::data_channel::handle_data_channel_event;
 use crate::service::file_manager::{handle_manager_file_delete, handle_manager_file_list};
@@ -832,72 +822,19 @@ impl DeskSession {
             shared_settings.clone()
         };
 
-        // Create the SettingEngine
-        let mut setting_engine = SettingEngine::default();
-        // Allow unbounded SCTP message size to improve throughput on localhost
-        setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
-        // Include loopback (127.0.0.1) as a host ICE candidate so that local browser
-        // connections (e.g. Tauri WebView → 127.0.0.1:8082) can succeed via the
-        // loopback candidate pair without requiring cross-interface routing.
-        setting_engine.set_include_loopback_candidate(true);
+        // ICE filtering + RTCPeerConnection construction live in the
+        // daemon-side `pc_manager` module so cut 3 (daemon owns PC) can
+        // reuse them without dragging DeskSession internals along.
+        let ice_servers = crate::daemon::pc_manager::filter_ice_servers(
+            &request_remote_model.ice_servers,
+            local_settings.turn_client.traversal_mode,
+            local_settings.args.startup_mode.clone(),
+        );
 
-        let mut ice_servers = Vec::new();
-        for ice_server in request_remote_model.ice_servers.iter() {
-            match ice_server.transport() {
-                Some(TurnTransport::Stun) => {
-                    // check if traversal mode is stun or turn
-                    if local_settings.turn_client.traversal_mode == TraversalMode::Stun
-                        || local_settings.turn_client.traversal_mode == TraversalMode::Turn
-                    {
-                        ice_servers.push(ice_server.clone());
-                    }
-                }
-                Some(TurnTransport::Turn) => {
-                    if local_settings.turn_client.traversal_mode == TraversalMode::Turn
-                        && self.settings.read().await.args.startup_mode == StartupMode::DeskServer
-                    {
-                        ice_servers.push(ice_server.clone());
-                    }
-                }
-                None => {
-                    log::warn!(
-                        "Ignoring ICE server with invalid/empty transport for connection {}: {:?}",
-                        from_connection_id,
-                        ice_server
-                    );
-                    continue;
-                }
-            }
-        }
-
-        // new rtc_peer_connection
-        // Create a MediaEngine object to configure the supported codec
-        let mut m = MediaEngine::default();
-        m.register_default_codecs()?;
-
-        let mut registry = Registry::new();
-
-        // Use the default set of Interceptors
-        registry = register_default_interceptors(registry, &mut m)?;
-
-        // Create the API object with the MediaEngine
-        let api = APIBuilder::new()
-            .with_setting_engine(setting_engine)
-            .with_media_engine(m)
-            .with_interceptor_registry(registry)
-            .build();
-
-        // Prepare the configuration for Server (use only STUN/Host)
-        let config = RTCConfiguration {
-            ice_servers: ice_servers
-                .iter()
-                .map(|ice_server| ice_server.into())
-                .collect(),
-            ..Default::default()
-        };
-
-        // Create a new RTCPeerConnection
-        let rtc_peer_connection = api.new_peer_connection(config).await?;
+        let rtc_peer_connection = crate::daemon::pc_manager::build_peer_connection(
+            ice_servers.iter().map(Into::into).collect(),
+        )
+        .await?;
 
         // get audio device
         let audio_device_list = match tokio::time::timeout(
