@@ -10,6 +10,7 @@ cargo build -p lcxl-remote-desk-server
 echo "Building Vite project..."
 pushd "$SCRIPT_DIR/vite-project" > /dev/null
 npm ci
+npm run build
 popd > /dev/null
 
 echo "Copying static files to target directory..."
@@ -18,6 +19,6 @@ STATIC_DIR="$TARGET_DIR/static"
 
 rm -rf "$STATIC_DIR"
 mkdir -p "$STATIC_DIR"
-cp -r dist/* "$STATIC_DIR/"
+cp -r "$SCRIPT_DIR/vite-project/dist/"* "$STATIC_DIR/"
 
 echo "Build and copy complete. Executable and static/ are in $TARGET_DIR"
