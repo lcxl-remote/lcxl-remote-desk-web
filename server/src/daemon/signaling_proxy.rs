@@ -1,3 +1,4 @@
+use super::signaling_router::{self, RouteOutcome, RouterContext};
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
@@ -310,15 +311,37 @@ async fn maintain_proxy_connection(
                                         continue;
                                     }
                                 };
-                                if let Ok(parsed) =
-                                    serde_json::from_str::<SignalingModel>(&text_str)
-                                    && matches!(
-                                        parsed.signaling_type,
-                                        SignalingType::RequestRemote
-                                    )
-                                        && let Some(from_id) = parsed.from_connection_id {
-                                            worker_mgr.track_browser_connection(from_id);
+                                let parsed_opt =
+                                    serde_json::from_str::<SignalingModel>(&text_str).ok();
+
+                                if let Some(parsed) = &parsed_opt
+                                    && matches!(parsed.signaling_type, SignalingType::RequestRemote)
+                                    && let Some(from_id) = parsed.from_connection_id.as_ref()
+                                {
+                                    worker_mgr.track_browser_connection(from_id.clone());
+                                }
+
+                                // Arch IV signaling router: cut 3a is a
+                                // pass-through (always returns ForwardToWorker)
+                                // so the dispatch point is wired in without
+                                // changing behaviour. Cuts 3b/3c flip
+                                // individual SignalingTypes to HandledByDaemon
+                                // without touching this loop again.
+                                let outcome = match parsed_opt.as_ref() {
+                                    Some(parsed) => {
+                                        let ctx = RouterContext::default();
+                                        match signaling_router::route(parsed, &ctx).await {
+                                            Ok(o) => o,
+                                            Err(_) => RouteOutcome::ForwardToWorker,
                                         }
+                                    }
+                                    None => RouteOutcome::ForwardToWorker,
+                                };
+
+                                if outcome == RouteOutcome::HandledByDaemon {
+                                    continue;
+                                }
+
                                 let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
                                     message: text_str,
                                     connection_id: None,
