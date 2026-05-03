@@ -153,9 +153,15 @@ pub async fn run_service_daemon_inner(
     let proxy_handle = {
         let settings = shared_settings_data.clone();
         let worker_mgr = worker_mgr.clone();
+        let host_control_hub = Arc::clone(&host_control_hub);
         actix_web::rt::spawn(async move {
-            if let Err(e) =
-                signaling_proxy::run_signaling_proxy(settings, worker_mgr, worker_rx).await
+            if let Err(e) = signaling_proxy::run_signaling_proxy(
+                settings,
+                worker_mgr,
+                host_control_hub,
+                worker_rx,
+            )
+            .await
             {
                 error!("Signaling proxy error: {e}");
             }

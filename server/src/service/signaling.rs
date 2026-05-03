@@ -639,7 +639,7 @@ async fn get_mdns_conn() -> Result<std::sync::Arc<DnsConn>, webrtc_mdns::Error> 
     Ok(conn)
 }
 
-async fn resolve_mdns_host(host: &str) -> Option<IpAddr> {
+pub(crate) async fn resolve_mdns_host(host: &str) -> Option<IpAddr> {
     let conn = get_mdns_conn().await.ok()?;
     let (_close_tx, close_rx) = mpsc::channel(1);
 
@@ -827,7 +827,7 @@ impl DeskSession {
         // reuse them without dragging DeskSession internals along.
         let ice_servers = crate::daemon::pc_manager::filter_ice_servers(
             &request_remote_model.ice_servers,
-            local_settings.turn_client.traversal_mode,
+            &local_settings.turn_client.traversal_mode,
             local_settings.args.startup_mode.clone(),
         );
 
@@ -1766,15 +1766,46 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         match signaling_model.signaling_type {
+            // Arch IV (PR 2 cut 3b): when the worker is a
+            // SessionWorker spawned by the daemon, the daemon already
+            // handled these variants via signaling_router, and the IPC
+            // proxy should never have forwarded them here. We log a
+            // warning and no-op rather than create a duplicate
+            // RTCPeerConnection alongside the daemon's. Other startup
+            // modes (Default / DeskServer) keep the legacy in-process
+            // path until PR 5 wires the in-process IpcTransport.
             SignalingType::RequestRemote => {
-                // Init PTC peer connection
-                self.init_ptc_peer_connection(signaling_model).await?;
+                let is_session_worker = {
+                    let s = self.settings.read().await;
+                    s.args.startup_mode == crate::model::settings::StartupMode::SessionWorker
+                };
+                if is_session_worker {
+                    warn!("[Arch IV] RequestRemote leaked to worker; ignoring (daemon owns PC).");
+                } else {
+                    self.init_ptc_peer_connection(signaling_model).await?;
+                }
             }
             SignalingType::Offer => {
-                self.handle_offer(signaling_model).await?;
+                let is_session_worker = {
+                    let s = self.settings.read().await;
+                    s.args.startup_mode == crate::model::settings::StartupMode::SessionWorker
+                };
+                if is_session_worker {
+                    warn!("[Arch IV] Offer leaked to worker; ignoring (daemon owns PC).");
+                } else {
+                    self.handle_offer(signaling_model).await?;
+                }
             }
             SignalingType::Answer => {}
             SignalingType::Canid => {
+                let is_session_worker = {
+                    let s = self.settings.read().await;
+                    s.args.startup_mode == crate::model::settings::StartupMode::SessionWorker
+                };
+                if is_session_worker {
+                    warn!("[Arch IV] Canid leaked to worker; ignoring (daemon owns PC).");
+                    return Ok(());
+                }
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
                 let rtc_peer_connection = self.get_rtc_peer_connection(from_connection_id)?;
 
@@ -1844,6 +1875,14 @@ impl DeskSession {
                 self.handle_request_control(signaling_model).await?;
             }
             SignalingType::CloseControl => {
+                let is_session_worker = {
+                    let s = self.settings.read().await;
+                    s.args.startup_mode == crate::model::settings::StartupMode::SessionWorker
+                };
+                if is_session_worker {
+                    warn!("[Arch IV] CloseControl leaked to worker; ignoring (daemon owns PC).");
+                    return Ok(());
+                }
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
                 if let Some(peer_connection) =
                     self.rtc_peer_connection_map.remove(from_connection_id)

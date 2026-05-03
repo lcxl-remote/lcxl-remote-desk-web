@@ -1,5 +1,7 @@
+use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouteOutcome, RouterContext};
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
+use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
 use awc::{Client, Connector};
@@ -18,16 +20,31 @@ use tokio::sync::broadcast;
 pub async fn run_signaling_proxy(
     settings: web::Data<SharedSettings>,
     worker_mgr: WorkerManager,
+    host_control_hub: Arc<HostControlHub>,
     mut worker_rx: WorkerMessageReceiver,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
 
+    // Daemon-side per-connection PC registry (Arch IV cut 3b). One
+    // registry shared across every signaling endpoint (local / remote
+    // signaling / remote manager) so the same PC handles inbound
+    // messages regardless of which WS surfaced them.
+    let pc_registry = PcRegistry::new();
+
+    let router_ctx = RouterContext {
+        pc_registry: pc_registry.clone(),
+        outbound_tx: outbound_tx.clone(),
+        settings: settings.clone(),
+        host_control_hub: host_control_hub.clone(),
+    };
+
     let local_handle = {
         let settings = settings.clone();
         let worker_mgr = worker_mgr.clone();
         let outbound_tx = outbound_tx.clone();
+        let router_ctx = router_ctx.clone();
         actix_web::rt::spawn(async move {
             loop {
                 let (port, enable_ipv6, local_token, startup_mode) = {
@@ -69,6 +86,7 @@ pub async fn run_signaling_proxy(
                 let _ = maintain_proxy_connection(
                     settings.clone(),
                     &worker_mgr,
+                    &router_ctx,
                     local_url,
                     local_token,
                     rx,
@@ -84,6 +102,7 @@ pub async fn run_signaling_proxy(
         let settings = settings.clone();
         let worker_mgr = worker_mgr.clone();
         let outbound_tx = outbound_tx.clone();
+        let router_ctx = router_ctx.clone();
         actix_web::rt::spawn(async move {
             loop {
                 let (signaling_url, signaling_token) = {
@@ -99,9 +118,15 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
-                    let _ =
-                        maintain_proxy_connection(settings.clone(), &worker_mgr, url, token, rx)
-                            .await;
+                    let _ = maintain_proxy_connection(
+                        settings.clone(),
+                        &worker_mgr,
+                        &router_ctx,
+                        url,
+                        token,
+                        rx,
+                    )
+                    .await;
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -113,6 +138,7 @@ pub async fn run_signaling_proxy(
         let settings = settings.clone();
         let worker_mgr = worker_mgr.clone();
         let outbound_tx = outbound_tx.clone();
+        let router_ctx = router_ctx.clone();
         actix_web::rt::spawn(async move {
             loop {
                 let (manager_url, manager_api_token) = {
@@ -128,9 +154,15 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
-                    let _ =
-                        maintain_proxy_connection(settings.clone(), &worker_mgr, url, token, rx)
-                            .await;
+                    let _ = maintain_proxy_connection(
+                        settings.clone(),
+                        &worker_mgr,
+                        &router_ctx,
+                        url,
+                        token,
+                        rx,
+                    )
+                    .await;
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -234,6 +266,7 @@ pub async fn run_signaling_proxy(
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     worker_mgr: &WorkerManager,
+    router_ctx: &RouterContext,
     signaling_url: String,
     auth_token: String,
     mut outbound_rx: broadcast::Receiver<String>,
@@ -329,10 +362,15 @@ async fn maintain_proxy_connection(
                                 // without touching this loop again.
                                 let outcome = match parsed_opt.as_ref() {
                                     Some(parsed) => {
-                                        let ctx = RouterContext::default();
-                                        match signaling_router::route(parsed, &ctx).await {
+                                        match signaling_router::route(parsed, router_ctx).await {
                                             Ok(o) => o,
-                                            Err(_) => RouteOutcome::ForwardToWorker,
+                                            Err(e) => {
+                                                warn!(
+                                                    "[Proxy] router handler failed for {:?}: {e}",
+                                                    parsed.signaling_type,
+                                                );
+                                                RouteOutcome::ForwardToWorker
+                                            }
                                         }
                                     }
                                     None => RouteOutcome::ForwardToWorker,
