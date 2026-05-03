@@ -45,6 +45,27 @@ pub enum WorkerToService {
 
     /// Worker reports an error
     Error(ErrorPayload),
+
+    /// Worker reports the authoritative `ConnectionAcceptState` for one of
+    /// its peer connections has changed. The daemon caches this map keyed
+    /// by `connection_id` and ships it as `preapproved_connections` into
+    /// the next worker's `WorkerInitPayload`, so that after worker restart
+    /// (UAC, lock screen, OS-session change, crash recovery) the new worker
+    /// can pre-populate `SignalingState` without re-prompting the user via
+    /// Tauri (whose dialog is invisible on the secure desktop during UAC).
+    ///
+    /// The worker is the source of truth — the daemon must not infer this
+    /// state by parsing signaling traffic.
+    ConnectionAcceptStateChanged {
+        connection_id: String,
+        state: ConnectionAcceptState,
+    },
+
+    /// Worker reports a peer connection is gone (browser closed the tab,
+    /// WebRTC ICE failed, etc.). The daemon drops the entry from its
+    /// per-connection cache so a long-running daemon does not accumulate
+    /// stale state across many connect/disconnect cycles.
+    ConnectionClosed { connection_id: String },
 }
 
 /// Messages sent from Service Core to Tauri UI
@@ -100,6 +121,31 @@ pub struct WorkerInitPayload {
     /// Local hub (used by tests / standalone runs).
     #[serde(default)]
     pub host_upstream_url: Option<String>,
+
+    /// Per-connection accept state the daemon cached before this worker was
+    /// (re)spawned. The worker uses this list to pre-populate
+    /// `SignalingState` at PC-creation time so the user is not re-prompted
+    /// across desktop / session switches. Empty on the first worker launch
+    /// and on standalone (non-daemon) runs.
+    #[serde(default)]
+    pub preapproved_connections: Vec<(String, ConnectionAcceptState)>,
+}
+
+/// Per-peer-connection acceptance state. The daemon caches this map keyed by
+/// `connection_id` and ships it across worker restarts (see
+/// `WorkerToService::ConnectionAcceptStateChanged` and
+/// `WorkerInitPayload::preapproved_connections`).
+///
+/// Each `bool` corresponds 1:1 to a field on the worker's
+/// `desk_signal_facade::SignalingState`. Both default to `false`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionAcceptState {
+    /// Remote peer was granted mouse / keyboard input.
+    pub accept_control: bool,
+    /// Remote peer was granted bidirectional clipboard sync. Independent of
+    /// `accept_control` — clipboard can be denied even when control was
+    /// granted, so the daemon must never infer this from control alone.
+    pub accept_clipboard_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +232,7 @@ mod tests {
             signaling_url: None,
             auth_token: Some("ipc-token".to_string()),
             host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
+            preapproved_connections: Vec::new(),
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
@@ -225,6 +272,93 @@ mod tests {
         let decoded: WorkerInitPayload = serde_json::from_value(legacy).unwrap();
         assert!(decoded.host_upstream_url.is_none());
         assert!(decoded.auth_token.is_none());
+        assert!(decoded.preapproved_connections.is_empty());
+    }
+
+    /// `preapproved_connections` round-trips and carries the per-connection
+    /// `ConnectionAcceptState` faithfully.
+    #[test]
+    fn worker_init_payload_preapproved_round_trip() {
+        let original = WorkerInitPayload {
+            session_id: "session-1".to_string(),
+            os_session_id: 1,
+            desktop_name: None,
+            config_json: "{}".to_string(),
+            signaling_url: None,
+            auth_token: None,
+            host_upstream_url: None,
+            preapproved_connections: vec![
+                (
+                    "conn-a".to_string(),
+                    ConnectionAcceptState {
+                        accept_control: true,
+                        accept_clipboard_sync: false,
+                    },
+                ),
+                (
+                    "conn-b".to_string(),
+                    ConnectionAcceptState {
+                        accept_control: true,
+                        accept_clipboard_sync: true,
+                    },
+                ),
+            ],
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.preapproved_connections, original.preapproved_connections);
+    }
+
+    /// `ConnectionAcceptState` defaults to all-false (the safe initial state
+    /// for any new `connection_id` the daemon has not yet seen approved).
+    #[test]
+    fn connection_accept_state_default_is_all_false() {
+        let s = ConnectionAcceptState::default();
+        assert!(!s.accept_control);
+        assert!(!s.accept_clipboard_sync);
+    }
+
+    /// `WorkerToService::ConnectionAcceptStateChanged` round-trips with the
+    /// shared tag/content shape (`type` / `payload`) used by the IPC reader.
+    #[test]
+    fn connection_accept_state_changed_round_trips() {
+        let msg = WorkerToService::ConnectionAcceptStateChanged {
+            connection_id: "conn-42".to_string(),
+            state: ConnectionAcceptState {
+                accept_control: true,
+                accept_clipboard_sync: true,
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: WorkerToService = serde_json::from_str(&json).unwrap();
+        match decoded {
+            WorkerToService::ConnectionAcceptStateChanged {
+                connection_id,
+                state,
+            } => {
+                assert_eq!(connection_id, "conn-42");
+                assert!(state.accept_control);
+                assert!(state.accept_clipboard_sync);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `WorkerToService::ConnectionClosed` round-trips and carries only the
+    /// `connection_id`.
+    #[test]
+    fn connection_closed_round_trips() {
+        let msg = WorkerToService::ConnectionClosed {
+            connection_id: "conn-x".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let decoded: WorkerToService = serde_json::from_str(&json).unwrap();
+        match decoded {
+            WorkerToService::ConnectionClosed { connection_id } => {
+                assert_eq!(connection_id, "conn-x");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
 

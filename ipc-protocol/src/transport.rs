@@ -83,6 +83,7 @@ mod tests {
             signaling_url: None,
             auth_token: None,
             host_upstream_url: None,
+            preapproved_connections: Vec::new(),
         });
 
         let mut buf = Vec::new();
