@@ -5,12 +5,11 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
     message::{
-        ConnectionAcceptState, MediaCapabilities, ServiceToWorker, SignalingPayload,
-        WorkerInitPayload, WorkerToService,
+        ConnectionAcceptState, MediaCapabilities, ServiceToWorker, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
-use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -384,13 +383,7 @@ impl WorkerManager {
         actix_web::rt::spawn(async move {
             let session = crate::worker::session::WorkerSession::new();
             if let Err(e) = session
-                .run_with_transports(
-                    init_for_worker,
-                    s2w_rx,
-                    w2s_tx,
-                    Some(media_tx),
-                    Some(hub),
-                )
+                .run_with_transports(init_for_worker, s2w_rx, w2s_tx, Some(media_tx), Some(hub))
                 .await
             {
                 error!("In-process worker exited with error: {e}");
@@ -555,26 +548,31 @@ impl WorkerManager {
         })
     }
 
-    /// Drain the per-connection cache, push `DesktopSwitching` to each
-    /// browser, and tell the active worker to begin shutdown. Returns the
-    /// drained `(connection_id, accept_state)` tuples so the caller can
-    /// hand them to the next worker via `start_worker(..., preapproved)`.
+    /// Drain the per-connection cache, pause every PC's media ingestion,
+    /// and tell the active worker to begin shutting down its encoders.
+    /// Returns the drained `(connection_id, accept_state)` tuples so the
+    /// caller can hand them to the next worker via
+    /// `start_worker(..., preapproved)`.
+    ///
+    /// **PR 6 — keep-PC semantics**: this no longer emits browser-facing
+    /// `SignalingType::DesktopSwitching`. Arch IV holds the WebRTC PC in
+    /// the daemon, so worker swaps are invisible to the browser apart
+    /// from a brief frame-freeze that resolves on the new worker's
+    /// first IDR (the per-PC `media_paused` flag set here gates frames
+    /// from the dying worker until the new worker reports
+    /// `Capabilities` and `pc_registry.resume_active_media` re-issues
+    /// `StartMedia` + `ForceKeyframe`).
     pub async fn notify_desktop_switch(&self) -> Vec<(String, ConnectionAcceptState)> {
         let preapproved: Vec<(String, ConnectionAcceptState)> = {
             let mut map = self.active_connections.lock().unwrap();
             map.drain().collect()
         };
 
-        for (id, _) in &preapproved {
-            if let Some(json) = build_signaling_event_json(SignalingType::DesktopSwitching, id) {
-                let _ =
-                    self.worker_msg_tx
-                        .send(WorkerToService::SignalingMessage(SignalingPayload {
-                            message: json,
-                            connection_id: None,
-                        }));
-            }
-        }
+        // PR 6: pause all PCs so write_video_frame drops samples the
+        // about-to-die worker is still producing while the browser PC
+        // keeps its existing reference frame. The first IDR from the
+        // replacement worker clears each per-PC flag in place.
+        self.pc_registry.pause_all_media().await;
 
         let inner = self.inner.lock().await;
         if let Some(worker) = &inner.active_worker {
@@ -877,16 +875,6 @@ fn launch_worker_as_user(
     }
 }
 
-fn build_signaling_event_json(
-    signaling_type: SignalingType,
-    to_connection_id: &str,
-) -> Option<String> {
-    let model =
-        SignalingModel::new_request::<()>(signaling_type, Some(to_connection_id.to_string()), None)
-            .ok()?;
-    serde_json::to_string(&model).ok()
-}
-
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 async fn run_pipe_server(
@@ -1018,14 +1006,13 @@ async fn run_pipe_server(
             }
         };
 
-    for (id, _) in &preapproved {
-        if let Some(json) = build_signaling_event_json(SignalingType::DesktopReady, id) {
-            let _ = msg_tx.send(WorkerToService::SignalingMessage(SignalingPayload {
-                message: json,
-                connection_id: None,
-            }));
-        }
-    }
+    // PR 6 keep-PC semantics: browser-facing `SignalingType::DesktopReady`
+    // is no longer emitted on worker (re)spawn. The browser's WebRTC PC
+    // stays up across worker swaps; the daemon's `signaling_proxy` calls
+    // `pc_registry.resume_active_media` on the worker's first
+    // `Capabilities` to re-issue cached `StartMedia` + `ForceKeyframe`,
+    // and the per-PC `media_paused` flag clears on the first IDR.
+    let _ = &preapproved; // retained for the in-flight transition; PR 7 strips the field.
 
     let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, pipe_name).await;
     info!("Pipe server for {pipe_name} exiting");
@@ -1194,14 +1181,9 @@ async fn run_pipe_server(
     )
     .await?;
 
-    for (id, _) in &preapproved {
-        if let Some(json) = build_signaling_event_json(SignalingType::DesktopReady, id) {
-            let _ = msg_tx.send(WorkerToService::SignalingMessage(SignalingPayload {
-                message: json,
-                connection_id: None,
-            }));
-        }
-    }
+    // PR 6 keep-PC: see the Windows path above; browser-facing
+    // DesktopReady is no longer emitted on worker spawn.
+    let _ = &preapproved;
 
     let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, socket_path).await;
     let _ = std::fs::remove_file(socket_path);
@@ -1247,8 +1229,7 @@ async fn bridge_event_transport(
     msg_tx: &mpsc::UnboundedSender<WorkerToService>,
     name: &str,
 ) -> bool {
-    let (worker_msg_tx, mut worker_msg_rx) =
-        mpsc::unbounded_channel::<Option<WorkerToService>>();
+    let (worker_msg_tx, mut worker_msg_rx) = mpsc::unbounded_channel::<Option<WorkerToService>>();
     tokio::spawn(async move {
         loop {
             match event_rx.recv().await {
@@ -1419,6 +1400,80 @@ mod tests {
         // owns the drain side-effect.
         let drained_again = mgr.notify_desktop_switch().await;
         assert!(drained_again.is_empty());
+    }
+
+    /// PR 6 keep-PC: `notify_desktop_switch` must NOT emit a
+    /// browser-facing `WorkerToService::SignalingMessage`. The Arch
+    /// III code shipped a `SignalingType::DesktopSwitching` over the
+    /// outbound channel for each tracked connection; with PR 6 the
+    /// browser PC stays up across the swap and the daemon resumes
+    /// media itself once the new worker reports `Capabilities`.
+    #[tokio::test]
+    async fn notify_desktop_switch_keep_pc_does_not_emit_browser_signaling() {
+        let (mgr, mut rx) = test_manager();
+        mgr.track_browser_connection("conn-1".to_string());
+        mgr.track_browser_connection("conn-2".to_string());
+
+        let drained = mgr.notify_desktop_switch().await;
+        assert_eq!(drained.len(), 2, "drain still returns the cached entries");
+
+        // No SignalingMessage should land on the worker-message channel.
+        // try_recv returns Empty when the channel has nothing buffered.
+        match rx.try_recv() {
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            other => panic!("PR 6 keep-PC must not emit browser signaling; got {other:?}"),
+        }
+    }
+
+    /// PR 6 keep-PC: `notify_desktop_switch` pauses every PC in the
+    /// registry it was constructed with. This is the contract the
+    /// daemon relies on so frames from the about-to-die worker are
+    /// dropped instead of pushed to the browser with stale references.
+    #[tokio::test]
+    async fn notify_desktop_switch_pauses_all_pcs() {
+        use crate::daemon::pc_manager::PcRegistry;
+        use desk_signal_facade::model::signal::RequestRemoteModel;
+
+        let pc_registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let mut s = crate::model::settings::Settings::default();
+        s.args.startup_mode = crate::model::settings::StartupMode::ServiceDaemon;
+        for id in ["pc-a", "pc-b"] {
+            pc_registry
+                .create_for_request_remote(id, &request_remote, &s)
+                .await
+                .expect("create");
+        }
+
+        let settings = web::Data::from(Arc::new(crate::model::settings::SharedSettings::from(s)));
+        let (mgr, _rx) = WorkerManager::new(settings, pc_registry.clone());
+
+        // Pre-condition: nothing paused.
+        for id in ["pc-a", "pc-b"] {
+            let ctx = pc_registry.get(id).await.unwrap();
+            assert!(
+                !ctx.read()
+                    .await
+                    .media_paused
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
+
+        let _drained = mgr.notify_desktop_switch().await;
+
+        // Post-condition: every PC is paused.
+        for id in ["pc-a", "pc-b"] {
+            let ctx = pc_registry.get(id).await.unwrap();
+            assert!(
+                ctx.read()
+                    .await
+                    .media_paused
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "notify_desktop_switch must pause {id}"
+            );
+        }
     }
 
     /// Capabilities round-trip: `set_worker_capabilities` stores the

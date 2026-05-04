@@ -195,6 +195,14 @@ pub async fn run_signaling_proxy(
                     caps.is_admin,
                 );
                 worker_mgr.set_worker_capabilities(caps);
+                // PR 6 keep-PC: every Capabilities arrival is the
+                // signal the worker is ready to accept media work.
+                // Re-issue cached `StartMedia` + `ForceKeyframe` for
+                // every PC that already negotiated an offer; the
+                // first IDR clears each PC's `media_paused` flag in
+                // place. For the very first Capabilities (no PCs yet,
+                // no cached offers) this is a no-op.
+                pc_registry.resume_active_media(&worker_mgr).await;
             }
             WorkerToService::SignalingMessage(payload) => {
                 debug!(
@@ -215,7 +223,8 @@ pub async fn run_signaling_proxy(
             }
             WorkerToService::DesktopChanged(payload) => {
                 info!(
-                    "[SignalingProxy] Worker reported desktop drift -> '{}'; restarting worker",
+                    "[SignalingProxy] Worker reported desktop drift -> '{}'; restarting worker \
+                     (keep-PC: browser PC stays up across the swap)",
                     payload.name
                 );
                 let worker_mgr = worker_mgr.clone();
@@ -223,7 +232,14 @@ pub async fn run_signaling_proxy(
                 // Run the switch on a separate task so the message loop
                 // keeps draining (notify_desktop_switch awaits worker
                 // mailbox flushes; bridge_loop pushes more messages while
-                // we wait).
+                // we wait). PR 6 path: notify_desktop_switch pauses every
+                // PC and tells the dying worker to shut down its
+                // encoders, then start_worker spawns the replacement.
+                // The new worker's `Capabilities` arrival above triggers
+                // `pc_registry.resume_active_media` to re-issue
+                // StartMedia + ForceKeyframe; the first IDR per PC
+                // clears its `media_paused` flag and the browser sees
+                // the desktop swap as a brief frame freeze.
                 actix_web::rt::spawn(async move {
                     let preapproved = worker_mgr.notify_desktop_switch().await;
                     tokio::time::sleep(Duration::from_millis(500)).await;
