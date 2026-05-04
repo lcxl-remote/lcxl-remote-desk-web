@@ -89,6 +89,14 @@ use tokio::sync::mpsc;
 struct ConnectionTask {
     stop_flag: Arc<AtomicBool>,
     keyframe_requested: Arc<AtomicBool>,
+    /// Live-update channel feeding fresh `UpdateMediaSettingsPayload`
+    /// values into the video pipeline thread. `update_settings` posts
+    /// here; the loop drains via `try_recv` on every tick and rebuilds
+    /// ticker / encoder when the relevant knobs differ from the cached
+    /// ones. Audio pipeline does not subscribe today (Opus owns its own
+    /// frame size + bitrate and a runtime change would require a
+    /// separate IPC variant).
+    settings_tx: mpsc::UnboundedSender<UpdateMediaSettingsPayload>,
     /// Held so the video task can be joined on `shutdown()`. None
     /// after the thread exits naturally on stop_flag observation.
     video_handle: Option<thread::JoinHandle<()>>,
@@ -150,6 +158,7 @@ impl MediaProducer {
         }
         let stop_flag = Arc::new(AtomicBool::new(false));
         let keyframe_requested = Arc::new(AtomicBool::new(false));
+        let (settings_tx, settings_rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
         let video_handle = spawn_video_pipeline_thread(
             self.desk_settings.clone(),
             payload.clone(),
@@ -157,6 +166,7 @@ impl MediaProducer {
             self.error_tx.clone(),
             Arc::clone(&stop_flag),
             Arc::clone(&keyframe_requested),
+            settings_rx,
         );
         // PR 3: audio pipeline runs in its own dedicated thread (WASAPI
         // / PipeWire / SCKit handles are COM/system-thread-bound the
@@ -175,6 +185,7 @@ impl MediaProducer {
             ConnectionTask {
                 stop_flag,
                 keyframe_requested,
+                settings_tx,
                 video_handle: Some(video_handle),
                 audio_handle: Some(audio_handle),
             },
@@ -220,15 +231,42 @@ impl MediaProducer {
         }
     }
 
-    /// Live-update knobs (fps / bitrate / quality). Cut 4 ack-only
-    /// (logs and returns) — the runtime apply path lands in a follow-up
-    /// once the encoder traits expose the right setter surface.
+    /// Live-update knobs (fps / quality). The video pipeline thread
+    /// owns the encoder + ticker, so we deliver via the per-connection
+    /// `settings_tx` mpsc channel; the loop's `try_recv` drains all
+    /// pending updates on the next tick and rebuilds ticker (fps) +
+    /// encoder (quality / bitrate). `bitrate_kbps` is currently routed
+    /// to the encoder rebuild path but per-codec mapping (h264 bps vs
+    /// vpx bps vs av1 quality-only) lives outside this fn — the
+    /// encoder factory pulls from the merged DeskSettings, not from
+    /// the IPC payload directly. No-op on unknown connection_id.
+    ///
+    /// Audio is intentionally not subscribed: Opus owns its frame size
+    /// (20 ms fixed) and bitrate is set at create time; runtime audio
+    /// retuning needs a separate variant once any UI exposes it.
     pub fn update_settings(&self, payload: UpdateMediaSettingsPayload) {
-        warn!(
-            "[MediaProducer] UpdateMediaSettings received for {} but live-apply is not yet \
-             implemented (fps={:?}, bitrate_kbps={:?}, quality={:?}); ignoring",
+        let map = self.inner.lock().expect("media producer lock poisoned");
+        let Some(task) = map.get(&payload.connection_id) else {
+            debug!(
+                "[MediaProducer] UpdateMediaSettings for unknown connection {}; ignoring",
+                payload.connection_id
+            );
+            return;
+        };
+        // Reject codec swap attempts at the IPC boundary — the IPC
+        // schema doesn't carry a codec field, but be explicit about
+        // what does flow.
+        info!(
+            "[MediaProducer] UpdateMediaSettings queued for {} (fps={:?}, bitrate_kbps={:?}, \
+             quality={:?})",
             payload.connection_id, payload.fps, payload.bitrate_kbps, payload.quality
         );
+        if task.settings_tx.send(payload).is_err() {
+            // The receiver lives in the pipeline thread; if it's gone
+            // the thread already exited (stop_flag, capture failure,
+            // etc.) and the next StopMedia / drop will reap us.
+            debug!("[MediaProducer] UpdateMediaSettings receiver gone; pipeline already stopped");
+        }
     }
 
     /// Stop every active pipeline. Called by `worker::session` on
@@ -307,6 +345,65 @@ fn codec_from_str(name: &str, is_video: bool) -> Option<MediaCodec> {
     }
 }
 
+/// Drain every pending `UpdateMediaSettingsPayload` from the per-
+/// connection mpsc and apply each to `merged_settings`. The tick + fps
+/// path is a `tokio::time::interval`, which the loop replaces on fps
+/// changes (interval can't be retuned in place).
+///
+/// Returns `true` when at least one knob actually changed — the caller
+/// uses this to decide whether to rebuild the encoder. We compare to
+/// the *current* `merged_settings` rather than the IPC payload
+/// directly so coalesced updates that converge to the same value as
+/// the live state are no-ops (the daemon currently fans out on every
+/// `UpdateDeskSettings`, including ones that don't move encoder-
+/// relevant fields).
+fn drain_settings_updates(
+    connection_id: &str,
+    settings_rx: &mut mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
+    merged_settings: &mut DeskSettings,
+    ticker: &mut tokio::time::Interval,
+    frame_duration_ns: &mut u64,
+) -> bool {
+    let mut changed = false;
+    while let Ok(payload) = settings_rx.try_recv() {
+        if let Some(fps) = payload.fps
+            && fps > 0
+            && fps != merged_settings.video_fps
+        {
+            merged_settings.video_fps = fps;
+            *ticker = tokio::time::interval(merged_settings.get_duration_by_video_fps());
+            *frame_duration_ns = merged_settings
+                .get_duration_by_video_fps()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64;
+            changed = true;
+        }
+        if let Some(q) = payload.quality
+            && q != merged_settings.video_quality
+        {
+            merged_settings.video_quality = q;
+            changed = true;
+        }
+        if let Some(kbps) = payload.bitrate_kbps
+            && kbps > 0
+        {
+            // Bitrate maps to the codec-specific encoder-settings
+            // struct (`H264EncoderSettings.bps`, `VpxEncoderSettings.bps`,
+            // etc.); applying it requires routing per active codec. Cut
+            // 5 keeps the wire field for forward compatibility but does
+            // not yet apply it — callers should change `quality` if
+            // they want a runtime bitrate effect today, since the
+            // factory recomputes bps from quality when the codec-
+            // specific settings are absent.
+            debug!(
+                "[MediaProducer:{connection_id}] UpdateMediaSettings.bitrate_kbps={kbps} ignored \
+                 (per-codec mapping not yet wired)"
+            );
+        }
+    }
+    changed
+}
+
 /// Build a `desk_settings` clone with the per-connection overrides
 /// from `StartMediaPayload` baked in (codec, fps). Quality / bitrate
 /// honour the connection request when non-zero; zero means "use
@@ -351,6 +448,7 @@ fn spawn_video_pipeline_thread(
     error_tx: mpsc::UnboundedSender<WorkerToService>,
     stop_flag: Arc<AtomicBool>,
     keyframe_requested: Arc<AtomicBool>,
+    settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
 ) -> thread::JoinHandle<()> {
     let connection_id = payload.connection_id.clone();
     let thread_name = format!("media-video-{}", &connection_id);
@@ -379,6 +477,7 @@ fn spawn_video_pipeline_thread(
                     error_tx,
                     stop_flag,
                     keyframe_requested,
+                    settings_rx,
                 )
                 .await
                 {
@@ -451,10 +550,11 @@ async fn video_pipeline_loop(
     error_tx: mpsc::UnboundedSender<WorkerToService>,
     stop_flag: Arc<AtomicBool>,
     keyframe_requested: Arc<AtomicBool>,
+    mut settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
 ) -> Result<(), String> {
     let connection_id = payload.connection_id.clone();
     let codec = payload.video_codec;
-    let merged_settings = payload_overrides(&base_settings, &payload);
+    let mut merged_settings = payload_overrides(&base_settings, &payload);
 
     info!(
         "[MediaProducer:{connection_id}] Starting pipeline: codec={codec:?}, fps={}",
@@ -468,7 +568,7 @@ async fn video_pipeline_loop(
     let mut next_pass_is_idr = true; // first frame is always I (encoder emits SPS/PPS+IDR)
     let mut seq: u64 = 0;
     let mut ticker = tokio::time::interval(merged_settings.get_duration_by_video_fps());
-    let frame_duration_ns = merged_settings
+    let mut frame_duration_ns = merged_settings
         .get_duration_by_video_fps()
         .as_nanos()
         .min(u64::MAX as u128) as u64;
@@ -478,6 +578,31 @@ async fn video_pipeline_loop(
         ticker.tick().await;
         if stop_flag.load(Ordering::Relaxed) {
             break;
+        }
+
+        // Apply any pending live-update settings before honouring the
+        // keyframe flag. We drain `try_recv` so a burst of settings
+        // changes coalesces into a single rebuild on this tick. The
+        // helper returns whether anything actionable changed; if so we
+        // rebuild the encoder (which will naturally emit an IDR on its
+        // first frame, satisfying the same `next_pass_is_idr`
+        // contract that `keyframe_requested` triggers).
+        let settings_changed = drain_settings_updates(
+            &connection_id,
+            &mut settings_rx,
+            &mut merged_settings,
+            &mut ticker,
+            &mut frame_duration_ns,
+        );
+        if settings_changed {
+            info!(
+                "[MediaProducer:{connection_id}] Live settings changed; recreating encoder \
+                 (fps={}, video_quality={})",
+                merged_settings.video_fps, merged_settings.video_quality
+            );
+            encoder = create_video_encoder(&merged_settings, &display_info)
+                .map_err(|e| format!("{e}"))?;
+            next_pass_is_idr = true;
         }
 
         if keyframe_requested.swap(false, Ordering::Relaxed) {
@@ -933,9 +1058,10 @@ mod tests {
         // exists to guard against `unwrap()` on a missing entry.
     }
 
-    /// Update-settings for cut 4 is ack-only. The test pins the
-    /// behaviour so a future "live apply" implementation won't
-    /// silently drop the warn-log breadcrumb.
+    /// `update_settings` for an unknown connection_id silently drops
+    /// (the producer doesn't allocate a per-connection task until
+    /// `start_media`); the daemon may race a `StopMedia` with a
+    /// settings change so the lookup-miss path must stay quiet.
     #[test]
     fn update_settings_does_not_panic_on_unknown_connection() {
         let (sender, _rx) = inprocess::make_media();
@@ -947,6 +1073,115 @@ mod tests {
             bitrate_kbps: Some(2_000),
             quality: Some(50),
         });
+    }
+
+    /// `drain_settings_updates` applies fps and quality changes to
+    /// `merged_settings`, rebuilds the ticker on fps changes, and
+    /// returns `true` so the caller knows to recreate the encoder.
+    /// A repeat of the same value is a no-op (returns `false`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_settings_updates_applies_fps_and_quality() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+        let mut merged = DeskSettings {
+            video_fps: 30,
+            video_quality: 22,
+            ..DeskSettings::default()
+        };
+        let mut ticker = tokio::time::interval(merged.get_duration_by_video_fps());
+        let mut frame_duration_ns = merged
+            .get_duration_by_video_fps()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+
+        // No pending update → returns false, leaves state untouched.
+        let changed = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut ticker,
+            &mut frame_duration_ns,
+        );
+        assert!(!changed);
+        assert_eq!(merged.video_fps, 30);
+
+        // Apply fps=60 + quality=40 → both change, returns true, frame
+        // duration recomputed.
+        tx.send(UpdateMediaSettingsPayload {
+            connection_id: "c1".into(),
+            fps: Some(60),
+            bitrate_kbps: None,
+            quality: Some(40),
+        })
+        .unwrap();
+        let changed = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut ticker,
+            &mut frame_duration_ns,
+        );
+        assert!(changed);
+        assert_eq!(merged.video_fps, 60);
+        assert_eq!(merged.video_quality, 40);
+        assert_eq!(
+            frame_duration_ns,
+            merged
+                .get_duration_by_video_fps()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+            "frame duration must follow the new fps"
+        );
+
+        // Same values again → no-op, returns false.
+        tx.send(UpdateMediaSettingsPayload {
+            connection_id: "c1".into(),
+            fps: Some(60),
+            bitrate_kbps: None,
+            quality: Some(40),
+        })
+        .unwrap();
+        let changed = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut ticker,
+            &mut frame_duration_ns,
+        );
+        assert!(!changed);
+    }
+
+    /// `drain_settings_updates` ignores `fps = 0` (sentinel for "use
+    /// default") and `bitrate_kbps` (per-codec mapping not yet wired).
+    /// Pinning these so a future change to the IPC schema doesn't
+    /// silently mis-apply.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_settings_updates_ignores_fps_zero_and_bitrate() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+        let mut merged = DeskSettings {
+            video_fps: 30,
+            video_quality: 22,
+            ..DeskSettings::default()
+        };
+        let mut ticker = tokio::time::interval(merged.get_duration_by_video_fps());
+        let mut frame_duration_ns = 0u64;
+
+        tx.send(UpdateMediaSettingsPayload {
+            connection_id: "c1".into(),
+            fps: Some(0), // sentinel — must NOT replace 30 with 0 fps
+            bitrate_kbps: Some(8_000), // currently unwired — must NOT change anything
+            quality: None,
+        })
+        .unwrap();
+        let changed = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut ticker,
+            &mut frame_duration_ns,
+        );
+        assert!(!changed, "fps=0 + bitrate alone must be a no-op today");
+        assert_eq!(merged.video_fps, 30);
+        assert_eq!(merged.video_quality, 22);
     }
 
     /// `build_media_frame` stamps ts_ns from wall clock, copies through

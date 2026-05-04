@@ -72,7 +72,7 @@ use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encode
 use desk_ipc_protocol::message::{
     ClipboardPayload, CursorDataPayload, FileTransferPayload, ForceKeyframePayload, InputPayload,
     MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload,
-    ServiceToWorker, StartMediaPayload, StopMediaPayload,
+    ServiceToWorker, StartMediaPayload, StopMediaPayload, UpdateMediaSettingsPayload,
 };
 use desk_signal_facade::model::signal::InitSignalingData;
 use std::time::Duration;
@@ -442,6 +442,57 @@ impl PcRegistry {
             .await
         {
             log::warn!("[pc_manager] reset_media_for {connection_id}: ForceKeyframe failed: {e}");
+        }
+    }
+
+    /// Fan out an `UpdateMediaSettings` to every PC that has already
+    /// negotiated a `StartMedia` (i.e. has a `cached_start_media`
+    /// snapshot). Called by `signaling_router` when the browser sends
+    /// `SignalingType::UpdateDeskSettings` so encoder fps / quality
+    /// changes flow into the live worker pipeline rather than waiting
+    /// for the next StopMedia / StartMedia cycle.
+    ///
+    /// PCs without a cached payload (offer hasn't landed) are skipped
+    /// — `handle_offer` will pick up the new daemon-wide settings on
+    /// its first StartMedia anyway. All-`None` payloads short-circuit
+    /// without iterating to keep the path quiet for unrelated
+    /// `UpdateDeskSettings` messages.
+    pub async fn broadcast_media_settings_update(
+        &self,
+        worker_mgr: &WorkerManager,
+        fps: Option<u32>,
+        bitrate_kbps: Option<u32>,
+        quality: Option<u32>,
+    ) {
+        if fps.is_none() && bitrate_kbps.is_none() && quality.is_none() {
+            return;
+        }
+        let connection_ids: Vec<String> = {
+            let map = self.inner.read().await;
+            let mut ids = Vec::with_capacity(map.len());
+            for (id, ctx) in map.iter() {
+                let ctx = ctx.read().await;
+                if ctx.cached_start_media.read().await.is_some() {
+                    ids.push(id.clone());
+                }
+            }
+            ids
+        };
+        for id in connection_ids {
+            let payload = UpdateMediaSettingsPayload {
+                connection_id: id.clone(),
+                fps,
+                bitrate_kbps,
+                quality,
+            };
+            if let Err(e) = worker_mgr
+                .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
+                .await
+            {
+                log::warn!(
+                    "[pc_manager] broadcast_media_settings_update {id}: send failed: {e}"
+                );
+            }
         }
     }
 }
@@ -1957,6 +2008,65 @@ mod tests {
         let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
 
         registry.reset_media_for("nope", &worker_mgr).await;
+    }
+
+    /// `broadcast_media_settings_update` with all-`None` payload
+    /// short-circuits without iterating the registry — pinning so a
+    /// future change doesn't accidentally fan out a no-op IPC to every
+    /// worker on every `UpdateDeskSettings` that touches only
+    /// non-media fields (wayland_control_mode, private_screen, etc.).
+    #[tokio::test]
+    async fn broadcast_media_settings_update_all_none_is_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-x", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        // No worker active and all-None payload — must complete cleanly.
+        registry
+            .broadcast_media_settings_update(&worker_mgr, None, None, None)
+            .await;
+    }
+
+    /// `broadcast_media_settings_update` only fans out to PCs that
+    /// already have a cached `StartMediaPayload`. A registry with PCs
+    /// that haven't received the first Offer yet (no cache) must
+    /// neither panic nor accidentally synthesize a default StartMedia
+    /// — handle_offer owns first-time fan-out.
+    #[tokio::test]
+    async fn broadcast_media_settings_update_skips_pcs_without_cached_offer() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-no-offer", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        // No cached_start_media → loop body skipped; no worker active
+        // either, but the function must still not panic.
+        registry
+            .broadcast_media_settings_update(&worker_mgr, Some(60), None, Some(40))
+            .await;
+
+        // The registered PC stays uncached.
+        let ctx = registry.get("conn-no-offer").await.unwrap();
+        assert!(ctx.read().await.cached_start_media.read().await.is_none());
     }
 
     /// `reset_media_for` on a registered connection without a cached

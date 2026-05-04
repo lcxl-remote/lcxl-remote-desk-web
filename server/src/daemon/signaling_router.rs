@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use actix_web::web;
+use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use tokio::sync::broadcast;
 
@@ -260,6 +261,39 @@ pub async fn route(
             );
             Ok(RouteOutcome::HandledByDaemon)
         }
+        SignalingType::UpdateDeskSettings => {
+            // The worker's `DeskSession::handle_update_desk_settings`
+            // still owns non-media fields (wayland_control_mode,
+            // private_screen toggles, etc.), so we keep the
+            // SignalingMessage forward via `ForwardToWorker`. In
+            // addition, the daemon sniffs the media-relevant knobs
+            // here and fans them out as typed `UpdateMediaSettings`
+            // IPC so the per-connection encoder pipeline retunes
+            // live. Without this hop the worker's media_producer
+            // would never see the new fps / quality — its capture
+            // loop reads `merged_settings` locally and the legacy
+            // watch channel that DeskSession writes to does not
+            // drive the Arch IV pipeline.
+            match model.get_data::<DeskSettings>() {
+                Ok(settings) => {
+                    ctx.pc_registry
+                        .broadcast_media_settings_update(
+                            &ctx.worker_mgr,
+                            Some(settings.video_fps),
+                            None,
+                            Some(settings.video_quality),
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[router] UpdateDeskSettings payload parse failed: {e}; forwarding the \
+                         raw message to the worker but no media settings will be retuned"
+                    );
+                }
+            }
+            Ok(RouteOutcome::ForwardToWorker)
+        }
         // Worker-owned: cut 3c flips these to typed event-transport
         // payloads; for now they keep flowing as raw SignalingMessage
         // IPC over the legacy path.
@@ -397,6 +431,55 @@ mod tests {
                 "{t:?}",
             );
         }
+    }
+
+    /// `UpdateDeskSettings` keeps flowing as `ForwardToWorker` (so
+    /// the worker's DeskSession sees `wayland_control_mode` etc.) and,
+    /// with a parseable DeskSettings payload, the daemon also fans
+    /// out a typed `UpdateMediaSettings` per active connection. The
+    /// fan-out is exercised over an empty pc_registry here — no panic
+    /// even when the inner loop iterates zero cached PCs.
+    #[tokio::test]
+    async fn route_update_desk_settings_forwards_and_broadcasts() {
+        let ctx = make_ctx();
+        let settings = desk_signal_facade::model::desk_settings::DeskSettings {
+            video_fps: 45,
+            video_quality: 33,
+            ..desk_signal_facade::model::desk_settings::DeskSettings::default()
+        };
+        let model = SignalingModel::new(
+            "r-update",
+            SignalingType::UpdateDeskSettings,
+            Some("conn-y".to_string()),
+            None,
+            Some(serde_json::to_value(&settings).unwrap()),
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(
+            outcome,
+            RouteOutcome::ForwardToWorker,
+            "UpdateDeskSettings must still bridge to worker for non-media fields"
+        );
+    }
+
+    /// Malformed `UpdateDeskSettings` payload (not a DeskSettings
+    /// object) must not crash the router — it should log and still
+    /// return `ForwardToWorker` so the worker's existing handler
+    /// gets a chance to log its own validation error.
+    #[tokio::test]
+    async fn route_update_desk_settings_with_invalid_payload_still_forwards() {
+        let ctx = make_ctx();
+        let model = SignalingModel::new(
+            "r-bad",
+            SignalingType::UpdateDeskSettings,
+            None,
+            None,
+            Some(serde_json::json!("not an object")),
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(outcome, RouteOutcome::ForwardToWorker);
     }
 
     /// `CloseControl` against an empty registry doesn't error — the
