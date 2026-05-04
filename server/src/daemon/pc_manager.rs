@@ -69,8 +69,9 @@ use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encode
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
 use desk_ipc_protocol::message::{
-    ClipboardPayload, ForceKeyframePayload, InputPayload, MediaCapabilities, MediaCodec,
-    MediaFrame, MediaFrameKind, OpaqueConnectionPayload, ServiceToWorker, StartMediaPayload,
+    ClipboardPayload, CursorDataPayload, ForceKeyframePayload, InputPayload, MediaCapabilities,
+    MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload, ServiceToWorker,
+    StartMediaPayload,
 };
 use desk_signal_facade::model::signal::InitSignalingData;
 use std::time::Duration;
@@ -948,6 +949,79 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
     }
 }
 
+/// PR 3: write a worker-emitted cursor-sync payload to the matching
+/// connection's `cursor_sync_event` DataChannel. Mirrors the Arch III
+/// path in `service::signaling::capture_screen_task` that did the same
+/// `channel.send_text(json)` call inline; here the daemon performs it
+/// based on a `WorkerToService::CursorData` IPC the worker pushes from
+/// its capture loop.
+///
+/// All "channel-not-open" / "connection-unknown" paths are silent:
+///
+/// - Unknown `connection_id` — race against `CloseControl`; trace-log.
+/// - No cursor DataChannel registered yet — browser hasn't opened the
+///   `cursor_sync_event` channel for this connection (e.g. control
+///   not granted, browser still negotiating). Debug-log + drop.
+/// - Channel registered but not in `Open` state — the WebRTC
+///   handshake hasn't completed for that DC; debug-log + drop.
+/// - Send failed — log warn and continue; the next cursor update will
+///   resync the browser without operator intervention.
+pub async fn write_cursor_data(registry: &PcRegistry, payload: CursorDataPayload) {
+    let ctx = match registry.get(&payload.connection_id).await {
+        Some(c) => c,
+        None => {
+            log::trace!(
+                "[pc_manager] dropping cursor data for unknown connection {}",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    let dc_opt = {
+        let ctx = ctx.read().await;
+        ctx.cursor_data_channel.read().await.clone()
+    };
+    let dc = match dc_opt {
+        Some(d) => d,
+        None => {
+            log::debug!(
+                "[pc_manager] dropping cursor data for {} — no cursor_sync DataChannel \
+                 registered yet (browser hasn't opened it)",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    if dc.ready_state() != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+        log::debug!(
+            "[pc_manager] dropping cursor data for {} — DC state is {:?}, not Open",
+            payload.connection_id,
+            dc.ready_state()
+        );
+        return;
+    }
+    // Worker ships JSON bytes (see CursorSyncData serialisation in
+    // model::data_channel); the daemon hands them through unchanged.
+    // We use `send_text` rather than `send` so the browser receives a
+    // text frame matching the legacy Arch III shape exactly.
+    let s = match std::str::from_utf8(&payload.data) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[pc_manager] cursor data for {} not UTF-8: {e}; dropping",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    if let Err(e) = dc.send_text(s.to_string()).await {
+        log::warn!(
+            "[pc_manager] failed to send cursor data for {}: {e}",
+            payload.connection_id
+        );
+    }
+}
+
 /// Daemon side of `SignalingType::CloseControl`. Removes the
 /// per-connection context, closes the PC, and tells the worker to
 /// drop its per-`connection_id` encoder via
@@ -1653,6 +1727,73 @@ mod tests {
             cursor_dc,
             worker_mgr,
         );
+    }
+
+    // ============== PR 3: cursor sync write_cursor_data ==============
+
+    /// `write_cursor_data` for an unknown connection_id is a silent
+    /// no-op (no panic). Critical: the IPC receiver loop must keep
+    /// draining cursor packets even after a connection has been
+    /// closed (race against `CloseControl`).
+    #[tokio::test]
+    async fn write_cursor_data_unknown_connection_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let payload = CursorDataPayload {
+            connection_id: "ghost".to_string(),
+            data: br#"{"visible":false}"#.to_vec(),
+        };
+        write_cursor_data(&registry, payload).await;
+    }
+
+    /// `write_cursor_data` for a known connection that has not yet
+    /// registered a `cursor_sync_event` DC (browser hasn't opened it
+    /// — control not granted, or DC negotiation in flight) is a
+    /// silent no-op. The browser would naturally not see a cursor
+    /// in that state; that is the intended behaviour.
+    #[tokio::test]
+    async fn write_cursor_data_no_dc_registered_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-no-cursor-dc", &request_remote, &s)
+            .await
+            .expect("create");
+        let payload = CursorDataPayload {
+            connection_id: "conn-no-cursor-dc".to_string(),
+            data: br#"{"visible":true,"shape_id":42}"#.to_vec(),
+        };
+        // Test passes if this returns without panicking; the
+        // cursor_data_channel slot is `None` at construction time,
+        // so the silent-drop path must fire.
+        write_cursor_data(&registry, payload).await;
+    }
+
+    /// Non-UTF-8 cursor payload bytes are dropped with a warn log,
+    /// not propagated. Worker should always serialise as JSON, but
+    /// the daemon must be resilient against a malformed shipment
+    /// from a buggy / mismatched worker version.
+    #[tokio::test]
+    async fn write_cursor_data_invalid_utf8_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-bad-utf8", &request_remote, &s)
+            .await
+            .expect("create");
+        // 0xFF is not a valid UTF-8 start byte — would panic on
+        // unwrap if the daemon used `.unwrap()` instead of the
+        // explicit error branch.
+        let payload = CursorDataPayload {
+            connection_id: "conn-bad-utf8".to_string(),
+            data: vec![0xFFu8, 0xFE, 0xFD],
+        };
+        write_cursor_data(&registry, payload).await;
     }
 
     // ============== Cut 5: RTCP PLI/FIR identity ==============

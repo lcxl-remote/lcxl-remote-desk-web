@@ -260,6 +260,15 @@ pub async fn run_signaling_proxy(
                     err.code, err.message, err.recoverable
                 );
             }
+            // PR 3 cursor sync: worker emits CursorData when its
+            // capture loop sees a cursor shape / position update;
+            // daemon writes the JSON bytes to the matching browser's
+            // `cursor_sync_event` DC. Lookup happens in
+            // `pc_manager::write_cursor_data` (silent-drop on
+            // unknown connection / no DC).
+            WorkerToService::CursorData(payload) => {
+                crate::daemon::pc_manager::write_cursor_data(&pc_registry, payload).await;
+            }
             // Arch IV variants — daemon's PR 2 event-pipe handler will
             // own these. The current Arch III signaling_proxy never sees
             // them because no Arch III worker emits them.

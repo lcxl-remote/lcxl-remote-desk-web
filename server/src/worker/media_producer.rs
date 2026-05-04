@@ -21,15 +21,23 @@
 //!   to send a one-shot `WorkerToService::Capabilities` to the daemon
 //!   on Init.
 //!
+//! ## What PR 3 adds
+//!
+//! - **Audio** — a sibling thread alongside video that drives
+//!   `desk-capture-engine`'s audio capture + Opus encoder, ships
+//!   `MediaFrame { Audio, Opus }` over the same media transport.
+//!   Daemon's `write_video_frame` already routes audio frames to the
+//!   per-PC `audio_track`, so no daemon-side change was needed for
+//!   sample writing.
+//! - **Cursor sync** — the video pipeline switches to
+//!   `CursorCaptureMode::SyncNative` when the backend supports it, and
+//!   pushes `WorkerToService::CursorData` IPC packets carrying the
+//!   serialised `CursorSyncData` JSON. Daemon's
+//!   `pc_manager::write_cursor_data` looks up the matching
+//!   `cursor_sync_event` DC and forwards via `dc.send_text(...)`.
+//!
 //! ## Out-of-scope (deferred)
 //!
-//! - **Audio** — handled by PR 3. `MediaCapabilities.audio_codecs` /
-//!   `audio_devices` are still populated so the daemon's device picker
-//!   has the data, but the producer does not run an audio encoder.
-//! - **Cursor sync** — also PR 3. Cut 4 hardcodes
-//!   `CursorCaptureMode::RenderInFrame` so the cursor still appears in
-//!   the encoded video but no separate cursor-sync DataChannel feed
-//!   exists yet.
 //! - **Capture sharing across connections** — plan calls for a single
 //!   capture broadcast feeding multiple encoders. Cut 4 takes the
 //!   simpler one-capture-per-connection path because (a) the more
@@ -49,8 +57,12 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use desk_capture_engine::audio_capture::audio_capture_factory::list_audio_capture;
-use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
+use desk_capture_engine::audio_capture::audio_capture_factory::{
+    create_audio_capture, list_audio_capture,
+};
+use desk_capture_engine::audio_encoder::audio_encoder_factory::{
+    create_audio_encoder, list_audio_encoder,
+};
 use desk_capture_engine::image_capture::image_capture_factory::{
     create_image_capture, list_image_capture,
 };
@@ -68,22 +80,29 @@ use desk_signal_facade::model::desk_settings::DeskSettings;
 use log::{debug, error, info, warn};
 use tokio::sync::mpsc;
 
-/// Per-connection media context. Holds the dedicated thread running
-/// the capture + encode loop plus the flags the event loop flips to
-/// drive it (`stop_flag`, `keyframe_requested`).
+/// Per-connection media context. Holds the dedicated threads running
+/// the capture + encode loops (one for video, one for audio) plus the
+/// flags the event loop flips to drive them. Both pipelines share the
+/// same `stop_flag` so `StopMedia` cleanly tears down both halves at
+/// once.
 struct ConnectionTask {
     stop_flag: Arc<AtomicBool>,
     keyframe_requested: Arc<AtomicBool>,
-    /// Held so the task can be joined on `shutdown()`. None after the
-    /// thread exits naturally on stop_flag observation.
-    handle: Option<thread::JoinHandle<()>>,
+    /// Held so the video task can be joined on `shutdown()`. None
+    /// after the thread exits naturally on stop_flag observation.
+    video_handle: Option<thread::JoinHandle<()>>,
+    /// Audio pipeline handle (PR 3). `None` when the worker did not
+    /// build an audio pipeline for this connection — currently always
+    /// spawned alongside video, but kept Optional so a future cut can
+    /// disable audio per connection without changing the field shape.
+    audio_handle: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for ConnectionTask {
     fn drop(&mut self) {
-        // Belt-and-braces: setting stop_flag here guarantees the thread
-        // observes a stop request even if the caller forgot to call
-        // `stop_media` (e.g. supervisor unwinding on a panic).
+        // Belt-and-braces: setting stop_flag here guarantees both
+        // threads observe a stop request even if the caller forgot to
+        // call `stop_media` (e.g. supervisor unwinding on a panic).
         self.stop_flag.store(true, Ordering::Relaxed);
     }
 }
@@ -130,20 +149,33 @@ impl MediaProducer {
         }
         let stop_flag = Arc::new(AtomicBool::new(false));
         let keyframe_requested = Arc::new(AtomicBool::new(false));
-        let handle = spawn_pipeline_thread(
+        let video_handle = spawn_video_pipeline_thread(
+            self.desk_settings.clone(),
+            payload.clone(),
+            Arc::clone(&self.media_sender),
+            self.error_tx.clone(),
+            Arc::clone(&stop_flag),
+            Arc::clone(&keyframe_requested),
+        );
+        // PR 3: audio pipeline runs in its own dedicated thread (WASAPI
+        // / PipeWire / SCKit handles are COM/system-thread-bound the
+        // same way as the video capture, so a separate thread + a
+        // current-thread Tokio runtime is the right shape — same
+        // pattern Arch III used in `capture_audio_task`).
+        let audio_handle = spawn_audio_pipeline_thread(
             self.desk_settings.clone(),
             payload,
             Arc::clone(&self.media_sender),
             self.error_tx.clone(),
             Arc::clone(&stop_flag),
-            Arc::clone(&keyframe_requested),
         );
         map.insert(
             connection_id,
             ConnectionTask {
                 stop_flag,
                 keyframe_requested,
-                handle: Some(handle),
+                video_handle: Some(video_handle),
+                audio_handle: Some(audio_handle),
             },
         );
     }
@@ -153,11 +185,13 @@ impl MediaProducer {
         let mut map = self.inner.lock().expect("media producer lock poisoned");
         if let Some(mut task) = map.remove(&payload.connection_id) {
             task.stop_flag.store(true, Ordering::Relaxed);
-            // We do not block-join the thread here: the worker IPC loop
-            // must remain responsive. The thread observes stop_flag in
-            // its capture/sleep cycle and exits within one frame
-            // interval. The Drop on ConnectionTask is also a fail-safe.
-            drop(task.handle.take());
+            // We do not block-join the threads here: the worker IPC
+            // loop must remain responsive. Both threads observe
+            // stop_flag in their capture/sleep cycle and exit within
+            // one frame interval. The Drop on ConnectionTask is also a
+            // fail-safe.
+            drop(task.video_handle.take());
+            drop(task.audio_handle.take());
             info!(
                 "[MediaProducer] StopMedia issued for connection {}",
                 payload.connection_id
@@ -305,11 +339,11 @@ fn video_codec_name(c: MediaCodec) -> Option<&'static str> {
     }
 }
 
-/// Spawn the dedicated thread that owns one connection's capture +
-/// encoder. Uses a current-thread Tokio runtime inside the thread so
-/// `media_sender.send_frame(...).await` can run without polluting the
-/// outer runtime with COM-bound state.
-fn spawn_pipeline_thread(
+/// Spawn the dedicated thread that owns one connection's video
+/// capture + encoder. Uses a current-thread Tokio runtime inside the
+/// thread so `media_sender.send_frame(...).await` can run without
+/// polluting the outer runtime with COM-bound state.
+fn spawn_video_pipeline_thread(
     base_settings: DeskSettings,
     payload: StartMediaPayload,
     media_sender: Arc<dyn MediaSender>,
@@ -318,7 +352,7 @@ fn spawn_pipeline_thread(
     keyframe_requested: Arc<AtomicBool>,
 ) -> thread::JoinHandle<()> {
     let connection_id = payload.connection_id.clone();
-    let thread_name = format!("media-{}", &connection_id);
+    let thread_name = format!("media-video-{}", &connection_id);
     thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
@@ -329,7 +363,7 @@ fn spawn_pipeline_thread(
                 Ok(rt) => rt,
                 Err(e) => {
                     error!(
-                        "[MediaProducer] Failed to build runtime for {connection_id}: {e}; \
+                        "[MediaProducer] Failed to build video runtime for {connection_id}: {e}; \
                          pipeline thread exits before first frame"
                     );
                     return;
@@ -337,7 +371,7 @@ fn spawn_pipeline_thread(
             };
             let local = tokio::task::LocalSet::new();
             runtime.block_on(local.run_until(async move {
-                if let Err(e) = pipeline_loop(
+                if let Err(e) = video_pipeline_loop(
                     base_settings,
                     payload,
                     media_sender,
@@ -347,19 +381,69 @@ fn spawn_pipeline_thread(
                 )
                 .await
                 {
-                    error!("[MediaProducer] Pipeline for {connection_id} exited with error: {e}");
+                    error!(
+                        "[MediaProducer] Video pipeline for {connection_id} exited with error: {e}"
+                    );
                 }
             }));
         })
-        .expect("spawn media pipeline thread")
+        .expect("spawn media video pipeline thread")
 }
 
-/// Inner async loop. Builds capture + encoder, then iterates: capture,
-/// honour keyframe flag (recreate encoder so the next encode emits an
-/// IDR), encode, push every NAL as a `MediaFrame`. Heartbeat-frame
-/// behaviour mirrors Arch III: on a static desktop emit one cached
-/// frame per second so the receiver does not stall.
-async fn pipeline_loop(
+/// PR 3: spawn the dedicated thread that owns one connection's audio
+/// capture + Opus encoder. Same threading rationale as
+/// [`spawn_video_pipeline_thread`] — WASAPI / PipeWire / SCKit handles
+/// are system-thread-bound, so audio gets its own thread + runtime.
+/// Errors during construction or capture are logged but never bring
+/// down the worker; the daemon already tolerates a video-only stream
+/// when the worker has no audio device available.
+fn spawn_audio_pipeline_thread(
+    base_settings: DeskSettings,
+    payload: StartMediaPayload,
+    media_sender: Arc<dyn MediaSender>,
+    error_tx: mpsc::UnboundedSender<WorkerToService>,
+    stop_flag: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    let connection_id = payload.connection_id.clone();
+    let thread_name = format!("media-audio-{}", &connection_id);
+    thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    error!(
+                        "[MediaProducer] Failed to build audio runtime for {connection_id}: {e}; \
+                         audio pipeline thread exits before first sample"
+                    );
+                    return;
+                }
+            };
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(async move {
+                if let Err(e) =
+                    audio_pipeline_loop(base_settings, payload, media_sender, error_tx, stop_flag)
+                        .await
+                {
+                    // Audio failures degrade the stream to video-only
+                    // but must not crash the connection; logged so the
+                    // operator can investigate.
+                    warn!("[MediaProducer] Audio pipeline for {connection_id} exited: {e}");
+                }
+            }));
+        })
+        .expect("spawn media audio pipeline thread")
+}
+
+/// Inner async loop for video. Builds capture + encoder, then
+/// iterates: capture, honour keyframe flag (recreate encoder so the
+/// next encode emits an IDR), encode, push every NAL as a `MediaFrame`.
+/// Heartbeat-frame behaviour mirrors Arch III: on a static desktop
+/// emit one cached frame per second so the receiver does not stall.
+async fn video_pipeline_loop(
     base_settings: DeskSettings,
     payload: StartMediaPayload,
     media_sender: Arc<dyn MediaSender>,
@@ -405,15 +489,63 @@ async fn pipeline_loop(
             next_pass_is_idr = true;
         }
 
-        let capture_result = match capture.capture(CaptureRequest {
-            cursor_mode: CursorCaptureMode::RenderInFrame,
-        }) {
+        // PR 3 cursor sync: prefer SyncNative when the capture
+        // backend supports it so the worker can ship cursor shape /
+        // position updates over the dedicated `cursor_sync_event`
+        // DC. Backends that don't support cursor sync fall back to
+        // RenderInFrame, where the cursor is baked into the encoded
+        // video and no cursor IPC is emitted.
+        //
+        // Trade-off: when the daemon hasn't registered a cursor DC
+        // (browser hasn't opened it because control isn't granted),
+        // `write_cursor_data` silently drops the IPC payload and the
+        // browser sees no cursor at all. Arch III handled this by
+        // dynamically flipping cursor_mode based on accept_control,
+        // which would require a new daemon→worker IPC notify. Worth
+        // it only if the no-control no-cursor regression matters;
+        // until then the simpler path is enough.
+        let cursor_mode = if capture.supports_cursor_sync() && merged_settings.show_mouse {
+            CursorCaptureMode::SyncNative
+        } else if !merged_settings.show_mouse {
+            CursorCaptureMode::Disable
+        } else {
+            CursorCaptureMode::RenderInFrame
+        };
+        let capture_result = match capture.capture(CaptureRequest { cursor_mode }) {
             Ok(r) => r,
             Err(e) => {
                 debug!("[MediaProducer:{connection_id}] capture error: {e}; continuing");
                 continue;
             }
         };
+
+        // Push cursor IPC whenever the capture surfaced an update and
+        // we asked for SyncNative. The error_tx is the worker's event
+        // pipe (not the media transport), so cursor packets do not
+        // compete with video frames for the bounded media channel.
+        if matches!(cursor_mode, CursorCaptureMode::SyncNative)
+            && let Some(cursor) = &capture_result.cursor_update
+        {
+            match serde_json::to_vec(cursor) {
+                Ok(bytes) => {
+                    let payload = desk_ipc_protocol::message::CursorDataPayload {
+                        connection_id: connection_id.clone(),
+                        data: bytes,
+                    };
+                    if error_tx.send(WorkerToService::CursorData(payload)).is_err() {
+                        // Event pipe gone — the worker is shutting
+                        // down. Let the next stop_flag check drop us.
+                        debug!(
+                            "[MediaProducer:{connection_id}] event pipe closed; \
+                             cursor IPC will not flow"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("[MediaProducer:{connection_id}] failed to serialise cursor update: {e}");
+                }
+            }
+        }
 
         if !capture_result.content_changed {
             // Static-desktop heartbeat: emit one cached frame per
@@ -478,6 +610,144 @@ async fn pipeline_loop(
     }
 
     info!("[MediaProducer:{connection_id}] Pipeline exiting (stop_flag observed)");
+    Ok(())
+}
+
+/// PR 3 inner async loop for audio. Mirrors Arch III's
+/// `capture_audio_task`: 5 ms ticker drives an inner buffer-drain loop
+/// that pulls 20 ms Opus packets out of the encoder and ships each one
+/// as a `MediaFrame { Audio }` to the daemon. The daemon's
+/// `write_video_frame` already routes `MediaFrameKind::Audio` to the
+/// per-PC `audio_track`, so no daemon-side change is needed for audio
+/// frames themselves to reach the browser.
+///
+/// **Audio codec is locked to Opus** for now — the only audio encoder
+/// the capture-engine factory ships. The IPC `audio_codec` field on
+/// `StartMediaPayload` is kept for forward compatibility but the
+/// worker simply asserts and proceeds with Opus.
+///
+/// Failures during capture init / start / encode propagate up as
+/// `Err(String)` and the spawning thread logs them at warn level — a
+/// degraded video-only stream is preferable to the connection
+/// crashing.
+async fn audio_pipeline_loop(
+    base_settings: DeskSettings,
+    payload: StartMediaPayload,
+    media_sender: Arc<dyn MediaSender>,
+    error_tx: mpsc::UnboundedSender<WorkerToService>,
+    stop_flag: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let connection_id = payload.connection_id.clone();
+    if !matches!(payload.audio_codec, MediaCodec::Opus) {
+        warn!(
+            "[MediaProducer:{connection_id}] Requested audio codec {:?} is not Opus; \
+             worker only ships Opus today — proceeding with Opus and ignoring the request",
+            payload.audio_codec,
+        );
+    }
+
+    info!("[MediaProducer:{connection_id}] Starting audio pipeline (Opus)");
+
+    let mut capture = create_audio_capture(&base_settings).map_err(|e| format!("{e}"))?;
+    let wave_format = capture.start().map_err(|e| format!("{e}"))?;
+    let mut encoder =
+        create_audio_encoder(&base_settings, wave_format).map_err(|e| format!("{e}"))?;
+
+    // 5 ms outer tick + inner drain loop matches Arch III's pacing —
+    // capture buffers fill at the OS audio cadence (typically 10 ms),
+    // and at 5 ms ticks we drain everything sitting in the buffer
+    // before sleeping again. Opus encoded packets carry 20 ms of audio
+    // each by capture-engine convention.
+    let mut ticker = tokio::time::interval(Duration::from_millis(5));
+    const AUDIO_FRAME_DURATION: Duration = Duration::from_millis(20);
+    let audio_duration_ns = AUDIO_FRAME_DURATION.as_nanos().min(u64::MAX as u128) as u64;
+    let mut seq: u64 = 0;
+
+    while !stop_flag.load(Ordering::Relaxed) {
+        ticker.tick().await;
+        if stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Drain whatever the capture has buffered. The inner loop
+        // exits on Empty (encoded buffer length 0) so we get back to
+        // the ticker and yield to the rest of the runtime.
+        loop {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let buffer = match capture.get_buffer() {
+                Ok(b) => b,
+                Err(desk_capture_engine::error::CaptureError::CustomError(err))
+                    if err.error_code == desk_utils::error::DeskErrorCode::ACTION_NEED_RETRY =>
+                {
+                    // Capture stream went away (device unplug, format
+                    // change, sleep/resume). Recreate per Arch III's
+                    // behaviour and continue from the next tick.
+                    warn!(
+                        "[MediaProducer:{connection_id}] audio capture needs retry — \
+                         recreating capture"
+                    );
+                    capture = match create_audio_capture(&base_settings) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(
+                                "[MediaProducer:{connection_id}] audio capture rebuild failed: \
+                                 {e}; audio pipeline exiting"
+                            );
+                            return Ok(());
+                        }
+                    };
+                    if let Err(e) = capture.start() {
+                        warn!(
+                            "[MediaProducer:{connection_id}] audio capture restart failed: \
+                             {e}; audio pipeline exiting"
+                        );
+                        return Ok(());
+                    }
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        "[MediaProducer:{connection_id}] audio get_buffer error: {e}; \
+                         skipping this tick"
+                    );
+                    break;
+                }
+            };
+
+            let encoded = match encoder.encode(buffer.as_ref()) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(
+                        "[MediaProducer:{connection_id}] audio encode error: {e}; \
+                         skipping packet"
+                    );
+                    break;
+                }
+            };
+            // Empty buffer = capture had nothing this tick — go back
+            // to the ticker without sending. Arch III followed the
+            // same convention.
+            if encoded.data.is_empty() {
+                break;
+            }
+            let frame = build_media_frame(
+                &connection_id,
+                seq,
+                audio_duration_ns,
+                MediaFrameKind::Audio,
+                MediaCodec::Opus,
+                encoded.data,
+            );
+            seq += 1;
+            if !send_frame(&media_sender, &error_tx, &connection_id, frame).await {
+                return Ok(());
+            }
+        }
+    }
+
+    info!("[MediaProducer:{connection_id}] Audio pipeline exiting (stop_flag observed)");
     Ok(())
 }
 
@@ -725,5 +995,58 @@ mod tests {
     #[test]
     fn media_transport_stuck_error_code_is_stable() {
         assert_eq!(ERROR_CODE_MEDIA_TRANSPORT_STUCK, -1001);
+    }
+
+    // ============== PR 3 audio + cursor sync tests ==============
+
+    /// `build_media_frame` for an audio packet stamps the right
+    /// `MediaFrameKind` + `MediaCodec` and the daemon's
+    /// `write_video_frame` (which routes audio to `audio_track`)
+    /// can pick the audio path off the resulting frame.
+    #[test]
+    fn build_media_frame_audio_kind_and_opus_codec() {
+        let frame = build_media_frame(
+            "c-audio",
+            7,
+            20_000_000, // 20 ms — Opus packet duration
+            MediaFrameKind::Audio,
+            MediaCodec::Opus,
+            vec![0xCD; 80],
+        );
+        assert_eq!(frame.kind, MediaFrameKind::Audio);
+        assert_eq!(frame.codec, MediaCodec::Opus);
+        assert_eq!(frame.duration_ns, 20_000_000);
+        assert_eq!(frame.payload.len(), 80);
+    }
+
+    /// CursorData payload that the worker emits is well-formed JSON
+    /// (`CursorSyncData` model). Mirrors what the daemon decodes via
+    /// `write_cursor_data` after passing through IPC. We can't drive
+    /// a real capture in this unit test so we hand-build the model
+    /// and verify it survives serde and matches the wire shape the
+    /// browser side expects.
+    #[test]
+    fn cursor_sync_data_serializes_to_json_bytes_for_ipc() {
+        use crate::model::data_channel::CursorSyncData;
+        let cursor = CursorSyncData {
+            base64_png: "AAAA".to_string(),
+            hotspot_x: 4,
+            hotspot_y: 7,
+            visible: true,
+            shape_id: 99,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let bytes = serde_json::to_vec(&cursor).expect("serialise");
+        // Round-trip via UTF-8 + serde to confirm the bytes are
+        // exactly what the daemon's `write_cursor_data` will hand
+        // through to `dc.send_text`. A regression here would mean
+        // the browser-side decoder breaks even though the IPC plumbing
+        // is intact.
+        let s = std::str::from_utf8(&bytes).expect("utf-8");
+        let decoded: CursorSyncData = serde_json::from_str(s).expect("decode");
+        assert_eq!(decoded.shape_id, 99);
+        assert!(decoded.visible);
+        assert_eq!(decoded.screen_width, 1920);
     }
 }
