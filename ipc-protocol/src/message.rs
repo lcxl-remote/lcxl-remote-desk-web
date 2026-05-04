@@ -19,6 +19,19 @@ pub enum ServiceToWorker {
     /// Force the worker to shut down immediately.
     Shutdown,
 
+    /// Forward a raw `SignalingType` JSON envelope to the worker.
+    ///
+    /// **Transitional bridge.** Arch IV moved WebRTC SDP/ICE handling and
+    /// the per-connection accept-state into the daemon, but the
+    /// `signaling_router` still classifies many user-session signaling
+    /// types (terminal management, manager file/system queries,
+    /// `EnablePrivateScreen`, `UpdateDeskSettings`, etc.) as
+    /// `RouteOutcome::ForwardToWorker` because their handlers live in
+    /// the user-session worker process. Until each of those types has a
+    /// typed event-transport variant, the daemon ships them through
+    /// this opaque envelope.
+    SignalingMessage(SignalingPayload),
+
     // ---------- Arch IV media control (event pipe) ----------
     /// Start a per-connection media pipeline (capture + per-connection
     /// video/audio encoder). Capture is shared across connections; the
@@ -92,6 +105,15 @@ pub enum WorkerToService {
     /// codec for new offers and to populate the UI's device pickers.
     Capabilities(MediaCapabilities),
 
+    /// Forward a worker-emitted signaling JSON envelope back to the
+    /// browser. Counterpart to [`ServiceToWorker::SignalingMessage`] —
+    /// the daemon writes the message verbatim onto the corresponding
+    /// signaling WebSocket. Used for terminal output, manager file /
+    /// system info responses, and any other reply produced by the
+    /// worker's `DeskSession::handle_message` paths that have not yet
+    /// migrated to a typed event-transport variant.
+    SignalingMessage(SignalingPayload),
+
     /// Worker reports its health status
     Heartbeat(HeartbeatPayload),
 
@@ -161,6 +183,21 @@ pub struct WorkerInitPayload {
     /// mode" until the cut that wires media_producer (PR 2 / cut 4).
     #[serde(default)]
     pub media_pipe_name: Option<String>,
+}
+
+/// Opaque signaling envelope used by the
+/// [`ServiceToWorker::SignalingMessage`] /
+/// [`WorkerToService::SignalingMessage`] transitional bridge. Carries
+/// the raw `SignalingType` JSON so the receiving end can re-parse
+/// using its existing dispatcher.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct SignalingPayload {
+    /// Raw `SignalingType` JSON (the wire shape sent over the
+    /// browser ↔ signaling-server WebSocket).
+    pub message: String,
+    /// `from_connection_id` extracted by the daemon at parse time so
+    /// the worker can dispatch without a second JSON parse.
+    pub connection_id: Option<String>,
 }
 
 // =============== Arch IV: media + per-connection control ===============

@@ -12,12 +12,13 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, WorkerInitPayload,
-        WorkerToService,
+        DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, SignalingPayload,
+        WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
 use desk_server_user::model::CurrentUser;
+use desk_signal_facade::model::signal::SignalingModel;
 use log::{error, info, warn};
 use std::{
     sync::Arc,
@@ -381,6 +382,35 @@ impl WorkerSession {
                     match msg_result {
                         Some(Some(msg)) => {
                             match msg {
+                                ServiceToWorker::SignalingMessage(payload) => {
+                                    // Transitional bridge: daemon's
+                                    // `signaling_router` forwards
+                                    // worker-owned types (terminal,
+                                    // EnablePrivateScreen,
+                                    // UpdateDeskSettings, manager file/
+                                    // system queries) over this opaque
+                                    // envelope. The worker re-parses
+                                    // and dispatches via the existing
+                                    // `DeskSession::handle_message`.
+                                    match serde_json::from_str::<SignalingModel>(&payload.message) {
+                                        Ok(signaling_model) => {
+                                            if let Err(e) = desk_session
+                                                .handle_message(&signaling_model)
+                                                .await
+                                            {
+                                                warn!(
+                                                    "DeskSession handle_message error: {}, type={}, request_id={}",
+                                                    e,
+                                                    signaling_model.signaling_type,
+                                                    signaling_model.request_id
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to parse signaling message: {}", e);
+                                        }
+                                    }
+                                }
                                 ServiceToWorker::Shutdown => {
                                     info!("Received Shutdown command");
                                     if let Err(e) = desk_session.shutdown().await {
@@ -509,12 +539,21 @@ impl WorkerSession {
 
                 desk_msg = desk_rx.recv() => {
                     match desk_msg {
-                        // Arch IV: DeskSession in the worker no longer
-                        // produces signaling text — the daemon owns the PC
-                        // and writes directly to the browser. Drop instead
-                        // of forwarding (the SignalingMessage IPC variant
-                        // is gone in Arch IV / PR 7).
-                        Some(DeskSessionMessage::Text(_text)) => {}
+                        Some(DeskSessionMessage::Text(text)) => {
+                            // Worker-emitted signaling reply (terminal
+                            // output, manager queries, file/system
+                            // info responses). Daemon's signaling proxy
+                            // ships this onto the corresponding
+                            // outbound WS so the browser sees it.
+                            let payload = WorkerToService::SignalingMessage(SignalingPayload {
+                                message: text.to_string(),
+                                connection_id: None,
+                            });
+                            if writer_tx.send(payload).is_err() {
+                                error!("IPC writer task died; exiting main loop");
+                                break;
+                            }
+                        }
                         Some(DeskSessionMessage::Binary(_bin)) => {
                             warn!("DeskSession sent binary message, skipping IPC forward");
                         }

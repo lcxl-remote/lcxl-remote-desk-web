@@ -5,7 +5,7 @@ use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
 use awc::{Client, Connector};
-use desk_ipc_protocol::message::WorkerToService;
+use desk_ipc_protocol::message::{ServiceToWorker, SignalingPayload, WorkerToService};
 use desk_signal_facade::model::{
     signal::{RemoteDeskTypeEnum, SignalingModel},
     version::VersionInfo,
@@ -203,6 +203,19 @@ pub async fn run_signaling_proxy(
                 // place. For the very first Capabilities (no PCs yet,
                 // no cached offers) this is a no-op.
                 pc_registry.resume_active_media(&worker_mgr).await;
+            }
+            // Worker-emitted signaling reply (terminal output, manager
+            // queries, file/system responses, etc.) — write straight onto
+            // the outbound channel so the WS sinks ship it back to the
+            // browser. Counterpart to the daemon-side
+            // `ServiceToWorker::SignalingMessage` forward in
+            // `handle_inbound_signaling_text`.
+            WorkerToService::SignalingMessage(payload) => {
+                debug!(
+                    "[SignalingProxy] Worker signaling response (len={})",
+                    payload.message.len()
+                );
+                let _ = outbound_tx.send(payload.message);
             }
             WorkerToService::Heartbeat(hb) => {
                 log::trace!(
@@ -472,18 +485,31 @@ async fn handle_inbound_signaling_text(
         return;
     }
 
-    // After PR 7 every browser-bound signaling type is daemon-handled by
-    // `signaling_router`. Anything still returning `ForwardToWorker` means
-    // the router has a missing arm — surface it loudly rather than silently
-    // dropping. Since the worker no longer accepts `SignalingMessage` we
-    // would have nowhere to send it anyway.
-    warn!(
-        "[Proxy] router returned ForwardToWorker for {:?}; the worker does not handle \
-         signaling in Arch IV — dropping. Add a daemon-side handler if this is reachable.",
-        parsed.signaling_type,
-    );
-    let _ = worker_mgr; // retained to avoid an unused-binding warning
-    let _ = text_str;
+    // Worker-owned types (terminal management, manager file / system
+    // info, EnablePrivateScreen, UpdateDeskSettings, etc.) are routed
+    // back to the user-session worker via the transitional
+    // `SignalingMessage` IPC bridge. Future cuts can replace each type
+    // with a typed event-transport variant; until then this preserves
+    // the management plane that PR 4's typed forwarders did not cover.
+    let from_connection_id = match parsed.from_connection_id.as_ref() {
+        Some(id) => id.clone(),
+        None => {
+            warn!(
+                "[Proxy] Dropping worker-bound signaling without from_connection_id: {:?} \
+                 (worker dispatcher requires the id without re-parsing the JSON)",
+                parsed.signaling_type,
+            );
+            return;
+        }
+    };
+
+    let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
+        message: text_str,
+        connection_id: Some(from_connection_id),
+    });
+    if let Err(e) = worker_mgr.send_to_worker(msg).await {
+        warn!("[Proxy] Failed to forward to worker: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -510,19 +536,18 @@ mod tests {
         (ctx, outbound_tx, worker_mgr)
     }
 
-    /// Any signaling type the router declines to handle (post-PR 7 the
-    /// worker has no signaling channel left, so `ForwardToWorker` is
-    /// effectively a "drop" outcome) must not panic the dispatcher.
+    /// Worker-owned signaling without `from_connection_id` is dropped
+    /// at the daemon (rather than forwarded as `connection_id: None`)
+    /// — the worker dispatcher requires the id without a re-parse.
     #[tokio::test]
-    async fn drops_router_forward_to_worker_without_panic() {
+    async fn drops_worker_bound_message_without_from_connection_id() {
         let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
 
-        // RequireControl is now daemon-handled, but if the router were
-        // ever extended with a type that still falls through to the
-        // worker, the dispatcher must drop it cleanly.
+        // EnablePrivateScreen is worker-owned (router returns
+        // `ForwardToWorker`).
         let model = SignalingModel::new(
             "req-1",
-            SignalingType::RequireControl,
+            SignalingType::EnablePrivateScreen,
             None,
             None,
             None,
@@ -530,6 +555,8 @@ mod tests {
         );
         let text = serde_json::to_string(&model).unwrap();
 
+        // No active worker — send_to_worker errors but the dispatcher
+        // logs and returns cleanly.
         handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
     }
 
@@ -560,6 +587,29 @@ mod tests {
             "req-2",
             SignalingType::RequestRemote,
             None, // missing from_connection_id triggers handler error
+            None,
+            None,
+            None,
+        );
+        let text = serde_json::to_string(&model).unwrap();
+
+        handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
+    }
+
+    /// Worker-owned signaling with `from_connection_id` reaches the
+    /// `send_to_worker` path. Without an active worker the call errors
+    /// (logged) but the dispatcher must still return cleanly. The
+    /// successful-forward case is covered by the production
+    /// `ServiceToWorker::SignalingMessage` round-trip in
+    /// `desk-ipc-protocol`.
+    #[tokio::test]
+    async fn worker_owned_with_from_connection_id_does_not_panic() {
+        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
+
+        let model = SignalingModel::new(
+            "req-3",
+            SignalingType::EnablePrivateScreen,
+            Some("conn-x".to_string()),
             None,
             None,
             None,
