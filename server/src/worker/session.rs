@@ -73,7 +73,7 @@ fn build_hub_from_init(
 async fn dispatch_typed_signaling<T>(
     desk_session: &mut DeskSession,
     signaling_type: SignalingType,
-    connection_id: String,
+    connection_id: Option<String>,
     data: &T,
 ) where
     T: serde::Serialize + ?Sized,
@@ -99,11 +99,21 @@ async fn dispatch_typed_signaling<T>(
 /// Also accepts an `Option<&T>` body so empty-body requests
 /// (`ManagerSystemInfoRequest` / `ManagerQuerySettingsRequest`) can
 /// share this helper without serialising a synthetic placeholder.
+///
+/// `connection_id` is `Option<String>` because manager-plane and
+/// `ListTerminal` requests can be dispatched from a HTTP REST
+/// controller (no originating browser PC). The synthetic
+/// `SignalingModel` we hand to `DeskSession::handle_message` simply
+/// carries a `None` `from_connection_id` in that case; the
+/// downstream worker handlers (`handle_manager_file_list`,
+/// `handle_list_terminals`, ...) already tolerate `None`, and
+/// `send_response` echoes it back into the response model's
+/// `to_connection_id`.
 async fn dispatch_typed_signaling_with_request_id<T>(
     desk_session: &mut DeskSession,
     signaling_type: SignalingType,
     request_id: String,
-    connection_id: String,
+    connection_id: Option<String>,
     data: Option<&T>,
 ) where
     T: serde::Serialize + ?Sized,
@@ -113,7 +123,7 @@ async fn dispatch_typed_signaling_with_request_id<T>(
             Ok(v) => Some(v),
             Err(e) => {
                 warn!(
-                    "Failed to serialise {signaling_type:?} payload for {connection_id}: \
+                    "Failed to serialise {signaling_type:?} payload for {connection_id:?}: \
                      {e}; dropping",
                 );
                 return;
@@ -124,7 +134,7 @@ async fn dispatch_typed_signaling_with_request_id<T>(
     let model = SignalingModel::new(
         &request_id,
         signaling_type,
-        Some(connection_id.clone()),
+        connection_id.clone(),
         None,
         signaling_data,
         None,
@@ -132,7 +142,7 @@ async fn dispatch_typed_signaling_with_request_id<T>(
     if let Err(e) = desk_session.handle_message(&model).await {
         warn!(
             "DeskSession handle_message error for typed {signaling_type:?}: {e}, \
-             connection_id={connection_id}, request_id={request_id}",
+             connection_id={connection_id:?}, request_id={request_id}",
         );
     }
 }
@@ -222,22 +232,23 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
                 },
             ))
         }
-        // Batch 2: manager-plane responses. `send_response` writes the
-        // target browser PC into `to_connection_id`; the original
-        // request's id is in `request_id`.
+        // Batch 2: manager-plane responses. `send_response` echoes
+        // `from_connection_id` of the inbound request as
+        // `to_connection_id` of the outbound response; HTTP-API-
+        // triggered manager requests carry `None`, so the typed
+        // payload also carries `Option<String>` and the daemon
+        // correlates the response by `request_id` alone.
         SignalingType::ManagerSystemInfo => {
-            let connection_id = model.to_connection_id.clone()?;
             let info = model.get_data_with_type::<SystemInfo>().ok().flatten()?;
             Some(WorkerToService::ManagerSystemInfoResponse(
                 ManagerSystemInfoResponsePayload {
                     request_id: model.request_id.clone(),
-                    connection_id,
+                    connection_id: model.to_connection_id.clone(),
                     info,
                 },
             ))
         }
         SignalingType::ManagerQuerySettings => {
-            let connection_id = model.to_connection_id.clone()?;
             let settings = model
                 .get_data_with_type::<RemoteSystemSettings>()
                 .ok()
@@ -245,13 +256,12 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
             Some(WorkerToService::ManagerQuerySettingsResponse(
                 ManagerQuerySettingsResponsePayload {
                     request_id: model.request_id.clone(),
-                    connection_id,
+                    connection_id: model.to_connection_id.clone(),
                     settings,
                 },
             ))
         }
         SignalingType::ManagerFileList => {
-            let connection_id = model.to_connection_id.clone()?;
             let response = model
                 .get_data_with_type::<FileListResponse>()
                 .ok()
@@ -259,33 +269,28 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
             Some(WorkerToService::ManagerFileListResponse(
                 ManagerFileListResponsePayload {
                     request_id: model.request_id.clone(),
-                    connection_id,
+                    connection_id: model.to_connection_id.clone(),
                     response,
                 },
             ))
         }
         // ManagerFileDelete / ManagerUpdateSettings responses carry
         // an empty body (`&()`), so a successful round-trip omits
-        // signaling_data; only `to_connection_id` + `request_id` are
-        // needed to route.
-        SignalingType::ManagerFileDelete => {
-            let connection_id = model.to_connection_id.clone()?;
-            Some(WorkerToService::ManagerFileDeleteResponse(
-                ManagerResponseRefPayload {
-                    request_id: model.request_id.clone(),
-                    connection_id,
-                },
-            ))
-        }
-        SignalingType::ManagerUpdateSettings => {
-            let connection_id = model.to_connection_id.clone()?;
-            Some(WorkerToService::ManagerUpdateSettingsResponse(
-                ManagerResponseRefPayload {
-                    request_id: model.request_id.clone(),
-                    connection_id,
-                },
-            ))
-        }
+        // signaling_data; `request_id` alone is enough to correlate
+        // back to the originating HTTP REST controller (or browser
+        // PC, when `to_connection_id` is `Some`).
+        SignalingType::ManagerFileDelete => Some(WorkerToService::ManagerFileDeleteResponse(
+            ManagerResponseRefPayload {
+                request_id: model.request_id.clone(),
+                connection_id: model.to_connection_id.clone(),
+            },
+        )),
+        SignalingType::ManagerUpdateSettings => Some(
+            WorkerToService::ManagerUpdateSettingsResponse(ManagerResponseRefPayload {
+                request_id: model.request_id.clone(),
+                connection_id: model.to_connection_id.clone(),
+            }),
+        ),
         // Batch 3: terminal-plane responses + notifications. The
         // worker's terminal handlers always set the target browser in
         // `to_connection_id` (either via `success_response` for
@@ -318,12 +323,11 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
             ))
         }
         SignalingType::ListTerminal => {
-            let connection_id = model.to_connection_id.clone()?;
             let terminals = model.get_data_with_type::<TerminalList>().ok().flatten()?;
             Some(WorkerToService::ListTerminalResponse(
                 ListTerminalResponsePayload {
                     request_id: model.request_id.clone(),
-                    connection_id,
+                    connection_id: model.to_connection_id.clone(),
                     terminals,
                 },
             ))
@@ -794,7 +798,7 @@ impl WorkerSession {
                                     dispatch_typed_signaling(
                                         &mut desk_session,
                                         SignalingType::EnablePrivateScreen,
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         &EnablePrivateScreenData {
                                             enable: payload.enable,
                                         },
@@ -805,7 +809,7 @@ impl WorkerSession {
                                     dispatch_typed_signaling(
                                         &mut desk_session,
                                         SignalingType::UpdateDeskSettings,
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         &payload.settings,
                                     )
                                     .await;
@@ -887,7 +891,7 @@ impl WorkerSession {
                                         &mut desk_session,
                                         SignalingType::StartTerminal,
                                         payload.request_id,
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         Some(&payload.session),
                                     )
                                     .await;
@@ -896,7 +900,7 @@ impl WorkerSession {
                                     dispatch_typed_signaling(
                                         &mut desk_session,
                                         SignalingType::SendDataToTerminal,
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         &payload.data,
                                     )
                                     .await;
@@ -905,7 +909,7 @@ impl WorkerSession {
                                     dispatch_typed_signaling(
                                         &mut desk_session,
                                         SignalingType::ResizeTerminal,
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         &payload.data,
                                     )
                                     .await;
@@ -922,7 +926,7 @@ impl WorkerSession {
                                         // form so a future test can pin the
                                         // request_id surface in trace logs.
                                         "typed-ipc".to_string(),
-                                        payload.connection_id,
+                                        Some(payload.connection_id),
                                         Option::<&()>::None,
                                     )
                                     .await;
@@ -1433,7 +1437,7 @@ mod tests {
         match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::ManagerSystemInfoResponse(p) => {
                 assert_eq!(p.request_id, "req-info-1");
-                assert_eq!(p.connection_id, "conn-info");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-info"));
                 assert_eq!(p.info.name.as_deref(), Some("alice-pc"));
                 assert_eq!(p.info.is_admin, Some(true));
             }
@@ -1475,7 +1479,7 @@ mod tests {
                     WorkerToService::ManagerUpdateSettingsResponse(p),
                 ) => {
                     assert_eq!(p.request_id, "req-empty");
-                    assert_eq!(p.connection_id, "conn-empty");
+                    assert_eq!(p.connection_id.as_deref(), Some("conn-empty"));
                 }
                 (expected, other) => {
                     panic!("expected {expected}, got {other:?}");
@@ -1578,7 +1582,7 @@ mod tests {
         match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::ListTerminalResponse(p) => {
                 assert_eq!(p.request_id, "req-list");
-                assert_eq!(p.connection_id, "conn-list");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
                 assert_eq!(p.terminals.commands.len(), 1);
                 assert_eq!(p.terminals.current, 0);
             }
@@ -1586,25 +1590,34 @@ mod tests {
         }
     }
 
-    /// Batch 4: a `ManagerSystemInfo` response missing
-    /// `to_connection_id` would be a bug in `send_response`; the
-    /// typed router's `model.to_connection_id.clone()?` short-circuits
-    /// to `None` and the helper now logs + drops (no SignalingMessage
-    /// fallback exists). Pinning this guards against silently
-    /// promoting a malformed response onto the wire.
+    /// Batch B (HTTP-API correlation): a `ManagerSystemInfo` response
+    /// produced by `handle_manager_system_info` for a HTTP-REST-
+    /// triggered request carries `to_connection_id == None` because
+    /// the original request from `signal-facade::request_peer_with_callback`
+    /// had no `from_connection_id`. The typed dispatcher must still
+    /// route it (the daemon's signal/manager bus correlates the
+    /// response by `request_id` alone in that case); a previous
+    /// `model.to_connection_id.clone()?` short-circuit silently
+    /// dropped these and broke `GET /api/desk/files/...`.
     #[test]
-    fn outbound_dispatch_manager_response_without_to_connection_is_dropped() {
+    fn outbound_dispatch_manager_response_without_to_connection_routes_with_none() {
         let info = SystemInfo::default();
         let model = SignalingModel::success_response(
             "req-info-noid",
             SignalingType::ManagerSystemInfo,
             None,
-            None, // <- missing to_connection_id
+            None, // HTTP-API trigger: no originating browser PC
             Some(&info),
         )
         .expect("build response");
         let text = serde_json::to_string(&model).expect("serialise");
-        assert!(build_outbound_payload_from_desk_text(text).is_none());
+        match build_outbound_payload_from_desk_text(text).expect("typed route") {
+            WorkerToService::ManagerSystemInfoResponse(p) => {
+                assert_eq!(p.request_id, "req-info-noid");
+                assert!(p.connection_id.is_none());
+            }
+            other => panic!("expected ManagerSystemInfoResponse, got {other:?}"),
+        }
     }
 
     /// Forwarder task exits immediately if the underlying transport returns

@@ -439,11 +439,17 @@ pub async fn run_signaling_proxy(
             // `ListTerminalResponse` is a `success_response` for
             // `ListTerminal`.
             WorkerToService::TerminalStarted(payload) => {
+                // Terminal session traffic always carries a
+                // `from_connection_id` (open_terminal_session mints
+                // one per terminal WS); wrap it in `Some` so the
+                // shared helper signature stays unified with
+                // manager-plane responses where it's `Option`.
+                let to = Some(payload.connection_id);
                 send_manager_response(
                     &outbound_tx,
                     "TerminalStarted",
                     &payload.request_id,
-                    &payload.connection_id,
+                    &to,
                     SignalingType::TerminalStarted,
                     Option::<&()>::None,
                 );
@@ -494,13 +500,16 @@ pub async fn run_signaling_proxy(
 /// non-fatal — log + drop, no panic on the bus.
 ///
 /// `from_connection_id` is left `None` (the daemon is the responder
-/// here, not a peer browser); `to_connection_id` is the browser PC
-/// the original request came from.
+/// here, not a peer browser); `to_connection_id` is `Option<String>`
+/// because manager-plane / `ListTerminal` requests can be HTTP-API-
+/// triggered without an originating browser PC — in that case the
+/// signal/manager server matches the response by `request_id` alone
+/// (see `signal-facade::model::connection::request_callback_map`).
 fn send_manager_response<T>(
     outbound_tx: &broadcast::Sender<String>,
     type_name: &'static str,
     request_id: &str,
-    connection_id: &str,
+    connection_id: &Option<String>,
     signaling_type: SignalingType,
     data: Option<&T>,
 ) where
@@ -510,7 +519,7 @@ fn send_manager_response<T>(
         request_id,
         signaling_type,
         None,
-        Some(connection_id.to_string()),
+        connection_id.clone(),
         data,
     ) {
         Ok(model) => match serde_json::to_string(&model) {
@@ -518,12 +527,12 @@ fn send_manager_response<T>(
                 let _ = outbound_tx.send(text);
             }
             Err(e) => warn!(
-                "[SignalingProxy] Failed to serialise {type_name} response for {connection_id}: \
+                "[SignalingProxy] Failed to serialise {type_name} response for {connection_id:?}: \
                  {e} (request_id={request_id})"
             ),
         },
         Err(e) => warn!(
-            "[SignalingProxy] Failed to build {type_name} response model for {connection_id}: \
+            "[SignalingProxy] Failed to build {type_name} response model for {connection_id:?}: \
              {e} (request_id={request_id})"
         ),
     }

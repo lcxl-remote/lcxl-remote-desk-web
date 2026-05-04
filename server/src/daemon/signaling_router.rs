@@ -436,11 +436,10 @@ async fn handle_update_desk_settings_inbound(
 // log + drop, same fail-soft semantics the SignalingMessage bridge
 // had.
 
-/// Helper: extract `from_connection_id` from an inbound manager
-/// request. Missing => log and return None so the caller drops the
-/// message. Manager queries always carry a connection_id (the daemon
-/// inserts it during inbound parse), so a missing one is a protocol
-/// error rather than a routine state.
+/// Helper: extract `from_connection_id` from an inbound model when
+/// the routing path requires one (e.g. terminal session traffic that
+/// keys per-PTY on the originating browser/terminal connection).
+/// Missing => log and return None so the caller drops the message.
 fn require_from_connection_id<'a>(
     model: &'a SignalingModel,
     signaling_type_name: &'static str,
@@ -458,16 +457,26 @@ fn require_from_connection_id<'a>(
     }
 }
 
+/// Helper: clone `from_connection_id` from an inbound model where
+/// `None` is a legitimate state — used by manager-plane and
+/// `ListTerminal` routing because those `SignalingType`s can be
+/// dispatched from a HTTP REST controller (e.g.
+/// `signal-facade::controller::sysinfo::list_files`) via
+/// `connection.request_peer_with_callback`, which does not populate
+/// `from_connection_id`. The response is correlated by `request_id`
+/// alone in that case, so the typed IPC payload simply carries
+/// `Option<String>` through to the worker.
+fn optional_from_connection_id(model: &SignalingModel) -> Option<String> {
+    model.from_connection_id.clone()
+}
+
 async fn handle_manager_system_info_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ManagerSystemInfo") else {
-        return Ok(());
-    };
     let payload = ManagerRequestRefPayload {
         request_id: model.request_id.clone(),
-        connection_id: connection_id.to_string(),
+        connection_id: optional_from_connection_id(model),
     };
     if let Err(e) = ctx
         .worker_mgr
@@ -483,12 +492,9 @@ async fn handle_manager_query_settings_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ManagerQuerySettings") else {
-        return Ok(());
-    };
     let payload = ManagerRequestRefPayload {
         request_id: model.request_id.clone(),
-        connection_id: connection_id.to_string(),
+        connection_id: optional_from_connection_id(model),
     };
     if let Err(e) = ctx
         .worker_mgr
@@ -504,14 +510,12 @@ async fn handle_manager_file_list_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ManagerFileList") else {
-        return Ok(());
-    };
+    let connection_id = optional_from_connection_id(model);
     let params = match model.get_data::<FileListParams>() {
         Ok(p) => p,
         Err(e) => {
             log::warn!(
-                "[router] ManagerFileList payload parse failed for {connection_id}: {e}; \
+                "[router] ManagerFileList payload parse failed for {connection_id:?}: {e}; \
                  dropping (request_id={})",
                 model.request_id,
             );
@@ -520,7 +524,7 @@ async fn handle_manager_file_list_inbound(
     };
     let payload = ManagerFileListRequestPayload {
         request_id: model.request_id.clone(),
-        connection_id: connection_id.to_string(),
+        connection_id,
         params,
     };
     if let Err(e) = ctx
@@ -537,14 +541,12 @@ async fn handle_manager_file_delete_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ManagerFileDelete") else {
-        return Ok(());
-    };
+    let connection_id = optional_from_connection_id(model);
     let request = match model.get_data::<DeleteFileRequest>() {
         Ok(r) => r,
         Err(e) => {
             log::warn!(
-                "[router] ManagerFileDelete payload parse failed for {connection_id}: {e}; \
+                "[router] ManagerFileDelete payload parse failed for {connection_id:?}: {e}; \
                  dropping (request_id={})",
                 model.request_id,
             );
@@ -553,7 +555,7 @@ async fn handle_manager_file_delete_inbound(
     };
     let payload = ManagerFileDeleteRequestPayload {
         request_id: model.request_id.clone(),
-        connection_id: connection_id.to_string(),
+        connection_id,
         request,
     };
     if let Err(e) = ctx
@@ -570,14 +572,12 @@ async fn handle_manager_update_settings_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ManagerUpdateSettings") else {
-        return Ok(());
-    };
+    let connection_id = optional_from_connection_id(model);
     let settings = match model.get_data::<RemoteSystemSettings>() {
         Ok(s) => s,
         Err(e) => {
             log::warn!(
-                "[router] ManagerUpdateSettings payload parse failed for {connection_id}: \
+                "[router] ManagerUpdateSettings payload parse failed for {connection_id:?}: \
                  {e}; dropping (request_id={})",
                 model.request_id,
             );
@@ -586,7 +586,7 @@ async fn handle_manager_update_settings_inbound(
     };
     let payload = ManagerUpdateSettingsRequestPayload {
         request_id: model.request_id.clone(),
-        connection_id: connection_id.to_string(),
+        connection_id,
         settings,
     };
     if let Err(e) = ctx
@@ -735,12 +735,9 @@ async fn handle_list_terminal_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let Some(connection_id) = require_from_connection_id(model, "ListTerminal") else {
-        return Ok(());
-    };
     let payload = ListTerminalRequestPayload {
         request_id: model.request_id.clone(),
-        connection_id: connection_id.to_string(),
+        connection_id: optional_from_connection_id(model),
     };
     if let Err(e) = ctx
         .worker_mgr
@@ -1045,14 +1042,81 @@ mod tests {
         }
     }
 
-    /// Manager requests without a `from_connection_id` are protocol
-    /// errors — daemon logs and drops, no panic, no IPC send.
+    /// HTTP-API-triggered manager requests (e.g.
+    /// `signal-facade::controller::sysinfo` →
+    /// `connection.request_peer_with_callback`) carry no
+    /// `from_connection_id`; the router must still forward the typed
+    /// request to the worker so the response can flow back via
+    /// `request_id` correlation. Previously the router dropped these
+    /// — that broke `GET /api/desk/files/...` and `GET
+    /// /api/desk/terminals/...` in portable mode.
     #[tokio::test]
-    async fn route_manager_request_without_connection_id_is_noop() {
+    async fn route_manager_request_without_connection_id_forwards() {
+        let ctx = make_ctx();
+        for t in [
+            SignalingType::ManagerSystemInfo,
+            SignalingType::ManagerQuerySettings,
+            SignalingType::ManagerFileDelete,
+            SignalingType::ManagerUpdateSettings,
+        ] {
+            let body = match t {
+                SignalingType::ManagerFileDelete => Some(
+                    serde_json::to_value(desk_signal_facade::model::files::DeleteFileRequest {
+                        file_path: "C:\\old.txt".to_string(),
+                        delete_permanently: Some(false),
+                        connection_id: None,
+                    })
+                    .unwrap(),
+                ),
+                SignalingType::ManagerUpdateSettings => Some(
+                    serde_json::to_value(
+                        desk_signal_facade::model::system_settings::RemoteSystemSettings::default(),
+                    )
+                    .unwrap(),
+                ),
+                _ => None,
+            };
+            let model = SignalingModel::new("req-no-conn", t, None, None, body, None);
+            assert!(
+                route(&model, &ctx).await.is_ok(),
+                "{t:?} with None from_connection_id must be forwarded, not dropped",
+            );
+        }
+    }
+
+    /// `ManagerFileList` specifically — same regression as the umbrella
+    /// test above, but pinned with a real `FileListParams` body so a
+    /// future split that re-introduces a `require_from_connection_id`
+    /// guard on the file-list path lights up here.
+    #[tokio::test]
+    async fn route_manager_file_list_without_connection_id_forwards() {
+        let ctx = make_ctx();
+        let params = desk_signal_facade::model::files::FileListParams {
+            path: "C:\\".to_string(),
+            page_no: 1,
+            page_count: 50,
+            ..Default::default()
+        };
+        let model = SignalingModel::new(
+            "req-fl-no-conn",
+            SignalingType::ManagerFileList,
+            None,
+            None,
+            Some(serde_json::to_value(&params).unwrap()),
+            None,
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+    }
+
+    /// `ListTerminal` is dispatched by
+    /// `signal-facade::controller::terminal::list_terminal` (REST GET)
+    /// without a `from_connection_id`. The router must forward it.
+    #[tokio::test]
+    async fn route_list_terminal_without_connection_id_forwards() {
         let ctx = make_ctx();
         let model = SignalingModel::new(
-            "req-info-noid",
-            SignalingType::ManagerSystemInfo,
+            "req-list-no-conn",
+            SignalingType::ListTerminal,
             None,
             None,
             None,

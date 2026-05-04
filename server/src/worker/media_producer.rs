@@ -302,21 +302,17 @@ impl MediaProducer {
             .into_iter()
             .filter_map(|s| codec_from_str(&s, false))
             .collect::<Vec<_>>();
-        let video_devices = list_image_capture()
-            .into_values()
-            .flat_map(|displays| displays.into_iter().map(|d| d.device_name))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
-        let audio_devices = list_audio_capture()
-            .into_values()
-            .flat_map(|devices| devices.into_iter().map(|d| d.firendly_name))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>();
+        // Daemon's `pc_manager` echoes these maps verbatim into
+        // `InitSignalingData::{video,audio}_device_list`, so the
+        // browser's capture-source picker keeps the per-driver
+        // grouping it had in the Arch III worker-owned-PC path.
+        let video_device_list = list_image_capture();
+        let audio_device_list = list_audio_capture();
         MediaCapabilities {
             video_codecs,
             audio_codecs,
-            video_devices,
-            audio_devices,
+            video_device_list,
+            audio_device_list,
             has_tauri,
             is_admin: desk_utils::permission::is_admin(),
             desktop_name: desktop_name.unwrap_or("").to_string(),

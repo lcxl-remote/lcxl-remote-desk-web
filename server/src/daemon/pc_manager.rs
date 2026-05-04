@@ -885,10 +885,17 @@ pub async fn handle_request_remote(
     // `WorkerToService::Capabilities` snapshot when available; fall
     // back to capture-engine's static factory enumerations for the
     // codec lists when the worker hasn't reported yet (first-Init
-    // race window). Device lists stay empty in the fallback path —
-    // those genuinely require a live worker enumeration.
-    let (audio_encoder_list, video_encoder_list, is_admin_value) = if let Some(caps) = capabilities
-    {
+    // race window). The fallback path leaves device lists empty
+    // because device enumeration requires a live capture stack on
+    // the worker's desktop — the daemon (running as SYSTEM in
+    // ServiceDaemon mode) cannot produce a meaningful list itself.
+    let (
+        audio_encoder_list,
+        video_encoder_list,
+        audio_device_list,
+        video_device_list,
+        is_admin_value,
+    ) = if let Some(caps) = capabilities {
         (
             caps.audio_codecs
                 .iter()
@@ -898,21 +905,25 @@ pub async fn handle_request_remote(
                 .iter()
                 .filter_map(media_codec_to_str)
                 .collect::<Vec<_>>(),
+            caps.audio_device_list.clone(),
+            caps.video_device_list.clone(),
             caps.is_admin,
         )
     } else {
         (
             list_audio_encoder(),
             list_video_encoder(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
             desk_utils::permission::is_admin(),
         )
     };
     let init_data = InitSignalingData {
         ice_servers: vec![],
         user_name: user_name.to_string(),
-        audio_device_list: std::collections::BTreeMap::new(),
+        audio_device_list,
         audio_encoder_list,
-        video_device_list: std::collections::BTreeMap::new(),
+        video_device_list,
         video_encoder_list,
         desk_settings: settings.desk.clone(),
         has_tauri,
@@ -2168,8 +2179,8 @@ mod tests {
         let caps = MediaCapabilities {
             video_codecs: vec![MediaCodec::Vp9, MediaCodec::Av1],
             audio_codecs: vec![MediaCodec::Opus],
-            video_devices: vec![],
-            audio_devices: vec![],
+            video_device_list: std::collections::BTreeMap::new(),
+            audio_device_list: std::collections::BTreeMap::new(),
             has_tauri: false,
             is_admin: true,
             desktop_name: "Default".to_string(),

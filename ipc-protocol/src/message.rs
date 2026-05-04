@@ -1,6 +1,8 @@
 use bincode::{Decode, Encode};
+use desk_signal_facade::model::audio_capture::AudioDevice;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
+use desk_signal_facade::model::image_capture::DisplayInfo;
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
 use desk_signal_facade::model::signal::SignalingType;
 use desk_signal_facade::model::system_info::SystemInfo;
@@ -9,6 +11,7 @@ use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalList, TerminalOutputData, TerminalResizeData,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Messages sent from Service Core (daemon) to Worker process over the
 /// **event** transport (low-latency, never-drop). Large media payloads do
@@ -383,19 +386,28 @@ pub enum MediaCodec {
 }
 
 /// Worker advertises which codecs / capture sources it can drive on the
-/// current desktop. Daemon decides which codec the SDP m-line offers.
+/// current desktop. Daemon decides which codec the SDP m-line offers and
+/// echoes the device lists into the `InitSignalingData` reply so the
+/// browser can render its capture-source picker.
 ///
-/// All `Vec` fields are ordered: index 0 is the worker's preferred choice.
-/// Field additions should default to empty so newer workers stay decodable
-/// by older daemons during a partial rollout — but in this Arch IV cutover
-/// daemon and worker bump together, so version skew is not a steady-state
-/// concern.
+/// `*_codecs` are ordered: index 0 is the worker's preferred choice.
+/// `*_device_list` mirrors the structured maps that
+/// `desk_capture_engine::list_image_capture` /
+/// `list_audio_capture` produce so the daemon can pass them through to
+/// `InitSignalingData::{video,audio}_device_list` without losing any
+/// per-driver grouping or device metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Encode, Decode)]
 pub struct MediaCapabilities {
     pub video_codecs: Vec<MediaCodec>,
     pub audio_codecs: Vec<MediaCodec>,
-    pub video_devices: Vec<String>,
-    pub audio_devices: Vec<String>,
+    /// Per-backend display map (e.g. `"dxgi" -> [DISPLAY1, DISPLAY2]`).
+    /// `#[bincode(with_serde)]` because the value type lives in
+    /// `desk-signal-facade` and only carries a serde derive.
+    #[bincode(with_serde)]
+    pub video_device_list: BTreeMap<String, Vec<DisplayInfo>>,
+    /// Per-backend audio device map.
+    #[bincode(with_serde)]
+    pub audio_device_list: BTreeMap<String, Vec<AudioDevice>>,
     /// Whether this worker can talk to a Tauri shell on the same desktop
     /// (for whiteboard / private-screen rendering).
     pub has_tauri: bool,
@@ -580,31 +592,39 @@ pub struct PrivateScreenStateChangedPayload {
 /// Carries the `request_id` so the worker can echo it back on the
 /// matching response payload, and the `connection_id` so the daemon
 /// can pick the right outbound signaling websocket when it ferries
-/// the response.
+/// the response. `connection_id` is `Option` because manager-plane
+/// requests originating from a HTTP REST controller (e.g.
+/// `signal-facade::controller::sysinfo` →
+/// `connection.request_peer_with_callback`) carry no `from_connection_id`
+/// — the daemon correlates the response by `request_id` alone in that
+/// path.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerRequestRefPayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
 }
 
 /// Shared envelope for body-less manager *responses*
 /// (`ManagerFileDeleteResponse`, `ManagerUpdateSettingsResponse`).
 /// Same shape as [`ManagerRequestRefPayload`] but kept distinct so
 /// the daemon's response-direction code is symmetric with the
-/// request-direction code at the type-system level.
+/// request-direction code at the type-system level. `connection_id`
+/// is `Option` for the same reason — see that type's docstring.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerResponseRefPayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
 }
 
 /// Payload for [`ServiceToWorker::ManagerFileListRequest`]. Carries
 /// `FileListParams` (filtering knobs, paging) verbatim from the
-/// browser-issued signaling envelope.
+/// browser-issued signaling envelope. `connection_id` is `Option`
+/// because manager-plane queries can be HTTP-API-triggered (no
+/// originating browser PC) — see [`ManagerRequestRefPayload`].
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerFileListRequestPayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
     #[bincode(with_serde)]
     pub params: FileListParams,
 }
@@ -613,7 +633,7 @@ pub struct ManagerFileListRequestPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerFileDeleteRequestPayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
     #[bincode(with_serde)]
     pub request: DeleteFileRequest,
 }
@@ -622,7 +642,7 @@ pub struct ManagerFileDeleteRequestPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerUpdateSettingsRequestPayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
     #[bincode(with_serde)]
     pub settings: RemoteSystemSettings,
 }
@@ -630,11 +650,13 @@ pub struct ManagerUpdateSettingsRequestPayload {
 /// Payload for [`WorkerToService::ManagerSystemInfoResponse`].
 /// `SystemInfo` is the wire shape the worker computed from
 /// `sysinfo::System` and the legacy handler used to send via
-/// `send_response`.
+/// `send_response`. `connection_id` is `Option` because the matching
+/// request can be HTTP-API-triggered with no `from_connection_id` —
+/// see [`ManagerRequestRefPayload`].
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerSystemInfoResponsePayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
     #[bincode(with_serde)]
     pub info: SystemInfo,
 }
@@ -643,7 +665,7 @@ pub struct ManagerSystemInfoResponsePayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerFileListResponsePayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
     #[bincode(with_serde)]
     pub response: FileListResponse,
 }
@@ -652,7 +674,7 @@ pub struct ManagerFileListResponsePayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ManagerQuerySettingsResponsePayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
     #[bincode(with_serde)]
     pub settings: RemoteSystemSettings,
 }
@@ -700,11 +722,15 @@ pub struct CloseTerminalPayload {
 
 /// Payload for [`ServiceToWorker::ListTerminalRequest`]. Body-less;
 /// `request_id` is echoed back on the
-/// [`WorkerToService::ListTerminalResponse`].
+/// [`WorkerToService::ListTerminalResponse`]. `connection_id` is
+/// `Option` because `signal-facade::controller::terminal::list_terminal`
+/// dispatches via `connection.request_peer_with_callback` with no
+/// originating browser PC — the response is correlated by
+/// `request_id`.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ListTerminalRequestPayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
 }
 
 /// Payload for [`WorkerToService::TerminalStarted`]. Empty body —
@@ -736,11 +762,12 @@ pub struct ReplyFromTerminalPayload {
 
 /// Payload for [`WorkerToService::ListTerminalResponse`]. Carries the
 /// fully resolved [`TerminalList`] the worker built from
-/// `which::which`/`which_re` lookups.
+/// `which::which`/`which_re` lookups. `connection_id` is `Option` for
+/// the same reason as [`ListTerminalRequestPayload`].
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ListTerminalResponsePayload {
     pub request_id: String,
-    pub connection_id: String,
+    pub connection_id: Option<String>,
     #[bincode(with_serde)]
     pub terminals: TerminalList,
 }
@@ -903,11 +930,41 @@ mod tests {
 
     #[test]
     fn capabilities_round_trips_bincode() {
+        use desk_signal_facade::model::audio_capture::{AudioDataFlow, AudioDevice};
+        use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+
+        let mut video_device_list: BTreeMap<String, Vec<DisplayInfo>> = BTreeMap::new();
+        video_device_list.insert(
+            "dxgi".to_string(),
+            vec![DisplayInfo {
+                device_name: "\\\\.\\DISPLAY1".to_string(),
+                display_device_name: Some("Generic PnP Monitor".to_string()),
+                desktop_coordinates: DisplayRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                resolutions: vec![],
+                attached_to_desktop: true,
+                rotation: 0,
+            }],
+        );
+        let mut audio_device_list: BTreeMap<String, Vec<AudioDevice>> = BTreeMap::new();
+        audio_device_list.insert(
+            "wasapi".to_string(),
+            vec![AudioDevice {
+                id: "mic-1".to_string(),
+                firendly_name: "Microphone (Realtek)".to_string(),
+                data_flow: AudioDataFlow::Capture,
+                default: true,
+            }],
+        );
         let msg = WorkerToService::Capabilities(MediaCapabilities {
             video_codecs: vec![MediaCodec::H264, MediaCodec::Vp9],
             audio_codecs: vec![MediaCodec::Opus],
-            video_devices: vec!["display-1".to_string()],
-            audio_devices: vec!["mic-1".to_string()],
+            video_device_list: video_device_list.clone(),
+            audio_device_list: audio_device_list.clone(),
             has_tauri: true,
             is_admin: false,
             desktop_name: "Default".to_string(),
@@ -915,6 +972,13 @@ mod tests {
         match bincode_round_trip(&msg) {
             WorkerToService::Capabilities(c) => {
                 assert_eq!(c.video_codecs, vec![MediaCodec::H264, MediaCodec::Vp9]);
+                assert_eq!(c.video_device_list.len(), 1);
+                assert_eq!(
+                    c.video_device_list["dxgi"][0].device_name,
+                    "\\\\.\\DISPLAY1"
+                );
+                assert_eq!(c.audio_device_list.len(), 1);
+                assert_eq!(c.audio_device_list["wasapi"][0].id, "mic-1");
                 assert!(c.has_tauri);
                 assert!(!c.is_admin);
                 assert_eq!(c.desktop_name, "Default");
@@ -1100,15 +1164,14 @@ mod tests {
     /// rather than as a silent wire-format drift.
     #[test]
     fn private_screen_state_changed_round_trips_bincode() {
-        let msg =
-            WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
-                connection_id: "conn-pss".to_string(),
-                data: PrivateScreenStateChangedData {
-                    visible: false,
-                    is_supported: false,
-                    error_msg: Some("hub denied".to_string()),
-                },
-            });
+        let msg = WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
+            connection_id: "conn-pss".to_string(),
+            data: PrivateScreenStateChangedData {
+                visible: false,
+                is_supported: false,
+                error_msg: Some("hub denied".to_string()),
+            },
+        });
         match bincode_round_trip(&msg) {
             WorkerToService::PrivateScreenStateChanged(p) => {
                 assert_eq!(p.connection_id, "conn-pss");
@@ -1129,12 +1192,27 @@ mod tests {
     fn manager_request_ref_round_trips_bincode() {
         let msg = ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
             request_id: "req-info-1".to_string(),
-            connection_id: "conn-mgr".to_string(),
+            connection_id: Some("conn-mgr".to_string()),
         });
         match bincode_round_trip(&msg) {
             ServiceToWorker::ManagerSystemInfoRequest(p) => {
                 assert_eq!(p.request_id, "req-info-1");
-                assert_eq!(p.connection_id, "conn-mgr");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-mgr"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // HTTP-API-triggered manager requests (e.g.
+        // `signal-facade::controller::sysinfo`) have no originating
+        // browser PC; verify a `None` connection_id round-trips so
+        // the daemon's manager handlers don't drop the request.
+        let none_msg = ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
+            request_id: "req-info-no-conn".to_string(),
+            connection_id: None,
+        });
+        match bincode_round_trip(&none_msg) {
+            ServiceToWorker::ManagerSystemInfoRequest(p) => {
+                assert!(p.connection_id.is_none());
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1155,13 +1233,13 @@ mod tests {
         };
         let msg = ServiceToWorker::ManagerFileListRequest(ManagerFileListRequestPayload {
             request_id: "req-fl".to_string(),
-            connection_id: "conn-fl".to_string(),
+            connection_id: Some("conn-fl".to_string()),
             params,
         });
         match bincode_round_trip(&msg) {
             ServiceToWorker::ManagerFileListRequest(p) => {
                 assert_eq!(p.request_id, "req-fl");
-                assert_eq!(p.connection_id, "conn-fl");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-fl"));
                 assert_eq!(p.params.path, "C:\\Users");
                 assert_eq!(p.params.page_no, 2);
                 assert_eq!(p.params.page_count, 50);
@@ -1189,13 +1267,12 @@ mod tests {
             auto_start: Some(true),
             manager_api_token: Some("mtok".to_string()),
         };
-        let msg = ServiceToWorker::ManagerUpdateSettingsRequest(
-            ManagerUpdateSettingsRequestPayload {
+        let msg =
+            ServiceToWorker::ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload {
                 request_id: "req-upd".to_string(),
-                connection_id: "conn-upd".to_string(),
+                connection_id: Some("conn-upd".to_string()),
                 settings,
-            },
-        );
+            });
         match bincode_round_trip(&msg) {
             ServiceToWorker::ManagerUpdateSettingsRequest(p) => {
                 assert_eq!(p.request_id, "req-upd");
@@ -1215,12 +1292,12 @@ mod tests {
     fn manager_response_ref_round_trips_bincode() {
         let msg = WorkerToService::ManagerFileDeleteResponse(ManagerResponseRefPayload {
             request_id: "req-del".to_string(),
-            connection_id: "conn-del".to_string(),
+            connection_id: Some("conn-del".to_string()),
         });
         match bincode_round_trip(&msg) {
             WorkerToService::ManagerFileDeleteResponse(p) => {
                 assert_eq!(p.request_id, "req-del");
-                assert_eq!(p.connection_id, "conn-del");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-del"));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1239,7 +1316,7 @@ mod tests {
         };
         let msg = WorkerToService::ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload {
             request_id: "req-info".to_string(),
-            connection_id: "conn-info".to_string(),
+            connection_id: Some("conn-info".to_string()),
             info,
         });
         match bincode_round_trip(&msg) {
@@ -1339,12 +1416,27 @@ mod tests {
 
         let list = ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
             request_id: "req-list".to_string(),
-            connection_id: "conn-list".to_string(),
+            connection_id: Some("conn-list".to_string()),
         });
         match bincode_round_trip(&list) {
             ServiceToWorker::ListTerminalRequest(p) => {
                 assert_eq!(p.request_id, "req-list");
-                assert_eq!(p.connection_id, "conn-list");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // HTTP-API-triggered list_terminal (signal-facade controller)
+        // dispatches with no `from_connection_id`; verify `None`
+        // round-trips so the daemon's terminal handler doesn't drop
+        // it.
+        let list_no_conn = ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
+            request_id: "req-list-no-conn".to_string(),
+            connection_id: None,
+        });
+        match bincode_round_trip(&list_no_conn) {
+            ServiceToWorker::ListTerminalRequest(p) => {
+                assert!(p.connection_id.is_none());
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1465,13 +1557,13 @@ mod tests {
         };
         let msg = WorkerToService::ListTerminalResponse(ListTerminalResponsePayload {
             request_id: "req-list".to_string(),
-            connection_id: "conn-list".to_string(),
+            connection_id: Some("conn-list".to_string()),
             terminals,
         });
         match bincode_round_trip(&msg) {
             WorkerToService::ListTerminalResponse(p) => {
                 assert_eq!(p.request_id, "req-list");
-                assert_eq!(p.connection_id, "conn-list");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
                 assert_eq!(p.terminals.commands.len(), 2);
                 assert_eq!(p.terminals.current, 1);
                 assert_eq!(p.terminals.commands[0][0], "C:\\Windows\\System32\\cmd.exe");
