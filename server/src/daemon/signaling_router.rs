@@ -101,9 +101,10 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ManagerUpdateSettings => RouteOwnership::Worker,
 
         // ---- Error / Unknown ----
-        // Treat error envelopes as worker-bound for the time being;
-        // worker's existing handler logs and discards them. PR 7
-        // will revisit once daemon-side error reporting lands.
+        // Treat error envelopes as worker-bound; the worker's existing
+        // handler logs and discards them. A future cleanup can move
+        // this to daemon-side reporting if the worker ever stops
+        // surfacing useful context.
         SignalingType::Error | SignalingType::Unknown => RouteOwnership::Worker,
     }
 }
@@ -117,12 +118,14 @@ pub enum RouteOwnership {
 
 /// What [`route`] told the caller to do with the message.
 ///
-/// `ForwardToWorker` is the *legacy* outcome that says "ship the raw
-/// JSON to the worker via `ServiceToWorker::SignalingMessage`". Cuts
-/// 3b / 3c shrink its remit one variant at a time; PR 7 retires the
-/// variant entirely once every signaling type has either been
-/// handled in the daemon or replaced by a typed event-transport
-/// payload.
+/// `ForwardToWorker` is the transitional outcome that says "ship the
+/// raw JSON to the worker via `ServiceToWorker::SignalingMessage`".
+/// Daemon-owned types (PC / SDP / ICE / SignalingState) are migrated;
+/// 22 worker-owned types (terminal control, manager file/system info,
+/// `EnablePrivateScreen`, `UpdateDeskSettings`, ...) still flow over
+/// the bridge because their handlers run inside the user-session
+/// worker. A future cleanup can replace the bridge with typed
+/// event-transport payloads per signaling type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteOutcome {
     /// Daemon handled the message inline; caller does nothing more.
