@@ -12,13 +12,12 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, SignalingPayload,
-        WorkerInitPayload, WorkerToService,
+        DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
 use desk_server_user::model::CurrentUser;
-use desk_signal_facade::model::signal::SignalingModel;
 use log::{error, info, warn};
 use std::{
     sync::Arc,
@@ -323,21 +322,11 @@ impl WorkerSession {
             return Ok(());
         }
 
-        // Drain init's preapproved Vec into the HashMap the worker uses for
-        // O(1) lookup at PC-creation time.
-        let preapproved: std::collections::HashMap<_, _> = init_payload
-            .preapproved_connections
-            .iter()
-            .cloned()
-            .collect();
-
         let mut desk_session = DeskSession::new(
             shared_settings_data,
             session_sender,
             CurrentUser::new_admin("worker_node"),
             host_control_hub,
-            Some(writer_tx.clone()),
-            preapproved,
         )
         .await
         .map_err(|e| format!("Failed to create DeskSession: {}", e))?;
@@ -392,29 +381,6 @@ impl WorkerSession {
                     match msg_result {
                         Some(Some(msg)) => {
                             match msg {
-                                ServiceToWorker::SignalingMessage(payload) => {
-                                    info!("Worker received SignalingMessage: {}", payload.message);
-                                    match serde_json::from_str::<SignalingModel>(&payload.message) {
-                                        Ok(signaling_model) => {
-                                            if let Err(e) = desk_session.handle_message(&signaling_model).await {
-                                                warn!(
-                                                    "DeskSession handle_message error: {}, type={}, request_id={}",
-                                                    e, signaling_model.signaling_type, signaling_model.request_id
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to parse signaling message: {}", e);
-                                        }
-                                    }
-                                }
-                                ServiceToWorker::DesktopSwitching => {
-                                    info!("Desktop switching - preparing for shutdown");
-                                    if let Err(e) = desk_session.shutdown().await {
-                                        error!("DeskSession shutdown error: {}", e);
-                                    }
-                                    break;
-                                }
                                 ServiceToWorker::Shutdown => {
                                     info!("Received Shutdown command");
                                     if let Err(e) = desk_session.shutdown().await {
@@ -543,16 +509,12 @@ impl WorkerSession {
 
                 desk_msg = desk_rx.recv() => {
                     match desk_msg {
-                        Some(DeskSessionMessage::Text(text)) => {
-                            let payload = WorkerToService::SignalingMessage(SignalingPayload {
-                                message: text.to_string(),
-                                connection_id: None,
-                            });
-                            if writer_tx.send(payload).is_err() {
-                                error!("IPC writer task died; exiting main loop");
-                                break;
-                            }
-                        }
+                        // Arch IV: DeskSession in the worker no longer
+                        // produces signaling text — the daemon owns the PC
+                        // and writes directly to the browser. Drop instead
+                        // of forwarding (the SignalingMessage IPC variant
+                        // is gone in Arch IV / PR 7).
+                        Some(DeskSessionMessage::Text(_text)) => {}
                         Some(DeskSessionMessage::Binary(_bin)) => {
                             warn!("DeskSession sent binary message, skipping IPC forward");
                         }
@@ -573,10 +535,6 @@ impl WorkerSession {
                                     error!("Failed to shutdown peer connection: {}", e);
                                 }
                             }
-                            // Tell the daemon this connection is gone so it
-                            // drops the cached accept-state. Bounds memory
-                            // growth on long-running daemons.
-                            desk_session.notify_daemon_connection_closed(&connection_id);
                         }
                         Some(DeskSessionMessage::Ping(_)) | Some(DeskSessionMessage::Pong(_)) => {}
                         None => {
@@ -806,7 +764,6 @@ mod tests {
             signaling_url: None,
             auth_token,
             host_upstream_url,
-            preapproved_connections: Vec::new(),
             media_pipe_name: None,
         }
     }
@@ -895,14 +852,19 @@ mod tests {
         let task = spawn_event_forwarder_task(rx, sender);
 
         tx.send(WorkerToService::Ready).expect("send Ready");
-        tx.send(WorkerToService::DesktopReady)
-            .expect("send DesktopReady");
+        tx.send(WorkerToService::Heartbeat(HeartbeatPayload {
+            timestamp_ms: 1,
+            active_connections: 0,
+            cpu_usage: None,
+            memory_usage: None,
+        }))
+        .expect("send Heartbeat");
         drop(tx);
 
         let m1 = receiver.recv().await.expect("recv first message");
         assert!(matches!(m1, WorkerToService::Ready));
         let m2 = receiver.recv().await.expect("recv second message");
-        assert!(matches!(m2, WorkerToService::DesktopReady));
+        assert!(matches!(m2, WorkerToService::Heartbeat(_)));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), task)
             .await

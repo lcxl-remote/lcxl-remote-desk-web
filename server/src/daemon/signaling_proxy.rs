@@ -5,9 +5,9 @@ use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
 use awc::{Client, Connector};
-use desk_ipc_protocol::message::{ServiceToWorker, SignalingPayload, WorkerToService};
+use desk_ipc_protocol::message::WorkerToService;
 use desk_signal_facade::model::{
-    signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType},
+    signal::{RemoteDeskTypeEnum, SignalingModel},
     version::VersionInfo,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -204,22 +204,12 @@ pub async fn run_signaling_proxy(
                 // no cached offers) this is a no-op.
                 pc_registry.resume_active_media(&worker_mgr).await;
             }
-            WorkerToService::SignalingMessage(payload) => {
-                debug!(
-                    "[SignalingProxy] Worker signaling response (len={})",
-                    payload.message.len()
-                );
-                let _ = outbound_tx.send(payload.message);
-            }
             WorkerToService::Heartbeat(hb) => {
                 log::trace!(
                     "[SignalingProxy] Heartbeat: connections={}, ts={}",
                     hb.active_connections,
                     hb.timestamp_ms
                 );
-            }
-            WorkerToService::DesktopReady => {
-                info!("[SignalingProxy] Worker desktop ready after switch");
             }
             WorkerToService::DesktopChanged(payload) => {
                 info!(
@@ -241,11 +231,11 @@ pub async fn run_signaling_proxy(
                 // clears its `media_paused` flag and the browser sees
                 // the desktop swap as a brief frame freeze.
                 actix_web::rt::spawn(async move {
-                    let preapproved = worker_mgr.notify_desktop_switch().await;
+                    worker_mgr.notify_desktop_switch().await;
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     let session_id = crate::daemon::session_monitor::get_active_session_id();
                     if let Err(e) = worker_mgr
-                        .start_worker(session_id, Some(new_desktop.clone()), preapproved)
+                        .start_worker(session_id, Some(new_desktop.clone()))
                         .await
                     {
                         error!(
@@ -254,21 +244,6 @@ pub async fn run_signaling_proxy(
                         );
                     }
                 });
-            }
-            WorkerToService::ConnectionAcceptStateChanged {
-                connection_id,
-                state,
-            } => {
-                debug!(
-                    "[SignalingProxy] Worker reported accept-state for {connection_id}: \
-                     control={} clipboard={}",
-                    state.accept_control, state.accept_clipboard_sync
-                );
-                worker_mgr.update_connection_accept(&connection_id, state);
-            }
-            WorkerToService::ConnectionClosed { connection_id } => {
-                debug!("[SignalingProxy] Worker reported connection closed: {connection_id}");
-                worker_mgr.remove_connection(&connection_id);
             }
             WorkerToService::Error(err) => {
                 error!(
@@ -306,12 +281,6 @@ pub async fn run_signaling_proxy(
             // `pc_manager::write_file_transfer_data`.
             WorkerToService::FileTransferData(payload) => {
                 crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload).await;
-            }
-            // Arch IV variants — daemon's PR 2 event-pipe handler will
-            // own these. The current Arch III signaling_proxy never sees
-            // them because no Arch III worker emits them.
-            other => {
-                debug!("[SignalingProxy] Ignoring Arch IV variant in Arch III proxy: {other:?}");
             }
         }
     }
@@ -488,20 +457,14 @@ async fn handle_inbound_signaling_text(
         }
     };
 
-    if matches!(parsed.signaling_type, SignalingType::RequestRemote)
-        && let Some(from_id) = parsed.from_connection_id.as_ref()
-    {
-        worker_mgr.track_browser_connection(from_id.clone());
-    }
-
     let outcome = match signaling_router::route(&parsed, router_ctx).await {
         Ok(o) => o,
         Err(e) => {
             warn!(
-                "[Proxy] router handler failed for {:?}: {e}; falling back to worker forward",
+                "[Proxy] router handler failed for {:?}: {e}; dropping unrouted message",
                 parsed.signaling_type,
             );
-            RouteOutcome::ForwardToWorker
+            return;
         }
     };
 
@@ -509,26 +472,18 @@ async fn handle_inbound_signaling_text(
         return;
     }
 
-    let from_connection_id = match parsed.from_connection_id.as_ref() {
-        Some(id) => id.clone(),
-        None => {
-            warn!(
-                "[Proxy] Dropping worker-bound signaling without from_connection_id: {:?} \
-                 (cut 3c contract: worker-routed types must carry the connection id so \
-                 the worker can dispatch without re-parsing the JSON)",
-                parsed.signaling_type,
-            );
-            return;
-        }
-    };
-
-    let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
-        message: text_str,
-        connection_id: Some(from_connection_id),
-    });
-    if let Err(e) = worker_mgr.send_to_worker(msg).await {
-        warn!("[Proxy] Failed to forward to worker: {e}");
-    }
+    // After PR 7 every browser-bound signaling type is daemon-handled by
+    // `signaling_router`. Anything still returning `ForwardToWorker` means
+    // the router has a missing arm — surface it loudly rather than silently
+    // dropping. Since the worker no longer accepts `SignalingMessage` we
+    // would have nowhere to send it anyway.
+    warn!(
+        "[Proxy] router returned ForwardToWorker for {:?}; the worker does not handle \
+         signaling in Arch IV — dropping. Add a daemon-side handler if this is reachable.",
+        parsed.signaling_type,
+    );
+    let _ = worker_mgr; // retained to avoid an unused-binding warning
+    let _ = text_str;
 }
 
 #[cfg(test)]
@@ -555,27 +510,26 @@ mod tests {
         (ctx, outbound_tx, worker_mgr)
     }
 
-    /// Worker-bound signaling without `from_connection_id` is dropped
-    /// at the daemon (rather than forwarded as `connection_id: None`
-    /// like Arch III did) — the worker would not be able to dispatch
-    /// without a re-parse otherwise.
+    /// Any signaling type the router declines to handle (post-PR 7 the
+    /// worker has no signaling channel left, so `ForwardToWorker` is
+    /// effectively a "drop" outcome) must not panic the dispatcher.
     #[tokio::test]
-    async fn drops_worker_bound_message_without_from_connection_id() {
+    async fn drops_router_forward_to_worker_without_panic() {
         let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
 
-        // RequireControl is worker-owned (router returns ForwardToWorker)
+        // RequireControl is now daemon-handled, but if the router were
+        // ever extended with a type that still falls through to the
+        // worker, the dispatcher must drop it cleanly.
         let model = SignalingModel::new(
             "req-1",
             SignalingType::RequireControl,
-            None, // missing from_connection_id
+            None,
             None,
             None,
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
 
-        // Should NOT panic, should NOT forward (no worker exists).
-        // Just verifies the function returns cleanly.
         handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
     }
 
@@ -597,10 +551,9 @@ mod tests {
 
     /// Daemon-owned RequestRemote without `from_connection_id` does
     /// not crash the dispatcher — the router's `handle_request_remote`
-    /// returns the per-handler error which we already log; the
-    /// dispatcher should not promote that into a forward attempt.
+    /// returns the per-handler error which we log and return.
     #[tokio::test]
-    async fn handles_router_error_without_forwarding() {
+    async fn handles_router_error_without_panic() {
         let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
 
         let model = SignalingModel::new(
@@ -613,9 +566,6 @@ mod tests {
         );
         let text = serde_json::to_string(&model).unwrap();
 
-        // Router returns Err -> dispatcher logs and falls through to
-        // the worker-forward path; that path then drops because
-        // from_connection_id is missing. Net: no panic, no forward.
         handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
     }
 }

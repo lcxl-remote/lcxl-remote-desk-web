@@ -4,14 +4,10 @@ use crate::model::settings::{Args, SharedSettings};
 use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
-    message::{
-        ConnectionAcceptState, MediaCapabilities, ServiceToWorker, WorkerInitPayload,
-        WorkerToService,
-    },
+    message::{MediaCapabilities, ServiceToWorker, WorkerInitPayload, WorkerToService},
     transport::{read_message, write_message},
 };
 use log::{debug, error, info, warn};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
@@ -31,17 +27,6 @@ pub struct WorkerManager {
     settings: web::Data<SharedSettings>,
     inner: Arc<Mutex<WorkerManagerInner>>,
     worker_msg_tx: Arc<mpsc::UnboundedSender<WorkerToService>>,
-    /// Per-connection accept-state cache. The daemon is a durable cache for
-    /// the worker's authoritative state — entries are inserted on first
-    /// `RequestRemote`, updated when the worker emits
-    /// `ConnectionAcceptStateChanged`, removed when the worker emits
-    /// `ConnectionClosed`, and drained into the next worker's
-    /// `WorkerInitPayload.preapproved_connections` on desktop / session
-    /// switch + crash recovery.
-    ///
-    /// Uses `std::sync::Mutex` because every critical section is a short,
-    /// synchronous map op with no `.await` inside the guard.
-    active_connections: Arc<StdMutex<HashMap<String, ConnectionAcceptState>>>,
     /// Daemon-side per-`connection_id` PeerConnection registry (Arch IV).
     /// Held as a clonable handle so the media-pipe receiver task can
     /// look up `video_track`s and call `write_sample` without going back
@@ -177,7 +162,6 @@ impl WorkerManager {
                 active_worker: None,
             })),
             worker_msg_tx: Arc::new(tx),
-            active_connections: Arc::new(StdMutex::new(HashMap::new())),
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
         };
@@ -188,7 +172,6 @@ impl WorkerManager {
         &self,
         session_id: u32,
         desktop_name: Option<String>,
-        preapproved: Vec<(String, ConnectionAcceptState)>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Clear stale capabilities. The new worker re-sends them on its
         // own Init handshake; until then the daemon ships an empty
@@ -247,7 +230,6 @@ impl WorkerManager {
                 config_c,
                 ipc_cmd_rx,
                 (*worker_msg_tx).clone(),
-                preapproved,
                 mgr_c,
                 host_upstream_url_c,
                 ipc_token_c,
@@ -333,10 +315,6 @@ impl WorkerManager {
             // the `shared_hub` parameter to `run_with_transports`.
             auth_token: None,
             host_upstream_url: None,
-            // Portable mode never swaps workers on UAC; nothing to
-            // preapprove (the daemon's accept-state cache stays empty
-            // for the entire process lifetime).
-            preapproved_connections: Vec::new(),
             // Media transport is in-process below; no named pipe needed.
             media_pipe_name: None,
         };
@@ -439,48 +417,6 @@ impl WorkerManager {
         }
     }
 
-    /// Insert a fresh entry on first `RequestRemote` observation. Idempotent
-    /// — re-observing a known id keeps the existing accept-state, so a
-    /// browser that drops then re-issues `RequestRemote` mid-session does
-    /// not silently lose its prior approvals.
-    pub fn track_browser_connection(&self, connection_id: String) {
-        self.active_connections
-            .lock()
-            .unwrap()
-            .entry(connection_id)
-            .or_default();
-    }
-
-    /// Replace the cached accept-state for a connection. No-op if the id is
-    /// unknown (race with browser drop / unrelated worker chatter).
-    pub fn update_connection_accept(&self, connection_id: &str, state: ConnectionAcceptState) {
-        let mut map = self.active_connections.lock().unwrap();
-        if let Some(slot) = map.get_mut(connection_id) {
-            *slot = state;
-        }
-    }
-
-    /// Drop the cached entry for a connection. Called when the worker
-    /// reports `WorkerToService::ConnectionClosed`. Bounds memory growth on
-    /// long-running daemons across many connect/disconnect cycles.
-    pub fn remove_connection(&self, connection_id: &str) {
-        self.active_connections
-            .lock()
-            .unwrap()
-            .remove(connection_id);
-    }
-
-    /// Aggregator-only test seam — read the current accept-state without
-    /// mutating. Production code should not need this.
-    #[cfg(test)]
-    pub fn connection_accept_state(&self, connection_id: &str) -> Option<ConnectionAcceptState> {
-        self.active_connections
-            .lock()
-            .unwrap()
-            .get(connection_id)
-            .copied()
-    }
-
     /// Record that the daemon just received an IPC message from the
     /// active worker. The watchdog uses this to detect when a worker
     /// has stopped responding (every IPC message — heartbeat or
@@ -548,38 +484,19 @@ impl WorkerManager {
         })
     }
 
-    /// Drain the per-connection cache, pause every PC's media ingestion,
-    /// and tell the active worker to begin shutting down its encoders.
-    /// Returns the drained `(connection_id, accept_state)` tuples so the
-    /// caller can hand them to the next worker via
-    /// `start_worker(..., preapproved)`.
+    /// Pause every PC's media ingestion so frames from the about-to-die
+    /// worker are dropped instead of pushed onto the browser PC. The first
+    /// IDR from the replacement worker clears each per-PC flag in place.
     ///
-    /// **PR 6 — keep-PC semantics**: this no longer emits browser-facing
-    /// `SignalingType::DesktopSwitching`. Arch IV holds the WebRTC PC in
-    /// the daemon, so worker swaps are invisible to the browser apart
-    /// from a brief frame-freeze that resolves on the new worker's
-    /// first IDR (the per-PC `media_paused` flag set here gates frames
-    /// from the dying worker until the new worker reports
-    /// `Capabilities` and `pc_registry.resume_active_media` re-issues
-    /// `StartMedia` + `ForceKeyframe`).
-    pub async fn notify_desktop_switch(&self) -> Vec<(String, ConnectionAcceptState)> {
-        let preapproved: Vec<(String, ConnectionAcceptState)> = {
-            let mut map = self.active_connections.lock().unwrap();
-            map.drain().collect()
-        };
-
-        // PR 6: pause all PCs so write_video_frame drops samples the
-        // about-to-die worker is still producing while the browser PC
-        // keeps its existing reference frame. The first IDR from the
-        // replacement worker clears each per-PC flag in place.
+    /// **Keep-PC semantics**: Arch IV holds the WebRTC PC in the daemon,
+    /// so worker swaps are invisible to the browser apart from a brief
+    /// frame-freeze that resolves on the new worker's first IDR. There
+    /// is no browser-facing `SignalingType::DesktopSwitching` emission and
+    /// no per-connection accept-state shipped to the next worker —
+    /// `SignalingState` lives next to the PC in the daemon and is never
+    /// torn down on a worker swap.
+    pub async fn notify_desktop_switch(&self) {
         self.pc_registry.pause_all_media().await;
-
-        let inner = self.inner.lock().await;
-        if let Some(worker) = &inner.active_worker {
-            let _ = worker.ipc_tx.send(ServiceToWorker::DesktopSwitching);
-        }
-
-        preapproved
     }
 
     pub fn handle_crash_recovery(&self, session_id: u32, desktop_name: Option<String>) {
@@ -589,12 +506,9 @@ impl WorkerManager {
         // is called from within a tokio::spawn task (run_pipe_server) which has no
         // LocalSet; calling spawn_local there panics and silently kills the task.
         tokio::spawn(async move {
-            let preapproved = mgr.notify_desktop_switch().await;
+            mgr.notify_desktop_switch().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Err(e) = mgr
-                .start_worker(session_id, desktop_name, preapproved)
-                .await
-            {
+            if let Err(e) = mgr.start_worker(session_id, desktop_name).await {
                 error!("[WorkerManager] Failed to restart Worker after crash: {e}");
             }
         });
@@ -884,7 +798,6 @@ async fn run_pipe_server(
     config_json: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: mpsc::UnboundedSender<WorkerToService>,
-    preapproved: Vec<(String, ConnectionAcceptState)>,
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
@@ -945,20 +858,6 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
-    // Re-seed the daemon's per-connection cache from `preapproved` BEFORE
-    // sending Init. The new worker will emit `ConnectionAcceptStateChanged`
-    // for each restored connection during PC creation, which arrives over
-    // IPC and updates the cache to the worker's new (post-restart)
-    // authoritative state — but we still want the cache to be populated in
-    // the meantime so a quick desktop re-switch right after restart still
-    // ships state forward.
-    {
-        let mut map = worker_mgr.active_connections.lock().unwrap();
-        for (id, state) in &preapproved {
-            map.insert(id.clone(), *state);
-        }
-    }
-
     write_message(
         &mut writer,
         &ServiceToWorker::Init(WorkerInitPayload {
@@ -969,7 +868,6 @@ async fn run_pipe_server(
             signaling_url: None,
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
-            preapproved_connections: preapproved.clone(),
             media_pipe_name: Some(media_pipe_name.clone()),
         }),
     )
@@ -1006,13 +904,12 @@ async fn run_pipe_server(
             }
         };
 
-    // PR 6 keep-PC semantics: browser-facing `SignalingType::DesktopReady`
-    // is no longer emitted on worker (re)spawn. The browser's WebRTC PC
-    // stays up across worker swaps; the daemon's `signaling_proxy` calls
+    // Keep-PC semantics: browser-facing `SignalingType::DesktopReady` is
+    // not emitted on worker (re)spawn. The browser's WebRTC PC stays up
+    // across worker swaps; the daemon's `signaling_proxy` calls
     // `pc_registry.resume_active_media` on the worker's first
     // `Capabilities` to re-issue cached `StartMedia` + `ForceKeyframe`,
     // and the per-PC `media_paused` flag clears on the first IDR.
-    let _ = &preapproved; // retained for the in-flight transition; PR 7 strips the field.
 
     let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, pipe_name).await;
     info!("Pipe server for {pipe_name} exiting");
@@ -1115,7 +1012,6 @@ async fn run_pipe_server(
     config_json: String,
     mut cmd_rx: mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: mpsc::UnboundedSender<WorkerToService>,
-    preapproved: Vec<(String, ConnectionAcceptState)>,
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
@@ -1156,13 +1052,6 @@ async fn run_pipe_server(
         other => warn!("Expected Ready, got: {other:?}"),
     }
 
-    {
-        let mut map = worker_mgr.active_connections.lock().unwrap();
-        for (id, state) in &preapproved {
-            map.insert(id.clone(), *state);
-        }
-    }
-
     write_message(
         &mut writer,
         &ServiceToWorker::Init(WorkerInitPayload {
@@ -1173,7 +1062,6 @@ async fn run_pipe_server(
             signaling_url: None,
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
-            preapproved_connections: preapproved.clone(),
             // Arch IV media pipe wiring lands in PR 2 cut 4. Until then
             // the worker stays single-pipe (Arch III).
             media_pipe_name: None,
@@ -1181,9 +1069,8 @@ async fn run_pipe_server(
     )
     .await?;
 
-    // PR 6 keep-PC: see the Windows path above; browser-facing
-    // DesktopReady is no longer emitted on worker spawn.
-    let _ = &preapproved;
+    // Keep-PC: see the Windows path above; browser-facing DesktopReady is
+    // not emitted on worker spawn.
 
     let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, socket_path).await;
     let _ = std::fs::remove_file(socket_path);
@@ -1219,9 +1106,9 @@ where
 /// Transport-agnostic bridge between the daemon's internal mpsc channels
 /// (`cmd_rx` for daemon → worker; `msg_tx` for worker → daemon) and the
 /// supplied event transport pair. Returns `true` when the daemon initiated
-/// the shutdown (Shutdown / DesktopSwitching command sent or cmd channel
-/// closed) and `false` when the worker side dropped first — the caller
-/// uses this to decide whether to trigger crash-recovery.
+/// the shutdown (Shutdown command sent or cmd channel closed) and `false`
+/// when the worker side dropped first — the caller uses this to decide
+/// whether to trigger crash-recovery.
 async fn bridge_event_transport(
     mut event_rx: Box<dyn EventReceiver<WorkerToService>>,
     event_tx: Arc<dyn EventSender<ServiceToWorker>>,
@@ -1252,10 +1139,7 @@ async fn bridge_event_transport(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(msg) => {
-                        if matches!(
-                            msg,
-                            ServiceToWorker::Shutdown | ServiceToWorker::DesktopSwitching
-                        ) {
+                        if matches!(msg, ServiceToWorker::Shutdown) {
                             daemon_initiated = true;
                         }
                         if let Err(e) = event_tx.send(msg).await {
@@ -1374,61 +1258,10 @@ mod tests {
         WorkerManager::new(settings, PcRegistry::new())
     }
 
-    /// Track-then-update-then-drain round trip — the path used by
-    /// `signaling_proxy` (track on RequestRemote, update on
-    /// ConnectionAcceptStateChanged, drain on desktop switch).
-    #[tokio::test]
-    async fn track_update_drain_round_trip() {
-        let (mgr, _rx) = test_manager();
-
-        mgr.track_browser_connection("conn-1".to_string());
-        mgr.update_connection_accept(
-            "conn-1",
-            ConnectionAcceptState {
-                accept_control: true,
-                accept_clipboard_sync: true,
-            },
-        );
-
-        let drained = mgr.notify_desktop_switch().await;
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].0, "conn-1");
-        assert!(drained[0].1.accept_control);
-        assert!(drained[0].1.accept_clipboard_sync);
-
-        // Second drain after first must be empty — `notify_desktop_switch`
-        // owns the drain side-effect.
-        let drained_again = mgr.notify_desktop_switch().await;
-        assert!(drained_again.is_empty());
-    }
-
-    /// PR 6 keep-PC: `notify_desktop_switch` must NOT emit a
-    /// browser-facing `WorkerToService::SignalingMessage`. The Arch
-    /// III code shipped a `SignalingType::DesktopSwitching` over the
-    /// outbound channel for each tracked connection; with PR 6 the
-    /// browser PC stays up across the swap and the daemon resumes
-    /// media itself once the new worker reports `Capabilities`.
-    #[tokio::test]
-    async fn notify_desktop_switch_keep_pc_does_not_emit_browser_signaling() {
-        let (mgr, mut rx) = test_manager();
-        mgr.track_browser_connection("conn-1".to_string());
-        mgr.track_browser_connection("conn-2".to_string());
-
-        let drained = mgr.notify_desktop_switch().await;
-        assert_eq!(drained.len(), 2, "drain still returns the cached entries");
-
-        // No SignalingMessage should land on the worker-message channel.
-        // try_recv returns Empty when the channel has nothing buffered.
-        match rx.try_recv() {
-            Err(mpsc::error::TryRecvError::Empty) => {}
-            other => panic!("PR 6 keep-PC must not emit browser signaling; got {other:?}"),
-        }
-    }
-
-    /// PR 6 keep-PC: `notify_desktop_switch` pauses every PC in the
-    /// registry it was constructed with. This is the contract the
-    /// daemon relies on so frames from the about-to-die worker are
-    /// dropped instead of pushed to the browser with stale references.
+    /// Keep-PC contract: `notify_desktop_switch` pauses every PC in the
+    /// registry it was constructed with. This is the contract the daemon
+    /// relies on so frames from the about-to-die worker are dropped
+    /// instead of pushed to the browser with stale references.
     #[tokio::test]
     async fn notify_desktop_switch_pauses_all_pcs() {
         use crate::daemon::pc_manager::PcRegistry;
@@ -1461,7 +1294,7 @@ mod tests {
             );
         }
 
-        let _drained = mgr.notify_desktop_switch().await;
+        mgr.notify_desktop_switch().await;
 
         // Post-condition: every PC is paused.
         for id in ["pc-a", "pc-b"] {
@@ -1505,64 +1338,6 @@ mod tests {
         assert_eq!(got.audio_codecs, caps.audio_codecs);
         assert_eq!(got.desktop_name, "Default");
         assert!(got.has_tauri);
-    }
-
-    /// `update_connection_accept` on an unknown id is a silent no-op (race
-    /// against browser disconnect / unrelated worker chatter).
-    #[test]
-    fn update_unknown_id_is_noop() {
-        let (mgr, _rx) = test_manager();
-        mgr.update_connection_accept(
-            "ghost",
-            ConnectionAcceptState {
-                accept_control: true,
-                accept_clipboard_sync: true,
-            },
-        );
-        assert!(mgr.connection_accept_state("ghost").is_none());
-    }
-
-    /// `track_browser_connection` is idempotent: re-tracking a known id
-    /// must NOT clobber the existing accept-state. This guards against a
-    /// browser quickly disconnecting and re-issuing RequestRemote within
-    /// the same worker lifetime — its prior approvals would otherwise be
-    /// silently downgraded.
-    #[test]
-    fn track_is_idempotent_keeps_existing_state() {
-        let (mgr, _rx) = test_manager();
-        mgr.track_browser_connection("conn-1".to_string());
-        mgr.update_connection_accept(
-            "conn-1",
-            ConnectionAcceptState {
-                accept_control: true,
-                accept_clipboard_sync: false,
-            },
-        );
-
-        // Re-track with the same id.
-        mgr.track_browser_connection("conn-1".to_string());
-
-        let after = mgr
-            .connection_accept_state("conn-1")
-            .expect("entry must still exist");
-        assert!(after.accept_control, "accept_control must not be reset");
-        assert!(!after.accept_clipboard_sync);
-    }
-
-    /// `remove_connection` drops the entry. Subsequent `notify_desktop_switch`
-    /// does not include it. This is the path used by
-    /// `WorkerToService::ConnectionClosed` to bound memory growth.
-    #[tokio::test]
-    async fn remove_drops_entry_from_drain() {
-        let (mgr, _rx) = test_manager();
-        mgr.track_browser_connection("alive".to_string());
-        mgr.track_browser_connection("doomed".to_string());
-
-        mgr.remove_connection("doomed");
-
-        let drained = mgr.notify_desktop_switch().await;
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].0, "alive");
     }
 
     /// Boundary: strictly greater than. Setting timeout exactly equal

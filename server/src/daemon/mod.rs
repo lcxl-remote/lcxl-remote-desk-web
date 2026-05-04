@@ -144,7 +144,7 @@ pub async fn run_service_daemon_inner(
     let initial_session = get_current_session_id();
     let initial_desktop = get_initial_desktop_name();
     if let Err(e) = worker_mgr
-        .start_worker(initial_session, initial_desktop, Vec::new())
+        .start_worker(initial_session, initial_desktop)
         .await
     {
         error!("Failed to start initial worker: {e}");

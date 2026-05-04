@@ -97,7 +97,6 @@ mod tests {
             signaling_url: None,
             auth_token: None,
             host_upstream_url: None,
-            preapproved_connections: Vec::new(),
             media_pipe_name: None,
         });
 
@@ -155,7 +154,6 @@ mod tests {
             signaling_url: None,
             auth_token: None,
             host_upstream_url: None,
-            preapproved_connections: Vec::new(),
             media_pipe_name: None,
         });
         let mut buf = Vec::new();

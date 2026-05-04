@@ -505,8 +505,6 @@ async fn maintain_signaling_connection(
         session_sender,
         CurrentUser::new_admin("server_node"),
         host_control_hub.clone(),
-        None,
-        HashMap::new(),
     )
     .await
     {
@@ -586,15 +584,6 @@ pub struct DeskSession {
     /// All approval flow + private-screen / whiteboard / service-op traffic
     /// routes through here.
     pub host_control_hub: Arc<HostControlHub>,
-    /// IPC channel back to the daemon for per-connection accept-state updates
-    /// (`ConnectionAcceptStateChanged` / `ConnectionClosed`). `None` in
-    /// embedded / portable mode where there is no daemon to inform.
-    pub daemon_event_tx: Option<mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>>,
-    /// Per-connection accept state the daemon shipped at worker init.
-    /// Consumed (drained) at PC creation in `init_ptc_peer_connection` so a
-    /// connection that survives a worker restart skips the Tauri prompt
-    /// and resumes immediately. Empty on first launch and in portable mode.
-    pub preapproved: HashMap<String, desk_ipc_protocol::message::ConnectionAcceptState>,
 }
 
 static MDNS_CONN: OnceCell<std::sync::Arc<DnsConn>> = OnceCell::new();
@@ -671,8 +660,6 @@ impl DeskSession {
         session: DeskSessionSender,
         user: CurrentUser,
         host_control_hub: Arc<HostControlHub>,
-        daemon_event_tx: Option<mpsc::UnboundedSender<desk_ipc_protocol::message::WorkerToService>>,
-        preapproved: HashMap<String, desk_ipc_protocol::message::ConnectionAcceptState>,
     ) -> Result<Self, DeskError> {
         let desk_settings = settings.read().await.clone().desk;
 
@@ -737,40 +724,7 @@ impl DeskSession {
             host_control_helper: helper,
             whiteboard_cmd_sender,
             host_control_hub,
-            daemon_event_tx,
-            preapproved,
         })
-    }
-
-    /// Push an authoritative `ConnectionAcceptState` to the daemon. No-op in
-    /// portable mode (no daemon connected). Called whenever the worker's
-    /// `SignalingState` for a peer is mutated for control / clipboard, so
-    /// the daemon's cache stays in lock-step with the worker's truth.
-    pub fn notify_daemon_accept_state(
-        &self,
-        connection_id: &str,
-        state: desk_ipc_protocol::message::ConnectionAcceptState,
-    ) {
-        if let Some(tx) = &self.daemon_event_tx {
-            let _ = tx.send(
-                desk_ipc_protocol::message::WorkerToService::ConnectionAcceptStateChanged {
-                    connection_id: connection_id.to_string(),
-                    state,
-                },
-            );
-        }
-    }
-
-    /// Tell the daemon a peer connection is gone so the daemon can drop its
-    /// cached accept-state for that id. No-op in portable mode.
-    pub fn notify_daemon_connection_closed(&self, connection_id: &str) {
-        if let Some(tx) = &self.daemon_event_tx {
-            let _ = tx.send(
-                desk_ipc_protocol::message::WorkerToService::ConnectionClosed {
-                    connection_id: connection_id.to_string(),
-                },
-            );
-        }
     }
 }
 
@@ -872,65 +826,16 @@ impl DeskSession {
             .await?;
         info!("Sent init signaling");
 
-        // If the daemon shipped a preapproved entry for this peer (worker
-        // restart on UAC / lock screen / OS-session change / crash recovery),
-        // restore SignalingState from it so the user is not re-prompted.
-        // Drained on consumption — restoration is one-shot per worker
-        // lifetime; subsequent reconnects within the same worker go through
-        // the normal RequireControl path.
-        let initial_state = match self.preapproved.remove(from_connection_id) {
-            Some(restored) => {
-                info!(
-                    "Restoring SignalingState for {from_connection_id} from preapproved \
-                     (control={}, clipboard={})",
-                    restored.accept_control, restored.accept_clipboard_sync
-                );
-                SignalingState {
-                    accept_control: restored.accept_control,
-                    accept_clipboard_sync: restored.accept_clipboard_sync,
-                    ..SignalingState::default()
-                }
-            }
-            None => SignalingState::default(),
-        };
-
-        let restored_accept_control = initial_state.accept_control;
-        let restored_accept_clipboard = initial_state.accept_clipboard_sync;
-
         self.rtc_peer_connection_map.insert(
             from_connection_id.to_owned(),
             Arc::new(tokio::sync::RwLock::new(PeerConnection {
                 rtc_peer_connection,
                 capture_screen_thread: None,
                 capture_audio_thread: None,
-                signaling_state: Arc::new(tokio::sync::RwLock::new(initial_state)),
+                signaling_state: Arc::new(tokio::sync::RwLock::new(SignalingState::default())),
                 cursor_data_channel: Arc::new(tokio::sync::RwLock::new(None)),
             })),
         );
-
-        // After restoration: proactively notify the browser so its
-        // `hasControl` state stays coherent (it never lost the React state on
-        // its side — the AcceptControl confirms it). And re-emit
-        // `ConnectionAcceptStateChanged` so the daemon's cache reflects this
-        // worker's authoritative state, not the pre-restart snapshot.
-        if restored_accept_control {
-            let _ = self
-                .session
-                .send_to_peer(
-                    &signaling_model.request_id,
-                    SignalingType::AcceptControl,
-                    from_connection_id,
-                    (),
-                )
-                .await;
-            self.notify_daemon_accept_state(
-                from_connection_id,
-                desk_ipc_protocol::message::ConnectionAcceptState {
-                    accept_control: true,
-                    accept_clipboard_sync: restored_accept_clipboard,
-                },
-            );
-        }
 
         Ok(())
     }
@@ -1877,10 +1782,6 @@ impl DeskSession {
                 let _ = self
                     .host_control_helper
                     .enable_private_screen(from_connection_id, false);
-                // PC is gone; tell the daemon to drop the cached
-                // accept-state so a later desktop switch doesn't ship a
-                // stale preapproved entry to the next worker.
-                self.notify_daemon_connection_closed(from_connection_id);
             }
             SignalingType::EnablePrivateScreen => {
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
@@ -2197,11 +2098,6 @@ impl DeskSession {
                     (),
                 )
                 .await?;
-            // Persist authoritative deny so the daemon's cache matches.
-            let new_state = desk_ipc_protocol::message::ConnectionAcceptState {
-                accept_control: false,
-                accept_clipboard_sync: false,
-            };
             // Lock briefly to write the deny into SignalingState too (so the
             // worker's gating layer agrees with what we told the peer).
             {
@@ -2210,7 +2106,6 @@ impl DeskSession {
                 s.accept_control = false;
                 s.accept_clipboard_sync = false;
             }
-            self.notify_daemon_accept_state(from_connection_id, new_state);
             return Ok(());
         }
 
@@ -2236,7 +2131,7 @@ impl DeskSession {
             .await
         };
 
-        let new_state = {
+        {
             let peer_connection = rtc_peer_connection.read().await;
             let mut signaling_state = peer_connection.signaling_state.write().await;
 
@@ -2258,11 +2153,7 @@ impl DeskSession {
                     from_connection_id
                 );
             }
-            desk_ipc_protocol::message::ConnectionAcceptState {
-                accept_control: signaling_state.accept_control,
-                accept_clipboard_sync: signaling_state.accept_clipboard_sync,
-            }
-        };
+        }
 
         let reply_type = if control_data.accept {
             SignalingType::AcceptControl
@@ -2278,10 +2169,6 @@ impl DeskSession {
                 (),
             )
             .await?;
-
-        // Push the post-decision state to the daemon so its cache is in
-        // lock-step with the worker's authoritative SignalingState.
-        self.notify_daemon_accept_state(from_connection_id, new_state);
 
         Ok(())
     }

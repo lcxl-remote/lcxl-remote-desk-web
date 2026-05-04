@@ -16,24 +16,6 @@ pub enum ServiceToWorker {
     /// Initialize the worker with session and configuration info
     Init(WorkerInitPayload),
 
-    // ---------- Arch III legacy (deprecated, removed by PR 7) ----------
-    /// Forward a signaling message (SDP offer/answer, ICE candidate) to the worker.
-    ///
-    /// **Deprecated (Arch IV)**: PC moves into the daemon, so signaling no
-    /// longer transits the worker. PR 7 will remove this variant once the
-    /// daemon-side `signaling_router` (PR 2) handles every `SignalingType`
-    /// natively.
-    SignalingMessage(SignalingPayload),
-
-    /// Notify the worker that a desktop switch is happening; the worker
-    /// should prepare to shut down.
-    ///
-    /// **Deprecated (Arch IV)**: desktop drift is detected by the worker's
-    /// own `desktop_monitor`; it now reports up via
-    /// [`WorkerToService::DesktopChanged`]. The daemon decides when to
-    /// kill+respawn the worker without needing to pre-announce it.
-    DesktopSwitching,
-
     /// Force the worker to shut down immediately.
     Shutdown,
 
@@ -110,18 +92,8 @@ pub enum WorkerToService {
     /// codec for new offers and to populate the UI's device pickers.
     Capabilities(MediaCapabilities),
 
-    /// **Deprecated (Arch IV)**: see
-    /// [`ServiceToWorker::SignalingMessage`].
-    SignalingMessage(SignalingPayload),
-
     /// Worker reports its health status
     Heartbeat(HeartbeatPayload),
-
-    /// **Deprecated (Arch IV)**: PC stays alive across worker swaps, so
-    /// the post-switch "ready" handshake collapses into the daemon
-    /// receiving the new worker's `Ready` + `Capabilities` and dispatching
-    /// `StartMedia` + `ForceKeyframe`.
-    DesktopReady,
 
     /// Worker detected the user-input desktop changed (e.g. user invoked UAC
     /// → secure desktop "Winlogon", switched to lock screen "ScreenSaver",
@@ -152,23 +124,6 @@ pub enum WorkerToService {
     /// TransferError) or a binary frame (downloaded chunk) on the
     /// browser's `file_transfer_event` DataChannel.
     FileTransferData(FileTransferPayload),
-
-    // ---------- Arch III legacy (deprecated, removed by PR 7) ----------
-    /// **Deprecated (Arch IV)**: SignalingState now lives in the daemon
-    /// (it owns the PeerConnection). The worker no longer holds any
-    /// per-connection accept state, so it has nothing to report.
-    /// PR 7 removes this variant together with
-    /// [`WorkerInitPayload::preapproved_connections`].
-    ConnectionAcceptStateChanged {
-        connection_id: String,
-        state: ConnectionAcceptState,
-    },
-
-    /// **Deprecated (Arch IV)**: connection lifecycle is owned by the
-    /// daemon; cleanup propagates worker-ward via
-    /// [`ServiceToWorker::StopMedia`] instead. Worker no longer reports
-    /// `ConnectionClosed`.
-    ConnectionClosed { connection_id: String },
 }
 
 /// Messages sent from Service Core to Tauri UI
@@ -234,38 +189,6 @@ pub struct WorkerInitPayload {
     /// mode" until the cut that wires media_producer (PR 2 / cut 4).
     #[serde(default)]
     pub media_pipe_name: Option<String>,
-
-    /// **Deprecated (Arch IV)**: PC lifetime moves into the daemon, so
-    /// the daemon owns `SignalingState` and never has to ship per-connection
-    /// accept state across worker restarts. PR 7 will remove this field.
-    /// New code should not read or set it.
-    #[serde(default)]
-    pub preapproved_connections: Vec<(String, ConnectionAcceptState)>,
-}
-
-/// Per-peer-connection acceptance state. The daemon caches this map keyed by
-/// `connection_id` and ships it across worker restarts (see
-/// `WorkerToService::ConnectionAcceptStateChanged` and
-/// `WorkerInitPayload::preapproved_connections`).
-///
-/// Each `bool` corresponds 1:1 to a field on the worker's
-/// `desk_signal_facade::SignalingState`. Both default to `false`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Encode, Decode, PartialEq, Eq)]
-pub struct ConnectionAcceptState {
-    /// Remote peer was granted mouse / keyboard input.
-    pub accept_control: bool,
-    /// Remote peer was granted bidirectional clipboard sync. Independent of
-    /// `accept_control` — clipboard can be denied even when control was
-    /// granted, so the daemon must never infer this from control alone.
-    pub accept_clipboard_sync: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct SignalingPayload {
-    /// The raw signaling message (SDP, ICE, etc.) as JSON
-    pub message: String,
-    /// Connection ID this message is associated with
-    pub connection_id: Option<String>,
 }
 
 // =============== Arch IV: media + per-connection control ===============
@@ -504,7 +427,6 @@ mod tests {
             signaling_url: None,
             auth_token: Some("ipc-token".to_string()),
             host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
-            preapproved_connections: Vec::new(),
             media_pipe_name: Some(r"\\.\pipe\lcxl-desk-ipc-7-uuid-media".to_string()),
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -547,98 +469,7 @@ mod tests {
         let decoded: WorkerInitPayload = serde_json::from_value(legacy).unwrap();
         assert!(decoded.host_upstream_url.is_none());
         assert!(decoded.auth_token.is_none());
-        assert!(decoded.preapproved_connections.is_empty());
         assert!(decoded.media_pipe_name.is_none());
-    }
-
-    /// `preapproved_connections` round-trips and carries the per-connection
-    /// `ConnectionAcceptState` faithfully.
-    #[test]
-    fn worker_init_payload_preapproved_round_trip() {
-        let original = WorkerInitPayload {
-            session_id: "session-1".to_string(),
-            os_session_id: 1,
-            desktop_name: None,
-            config_json: "{}".to_string(),
-            signaling_url: None,
-            auth_token: None,
-            host_upstream_url: None,
-            preapproved_connections: vec![
-                (
-                    "conn-a".to_string(),
-                    ConnectionAcceptState {
-                        accept_control: true,
-                        accept_clipboard_sync: false,
-                    },
-                ),
-                (
-                    "conn-b".to_string(),
-                    ConnectionAcceptState {
-                        accept_control: true,
-                        accept_clipboard_sync: true,
-                    },
-                ),
-            ],
-            media_pipe_name: None,
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            decoded.preapproved_connections,
-            original.preapproved_connections
-        );
-    }
-
-    /// `ConnectionAcceptState` defaults to all-false (the safe initial state
-    /// for any new `connection_id` the daemon has not yet seen approved).
-    #[test]
-    fn connection_accept_state_default_is_all_false() {
-        let s = ConnectionAcceptState::default();
-        assert!(!s.accept_control);
-        assert!(!s.accept_clipboard_sync);
-    }
-
-    /// `WorkerToService::ConnectionAcceptStateChanged` round-trips with the
-    /// shared tag/content shape (`type` / `payload`) used by the IPC reader.
-    #[test]
-    fn connection_accept_state_changed_round_trips() {
-        let msg = WorkerToService::ConnectionAcceptStateChanged {
-            connection_id: "conn-42".to_string(),
-            state: ConnectionAcceptState {
-                accept_control: true,
-                accept_clipboard_sync: true,
-            },
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: WorkerToService = serde_json::from_str(&json).unwrap();
-        match decoded {
-            WorkerToService::ConnectionAcceptStateChanged {
-                connection_id,
-                state,
-            } => {
-                assert_eq!(connection_id, "conn-42");
-                assert!(state.accept_control);
-                assert!(state.accept_clipboard_sync);
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    /// `WorkerToService::ConnectionClosed` round-trips and carries only the
-    /// `connection_id`.
-    #[test]
-    fn connection_closed_round_trips() {
-        let msg = WorkerToService::ConnectionClosed {
-            connection_id: "conn-x".to_string(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let decoded: WorkerToService = serde_json::from_str(&json).unwrap();
-        match decoded {
-            WorkerToService::ConnectionClosed { connection_id } => {
-                assert_eq!(connection_id, "conn-x");
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
     }
 
     // ============== Arch IV variants — bincode v2 round-trips ==============

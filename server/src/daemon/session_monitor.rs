@@ -46,12 +46,12 @@ async fn run_windows_session_monitor(
                 last_desktop_name, current_desktop
             );
 
-            let preapproved = worker_mgr.notify_desktop_switch().await;
+            worker_mgr.notify_desktop_switch().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
 
             let session_id = get_active_session_id();
             match worker_mgr
-                .start_worker(session_id, Some(current_desktop.clone()), preapproved)
+                .start_worker(session_id, Some(current_desktop.clone()))
                 .await
             {
                 Ok(_) => {
