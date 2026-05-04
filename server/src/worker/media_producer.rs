@@ -36,6 +36,16 @@
 //!   `pc_manager::write_cursor_data` looks up the matching
 //!   `cursor_sync_event` DC and forwards via `dc.send_text(...)`.
 //!
+//! ## What PR 7 follow-up adds
+//!
+//! - **`UpdateMediaSettings` live-apply** — fps / quality changes
+//!   surface through `update_settings` → per-pipeline mpsc, drained
+//!   on the next encode tick, encoder rebuilt in place without
+//!   restarting capture. `bitrate_kbps` ride the same channel but
+//!   per-codec routing is still pending (logged + ignored — see the
+//!   TODO breadcrumb in `drain_settings_updates`); the UI today only
+//!   surfaces a quality slider so this gap is invisible.
+//!
 //! ## Out-of-scope (deferred)
 //!
 //! - **Capture sharing across connections** — plan calls for a single
@@ -46,10 +56,6 @@
 //!   correctness does not depend on sharing. The shared-capture
 //!   optimisation lands in a follow-up cut once the multi-browser
 //!   stress path actually warrants it.
-//! - **`UpdateMediaSettings` live-apply** — recorded as a TODO; cut 4
-//!   logs the request and returns OK without rebuilding the encoder so
-//!   the IPC contract is honoured even though the runtime knob is
-//!   pending.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
