@@ -84,8 +84,12 @@ pub enum ServiceToWorker {
 
     // ---------- Arch IV file / whiteboard pass-through ----------
     /// Opaque file-transfer command from the browser DataChannel. Worker
-    /// dispatches into its existing `file_transfer` module.
-    FileTransferCommand(OpaqueConnectionPayload),
+    /// dispatches into its existing `file_transfer` module. Carries
+    /// `is_text` so the worker can distinguish JSON control frames
+    /// (download/upload requests, completion ack) from binary chunk
+    /// uploads, matching the Arch III `DataChannelMessage::is_string`
+    /// dispatch in `service::file_transfer::handle_file_transfer_event`.
+    FileTransferCommand(FileTransferPayload),
 
     /// Opaque whiteboard / private-screen / Tauri-shell command from the
     /// browser DataChannel. Worker dispatches via the existing
@@ -142,8 +146,12 @@ pub enum WorkerToService {
     /// Routed by daemon to the per-connection `cursor_sync` DC.
     CursorData(CursorDataPayload),
 
-    /// Opaque worker → daemon response for file-transfer commands.
-    FileTransferData(OpaqueConnectionPayload),
+    /// Worker → daemon response for file-transfer commands. Carries
+    /// `is_text` so the daemon writes the bytes as a text frame (JSON
+    /// control message — DownloadResponse / TransferComplete /
+    /// TransferError) or a binary frame (downloaded chunk) on the
+    /// browser's `file_transfer_event` DataChannel.
+    FileTransferData(FileTransferPayload),
 
     // ---------- Arch III legacy (deprecated, removed by PR 7) ----------
     /// **Deprecated (Arch IV)**: SignalingState now lives in the daemon
@@ -398,6 +406,20 @@ pub struct ConnectionRefPayload {
 pub struct OpaqueConnectionPayload {
     pub connection_id: String,
     pub data: Vec<u8>,
+}
+
+/// File-transfer wire shape. Same as [`OpaqueConnectionPayload`] plus
+/// an `is_text` discriminator: the WebRTC DataChannel distinguishes
+/// text vs binary frames at the wire level (`DataChannelMessage::
+/// is_string`), and the file-transfer protocol uses both — JSON
+/// control messages travel as text, file chunks travel as binary —
+/// so the IPC has to preserve that bit for the daemon's `dc.send_text`
+/// vs `dc.send` decision.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct FileTransferPayload {
+    pub connection_id: String,
+    pub data: Vec<u8>,
+    pub is_text: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -725,6 +747,42 @@ mod tests {
                 assert_eq!(c.desktop_name, "Default");
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// PR 4 cut 2: `FileTransferPayload` carries an `is_text` flag
+    /// alongside `connection_id` + `data`. Verify both true and false
+    /// survive round-trip — a flipped bit would break the daemon's
+    /// `dc.send_text` vs `dc.send` decision and corrupt downloads.
+    #[test]
+    fn file_transfer_payload_round_trip_preserves_is_text_flag() {
+        for is_text in [true, false] {
+            let cmd = ServiceToWorker::FileTransferCommand(FileTransferPayload {
+                connection_id: "ft-1".to_string(),
+                data: vec![1, 2, 3],
+                is_text,
+            });
+            match bincode_round_trip(&cmd) {
+                ServiceToWorker::FileTransferCommand(p) => {
+                    assert_eq!(p.connection_id, "ft-1");
+                    assert_eq!(p.data, vec![1, 2, 3]);
+                    assert_eq!(p.is_text, is_text);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+            let resp = WorkerToService::FileTransferData(FileTransferPayload {
+                connection_id: "ft-1".to_string(),
+                data: vec![9, 8, 7],
+                is_text,
+            });
+            match bincode_round_trip(&resp) {
+                WorkerToService::FileTransferData(p) => {
+                    assert_eq!(p.connection_id, "ft-1");
+                    assert_eq!(p.data, vec![9, 8, 7]);
+                    assert_eq!(p.is_text, is_text);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
         }
     }
 

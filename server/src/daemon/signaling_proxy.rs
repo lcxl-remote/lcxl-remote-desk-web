@@ -269,6 +269,28 @@ pub async fn run_signaling_proxy(
             WorkerToService::CursorData(payload) => {
                 crate::daemon::pc_manager::write_cursor_data(&pc_registry, payload).await;
             }
+            // PR 4 cut 1 clipboard write-back: worker emits
+            // ClipboardRead when its polling task observes a local
+            // clipboard change (or in response to ClipboardRequest);
+            // daemon writes the JSON to the matching browser's
+            // `clipboard_event` DC. Permission gate
+            // (`accept_clipboard_sync`) lives in
+            // `pc_manager::write_clipboard_data` so the worker stays
+            // ignorant of per-connection accept state.
+            WorkerToService::ClipboardRead(payload) => {
+                crate::daemon::pc_manager::write_clipboard_data(&pc_registry, payload).await;
+            }
+            // PR 4 cut 2 file-transfer write-back: worker emits
+            // FileTransferData for each download response chunk and
+            // for upload completion replies; daemon writes the bytes
+            // to the matching browser's `file_transfer_event` DC,
+            // dispatching on `is_text` to choose `send_text` vs
+            // `send` (binary). Permission gate
+            // (`accept_control`) lives in
+            // `pc_manager::write_file_transfer_data`.
+            WorkerToService::FileTransferData(payload) => {
+                crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload).await;
+            }
             // Arch IV variants — daemon's PR 2 event-pipe handler will
             // own these. The current Arch III signaling_proxy never sees
             // them because no Arch III worker emits them.

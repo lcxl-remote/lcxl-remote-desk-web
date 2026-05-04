@@ -2,7 +2,11 @@ use crate::{
     host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
-    worker::{desktop_monitor, input_dispatcher::InputDispatcher, media_producer::MediaProducer},
+    worker::{
+        clipboard_dispatcher::ClipboardDispatcher, desktop_monitor,
+        file_transfer_dispatcher::FileTransferDispatcher, input_dispatcher::InputDispatcher,
+        media_producer::MediaProducer, whiteboard_dispatcher::WhiteboardDispatcher,
+    },
 };
 use actix_web::web;
 use desk_ipc_protocol::{
@@ -189,6 +193,29 @@ impl WorkerSession {
             let desk_settings = shared_settings.read().await.desk.clone();
             Arc::new(InputDispatcher::new(desk_settings))
         };
+        // PR 4 cut 1: clipboard dispatcher. Construction can fail when
+        // the platform host-control helper cannot be initialised
+        // (Linux without a clipboard backend, etc.); on failure the
+        // worker continues without clipboard sync — the IPC variants
+        // log + drop in the main loop instead of dispatching.
+        let clipboard_dispatcher: Option<ClipboardDispatcher> = {
+            let desk_settings = shared_settings.read().await.desk.clone();
+            match ClipboardDispatcher::new(&desk_settings, writer_tx.clone()) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    warn!("{e}");
+                    None
+                }
+            }
+        };
+        // PR 4 cut 2: file transfer dispatcher. Always constructible —
+        // it owns no resource that can fail at init time.
+        let file_transfer_dispatcher = FileTransferDispatcher::new(writer_tx.clone());
+        // PR 4 cut 3: whiteboard dispatcher. Spawns a bridge thread to
+        // the host_control_hub on construction; reuses the same hub
+        // the DeskSession (legacy / portable path) uses so messages
+        // flow through a single Tauri overlay manager.
+        let whiteboard_dispatcher = WhiteboardDispatcher::new(Arc::clone(&host_control_hub));
         if writer_tx
             .send(WorkerToService::Capabilities(capabilities))
             .is_err()
@@ -308,6 +335,19 @@ impl WorkerSession {
                                         // mouse / keyboard input is ready as
                                         // soon as the browser opens its DCs.
                                         input_dispatcher.start_connection(&payload);
+                                        // PR 4 cut 1: subscribe the connection
+                                        // to clipboard sync; the dispatcher
+                                        // starts its polling loop on the first
+                                        // active connection.
+                                        if let Some(d) = clipboard_dispatcher.as_ref() {
+                                            d.start_connection(&payload).await;
+                                        }
+                                        // PR 4 cut 2: subscribe the connection
+                                        // to file transfer commands.
+                                        file_transfer_dispatcher.start_connection(&payload).await;
+                                        // PR 4 cut 3: subscribe the connection
+                                        // to whiteboard draw commands.
+                                        whiteboard_dispatcher.start_connection(&payload).await;
                                         producer.start_media(payload);
                                     } else {
                                         warn!(
@@ -321,6 +361,11 @@ impl WorkerSession {
                                         producer.stop_media(&payload);
                                     }
                                     input_dispatcher.stop_connection(&payload);
+                                    if let Some(d) = clipboard_dispatcher.as_ref() {
+                                        d.stop_connection(&payload).await;
+                                    }
+                                    file_transfer_dispatcher.stop_connection(&payload).await;
+                                    whiteboard_dispatcher.stop_connection(&payload).await;
                                 }
                                 ServiceToWorker::ForceKeyframe(payload) => {
                                     if let Some(producer) = media_producer.as_ref() {
@@ -345,43 +390,34 @@ impl WorkerSession {
                                 ServiceToWorker::KeyboardInput(payload) => {
                                     input_dispatcher.dispatch_keyboard(&payload);
                                 }
-                                // Cut 5: log + drop. PR 4 wires the
-                                // worker-side clipboard / file-transfer /
-                                // whiteboard modules onto these IPC
-                                // variants. Until then the daemon already
-                                // routes correctly so the daemon-side test
-                                // surface is exercised; the worker side is
-                                // a stub that warns once per message.
+                                // PR 4 cut 1: clipboard handlers route to
+                                // the per-worker clipboard dispatcher when
+                                // it was successfully constructed; otherwise
+                                // log + drop so a worker without a clipboard
+                                // backend stays alive for video / input.
                                 ServiceToWorker::ClipboardWrite(payload) => {
-                                    warn!(
-                                        "Worker received ClipboardWrite for {} ({} bytes); \
-                                         worker-side handler lands in PR 4",
-                                        payload.connection_id,
-                                        payload.data.len(),
-                                    );
+                                    if let Some(d) = clipboard_dispatcher.as_ref() {
+                                        d.handle_clipboard_write(payload).await;
+                                    } else {
+                                        warn!(
+                                            "ClipboardWrite dropped — no clipboard backend on this worker"
+                                        );
+                                    }
                                 }
                                 ServiceToWorker::ClipboardRequest(payload) => {
-                                    warn!(
-                                        "Worker received ClipboardRequest for {}; \
-                                         worker-side handler lands in PR 4",
-                                        payload.connection_id,
-                                    );
+                                    if let Some(d) = clipboard_dispatcher.as_ref() {
+                                        d.handle_clipboard_request(payload).await;
+                                    } else {
+                                        warn!(
+                                            "ClipboardRequest dropped — no clipboard backend on this worker"
+                                        );
+                                    }
                                 }
                                 ServiceToWorker::FileTransferCommand(payload) => {
-                                    warn!(
-                                        "Worker received FileTransferCommand for {} ({} bytes); \
-                                         worker-side handler lands in PR 4",
-                                        payload.connection_id,
-                                        payload.data.len(),
-                                    );
+                                    file_transfer_dispatcher.handle_command(payload).await;
                                 }
                                 ServiceToWorker::WhiteboardCommand(payload) => {
-                                    warn!(
-                                        "Worker received WhiteboardCommand for {} ({} bytes); \
-                                         worker-side handler lands in PR 4",
-                                        payload.connection_id,
-                                        payload.data.len(),
-                                    );
+                                    whiteboard_dispatcher.handle_command(payload).await;
                                 }
                             }
                         }
@@ -475,6 +511,11 @@ impl WorkerSession {
             producer.shutdown();
         }
         input_dispatcher.shutdown();
+        if let Some(d) = clipboard_dispatcher.as_ref() {
+            d.shutdown().await;
+        }
+        file_transfer_dispatcher.shutdown().await;
+        whiteboard_dispatcher.shutdown().await;
         drop(writer_tx);
         let _ = writer_task.await;
 

@@ -69,9 +69,9 @@ use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encode
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
 use desk_ipc_protocol::message::{
-    ClipboardPayload, CursorDataPayload, ForceKeyframePayload, InputPayload, MediaCapabilities,
-    MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload, ServiceToWorker,
-    StartMediaPayload,
+    ClipboardPayload, CursorDataPayload, FileTransferPayload, ForceKeyframePayload, InputPayload,
+    MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload,
+    ServiceToWorker, StartMediaPayload,
 };
 use desk_signal_facade::model::signal::InitSignalingData;
 use std::time::Duration;
@@ -188,6 +188,19 @@ pub struct PeerConnectionContext {
     /// handler; PR 3 wires worker-side `WorkerToService::CursorData` to
     /// `dc.send(...)` here.
     pub cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    /// Set when the browser opens the `clipboard_event` DataChannel.
+    /// PR 4 cut 1 wires worker-side `WorkerToService::ClipboardRead` to
+    /// `dc.send_text(...)` here. Browser→host clipboard writes still
+    /// flow through the standard router (DC `on_message` →
+    /// `ServiceToWorker::ClipboardWrite`).
+    pub clipboard_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    /// Set when the browser opens the `file_transfer_event`
+    /// DataChannel. PR 4 cut 2 wires worker-side
+    /// `WorkerToService::FileTransferData` to `dc.send_text(...)` /
+    /// `dc.send(...)` (per-payload `is_text`) here. Browser→worker
+    /// chunks and control messages still flow through the standard
+    /// router as `ServiceToWorker::FileTransferCommand`.
+    pub file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
 }
 
 /// Daemon-wide registry of active per-browser
@@ -268,6 +281,8 @@ impl PcRegistry {
             video_track: None,
             audio_track: None,
             cursor_data_channel: Arc::new(RwLock::new(None)),
+            clipboard_data_channel: Arc::new(RwLock::new(None)),
+            file_transfer_data_channel: Arc::new(RwLock::new(None)),
         }));
 
         self.inner
@@ -341,7 +356,12 @@ fn classify_dc_label(label: &str) -> Option<DcRoute> {
 /// to `ClipboardRequest` but the current protocol multiplexes both
 /// over the same `clipboard_event` channel and the worker disambiguates
 /// by payload, so cut 5 always emits `ClipboardWrite`.
-fn route_to_service_msg(route: DcRoute, connection_id: &str, data: Vec<u8>) -> ServiceToWorker {
+fn route_to_service_msg(
+    route: DcRoute,
+    connection_id: &str,
+    data: Vec<u8>,
+    is_text: bool,
+) -> ServiceToWorker {
     match route {
         DcRoute::Mouse => ServiceToWorker::MouseInput(InputPayload {
             connection_id: connection_id.to_string(),
@@ -359,9 +379,14 @@ fn route_to_service_msg(route: DcRoute, connection_id: &str, data: Vec<u8>) -> S
             connection_id: connection_id.to_string(),
             data,
         }),
-        DcRoute::FileTransfer => ServiceToWorker::FileTransferCommand(OpaqueConnectionPayload {
+        // PR 4 cut 2: file_transfer carries the text/binary
+        // discriminator so the worker dispatches to the JSON-control
+        // path or the binary-chunk path correctly. Other routes ignore
+        // `is_text` (their wire shape is text-only on the browser side).
+        DcRoute::FileTransfer => ServiceToWorker::FileTransferCommand(FileTransferPayload {
             connection_id: connection_id.to_string(),
             data,
+            is_text,
         }),
         DcRoute::Whiteboard => ServiceToWorker::WhiteboardCommand(OpaqueConnectionPayload {
             connection_id: connection_id.to_string(),
@@ -398,7 +423,11 @@ async fn route_is_permitted(route: DcRoute, state: &Arc<RwLock<SignalingState>>)
 /// IPC-forwarding closure that ships to the worker via
 /// `ServiceToWorker::*`, or (b) for `cursor_sync_event`, has its
 /// `Arc<RTCDataChannel>` stashed in the per-connection
-/// `cursor_data_channel` slot for PR 3 cursor-write-back.
+/// `cursor_data_channel` slot for PR 3 cursor-write-back. PR 4 cut 1
+/// adds a third path: `clipboard_event` channels are *both* stashed
+/// (so the worker can push back via `WorkerToService::ClipboardRead`)
+/// *and* wired with the on_message forwarder (so browser→host writes
+/// flow through `ServiceToWorker::ClipboardWrite`).
 ///
 /// Permission gates (`accept_control` / `accept_clipboard_sync`) are
 /// checked *here*, before IPC, so the worker side can blindly trust
@@ -409,6 +438,8 @@ pub fn register_data_channel_router(
     connection_id: String,
     signaling_state: Arc<RwLock<SignalingState>>,
     cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    clipboard_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     worker_mgr: WorkerManager,
 ) {
     pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
@@ -417,6 +448,8 @@ pub fn register_data_channel_router(
         let connection_id = connection_id.clone();
         let signaling_state = Arc::clone(&signaling_state);
         let cursor_data_channel = Arc::clone(&cursor_data_channel);
+        let clipboard_data_channel = Arc::clone(&clipboard_data_channel);
+        let file_transfer_data_channel = Arc::clone(&file_transfer_data_channel);
         let worker_mgr = worker_mgr.clone();
         Box::pin(async move {
             log::info!("[DcRouter] {connection_id}: new DataChannel label='{label}' id={dc_id}");
@@ -437,6 +470,27 @@ pub fn register_data_channel_router(
                      for PR 3 worker→daemon cursor write-back"
                 );
                 return;
+            }
+            if route == DcRoute::Clipboard {
+                let mut slot = clipboard_data_channel.write().await;
+                *slot = Some(Arc::clone(&dc));
+                log::info!(
+                    "[DcRouter] {connection_id}: stashed clipboard_event channel \
+                     for PR 4 worker→daemon clipboard write-back"
+                );
+                // Fall through to install the on_message forwarder so
+                // browser→host writes still flow as ClipboardWrite IPC.
+            }
+            if route == DcRoute::FileTransfer {
+                let mut slot = file_transfer_data_channel.write().await;
+                *slot = Some(Arc::clone(&dc));
+                log::info!(
+                    "[DcRouter] {connection_id}: stashed file_transfer_event channel \
+                     for PR 4 worker→daemon file write-back"
+                );
+                // Fall through to install the on_message forwarder so
+                // browser→host commands and chunks still flow as
+                // FileTransferCommand IPC.
             }
             install_browser_dc_message_forwarder(
                 dc,
@@ -467,6 +521,7 @@ fn install_browser_dc_message_forwarder(
             let signaling_state = Arc::clone(&signaling_state);
             let worker_mgr = worker_mgr.clone();
             let bytes = msg.data.to_vec();
+            let is_text = msg.is_string;
             Box::pin(async move {
                 if !route_is_permitted(route, &signaling_state).await {
                     log::debug!(
@@ -474,7 +529,7 @@ fn install_browser_dc_message_forwarder(
                     );
                     return;
                 }
-                let svc_msg = route_to_service_msg(route, &connection_id, bytes);
+                let svc_msg = route_to_service_msg(route, &connection_id, bytes, is_text);
                 if let Err(e) = worker_mgr.send_to_worker(svc_msg).await {
                     log::warn!(
                         "[DcRouter] {connection_id}: failed to forward {route:?} to worker: {e}"
@@ -622,6 +677,8 @@ pub async fn handle_request_remote(
             from_connection_id.to_string(),
             Arc::clone(&ctx_guard.signaling_state),
             Arc::clone(&ctx_guard.cursor_data_channel),
+            Arc::clone(&ctx_guard.clipboard_data_channel),
+            Arc::clone(&ctx_guard.file_transfer_data_channel),
             mgr.clone(),
         );
     }
@@ -1017,6 +1074,185 @@ pub async fn write_cursor_data(registry: &PcRegistry, payload: CursorDataPayload
     if let Err(e) = dc.send_text(s.to_string()).await {
         log::warn!(
             "[pc_manager] failed to send cursor data for {}: {e}",
+            payload.connection_id
+        );
+    }
+}
+
+/// PR 4 cut 1: write a worker-emitted clipboard payload (text or
+/// chunked image — already JSON-encoded as `ClipboardEventData`) to
+/// the matching connection's `clipboard_event` DataChannel. Mirrors
+/// the Arch III polling-task `dc.send_text(...)` calls in
+/// `service::clipboard_event::handle_clipboard_event`; here the daemon
+/// writes the JSON unchanged so the browser sees the exact same wire
+/// shape.
+///
+/// Permission gating is applied here (not the worker): the worker
+/// emits unconditionally for every active connection so it does not
+/// have to track per-connection accept state, and the daemon drops the
+/// IPC if `accept_control && accept_clipboard_sync` is not set on
+/// the matching `SignalingState`. This keeps the trust boundary on the
+/// daemon side, same as the browser→worker direction in
+/// `register_data_channel_router`.
+///
+/// Silent-drop branches:
+///
+/// - Unknown `connection_id` — race against `CloseControl`; trace-log.
+/// - Permission not granted — `accept_clipboard_sync` is false; debug-log.
+/// - No clipboard DataChannel registered yet — browser hasn't opened
+///   the `clipboard_event` channel; debug-log.
+/// - Channel registered but not in `Open` state — debug-log.
+/// - Non-UTF-8 bytes — warn + drop (worker should always serialise
+///   `ClipboardEventData` as JSON; this defends against a
+///   mismatched-version worker).
+/// - Send failed — warn-log; the next clipboard change will resync
+///   the browser without operator intervention.
+pub async fn write_clipboard_data(registry: &PcRegistry, payload: ClipboardPayload) {
+    let ctx = match registry.get(&payload.connection_id).await {
+        Some(c) => c,
+        None => {
+            log::trace!(
+                "[pc_manager] dropping clipboard data for unknown connection {}",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    let (dc_opt, accepted) = {
+        let ctx = ctx.read().await;
+        let dc = ctx.clipboard_data_channel.read().await.clone();
+        let s = ctx.signaling_state.read().await;
+        (dc, s.accept_control && s.accept_clipboard_sync)
+    };
+    if !accepted {
+        log::debug!(
+            "[pc_manager] dropping clipboard data for {} — permission not granted",
+            payload.connection_id
+        );
+        return;
+    }
+    let dc = match dc_opt {
+        Some(d) => d,
+        None => {
+            log::debug!(
+                "[pc_manager] dropping clipboard data for {} — no clipboard DataChannel \
+                 registered yet (browser hasn't opened it)",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    if dc.ready_state() != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+        log::debug!(
+            "[pc_manager] dropping clipboard data for {} — DC state is {:?}, not Open",
+            payload.connection_id,
+            dc.ready_state()
+        );
+        return;
+    }
+    let s = match std::str::from_utf8(&payload.data) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[pc_manager] clipboard data for {} not UTF-8: {e}; dropping",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    if let Err(e) = dc.send_text(s.to_string()).await {
+        log::warn!(
+            "[pc_manager] failed to send clipboard data for {}: {e}",
+            payload.connection_id
+        );
+    }
+}
+
+/// PR 4 cut 2: write a worker-emitted file-transfer payload to the
+/// matching connection's `file_transfer_event` DataChannel. Mirrors
+/// the Arch III `dc.send_text` (JSON control replies) /
+/// `dc.send` (binary chunks) calls in
+/// `service::file_transfer::handle_download_request`; here the daemon
+/// dispatches based on the `is_text` flag carried with the IPC.
+///
+/// Permission gate: file transfer is gated on `accept_control` (it
+/// shares the remote-control flag, like the browser-→host
+/// router's `route_is_permitted` does). A connection that has not
+/// granted control gets nothing.
+///
+/// Silent-drop branches:
+///
+/// - Unknown `connection_id` — race against `CloseControl`; trace.
+/// - Permission not granted — debug.
+/// - No file-transfer DC registered — debug (browser hasn't opened it).
+/// - DC not in Open state — debug.
+/// - send_text on non-UTF-8 bytes — warn + drop. The worker should
+///   only set `is_text=true` when the bytes parse as UTF-8 (JSON
+///   control message); this defends against a buggy worker.
+/// - Send failed — warn-log; the worker's transfer protocol carries
+///   per-chunk acks so the browser detects the loss and the next
+///   chunk eventually retransmits via `TransferError`.
+pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransferPayload) {
+    let ctx = match registry.get(&payload.connection_id).await {
+        Some(c) => c,
+        None => {
+            log::trace!(
+                "[pc_manager] dropping file transfer data for unknown connection {}",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    let (dc_opt, accepted) = {
+        let ctx = ctx.read().await;
+        let dc = ctx.file_transfer_data_channel.read().await.clone();
+        let s = ctx.signaling_state.read().await;
+        (dc, s.accept_control)
+    };
+    if !accepted {
+        log::debug!(
+            "[pc_manager] dropping file transfer data for {} — control not granted",
+            payload.connection_id
+        );
+        return;
+    }
+    let dc = match dc_opt {
+        Some(d) => d,
+        None => {
+            log::debug!(
+                "[pc_manager] dropping file transfer data for {} — no file_transfer DataChannel \
+                 registered yet",
+                payload.connection_id
+            );
+            return;
+        }
+    };
+    if dc.ready_state() != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+        log::debug!(
+            "[pc_manager] dropping file transfer data for {} — DC state is {:?}, not Open",
+            payload.connection_id,
+            dc.ready_state()
+        );
+        return;
+    }
+    let result = if payload.is_text {
+        let s = match std::str::from_utf8(&payload.data) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!(
+                    "[pc_manager] file transfer text for {} not UTF-8: {e}; dropping",
+                    payload.connection_id
+                );
+                return;
+            }
+        };
+        dc.send_text(s.to_string()).await
+    } else {
+        dc.send(&bytes::Bytes::from(payload.data)).await
+    };
+    if let Err(e) = result {
+        log::warn!(
+            "[pc_manager] failed to send file transfer data for {}: {e}",
             payload.connection_id
         );
     }
@@ -1611,32 +1847,52 @@ mod tests {
         let cid = "conn-test";
         let data = vec![1u8, 2, 3, 4];
 
-        match route_to_service_msg(DcRoute::Mouse, cid, data.clone()) {
+        match route_to_service_msg(DcRoute::Mouse, cid, data.clone(), true) {
             ServiceToWorker::MouseInput(p) => {
                 assert_eq!(p.connection_id, cid);
                 assert_eq!(p.data, data);
             }
             other => panic!("expected MouseInput, got {other:?}"),
         }
-        match route_to_service_msg(DcRoute::MouseMove, cid, data.clone()) {
+        match route_to_service_msg(DcRoute::MouseMove, cid, data.clone(), true) {
             ServiceToWorker::MouseMoveInput(p) => assert_eq!(p.data, data),
             other => panic!("expected MouseMoveInput, got {other:?}"),
         }
-        match route_to_service_msg(DcRoute::Keyboard, cid, data.clone()) {
+        match route_to_service_msg(DcRoute::Keyboard, cid, data.clone(), true) {
             ServiceToWorker::KeyboardInput(p) => assert_eq!(p.data, data),
             other => panic!("expected KeyboardInput, got {other:?}"),
         }
-        match route_to_service_msg(DcRoute::Clipboard, cid, data.clone()) {
+        match route_to_service_msg(DcRoute::Clipboard, cid, data.clone(), true) {
             ServiceToWorker::ClipboardWrite(p) => assert_eq!(p.data, data),
             other => panic!("expected ClipboardWrite, got {other:?}"),
         }
-        match route_to_service_msg(DcRoute::FileTransfer, cid, data.clone()) {
-            ServiceToWorker::FileTransferCommand(p) => assert_eq!(p.data, data),
+        match route_to_service_msg(DcRoute::FileTransfer, cid, data.clone(), true) {
+            ServiceToWorker::FileTransferCommand(p) => {
+                assert_eq!(p.data, data);
+                assert!(p.is_text, "is_text=true must propagate to payload");
+            }
             other => panic!("expected FileTransferCommand, got {other:?}"),
         }
-        match route_to_service_msg(DcRoute::Whiteboard, cid, data.clone()) {
+        match route_to_service_msg(DcRoute::Whiteboard, cid, data.clone(), true) {
             ServiceToWorker::WhiteboardCommand(p) => assert_eq!(p.data, data),
             other => panic!("expected WhiteboardCommand, got {other:?}"),
+        }
+    }
+
+    /// PR 4 cut 2: when the browser sends a binary file-transfer
+    /// chunk, the daemon must forward `is_text=false` so the worker
+    /// dispatches into the chunk-write path rather than trying to
+    /// parse JSON.
+    #[test]
+    fn route_to_service_msg_file_transfer_preserves_binary_flag() {
+        let cid = "conn-binary";
+        let data = vec![0xFFu8, 0x00, 0xAA, 0x55];
+        match route_to_service_msg(DcRoute::FileTransfer, cid, data.clone(), false) {
+            ServiceToWorker::FileTransferCommand(p) => {
+                assert_eq!(p.data, data);
+                assert!(!p.is_text, "is_text=false must propagate for binary chunks");
+            }
+            other => panic!("expected FileTransferCommand, got {other:?}"),
         }
     }
 
@@ -1647,7 +1903,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "CursorSync DC has no upstream message variant")]
     fn route_to_service_msg_cursor_sync_panics() {
-        let _ = route_to_service_msg(DcRoute::CursorSync, "c", vec![]);
+        let _ = route_to_service_msg(DcRoute::CursorSync, "c", vec![], true);
     }
 
     /// `accept_control = false` blocks Mouse / MouseMove / Keyboard
@@ -1717,6 +1973,8 @@ mod tests {
         let pc = build_peer_connection(vec![]).await.expect("pc");
         let signaling_state = Arc::new(RwLock::new(SignalingState::default()));
         let cursor_dc = Arc::new(RwLock::new(None));
+        let clipboard_dc = Arc::new(RwLock::new(None));
+        let file_transfer_dc = Arc::new(RwLock::new(None));
         let shared = SharedSettings::from(Settings::default());
         let settings_data = actix_web::web::Data::new(shared);
         let (worker_mgr, _) = WorkerManager::new(settings_data, PcRegistry::new());
@@ -1725,6 +1983,8 @@ mod tests {
             "conn-smoke".to_string(),
             signaling_state,
             cursor_dc,
+            clipboard_dc,
+            file_transfer_dc,
             worker_mgr,
         );
     }
@@ -1794,6 +2054,99 @@ mod tests {
             data: vec![0xFFu8, 0xFE, 0xFD],
         };
         write_cursor_data(&registry, payload).await;
+    }
+
+    // ============== PR 4 cut 1: write_clipboard_data ==============
+
+    /// `write_clipboard_data` for an unknown connection_id is a silent
+    /// no-op — race against `CloseControl` must not panic.
+    #[tokio::test]
+    async fn write_clipboard_data_unknown_connection_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let payload = ClipboardPayload {
+            connection_id: "ghost".to_string(),
+            data: br#"{"type":"text","content":"x"}"#.to_vec(),
+        };
+        write_clipboard_data(&registry, payload).await;
+    }
+
+    /// Permission gate: a connection that has neither `accept_control`
+    /// nor `accept_clipboard_sync` set must not receive clipboard
+    /// pushes. Mirrors the Arch III polling-task gate that read both
+    /// flags from `SignalingState`.
+    #[tokio::test]
+    async fn write_clipboard_data_drops_when_permission_not_granted() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-no-perm", &request_remote, &s)
+            .await
+            .expect("create");
+        let payload = ClipboardPayload {
+            connection_id: "conn-no-perm".to_string(),
+            data: br#"{"type":"text","content":"x"}"#.to_vec(),
+        };
+        // Default SignalingState has both flags false, so this must
+        // silent-drop on the permission gate (before the DC-not-found
+        // branch).
+        write_clipboard_data(&registry, payload).await;
+    }
+
+    /// Permission granted but clipboard DC slot empty (browser hasn't
+    /// opened the `clipboard_event` channel) is a silent no-op.
+    #[tokio::test]
+    async fn write_clipboard_data_no_dc_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let ctx = registry
+            .create_for_request_remote("conn-no-dc", &request_remote, &s)
+            .await
+            .expect("create");
+        // Flip the gates so we exercise the DC-missing branch.
+        {
+            let ctx_read = ctx.read().await;
+            let mut s = ctx_read.signaling_state.write().await;
+            s.accept_control = true;
+            s.accept_clipboard_sync = true;
+        }
+        let payload = ClipboardPayload {
+            connection_id: "conn-no-dc".to_string(),
+            data: br#"{"type":"text","content":"x"}"#.to_vec(),
+        };
+        write_clipboard_data(&registry, payload).await;
+    }
+
+    /// Non-UTF-8 clipboard payload bytes are dropped (warn-logged) —
+    /// matches the cursor variant. Defends against a buggy worker
+    /// shipping malformed bytes.
+    #[tokio::test]
+    async fn write_clipboard_data_invalid_utf8_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let ctx = registry
+            .create_for_request_remote("conn-bad-utf8-clip", &request_remote, &s)
+            .await
+            .expect("create");
+        {
+            let ctx_read = ctx.read().await;
+            let mut s = ctx_read.signaling_state.write().await;
+            s.accept_control = true;
+            s.accept_clipboard_sync = true;
+        }
+        let payload = ClipboardPayload {
+            connection_id: "conn-bad-utf8-clip".to_string(),
+            data: vec![0xFFu8, 0xFE, 0xFD],
+        };
+        write_clipboard_data(&registry, payload).await;
     }
 
     // ============== Cut 5: RTCP PLI/FIR identity ==============
