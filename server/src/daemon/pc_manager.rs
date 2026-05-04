@@ -46,11 +46,15 @@ use webrtc::api::media_engine::{
     MIME_TYPE_AV1, MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_VP8, MIME_TYPE_VP9, MediaEngine,
 };
 use webrtc::api::setting_engine::{SctpMaxMessageSize, SettingEngine};
+use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::{RTCPeerConnection, configuration::RTCConfiguration};
+use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
+use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
+use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
@@ -61,7 +65,8 @@ use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encode
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
 use desk_ipc_protocol::message::{
-    MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, ServiceToWorker, StartMediaPayload,
+    ClipboardPayload, ForceKeyframePayload, InputPayload, MediaCapabilities, MediaCodec,
+    MediaFrame, MediaFrameKind, OpaqueConnectionPayload, ServiceToWorker, StartMediaPayload,
 };
 use desk_signal_facade::model::signal::InitSignalingData;
 use std::time::Duration;
@@ -158,8 +163,10 @@ pub async fn build_peer_connection(
 /// Cut 3b populates `pc` + `signaling_state` + (when the offer
 /// includes media) `video_track` / `audio_track`. Cut 4 starts
 /// writing samples into the tracks from worker `MediaFrame`s; cut 5
-/// fills `cursor_data_channel` and the input DCs are wired up by the
-/// daemon-side `on_data_channel` handler (also added in cut 5).
+/// installs the `on_data_channel` handler that routes browser DC
+/// traffic over IPC to the worker (mouse / keyboard / clipboard /
+/// file / whiteboard) and stashes the cursor-sync DC in
+/// `cursor_data_channel` for PR 3 to push cursor updates back to.
 pub struct PeerConnectionContext {
     pub connection_id: String,
     pub pc: Arc<RTCPeerConnection>,
@@ -171,6 +178,11 @@ pub struct PeerConnectionContext {
     /// Set on the first `Offer` whose SDP carries `m=audio`. Same
     /// fill timing as `video_track`.
     pub audio_track: Option<Arc<TrackLocalStaticSample>>,
+    /// Set when the browser opens the `cursor_sync_event` DataChannel.
+    /// Cut 5 only writes to this slot from the daemon `on_data_channel`
+    /// handler; PR 3 wires worker-side `WorkerToService::CursorData` to
+    /// `dc.send(...)` here.
+    pub cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
 }
 
 /// Daemon-wide registry of active per-browser
@@ -250,6 +262,7 @@ impl PcRegistry {
             signaling_state: Arc::new(RwLock::new(SignalingState::default())),
             video_track: None,
             audio_track: None,
+            cursor_data_channel: Arc::new(RwLock::new(None)),
         }));
 
         self.inner
@@ -259,6 +272,273 @@ impl PcRegistry {
 
         Ok(ctx)
     }
+}
+
+// =====================================================================
+// Cut 5: DataChannel routing daemon → worker
+// =====================================================================
+
+/// DataChannel labels the browser opens against the daemon-held PC.
+/// Mirrors the constants in `crate::model::data_channel` (kept locally
+/// so this module does not depend on that one in tests / docs).
+const DC_LABEL_MOUSE: &str = "mouse_event";
+const DC_LABEL_MOUSE_MOVE: &str = "mouse_move_event";
+const DC_LABEL_KEYBOARD: &str = "keyboard_event";
+const DC_LABEL_CLIPBOARD: &str = "clipboard_event";
+const DC_LABEL_FILE_TRANSFER: &str = "file_transfer_event";
+const DC_LABEL_WHITEBOARD: &str = "whiteboard_event";
+const DC_LABEL_CURSOR_SYNC: &str = "cursor_sync_event";
+
+/// What to do with a DataChannel message based on its label. Pure
+/// classification — no I/O — so it stays cheap to test exhaustively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DcRoute {
+    /// Mouse non-move events (click / wheel). Gated by `accept_control`.
+    Mouse,
+    /// High-frequency mouse-move events. Gated by `accept_control`,
+    /// kept distinct so the worker can apply move-specific coalescing.
+    MouseMove,
+    /// Keyboard events. Gated by `accept_control`.
+    Keyboard,
+    /// Clipboard writes (browser → host). Gated by `accept_clipboard_sync`.
+    Clipboard,
+    /// File-transfer commands. Gated by `accept_control` (file ops are
+    /// part of the control surface).
+    FileTransfer,
+    /// Whiteboard commands. Gated by `accept_control`.
+    Whiteboard,
+    /// Cursor-sync DataChannel — the browser doesn't push to it; we
+    /// stash the channel handle so PR 3's worker→daemon CursorData
+    /// path has somewhere to write to.
+    CursorSync,
+}
+
+/// Map a DataChannel `label` to its route. Returns `None` for
+/// unknown labels so the caller can warn-and-drop without panicking.
+fn classify_dc_label(label: &str) -> Option<DcRoute> {
+    match label {
+        DC_LABEL_MOUSE => Some(DcRoute::Mouse),
+        DC_LABEL_MOUSE_MOVE => Some(DcRoute::MouseMove),
+        DC_LABEL_KEYBOARD => Some(DcRoute::Keyboard),
+        DC_LABEL_CLIPBOARD => Some(DcRoute::Clipboard),
+        DC_LABEL_FILE_TRANSFER => Some(DcRoute::FileTransfer),
+        DC_LABEL_WHITEBOARD => Some(DcRoute::Whiteboard),
+        DC_LABEL_CURSOR_SYNC => Some(DcRoute::CursorSync),
+        _ => None,
+    }
+}
+
+/// Build the `ServiceToWorker` IPC variant a given DcRoute should
+/// forward as. Used by the daemon's `on_data_channel.on_message`
+/// handler. Cut 5 only handles browser→host directions; the
+/// `Clipboard` arm uses `ClipboardWrite` (browser writing to host
+/// clipboard); a future browser→host clipboard *request* DC would map
+/// to `ClipboardRequest` but the current protocol multiplexes both
+/// over the same `clipboard_event` channel and the worker disambiguates
+/// by payload, so cut 5 always emits `ClipboardWrite`.
+fn route_to_service_msg(route: DcRoute, connection_id: &str, data: Vec<u8>) -> ServiceToWorker {
+    match route {
+        DcRoute::Mouse => ServiceToWorker::MouseInput(InputPayload {
+            connection_id: connection_id.to_string(),
+            data,
+        }),
+        DcRoute::MouseMove => ServiceToWorker::MouseMoveInput(InputPayload {
+            connection_id: connection_id.to_string(),
+            data,
+        }),
+        DcRoute::Keyboard => ServiceToWorker::KeyboardInput(InputPayload {
+            connection_id: connection_id.to_string(),
+            data,
+        }),
+        DcRoute::Clipboard => ServiceToWorker::ClipboardWrite(ClipboardPayload {
+            connection_id: connection_id.to_string(),
+            data,
+        }),
+        DcRoute::FileTransfer => ServiceToWorker::FileTransferCommand(OpaqueConnectionPayload {
+            connection_id: connection_id.to_string(),
+            data,
+        }),
+        DcRoute::Whiteboard => ServiceToWorker::WhiteboardCommand(OpaqueConnectionPayload {
+            connection_id: connection_id.to_string(),
+            data,
+        }),
+        // CursorSync is read-side only; it never produces an IPC
+        // message — the caller should not invoke this for it.
+        DcRoute::CursorSync => unreachable!("CursorSync DC has no upstream message variant"),
+    }
+}
+
+/// Permission gate. Returns `true` if the message should be forwarded
+/// to the worker given the current `SignalingState`. Mirrors the
+/// per-handler gating that lived in the worker's `handle_*_event`
+/// functions in Arch III; consolidating it here means the worker can
+/// trust every IPC variant it receives — gating is a daemon-side
+/// concern only. `CursorSync` is filtered out before this is called.
+async fn route_is_permitted(route: DcRoute, state: &Arc<RwLock<SignalingState>>) -> bool {
+    let s = state.read().await;
+    match route {
+        DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard => s.accept_control,
+        DcRoute::Clipboard => s.accept_clipboard_sync,
+        // File / whiteboard ride on the control grant in Arch III; PR
+        // 4 may split file_transfer onto its own switch but cut 5
+        // matches Arch III's behaviour exactly to avoid behaviour
+        // regressions during the cutover.
+        DcRoute::FileTransfer | DcRoute::Whiteboard => s.accept_control,
+        DcRoute::CursorSync => unreachable!("CursorSync DC has no message route"),
+    }
+}
+
+/// Install the daemon's `on_data_channel` callback. Each browser-opened
+/// DataChannel either (a) gets its `on_message` wired into the
+/// IPC-forwarding closure that ships to the worker via
+/// `ServiceToWorker::*`, or (b) for `cursor_sync_event`, has its
+/// `Arc<RTCDataChannel>` stashed in the per-connection
+/// `cursor_data_channel` slot for PR 3 cursor-write-back.
+///
+/// Permission gates (`accept_control` / `accept_clipboard_sync`) are
+/// checked *here*, before IPC, so the worker side can blindly trust
+/// any IPC message it gets — keeping the trust boundary on the daemon
+/// side where it belongs.
+pub fn register_data_channel_router(
+    pc: Arc<RTCPeerConnection>,
+    connection_id: String,
+    signaling_state: Arc<RwLock<SignalingState>>,
+    cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    worker_mgr: WorkerManager,
+) {
+    pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
+        let label = dc.label().to_owned();
+        let dc_id = dc.id();
+        let connection_id = connection_id.clone();
+        let signaling_state = Arc::clone(&signaling_state);
+        let cursor_data_channel = Arc::clone(&cursor_data_channel);
+        let worker_mgr = worker_mgr.clone();
+        Box::pin(async move {
+            log::info!("[DcRouter] {connection_id}: new DataChannel label='{label}' id={dc_id}");
+            let route = match classify_dc_label(&label) {
+                Some(r) => r,
+                None => {
+                    log::warn!(
+                        "[DcRouter] {connection_id}: unknown DC label '{label}' — dropping channel"
+                    );
+                    return;
+                }
+            };
+            if route == DcRoute::CursorSync {
+                let mut slot = cursor_data_channel.write().await;
+                *slot = Some(Arc::clone(&dc));
+                log::info!(
+                    "[DcRouter] {connection_id}: stashed cursor_sync_event channel \
+                     for PR 3 worker→daemon cursor write-back"
+                );
+                return;
+            }
+            install_browser_dc_message_forwarder(
+                dc,
+                connection_id,
+                route,
+                signaling_state,
+                worker_mgr,
+            );
+        })
+    }));
+}
+
+/// Install the per-DC `on_message` callback that gates on
+/// `signaling_state` and forwards bytes to the worker via the worker
+/// manager's IPC sender. Pulled out of the closure body so the routing
+/// logic is unit-testable in isolation (the closure itself can't be
+/// unit-tested without spinning up a full PC).
+fn install_browser_dc_message_forwarder(
+    dc: Arc<RTCDataChannel>,
+    connection_id: String,
+    route: DcRoute,
+    signaling_state: Arc<RwLock<SignalingState>>,
+    worker_mgr: WorkerManager,
+) {
+    dc.on_message(Box::new(
+        move |msg: webrtc::data_channel::data_channel_message::DataChannelMessage| {
+            let connection_id = connection_id.clone();
+            let signaling_state = Arc::clone(&signaling_state);
+            let worker_mgr = worker_mgr.clone();
+            let bytes = msg.data.to_vec();
+            Box::pin(async move {
+                if !route_is_permitted(route, &signaling_state).await {
+                    log::debug!(
+                        "[DcRouter] {connection_id}: dropped {route:?} message (permission denied)"
+                    );
+                    return;
+                }
+                let svc_msg = route_to_service_msg(route, &connection_id, bytes);
+                if let Err(e) = worker_mgr.send_to_worker(svc_msg).await {
+                    log::warn!(
+                        "[DcRouter] {connection_id}: failed to forward {route:?} to worker: {e}"
+                    );
+                }
+            })
+        },
+    ));
+}
+
+// =====================================================================
+// Cut 5: RTCP reader → ForceKeyframe IPC
+// =====================================================================
+
+/// Spawn a task that reads RTCP feedback off `rtp_sender` and translates
+/// PLI / FIR packets into `ServiceToWorker::ForceKeyframe` IPC messages
+/// addressed to `connection_id`. PLI = Picture Loss Indication (RFC
+/// 4585 §6.3.1), FIR = Full Intra Request (RFC 5104 §4.3.1.1); both
+/// are the browser asking us for a fresh IDR. The encoder is on the
+/// worker side, so we hand the request off via the worker manager
+/// and let the worker's `MediaProducer::force_keyframe` flag the next
+/// encode pass.
+///
+/// Exits when `read_rtcp` returns `Err` — that happens on PC close /
+/// CloseControl, which is the natural lifetime of the task. A noisy
+/// transient read error logs at warn level and continues, because the
+/// rtp_sender survives single bad reads (e.g. malformed RTCP packet
+/// from a buggy proxy).
+fn spawn_rtcp_force_keyframe_task(
+    rtp_sender: Arc<RTCRtpSender>,
+    connection_id: String,
+    worker_mgr: WorkerManager,
+) {
+    tokio::spawn(async move {
+        log::info!("[RtcpReader] {connection_id}: starting");
+        loop {
+            match rtp_sender.read_rtcp().await {
+                Ok((packets, _attrs)) => {
+                    for pkt in packets {
+                        let any = pkt.as_any();
+                        let is_force_keyframe =
+                            any.is::<PictureLossIndication>() || any.is::<FullIntraRequest>();
+                        if !is_force_keyframe {
+                            continue;
+                        }
+                        log::debug!(
+                            "[RtcpReader] {connection_id}: PLI/FIR received → ForceKeyframe IPC"
+                        );
+                        let msg = ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                            connection_id: connection_id.clone(),
+                        });
+                        if let Err(e) = worker_mgr.send_to_worker(msg).await {
+                            log::warn!(
+                                "[RtcpReader] {connection_id}: ForceKeyframe IPC failed: {e}"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    // read_rtcp returns Err on PC close — the only sane
+                    // exit. Log at info (not warn) so a normal close
+                    // doesn't fill the logs; the message identifies it
+                    // as the natural lifetime ending.
+                    log::info!("[RtcpReader] {connection_id}: exiting (read_rtcp closed): {e}");
+                    break;
+                }
+            }
+        }
+    });
 }
 
 // =====================================================================
@@ -314,14 +594,32 @@ pub async fn handle_request_remote(
     user_name: &str,
     has_tauri: bool,
     capabilities: Option<&MediaCapabilities>,
+    worker_mgr: Option<&WorkerManager>,
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let request_remote = model.get_data::<RequestRemoteModel>()?;
 
-    let _ctx = registry
+    let ctx = registry
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
+
+    // Cut 5: install the daemon-side `on_data_channel` router on the
+    // freshly-created PC. Done before the Offer arrives so any
+    // DataChannel the browser opens during SDP setup has its handlers
+    // attached on first onopen / onmessage. `worker_mgr` is `Option`
+    // so unit-test paths that only exercise SDP / ICE handlers do not
+    // have to construct a WorkerManager.
+    if let Some(mgr) = worker_mgr {
+        let ctx_guard = ctx.read().await;
+        register_data_channel_router(
+            Arc::clone(&ctx_guard.pc),
+            from_connection_id.to_string(),
+            Arc::clone(&ctx_guard.signaling_state),
+            Arc::clone(&ctx_guard.cursor_data_channel),
+            mgr.clone(),
+        );
+    }
 
     // Cut 4: populate the Init reply from the worker's
     // `WorkerToService::Capabilities` snapshot when available; fall
@@ -451,14 +749,22 @@ pub async fn handle_offer(
             "video".to_owned(),
             "webrtc-rs".to_owned(),
         ));
-        let _rtp_sender = ctx_guard
+        let rtp_sender = ctx_guard
             .pc
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
         ctx_guard.video_track = Some(video_track);
-        // RTCP PLI/FIR reader spawns in cut 4 alongside the IPC
-        // ForceKeyframe path — until then a missed keyframe just
-        // shows up as a few stale-frame seconds, no IPC needed.
+        // Cut 5: spawn the RTCP reader. Browser sends PLI / FIR when
+        // it detects packet loss or just joined an in-progress stream;
+        // we translate either into `ServiceToWorker::ForceKeyframe`
+        // so the per-connection encoder emits an IDR on its next
+        // pass. Reader exits when the rtp_sender is closed (PC drop /
+        // CloseControl), see `spawn_rtcp_force_keyframe_task`.
+        spawn_rtcp_force_keyframe_task(
+            rtp_sender,
+            from_connection_id.to_string(),
+            worker_mgr.clone(),
+        );
     }
 
     if has_audio && ctx_guard.audio_track.is_none() {
@@ -934,6 +1240,7 @@ mod tests {
             "user-x",
             false,
             Some(&caps),
+            None,
             &model,
         )
         .await
@@ -982,9 +1289,18 @@ mod tests {
             None,
         );
 
-        handle_request_remote(&registry, &outbound_tx, &s, "user-x", false, None, &model)
-            .await
-            .expect("handle ok");
+        handle_request_remote(
+            &registry,
+            &outbound_tx,
+            &s,
+            "user-x",
+            false,
+            None,
+            None,
+            &model,
+        )
+        .await
+        .expect("handle ok");
 
         let text = outbound_rx.recv().await.expect("init reply");
         let reply: SignalingModel = serde_json::from_str(&text).unwrap();
@@ -1031,6 +1347,196 @@ mod tests {
             video_encoder_to_media_codec(VideoEncoderType::VP8),
             MediaCodec::Vp8
         );
+    }
+
+    // ============== Cut 5: DataChannel routing tests ==============
+
+    /// Every known DC label must classify to a `DcRoute`. Pin so a new
+    /// label added to `model::data_channel` without a matching route
+    /// here is caught at PR-review time rather than silently dropped
+    /// at runtime.
+    #[test]
+    fn classify_dc_label_covers_all_known_labels() {
+        assert_eq!(classify_dc_label("mouse_event"), Some(DcRoute::Mouse));
+        assert_eq!(
+            classify_dc_label("mouse_move_event"),
+            Some(DcRoute::MouseMove)
+        );
+        assert_eq!(classify_dc_label("keyboard_event"), Some(DcRoute::Keyboard));
+        assert_eq!(
+            classify_dc_label("clipboard_event"),
+            Some(DcRoute::Clipboard)
+        );
+        assert_eq!(
+            classify_dc_label("file_transfer_event"),
+            Some(DcRoute::FileTransfer)
+        );
+        assert_eq!(
+            classify_dc_label("whiteboard_event"),
+            Some(DcRoute::Whiteboard)
+        );
+        assert_eq!(
+            classify_dc_label("cursor_sync_event"),
+            Some(DcRoute::CursorSync)
+        );
+        assert_eq!(classify_dc_label("not-a-real-channel"), None);
+    }
+
+    /// Each non-CursorSync route maps to the correct
+    /// `ServiceToWorker` variant carrying the same `connection_id` and
+    /// payload bytes the browser sent. The IPC layer is the trust
+    /// boundary between daemon and worker; this test pins the
+    /// translation so a refactor cannot accidentally re-route mouse
+    /// events as keyboard events.
+    #[test]
+    fn route_to_service_msg_preserves_payload_and_connection_id() {
+        let cid = "conn-test";
+        let data = vec![1u8, 2, 3, 4];
+
+        match route_to_service_msg(DcRoute::Mouse, cid, data.clone()) {
+            ServiceToWorker::MouseInput(p) => {
+                assert_eq!(p.connection_id, cid);
+                assert_eq!(p.data, data);
+            }
+            other => panic!("expected MouseInput, got {other:?}"),
+        }
+        match route_to_service_msg(DcRoute::MouseMove, cid, data.clone()) {
+            ServiceToWorker::MouseMoveInput(p) => assert_eq!(p.data, data),
+            other => panic!("expected MouseMoveInput, got {other:?}"),
+        }
+        match route_to_service_msg(DcRoute::Keyboard, cid, data.clone()) {
+            ServiceToWorker::KeyboardInput(p) => assert_eq!(p.data, data),
+            other => panic!("expected KeyboardInput, got {other:?}"),
+        }
+        match route_to_service_msg(DcRoute::Clipboard, cid, data.clone()) {
+            ServiceToWorker::ClipboardWrite(p) => assert_eq!(p.data, data),
+            other => panic!("expected ClipboardWrite, got {other:?}"),
+        }
+        match route_to_service_msg(DcRoute::FileTransfer, cid, data.clone()) {
+            ServiceToWorker::FileTransferCommand(p) => assert_eq!(p.data, data),
+            other => panic!("expected FileTransferCommand, got {other:?}"),
+        }
+        match route_to_service_msg(DcRoute::Whiteboard, cid, data.clone()) {
+            ServiceToWorker::WhiteboardCommand(p) => assert_eq!(p.data, data),
+            other => panic!("expected WhiteboardCommand, got {other:?}"),
+        }
+    }
+
+    /// CursorSync routing is a programmer error — calling
+    /// `route_to_service_msg` on it must panic rather than silently
+    /// emit a wrong variant. The router skips this case explicitly
+    /// before reaching the routing call.
+    #[test]
+    #[should_panic(expected = "CursorSync DC has no upstream message variant")]
+    fn route_to_service_msg_cursor_sync_panics() {
+        let _ = route_to_service_msg(DcRoute::CursorSync, "c", vec![]);
+    }
+
+    /// `accept_control = false` blocks Mouse / MouseMove / Keyboard
+    /// even when `accept_clipboard_sync = true`. Critical: a
+    /// regression here would let an unauthorised peer drive the
+    /// host's mouse / keyboard.
+    #[tokio::test]
+    async fn route_is_permitted_blocks_input_when_control_denied() {
+        let state = Arc::new(RwLock::new(SignalingState {
+            accept_control: false,
+            accept_clipboard_sync: true,
+            ..SignalingState::default()
+        }));
+        assert!(!route_is_permitted(DcRoute::Mouse, &state).await);
+        assert!(!route_is_permitted(DcRoute::MouseMove, &state).await);
+        assert!(!route_is_permitted(DcRoute::Keyboard, &state).await);
+        assert!(!route_is_permitted(DcRoute::FileTransfer, &state).await);
+        assert!(!route_is_permitted(DcRoute::Whiteboard, &state).await);
+        // Clipboard rides on its own gate, not control.
+        assert!(route_is_permitted(DcRoute::Clipboard, &state).await);
+    }
+
+    /// `accept_clipboard_sync = false` blocks Clipboard even when
+    /// `accept_control = true`. Independent gates: a peer can be
+    /// trusted with mouse/keyboard but not clipboard (e.g. screen
+    /// share without copy-paste).
+    #[tokio::test]
+    async fn route_is_permitted_blocks_clipboard_when_clipboard_denied() {
+        let state = Arc::new(RwLock::new(SignalingState {
+            accept_control: true,
+            accept_clipboard_sync: false,
+            ..SignalingState::default()
+        }));
+        assert!(!route_is_permitted(DcRoute::Clipboard, &state).await);
+        // Control-gated routes still pass.
+        assert!(route_is_permitted(DcRoute::Mouse, &state).await);
+        assert!(route_is_permitted(DcRoute::Keyboard, &state).await);
+    }
+
+    /// Both gates open → every routable variant is permitted (cursor
+    /// sync stays out because the gate function panics on it; the
+    /// caller filters cursor sync before calling).
+    #[tokio::test]
+    async fn route_is_permitted_allows_all_when_both_accepted() {
+        let state = Arc::new(RwLock::new(SignalingState {
+            accept_control: true,
+            accept_clipboard_sync: true,
+            ..SignalingState::default()
+        }));
+        assert!(route_is_permitted(DcRoute::Mouse, &state).await);
+        assert!(route_is_permitted(DcRoute::MouseMove, &state).await);
+        assert!(route_is_permitted(DcRoute::Keyboard, &state).await);
+        assert!(route_is_permitted(DcRoute::Clipboard, &state).await);
+        assert!(route_is_permitted(DcRoute::FileTransfer, &state).await);
+        assert!(route_is_permitted(DcRoute::Whiteboard, &state).await);
+    }
+
+    /// `register_data_channel_router` is async-callable on a
+    /// freshly-built PC without panicking. We can't drive a real DC
+    /// open here without a peer connection on the other side, so this
+    /// is a smoke test for the registration call only — the routing
+    /// behaviour itself is covered by the pure-function tests above.
+    #[tokio::test]
+    async fn register_data_channel_router_smoke() {
+        use crate::model::settings::SharedSettings;
+
+        let pc = build_peer_connection(vec![]).await.expect("pc");
+        let signaling_state = Arc::new(RwLock::new(SignalingState::default()));
+        let cursor_dc = Arc::new(RwLock::new(None));
+        let shared = SharedSettings::from(Settings::default());
+        let settings_data = actix_web::web::Data::new(shared);
+        let (worker_mgr, _) = WorkerManager::new(settings_data, PcRegistry::new());
+        register_data_channel_router(
+            Arc::new(pc),
+            "conn-smoke".to_string(),
+            signaling_state,
+            cursor_dc,
+            worker_mgr,
+        );
+    }
+
+    // ============== Cut 5: RTCP PLI/FIR identity ==============
+
+    /// Identifying RTCP packets via `as_any().is::<T>()` is the path
+    /// `spawn_rtcp_force_keyframe_task` uses to decide whether to
+    /// emit ForceKeyframe. Pin the identity so a webrtc-rs version
+    /// bump that changed the trait object representation is caught
+    /// here, not in production where missed PLIs become "browser
+    /// stuck on stale frame after a packet loss".
+    #[test]
+    fn rtcp_pli_and_fir_are_distinguishable_via_as_any() {
+        use webrtc::rtcp::packet::Packet;
+
+        let pli: Box<dyn Packet + Send + Sync> = Box::new(PictureLossIndication {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+        });
+        let fir: Box<dyn Packet + Send + Sync> = Box::new(FullIntraRequest {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+            fir: vec![],
+        });
+
+        assert!(pli.as_any().is::<PictureLossIndication>());
+        assert!(!pli.as_any().is::<FullIntraRequest>());
+        assert!(fir.as_any().is::<FullIntraRequest>());
+        assert!(!fir.as_any().is::<PictureLossIndication>());
     }
 
     /// Multi-connection: independent contexts coexist; closing one

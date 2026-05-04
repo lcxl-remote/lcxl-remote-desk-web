@@ -1,4 +1,5 @@
 pub mod desktop_monitor;
+pub mod input_dispatcher;
 pub mod media_producer;
 pub mod session;
 

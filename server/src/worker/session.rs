@@ -2,7 +2,7 @@ use crate::{
     host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
-    worker::{desktop_monitor, media_producer::MediaProducer},
+    worker::{desktop_monitor, input_dispatcher::InputDispatcher, media_producer::MediaProducer},
 };
 use actix_web::web;
 use desk_ipc_protocol::{
@@ -181,6 +181,14 @@ impl WorkerSession {
             init_payload.desktop_name.as_deref(),
             init_payload.host_upstream_url.is_some(),
         );
+        // Cut 5: per-connection input handlers. Constructed once per
+        // worker; `start_connection` / `stop_connection` keyed off the
+        // same `connection_id` the daemon ships in `StartMedia` /
+        // `StopMedia`.
+        let input_dispatcher = {
+            let desk_settings = shared_settings.read().await.desk.clone();
+            Arc::new(InputDispatcher::new(desk_settings))
+        };
         if writer_tx
             .send(WorkerToService::Capabilities(capabilities))
             .is_err()
@@ -295,6 +303,11 @@ impl WorkerSession {
                                             payload.video_codec,
                                             payload.fps,
                                         );
+                                        // Cut 5: spin up per-connection input
+                                        // handlers alongside the encoder so
+                                        // mouse / keyboard input is ready as
+                                        // soon as the browser opens its DCs.
+                                        input_dispatcher.start_connection(&payload);
                                         producer.start_media(payload);
                                     } else {
                                         warn!(
@@ -307,6 +320,7 @@ impl WorkerSession {
                                     if let Some(producer) = media_producer.as_ref() {
                                         producer.stop_media(&payload);
                                     }
+                                    input_dispatcher.stop_connection(&payload);
                                 }
                                 ServiceToWorker::ForceKeyframe(payload) => {
                                     if let Some(producer) = media_producer.as_ref() {
@@ -318,14 +332,55 @@ impl WorkerSession {
                                         producer.update_settings(payload);
                                     }
                                 }
-                                // Arch IV variants the daemon does not yet
-                                // emit (mouse / keyboard / clipboard / file /
-                                // whiteboard). Cut 5 wires these onto
-                                // existing handler modules; until then they
-                                // are silently dropped at the worker.
-                                other => {
+                                // Cut 5: input IPC. The daemon already
+                                // gated on `accept_control` /
+                                // `accept_clipboard_sync` before sending,
+                                // so the worker injects unconditionally.
+                                ServiceToWorker::MouseInput(payload) => {
+                                    input_dispatcher.dispatch_mouse(&payload);
+                                }
+                                ServiceToWorker::MouseMoveInput(payload) => {
+                                    input_dispatcher.dispatch_mouse_move(&payload);
+                                }
+                                ServiceToWorker::KeyboardInput(payload) => {
+                                    input_dispatcher.dispatch_keyboard(&payload);
+                                }
+                                // Cut 5: log + drop. PR 4 wires the
+                                // worker-side clipboard / file-transfer /
+                                // whiteboard modules onto these IPC
+                                // variants. Until then the daemon already
+                                // routes correctly so the daemon-side test
+                                // surface is exercised; the worker side is
+                                // a stub that warns once per message.
+                                ServiceToWorker::ClipboardWrite(payload) => {
                                     warn!(
-                                        "Worker received unhandled Arch IV variant: {other:?}; ignoring"
+                                        "Worker received ClipboardWrite for {} ({} bytes); \
+                                         worker-side handler lands in PR 4",
+                                        payload.connection_id,
+                                        payload.data.len(),
+                                    );
+                                }
+                                ServiceToWorker::ClipboardRequest(payload) => {
+                                    warn!(
+                                        "Worker received ClipboardRequest for {}; \
+                                         worker-side handler lands in PR 4",
+                                        payload.connection_id,
+                                    );
+                                }
+                                ServiceToWorker::FileTransferCommand(payload) => {
+                                    warn!(
+                                        "Worker received FileTransferCommand for {} ({} bytes); \
+                                         worker-side handler lands in PR 4",
+                                        payload.connection_id,
+                                        payload.data.len(),
+                                    );
+                                }
+                                ServiceToWorker::WhiteboardCommand(payload) => {
+                                    warn!(
+                                        "Worker received WhiteboardCommand for {} ({} bytes); \
+                                         worker-side handler lands in PR 4",
+                                        payload.connection_id,
+                                        payload.data.len(),
                                     );
                                 }
                             }
@@ -419,6 +474,7 @@ impl WorkerSession {
         if let Some(producer) = media_producer.as_ref() {
             producer.shutdown();
         }
+        input_dispatcher.shutdown();
         drop(writer_tx);
         let _ = writer_task.await;
 

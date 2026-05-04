@@ -205,6 +205,7 @@ pub async fn route(
                 &user_name,
                 has_tauri,
                 capabilities.as_ref(),
+                Some(&ctx.worker_mgr),
                 model,
             )
             .await?;
