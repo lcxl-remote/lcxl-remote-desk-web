@@ -70,7 +70,6 @@ use desk_utils::{error::DeskErrorCode, network::check_ipv6_available, rest::Rest
 use error::DeskError;
 use log::{error, info, warn};
 use model::settings::{Args, Settings, SharedSettings, StartupMode};
-use service::signaling::start_desk_session;
 
 use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
@@ -414,17 +413,17 @@ pub async fn run_with_hub(
 
     // Start the desk pipeline.
     //
-    // - **Default (portable)** routes through the Arch IV in-process
-    //   daemon-worker pipeline so the WebRTC PeerConnection lives in the
-    //   daemon-side code path identical to ServiceDaemon mode (PR 5
-    //   introduces this).
-    // - **DeskServer** still runs the legacy `start_desk_session` route.
-    //   Migration of the headless desk-server path is intentionally
-    //   deferred to PR 7 cleanup so this PR keeps a single behavioural
-    //   surface to validate.
+    // Both **Default (portable)** and **DeskServer (headless)** route
+    // through the Arch IV in-process daemon-worker pipeline so the WebRTC
+    // PeerConnection lives in the daemon-side code path identical to
+    // ServiceDaemon mode. The signaling proxy's `local_handle` skips
+    // itself in DeskServer mode (only Default + ServiceDaemon expose a
+    // local signaling endpoint), so DeskServer naturally runs only the
+    // remote signaling + remote manager WS clients — matching the
+    // headless "connect to remote signal server" role.
     match startup_mode {
-        StartupMode::Default => {
-            info!("Starting desk session (in-process Arch IV portable)");
+        StartupMode::Default | StartupMode::DeskServer => {
+            info!("Starting desk pipeline (Arch IV in-process daemon, mode={startup_mode:?})");
             let settings_clone = shared_settings_data.clone();
             let session_hub = host_control_hub_arc.clone();
             let args_clone = settings.args.clone();
@@ -433,19 +432,6 @@ pub async fn run_with_hub(
                     daemon::start_inprocess_daemon(args_clone, settings_clone, session_hub).await
                 {
                     error!("In-process daemon failed to start: {e}");
-                }
-            });
-        }
-        StartupMode::DeskServer => {
-            info!("Starting desk session (legacy DeskServer path)");
-            let settings_clone = shared_settings_data.clone();
-            let startup_mode_clone = startup_mode.clone();
-            let session_hub = host_control_hub_arc.clone();
-            actix_web::rt::spawn(async move {
-                if let Err(e) =
-                    start_desk_session(settings_clone, startup_mode_clone, session_hub).await
-                {
-                    error!("Desk session error: {}", e);
                 }
             });
         }

@@ -218,28 +218,33 @@ fn get_current_session_id() -> u32 {
     0
 }
 
-/// Portable / Default-mode entry into the Arch IV daemon-worker pipeline,
-/// running entirely in-process. Used by [`crate::run_with_hub`] to replace
-/// the Arch III `start_desk_session` path so that even in single-process
-/// mode the WebRTC PeerConnection lives in the daemon-side code, not in a
+/// Single-process entry into the Arch IV daemon-worker pipeline, used by
+/// [`crate::run_with_hub`] for both `StartupMode::Default` (portable) and
+/// `StartupMode::DeskServer` (headless desk node). Replaces the Arch III
+/// `start_desk_session` path so that even in single-process modes the
+/// WebRTC PeerConnection lives in the daemon-side code, not in a
 /// `DeskSession`-coupled `capture` task.
 ///
 /// Compared with [`run_service_daemon_inner`]:
-/// - **No HTTP local API** — the caller's `actix-web` server already serves
-///   `/api/desk/signaling` for browser connections; portable mode reuses
-///   that same listener.
+/// - **No HTTP local API** — the caller's `actix-web` server already binds
+///   the listener; in Default mode it also serves `/api/desk/signaling`
+///   for browser connections, while in DeskServer mode the local
+///   signaling endpoint is intentionally absent (the proxy's local-WS
+///   client also skips itself in DeskServer mode — see
+///   [`signaling_proxy::run_signaling_proxy`]).
 /// - **No `CreateProcessAsUserW`** — `WorkerManager::start_inprocess_worker`
 ///   spawns the worker as a same-process `actix_web::rt::spawn` task and
 ///   wires it via in-process tokio mpsc transports.
 /// - **Same `signaling_proxy`** — the proxy's signaling-WS clients (local
-///   loopback in Default mode; remote signaling/manager when configured)
+///   loopback when applicable; remote signaling / manager when configured)
 ///   feed the daemon-held `PcRegistry` through the shared
 ///   `SignalingRouter`, so the inbound SDP/ICE path is identical to the
 ///   ServiceDaemon mode.
-/// - **No session monitor / heartbeat watchdog** — portable mode cannot
-///   swap workers on UAC (single process), so there is nothing for the
-///   monitor to detect; and watchdog-driven restarts would tear down the
-///   actix-rt System the same task is running on.
+/// - **No session monitor / heartbeat watchdog** — single-process modes
+///   cannot swap workers on UAC (single process owns the capture session),
+///   so there is nothing for the monitor to detect; and watchdog-driven
+///   restarts would tear down the actix-rt System the same task is
+///   running on.
 pub async fn start_inprocess_daemon(
     args: crate::model::settings::Args,
     settings: web::Data<SharedSettings>,
