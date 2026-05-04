@@ -565,9 +565,7 @@ mod tests {
             transfer_id: "00000000-0000-0000-0000-000000000001".into(),
             file_path: file_path.to_string_lossy().to_string(),
         };
-        d.serve_download("c1".into(), req)
-            .await
-            .expect("serve ok");
+        d.serve_download("c1".into(), req).await.expect("serve ok");
         // First message: DownloadResponse (text)
         let m = rx.recv().await.expect("download response");
         match m {
@@ -648,7 +646,8 @@ mod tests {
         }
         // Send 2 chunks
         for i in 0..total_chunks as u32 {
-            let chunk_bytes = build_binary_chunk(&transfer_id, i, &vec![b'A' + i as u8; chunk_size]);
+            let chunk_bytes =
+                build_binary_chunk(&transfer_id, i, &vec![b'A' + i as u8; chunk_size]);
             d.handle_command(FileTransferPayload {
                 connection_id: "c1".into(),
                 data: chunk_bytes,

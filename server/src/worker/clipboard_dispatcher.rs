@@ -167,7 +167,9 @@ impl ClipboardDispatcher {
     pub async fn start_connection(&self, payload: &StartMediaPayload) {
         let mut inner = self.inner.lock().await;
         let was_empty = inner.active_connections.is_empty();
-        let inserted = inner.active_connections.insert(payload.connection_id.clone());
+        let inserted = inner
+            .active_connections
+            .insert(payload.connection_id.clone());
         if !inserted {
             debug!(
                 "[ClipboardDispatcher] {}: duplicate StartMedia (already active)",
@@ -350,7 +352,9 @@ fn read_local_clipboard(inner: &mut ClipboardInner) -> Option<Vec<Vec<u8>>> {
                         }
                     };
                     if png_data.len() > MAX_IMAGE_SIZE {
-                        warn!("[ClipboardDispatcher] local clipboard image too large to sync (>25MB)");
+                        warn!(
+                            "[ClipboardDispatcher] local clipboard image too large to sync (>25MB)"
+                        );
                         inner.last_pushed_hash = Some(hash);
                         return Some(vec![encode_error("Image too large to sync (>25MB)")]);
                     }
@@ -375,11 +379,7 @@ fn read_local_clipboard(inner: &mut ClipboardInner) -> Option<Vec<Vec<u8>>> {
 /// `WorkerToService::ClipboardRead`. Failures (channel closed) are
 /// logged at warn level — the dispatcher cannot recover from a dead
 /// IPC writer task and the worker will exit shortly anyway.
-fn emit_to(
-    tx: &mpsc::UnboundedSender<WorkerToService>,
-    connection_id: &str,
-    data: Vec<u8>,
-) {
+fn emit_to(tx: &mpsc::UnboundedSender<WorkerToService>, connection_id: &str, data: Vec<u8>) {
     let payload = ClipboardPayload {
         connection_id: connection_id.to_string(),
         data,
@@ -418,15 +418,11 @@ fn apply_text(inner: &mut ClipboardInner, connection_id: &str, content: Option<S
         }
     };
     if text.len() > MAX_TEXT_SIZE {
-        warn!(
-            "[ClipboardDispatcher] {connection_id}: incoming text exceeds 1MB; dropping"
-        );
+        warn!("[ClipboardDispatcher] {connection_id}: incoming text exceeds 1MB; dropping");
         return;
     }
     if let Err(e) = inner.helper.set_text_to_clipboard(&text) {
-        error!(
-            "[ClipboardDispatcher] {connection_id}: set_text_to_clipboard failed: {e}"
-        );
+        error!("[ClipboardDispatcher] {connection_id}: set_text_to_clipboard failed: {e}");
         return;
     }
     inner.last_written_hash = Some(hash_text(&text));
@@ -460,11 +456,7 @@ fn apply_image_start(inner: &mut ClipboardInner, connection_id: &str, event: &Cl
     );
 }
 
-fn apply_image_chunk(
-    inner: &mut ClipboardInner,
-    connection_id: &str,
-    content: Option<String>,
-) {
+fn apply_image_chunk(inner: &mut ClipboardInner, connection_id: &str, content: Option<String>) {
     let chunk = match content {
         Some(c) => c,
         None => return,
@@ -473,9 +465,7 @@ fn apply_image_chunk(
         state.data.extend_from_slice(chunk.as_bytes());
         state.chunks_received += 1;
     } else {
-        debug!(
-            "[ClipboardDispatcher] {connection_id}: image_chunk before image_start; dropping"
-        );
+        debug!("[ClipboardDispatcher] {connection_id}: image_chunk before image_start; dropping");
     }
 }
 
@@ -483,9 +473,7 @@ fn apply_image_end(inner: &mut ClipboardInner, connection_id: &str) {
     let state = match inner.image_states.remove(connection_id) {
         Some(s) => s,
         None => {
-            debug!(
-                "[ClipboardDispatcher] {connection_id}: image_end without start; dropping"
-            );
+            debug!("[ClipboardDispatcher] {connection_id}: image_end without start; dropping");
             return;
         }
     };
@@ -500,9 +488,7 @@ fn apply_image_end(inner: &mut ClipboardInner, connection_id: &str) {
     let png_bytes = match BASE64_STANDARD.decode(&state.data) {
         Ok(b) => b,
         Err(e) => {
-            error!(
-                "[ClipboardDispatcher] {connection_id}: base64 decode failed: {e}"
-            );
+            error!("[ClipboardDispatcher] {connection_id}: base64 decode failed: {e}");
             return;
         }
     };
@@ -511,9 +497,7 @@ fn apply_image_end(inner: &mut ClipboardInner, connection_id: &str) {
     let mut reader = match decoder.read_info() {
         Ok(r) => r,
         Err(e) => {
-            error!(
-                "[ClipboardDispatcher] {connection_id}: PNG header decode failed: {e}"
-            );
+            error!("[ClipboardDispatcher] {connection_id}: PNG header decode failed: {e}");
             return;
         }
     };
@@ -521,9 +505,7 @@ fn apply_image_end(inner: &mut ClipboardInner, connection_id: &str) {
     let info = match reader.next_frame(&mut buf) {
         Ok(i) => i,
         Err(e) => {
-            error!(
-                "[ClipboardDispatcher] {connection_id}: PNG frame decode failed: {e}"
-            );
+            error!("[ClipboardDispatcher] {connection_id}: PNG frame decode failed: {e}");
             return;
         }
     };
@@ -533,9 +515,7 @@ fn apply_image_end(inner: &mut ClipboardInner, connection_id: &str) {
         bytes: std::borrow::Cow::Owned(buf[..info.buffer_size()].to_vec()),
     };
     if let Err(e) = inner.helper.set_image_to_clipboard(&img) {
-        error!(
-            "[ClipboardDispatcher] {connection_id}: set_image_to_clipboard failed: {e}"
-        );
+        error!("[ClipboardDispatcher] {connection_id}: set_image_to_clipboard failed: {e}");
         return;
     }
     inner.last_written_hash = Some(hash_image(&img));
@@ -588,8 +568,7 @@ fn encode_error(msg: &str) -> Vec<u8> {
 fn encode_png(image: &ClipboardImage) -> Option<Vec<u8>> {
     let mut png_data = Vec::new();
     {
-        let mut encoder =
-            png::Encoder::new(&mut png_data, image.width as u32, image.height as u32);
+        let mut encoder = png::Encoder::new(&mut png_data, image.width as u32, image.height as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().ok()?;
@@ -607,8 +586,8 @@ fn encode_image_messages(png_data: &[u8], width: usize, height: usize) -> Vec<Ve
         let end = std::cmp::min(offset + IMAGE_CHUNK_SIZE, bytes.len());
         // Safe because base64 is pure ASCII and chunk boundaries fall
         // on byte boundaries (no multi-byte UTF-8 split).
-        let s = std::str::from_utf8(&bytes[offset..end])
-            .expect("base64 output is always valid UTF-8");
+        let s =
+            std::str::from_utf8(&bytes[offset..end]).expect("base64 output is always valid UTF-8");
         chunks.push(s);
         offset = end;
     }
@@ -623,9 +602,7 @@ fn encode_image_messages(png_data: &[u8], width: usize, height: usize) -> Vec<Ve
         chunk_count: Some(chunk_count),
         index: None,
     };
-    out.push(
-        serde_json::to_vec(&start).expect("ClipboardEventData (image_start) serialise"),
-    );
+    out.push(serde_json::to_vec(&start).expect("ClipboardEventData (image_start) serialise"));
     for (i, chunk) in chunks.into_iter().enumerate() {
         let msg = ClipboardEventData {
             r#type: "image_chunk".to_string(),
@@ -636,9 +613,7 @@ fn encode_image_messages(png_data: &[u8], width: usize, height: usize) -> Vec<Ve
             chunk_count: None,
             index: Some(i as u32),
         };
-        out.push(
-            serde_json::to_vec(&msg).expect("ClipboardEventData (image_chunk) serialise"),
-        );
+        out.push(serde_json::to_vec(&msg).expect("ClipboardEventData (image_chunk) serialise"));
     }
     let end = ClipboardEventData {
         r#type: "image_end".to_string(),
@@ -874,7 +849,12 @@ mod tests {
             data: serde_json::to_vec(&end).unwrap(),
         })
         .await;
-        let written_image = handles.image.lock().unwrap().clone().expect("image written");
+        let written_image = handles
+            .image
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("image written");
         assert_eq!(written_image.width, 2);
         assert_eq!(written_image.height, 2);
         // last_written_hash stamped with the decoded image's hash.
