@@ -642,11 +642,10 @@ impl WorkerSession {
 
         // Independent heartbeat task: pushes `Heartbeat` to the writer queue
         // every 5 s regardless of what the main loop is doing.
-        // active_connections is reported as 0 here because the count lives in
-        // `desk_session.rtc_peer_connection_map` which the main loop owns;
-        // surfacing it to this task would require an Arc<AtomicU32> updated
-        // at every map mutation. The daemon only logs the field at trace
-        // level — its watchdog cares about IPC freshness, not the count.
+        // active_connections is reported as 0 because in Arch IV the
+        // PeerConnections live on the daemon side; the worker has no
+        // map to count. The daemon only logs the field at trace level —
+        // its watchdog cares about IPC freshness, not the count.
         let heartbeat_task =
             spawn_heartbeat_task(writer_tx.clone(), tokio::time::Duration::from_secs(5));
 
@@ -980,20 +979,6 @@ impl WorkerSession {
                         Some(DeskSessionMessage::Close) => {
                             info!("DeskSession requested close");
                             break;
-                        }
-                        Some(DeskSessionMessage::WebRTCDropped(connection_id)) => {
-                            info!(
-                                "WebRTC dropped for connection {}, shutting down peer connection",
-                                connection_id
-                            );
-                            if let Some(peer_connection) =
-                                desk_session.rtc_peer_connection_map.remove(&connection_id)
-                            {
-                                let peer_connection = peer_connection.read().await;
-                                if let Err(e) = peer_connection.shutdown().await {
-                                    error!("Failed to shutdown peer connection: {}", e);
-                                }
-                            }
                         }
                         Some(DeskSessionMessage::Ping(_)) | Some(DeskSessionMessage::Pong(_)) => {}
                         None => {
@@ -1359,9 +1344,7 @@ mod tests {
                 assert!(p.data.is_supported);
                 assert!(p.data.error_msg.is_none());
             }
-            other => panic!(
-                "PrivateScreenStateChanged must take the typed path, got {other:?}",
-            ),
+            other => panic!("PrivateScreenStateChanged must take the typed path, got {other:?}",),
         }
     }
 
@@ -1486,10 +1469,7 @@ mod tests {
             let text = serde_json::to_string(&model).expect("serialise");
             let routed = build_outbound_payload_from_desk_text(text).expect("typed route");
             match (expected_variant, routed) {
-                (
-                    "ManagerFileDeleteResponse",
-                    WorkerToService::ManagerFileDeleteResponse(p),
-                )
+                ("ManagerFileDeleteResponse", WorkerToService::ManagerFileDeleteResponse(p))
                 | (
                     "ManagerUpdateSettingsResponse",
                     WorkerToService::ManagerUpdateSettingsResponse(p),

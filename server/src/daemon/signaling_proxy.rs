@@ -117,14 +117,9 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
-                    let _ = maintain_proxy_connection(
-                        settings.clone(),
-                        &router_ctx,
-                        url,
-                        token,
-                        rx,
-                    )
-                    .await;
+                    let _ =
+                        maintain_proxy_connection(settings.clone(), &router_ctx, url, token, rx)
+                            .await;
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -151,14 +146,9 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
-                    let _ = maintain_proxy_connection(
-                        settings.clone(),
-                        &router_ctx,
-                        url,
-                        token,
-                        rx,
-                    )
-                    .await;
+                    let _ =
+                        maintain_proxy_connection(settings.clone(), &router_ctx, url, token, rx)
+                            .await;
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -226,17 +216,13 @@ pub async fn run_signaling_proxy(
                         Err(e) => warn!(
                             "[SignalingProxy] Failed to serialise SignalingError response \
                              for {} (request_id={}, type={:?}): {e}",
-                            payload.connection_id,
-                            payload.request_id,
-                            payload.signaling_type,
+                            payload.connection_id, payload.request_id, payload.signaling_type,
                         ),
                     },
                     Err(e) => warn!(
                         "[SignalingProxy] Failed to build SignalingError response model \
                          for {} (request_id={}, type={:?}): {e}",
-                        payload.connection_id,
-                        payload.request_id,
-                        payload.signaling_type,
+                        payload.connection_id, payload.request_id, payload.signaling_type,
                     ),
                 }
             }

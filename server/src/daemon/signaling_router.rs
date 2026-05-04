@@ -319,9 +319,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         }
         // Batch 3 of the typed-IPC migration — terminal plane.
         SignalingType::StartTerminal => handle_start_terminal_inbound(ctx, model).await,
-        SignalingType::SendDataToTerminal => {
-            handle_send_data_to_terminal_inbound(ctx, model).await
-        }
+        SignalingType::SendDataToTerminal => handle_send_data_to_terminal_inbound(ctx, model).await,
         SignalingType::ResizeTerminal => handle_resize_terminal_inbound(ctx, model).await,
         SignalingType::CloseTerminal => handle_close_terminal_inbound(ctx, model).await,
         SignalingType::ListTerminal => handle_list_terminal_inbound(ctx, model).await,
@@ -1001,14 +999,8 @@ mod tests {
     async fn route_manager_requests_handled_inline_not_bridged() {
         let ctx = make_ctx();
         let cases = [
-            (
-                SignalingType::ManagerSystemInfo,
-                serde_json::Value::Null,
-            ),
-            (
-                SignalingType::ManagerQuerySettings,
-                serde_json::Value::Null,
-            ),
+            (SignalingType::ManagerSystemInfo, serde_json::Value::Null),
+            (SignalingType::ManagerQuerySettings, serde_json::Value::Null),
             (
                 SignalingType::ManagerFileList,
                 serde_json::to_value(desk_signal_facade::model::files::FileListParams {
@@ -1093,9 +1085,8 @@ mod tests {
     #[tokio::test]
     async fn route_enable_private_screen_handled_inline_not_bridged() {
         let ctx = make_ctx();
-        let data = desk_signal_facade::model::private_screen::EnablePrivateScreenData {
-            enable: true,
-        };
+        let data =
+            desk_signal_facade::model::private_screen::EnablePrivateScreenData { enable: true };
         let model = SignalingModel::new(
             "r-eps",
             SignalingType::EnablePrivateScreen,
@@ -1113,9 +1104,8 @@ mod tests {
     #[tokio::test]
     async fn route_enable_private_screen_without_connection_id_is_noop() {
         let ctx = make_ctx();
-        let data = desk_signal_facade::model::private_screen::EnablePrivateScreenData {
-            enable: false,
-        };
+        let data =
+            desk_signal_facade::model::private_screen::EnablePrivateScreenData { enable: false };
         let model = SignalingModel::new(
             "r-eps-noid",
             SignalingType::EnablePrivateScreen,

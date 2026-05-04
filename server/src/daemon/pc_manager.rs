@@ -397,10 +397,7 @@ impl PcRegistry {
         // Pause this PC's media ingestion until the new IDR clears the flag
         // — same pattern as `pause_all_media` but scoped to one connection.
         if let Some(ctx) = self.get(connection_id).await {
-            ctx.read()
-                .await
-                .media_paused
-                .store(true, Ordering::Relaxed);
+            ctx.read().await.media_paused.store(true, Ordering::Relaxed);
         }
 
         log::info!(
@@ -489,9 +486,7 @@ impl PcRegistry {
                 .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
                 .await
             {
-                log::warn!(
-                    "[pc_manager] broadcast_media_settings_update {id}: send failed: {e}"
-                );
+                log::warn!("[pc_manager] broadcast_media_settings_update {id}: send failed: {e}");
             }
         }
     }

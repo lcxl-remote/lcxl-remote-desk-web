@@ -1167,7 +1167,7 @@ mod tests {
 
         tx.send(UpdateMediaSettingsPayload {
             connection_id: "c1".into(),
-            fps: Some(0), // sentinel — must NOT replace 30 with 0 fps
+            fps: Some(0),              // sentinel — must NOT replace 30 with 0 fps
             bitrate_kbps: Some(8_000), // currently unwired — must NOT change anything
             quality: None,
         })
