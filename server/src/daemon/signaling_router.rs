@@ -57,6 +57,13 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::Canid
         | SignalingType::CloseControl => RouteOwnership::Daemon,
 
+        // Cut 6: daemon owns SignalingState now, so the per-connection
+        // accept-control flow runs daemon-side (browser → daemon →
+        // host_control_hub → user → daemon updates SignalingState +
+        // emits AcceptControl/DenyControl back). Worker no longer
+        // sees RequireControl in daemon-worker mode.
+        SignalingType::RequireControl => RouteOwnership::Daemon,
+
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
         // rather than relay to the worker (which has no PC to act on).
@@ -71,8 +78,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         SignalingType::Heartbeat => RouteOwnership::Daemon,
 
         // ---- Worker-owned: user-session resources ----
-        SignalingType::RequireControl
-        | SignalingType::AcceptControl
+        SignalingType::AcceptControl
         | SignalingType::DenyControl
         | SignalingType::ChangeDisplaySettings
         | SignalingType::EnablePrivateScreen
@@ -224,6 +230,18 @@ pub async fn route(
             pc_manager::handle_close_control(&ctx.pc_registry, &ctx.worker_mgr, model).await?;
             Ok(RouteOutcome::HandledByDaemon)
         }
+        SignalingType::RequireControl => {
+            let settings: &SharedSettings = &ctx.settings;
+            pc_manager::handle_require_control(
+                &ctx.pc_registry,
+                &ctx.outbound_tx,
+                settings,
+                &ctx.host_control_hub,
+                model,
+            )
+            .await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
         // Daemon-emitted; the browser should never send these at us
         // but if it does, swallow rather than relay to the worker.
         SignalingType::Answer
@@ -264,6 +282,7 @@ mod tests {
             SignalingType::Answer,
             SignalingType::Canid,
             SignalingType::CloseControl,
+            SignalingType::RequireControl,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -283,7 +302,6 @@ mod tests {
     #[test]
     fn classify_worker_owned_types() {
         for t in [
-            SignalingType::RequireControl,
             SignalingType::AcceptControl,
             SignalingType::DenyControl,
             SignalingType::ChangeDisplaySettings,
@@ -365,7 +383,6 @@ mod tests {
     async fn route_forwards_worker_owned_variants() {
         let ctx = make_ctx();
         for t in [
-            SignalingType::RequireControl,
             SignalingType::ManagerFileList,
             SignalingType::ManagerSystemInfo,
             SignalingType::EnablePrivateScreen,

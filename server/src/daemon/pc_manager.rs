@@ -60,7 +60,11 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
-use crate::model::settings::{Settings, StartupMode, TraversalMode};
+use crate::host_control::HostControlHub;
+use crate::model::data_channel::SignalRequestControlData;
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::model::settings::{Settings, SharedSettings, StartupMode, TraversalMode};
+use crate::service::signaling::{should_short_circuit_clipboard, should_short_circuit_control};
 use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
@@ -980,6 +984,146 @@ pub async fn handle_close_control(
     Ok(())
 }
 
+/// Daemon side of `SignalingType::RequireControl`. Mirrors the
+/// worker-side `DeskSession::handle_request_control` from Arch III but
+/// runs against the daemon-held PC. The browser sends this to either
+/// (a) request control + clipboard grants (`accept = true`) or (b)
+/// release them (`accept = false`); the daemon dispatches to the
+/// host-control hub for user approval (subject to settings allow /
+/// remember bits), updates the per-connection [`SignalingState`], and
+/// emits the matching reply back through the outbound sink:
+///
+/// - `accept = true` && approved → `AcceptControl`
+/// - `accept = true` && denied → `DenyControl` (state stays false)
+/// - `accept = false` (release) → `CloseControl` (state goes false)
+///
+/// Cut 5's daemon `on_data_channel` router gates each forwarded
+/// browser-input event on the resulting `accept_control` /
+/// `accept_clipboard_sync` flags, so the worker only ever sees IPC
+/// payloads the user has authorised.
+pub async fn handle_require_control(
+    registry: &PcRegistry,
+    outbound: &OutboundSink,
+    settings: &SharedSettings,
+    host_control_hub: &Arc<HostControlHub>,
+    model: &SignalingModel,
+) -> Result<(), DeskError> {
+    let from_connection_id = model.check_and_get_from_connection_id()?;
+    let ctx = registry.get(from_connection_id).await.ok_or_else(|| {
+        DeskError::CustomError(CustomDeskError::new(
+            DeskErrorCode::SYSTEM_ERROR,
+            &format!(
+                "No PC for {from_connection_id} (RequireControl arrived before RequestRemote?)"
+            ),
+        ))
+    })?;
+
+    let control_data = model.get_data::<SignalRequestControlData>()?;
+    log::info!(
+        "[pc_manager] {from_connection_id} RequireControl: {:?}",
+        control_data
+    );
+
+    // Snapshot the pre-decision state for the short-circuit helpers
+    // (re-grant of an already-accepted permission must not re-prompt
+    // the user). Read lock dropped before the approval await so the
+    // signaling-state write below can take exclusive access cleanly.
+    let (currently_has_control, currently_has_clipboard) = {
+        let ctx = ctx.read().await;
+        let s = ctx.signaling_state.read().await;
+        (s.accept_control, s.accept_clipboard_sync)
+    };
+
+    let allow_control = settings.read().await.security.allow_remote_control;
+    let allow_clipboard = settings.read().await.security.allow_clipboard_sync;
+
+    let control_approved =
+        if should_short_circuit_control(control_data.accept, currently_has_control) {
+            log::info!(
+                "[pc_manager] {from_connection_id}: short-circuit RemoteControl (already accepted)"
+            );
+            true
+        } else {
+            check_security_permission(
+                settings,
+                host_control_hub,
+                allow_control,
+                SecurityPermissionType::RemoteControl,
+                Some(from_connection_id.to_string()),
+            )
+            .await
+        };
+
+    if !control_approved {
+        log::warn!("[pc_manager] {from_connection_id}: RemoteControl denied");
+        {
+            let ctx = ctx.read().await;
+            let mut s = ctx.signaling_state.write().await;
+            s.accept_control = false;
+            s.accept_clipboard_sync = false;
+        }
+        send_response::<()>(
+            outbound,
+            &model.request_id,
+            SignalingType::DenyControl,
+            from_connection_id,
+            None,
+        )?;
+        return Ok(());
+    }
+
+    let clipboard_approved = if !control_data.accept_clipboard_sync {
+        false
+    } else if should_short_circuit_clipboard(
+        control_data.accept_clipboard_sync,
+        currently_has_clipboard,
+    ) {
+        log::info!(
+            "[pc_manager] {from_connection_id}: short-circuit ClipboardSync (already accepted)"
+        );
+        true
+    } else {
+        check_security_permission(
+            settings,
+            host_control_hub,
+            allow_clipboard,
+            SecurityPermissionType::ClipboardSync,
+            Some(from_connection_id.to_string()),
+        )
+        .await
+    };
+
+    {
+        let ctx = ctx.read().await;
+        let mut s = ctx.signaling_state.write().await;
+        if control_data.accept {
+            s.accept_control = true;
+            s.accept_clipboard_sync = clipboard_approved;
+            log::info!(
+                "[pc_manager] {from_connection_id}: AcceptControl \
+                 (accept_control=true, accept_clipboard_sync={clipboard_approved})"
+            );
+        } else {
+            s.accept_control = false;
+            s.accept_clipboard_sync = false;
+            log::info!("[pc_manager] {from_connection_id}: release (CloseControl)");
+        }
+    }
+
+    let reply_type = if control_data.accept {
+        SignalingType::AcceptControl
+    } else {
+        SignalingType::CloseControl
+    };
+    send_response::<()>(
+        outbound,
+        &model.request_id,
+        reply_type,
+        from_connection_id,
+        None,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1537,6 +1681,235 @@ mod tests {
         assert!(!pli.as_any().is::<FullIntraRequest>());
         assert!(fir.as_any().is::<FullIntraRequest>());
         assert!(!fir.as_any().is::<PictureLossIndication>());
+    }
+
+    // ============== Cut 6: handle_require_control tests ==============
+
+    /// Build a SharedSettings whose security knobs are set to the
+    /// given allow-state for control / clipboard. `Some(true)` means
+    /// auto-allow without user prompt; `Some(false)` means auto-deny;
+    /// `None` would route to the host_control_hub which our test
+    /// fixture cannot drive without a Tauri shell.
+    fn settings_with_security(
+        allow_control: Option<bool>,
+        allow_clipboard: Option<bool>,
+    ) -> Arc<crate::model::settings::SharedSettings> {
+        let mut s = Settings::default();
+        s.security.allow_remote_control = allow_control;
+        s.security.allow_clipboard_sync = allow_clipboard;
+        Arc::new(crate::model::settings::SharedSettings::from(s))
+    }
+
+    fn require_control_model(
+        from_connection_id: &str,
+        accept: bool,
+        accept_clipboard_sync: bool,
+    ) -> SignalingModel {
+        SignalingModel::new(
+            "req-rc",
+            SignalingType::RequireControl,
+            Some(from_connection_id.to_string()),
+            None,
+            Some(
+                serde_json::to_value(SignalRequestControlData {
+                    accept,
+                    accept_file_transfer: false,
+                    accept_clipboard_sync,
+                })
+                .unwrap(),
+            ),
+            None,
+        )
+    }
+
+    /// Auto-allow happy path: settings.security.allow_remote_control =
+    /// Some(true) + browser asks for both control and clipboard. State
+    /// flips, daemon emits AcceptControl back through outbound.
+    #[tokio::test]
+    async fn handle_require_control_auto_allows_and_emits_accept() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        let settings = settings_with_security(Some(true), Some(true));
+        let hub = Arc::new(HostControlHub::new_local());
+
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        registry
+            .create_for_request_remote("conn-rc", &request_remote, &*settings.read().await)
+            .await
+            .expect("seed pc");
+
+        let model = require_control_model("conn-rc", true, true);
+        handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+            .await
+            .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("AcceptControl reply");
+        let reply: SignalingModel = serde_json::from_str(&text).expect("decode reply");
+        assert!(
+            matches!(reply.signaling_type, SignalingType::AcceptControl),
+            "expected AcceptControl, got {:?}",
+            reply.signaling_type,
+        );
+        let ctx = registry.get("conn-rc").await.unwrap();
+        let s = ctx.read().await.signaling_state.read().await.clone();
+        assert!(s.accept_control, "accept_control must flip true");
+        assert!(
+            s.accept_clipboard_sync,
+            "accept_clipboard_sync must flip true when both grants approved"
+        );
+    }
+
+    /// Control denied via settings: state stays false, DenyControl
+    /// reply. Subsequent Cut 5 mouse / keyboard IPC must remain blocked
+    /// because the daemon's permission gate reads from the same state.
+    #[tokio::test]
+    async fn handle_require_control_auto_denies_and_emits_deny() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        let settings = settings_with_security(Some(false), None);
+        let hub = Arc::new(HostControlHub::new_local());
+
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        registry
+            .create_for_request_remote("conn-deny", &request_remote, &*settings.read().await)
+            .await
+            .expect("seed pc");
+
+        let model = require_control_model("conn-deny", true, false);
+        handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+            .await
+            .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("DenyControl reply");
+        let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
+        assert!(
+            matches!(reply.signaling_type, SignalingType::DenyControl),
+            "expected DenyControl, got {:?}",
+            reply.signaling_type,
+        );
+        let ctx = registry.get("conn-deny").await.unwrap();
+        let s = ctx.read().await.signaling_state.read().await.clone();
+        assert!(!s.accept_control, "accept_control must stay false");
+        assert!(
+            !s.accept_clipboard_sync,
+            "accept_clipboard_sync must stay false"
+        );
+    }
+
+    /// Release path: browser sends RequireControl{accept=false} to
+    /// release a previously-granted control. State goes false +
+    /// CloseControl reply. The short-circuit helper must NOT
+    /// short-circuit the release (would leave the worker stuck with
+    /// accept_control=true) — covered by `should_short_circuit_*`
+    /// helper tests in service::signaling, but verified end-to-end here.
+    #[tokio::test]
+    async fn handle_require_control_release_emits_close_and_resets_state() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        let settings = settings_with_security(Some(true), Some(true));
+        let hub = Arc::new(HostControlHub::new_local());
+
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let ctx = registry
+            .create_for_request_remote("conn-release", &request_remote, &*settings.read().await)
+            .await
+            .expect("seed pc");
+        // Pre-flip state to "currently controlling" so the release
+        // path is the one that fires.
+        {
+            let ctx_read = ctx.read().await;
+            let mut s = ctx_read.signaling_state.write().await;
+            s.accept_control = true;
+            s.accept_clipboard_sync = true;
+        }
+
+        let model = require_control_model("conn-release", false, false);
+        handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
+            .await
+            .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("CloseControl reply");
+        let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
+        assert!(
+            matches!(reply.signaling_type, SignalingType::CloseControl),
+            "expected CloseControl, got {:?}",
+            reply.signaling_type,
+        );
+        let s = ctx.read().await.signaling_state.read().await.clone();
+        assert!(!s.accept_control, "accept_control must go false on release");
+        assert!(
+            !s.accept_clipboard_sync,
+            "accept_clipboard_sync must go false on release"
+        );
+    }
+
+    /// Re-grant of an already-accepted control short-circuits — the
+    /// helper returns true without prompting the user (would race
+    /// against any in-flight Tauri dialog otherwise). State stays
+    /// true, AcceptControl reply emitted.
+    #[tokio::test]
+    async fn handle_require_control_regrant_short_circuits() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        // Settings deliberately set to None so a non-short-circuit
+        // path would route to the hub — but the short-circuit fires
+        // first because state is already accepted. If the
+        // short-circuit broke, this test would hang on the hub call.
+        let settings = settings_with_security(None, None);
+        let hub = Arc::new(HostControlHub::new_local());
+
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let ctx = registry
+            .create_for_request_remote("conn-regrant", &request_remote, &*settings.read().await)
+            .await
+            .expect("seed pc");
+        {
+            let ctx_read = ctx.read().await;
+            let mut s = ctx_read.signaling_state.write().await;
+            s.accept_control = true;
+            s.accept_clipboard_sync = true;
+        }
+
+        let model = require_control_model("conn-regrant", true, true);
+        // Short timeout so a regression that bypasses the
+        // short-circuit and falls into the hub call (which would
+        // never complete in this test fixture) fails loudly.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            handle_require_control(&registry, &outbound_tx, &settings, &hub, &model),
+        )
+        .await
+        .expect("handle_require_control must short-circuit, not block on hub")
+        .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("AcceptControl reply");
+        let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
+        assert!(matches!(reply.signaling_type, SignalingType::AcceptControl));
+    }
+
+    /// RequireControl for an unknown `connection_id` returns an error
+    /// (browser sent a grant for a PC the daemon never created — most
+    /// likely the matching RequestRemote was rejected upstream). The
+    /// router relays the error to the upstream signaling so the
+    /// browser can re-issue cleanly.
+    #[tokio::test]
+    async fn handle_require_control_unknown_connection_errors() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, _) = broadcast::channel::<String>(8);
+        let settings = settings_with_security(Some(true), Some(true));
+        let hub = Arc::new(HostControlHub::new_local());
+
+        let model = require_control_model("ghost", true, true);
+        let result = handle_require_control(&registry, &outbound_tx, &settings, &hub, &model).await;
+        assert!(result.is_err(), "unknown connection must surface an error");
     }
 
     /// Multi-connection: independent contexts coexist; closing one
