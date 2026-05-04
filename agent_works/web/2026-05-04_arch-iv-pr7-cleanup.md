@@ -12,15 +12,20 @@ ConnectionAccept / SignalingMessage layer dead weight.
 
 ### IPC protocol (`web/ipc-protocol/src/message.rs`)
 
-- `ServiceToWorker::SignalingMessage` and `DesktopSwitching` variants.
-- `WorkerToService::SignalingMessage`, `DesktopReady`,
+- `ServiceToWorker::DesktopSwitching` variant.
+- `WorkerToService::DesktopReady`,
   `ConnectionAcceptStateChanged { connection_id, state }`,
   `ConnectionClosed { connection_id }` variants.
 - `WorkerInitPayload.preapproved_connections` field.
-- `ConnectionAcceptState` struct and `SignalingPayload` struct.
+- `ConnectionAcceptState` struct.
 - `ServiceToUI` / `UIToService` enums and their payload types
   (`ServiceStatus`, `ConnectionStatePayload`, `DesktopSwitchPayload`,
   `DesktopSwitchPhase`). Never wired up in this workspace.
+
+`ServiceToWorker::SignalingMessage` /
+`WorkerToService::SignalingMessage` / `SignalingPayload` were briefly
+removed in cut 1 and **restored in cut 4** — see "Cut 4 (post-audit fix)"
+below.
 
 ### Daemon (`web/server/src/daemon/`)
 
@@ -94,17 +99,66 @@ ConnectionAccept / SignalingMessage layer dead weight.
 | --- | --- | --- | --- |
 | 1 | `be9cc11` | 8 | +78 / −675 |
 | 2 | `6d84628` | 2 | +7 / −106 |
+| 4 | `e4e01e6` | 3 | +155 / −29 |
 
 (Cut 2 is small because the bulk of the structural delete landed in
-Cut 1; Cut 2 is the dead-IPC-types + worker-guard sweep.)
+Cut 1; Cut 2 is the dead-IPC-types + worker-guard sweep. Cut 3 is the
+archive doc itself + the parent-workspace submodule bump and is not
+listed here as a code cut. Cut 4 is the post-audit regression fix
+described below.)
+
+### Cut 4 (post-audit fix)
+
+Cut 1 deleted `ServiceToWorker::SignalingMessage` and the daemon's
+worker-forward fallback on the assumption that every browser-bound
+signaling type was already handled daemon-side. **The audit was
+incorrect.** `signaling_router::route` still classifies 22 worker-owned
+SignalingTypes as `RouteOutcome::ForwardToWorker` because their
+handlers live in the user-session worker process, not the daemon:
+
+- `EnablePrivateScreen`, `PrivateScreenStateChanged`,
+  `UpdateDeskSettings`, `ChangeDisplaySettings`, `AudioPlaybackError`
+- Terminal control: `StartTerminal` / `SendDataToTerminal` /
+  `ResizeTerminal` / `CloseTerminal` / `ReplyFromTerminal` /
+  `ListTerminal` / `TerminalStarted` / `TerminalClosed`
+- Manager queries: `ManagerSystemInfo`, `ManagerSystemStatue`,
+  `ManagerFileList`, `ManagerFileDelete`, `ManagerQuerySettings`,
+  `ManagerUpdateSettings`
+- `AcceptControl`, `DenyControl` reply emission from the legacy
+  DeskServer worker path
+- `Error`, `Unknown` envelope catch-all
+
+Without the IPC bridge those types silently dropped at the daemon's
+proxy — a regression that broke private-screen overlay, terminal,
+file management, and runtime settings changes in daemon-worker mode.
+
+Cut 4 restores:
+- `ServiceToWorker::SignalingMessage(SignalingPayload)` as a
+  *transitional* bridge variant.
+- `WorkerToService::SignalingMessage(SignalingPayload)` as the return
+  path for worker-emitted replies.
+- `SignalingPayload { message, connection_id }` struct.
+- `signaling_proxy::handle_inbound_signaling_text` worker forward path
+  (drop without `from_connection_id`, send as `SignalingMessage`
+  otherwise).
+- `signaling_proxy` `WorkerToService::SignalingMessage` arm copying
+  the payload onto `outbound_tx`.
+- Worker `ServiceToWorker::SignalingMessage` re-parse +
+  `DeskSession::handle_message` dispatch.
+- Worker `DeskSessionMessage::Text` outbound forwarding as
+  `WorkerToService::SignalingMessage`.
+
+The doc-comments on the restored variants mark them transitional —
+future work can replace each remaining type with a typed event-
+transport variant and finally retire the bridge.
 
 ## Validation
 
 - `cargo check -p lcxl-remote-desk-server --all-targets` clean (only
   pre-existing warnings outside PR 7 scope).
 - `cargo test -p desk-ipc-protocol`: **23 passed** / 0 failed.
-- `cargo test -p lcxl-remote-desk-server --lib`: **220 passed** / 0
-  failed.
+- `cargo test -p lcxl-remote-desk-server --lib`: **221 passed** / 0
+  failed (cut 4 added one signaling_proxy regression test).
 - `cargo test -p desk-server-version`: **6 passed** / 0 failed.
 - Pre-existing `desk-capture-engine`
   `audio_capture::wasapi_capture::tests::test_write_wav`
