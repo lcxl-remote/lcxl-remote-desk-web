@@ -8,6 +8,7 @@ use desk_ipc_protocol::{
     transport::{read_message, write_message},
 };
 use log::{debug, error, info, warn};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, mpsc};
@@ -40,6 +41,16 @@ pub struct WorkerManager {
     /// of its Init handshake. Read by `pc_manager::handle_request_remote`
     /// to populate the daemon's `Init` reply with codec / device data.
     worker_capabilities: Arc<StdMutex<Option<MediaCapabilities>>>,
+    /// `true` once [`Self::start_inprocess_worker`] has been called.
+    /// Portable / Default mode runs the worker as an `actix_web::rt::spawn`
+    /// task in the same process, so the daemon must NOT fall back to
+    /// `start_worker` (which spawns an external process via
+    /// `CreateProcessAsUserW`) on desktop drift or crash recovery —
+    /// in-process mode has nothing to swap to and no SYSTEM token to
+    /// launch under. The signaling proxy and crash-recovery paths read
+    /// this flag and skip the swap, leaving the existing in-process
+    /// worker in place.
+    is_inprocess: Arc<AtomicBool>,
 }
 
 struct WorkerManagerInner {
@@ -164,8 +175,17 @@ impl WorkerManager {
             worker_msg_tx: Arc::new(tx),
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
+            is_inprocess: Arc::new(AtomicBool::new(false)),
         };
         (mgr, rx)
+    }
+
+    /// Returns `true` when this manager is driving an in-process (portable
+    /// / Default-mode) worker. Set by [`Self::start_inprocess_worker`] and
+    /// read by `signaling_proxy` to gate worker-restart actions that are
+    /// only meaningful in the daemon-spawned (named-pipe) topology.
+    pub fn is_inprocess(&self) -> bool {
+        self.is_inprocess.load(Ordering::Relaxed)
     }
 
     pub async fn start_worker(
@@ -278,6 +298,13 @@ impl WorkerManager {
         desktop_name: Option<String>,
         host_control_hub: Arc<HostControlHub>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Latch the in-process flag so `signaling_proxy::DesktopChanged`
+        // and `handle_crash_recovery` skip their swap-to-fresh-worker
+        // branches. Once set this manager remains in in-process mode
+        // for the rest of its lifetime — switching topologies mid-run
+        // is not a supported configuration.
+        self.is_inprocess.store(true, Ordering::Relaxed);
+
         // Mirror start_worker: a fresh worker re-reports capabilities on its
         // own; clearing the cached snapshot avoids handing stale device data
         // to a `RequestRemote` that lands between Init and the worker's
@@ -500,6 +527,19 @@ impl WorkerManager {
     }
 
     pub fn handle_crash_recovery(&self, session_id: u32, desktop_name: Option<String>) {
+        // Portable / Default mode: there is no external process to
+        // crash-recover. The "worker" is an in-process task — if it
+        // unwound the whole runtime is going down anyway, and even if
+        // we tried to re-launch we'd hit `CreateProcessAsUserW` from a
+        // non-SYSTEM context. Log and bail.
+        if self.is_inprocess() {
+            warn!(
+                "[WorkerManager] In-process worker exited unexpectedly (session={session_id}); \
+                 crash recovery is a no-op in portable mode"
+            );
+            return;
+        }
+
         warn!("[WorkerManager] Worker exited unexpectedly — restarting (session={session_id})");
         let mgr = self.clone();
         // Must use tokio::spawn (not actix_web::rt::spawn / spawn_local) because this
@@ -1307,6 +1347,44 @@ mod tests {
                 "notify_desktop_switch must pause {id}"
             );
         }
+    }
+
+    /// `is_inprocess()` defaults to `false` because new managers run in
+    /// daemon-spawned (named-pipe) mode unless explicitly switched. The
+    /// flag is meant to be one-way — set once by `start_inprocess_worker`
+    /// — so the default must never accidentally drift to `true`.
+    #[test]
+    fn is_inprocess_false_by_default() {
+        let (mgr, _rx) = test_manager();
+        assert!(
+            !mgr.is_inprocess(),
+            "fresh WorkerManager defaults to daemon-spawned (out-of-process) mode"
+        );
+    }
+
+    /// `handle_crash_recovery` in in-process mode must not try to spawn
+    /// a replacement worker. In portable mode there is no external
+    /// process to relaunch, and `start_worker` would call
+    /// `CreateProcessAsUserW` from a non-SYSTEM context — succeeding
+    /// only by accident, mostly failing in confusing ways. The fix in
+    /// PR 7 audit cut: short-circuit the recovery before any spawn.
+    #[tokio::test]
+    async fn handle_crash_recovery_is_noop_when_inprocess() {
+        let (mgr, _rx) = test_manager();
+        mgr.is_inprocess.store(true, Ordering::Relaxed);
+
+        // Should return synchronously without scheduling any recovery work.
+        mgr.handle_crash_recovery(0, None);
+
+        // Yield once so any (incorrectly) spawned task would get a chance
+        // to flip state. With the fix in place, nothing is queued.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let inner = mgr.inner.lock().await;
+        assert!(
+            inner.active_worker.is_none(),
+            "in-process crash recovery must not start a worker"
+        );
     }
 
     /// Capabilities round-trip: `set_worker_capabilities` stores the

@@ -72,7 +72,7 @@ use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encode
 use desk_ipc_protocol::message::{
     ClipboardPayload, CursorDataPayload, FileTransferPayload, ForceKeyframePayload, InputPayload,
     MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload,
-    ServiceToWorker, StartMediaPayload,
+    ServiceToWorker, StartMediaPayload, StopMediaPayload,
 };
 use desk_signal_facade::model::signal::InitSignalingData;
 use std::time::Duration;
@@ -368,6 +368,80 @@ impl PcRegistry {
             {
                 log::warn!("[pc_manager] resume ForceKeyframe for {id} failed: {e}");
             }
+        }
+    }
+
+    /// Per-connection encoder reset: tells the worker to drop the existing
+    /// encoder pipeline for `connection_id` and start a fresh one using the
+    /// cached `StartMediaPayload`, then forces an IDR so the daemon can
+    /// resume `write_sample` once the new keyframe arrives.
+    ///
+    /// Called by `signaling_proxy` when the worker reports
+    /// `WorkerToService::Error { code: ERROR_CODE_MEDIA_TRANSPORT_STUCK,
+    /// connection_id: Some(..) }` — the I-frame send timed out and the
+    /// only safe recovery is a clean restart of that connection's encoder
+    /// pipeline. PCs without a cached offer (the error fired before the
+    /// first StartMedia ever landed) are a no-op other than the StopMedia
+    /// to clear any half-built worker state.
+    pub async fn reset_media_for(&self, connection_id: &str, worker_mgr: &WorkerManager) {
+        let cached = match self.get(connection_id).await {
+            Some(ctx) => ctx.read().await.cached_start_media.read().await.clone(),
+            None => {
+                log::debug!(
+                    "[pc_manager] reset_media_for: unknown connection {connection_id}; ignoring"
+                );
+                return;
+            }
+        };
+
+        // Pause this PC's media ingestion until the new IDR clears the flag
+        // — same pattern as `pause_all_media` but scoped to one connection.
+        if let Some(ctx) = self.get(connection_id).await {
+            ctx.read()
+                .await
+                .media_paused
+                .store(true, Ordering::Relaxed);
+        }
+
+        log::info!(
+            "[pc_manager] reset_media_for {connection_id}: issuing StopMedia + StartMedia + \
+             ForceKeyframe"
+        );
+        if let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::StopMedia(StopMediaPayload {
+                connection_id: connection_id.to_string(),
+            }))
+            .await
+        {
+            log::warn!("[pc_manager] reset_media_for {connection_id}: StopMedia failed: {e}");
+            // Continue anyway — StartMedia is the actual recovery action.
+        }
+
+        let payload = match cached {
+            Some(p) => p,
+            None => {
+                log::warn!(
+                    "[pc_manager] reset_media_for {connection_id}: no cached StartMedia (offer \
+                     never landed); leaving connection paused — caller must redo handle_offer"
+                );
+                return;
+            }
+        };
+
+        if let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::StartMedia(payload))
+            .await
+        {
+            log::warn!("[pc_manager] reset_media_for {connection_id}: StartMedia failed: {e}");
+            return;
+        }
+        if let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                connection_id: connection_id.to_string(),
+            }))
+            .await
+        {
+            log::warn!("[pc_manager] reset_media_for {connection_id}: ForceKeyframe failed: {e}");
         }
     }
 }
@@ -1868,6 +1942,55 @@ mod tests {
         // No PCs registered, no worker active — resume must just iterate
         // zero entries and return cleanly.
         registry.resume_active_media(&worker_mgr).await;
+    }
+
+    /// `reset_media_for` on an unknown connection_id is a silent no-op:
+    /// the daemon's MediaTransportStuck handler may race a
+    /// `StopMedia` / `pc.close()` and we don't want a stale recovery
+    /// attempt to panic or spawn IPC sends for a vanished PC.
+    #[tokio::test]
+    async fn reset_media_for_unknown_connection_is_noop() {
+        let registry = PcRegistry::new();
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        registry.reset_media_for("nope", &worker_mgr).await;
+    }
+
+    /// `reset_media_for` on a registered connection without a cached
+    /// `StartMediaPayload` (the stuck error fired before the first
+    /// Offer/StartMedia ever landed) must still pause the PC and
+    /// emit `StopMedia` to clear any half-built worker state, but
+    /// must not synthesize a `StartMedia` from defaults.
+    #[tokio::test]
+    async fn reset_media_for_pauses_pc_even_without_cached_offer() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-stuck", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        registry.reset_media_for("conn-stuck", &worker_mgr).await;
+
+        let ctx = registry.get("conn-stuck").await.unwrap();
+        assert!(
+            ctx.read().await.media_paused.load(Ordering::Relaxed),
+            "reset_media_for must pause the PC so subsequent video frames are dropped \
+             until a fresh IDR clears the flag"
+        );
+        // No cached StartMedia => the cached slot stays None and the
+        // function returns early after the StopMedia send.
+        assert!(ctx.read().await.cached_start_media.read().await.is_none());
     }
 
     /// PR 6: a PC that hasn't yet received an Offer has

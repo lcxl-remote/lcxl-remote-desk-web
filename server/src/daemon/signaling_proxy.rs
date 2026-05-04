@@ -5,7 +5,9 @@ use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
 use awc::{Client, Connector};
-use desk_ipc_protocol::message::{ServiceToWorker, SignalingPayload, WorkerToService};
+use desk_ipc_protocol::message::{
+    ERROR_CODE_MEDIA_TRANSPORT_STUCK, ServiceToWorker, SignalingPayload, WorkerToService,
+};
 use desk_signal_facade::model::{
     signal::{RemoteDeskTypeEnum, SignalingModel},
     version::VersionInfo,
@@ -225,6 +227,21 @@ pub async fn run_signaling_proxy(
                 );
             }
             WorkerToService::DesktopChanged(payload) => {
+                // Portable / Default mode: the "worker" is an in-process
+                // task and we can't cross window-stations from a single
+                // process anyway. The worker still spawns desktop_monitor
+                // (it doesn't know its own topology) so the event arrives,
+                // but acting on it would mean calling `start_worker` —
+                // i.e. `CreateProcessAsUserW` — from a non-SYSTEM
+                // context, which fails or worse, half-succeeds. Skip.
+                if worker_mgr.is_inprocess() {
+                    debug!(
+                        "[SignalingProxy] In-process worker reported desktop drift -> '{}'; \
+                         no-op in portable mode (single process cannot cross window stations)",
+                        payload.name
+                    );
+                    continue;
+                }
                 info!(
                     "[SignalingProxy] Worker reported desktop drift -> '{}'; restarting worker \
                      (keep-PC: browser PC stays up across the swap)",
@@ -260,9 +277,29 @@ pub async fn run_signaling_proxy(
             }
             WorkerToService::Error(err) => {
                 error!(
-                    "[SignalingProxy] Worker error: code={}, msg={}, recoverable={}",
-                    err.code, err.message, err.recoverable
+                    "[SignalingProxy] Worker error: code={}, msg={}, recoverable={}, \
+                     connection_id={:?}",
+                    err.code, err.message, err.recoverable, err.connection_id
                 );
+                // MediaTransportStuck self-heal: I-frame send timed out
+                // on the worker side. Per the Arch IV plan the daemon
+                // (not the worker) owns recovery — issue StopMedia +
+                // StartMedia + ForceKeyframe so the encoder pipeline
+                // is rebuilt and a fresh IDR clears the paused flag.
+                if err.code == ERROR_CODE_MEDIA_TRANSPORT_STUCK {
+                    if let Some(connection_id) = err.connection_id.clone() {
+                        let registry = pc_registry.clone();
+                        let worker_mgr = worker_mgr.clone();
+                        actix_web::rt::spawn(async move {
+                            registry.reset_media_for(&connection_id, &worker_mgr).await;
+                        });
+                    } else {
+                        warn!(
+                            "[SignalingProxy] MediaTransportStuck without connection_id; \
+                             cannot scope reset — leaving stream paused"
+                        );
+                    }
+                }
             }
             // PR 3 cursor sync: worker emits CursorData when its
             // capture loop sees a cursor shape / position update;

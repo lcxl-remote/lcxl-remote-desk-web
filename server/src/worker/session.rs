@@ -205,6 +205,7 @@ impl WorkerSession {
                     code: -1,
                     message: format!("Failed to parse config: {}", e),
                     recoverable: false,
+                    connection_id: None,
                 });
                 let _ = event_tx.send(err_msg).await;
                 return Err(Box::new(e));

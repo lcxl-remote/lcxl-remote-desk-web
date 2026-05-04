@@ -372,6 +372,17 @@ pub struct HeartbeatPayload {
     pub memory_usage: Option<u64>,
 }
 
+/// Sentinel `ErrorPayload::code` value the worker emits when its media
+/// transport blocked an I-frame send for longer than the configured
+/// `MediaTransport` timeout. The daemon uses the matching `connection_id`
+/// to issue `StopMedia` + `StartMedia` for that connection so the encoder
+/// pipeline is reset rather than left wedged behind a saturated pipe.
+///
+/// Picked deliberately outside the `DeskErrorCode` u16 range so daemon-
+/// side dispatch can match on it without colliding with broader IPC
+/// error codes.
+pub const ERROR_CODE_MEDIA_TRANSPORT_STUCK: i32 = -1001;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct ErrorPayload {
     /// Error code
@@ -380,6 +391,12 @@ pub struct ErrorPayload {
     pub message: String,
     /// Whether the worker can continue operating
     pub recoverable: bool,
+    /// Optional per-connection scope. When `Some`, the daemon can
+    /// take per-connection recovery action (e.g. `StopMedia` +
+    /// `StartMedia` on [`ERROR_CODE_MEDIA_TRANSPORT_STUCK`]). `None`
+    /// for worker-wide errors that don't map to a single PC.
+    #[serde(default)]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -594,6 +611,66 @@ mod tests {
                 other => panic!("unexpected: {other:?}"),
             }
         }
+    }
+
+    /// `ErrorPayload.connection_id` survives a bincode round-trip in
+    /// both `Some` and `None` forms. The daemon's `MediaTransportStuck`
+    /// recovery path keys off this field — losing it would silently
+    /// regress the self-heal we just wired up.
+    #[test]
+    fn error_payload_connection_id_round_trips_bincode() {
+        let scoped = WorkerToService::Error(ErrorPayload {
+            code: ERROR_CODE_MEDIA_TRANSPORT_STUCK,
+            message: "stuck".to_string(),
+            recoverable: true,
+            connection_id: Some("conn-7".to_string()),
+        });
+        match bincode_round_trip(&scoped) {
+            WorkerToService::Error(p) => {
+                assert_eq!(p.code, ERROR_CODE_MEDIA_TRANSPORT_STUCK);
+                assert_eq!(p.connection_id.as_deref(), Some("conn-7"));
+                assert!(p.recoverable);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let global = WorkerToService::Error(ErrorPayload {
+            code: -1,
+            message: "init failed".to_string(),
+            recoverable: false,
+            connection_id: None,
+        });
+        match bincode_round_trip(&global) {
+            WorkerToService::Error(p) => {
+                assert_eq!(p.code, -1);
+                assert!(p.connection_id.is_none());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// JSON payloads emitted by older binaries that pre-date the
+    /// `connection_id` field must still decode (the `#[serde(default)]`
+    /// attribute is what makes this work).
+    #[test]
+    fn error_payload_accepts_legacy_json_without_connection_id() {
+        let legacy = serde_json::json!({
+            "code": -1,
+            "message": "boom",
+            "recoverable": false,
+        });
+        let decoded: ErrorPayload = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.code, -1);
+        assert!(!decoded.recoverable);
+        assert!(decoded.connection_id.is_none());
+    }
+
+    /// `ERROR_CODE_MEDIA_TRANSPORT_STUCK` is part of the IPC contract;
+    /// pin its numeric value so a refactor that accidentally renames or
+    /// shadows it shows up as a test failure.
+    #[test]
+    fn media_transport_stuck_error_code_is_stable() {
+        assert_eq!(ERROR_CODE_MEDIA_TRANSPORT_STUCK, -1001);
     }
 
     /// `MediaFrame` is the hot path on the media transport — sanity check

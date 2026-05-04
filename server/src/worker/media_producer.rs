@@ -73,8 +73,9 @@ use desk_capture_engine::video_encoder::video_encoder_factory::{
 };
 use desk_ipc_protocol::dual_transport::{MediaSender, TransportError};
 use desk_ipc_protocol::message::{
-    ErrorPayload, MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, StartMediaPayload,
-    StopMediaPayload, UpdateMediaSettingsPayload, WorkerToService,
+    ERROR_CODE_MEDIA_TRANSPORT_STUCK, ErrorPayload, MediaCapabilities, MediaCodec, MediaFrame,
+    MediaFrameKind, StartMediaPayload, StopMediaPayload, UpdateMediaSettingsPayload,
+    WorkerToService,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use log::{debug, error, info, warn};
@@ -806,6 +807,9 @@ async fn send_frame(
                 "[MediaProducer:{connection_id}] I-frame send timed out; surfacing \
                  MediaTransportStuck to daemon for reset"
             );
+            // Carry `connection_id` on the payload so the daemon can issue
+            // StopMedia + StartMedia for exactly this PC instead of having
+            // to parse the human-readable `message` field.
             let _ = error_tx.send(WorkerToService::Error(ErrorPayload {
                 code: ERROR_CODE_MEDIA_TRANSPORT_STUCK,
                 message: format!(
@@ -813,6 +817,7 @@ async fn send_frame(
                      daemon should issue StopMedia+StartMedia"
                 ),
                 recoverable: true,
+                connection_id: Some(connection_id.to_string()),
             }));
             true
         }
@@ -822,11 +827,6 @@ async fn send_frame(
         }
     }
 }
-
-/// Sentinel error code for the daemon-side handler. Picked deliberately
-/// outside the `DeskErrorCode` u16 range so the daemon can match on it
-/// without a name collision with the broader ErrorPayload codes.
-pub const ERROR_CODE_MEDIA_TRANSPORT_STUCK: i32 = -1001;
 
 #[cfg(test)]
 mod tests {
@@ -988,13 +988,6 @@ mod tests {
         );
         assert_eq!(caps.desktop_name, "Default");
         assert!(!caps.has_tauri);
-    }
-
-    /// `MediaTransportStuck` error code must remain stable so the
-    /// daemon-side handler can match on it. Pinned by a regression test.
-    #[test]
-    fn media_transport_stuck_error_code_is_stable() {
-        assert_eq!(ERROR_CODE_MEDIA_TRANSPORT_STUCK, -1001);
     }
 
     // ============== PR 3 audio + cursor sync tests ==============
