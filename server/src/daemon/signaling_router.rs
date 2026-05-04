@@ -6,28 +6,21 @@
 //! around the daemon-held PeerConnection:
 //!
 //! - **Daemon-owned**: types that touch the [`RTCPeerConnection`] /
-//!   SDP / ICE / `SignalingState`. Handled inline by the router, on
-//!   the daemon side, against [`super::pc_manager`]'s registry.
-//! - **Worker-owned**: types that need the user-session WinSta0
+//!   SDP / ICE / `SignalingState`, and "swallow" types — daemon-emitted
+//!   notifications or dead-enum variants the browser should never echo
+//!   back. Handled inline (or trace-logged + dropped) on the daemon
+//!   side, against [`super::pc_manager`]'s registry.
+//! - **Worker-bound**: types that need the user-session WinSta0
 //!   (file system, terminal, Tauri shell, screen / audio capture
-//!   parameters, ...). Forwarded to the worker — initially as raw
-//!   `SignalingMessage` IPC for Arch III compatibility, later as
-//!   typed `OpaqueConnectionPayload` events.
+//!   parameters, ...). Each one rides a typed `ServiceToWorker::*`
+//!   IPC variant — there is no opaque-envelope bridge anymore.
 //!
-//! ## Rollout schedule
-//!
-//! - **Cut 3a (this commit)**: skeleton + [`classify`] table +
-//!   [`route`] entry point that always returns
-//!   [`RouteOutcome::ForwardToWorker`]. The dispatch point is wired
-//!   into `signaling_proxy` so subsequent cuts can flip individual
-//!   types over without touching the proxy again.
-//! - **Cut 3b**: daemon takes over `RequestRemote` / `Offer` /
-//!   `Answer` / `Canid` / `CloseControl` against a
-//!   `pc_manager::PcRegistry`.
-//! - **Cut 3c**: worker-owned types switch from raw `SignalingMessage`
-//!   forwarding to typed event-transport payloads (`MouseInput` /
-//!   `ClipboardWrite` / `FileTransferCommand` / etc. — the variants
-//!   added in PR 1 commit 3).
+//! Batches 0–4 of the typed-IPC migration removed the transitional
+//! `ServiceToWorker::SignalingMessage` / `WorkerToService::SignalingMessage`
+//! variants and the `RouteOutcome::ForwardToWorker` fallback that fed
+//! them. `route` now never falls back: every inbound `SignalingType`
+//! is either handled inline (daemon-owned) or shipped to the worker
+//! through a dedicated typed IPC variant.
 
 use std::sync::Arc;
 
@@ -142,15 +135,12 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // Heartbeat is a WS keepalive — not for the worker.
         SignalingType::Heartbeat => RouteOwnership::Daemon,
 
-        // ---- Worker-owned: user-session resources ----
-        // The classification here means "the actual handler runs in
-        // the user-session worker process". Whether the message
-        // crosses the legacy `SignalingMessage` opaque-envelope
-        // bridge or rides a typed IPC variant is a routing detail
-        // decided in `route` below. As of batch 3 the manager-plane
-        // request types AND the terminal-plane request types both
-        // ride typed IPC; the legacy bridge is no longer used by
-        // any inbound type.
+        // ---- Worker-bound: user-session resources ----
+        // Each of these rides a dedicated typed `ServiceToWorker::*`
+        // IPC variant — see `route` below for the per-type dispatch
+        // helpers (batches 1–3 of the typed-IPC migration covered
+        // them all; the legacy `SignalingMessage` bridge no longer
+        // exists).
         SignalingType::EnablePrivateScreen
         | SignalingType::UpdateDeskSettings
         | SignalingType::ManagerSystemInfo
@@ -165,11 +155,15 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ManagerUpdateSettings => RouteOwnership::Worker,
 
         // ---- Error / Unknown ----
-        // Treat error envelopes as worker-bound; the worker's existing
-        // handler logs and discards them. A future cleanup can move
-        // this to daemon-side reporting if the worker ever stops
-        // surfacing useful context.
-        SignalingType::Error | SignalingType::Unknown => RouteOwnership::Worker,
+        // After batch 4 these are daemon-owned. `Error` is something
+        // the daemon emits at the wire level (legacy: worker bounced
+        // it through the bridge after `handle_message` failed; now
+        // worker errors take the typed `WorkerToService::SignalingError`
+        // path so the daemon can ferry them back). `Unknown` is the
+        // serde-default catch-all for unrecognised wire enum values
+        // — bouncing it to the worker would only round-trip an error
+        // back. Both swallow at the daemon with a trace log.
+        SignalingType::Error | SignalingType::Unknown => RouteOwnership::Daemon,
     }
 }
 
@@ -178,25 +172,6 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
 pub enum RouteOwnership {
     Daemon,
     Worker,
-}
-
-/// What [`route`] told the caller to do with the message.
-///
-/// `ForwardToWorker` is the transitional outcome that says "ship the
-/// raw JSON to the worker via `ServiceToWorker::SignalingMessage`".
-/// Daemon-owned types (PC / SDP / ICE / SignalingState) are migrated;
-/// 22 worker-owned types (terminal control, manager file/system info,
-/// `EnablePrivateScreen`, `UpdateDeskSettings`, ...) still flow over
-/// the bridge because their handlers run inside the user-session
-/// worker. A future cleanup can replace the bridge with typed
-/// event-transport payloads per signaling type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RouteOutcome {
-    /// Daemon handled the message inline; caller does nothing more.
-    HandledByDaemon,
-    /// Daemon did not handle the message; caller falls back to the
-    /// raw-JSON `ServiceToWorker::SignalingMessage` IPC path.
-    ForwardToWorker,
 }
 
 /// Errors the router can surface while routing.
@@ -243,32 +218,20 @@ pub struct RouterContext {
 
 /// Route a signaling message.
 ///
-/// Cut 3b: daemon-owned WebRTC SDP/ICE types
-/// (`RequestRemote` / `Offer` / `Canid` / `CloseControl`) are
-/// dispatched against `ctx.pc_registry`; daemon emits replies via
-/// `ctx.outbound_tx`. `Answer` returns `HandledByDaemon` immediately
-/// because the daemon-as-callee never receives an Answer (the daemon
-/// SENDS Answers in `handle_offer`); a stray Answer in the inbound
-/// stream is a protocol error from the browser and dropping it on
-/// the floor is the safest reaction.
-///
-/// `Init` / `DesktopSwitching` / `DesktopReady` /
-/// `FetchConnections` / `ConnectionList` / `Heartbeat` are
-/// daemon-owned but daemon-emitted in this codebase (the browser
-/// does not send them at us); the router classifies them as
-/// `HandledByDaemon` so they don't leak to the worker, and the
-/// "handler" is a no-op.
-///
-/// Worker-owned types still return `ForwardToWorker` (cut 3c flips
-/// individual ones to typed event-transport payloads).
-pub async fn route(
-    model: &SignalingModel,
-    ctx: &RouterContext,
-) -> Result<RouteOutcome, RouterError> {
+/// Each `SignalingType` is exhaustively dispatched: PC / SDP / ICE /
+/// SignalingState types run inline against `ctx.pc_registry`;
+/// worker-bound types (terminal, manager queries, EnablePrivateScreen,
+/// UpdateDeskSettings) are shipped to the worker via dedicated
+/// `ServiceToWorker::*` typed IPC variants; daemon-emitted notifications
+/// and dead-enum variants (`Answer`, `Init`, `Heartbeat`, `Error`,
+/// `Unknown`, ...) are trace-logged + dropped. There is no fallback
+/// path — batch 4 of the typed-IPC migration removed the
+/// `SignalingMessage` bridge.
+pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
     match model.signaling_type {
         SignalingType::RequestRemote => {
             let s = ctx.settings.read().await.clone();
-            let user_name = "worker_node".to_string(); // Cut 3b placeholder; cut 3c threads CurrentUser through.
+            let user_name = "worker_node".to_string();
             let has_tauri = ctx.host_control_hub.has_tauri_ui();
             let capabilities = ctx.worker_mgr.worker_capabilities();
             pc_manager::handle_request_remote(
@@ -282,20 +245,20 @@ pub async fn route(
                 model,
             )
             .await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            Ok(())
         }
         SignalingType::Offer => {
             pc_manager::handle_offer(&ctx.pc_registry, &ctx.outbound_tx, &ctx.worker_mgr, model)
                 .await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            Ok(())
         }
         SignalingType::Canid => {
             pc_manager::handle_canid(&ctx.pc_registry, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            Ok(())
         }
         SignalingType::CloseControl => {
             pc_manager::handle_close_control(&ctx.pc_registry, &ctx.worker_mgr, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            Ok(())
         }
         SignalingType::RequireControl => {
             let settings: &SharedSettings = &ctx.settings;
@@ -307,12 +270,15 @@ pub async fn route(
                 model,
             )
             .await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            Ok(())
         }
         // Daemon-emitted or dead inbound; the browser should never
-        // send these at us but if it does, swallow rather than relay
-        // to the worker. See classify() doc-comments for per-variant
-        // rationale.
+        // send these at us but if it does, swallow rather than
+        // routing onward. See classify() doc-comments for per-variant
+        // rationale. After batch 4 `Error` and `Unknown` join this
+        // group (they used to be worker-bound for verbose logging,
+        // but since the bridge is gone there is no point round-tripping
+        // them).
         SignalingType::Answer
         | SignalingType::Init
         | SignalingType::AcceptControl
@@ -328,69 +294,37 @@ pub async fn route(
         | SignalingType::DesktopReady
         | SignalingType::FetchConnections
         | SignalingType::ConnectionList
-        | SignalingType::Heartbeat => {
+        | SignalingType::Heartbeat
+        | SignalingType::Error
+        | SignalingType::Unknown => {
             log::trace!(
-                "[router] daemon-emitted variant arrived inbound, dropping: {:?}",
+                "[router] daemon-emitted or unknown variant arrived inbound, dropping: {:?}",
                 model.signaling_type,
             );
-            Ok(RouteOutcome::HandledByDaemon)
+            Ok(())
         }
         SignalingType::EnablePrivateScreen => {
-            handle_enable_private_screen_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            handle_enable_private_screen_inbound(ctx, model).await
         }
-        SignalingType::UpdateDeskSettings => {
-            handle_update_desk_settings_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
+        SignalingType::UpdateDeskSettings => handle_update_desk_settings_inbound(ctx, model).await,
         // Batch 2 of the typed-IPC migration — manager plane.
-        SignalingType::ManagerSystemInfo => {
-            handle_manager_system_info_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
+        SignalingType::ManagerSystemInfo => handle_manager_system_info_inbound(ctx, model).await,
         SignalingType::ManagerQuerySettings => {
-            handle_manager_query_settings_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            handle_manager_query_settings_inbound(ctx, model).await
         }
-        SignalingType::ManagerFileList => {
-            handle_manager_file_list_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
-        SignalingType::ManagerFileDelete => {
-            handle_manager_file_delete_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
+        SignalingType::ManagerFileList => handle_manager_file_list_inbound(ctx, model).await,
+        SignalingType::ManagerFileDelete => handle_manager_file_delete_inbound(ctx, model).await,
         SignalingType::ManagerUpdateSettings => {
-            handle_manager_update_settings_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            handle_manager_update_settings_inbound(ctx, model).await
         }
         // Batch 3 of the typed-IPC migration — terminal plane.
-        SignalingType::StartTerminal => {
-            handle_start_terminal_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
+        SignalingType::StartTerminal => handle_start_terminal_inbound(ctx, model).await,
         SignalingType::SendDataToTerminal => {
-            handle_send_data_to_terminal_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
+            handle_send_data_to_terminal_inbound(ctx, model).await
         }
-        SignalingType::ResizeTerminal => {
-            handle_resize_terminal_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
-        SignalingType::CloseTerminal => {
-            handle_close_terminal_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
-        SignalingType::ListTerminal => {
-            handle_list_terminal_inbound(ctx, model).await?;
-            Ok(RouteOutcome::HandledByDaemon)
-        }
-        // Worker-owned: every inbound type now rides typed IPC
-        // (batches 1–3); the legacy `SignalingMessage` bridge no
-        // longer carries any inbound traffic. This catch-all stays
-        // as a safety net — Error / Unknown surface here and we
-        // forward them to the worker which logs and drops.
-        _ => Ok(RouteOutcome::ForwardToWorker),
+        SignalingType::ResizeTerminal => handle_resize_terminal_inbound(ctx, model).await,
+        SignalingType::CloseTerminal => handle_close_terminal_inbound(ctx, model).await,
+        SignalingType::ListTerminal => handle_list_terminal_inbound(ctx, model).await,
     }
 }
 
@@ -853,6 +787,9 @@ mod tests {
             SignalingType::FetchConnections,
             SignalingType::ConnectionList,
             SignalingType::Heartbeat,
+            // Batch 4: Error / Unknown are daemon-owned now.
+            SignalingType::Error,
+            SignalingType::Unknown,
         ] {
             assert_eq!(
                 classify(t),
@@ -862,7 +799,7 @@ mod tests {
         }
     }
 
-    /// Worker-owned: user-session resources (files, terminal request
+    /// Worker-bound: user-session resources (files, terminal request
     /// types, settings, overlays, approval, manager queries). The 3
     /// terminal *reverse* notification types (`ReplyFromTerminal`,
     /// `TerminalStarted`, `TerminalClosed`) are classified as
@@ -883,8 +820,6 @@ mod tests {
             SignalingType::ListTerminal,
             SignalingType::ManagerQuerySettings,
             SignalingType::ManagerUpdateSettings,
-            SignalingType::Error,
-            SignalingType::Unknown,
         ] {
             assert_eq!(
                 classify(t),
@@ -941,24 +876,21 @@ mod tests {
             SignalingType::FetchConnections,
             SignalingType::ConnectionList,
             SignalingType::Heartbeat,
+            SignalingType::Error,
+            SignalingType::Unknown,
         ] {
             let model = SignalingModel::new("r", t, None, None, None, None);
-            assert_eq!(
-                route(&model, &ctx).await.unwrap(),
-                RouteOutcome::HandledByDaemon,
-                "{t:?}",
-            );
+            assert!(route(&model, &ctx).await.is_ok(), "{t:?}");
         }
     }
 
     /// Pin behaviour: a stray inbound `AcceptControl` (which would
     /// be a protocol error from the browser, since the daemon emits
-    /// AcceptControl outbound) is swallowed — `route` returns
-    /// `HandledByDaemon` so the message never crosses the
-    /// `SignalingMessage` bridge to the worker. This guards the
-    /// reclassification done in batch 0 of the typed-IPC migration:
-    /// before it the same input reached the worker and got bounced
-    /// back as `UNKNOWN_SIGNALING_TYPE`.
+    /// AcceptControl outbound) is swallowed — `route` returns Ok
+    /// so the message never reaches the worker. After batch 4 the
+    /// SignalingMessage bridge is gone, so the only way for an
+    /// inbound `AcceptControl` to leak through would be a new
+    /// regression in `route()`'s match.
     #[tokio::test]
     async fn route_inbound_accept_control_is_swallowed_not_bridged() {
         let ctx = make_ctx();
@@ -970,20 +902,15 @@ mod tests {
             None,
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(
-            outcome,
-            RouteOutcome::HandledByDaemon,
-            "AcceptControl inbound must be swallowed, not bridged",
-        );
+        route(&model, &ctx)
+            .await
+            .expect("AcceptControl inbound must be swallowed, not surfaced as error");
     }
 
     /// Batch 3: every terminal-plane request type is now handled
-    /// inline via typed `ServiceToWorker::*Request` IPC. The
-    /// legacy `SignalingMessage` bridge no longer carries any
-    /// terminal traffic. Without an active worker the typed send
-    /// is logged but the route call itself still succeeds —
-    /// `route` returns `HandledByDaemon`.
+    /// inline via typed `ServiceToWorker::*Request` IPC. Without an
+    /// active worker the typed send is logged but the route call
+    /// itself still succeeds.
     #[tokio::test]
     async fn route_terminal_requests_handled_inline_not_bridged() {
         let ctx = make_ctx();
@@ -1023,11 +950,9 @@ mod tests {
                 signaling_data,
                 None,
             );
-            let outcome = route(&model, &ctx).await.unwrap();
-            assert_eq!(
-                outcome,
-                RouteOutcome::HandledByDaemon,
-                "{t:?} must ride typed IPC, not the SignalingMessage bridge",
+            assert!(
+                route(&model, &ctx).await.is_ok(),
+                "{t:?} must succeed inline (no bridge fallback exists)",
             );
         }
     }
@@ -1045,8 +970,7 @@ mod tests {
             SignalingType::ListTerminal,
         ] {
             let model = SignalingModel::new("req-noid", t, None, None, None, None);
-            let outcome = route(&model, &ctx).await.unwrap();
-            assert_eq!(outcome, RouteOutcome::HandledByDaemon, "{t:?}");
+            assert!(route(&model, &ctx).await.is_ok(), "{t:?}");
         }
     }
 
@@ -1066,16 +990,13 @@ mod tests {
             Some(serde_json::json!("not start terminal session")),
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
+        assert!(route(&model, &ctx).await.is_ok());
     }
 
-    /// Batch 2: manager-plane requests are now handled inline by the
+    /// Batch 2: manager-plane requests are handled inline by the
     /// router (typed `ServiceToWorker::Manager*Request` IPC). With no
     /// active worker the typed send is logged but the route call
-    /// itself still succeeds — `route` returns `HandledByDaemon`,
-    /// the legacy `SignalingMessage` bridge no longer carries these
-    /// types.
+    /// itself still succeeds.
     #[tokio::test]
     async fn route_manager_requests_handled_inline_not_bridged() {
         let ctx = make_ctx();
@@ -1125,11 +1046,9 @@ mod tests {
                 signaling_data,
                 None,
             );
-            let outcome = route(&model, &ctx).await.unwrap();
-            assert_eq!(
-                outcome,
-                RouteOutcome::HandledByDaemon,
-                "{t:?} must ride typed IPC, not the SignalingMessage bridge",
+            assert!(
+                route(&model, &ctx).await.is_ok(),
+                "{t:?} must ride typed IPC",
             );
         }
     }
@@ -1147,8 +1066,7 @@ mod tests {
             None,
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
+        assert!(route(&model, &ctx).await.is_ok());
     }
 
     /// Malformed manager request bodies (e.g. `ManagerFileList` with
@@ -1165,14 +1083,11 @@ mod tests {
             Some(serde_json::json!("not file list params")),
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
+        assert!(route(&model, &ctx).await.is_ok());
     }
 
-    /// Batch 1: `EnablePrivateScreen` is now handled inline by the
-    /// router (typed [`ServiceToWorker::EnablePrivateScreen`] IPC).
-    /// `route` returns `HandledByDaemon` — the legacy
-    /// `SignalingMessage` bridge no longer carries this type. With no
+    /// Batch 1: `EnablePrivateScreen` is handled inline by the router
+    /// (typed [`ServiceToWorker::EnablePrivateScreen`] IPC). With no
     /// active worker the typed send is logged but the route call
     /// itself still succeeds.
     #[tokio::test]
@@ -1189,12 +1104,7 @@ mod tests {
             Some(serde_json::to_value(&data).unwrap()),
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(
-            outcome,
-            RouteOutcome::HandledByDaemon,
-            "EnablePrivateScreen must ride typed IPC, not the SignalingMessage bridge",
-        );
+        assert!(route(&model, &ctx).await.is_ok());
     }
 
     /// `EnablePrivateScreen` arriving without a `from_connection_id`
@@ -1214,16 +1124,13 @@ mod tests {
             Some(serde_json::to_value(&data).unwrap()),
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
+        assert!(route(&model, &ctx).await.is_ok());
     }
 
-    /// Batch 1: `UpdateDeskSettings` is now fully handled by the
-    /// router — it both fans out the typed `UpdateMediaSettings` IPC
-    /// for the encoder pipeline AND ships the full settings to the
-    /// worker as typed [`ServiceToWorker::UpdateDeskSettings`]. The
-    /// route returns `HandledByDaemon`; the legacy SignalingMessage
-    /// bridge no longer carries this type.
+    /// Batch 1: `UpdateDeskSettings` is fully handled by the router —
+    /// it both fans out the typed `UpdateMediaSettings` IPC for the
+    /// encoder pipeline AND ships the full settings to the worker as
+    /// typed [`ServiceToWorker::UpdateDeskSettings`].
     #[tokio::test]
     async fn route_update_desk_settings_handled_inline_not_bridged() {
         let ctx = make_ctx();
@@ -1240,18 +1147,13 @@ mod tests {
             Some(serde_json::to_value(&settings).unwrap()),
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(
-            outcome,
-            RouteOutcome::HandledByDaemon,
-            "UpdateDeskSettings must ride typed IPC, not the SignalingMessage bridge",
-        );
+        assert!(route(&model, &ctx).await.is_ok());
     }
 
     /// Malformed `UpdateDeskSettings` payload (not a DeskSettings
     /// object) must not crash the router — it should log and drop.
     #[tokio::test]
-    async fn route_update_desk_settings_with_invalid_payload_still_forwards() {
+    async fn route_update_desk_settings_with_invalid_payload_is_dropped() {
         let ctx = make_ctx();
         let model = SignalingModel::new(
             "r-bad",
@@ -1261,13 +1163,7 @@ mod tests {
             Some(serde_json::json!("not an object")),
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(
-            outcome,
-            RouteOutcome::HandledByDaemon,
-            "malformed UpdateDeskSettings is logged + dropped — no bridge fallback now \
-             that batch 1 carries it on typed IPC",
-        );
+        assert!(route(&model, &ctx).await.is_ok());
     }
 
     /// `CloseControl` against an empty registry doesn't error — the
@@ -1285,7 +1181,6 @@ mod tests {
             None,
             None,
         );
-        let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
+        assert!(route(&model, &ctx).await.is_ok());
     }
 }

@@ -16,7 +16,7 @@ use desk_ipc_protocol::{
         ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
         ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
         PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
-        SignalingPayload, TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload,
+        SignalingErrorPayload, TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload,
         WorkerToService,
     },
     transport::{read_message, write_message},
@@ -137,51 +137,76 @@ async fn dispatch_typed_signaling_with_request_id<T>(
     }
 }
 
-/// Typed-IPC migration helper: classify an outbound signaling text
-/// blob produced by `DeskSession` and route it onto a typed
-/// `WorkerToService` variant when one exists, falling back to the
-/// legacy `SignalingMessage` opaque envelope for types not yet
-/// migrated.
+/// Classify an outbound signaling text blob produced by `DeskSession`
+/// into a typed `WorkerToService` variant. Handles three groups:
 ///
-/// Parsing failures and unmatched types fall through to
-/// `SignalingMessage` — the same behaviour the bridge had before
-/// batch 1, so a malformed inner JSON keeps the existing
-/// fail-soft semantics rather than dropping the message silently.
-fn build_outbound_payload_from_desk_text(text: String) -> WorkerToService {
-    match serde_json::from_str::<SignalingModel>(&text) {
-        Ok(model) => {
-            // `PrivateScreenStateChanged` is constructed via
-            // `SignalingModel::new_request(..., Some(connection_id), ...)`,
-            // which places the target connection in `to_connection_id`
-            // (server-initiated request to a specific browser). Manager
-            // responses come from `PeerSignalingSender::send_response`
-            // which also writes the target browser into
-            // `to_connection_id` and leaves `from_connection_id = None`.
-            // The legacy SignalingMessage fallback ferries
-            // `from_connection_id` only because that's what the
-            // pre-batch daemon-side proxy keyed off; manager responses
-            // wouldn't have populated it anyway.
-            if let Some(typed) = try_route_typed_outbound(&model) {
-                return typed;
-            }
-            WorkerToService::SignalingMessage(SignalingPayload {
-                message: text,
-                connection_id: model.from_connection_id,
-            })
+/// 1. **Error responses** (`response_state.error_code != 0`): packed
+///    into [`WorkerToService::SignalingError`] regardless of the
+///    originating `SignalingType`. Catches every
+///    `service::signaling::DeskSession::send_error` call (terminal
+///    permission denied, manager file errors, the fallthrough
+///    `_ => UNKNOWN_SIGNALING_TYPE`, ...).
+/// 2. **Typed success responses / notifications** for migrated
+///    SignalingTypes (PrivateScreenStateChanged, Manager*, Terminal*):
+///    routed via [`try_route_typed_outbound`].
+/// 3. **Anything else**: log + drop. Returns `None`. After batch 4
+///    of the typed-IPC migration there is no `SignalingMessage`
+///    fallback bridge — every outbound type the daemon needs to
+///    surface to the browser is explicitly typed. A `None` result
+///    indicates either a parse failure (malformed JSON the worker
+///    never produced under normal operation) or a `SignalingType` no
+///    longer expected on the worker → daemon path.
+fn build_outbound_payload_from_desk_text(text: String) -> Option<WorkerToService> {
+    let model = match serde_json::from_str::<SignalingModel>(&text) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                "Worker emitted unparseable signaling JSON; dropping (len={}, err={e})",
+                text.len()
+            );
+            return None;
         }
-        Err(_) => WorkerToService::SignalingMessage(SignalingPayload {
-            message: text,
-            connection_id: None,
-        }),
+    };
+
+    // Error responses: route ALL of them through the typed
+    // SignalingError catch-all — the original SignalingType is
+    // preserved in the payload so the daemon can rebuild the
+    // outbound `SignalingModel::error(...)` and the browser keys
+    // off `signaling_type` to match the response to its pending
+    // request.
+    if let Some(state) = model.response_state.as_ref()
+        && !state.is_success()
+    {
+        let connection_id = model.to_connection_id.clone().unwrap_or_default();
+        return Some(WorkerToService::SignalingError(SignalingErrorPayload {
+            request_id: model.request_id.clone(),
+            connection_id,
+            signaling_type: model.signaling_type,
+            error_code: state.error_code,
+            error_message: state.message.clone(),
+        }));
     }
+
+    if let Some(typed) = try_route_typed_outbound(&model) {
+        return Some(typed);
+    }
+
+    warn!(
+        "Worker emitted signaling reply with no typed IPC route: type={:?}, request_id={}; \
+         dropping (the SignalingMessage bridge no longer exists — every outbound type must \
+         have a typed variant)",
+        model.signaling_type, model.request_id,
+    );
+    None
 }
 
 /// Return `Some(typed)` when the outbound `SignalingModel` matches a
-/// type that batches 1+ have promoted to a typed `WorkerToService`
-/// variant; `None` to leave it on the legacy `SignalingMessage`
-/// bridge. Splits per-type matching out of
-/// `build_outbound_payload_from_desk_text` so each batch can append
-/// arms without the surrounding match getting unwieldy.
+/// success-response or notification type that has been promoted to a
+/// typed `WorkerToService` variant; `None` for unmatched types (the
+/// caller logs + drops). Error responses are handled separately by
+/// the SignalingError branch in `build_outbound_payload_from_desk_text`.
+/// Splits per-type matching out so each batch can append arms without
+/// the surrounding function getting unwieldy.
 fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
     match model.signaling_type {
         SignalingType::PrivateScreenStateChanged => {
@@ -640,35 +665,6 @@ impl WorkerSession {
                     match msg_result {
                         Some(Some(msg)) => {
                             match msg {
-                                ServiceToWorker::SignalingMessage(payload) => {
-                                    // Transitional bridge: daemon's
-                                    // `signaling_router` forwards
-                                    // worker-owned types (terminal,
-                                    // EnablePrivateScreen,
-                                    // UpdateDeskSettings, manager file/
-                                    // system queries) over this opaque
-                                    // envelope. The worker re-parses
-                                    // and dispatches via the existing
-                                    // `DeskSession::handle_message`.
-                                    match serde_json::from_str::<SignalingModel>(&payload.message) {
-                                        Ok(signaling_model) => {
-                                            if let Err(e) = desk_session
-                                                .handle_message(&signaling_model)
-                                                .await
-                                            {
-                                                warn!(
-                                                    "DeskSession handle_message error: {}, type={}, request_id={}",
-                                                    e,
-                                                    signaling_model.signaling_type,
-                                                    signaling_model.request_id
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to parse signaling message: {}", e);
-                                        }
-                                    }
-                                }
                                 ServiceToWorker::Shutdown => {
                                     info!("Received Shutdown command");
                                     if let Err(e) = desk_session.shutdown().await {
@@ -959,17 +955,21 @@ impl WorkerSession {
                     match desk_msg {
                         Some(DeskSessionMessage::Text(text)) => {
                             // Worker-emitted signaling reply (terminal
-                            // output, manager queries, file/system
-                            // info responses). Typed-IPC migration
-                            // batch 1 routes a few SignalingTypes
-                            // through dedicated IPC variants instead
-                            // of the legacy `SignalingMessage` opaque
-                            // envelope; everything else still flows
-                            // over the bridge until later batches
-                            // migrate it.
-                            let payload =
-                                build_outbound_payload_from_desk_text(text.to_string());
-                            if writer_tx.send(payload).is_err() {
+                            // output, manager queries, file/system info
+                            // responses, error responses, ...). Every
+                            // SignalingType the daemon needs to surface
+                            // to the browser is shipped via a dedicated
+                            // typed `WorkerToService::*` variant — error
+                            // responses go through the SignalingError
+                            // catch-all regardless of their original
+                            // type. After batch 4 of the typed-IPC
+                            // migration there is no opaque-envelope
+                            // bridge fallback; unrouted text is logged
+                            // + dropped inside the helper.
+                            if let Some(payload) =
+                                build_outbound_payload_from_desk_text(text.to_string())
+                                && writer_tx.send(payload).is_err()
+                            {
                                 error!("IPC writer task died; exiting main loop");
                                 break;
                             }
@@ -1210,6 +1210,7 @@ fn spawn_heartbeat_task(
 mod tests {
     use super::*;
     use crate::host_control::HubMode;
+    use desk_utils::error::DeskErrorCode;
 
     fn payload_with(
         host_upstream_url: Option<String>,
@@ -1351,8 +1352,7 @@ mod tests {
         )
         .expect("build PrivateScreenStateChanged model");
         let text = serde_json::to_string(&model).expect("serialise");
-        let routed = build_outbound_payload_from_desk_text(text);
-        match routed {
+        match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::PrivateScreenStateChanged(p) => {
                 assert_eq!(p.connection_id, "conn-pss");
                 assert!(p.data.visible);
@@ -1365,16 +1365,56 @@ mod tests {
         }
     }
 
-    /// After batch 3 every worker-emitted signaling type that the
-    /// daemon expects to surface to the browser rides a typed IPC
-    /// variant. Unrecognised reply types (errors, an `Unknown`
-    /// envelope, etc.) still fall back to the `SignalingMessage`
-    /// bridge so the daemon's existing logging and parse-and-rebroadcast
-    /// can still attempt delivery — better than silently dropping.
+    /// Batch 4: error responses (any SignalingType, response_state
+    /// with non-zero error_code) all flow through the typed
+    /// `WorkerToService::SignalingError` catch-all. The daemon
+    /// rebuilds a `SignalingModel::error(...)` from this payload so
+    /// the browser sees the error response on its pending request.
     #[test]
-    fn outbound_dispatch_falls_back_to_signaling_message_for_unrecognised_types() {
+    fn outbound_dispatch_routes_error_responses_to_typed_signaling_error() {
+        // SignalingModel::error builds the canonical wire shape.
+        let model = SignalingModel::error(
+            "req-bad",
+            SignalingType::StartTerminal,
+            None,
+            Some("conn-term".to_string()),
+            DeskErrorCode::PERMISSION_ERROR,
+            "Permission denied",
+        )
+        .expect("build error response");
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text).expect("typed error route") {
+            WorkerToService::SignalingError(p) => {
+                assert_eq!(p.request_id, "req-bad");
+                assert_eq!(p.connection_id, "conn-term");
+                assert!(matches!(p.signaling_type, SignalingType::StartTerminal));
+                assert_eq!(p.error_code, DeskErrorCode::PERMISSION_ERROR.code());
+                assert_eq!(p.error_message.as_deref(), Some("Permission denied"));
+            }
+            other => panic!("expected SignalingError, got {other:?}"),
+        }
+    }
+
+    /// Batch 4: malformed JSON (a `service::signaling` bug or a wire
+    /// corruption) is logged + dropped now — there is no
+    /// SignalingMessage bridge to ferry it through. Returns `None`.
+    #[test]
+    fn outbound_dispatch_drops_malformed_signaling_text() {
+        let raw = "not-a-signaling-model".to_string();
+        assert!(
+            build_outbound_payload_from_desk_text(raw).is_none(),
+            "malformed JSON must drop, not surface as a typed variant",
+        );
+    }
+
+    /// Batch 4: an unrecognised `SignalingType` (e.g. `Error`,
+    /// `Unknown`, or a brand-new variant the worker emitted before
+    /// the daemon learned about) is logged + dropped. Returns `None`.
+    /// This is a tightening of the previous SignalingMessage fallback.
+    #[test]
+    fn outbound_dispatch_drops_unrecognised_signaling_types() {
         let model = SignalingModel::new(
-            "errno",
+            "stray",
             SignalingType::Error,
             Some("conn-x".to_string()),
             None,
@@ -1382,28 +1422,7 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).expect("serialise");
-        match build_outbound_payload_from_desk_text(text.clone()) {
-            WorkerToService::SignalingMessage(p) => {
-                assert_eq!(p.message, text);
-                assert_eq!(p.connection_id.as_deref(), Some("conn-x"));
-            }
-            other => panic!("expected SignalingMessage fallback, got {other:?}"),
-        }
-    }
-
-    /// Malformed JSON stays on the SignalingMessage path so the
-    /// daemon's existing logging surfaces the parse error — same
-    /// fail-soft behaviour the bridge had before batch 1.
-    #[test]
-    fn outbound_dispatch_falls_back_when_payload_is_not_signaling_model() {
-        let raw = "not-a-signaling-model".to_string();
-        match build_outbound_payload_from_desk_text(raw.clone()) {
-            WorkerToService::SignalingMessage(p) => {
-                assert_eq!(p.message, raw);
-                assert!(p.connection_id.is_none());
-            }
-            other => panic!("expected SignalingMessage fallback, got {other:?}"),
-        }
+        assert!(build_outbound_payload_from_desk_text(text).is_none());
     }
 
     /// Batch 2: `ManagerSystemInfo` response (built by the worker's
@@ -1428,7 +1447,7 @@ mod tests {
         )
         .expect("build response");
         let text = serde_json::to_string(&model).expect("serialise");
-        match build_outbound_payload_from_desk_text(text) {
+        match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::ManagerSystemInfoResponse(p) => {
                 assert_eq!(p.request_id, "req-info-1");
                 assert_eq!(p.connection_id, "conn-info");
@@ -1465,7 +1484,8 @@ mod tests {
             )
             .expect("build response");
             let text = serde_json::to_string(&model).expect("serialise");
-            match (expected_variant, build_outbound_payload_from_desk_text(text)) {
+            let routed = build_outbound_payload_from_desk_text(text).expect("typed route");
+            match (expected_variant, routed) {
                 (
                     "ManagerFileDeleteResponse",
                     WorkerToService::ManagerFileDeleteResponse(p),
@@ -1502,7 +1522,7 @@ mod tests {
         )
         .expect("build response");
         let text = serde_json::to_string(&model).expect("serialise");
-        match build_outbound_payload_from_desk_text(text) {
+        match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::TerminalStarted(p) => {
                 assert_eq!(p.request_id, "req-start");
                 assert_eq!(p.connection_id, "conn-term");
@@ -1523,7 +1543,7 @@ mod tests {
         )
         .expect("build new_request");
         let text = serde_json::to_string(&model).expect("serialise");
-        match build_outbound_payload_from_desk_text(text) {
+        match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::TerminalClosed(p) => {
                 assert_eq!(p.connection_id, "conn-term");
             }
@@ -1548,7 +1568,7 @@ mod tests {
         )
         .expect("build new_request");
         let text = serde_json::to_string(&model).expect("serialise");
-        match build_outbound_payload_from_desk_text(text) {
+        match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::ReplyFromTerminal(p) => {
                 assert_eq!(p.connection_id, "conn-term");
                 assert_eq!(p.data.content, "hello\r\nworld\r\n");
@@ -1575,7 +1595,7 @@ mod tests {
         )
         .expect("build response");
         let text = serde_json::to_string(&model).expect("serialise");
-        match build_outbound_payload_from_desk_text(text) {
+        match build_outbound_payload_from_desk_text(text).expect("typed route") {
             WorkerToService::ListTerminalResponse(p) => {
                 assert_eq!(p.request_id, "req-list");
                 assert_eq!(p.connection_id, "conn-list");
@@ -1586,13 +1606,14 @@ mod tests {
         }
     }
 
-    /// A `ManagerSystemInfo` response missing `to_connection_id`
-    /// (would be a bug in `send_response`) falls back to the
-    /// SignalingMessage bridge so the daemon's existing parse-and-
-    /// rebroadcast can still attempt delivery — better than silently
-    /// dropping the response.
+    /// Batch 4: a `ManagerSystemInfo` response missing
+    /// `to_connection_id` would be a bug in `send_response`; the
+    /// typed router's `model.to_connection_id.clone()?` short-circuits
+    /// to `None` and the helper now logs + drops (no SignalingMessage
+    /// fallback exists). Pinning this guards against silently
+    /// promoting a malformed response onto the wire.
     #[test]
-    fn outbound_dispatch_manager_response_without_to_connection_falls_back() {
+    fn outbound_dispatch_manager_response_without_to_connection_is_dropped() {
         let info = SystemInfo::default();
         let model = SignalingModel::success_response(
             "req-info-noid",
@@ -1603,10 +1624,7 @@ mod tests {
         )
         .expect("build response");
         let text = serde_json::to_string(&model).expect("serialise");
-        match build_outbound_payload_from_desk_text(text) {
-            WorkerToService::SignalingMessage(_) => {}
-            other => panic!("expected SignalingMessage fallback, got {other:?}"),
-        }
+        assert!(build_outbound_payload_from_desk_text(text).is_none());
     }
 
     /// Forwarder task exits immediately if the underlying transport returns

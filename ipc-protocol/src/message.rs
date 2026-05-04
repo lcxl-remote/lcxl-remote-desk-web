@@ -2,6 +2,7 @@ use bincode::{Decode, Encode};
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
+use desk_signal_facade::model::signal::SignalingType;
 use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{
@@ -26,19 +27,6 @@ pub enum ServiceToWorker {
 
     /// Force the worker to shut down immediately.
     Shutdown,
-
-    /// Forward a raw `SignalingType` JSON envelope to the worker.
-    ///
-    /// **Transitional bridge.** Arch IV moved WebRTC SDP/ICE handling and
-    /// the per-connection accept-state into the daemon, but the
-    /// `signaling_router` still classifies many user-session signaling
-    /// types (terminal management, manager file/system queries,
-    /// `EnablePrivateScreen`, `UpdateDeskSettings`, etc.) as
-    /// `RouteOutcome::ForwardToWorker` because their handlers live in
-    /// the user-session worker process. Until each of those types has a
-    /// typed event-transport variant, the daemon ships them through
-    /// this opaque envelope.
-    SignalingMessage(SignalingPayload),
 
     // ---------- Arch IV media control (event pipe) ----------
     /// Start a per-connection media pipeline (capture + per-connection
@@ -102,8 +90,6 @@ pub enum ServiceToWorker {
     // ---------- Arch IV typed-IPC migration batch 1 ----------
     /// Browser-issued private-screen toggle. Worker enables / disables
     /// the per-connection private screen via its `host_control_helper`.
-    /// Replaces the legacy `EnablePrivateScreen` flow over the
-    /// `SignalingMessage` bridge.
     EnablePrivateScreen(EnablePrivateScreenPayload),
 
     /// Browser-issued desk-settings update. Carries the full
@@ -112,15 +98,12 @@ pub enum ServiceToWorker {
     /// also sniffs the media-relevant knobs and fans them out as
     /// [`Self::UpdateMediaSettings`] separately so the per-connection
     /// encoder pipeline retunes live (see `pc_manager::
-    /// broadcast_media_settings_update`). Replaces the legacy
-    /// `UpdateDeskSettings` flow over the `SignalingMessage` bridge.
+    /// broadcast_media_settings_update`).
     UpdateDeskSettings(UpdateDeskSettingsPayload),
 
     // ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
     /// Browser → worker request for the host's [`SystemInfo`]. Worker
     /// replies via [`WorkerToService::ManagerSystemInfoResponse`].
-    /// Replaces the legacy `ManagerSystemInfo` flow over the
-    /// `SignalingMessage` bridge.
     ManagerSystemInfoRequest(ManagerRequestRefPayload),
 
     /// Browser → worker request to enumerate files. Worker replies
@@ -144,11 +127,10 @@ pub enum ServiceToWorker {
     /// Browser → worker request to launch a new PTY-backed terminal
     /// session. Worker replies via
     /// [`WorkerToService::TerminalStarted`] (empty body) on success;
-    /// failures fall through to the legacy `Error` enum. The PTY
-    /// reader thread emits `ReplyFromTerminal` chunks until the child
-    /// exits, at which point the monitor task emits `TerminalClosed`.
-    /// Replaces the legacy `StartTerminal` flow over the
-    /// `SignalingMessage` bridge.
+    /// failures take the typed [`WorkerToService::SignalingError`]
+    /// reverse path. The PTY reader thread emits `ReplyFromTerminal`
+    /// chunks until the child exits, at which point the monitor task
+    /// emits `TerminalClosed`.
     StartTerminalRequest(StartTerminalRequestPayload),
 
     /// Browser → worker keystroke / paste write to a running terminal.
@@ -183,14 +165,21 @@ pub enum WorkerToService {
     /// codec for new offers and to populate the UI's device pickers.
     Capabilities(MediaCapabilities),
 
-    /// Forward a worker-emitted signaling JSON envelope back to the
-    /// browser. Counterpart to [`ServiceToWorker::SignalingMessage`] —
-    /// the daemon writes the message verbatim onto the corresponding
-    /// signaling WebSocket. Used for terminal output, manager file /
-    /// system info responses, and any other reply produced by the
-    /// worker's `DeskSession::handle_message` paths that have not yet
-    /// migrated to a typed event-transport variant.
-    SignalingMessage(SignalingPayload),
+    /// Worker → daemon error response carrying the original
+    /// `SignalingType` + a `DeskErrorCode` numeric code + an optional
+    /// human-readable message. Daemon rebuilds an outbound
+    /// `SignalingModel::error(...)` and writes it onto the matching
+    /// browser's signaling WS.
+    ///
+    /// This typed catch-all replaces the `WorkerToService::SignalingMessage`
+    /// reverse path that previously carried `service::signaling::DeskSession::
+    /// send_error` output verbatim. Worker-side helpers
+    /// (`handle_manager_terminal_start`, `service::signaling`'s
+    /// fallback `_ =>`, etc.) keep calling `session.send_error(...)`
+    /// unchanged; the worker IPC main loop's outbound classifier
+    /// detects `model.response_state.error_code != 0` and routes
+    /// the error here regardless of the originating `SignalingType`.
+    SignalingError(SignalingErrorPayload),
 
     /// Worker reports its health status
     Heartbeat(HeartbeatPayload),
@@ -231,8 +220,7 @@ pub enum WorkerToService {
     /// worker's `HostControlHub::subscribe_state` broadcast bus.
     /// The daemon forwards this to the browser as a
     /// `SignalingType::PrivateScreenStateChanged` reply on the matching
-    /// signaling websocket. Replaces the legacy reverse path through
-    /// the `SignalingMessage` bridge.
+    /// signaling websocket.
     PrivateScreenStateChanged(PrivateScreenStateChangedPayload),
 
     // ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
@@ -325,19 +313,25 @@ pub struct WorkerInitPayload {
     pub media_pipe_name: Option<String>,
 }
 
-/// Opaque signaling envelope used by the
-/// [`ServiceToWorker::SignalingMessage`] /
-/// [`WorkerToService::SignalingMessage`] transitional bridge. Carries
-/// the raw `SignalingType` JSON so the receiving end can re-parse
-/// using its existing dispatcher.
+/// Payload for [`WorkerToService::SignalingError`]. Carries the
+/// originating request's correlation fields plus a numeric
+/// `DeskErrorCode` and optional message. The daemon rebuilds the
+/// outbound `SignalingModel::error(...)` wire shape from these fields
+/// — `signaling_type` is what the browser keys off when matching the
+/// reply to its pending request.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct SignalingPayload {
-    /// Raw `SignalingType` JSON (the wire shape sent over the
-    /// browser ↔ signaling-server WebSocket).
-    pub message: String,
-    /// `from_connection_id` extracted by the daemon at parse time so
-    /// the worker can dispatch without a second JSON parse.
-    pub connection_id: Option<String>,
+pub struct SignalingErrorPayload {
+    pub request_id: String,
+    pub connection_id: String,
+    /// `SignalingType` rides bincode 2's `with_serde` field attribute
+    /// because the facade enum is `Serialize_repr` / `Deserialize_repr`
+    /// (i32 discriminant) — bincode's derived impl wouldn't know
+    /// about the explicit `#[repr(i32)]` discriminant numbers, so we
+    /// delegate to its serde impl on the wire.
+    #[bincode(with_serde)]
+    pub signaling_type: SignalingType,
+    pub error_code: i32,
+    pub error_message: Option<String>,
 }
 
 // =============== Arch IV: media + per-connection control ===============
@@ -1405,6 +1399,53 @@ mod tests {
                 assert_eq!(p.connection_id, "conn-term");
                 assert_eq!(p.data.content.len(), body.len());
                 assert_eq!(p.data.content, body);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // === Arch IV typed-IPC migration batch 4 — round-trip tests ===
+
+    /// `SignalingError` rides bincode 2's `with_serde` field attribute
+    /// on `SignalingType` (the facade enum is `Serialize_repr` /
+    /// `Deserialize_repr`). Round-trip a representative type +
+    /// non-zero `error_code` + an explicit message so a wire-format
+    /// drift on any field shows up as a test failure rather than a
+    /// silent corruption that swaps which `SignalingType` the browser
+    /// thinks the error belongs to.
+    #[test]
+    fn signaling_error_round_trips_bincode() {
+        let msg = WorkerToService::SignalingError(SignalingErrorPayload {
+            request_id: "req-err-1".to_string(),
+            connection_id: "conn-err".to_string(),
+            signaling_type: SignalingType::StartTerminal,
+            error_code: 401,
+            error_message: Some("Permission denied".to_string()),
+        });
+        match bincode_round_trip(&msg) {
+            WorkerToService::SignalingError(p) => {
+                assert_eq!(p.request_id, "req-err-1");
+                assert_eq!(p.connection_id, "conn-err");
+                assert!(matches!(p.signaling_type, SignalingType::StartTerminal));
+                assert_eq!(p.error_code, 401);
+                assert_eq!(p.error_message.as_deref(), Some("Permission denied"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // `error_message` is Option<String>; verify the None case
+        // (some send_error callers omit a message).
+        let msg = WorkerToService::SignalingError(SignalingErrorPayload {
+            request_id: "req-err-2".to_string(),
+            connection_id: "conn-err".to_string(),
+            signaling_type: SignalingType::ManagerFileList,
+            error_code: -1,
+            error_message: None,
+        });
+        match bincode_round_trip(&msg) {
+            WorkerToService::SignalingError(p) => {
+                assert_eq!(p.error_code, -1);
+                assert!(p.error_message.is_none());
             }
             other => panic!("unexpected: {other:?}"),
         }

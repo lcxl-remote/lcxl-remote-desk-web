@@ -1,15 +1,13 @@
 use super::pc_manager::PcRegistry;
-use super::signaling_router::{self, RouteOutcome, RouterContext};
+use super::signaling_router::{self, RouterContext};
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
 use awc::{Client, Connector};
-use desk_ipc_protocol::message::{
-    ERROR_CODE_MEDIA_TRANSPORT_STUCK, ServiceToWorker, SignalingPayload, WorkerToService,
-};
+use desk_ipc_protocol::message::{ERROR_CODE_MEDIA_TRANSPORT_STUCK, WorkerToService};
 use desk_signal_facade::model::{
-    signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType},
+    signal::{RemoteDeskTypeEnum, SignalingModel, SignalingResponseState, SignalingType},
     version::VersionInfo,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -46,7 +44,6 @@ pub async fn run_signaling_proxy(
 
     let local_handle = {
         let settings = settings.clone();
-        let worker_mgr = worker_mgr.clone();
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
         actix_web::rt::spawn(async move {
@@ -89,7 +86,6 @@ pub async fn run_signaling_proxy(
                 let rx = outbound_tx.subscribe();
                 let _ = maintain_proxy_connection(
                     settings.clone(),
-                    &worker_mgr,
                     &router_ctx,
                     local_url,
                     local_token,
@@ -104,7 +100,6 @@ pub async fn run_signaling_proxy(
 
     let remote_sig_handle = {
         let settings = settings.clone();
-        let worker_mgr = worker_mgr.clone();
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
         actix_web::rt::spawn(async move {
@@ -124,7 +119,6 @@ pub async fn run_signaling_proxy(
                     let rx = outbound_tx.subscribe();
                     let _ = maintain_proxy_connection(
                         settings.clone(),
-                        &worker_mgr,
                         &router_ctx,
                         url,
                         token,
@@ -140,7 +134,6 @@ pub async fn run_signaling_proxy(
 
     let remote_mgr_handle = {
         let settings = settings.clone();
-        let worker_mgr = worker_mgr.clone();
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
         actix_web::rt::spawn(async move {
@@ -160,7 +153,6 @@ pub async fn run_signaling_proxy(
                     let rx = outbound_tx.subscribe();
                     let _ = maintain_proxy_connection(
                         settings.clone(),
-                        &worker_mgr,
                         &router_ctx,
                         url,
                         token,
@@ -206,18 +198,47 @@ pub async fn run_signaling_proxy(
                 // no cached offers) this is a no-op.
                 pc_registry.resume_active_media(&worker_mgr).await;
             }
-            // Worker-emitted signaling reply (terminal output, manager
-            // queries, file/system responses, etc.) — write straight onto
-            // the outbound channel so the WS sinks ship it back to the
-            // browser. Counterpart to the daemon-side
-            // `ServiceToWorker::SignalingMessage` forward in
-            // `handle_inbound_signaling_text`.
-            WorkerToService::SignalingMessage(payload) => {
-                debug!(
-                    "[SignalingProxy] Worker signaling response (len={})",
-                    payload.message.len()
-                );
-                let _ = outbound_tx.send(payload.message);
+            // Worker-emitted typed error response. Catches every
+            // `service::signaling::DeskSession::send_error` call (terminal
+            // permission denied, manager file errors, fallthrough
+            // `_ => UNKNOWN_SIGNALING_TYPE`, ...) regardless of the
+            // originating `SignalingType`. Daemon rebuilds the matching
+            // outbound `SignalingModel::error(...)` and broadcasts to the
+            // WS sinks so the browser sees the error response on its
+            // pending request.
+            WorkerToService::SignalingError(payload) => {
+                let response_state = SignalingResponseState {
+                    error_code: payload.error_code,
+                    message: payload.error_message.clone(),
+                };
+                match SignalingModel::new_response::<()>(
+                    &payload.request_id,
+                    payload.signaling_type,
+                    None,
+                    Some(payload.connection_id.clone()),
+                    None,
+                    response_state,
+                ) {
+                    Ok(model) => match serde_json::to_string(&model) {
+                        Ok(text) => {
+                            let _ = outbound_tx.send(text);
+                        }
+                        Err(e) => warn!(
+                            "[SignalingProxy] Failed to serialise SignalingError response \
+                             for {} (request_id={}, type={:?}): {e}",
+                            payload.connection_id,
+                            payload.request_id,
+                            payload.signaling_type,
+                        ),
+                    },
+                    Err(e) => warn!(
+                        "[SignalingProxy] Failed to build SignalingError response model \
+                         for {} (request_id={}, type={:?}): {e}",
+                        payload.connection_id,
+                        payload.request_id,
+                        payload.signaling_type,
+                    ),
+                }
             }
             WorkerToService::Heartbeat(hb) => {
                 log::trace!(
@@ -559,7 +580,6 @@ fn send_terminal_notification<T>(
 
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
-    worker_mgr: &WorkerManager,
     router_ctx: &RouterContext,
     signaling_url: String,
     auth_token: String,
@@ -638,12 +658,7 @@ async fn maintain_proxy_connection(
                                         continue;
                                     }
                                 };
-                                handle_inbound_signaling_text(
-                                    text_str,
-                                    &worker_mgr,
-                                    router_ctx,
-                                )
-                                .await;
+                                handle_inbound_signaling_text(text_str, router_ctx).await;
                             }
                             awc::ws::Frame::Ping(data) => {
                                 let _ = sink.send(awc::ws::Message::Pong(data)).await;
@@ -691,28 +706,17 @@ async fn maintain_proxy_connection(
 }
 
 /// Inbound-text dispatcher pulled out of `maintain_proxy_connection`
-/// so the parse / route / forward sequence is reusable for tests and
-/// the per-frame logic stays out of the WS select loop.
+/// so the parse / route sequence is reusable for tests and the
+/// per-frame logic stays out of the WS select loop.
 ///
-/// Cut 3c hygiene:
-///
-/// - Parse the inbound text **once** (the WS loop used to parse twice
-///   — a partial parse for `RequestRemote` tracking, then the router
-///   parsed a second time inside `route()`).
-/// - Reject worker-bound types missing `from_connection_id`. Until cut
-///   3c every legacy-forwarded message carried `connection_id: None`
-///   and the worker had to re-parse the JSON to find out who it came
-///   from; now the daemon refuses to forward something the worker
-///   would not be able to dispatch on, and surfaces the rejection to
-///   the operator via a warn-level log.
-/// - When forwarding, populate `SignalingPayload.connection_id` from
-///   `from_connection_id` so the worker can dispatch without a
-///   re-parse.
-async fn handle_inbound_signaling_text(
-    text_str: String,
-    worker_mgr: &WorkerManager,
-    router_ctx: &RouterContext,
-) {
+/// Parses the inbound text once and hands the model to
+/// [`signaling_router::route`]. The router exhaustively dispatches:
+/// PC / SDP / ICE types are handled inline, worker-bound types ride
+/// dedicated `ServiceToWorker::*` typed IPC variants, and
+/// daemon-emitted notifications are trace-logged + dropped. After
+/// batch 4 of the typed-IPC migration there is no fallback path —
+/// the previous opaque `SignalingMessage` bridge has been removed.
+async fn handle_inbound_signaling_text(text_str: String, router_ctx: &RouterContext) {
     let parsed = match serde_json::from_str::<SignalingModel>(&text_str) {
         Ok(m) => m,
         Err(e) => {
@@ -721,45 +725,11 @@ async fn handle_inbound_signaling_text(
         }
     };
 
-    let outcome = match signaling_router::route(&parsed, router_ctx).await {
-        Ok(o) => o,
-        Err(e) => {
-            warn!(
-                "[Proxy] router handler failed for {:?}: {e}; dropping unrouted message",
-                parsed.signaling_type,
-            );
-            return;
-        }
-    };
-
-    if outcome == RouteOutcome::HandledByDaemon {
-        return;
-    }
-
-    // Worker-owned types (terminal management, manager file / system
-    // info, EnablePrivateScreen, UpdateDeskSettings, etc.) are routed
-    // back to the user-session worker via the transitional
-    // `SignalingMessage` IPC bridge. Future cuts can replace each type
-    // with a typed event-transport variant; until then this preserves
-    // the management plane that PR 4's typed forwarders did not cover.
-    let from_connection_id = match parsed.from_connection_id.as_ref() {
-        Some(id) => id.clone(),
-        None => {
-            warn!(
-                "[Proxy] Dropping worker-bound signaling without from_connection_id: {:?} \
-                 (worker dispatcher requires the id without re-parsing the JSON)",
-                parsed.signaling_type,
-            );
-            return;
-        }
-    };
-
-    let msg = ServiceToWorker::SignalingMessage(SignalingPayload {
-        message: text_str,
-        connection_id: Some(from_connection_id),
-    });
-    if let Err(e) = worker_mgr.send_to_worker(msg).await {
-        warn!("[Proxy] Failed to forward to worker: {e}");
+    if let Err(e) = signaling_router::route(&parsed, router_ctx).await {
+        warn!(
+            "[Proxy] router handler failed for {:?}: {e}; dropping unrouted message",
+            parsed.signaling_type,
+        );
     }
 }
 
@@ -771,7 +741,7 @@ mod tests {
     use crate::model::settings::{Settings, SharedSettings};
     use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 
-    fn make_router_ctx_and_mgr() -> (RouterContext, broadcast::Sender<String>, WorkerManager) {
+    fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         let (outbound_tx, _) = broadcast::channel::<String>(16);
         let shared = SharedSettings::from(Settings::default());
         let settings = web::Data::new(shared);
@@ -782,20 +752,20 @@ mod tests {
             outbound_tx: outbound_tx.clone(),
             settings,
             host_control_hub: Arc::new(HostControlHub::new_local()),
-            worker_mgr: worker_mgr.clone(),
+            worker_mgr,
         };
-        (ctx, outbound_tx, worker_mgr)
+        (ctx, outbound_tx)
     }
 
-    /// Worker-owned signaling without `from_connection_id` is dropped
-    /// at the daemon (rather than forwarded as `connection_id: None`)
-    /// — the worker dispatcher requires the id without a re-parse.
+    /// Worker-bound signaling without `from_connection_id` is dropped
+    /// inside `route()` (the per-type helper logs and returns Ok). The
+    /// dispatcher therefore returns cleanly with no IPC send. Pinning
+    /// this guards against a regression where `route()` would surface
+    /// a missing-id case as a `RouterError` and noisily warn-spam.
     #[tokio::test]
     async fn drops_worker_bound_message_without_from_connection_id() {
-        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
+        let (router_ctx, _out_tx) = make_router_ctx();
 
-        // EnablePrivateScreen is worker-owned (router returns
-        // `ForwardToWorker`).
         let model = SignalingModel::new(
             "req-1",
             SignalingType::EnablePrivateScreen,
@@ -805,26 +775,15 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-
-        // No active worker — send_to_worker errors but the dispatcher
-        // logs and returns cleanly.
-        handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
+        handle_inbound_signaling_text(text, &router_ctx).await;
     }
 
     /// Malformed JSON arriving on the WS is dropped with a warning
-    /// rather than crashing the proxy loop (cut 3c collapses the
-    /// previous lossy `from_str(...).ok()` two-step into a single
-    /// validated parse).
+    /// rather than crashing the proxy loop.
     #[tokio::test]
     async fn drops_malformed_json() {
-        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
-
-        handle_inbound_signaling_text(
-            "{ this is not valid json".to_string(),
-            &worker_mgr,
-            &router_ctx,
-        )
-        .await;
+        let (router_ctx, _out_tx) = make_router_ctx();
+        handle_inbound_signaling_text("{ this is not valid json".to_string(), &router_ctx).await;
     }
 
     /// Daemon-owned RequestRemote without `from_connection_id` does
@@ -832,7 +791,7 @@ mod tests {
     /// returns the per-handler error which we log and return.
     #[tokio::test]
     async fn handles_router_error_without_panic() {
-        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
+        let (router_ctx, _out_tx) = make_router_ctx();
 
         let model = SignalingModel::new(
             "req-2",
@@ -843,19 +802,17 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-
-        handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
+        handle_inbound_signaling_text(text, &router_ctx).await;
     }
 
-    /// Worker-owned signaling with `from_connection_id` reaches the
-    /// `send_to_worker` path. Without an active worker the call errors
-    /// (logged) but the dispatcher must still return cleanly. The
-    /// successful-forward case is covered by the production
-    /// `ServiceToWorker::SignalingMessage` round-trip in
-    /// `desk-ipc-protocol`.
+    /// Worker-bound signaling with `from_connection_id` reaches the
+    /// typed `send_to_worker` path. Without an active worker the call
+    /// errors inside `route()` (logged), but the dispatcher must still
+    /// return cleanly. The successful-forward case is covered by
+    /// per-variant round-trip tests in `desk-ipc-protocol`.
     #[tokio::test]
     async fn worker_owned_with_from_connection_id_does_not_panic() {
-        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
+        let (router_ctx, _out_tx) = make_router_ctx();
 
         let model = SignalingModel::new(
             "req-3",
@@ -866,7 +823,6 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-
-        handle_inbound_signaling_text(text, &worker_mgr, &router_ctx).await;
+        handle_inbound_signaling_text(text, &router_ctx).await;
     }
 }
