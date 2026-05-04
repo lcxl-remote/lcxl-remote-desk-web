@@ -65,6 +65,16 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // sees RequireControl in daemon-worker mode.
         SignalingType::RequireControl => RouteOwnership::Daemon,
 
+        // Daemon-emitted reply variants for the RequireControl flow.
+        // The daemon emits AcceptControl / DenyControl outbound to the
+        // browser from `pc_manager::handle_require_control`; browsers
+        // never echo them back. If a stray inbound copy arrives the
+        // daemon swallows it (worker's `DeskSession::handle_message`
+        // has no arm for these and would only return
+        // `UNKNOWN_SIGNALING_TYPE` — bridging would just bounce
+        // confusing errors back to the browser).
+        SignalingType::AcceptControl | SignalingType::DenyControl => RouteOwnership::Daemon,
+
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
         // rather than relay to the worker (which has no PC to act on).
@@ -79,9 +89,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         SignalingType::Heartbeat => RouteOwnership::Daemon,
 
         // ---- Worker-owned: user-session resources ----
-        SignalingType::AcceptControl
-        | SignalingType::DenyControl
-        | SignalingType::ChangeDisplaySettings
+        SignalingType::ChangeDisplaySettings
         | SignalingType::EnablePrivateScreen
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
@@ -248,8 +256,13 @@ pub async fn route(
         }
         // Daemon-emitted; the browser should never send these at us
         // but if it does, swallow rather than relay to the worker.
+        // AcceptControl / DenyControl are reply variants emitted by
+        // `pc_manager::handle_require_control`; an inbound copy from
+        // the browser is a protocol error and gets dropped here.
         SignalingType::Answer
         | SignalingType::Init
+        | SignalingType::AcceptControl
+        | SignalingType::DenyControl
         | SignalingType::DesktopSwitching
         | SignalingType::DesktopReady
         | SignalingType::FetchConnections
@@ -320,6 +333,8 @@ mod tests {
             SignalingType::Canid,
             SignalingType::CloseControl,
             SignalingType::RequireControl,
+            SignalingType::AcceptControl,
+            SignalingType::DenyControl,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -339,8 +354,6 @@ mod tests {
     #[test]
     fn classify_worker_owned_types() {
         for t in [
-            SignalingType::AcceptControl,
-            SignalingType::DenyControl,
             SignalingType::ChangeDisplaySettings,
             SignalingType::EnablePrivateScreen,
             SignalingType::PrivateScreenStateChanged,
@@ -388,16 +401,22 @@ mod tests {
         }
     }
 
-    /// Daemon-emitted-only variants (Answer / Init / DesktopSwitching
-    /// / DesktopReady / FetchConnections / ConnectionList /
-    /// Heartbeat) arriving on the inbound WS stream are swallowed —
-    /// they MUST NOT reach the worker (which has no PC to act on).
+    /// Daemon-emitted-only variants (Answer / Init / AcceptControl /
+    /// DenyControl / DesktopSwitching / DesktopReady /
+    /// FetchConnections / ConnectionList / Heartbeat) arriving on
+    /// the inbound WS stream are swallowed — they MUST NOT reach
+    /// the worker (which has no PC to act on, and whose
+    /// `DeskSession::handle_message` would only return
+    /// `UNKNOWN_SIGNALING_TYPE` and bounce a confusing error to the
+    /// browser).
     #[tokio::test]
     async fn route_swallows_daemon_emitted_variants() {
         let ctx = make_ctx();
         for t in [
             SignalingType::Answer,
             SignalingType::Init,
+            SignalingType::AcceptControl,
+            SignalingType::DenyControl,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -411,6 +430,33 @@ mod tests {
                 "{t:?}",
             );
         }
+    }
+
+    /// Pin behaviour: a stray inbound `AcceptControl` (which would
+    /// be a protocol error from the browser, since the daemon emits
+    /// AcceptControl outbound) is swallowed — `route` returns
+    /// `HandledByDaemon` so the message never crosses the
+    /// `SignalingMessage` bridge to the worker. This guards the
+    /// reclassification done in batch 0 of the typed-IPC migration:
+    /// before it the same input reached the worker and got bounced
+    /// back as `UNKNOWN_SIGNALING_TYPE`.
+    #[tokio::test]
+    async fn route_inbound_accept_control_is_swallowed_not_bridged() {
+        let ctx = make_ctx();
+        let model = SignalingModel::new(
+            "stray-accept",
+            SignalingType::AcceptControl,
+            Some("conn-z".to_string()),
+            None,
+            None,
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(
+            outcome,
+            RouteOutcome::HandledByDaemon,
+            "AcceptControl inbound must be swallowed, not bridged",
+        );
     }
 
     /// Worker-owned variants still flow over the legacy IPC path
