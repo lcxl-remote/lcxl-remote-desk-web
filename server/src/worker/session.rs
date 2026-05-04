@@ -10,7 +10,7 @@ use crate::{
 };
 use actix_web::web;
 use desk_ipc_protocol::{
-    dual_transport::{MediaSender, framed},
+    dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
         DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, SignalingPayload,
         WorkerInitPayload, WorkerToService,
@@ -25,7 +25,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{self, AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite},
     sync::mpsc,
 };
 
@@ -50,13 +50,27 @@ fn build_hub_from_init(
     }
 }
 
-pub struct WorkerSession {
-    args: Args,
+/// Worker-side session. Stateless wrapper — all mutable state lives in the
+/// dispatchers / `DeskSession` instances built per-session inside
+/// [`Self::run_with_transports`]. The struct exists so the named-pipe
+/// entry point ([`Self::run`]) and the in-process portable entry
+/// ([`Self::run_with_transports`]) share an inherent-method namespace.
+pub struct WorkerSession;
+
+impl Default for WorkerSession {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorkerSession {
+    pub fn new() -> Self {
+        WorkerSession
+    }
+
     pub async fn run(args: Args, pipe_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let session = WorkerSession { args };
+        let _ = args; // Reserved for future per-mode toggles; not used today.
+        let session = WorkerSession;
         session.connect_and_serve(pipe_name).await
     }
 
@@ -72,6 +86,13 @@ impl WorkerSession {
         self.ipc_loop(reader, writer).await
     }
 
+    /// Named-pipe / Unix-socket entry. Performs the Ready / Init handshake
+    /// directly on the byte stream (so the pre-handshake protocol stays
+    /// length-prefix bincode v2 — same as Arch III), then wraps the remaining
+    /// stream in `framed` event transports and connects the optional media
+    /// pipe before delegating to [`Self::run_with_transports`]. The
+    /// transport-agnostic main loop is shared with the in-process portable
+    /// path (PR 5) — only the way transports are constructed differs.
     async fn ipc_loop<R, W>(
         &self,
         mut reader: R,
@@ -104,6 +125,71 @@ impl WorkerSession {
             }
         };
 
+        // Wrap the post-handshake bytes in framed event transports. The
+        // wire format (`LengthDelimitedCodec` + bincode v2) is binary
+        // compatible with the `read_message` / `write_message` calls above
+        // — both speak length-prefixed bincode-v2 with a 16 MB cap.
+        let event_tx: Arc<dyn EventSender<WorkerToService>> = framed::spawn_event_sender(writer);
+        let event_rx: Box<dyn EventReceiver<ServiceToWorker>> = framed::make_event_receiver(reader);
+
+        // Arch IV cut 4: optional media pipe. Connect failure is non-fatal —
+        // the worker continues to serve event-pipe traffic (mouse / clipboard
+        // / file transfer / ...) and reports `Capabilities` so the daemon can
+        // populate `RequestRemote` Init replies even if no frames flow.
+        let media_sender = match init_payload.media_pipe_name.as_deref() {
+            Some(name) => {
+                info!("Worker connecting to media pipe: {name}");
+                match connect_media_pipe(name).await {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        warn!(
+                            "Worker failed to connect to media pipe {name}: {e}; \
+                             continuing without media transport"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
+        // Named-pipe path: no shared hub — worker constructs its own
+        // (Forwarder if `host_upstream_url` is set, Local otherwise).
+        self.run_with_transports(init_payload, event_rx, event_tx, media_sender, None)
+            .await
+    }
+
+    /// Transport-agnostic main loop. Used by both:
+    ///
+    /// - the named-pipe / Unix-socket path (after Ready/Init handshake on the
+    ///   raw byte stream); and
+    /// - the in-process portable path (PR 5) where daemon and worker share
+    ///   one process and transports are tokio mpsc channels — no byte
+    ///   serialization, no handshake required because the caller just hands
+    ///   the [`WorkerInitPayload`] directly.
+    ///
+    /// All worker-side dispatchers (input / clipboard / file-transfer /
+    /// whiteboard / media producer / heartbeat) talk to the daemon through
+    /// an internal `mpsc::UnboundedSender<WorkerToService>` — an event
+    /// forwarder task drains that mpsc and pushes onto the supplied
+    /// [`EventSender`]. This keeps the dispatchers transport-oblivious and
+    /// preserves the property that one slow handler (e.g. an awaited
+    /// approval prompt) cannot stall heartbeats / IDR write-throughs.
+    ///
+    /// `shared_hub` is the in-process bypass for the host-control hub. When
+    /// `Some`, the supplied hub is used directly (PR 5 portable mode where
+    /// daemon and worker share the same `Arc<HostControlHub>`); when `None`
+    /// the worker constructs its own hub from `init_payload.host_upstream_url`
+    /// (named-pipe daemon mode — Forwarder bridges via ws back to the
+    /// daemon's aggregator).
+    pub async fn run_with_transports(
+        &self,
+        init_payload: WorkerInitPayload,
+        mut event_rx: Box<dyn EventReceiver<ServiceToWorker>>,
+        event_tx: Arc<dyn EventSender<WorkerToService>>,
+        media_sender: Option<Arc<dyn MediaSender>>,
+        shared_hub: Option<Arc<HostControlHub>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let settings = match serde_json::from_str::<Settings>(&init_payload.config_json) {
             Ok(mut s) => {
                 // Args is #[serde(skip)] so it defaults to Args::default() after
@@ -120,7 +206,7 @@ impl WorkerSession {
                     message: format!("Failed to parse config: {}", e),
                     recoverable: false,
                 });
-                write_message(&mut writer, &err_msg).await?;
+                let _ = event_tx.send(err_msg).await;
                 return Err(Box::new(e));
             }
         };
@@ -138,49 +224,62 @@ impl WorkerSession {
             sender: desk_tx.clone(),
         };
 
-        // Build the host-control hub. When the daemon supplied a host_upstream_url
-        // we run as a Forwarder and bridge approval / private-screen / whiteboard
-        // traffic over ws to the daemon's aggregator. Without an upstream URL
-        // (standalone or test runs) fall back to a Local hub — its approvals
-        // deny-fast because nothing connects to the worker's own ws endpoint.
-        let (host_control_hub, upstream_spec) = build_hub_from_init(&init_payload);
-        match upstream_spec {
-            Some((upstream, url, token)) => {
-                spawn_upstream_ws_task(upstream, url, token);
+        // Build the host-control hub. In named-pipe daemon mode the daemon
+        // supplied a `host_upstream_url` so we run as a Forwarder and bridge
+        // approval / private-screen / whiteboard traffic over ws back to the
+        // daemon's aggregator. In PR 5 portable mode the caller hands us the
+        // daemon's hub directly via `shared_hub` — no ws, no extra task,
+        // both ends share the same `Arc`. Standalone / test runs (no
+        // upstream and no shared hub) fall back to a Local hub whose
+        // approvals deny-fast.
+        let host_control_hub = match shared_hub {
+            Some(h) => {
+                info!("Using shared host-control hub (in-process portable mode)");
+                h
             }
             None => {
-                warn!(
-                    "Init payload missing host_upstream_url; falling back to Local hub \
-                     (approvals will deny-fast)."
-                );
+                let (hub, upstream_spec) = build_hub_from_init(&init_payload);
+                match upstream_spec {
+                    Some((upstream, url, token)) => {
+                        spawn_upstream_ws_task(upstream, url, token);
+                    }
+                    None => {
+                        warn!(
+                            "Init payload missing host_upstream_url and no shared hub; \
+                             falling back to Local hub (approvals will deny-fast)."
+                        );
+                    }
+                }
+                hub
             }
-        }
+        };
 
-        // Outbound IPC: a dedicated writer task owns `writer` and drains an
-        // unbounded mpsc. Decoupling the writer from the main `select!` loop
-        // means heartbeats (and other queued messages) keep flowing even when
-        // the main loop is blocked awaiting a long-running handler — e.g.
-        // `request_approval` waiting for the user to click the Tauri dialog.
-        // Without this split the heartbeat-timer arm of `select!` would never
-        // be polled while a handler `await`ed, causing the daemon's watchdog
-        // to declare the worker stuck and kill it after 30 s.
-        //
-        // Created before `DeskSession::new` so the session can hold a clone
-        // for `ConnectionAcceptStateChanged` / `ConnectionClosed` emissions.
+        // Outbound IPC: dispatchers and the main loop send into an unbounded
+        // mpsc; an event-forwarder task drains that mpsc and pushes onto the
+        // supplied `EventSender`. Decoupling lets a long-running handler
+        // (e.g. `request_approval` awaiting a Tauri dialog) coexist with the
+        // heartbeat tick without starving the writer side. The forwarder is
+        // joined at shutdown so the in-process transport's mpsc capacity is
+        // fully drained before the test/runtime moves on.
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
-        let writer_task = spawn_ipc_writer_task(writer, writer_rx);
+        let writer_task = spawn_event_forwarder_task(writer_rx, Arc::clone(&event_tx));
 
-        // Arch IV cut 4: when the daemon supplied a `media_pipe_name`, dial
-        // the secondary pipe and spin up the media producer. Failure here
-        // is non-fatal — the worker still serves all event-pipe traffic
-        // (mouse / clipboard / file-transfer etc.) but no video frames will
-        // flow until the pipe pair is fixed. Capabilities are sent
-        // unconditionally so the daemon can populate `RequestRemote` Init
-        // replies even if media isn't wired yet.
-        let media_producer: Option<Arc<MediaProducer>> =
-            build_media_producer_if_configured(&init_payload, &shared_settings, writer_tx.clone())
-                .await
-                .map(Arc::new);
+        // Arch IV cut 4: build the media producer when the caller supplied a
+        // media transport. In named-pipe mode this is the secondary pipe; in
+        // in-process mode it's an mpsc-backed `MediaSender`. Either way the
+        // producer's policy is identical (drop-on-backpressure for P-frames,
+        // 500 ms timeout for I-frames).
+        let media_producer: Option<Arc<MediaProducer>> = match media_sender {
+            Some(sender) => {
+                let desk_settings = shared_settings.read().await.desk.clone();
+                Some(Arc::new(MediaProducer::new(
+                    desk_settings,
+                    sender,
+                    writer_tx.clone(),
+                )))
+            }
+            None => None,
+        };
         let capabilities = MediaProducer::build_capabilities(
             init_payload.desktop_name.as_deref(),
             init_payload.host_upstream_url.is_some(),
@@ -245,15 +344,25 @@ impl WorkerSession {
 
         info!("DeskSession created successfully, entering main loop");
 
+        // Reader task: drain the inbound `EventReceiver<ServiceToWorker>`
+        // and forward into an unbounded mpsc the main loop selects on. A
+        // `None` from `recv()` means the transport closed (peer disconnected
+        // or in-process channel dropped); the main loop sees that as
+        // `Some(None)` on the mpsc and breaks cleanly.
         let (service_msg_tx, mut service_msg_rx) =
-            mpsc::unbounded_channel::<io::Result<ServiceToWorker>>();
-
+            mpsc::unbounded_channel::<Option<ServiceToWorker>>();
         tokio::spawn(async move {
             loop {
-                let result = read_message::<_, ServiceToWorker>(&mut reader).await;
-                let should_stop = result.is_err();
-                if service_msg_tx.send(result).is_err() || should_stop {
-                    break;
+                match event_rx.recv().await {
+                    Some(msg) => {
+                        if service_msg_tx.send(Some(msg)).is_err() {
+                            break;
+                        }
+                    }
+                    None => {
+                        let _ = service_msg_tx.send(None);
+                        break;
+                    }
                 }
             }
         });
@@ -281,7 +390,7 @@ impl WorkerSession {
             tokio::select! {
                 msg_result = service_msg_rx.recv() => {
                     match msg_result {
-                        Some(Ok(msg)) => {
+                        Some(Some(msg)) => {
                             match msg {
                                 ServiceToWorker::SignalingMessage(payload) => {
                                     info!("Worker received SignalingMessage: {}", payload.message);
@@ -421,12 +530,8 @@ impl WorkerSession {
                                 }
                             }
                         }
-                        Some(Err(e)) => {
-                            if e.kind() == io::ErrorKind::UnexpectedEof {
-                                info!("IPC connection closed by Service");
-                            } else {
-                                error!("IPC read error: {}", e);
-                            }
+                        Some(None) => {
+                            info!("IPC event transport closed by Service");
                             break;
                         }
                         None => {
@@ -587,35 +692,6 @@ impl WorkerSession {
     }
 }
 
-/// Connect to the daemon's media pipe (when `Init` carried a
-/// `media_pipe_name`) and build a [`MediaProducer`] on top of it.
-/// Returns `None` when no media pipe was configured *or* when the
-/// connect fails — the worker then runs without a media transport
-/// (event pipe and host control still work, but no encoded frames flow
-/// to the daemon).
-async fn build_media_producer_if_configured(
-    init: &WorkerInitPayload,
-    settings: &Arc<SharedSettings>,
-    error_tx: mpsc::UnboundedSender<WorkerToService>,
-) -> Option<MediaProducer> {
-    let media_pipe_name = init.media_pipe_name.as_ref()?;
-    info!("Worker connecting to media pipe: {media_pipe_name}");
-
-    let media_sender: Arc<dyn MediaSender> = match connect_media_pipe(media_pipe_name).await {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(
-                "Worker failed to connect to media pipe {media_pipe_name}: {e}; \
-                 continuing without media transport"
-            );
-            return None;
-        }
-    };
-
-    let desk_settings = settings.read().await.desk.clone();
-    Some(MediaProducer::new(desk_settings, media_sender, error_tx))
-}
-
 /// Open the daemon-side media pipe (Windows: named pipe; Unix: domain
 /// socket) and wrap the writer half in a [`MediaSender`] that flushes
 /// onto it via the framed transport from `desk-ipc-protocol`.
@@ -662,21 +738,23 @@ async fn connect_media_pipe(
     }
 }
 
-/// Spawn a task that owns `writer` and drains `rx`, writing each message to
-/// the IPC. Decoupled from the main `select!` so a long-running handler can't
-/// block outbound traffic. The task exits when all senders are dropped or a
-/// write fails.
-fn spawn_ipc_writer_task<W>(
-    mut writer: W,
+/// Spawn a task that drains the dispatcher-facing mpsc and forwards each
+/// message onto the supplied [`EventSender`]. Replaces the old byte-stream
+/// writer task so the same forwarder works for the named-pipe path (where
+/// the sender is `framed::FramedEventSender`) and the in-process path
+/// (where the sender is `inprocess::InProcessEventSender`). Decoupling the
+/// forwarder from the main `select!` preserves the property that a slow
+/// handler cannot stall heartbeats or other queued outbound messages. The
+/// task exits when all dispatcher senders drop (clean shutdown) or when
+/// the underlying transport returns `Closed`.
+fn spawn_event_forwarder_task(
     mut rx: mpsc::UnboundedReceiver<WorkerToService>,
-) -> tokio::task::JoinHandle<()>
-where
-    W: AsyncWrite + Unpin + Send + 'static,
-{
+    sender: Arc<dyn EventSender<WorkerToService>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let Err(e) = write_message(&mut writer, &msg).await {
-                warn!("Failed to write IPC message: {}", e);
+            if let Err(e) = sender.send(msg).await {
+                warn!("Failed to forward IPC message: {}", e);
                 break;
             }
         }
@@ -802,32 +880,55 @@ mod tests {
             .expect("task panicked");
     }
 
-    /// Writer task drains the queue in order and exits when all senders are
-    /// dropped. Uses an in-memory duplex stream so we can read back the bytes.
+    /// Forwarder task drains the dispatcher-facing mpsc and pushes onto the
+    /// supplied [`EventSender`] in order, then exits when all senders are
+    /// dropped. Uses the in-process transport so the test stays fully sync
+    /// (no IO scheduling); the framed-transport path is exercised by the
+    /// `inproc_event_round_trips` / `framed_event_round_trips_through_duplex`
+    /// tests in `desk_ipc_protocol::dual_transport`.
     #[tokio::test]
-    async fn writer_task_drains_queue_and_exits_when_senders_dropped() {
-        let (server_side, mut client_side) = tokio::io::duplex(64 * 1024);
+    async fn event_forwarder_drains_queue_and_exits_when_senders_dropped() {
+        use desk_ipc_protocol::dual_transport::inprocess;
+
+        let (sender, mut receiver) = inprocess::make_event::<WorkerToService>();
         let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
-        let task = spawn_ipc_writer_task(server_side, rx);
+        let task = spawn_event_forwarder_task(rx, sender);
 
         tx.send(WorkerToService::Ready).expect("send Ready");
         tx.send(WorkerToService::DesktopReady)
             .expect("send DesktopReady");
         drop(tx);
 
-        // Both messages must have been written and decodable in order.
-        let m1: WorkerToService = read_message(&mut client_side)
-            .await
-            .expect("read first message");
+        let m1 = receiver.recv().await.expect("recv first message");
         assert!(matches!(m1, WorkerToService::Ready));
-        let m2: WorkerToService = read_message(&mut client_side)
-            .await
-            .expect("read second message");
+        let m2 = receiver.recv().await.expect("recv second message");
         assert!(matches!(m2, WorkerToService::DesktopReady));
 
         tokio::time::timeout(tokio::time::Duration::from_secs(1), task)
             .await
-            .expect("writer task must exit after senders drop")
+            .expect("forwarder task must exit after senders drop")
+            .expect("task panicked");
+    }
+
+    /// Forwarder task exits immediately if the underlying transport returns
+    /// `Closed` on the first send. Built by dropping the in-process
+    /// receiver before any forwarder send happens — the next `send` then
+    /// surfaces `TransportError::Closed`.
+    #[tokio::test]
+    async fn event_forwarder_exits_when_transport_closed() {
+        use desk_ipc_protocol::dual_transport::inprocess;
+
+        let (sender, receiver) = inprocess::make_event::<WorkerToService>();
+        drop(receiver);
+        let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let task = spawn_event_forwarder_task(rx, sender);
+
+        // Push one message; forwarder will observe `Closed` and exit.
+        tx.send(WorkerToService::Ready).expect("send Ready");
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), task)
+            .await
+            .expect("forwarder task must exit after transport closes")
             .expect("task panicked");
     }
 }
