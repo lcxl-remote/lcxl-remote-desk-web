@@ -218,6 +218,78 @@ fn get_current_session_id() -> u32 {
     0
 }
 
+/// Portable / Default-mode entry into the Arch IV daemon-worker pipeline,
+/// running entirely in-process. Used by [`crate::run_with_hub`] to replace
+/// the Arch III `start_desk_session` path so that even in single-process
+/// mode the WebRTC PeerConnection lives in the daemon-side code, not in a
+/// `DeskSession`-coupled `capture` task.
+///
+/// Compared with [`run_service_daemon_inner`]:
+/// - **No HTTP local API** — the caller's `actix-web` server already serves
+///   `/api/desk/signaling` for browser connections; portable mode reuses
+///   that same listener.
+/// - **No `CreateProcessAsUserW`** — `WorkerManager::start_inprocess_worker`
+///   spawns the worker as a same-process `actix_web::rt::spawn` task and
+///   wires it via in-process tokio mpsc transports.
+/// - **Same `signaling_proxy`** — the proxy's signaling-WS clients (local
+///   loopback in Default mode; remote signaling/manager when configured)
+///   feed the daemon-held `PcRegistry` through the shared
+///   `SignalingRouter`, so the inbound SDP/ICE path is identical to the
+///   ServiceDaemon mode.
+/// - **No session monitor / heartbeat watchdog** — portable mode cannot
+///   swap workers on UAC (single process), so there is nothing for the
+///   monitor to detect; and watchdog-driven restarts would tear down the
+///   actix-rt System the same task is running on.
+pub async fn start_inprocess_daemon(
+    args: crate::model::settings::Args,
+    settings: web::Data<SharedSettings>,
+    host_control_hub: Arc<crate::host_control::HostControlHub>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("Starting in-process daemon (Arch IV portable mode)");
+
+    let pc_registry = PcRegistry::new();
+    let (worker_mgr, worker_rx) =
+        worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
+
+    let session_id = get_current_session_id();
+    let initial_desktop = get_initial_desktop_name();
+
+    // Spawn the in-process worker: same WorkerSession::run_with_transports
+    // entry point as the ServiceDaemon path; only difference is the
+    // transport flavour (mpsc instead of named-pipe-framed).
+    worker_mgr
+        .start_inprocess_worker(
+            args,
+            session_id,
+            initial_desktop,
+            Arc::clone(&host_control_hub),
+        )
+        .await?;
+
+    // Same signaling proxy as ServiceDaemon mode: drains worker_rx, routes
+    // inbound signaling against the shared PcRegistry, and connects to the
+    // local + remote signaling endpoints (per the proxy's Default-mode
+    // branch — see `signaling_proxy::run_signaling_proxy`).
+    let proxy_settings = settings.clone();
+    let proxy_hub = Arc::clone(&host_control_hub);
+    let proxy_registry = pc_registry.clone();
+    actix_web::rt::spawn(async move {
+        if let Err(e) = signaling_proxy::run_signaling_proxy(
+            proxy_settings,
+            worker_mgr,
+            proxy_hub,
+            worker_rx,
+            proxy_registry,
+        )
+        .await
+        {
+            error!("In-process signaling proxy error: {e}");
+        }
+    });
+
+    Ok(())
+}
+
 /// Returns the actual active input desktop name at startup so the initial
 /// worker is started on the correct desktop (e.g. "Winlogon" at the lock
 /// screen rather than always "Default").

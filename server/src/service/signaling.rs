@@ -336,51 +336,26 @@ pub async fn start_desk_session(
     startup_mode: crate::model::settings::StartupMode,
     host_control_hub: Arc<HostControlHub>,
 ) -> Result<(), DeskError> {
-    // ===== Loop 1: Local Signaling Connection =====
-    // Only in Default mode (signaling server and desk server co-exist in same process)
-    if startup_mode == crate::model::settings::StartupMode::Default {
-        let local_settings = settings.clone();
-        let local_hub = host_control_hub.clone();
-
-        actix_web::rt::spawn(async move {
-            loop {
-                let (port, enable_ipv6, local_token) = {
-                    let s = local_settings.read().await;
-                    (
-                        s.system.port,
-                        s.system.enable_ipv6,
-                        s.system.local_signaling_token.clone().unwrap_or_default(),
-                    )
-                };
-
-                if local_token.is_empty() {
-                    log::warn!(
-                        "local_signaling_token is not set, skipping local signaling connection"
-                    );
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-
-                let local_url = if enable_ipv6 {
-                    format!("ws://[::1]:{}/api/desk/signaling", port)
-                } else {
-                    format!("ws://127.0.0.1:{}/api/desk/signaling", port)
-                };
-
-                let _ = maintain_signaling_connection(
-                    local_settings.clone(),
-                    local_url,
-                    local_token,
-                    local_hub.clone(),
-                )
-                .await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
+    // PR 5 cut 3: the Local Signaling Connection loop (Default-only) was
+    // removed because Default mode now goes through
+    // `daemon::start_inprocess_daemon`, which spins up its own
+    // `signaling_proxy` covering the local + remote signaling endpoints
+    // through the Arch IV daemon-side router. The legacy
+    // `start_desk_session` body below only runs for `StartupMode::DeskServer`
+    // (the headless desk-server path is migrated in a later PR — see
+    // plan PR 7 cleanup). Treat any `StartupMode::Default` invocation here
+    // as a programming error; we log and return immediately rather than
+    // double-spawning the WS clients.
+    if matches!(startup_mode, crate::model::settings::StartupMode::Default) {
+        warn!(
+            "start_desk_session invoked in Default mode — Arch IV portable path \
+             owns this responsibility now; ignoring duplicate startup."
+        );
+        return Ok(());
     }
 
     // ===== Loop 2: Remote Signaling Server Connection =====
-    // In Default and DeskServer modes
+    // In DeskServer mode (Default mode handled above by start_inprocess_daemon).
     {
         let remote_sig_settings = settings.clone();
         let remote_sig_hub = host_control_hub.clone();
@@ -412,7 +387,7 @@ pub async fn start_desk_session(
     }
 
     // ===== Loop 3: Remote Manager Server Connection =====
-    // In Default and DeskServer modes
+    // In DeskServer mode (Default mode handled by start_inprocess_daemon).
     {
         let remote_mgr_settings = settings.clone();
         let remote_mgr_hub = host_control_hub.clone();
