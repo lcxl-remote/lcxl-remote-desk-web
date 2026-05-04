@@ -126,34 +126,6 @@ pub enum WorkerToService {
     FileTransferData(FileTransferPayload),
 }
 
-/// Messages sent from Service Core to Tauri UI
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-#[serde(tag = "type", content = "payload")]
-pub enum ServiceToUI {
-    /// Service status update
-    StatusUpdate(ServiceStatus),
-
-    /// Connection state changed
-    ConnectionState(ConnectionStatePayload),
-
-    /// Desktop switch event
-    DesktopSwitchEvent(DesktopSwitchPayload),
-}
-
-/// Messages sent from Tauri UI to Service Core
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-#[serde(tag = "type", content = "payload")]
-pub enum UIToService {
-    /// Request service status
-    GetStatus,
-
-    /// Start/stop service
-    SetServiceState { enabled: bool },
-
-    /// Update configuration
-    UpdateConfig(String), // JSON config string
-}
-
 // ==================== Payload Types ====================
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -374,42 +346,12 @@ pub struct ErrorPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct ServiceStatus {
-    /// Whether the service is running as a Windows service
-    pub is_service_mode: bool,
-    /// Whether a worker is currently active
-    pub worker_active: bool,
-    /// Current OS session ID
-    pub current_session_id: Option<u32>,
-    /// Current desktop name
-    pub current_desktop: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct ConnectionStatePayload {
-    /// Connection ID
-    pub connection_id: String,
-    /// Connection state
-    pub state: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct DesktopChangedPayload {
     /// New input desktop name as returned by `OpenInputDesktop` +
     /// `GetUserObjectInformationW(UOI_NAME)`. Examples: "Default", "Winlogon",
     /// "Screen-saver". The daemon launches the next worker with this name as
     /// the `lpDesktop` argument to `CreateProcessAsUserW`.
     pub name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct DesktopSwitchPayload {
-    /// Previous desktop name
-    pub from_desktop: Option<String>,
-    /// New desktop name
-    pub to_desktop: Option<String>,
-    /// Phase of the switch
-    pub phase: DesktopSwitchPhase,
 }
 
 #[cfg(test)]
@@ -638,18 +580,4 @@ mod tests {
         assert_eq!(decoded.payload.len(), payload.len());
         assert_eq!(decoded.payload, payload);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
-pub enum DesktopSwitchPhase {
-    /// Switch is starting, worker may disconnect
-    Starting,
-    /// New worker is initializing
-    WorkerInitializing,
-    /// Switch complete, connections are being re-established
-    Reconnecting,
-    /// Switch complete, all connections restored
-    Complete,
-    /// Switch failed
-    Failed(String),
 }

@@ -1646,46 +1646,19 @@ impl DeskSession {
         signaling_model: &SignalingModel,
     ) -> Result<(), DeskError> {
         match signaling_model.signaling_type {
-            // Arch IV (PR 2 cut 3b): when the worker is a
-            // SessionWorker spawned by the daemon, the daemon already
-            // handled these variants via signaling_router, and the IPC
-            // proxy should never have forwarded them here. We log a
-            // warning and no-op rather than create a duplicate
-            // RTCPeerConnection alongside the daemon's. Other startup
-            // modes (Default / DeskServer) keep the legacy in-process
-            // path until PR 5 wires the in-process IpcTransport.
+            // Arch IV: SessionWorker mode never reaches this dispatcher —
+            // the daemon owns the PC and handles signaling natively. The
+            // worker IPC loop dropped its `SignalingMessage` handler in
+            // PR 7; only the legacy DeskServer WS path still hits
+            // `handle_message`, and there `args.startup_mode == DeskServer`.
             SignalingType::RequestRemote => {
-                let is_session_worker = {
-                    let s = self.settings.read().await;
-                    s.args.startup_mode == crate::model::settings::StartupMode::SessionWorker
-                };
-                if is_session_worker {
-                    warn!("[Arch IV] RequestRemote leaked to worker; ignoring (daemon owns PC).");
-                } else {
-                    self.init_ptc_peer_connection(signaling_model).await?;
-                }
+                self.init_ptc_peer_connection(signaling_model).await?;
             }
             SignalingType::Offer => {
-                let is_session_worker = {
-                    let s = self.settings.read().await;
-                    s.args.startup_mode == crate::model::settings::StartupMode::SessionWorker
-                };
-                if is_session_worker {
-                    warn!("[Arch IV] Offer leaked to worker; ignoring (daemon owns PC).");
-                } else {
-                    self.handle_offer(signaling_model).await?;
-                }
+                self.handle_offer(signaling_model).await?;
             }
             SignalingType::Answer => {}
             SignalingType::Canid => {
-                let is_session_worker = {
-                    let s = self.settings.read().await;
-                    s.args.startup_mode == crate::model::settings::StartupMode::SessionWorker
-                };
-                if is_session_worker {
-                    warn!("[Arch IV] Canid leaked to worker; ignoring (daemon owns PC).");
-                    return Ok(());
-                }
                 let from_connection_id = signaling_model.check_and_get_from_connection_id()?;
                 let rtc_peer_connection = self.get_rtc_peer_connection(from_connection_id)?;
 
