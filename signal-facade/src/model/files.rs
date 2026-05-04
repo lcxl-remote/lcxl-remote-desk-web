@@ -6,7 +6,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::error::DeskSignalFacadeError;
 
-#[derive(Deserialize, Serialize, ToSchema, IntoParams, Default)]
+#[derive(Deserialize, Serialize, ToSchema, IntoParams, Default, Clone, Debug)]
 pub struct FileListParams {
     pub path: String,
     pub page_no: i64,
@@ -32,7 +32,7 @@ pub struct FileListParams {
     pub connection_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, ToSchema, Debug)]
+#[derive(Serialize, Deserialize, ToSchema, Debug, Clone)]
 pub struct FileInfo {
     pub name: String,
     pub path: String,
@@ -133,7 +133,7 @@ impl FileInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, ToSchema, Debug, Clone)]
 pub struct FileListResponse {
     pub file_info_list: Vec<FileInfo>,
     pub total_count: i64,

@@ -33,11 +33,15 @@ use std::sync::Arc;
 
 use actix_web::web;
 use desk_ipc_protocol::message::{
-    EnablePrivateScreenPayload, ServiceToWorker, UpdateDeskSettingsPayload,
+    EnablePrivateScreenPayload, ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload,
+    ManagerRequestRefPayload, ManagerUpdateSettingsRequestPayload, ServiceToWorker,
+    UpdateDeskSettingsPayload,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::private_screen::EnablePrivateScreenData;
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use tokio::sync::broadcast;
 
 use crate::daemon::pc_manager::{self, PcRegistry};
@@ -99,9 +103,15 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   variant is dead until that work lands. Portable mode
         //   still produces it from `service::signaling`, but that
         //   path bypasses the router entirely.
+        // - `ManagerSystemStatue` (batch 2): a dead-enum variant —
+        //   the worker's `handle_message` has no arm and the
+        //   front-end never emits it. Swallow the same way batch 0
+        //   handled AcceptControl / DenyControl and batch 1 handled
+        //   ChangeDisplaySettings.
         SignalingType::ChangeDisplaySettings
         | SignalingType::PrivateScreenStateChanged
-        | SignalingType::AudioPlaybackError => RouteOwnership::Daemon,
+        | SignalingType::AudioPlaybackError
+        | SignalingType::ManagerSystemStatue => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -117,19 +127,16 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         SignalingType::Heartbeat => RouteOwnership::Daemon,
 
         // ---- Worker-owned: user-session resources ----
-        // `EnablePrivateScreen` and `UpdateDeskSettings` are still
-        // worker-owned (the actual handlers live in
-        // `service/signaling::DeskSession::handle_message`'s arms
-        // for those types) but as of batch 1 they ride typed
-        // [`ServiceToWorker::EnablePrivateScreen`] /
-        // [`ServiceToWorker::UpdateDeskSettings`] IPC instead of
-        // the legacy `SignalingMessage` opaque envelope. The router
-        // returns `HandledByDaemon` for both because the typed
-        // IPC send happens inline below.
+        // The classification here means "the actual handler runs in
+        // the user-session worker process". Whether the message
+        // crosses the legacy `SignalingMessage` opaque-envelope
+        // bridge or rides a typed IPC variant is a routing detail
+        // decided in `route` below. As of batch 2 the manager-plane
+        // request types ride typed IPC; terminal management still
+        // bridges over `SignalingMessage` (batch 3).
         SignalingType::EnablePrivateScreen
         | SignalingType::UpdateDeskSettings
         | SignalingType::ManagerSystemInfo
-        | SignalingType::ManagerSystemStatue
         | SignalingType::ManagerFileList
         | SignalingType::ManagerFileDelete
         | SignalingType::StartTerminal
@@ -299,6 +306,7 @@ pub async fn route(
         | SignalingType::ChangeDisplaySettings
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
+        | SignalingType::ManagerSystemStatue
         | SignalingType::DesktopSwitching
         | SignalingType::DesktopReady
         | SignalingType::FetchConnections
@@ -316,6 +324,27 @@ pub async fn route(
         }
         SignalingType::UpdateDeskSettings => {
             handle_update_desk_settings_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        // Batch 2 of the typed-IPC migration — manager plane.
+        SignalingType::ManagerSystemInfo => {
+            handle_manager_system_info_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::ManagerQuerySettings => {
+            handle_manager_query_settings_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::ManagerFileList => {
+            handle_manager_file_list_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::ManagerFileDelete => {
+            handle_manager_file_delete_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::ManagerUpdateSettings => {
+            handle_manager_update_settings_inbound(ctx, model).await?;
             Ok(RouteOutcome::HandledByDaemon)
         }
         // Worker-owned: subsequent batches will flip these to typed
@@ -423,6 +452,181 @@ async fn handle_update_desk_settings_inbound(
     Ok(())
 }
 
+// ---- Batch 2: manager plane typed-IPC dispatch helpers ----
+//
+// All five share the same skeleton — pull `from_connection_id` (the
+// browser's PC ID), build the typed `ServiceToWorker::Manager*Request`
+// payload, ship it via `WorkerManager::send_to_worker`. Differences are
+// only in payload type and whether the inbound model carries a body.
+// The `request_id` is echoed verbatim so the worker's
+// `ManagerResponseRefPayload` / typed-response payload can correlate.
+// Errors are non-fatal for the WS connection: parse / send failures
+// log + drop, same fail-soft semantics the SignalingMessage bridge
+// had.
+
+/// Helper: extract `from_connection_id` from an inbound manager
+/// request. Missing => log and return None so the caller drops the
+/// message. Manager queries always carry a connection_id (the daemon
+/// inserts it during inbound parse), so a missing one is a protocol
+/// error rather than a routine state.
+fn require_from_connection_id<'a>(
+    model: &'a SignalingModel,
+    signaling_type_name: &'static str,
+) -> Option<&'a str> {
+    match model.from_connection_id.as_deref() {
+        Some(id) => Some(id),
+        None => {
+            log::warn!(
+                "[router] {signaling_type_name} missing from_connection_id; ignoring \
+                 (request_id={})",
+                model.request_id,
+            );
+            None
+        }
+    }
+}
+
+async fn handle_manager_system_info_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "ManagerSystemInfo") else {
+        return Ok(());
+    };
+    let payload = ManagerRequestRefPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ManagerSystemInfoRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed ManagerSystemInfoRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_manager_query_settings_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "ManagerQuerySettings") else {
+        return Ok(());
+    };
+    let payload = ManagerRequestRefPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ManagerQuerySettingsRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed ManagerQuerySettingsRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_manager_file_list_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "ManagerFileList") else {
+        return Ok(());
+    };
+    let params = match model.get_data::<FileListParams>() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!(
+                "[router] ManagerFileList payload parse failed for {connection_id}: {e}; \
+                 dropping (request_id={})",
+                model.request_id,
+            );
+            return Ok(());
+        }
+    };
+    let payload = ManagerFileListRequestPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+        params,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ManagerFileListRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed ManagerFileListRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_manager_file_delete_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "ManagerFileDelete") else {
+        return Ok(());
+    };
+    let request = match model.get_data::<DeleteFileRequest>() {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "[router] ManagerFileDelete payload parse failed for {connection_id}: {e}; \
+                 dropping (request_id={})",
+                model.request_id,
+            );
+            return Ok(());
+        }
+    };
+    let payload = ManagerFileDeleteRequestPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+        request,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ManagerFileDeleteRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed ManagerFileDeleteRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_manager_update_settings_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "ManagerUpdateSettings") else {
+        return Ok(());
+    };
+    let settings = match model.get_data::<RemoteSystemSettings>() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[router] ManagerUpdateSettings payload parse failed for {connection_id}: \
+                 {e}; dropping (request_id={})",
+                model.request_id,
+            );
+            return Ok(());
+        }
+    };
+    let payload = ManagerUpdateSettingsRequestPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+        settings,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ManagerUpdateSettingsRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed ManagerUpdateSettingsRequest: {e}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +651,7 @@ mod tests {
             SignalingType::ChangeDisplaySettings,
             SignalingType::PrivateScreenStateChanged,
             SignalingType::AudioPlaybackError,
+            SignalingType::ManagerSystemStatue,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -469,7 +674,6 @@ mod tests {
             SignalingType::EnablePrivateScreen,
             SignalingType::UpdateDeskSettings,
             SignalingType::ManagerSystemInfo,
-            SignalingType::ManagerSystemStatue,
             SignalingType::ManagerFileList,
             SignalingType::ManagerFileDelete,
             SignalingType::StartTerminal,
@@ -531,6 +735,7 @@ mod tests {
             SignalingType::ChangeDisplaySettings,
             SignalingType::PrivateScreenStateChanged,
             SignalingType::AudioPlaybackError,
+            SignalingType::ManagerSystemStatue,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -574,16 +779,17 @@ mod tests {
     }
 
     /// Worker-owned variants that haven't been typed-migrated yet
-    /// (manager plane / terminal — batches 2 and 3) still flow over
-    /// the legacy `SignalingMessage` IPC bridge.
+    /// (terminal — batch 3) still flow over the legacy
+    /// `SignalingMessage` IPC bridge.
     #[tokio::test]
     async fn route_forwards_unmigrated_worker_owned_variants() {
         let ctx = make_ctx();
         for t in [
-            SignalingType::ManagerFileList,
-            SignalingType::ManagerSystemInfo,
             SignalingType::StartTerminal,
             SignalingType::SendDataToTerminal,
+            SignalingType::ResizeTerminal,
+            SignalingType::CloseTerminal,
+            SignalingType::ListTerminal,
         ] {
             let model = SignalingModel::new("r", t, None, None, None, None);
             assert_eq!(
@@ -592,6 +798,105 @@ mod tests {
                 "{t:?}",
             );
         }
+    }
+
+    /// Batch 2: manager-plane requests are now handled inline by the
+    /// router (typed `ServiceToWorker::Manager*Request` IPC). With no
+    /// active worker the typed send is logged but the route call
+    /// itself still succeeds — `route` returns `HandledByDaemon`,
+    /// the legacy `SignalingMessage` bridge no longer carries these
+    /// types.
+    #[tokio::test]
+    async fn route_manager_requests_handled_inline_not_bridged() {
+        let ctx = make_ctx();
+        let cases = [
+            (
+                SignalingType::ManagerSystemInfo,
+                serde_json::Value::Null,
+            ),
+            (
+                SignalingType::ManagerQuerySettings,
+                serde_json::Value::Null,
+            ),
+            (
+                SignalingType::ManagerFileList,
+                serde_json::to_value(desk_signal_facade::model::files::FileListParams {
+                    path: "C:\\".to_string(),
+                    page_no: 1,
+                    page_count: 50,
+                    ..Default::default()
+                })
+                .unwrap(),
+            ),
+            (
+                SignalingType::ManagerFileDelete,
+                serde_json::to_value(desk_signal_facade::model::files::DeleteFileRequest {
+                    file_path: "C:\\old.txt".to_string(),
+                    delete_permanently: Some(false),
+                    connection_id: Some("conn-mgr".to_string()),
+                })
+                .unwrap(),
+            ),
+            (
+                SignalingType::ManagerUpdateSettings,
+                serde_json::to_value(
+                    desk_signal_facade::model::system_settings::RemoteSystemSettings::default(),
+                )
+                .unwrap(),
+            ),
+        ];
+        for (t, body) in cases {
+            let signaling_data = if body.is_null() { None } else { Some(body) };
+            let model = SignalingModel::new(
+                "req-mgr",
+                t,
+                Some("conn-mgr".to_string()),
+                None,
+                signaling_data,
+                None,
+            );
+            let outcome = route(&model, &ctx).await.unwrap();
+            assert_eq!(
+                outcome,
+                RouteOutcome::HandledByDaemon,
+                "{t:?} must ride typed IPC, not the SignalingMessage bridge",
+            );
+        }
+    }
+
+    /// Manager requests without a `from_connection_id` are protocol
+    /// errors — daemon logs and drops, no panic, no IPC send.
+    #[tokio::test]
+    async fn route_manager_request_without_connection_id_is_noop() {
+        let ctx = make_ctx();
+        let model = SignalingModel::new(
+            "req-info-noid",
+            SignalingType::ManagerSystemInfo,
+            None,
+            None,
+            None,
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
+    }
+
+    /// Malformed manager request bodies (e.g. `ManagerFileList` with
+    /// non-`FileListParams` JSON) must not crash the router — they
+    /// should log + drop.
+    #[tokio::test]
+    async fn route_manager_file_list_with_invalid_payload_is_dropped() {
+        let ctx = make_ctx();
+        let model = SignalingModel::new(
+            "req-fl-bad",
+            SignalingType::ManagerFileList,
+            Some("conn-fl".to_string()),
+            None,
+            Some(serde_json::json!("not file list params")),
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
     }
 
     /// Batch 1: `EnablePrivateScreen` is now handled inline by the

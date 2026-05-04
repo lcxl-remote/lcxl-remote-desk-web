@@ -13,16 +13,23 @@ use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
         DesktopChangedPayload, EnablePrivateScreenPayload, HeartbeatPayload,
+        ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload,
+        ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
+        ManagerRequestRefPayload, ManagerResponseRefPayload,
+        ManagerSystemInfoResponsePayload, ManagerUpdateSettingsRequestPayload,
         PrivateScreenStateChangedPayload, ServiceToWorker, SignalingPayload,
         UpdateDeskSettingsPayload, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
 use desk_server_user::model::CurrentUser;
+use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::private_screen::{
     EnablePrivateScreenData, PrivateScreenStateChangedData,
 };
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+use desk_signal_facade::model::system_info::SystemInfo;
+use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use log::{error, info, warn};
 use std::{
     sync::Arc,
@@ -71,22 +78,51 @@ async fn dispatch_typed_signaling<T>(
 ) where
     T: serde::Serialize + ?Sized,
 {
-    let signaling_data = match serde_json::to_value(data) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            warn!(
-                "Failed to serialise {signaling_type:?} payload for {connection_id}: {e}; \
-                 dropping",
-            );
-            return;
-        }
+    dispatch_typed_signaling_with_request_id(
+        desk_session,
+        signaling_type,
+        // One-way notifications carry no request_id; a placeholder
+        // keeps logs scannable.
+        "typed-ipc".to_string(),
+        connection_id,
+        Some(data),
+    )
+    .await
+}
+
+/// Same as [`dispatch_typed_signaling`] but lets the caller pass an
+/// explicit `request_id` (manager-plane requests need to echo it
+/// back so the worker's `send_response` writes the same id, which
+/// the desk_rx outbound classifier then re-uses on the typed
+/// `Manager*Response`).
+///
+/// Also accepts an `Option<&T>` body so empty-body requests
+/// (`ManagerSystemInfoRequest` / `ManagerQuerySettingsRequest`) can
+/// share this helper without serialising a synthetic placeholder.
+async fn dispatch_typed_signaling_with_request_id<T>(
+    desk_session: &mut DeskSession,
+    signaling_type: SignalingType,
+    request_id: String,
+    connection_id: String,
+    data: Option<&T>,
+) where
+    T: serde::Serialize + ?Sized,
+{
+    let signaling_data = match data {
+        Some(d) => match serde_json::to_value(d) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                warn!(
+                    "Failed to serialise {signaling_type:?} payload for {connection_id}: \
+                     {e}; dropping",
+                );
+                return;
+            }
+        },
+        None => None,
     };
     let model = SignalingModel::new(
-        // Typed IPC carries no request_id today — the SignalingModel
-        // request_id is only used for response correlation, which
-        // these one-way notifications don't need. A placeholder keeps
-        // logs scannable.
-        "typed-ipc",
+        &request_id,
         signaling_type,
         Some(connection_id.clone()),
         None,
@@ -96,7 +132,7 @@ async fn dispatch_typed_signaling<T>(
     if let Err(e) = desk_session.handle_message(&model).await {
         warn!(
             "DeskSession handle_message error for typed {signaling_type:?}: {e}, \
-             connection_id={connection_id}",
+             connection_id={connection_id}, request_id={request_id}",
         );
     }
 }
@@ -117,26 +153,16 @@ fn build_outbound_payload_from_desk_text(text: String) -> WorkerToService {
             // `PrivateScreenStateChanged` is constructed via
             // `SignalingModel::new_request(..., Some(connection_id), ...)`,
             // which places the target connection in `to_connection_id`
-            // (server-initiated request to a specific browser). For the
-            // legacy SignalingMessage path we still ferry
-            // `from_connection_id` because that's what the existing
-            // daemon-side proxy uses to scope the rebroadcast.
-            if matches!(model.signaling_type, SignalingType::PrivateScreenStateChanged) {
-                if let Some(connection_id) = model.to_connection_id.clone()
-                    && let Ok(Some(data)) =
-                        model.get_data_with_type::<PrivateScreenStateChangedData>()
-                {
-                    return WorkerToService::PrivateScreenStateChanged(
-                        PrivateScreenStateChangedPayload {
-                            connection_id,
-                            data,
-                        },
-                    );
-                }
-                warn!(
-                    "PrivateScreenStateChanged outbound missing to_connection_id or \
-                     invalid payload; falling back to SignalingMessage bridge",
-                );
+            // (server-initiated request to a specific browser). Manager
+            // responses come from `PeerSignalingSender::send_response`
+            // which also writes the target browser into
+            // `to_connection_id` and leaves `from_connection_id = None`.
+            // The legacy SignalingMessage fallback ferries
+            // `from_connection_id` only because that's what the
+            // pre-batch daemon-side proxy keyed off; manager responses
+            // wouldn't have populated it anyway.
+            if let Some(typed) = try_route_typed_outbound(&model) {
+                return typed;
             }
             WorkerToService::SignalingMessage(SignalingPayload {
                 message: text,
@@ -147,6 +173,95 @@ fn build_outbound_payload_from_desk_text(text: String) -> WorkerToService {
             message: text,
             connection_id: None,
         }),
+    }
+}
+
+/// Return `Some(typed)` when the outbound `SignalingModel` matches a
+/// type that batches 1+ have promoted to a typed `WorkerToService`
+/// variant; `None` to leave it on the legacy `SignalingMessage`
+/// bridge. Splits per-type matching out of
+/// `build_outbound_payload_from_desk_text` so each batch can append
+/// arms without the surrounding match getting unwieldy.
+fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
+    match model.signaling_type {
+        SignalingType::PrivateScreenStateChanged => {
+            let connection_id = model.to_connection_id.clone()?;
+            let data = model
+                .get_data_with_type::<PrivateScreenStateChangedData>()
+                .ok()
+                .flatten()?;
+            Some(WorkerToService::PrivateScreenStateChanged(
+                PrivateScreenStateChangedPayload {
+                    connection_id,
+                    data,
+                },
+            ))
+        }
+        // Batch 2: manager-plane responses. `send_response` writes the
+        // target browser PC into `to_connection_id`; the original
+        // request's id is in `request_id`.
+        SignalingType::ManagerSystemInfo => {
+            let connection_id = model.to_connection_id.clone()?;
+            let info = model.get_data_with_type::<SystemInfo>().ok().flatten()?;
+            Some(WorkerToService::ManagerSystemInfoResponse(
+                ManagerSystemInfoResponsePayload {
+                    request_id: model.request_id.clone(),
+                    connection_id,
+                    info,
+                },
+            ))
+        }
+        SignalingType::ManagerQuerySettings => {
+            let connection_id = model.to_connection_id.clone()?;
+            let settings = model
+                .get_data_with_type::<RemoteSystemSettings>()
+                .ok()
+                .flatten()?;
+            Some(WorkerToService::ManagerQuerySettingsResponse(
+                ManagerQuerySettingsResponsePayload {
+                    request_id: model.request_id.clone(),
+                    connection_id,
+                    settings,
+                },
+            ))
+        }
+        SignalingType::ManagerFileList => {
+            let connection_id = model.to_connection_id.clone()?;
+            let response = model
+                .get_data_with_type::<FileListResponse>()
+                .ok()
+                .flatten()?;
+            Some(WorkerToService::ManagerFileListResponse(
+                ManagerFileListResponsePayload {
+                    request_id: model.request_id.clone(),
+                    connection_id,
+                    response,
+                },
+            ))
+        }
+        // ManagerFileDelete / ManagerUpdateSettings responses carry
+        // an empty body (`&()`), so a successful round-trip omits
+        // signaling_data; only `to_connection_id` + `request_id` are
+        // needed to route.
+        SignalingType::ManagerFileDelete => {
+            let connection_id = model.to_connection_id.clone()?;
+            Some(WorkerToService::ManagerFileDeleteResponse(
+                ManagerResponseRefPayload {
+                    request_id: model.request_id.clone(),
+                    connection_id,
+                },
+            ))
+        }
+        SignalingType::ManagerUpdateSettings => {
+            let connection_id = model.to_connection_id.clone()?;
+            Some(WorkerToService::ManagerUpdateSettingsResponse(
+                ManagerResponseRefPayload {
+                    request_id: model.request_id.clone(),
+                    connection_id,
+                },
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -658,6 +773,64 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
+                                // Typed-IPC migration batch 2: manager
+                                // plane requests. Worker rebuilds a
+                                // SignalingModel with the original
+                                // request_id so DeskSession::handle_message
+                                // emits a response carrying that same
+                                // request_id, which the desk_rx outbound
+                                // classifier turns into the matching
+                                // typed `WorkerToService::Manager*Response`.
+                                ServiceToWorker::ManagerSystemInfoRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::ManagerSystemInfo,
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        Option::<&()>::None,
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::ManagerQuerySettingsRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::ManagerQuerySettings,
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        Option::<&()>::None,
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::ManagerFileListRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::ManagerFileList,
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        Some(&payload.params),
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::ManagerFileDeleteRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::ManagerFileDelete,
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        Some(&payload.request),
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::ManagerUpdateSettingsRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::ManagerUpdateSettings,
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        Some(&payload.settings),
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         Some(None) => {
@@ -1115,6 +1288,105 @@ mod tests {
                 assert_eq!(p.message, raw);
                 assert!(p.connection_id.is_none());
             }
+            other => panic!("expected SignalingMessage fallback, got {other:?}"),
+        }
+    }
+
+    /// Batch 2: `ManagerSystemInfo` response (built by the worker's
+    /// `send_response`) gets routed onto
+    /// `WorkerToService::ManagerSystemInfoResponse` carrying the
+    /// `request_id`, `connection_id`, and the `SystemInfo` body
+    /// verbatim. This guards the typed-routing decision on the
+    /// happy path.
+    #[test]
+    fn outbound_dispatch_routes_manager_system_info_response_to_typed_variant() {
+        let mut info = SystemInfo::default();
+        info.name = Some("alice-pc".to_string());
+        info.is_admin = Some(true);
+        let model = SignalingModel::success_response(
+            "req-info-1",
+            SignalingType::ManagerSystemInfo,
+            None,
+            Some("conn-info".to_string()),
+            Some(&info),
+        )
+        .expect("build response");
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text) {
+            WorkerToService::ManagerSystemInfoResponse(p) => {
+                assert_eq!(p.request_id, "req-info-1");
+                assert_eq!(p.connection_id, "conn-info");
+                assert_eq!(p.info.name.as_deref(), Some("alice-pc"));
+                assert_eq!(p.info.is_admin, Some(true));
+            }
+            other => panic!("expected ManagerSystemInfoResponse, got {other:?}"),
+        }
+    }
+
+    /// Batch 2: empty-body responses (`ManagerFileDelete`,
+    /// `ManagerUpdateSettings`) ride
+    /// `WorkerToService::ManagerResponseRefPayload` — only the
+    /// `request_id` + `connection_id` matter. Verify both variants
+    /// route to the right enum tag.
+    #[test]
+    fn outbound_dispatch_routes_empty_body_manager_responses_to_typed_variants() {
+        for (signaling_type, expected_variant) in [
+            (
+                SignalingType::ManagerFileDelete,
+                "ManagerFileDeleteResponse",
+            ),
+            (
+                SignalingType::ManagerUpdateSettings,
+                "ManagerUpdateSettingsResponse",
+            ),
+        ] {
+            let model = SignalingModel::success_response(
+                "req-empty",
+                signaling_type,
+                None,
+                Some("conn-empty".to_string()),
+                Some(&()),
+            )
+            .expect("build response");
+            let text = serde_json::to_string(&model).expect("serialise");
+            match (expected_variant, build_outbound_payload_from_desk_text(text)) {
+                (
+                    "ManagerFileDeleteResponse",
+                    WorkerToService::ManagerFileDeleteResponse(p),
+                )
+                | (
+                    "ManagerUpdateSettingsResponse",
+                    WorkerToService::ManagerUpdateSettingsResponse(p),
+                ) => {
+                    assert_eq!(p.request_id, "req-empty");
+                    assert_eq!(p.connection_id, "conn-empty");
+                }
+                (expected, other) => {
+                    panic!("expected {expected}, got {other:?}");
+                }
+            }
+        }
+    }
+
+    /// A `ManagerSystemInfo` response missing `to_connection_id`
+    /// (would be a bug in `send_response`) falls back to the
+    /// SignalingMessage bridge so the daemon's existing parse-and-
+    /// rebroadcast can still attempt delivery — better than silently
+    /// dropping the response.
+    #[test]
+    fn outbound_dispatch_manager_response_without_to_connection_falls_back() {
+        let info = SystemInfo::default();
+        let model = SignalingModel::success_response(
+            "req-info-noid",
+            SignalingType::ManagerSystemInfo,
+            None,
+            None, // <- missing to_connection_id
+            Some(&info),
+        )
+        .expect("build response");
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text) {
+            WorkerToService::SignalingMessage(_) => {}
             other => panic!("expected SignalingMessage fallback, got {other:?}"),
         }
     }

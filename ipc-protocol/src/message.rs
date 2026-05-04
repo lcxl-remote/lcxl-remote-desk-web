@@ -1,6 +1,9 @@
 use bincode::{Decode, Encode};
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
+use desk_signal_facade::model::system_info::SystemInfo;
+use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use serde::{Deserialize, Serialize};
 
 /// Messages sent from Service Core (daemon) to Worker process over the
@@ -109,6 +112,30 @@ pub enum ServiceToWorker {
     /// broadcast_media_settings_update`). Replaces the legacy
     /// `UpdateDeskSettings` flow over the `SignalingMessage` bridge.
     UpdateDeskSettings(UpdateDeskSettingsPayload),
+
+    // ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
+    /// Browser → worker request for the host's [`SystemInfo`]. Worker
+    /// replies via [`WorkerToService::ManagerSystemInfoResponse`].
+    /// Replaces the legacy `ManagerSystemInfo` flow over the
+    /// `SignalingMessage` bridge.
+    ManagerSystemInfoRequest(ManagerRequestRefPayload),
+
+    /// Browser → worker request to enumerate files. Worker replies
+    /// via [`WorkerToService::ManagerFileListResponse`].
+    ManagerFileListRequest(ManagerFileListRequestPayload),
+
+    /// Browser → worker request to delete a file. Worker replies via
+    /// [`WorkerToService::ManagerFileDeleteResponse`] (empty body).
+    ManagerFileDeleteRequest(ManagerFileDeleteRequestPayload),
+
+    /// Browser → worker request for [`RemoteSystemSettings`]. Worker
+    /// replies via [`WorkerToService::ManagerQuerySettingsResponse`].
+    ManagerQuerySettingsRequest(ManagerRequestRefPayload),
+
+    /// Browser → worker update of [`RemoteSystemSettings`]. Worker
+    /// persists the new values and replies via
+    /// [`WorkerToService::ManagerUpdateSettingsResponse`] (empty body).
+    ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -175,6 +202,31 @@ pub enum WorkerToService {
     /// signaling websocket. Replaces the legacy reverse path through
     /// the `SignalingMessage` bridge.
     PrivateScreenStateChanged(PrivateScreenStateChangedPayload),
+
+    // ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
+    /// Worker → daemon response to
+    /// [`ServiceToWorker::ManagerSystemInfoRequest`]. Daemon
+    /// rebuilds the matching `SignalingType::ManagerSystemInfo`
+    /// outbound model and writes it to the browser's signaling WS.
+    ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload),
+
+    /// Worker → daemon response to
+    /// [`ServiceToWorker::ManagerFileListRequest`].
+    ManagerFileListResponse(ManagerFileListResponsePayload),
+
+    /// Worker → daemon response to
+    /// [`ServiceToWorker::ManagerFileDeleteRequest`] (empty body —
+    /// `request_id` correlates with the original request).
+    ManagerFileDeleteResponse(ManagerResponseRefPayload),
+
+    /// Worker → daemon response to
+    /// [`ServiceToWorker::ManagerQuerySettingsRequest`].
+    ManagerQuerySettingsResponse(ManagerQuerySettingsResponsePayload),
+
+    /// Worker → daemon response to
+    /// [`ServiceToWorker::ManagerUpdateSettingsRequest`] (empty
+    /// body — settings persistence happens on the worker side).
+    ManagerUpdateSettingsResponse(ManagerResponseRefPayload),
 }
 
 // ==================== Payload Types ====================
@@ -466,6 +518,90 @@ pub struct PrivateScreenStateChangedPayload {
     pub connection_id: String,
     #[bincode(with_serde)]
     pub data: PrivateScreenStateChangedData,
+}
+
+// ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
+
+/// Shared envelope for body-less manager *requests*
+/// (`ManagerSystemInfoRequest`, `ManagerQuerySettingsRequest`).
+/// Carries the `request_id` so the worker can echo it back on the
+/// matching response payload, and the `connection_id` so the daemon
+/// can pick the right outbound signaling websocket when it ferries
+/// the response.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerRequestRefPayload {
+    pub request_id: String,
+    pub connection_id: String,
+}
+
+/// Shared envelope for body-less manager *responses*
+/// (`ManagerFileDeleteResponse`, `ManagerUpdateSettingsResponse`).
+/// Same shape as [`ManagerRequestRefPayload`] but kept distinct so
+/// the daemon's response-direction code is symmetric with the
+/// request-direction code at the type-system level.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerResponseRefPayload {
+    pub request_id: String,
+    pub connection_id: String,
+}
+
+/// Payload for [`ServiceToWorker::ManagerFileListRequest`]. Carries
+/// `FileListParams` (filtering knobs, paging) verbatim from the
+/// browser-issued signaling envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerFileListRequestPayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub params: FileListParams,
+}
+
+/// Payload for [`ServiceToWorker::ManagerFileDeleteRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerFileDeleteRequestPayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub request: DeleteFileRequest,
+}
+
+/// Payload for [`ServiceToWorker::ManagerUpdateSettingsRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerUpdateSettingsRequestPayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub settings: RemoteSystemSettings,
+}
+
+/// Payload for [`WorkerToService::ManagerSystemInfoResponse`].
+/// `SystemInfo` is the wire shape the worker computed from
+/// `sysinfo::System` and the legacy handler used to send via
+/// `send_response`.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerSystemInfoResponsePayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub info: SystemInfo,
+}
+
+/// Payload for [`WorkerToService::ManagerFileListResponse`].
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerFileListResponsePayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub response: FileListResponse,
+}
+
+/// Payload for [`WorkerToService::ManagerQuerySettingsResponse`].
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ManagerQuerySettingsResponsePayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub settings: RemoteSystemSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -836,6 +972,136 @@ mod tests {
                 assert!(!p.data.visible);
                 assert!(!p.data.is_supported);
                 assert_eq!(p.data.error_msg.as_deref(), Some("hub denied"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // === Arch IV typed-IPC migration batch 2 — round-trip tests ===
+
+    /// Body-less manager request envelopes carry only `request_id` +
+    /// `connection_id`; verify the field order survives bincode (a
+    /// reorder would silently swap them on matched-version pairs).
+    #[test]
+    fn manager_request_ref_round_trips_bincode() {
+        let msg = ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
+            request_id: "req-info-1".to_string(),
+            connection_id: "conn-mgr".to_string(),
+        });
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::ManagerSystemInfoRequest(p) => {
+                assert_eq!(p.request_id, "req-info-1");
+                assert_eq!(p.connection_id, "conn-mgr");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ManagerFileListRequest` rides bincode 2's `with_serde` field
+    /// attribute on `FileListParams`. Use a non-default page_count
+    /// + filename filter so a stripped field shows up as a test
+    /// failure.
+    #[test]
+    fn manager_file_list_request_round_trips_bincode() {
+        let params = FileListParams {
+            path: "C:\\Users".to_string(),
+            page_no: 2,
+            page_count: 50,
+            file_name: Some("readme".to_string()),
+            ..Default::default()
+        };
+        let msg = ServiceToWorker::ManagerFileListRequest(ManagerFileListRequestPayload {
+            request_id: "req-fl".to_string(),
+            connection_id: "conn-fl".to_string(),
+            params,
+        });
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::ManagerFileListRequest(p) => {
+                assert_eq!(p.request_id, "req-fl");
+                assert_eq!(p.connection_id, "conn-fl");
+                assert_eq!(p.params.path, "C:\\Users");
+                assert_eq!(p.params.page_no, 2);
+                assert_eq!(p.params.page_count, 50);
+                assert_eq!(p.params.file_name.as_deref(), Some("readme"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ManagerUpdateSettingsRequest` rides `RemoteSystemSettings`
+    /// over `with_serde`. Round-trip a non-default payload so a
+    /// reorder/strip in the facade struct trips here rather than
+    /// silently corrupting persisted settings.
+    #[test]
+    fn manager_update_settings_request_round_trips_bincode() {
+        let settings = RemoteSystemSettings {
+            enable_ipv6: true,
+            port: 8443,
+            listen_addr_ipv4: "0.0.0.0".to_string(),
+            listen_addr_ipv6: "::".to_string(),
+            locale: Some("zh-CN".to_string()),
+            signaling_url: Some("wss://signal.example".to_string()),
+            signaling_token: Some("tok".to_string()),
+            manager_url: Some("https://mgr.example".to_string()),
+            auto_start: Some(true),
+            manager_api_token: Some("mtok".to_string()),
+        };
+        let msg = ServiceToWorker::ManagerUpdateSettingsRequest(
+            ManagerUpdateSettingsRequestPayload {
+                request_id: "req-upd".to_string(),
+                connection_id: "conn-upd".to_string(),
+                settings,
+            },
+        );
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::ManagerUpdateSettingsRequest(p) => {
+                assert_eq!(p.request_id, "req-upd");
+                assert!(p.settings.enable_ipv6);
+                assert_eq!(p.settings.port, 8443);
+                assert_eq!(p.settings.locale.as_deref(), Some("zh-CN"));
+                assert_eq!(p.settings.auto_start, Some(true));
+                assert_eq!(p.settings.manager_api_token.as_deref(), Some("mtok"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Body-less manager response envelopes are distinct from request
+    /// envelopes at the type level; round-trip pins the variant tag.
+    #[test]
+    fn manager_response_ref_round_trips_bincode() {
+        let msg = WorkerToService::ManagerFileDeleteResponse(ManagerResponseRefPayload {
+            request_id: "req-del".to_string(),
+            connection_id: "conn-del".to_string(),
+        });
+        match bincode_round_trip(&msg) {
+            WorkerToService::ManagerFileDeleteResponse(p) => {
+                assert_eq!(p.request_id, "req-del");
+                assert_eq!(p.connection_id, "conn-del");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ManagerSystemInfoResponse` carries the full `SystemInfo`
+    /// blob; verify `startup_mode` + `is_admin` survive (the legacy
+    /// handler set both at runtime so they are the most likely
+    /// round-trip regression points).
+    #[test]
+    fn manager_system_info_response_round_trips_bincode() {
+        let mut info = SystemInfo::default();
+        info.name = Some("alice-pc".to_string());
+        info.is_admin = Some(true);
+        let msg = WorkerToService::ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload {
+            request_id: "req-info".to_string(),
+            connection_id: "conn-info".to_string(),
+            info,
+        });
+        match bincode_round_trip(&msg) {
+            WorkerToService::ManagerSystemInfoResponse(p) => {
+                assert_eq!(p.request_id, "req-info");
+                assert_eq!(p.info.name.as_deref(), Some("alice-pc"));
+                assert_eq!(p.info.is_admin, Some(true));
             }
             other => panic!("unexpected: {other:?}"),
         }

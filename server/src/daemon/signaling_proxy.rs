@@ -363,6 +363,64 @@ pub async fn run_signaling_proxy(
                     ),
                 }
             }
+            // Batch 2 of the typed-IPC migration — manager plane
+            // responses. Each `Manager*Response` rebuilds the
+            // matching outbound `SignalingType::Manager*` response
+            // model and writes it to the connection's WS sink. The
+            // daemon owns the SignalingResponseState (always
+            // `success` here — the worker only ships responses for
+            // requests it handled successfully; failures still ride
+            // the `Error` enum).
+            WorkerToService::ManagerSystemInfoResponse(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "ManagerSystemInfo",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::ManagerSystemInfo,
+                    Some(&payload.info),
+                );
+            }
+            WorkerToService::ManagerFileListResponse(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "ManagerFileList",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::ManagerFileList,
+                    Some(&payload.response),
+                );
+            }
+            WorkerToService::ManagerFileDeleteResponse(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "ManagerFileDelete",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::ManagerFileDelete,
+                    Option::<&()>::None,
+                );
+            }
+            WorkerToService::ManagerQuerySettingsResponse(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "ManagerQuerySettings",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::ManagerQuerySettings,
+                    Some(&payload.settings),
+                );
+            }
+            WorkerToService::ManagerUpdateSettingsResponse(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "ManagerUpdateSettings",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::ManagerUpdateSettings,
+                    Option::<&()>::None,
+                );
+            }
         }
     }
 
@@ -372,6 +430,48 @@ pub async fn run_signaling_proxy(
 
     info!("Signaling proxy stopped");
     Ok(())
+}
+
+/// Helper for batch 2 of the typed-IPC migration: rebuild the
+/// outbound `Manager*` response `SignalingModel` (with the
+/// `request_id` echoed for correlation) and broadcast it to the
+/// browser via `outbound_tx`. Build / serialise failures are
+/// non-fatal — log + drop, no panic on the bus.
+///
+/// `from_connection_id` is left `None` (the daemon is the responder
+/// here, not a peer browser); `to_connection_id` is the browser PC
+/// the original request came from.
+fn send_manager_response<T>(
+    outbound_tx: &broadcast::Sender<String>,
+    type_name: &'static str,
+    request_id: &str,
+    connection_id: &str,
+    signaling_type: SignalingType,
+    data: Option<&T>,
+) where
+    T: serde::Serialize + ?Sized,
+{
+    match SignalingModel::success_response(
+        request_id,
+        signaling_type,
+        None,
+        Some(connection_id.to_string()),
+        data,
+    ) {
+        Ok(model) => match serde_json::to_string(&model) {
+            Ok(text) => {
+                let _ = outbound_tx.send(text);
+            }
+            Err(e) => warn!(
+                "[SignalingProxy] Failed to serialise {type_name} response for {connection_id}: \
+                 {e} (request_id={request_id})"
+            ),
+        },
+        Err(e) => warn!(
+            "[SignalingProxy] Failed to build {type_name} response model for {connection_id}: \
+             {e} (request_id={request_id})"
+        ),
+    }
 }
 
 async fn maintain_proxy_connection(
