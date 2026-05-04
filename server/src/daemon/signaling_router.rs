@@ -36,6 +36,7 @@ use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use tokio::sync::broadcast;
 
 use crate::daemon::pc_manager::{self, PcRegistry};
+use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
 use crate::model::settings::SharedSettings;
@@ -159,6 +160,12 @@ pub struct RouterContext {
     pub outbound_tx: broadcast::Sender<String>,
     pub settings: web::Data<SharedSettings>,
     pub host_control_hub: Arc<HostControlHub>,
+    /// Cut 4: handle_request_remote reads `worker_capabilities` from
+    /// here to populate the Init reply, and handle_offer issues
+    /// `ServiceToWorker::StartMedia` through it once the SDP exchange
+    /// completes (so the worker knows to spin up the per-connection
+    /// encoder).
+    pub worker_mgr: WorkerManager,
 }
 
 /// Route a signaling message.
@@ -190,19 +197,22 @@ pub async fn route(
             let s = ctx.settings.read().await.clone();
             let user_name = "worker_node".to_string(); // Cut 3b placeholder; cut 3c threads CurrentUser through.
             let has_tauri = ctx.host_control_hub.has_tauri_ui();
+            let capabilities = ctx.worker_mgr.worker_capabilities();
             pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
                 &s,
                 &user_name,
                 has_tauri,
+                capabilities.as_ref(),
                 model,
             )
             .await?;
             Ok(RouteOutcome::HandledByDaemon)
         }
         SignalingType::Offer => {
-            pc_manager::handle_offer(&ctx.pc_registry, &ctx.outbound_tx, model).await?;
+            pc_manager::handle_offer(&ctx.pc_registry, &ctx.outbound_tx, &ctx.worker_mgr, model)
+                .await?;
             Ok(RouteOutcome::HandledByDaemon)
         }
         SignalingType::Canid => {
@@ -210,7 +220,7 @@ pub async fn route(
             Ok(RouteOutcome::HandledByDaemon)
         }
         SignalingType::CloseControl => {
-            pc_manager::handle_close_control(&ctx.pc_registry, model).await?;
+            pc_manager::handle_close_control(&ctx.pc_registry, &ctx.worker_mgr, model).await?;
             Ok(RouteOutcome::HandledByDaemon)
         }
         // Daemon-emitted; the browser should never send these at us
@@ -310,11 +320,15 @@ mod tests {
         let shared = crate::model::settings::SharedSettings::from(
             crate::model::settings::Settings::default(),
         );
+        let settings = web::Data::new(shared);
+        let pc_registry = PcRegistry::new();
+        let (worker_mgr, _) = WorkerManager::new(settings.clone(), pc_registry.clone());
         RouterContext {
-            pc_registry: PcRegistry::new(),
+            pc_registry,
             outbound_tx,
-            settings: web::Data::new(shared),
+            settings,
             host_control_hub: Arc::new(HostControlHub::new_local()),
+            worker_mgr,
         }
     }
 

@@ -9,6 +9,7 @@ pub mod tauri_ipc;
 pub mod windows_service;
 pub mod worker_manager;
 
+use crate::daemon::pc_manager::PcRegistry;
 use crate::host_control::HostControlHub;
 use crate::model::settings::{Args, Settings, SharedSettings};
 use actix_web::web;
@@ -130,7 +131,15 @@ pub async fn run_service_daemon_inner(
         ),
     }
 
-    let (worker_mgr, worker_rx) = worker_manager::WorkerManager::new(shared_settings_data.clone());
+    // Daemon-wide per-`connection_id` PeerConnection registry (Arch IV).
+    // Shared between `WorkerManager` (so the media-pipe receiver task
+    // can look up `video_track`s) and `signaling_proxy` (so the
+    // `RouterContext` referenced by every signaling endpoint sees the
+    // same PCs).
+    let pc_registry = PcRegistry::new();
+
+    let (worker_mgr, worker_rx) =
+        worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
 
     let initial_session = get_current_session_id();
     let initial_desktop = get_initial_desktop_name();
@@ -154,12 +163,14 @@ pub async fn run_service_daemon_inner(
         let settings = shared_settings_data.clone();
         let worker_mgr = worker_mgr.clone();
         let host_control_hub = Arc::clone(&host_control_hub);
+        let pc_registry = pc_registry.clone();
         actix_web::rt::spawn(async move {
             if let Err(e) = signaling_proxy::run_signaling_proxy(
                 settings,
                 worker_mgr,
                 host_control_hub,
                 worker_rx,
+                pc_registry,
             )
             .await
             {

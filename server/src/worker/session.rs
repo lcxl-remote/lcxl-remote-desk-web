@@ -2,10 +2,11 @@ use crate::{
     host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
-    worker::desktop_monitor,
+    worker::{desktop_monitor, media_producer::MediaProducer},
 };
 use actix_web::web;
 use desk_ipc_protocol::{
+    dual_transport::{MediaSender, framed},
     message::{
         DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, SignalingPayload,
         WorkerInitPayload, WorkerToService,
@@ -165,6 +166,29 @@ impl WorkerSession {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let writer_task = spawn_ipc_writer_task(writer, writer_rx);
 
+        // Arch IV cut 4: when the daemon supplied a `media_pipe_name`, dial
+        // the secondary pipe and spin up the media producer. Failure here
+        // is non-fatal — the worker still serves all event-pipe traffic
+        // (mouse / clipboard / file-transfer etc.) but no video frames will
+        // flow until the pipe pair is fixed. Capabilities are sent
+        // unconditionally so the daemon can populate `RequestRemote` Init
+        // replies even if media isn't wired yet.
+        let media_producer: Option<Arc<MediaProducer>> =
+            build_media_producer_if_configured(&init_payload, &shared_settings, writer_tx.clone())
+                .await
+                .map(Arc::new);
+        let capabilities = MediaProducer::build_capabilities(
+            init_payload.desktop_name.as_deref(),
+            init_payload.host_upstream_url.is_some(),
+        );
+        if writer_tx
+            .send(WorkerToService::Capabilities(capabilities))
+            .is_err()
+        {
+            error!("IPC writer task died before Capabilities could be sent; exiting");
+            return Ok(());
+        }
+
         // Drain init's preapproved Vec into the HashMap the worker uses for
         // O(1) lookup at PC-creation time.
         let preapproved: std::collections::HashMap<_, _> = init_payload
@@ -257,9 +281,48 @@ impl WorkerSession {
                                 ServiceToWorker::Init(_) => {
                                     warn!("Received duplicate Init, ignoring");
                                 }
-                                // Arch IV variants — daemon does not emit them
-                                // against an Arch III worker; the dedicated
-                                // event-pipe handler lands in PR 2.
+                                // Arch IV cut 4: media-control IPC. Routed
+                                // straight to the producer; the producer
+                                // returns immediately (start_media spawns a
+                                // dedicated capture thread) so the IPC loop
+                                // stays responsive to the watchdog and the
+                                // daemon's other commands.
+                                ServiceToWorker::StartMedia(payload) => {
+                                    if let Some(producer) = media_producer.as_ref() {
+                                        info!(
+                                            "Worker received StartMedia for {}: codec={:?}, fps={}",
+                                            payload.connection_id,
+                                            payload.video_codec,
+                                            payload.fps,
+                                        );
+                                        producer.start_media(payload);
+                                    } else {
+                                        warn!(
+                                            "Worker received StartMedia but media producer is \
+                                             not configured (no media_pipe_name in Init); ignoring"
+                                        );
+                                    }
+                                }
+                                ServiceToWorker::StopMedia(payload) => {
+                                    if let Some(producer) = media_producer.as_ref() {
+                                        producer.stop_media(&payload);
+                                    }
+                                }
+                                ServiceToWorker::ForceKeyframe(payload) => {
+                                    if let Some(producer) = media_producer.as_ref() {
+                                        producer.force_keyframe(&payload.connection_id);
+                                    }
+                                }
+                                ServiceToWorker::UpdateMediaSettings(payload) => {
+                                    if let Some(producer) = media_producer.as_ref() {
+                                        producer.update_settings(payload);
+                                    }
+                                }
+                                // Arch IV variants the daemon does not yet
+                                // emit (mouse / keyboard / clipboard / file /
+                                // whiteboard). Cut 5 wires these onto
+                                // existing handler modules; until then they
+                                // are silently dropped at the worker.
                                 other => {
                                     warn!(
                                         "Worker received unhandled Arch IV variant: {other:?}; ignoring"
@@ -346,9 +409,16 @@ impl WorkerSession {
         }
 
         // Order matters: stop the heartbeat task first so it doesn't keep
-        // pushing into writer_tx, then drop our own writer_tx so the writer
-        // task observes "all senders gone" and drains + exits cleanly.
+        // pushing into writer_tx, then shut down media-producer pipeline
+        // threads (each one observes its `stop_flag` within one frame
+        // tick and drops its `MediaSender`, which in turn lets the framed
+        // writer task on the media pipe drain and exit). Finally drop our
+        // own writer_tx so the event-pipe writer task observes "all
+        // senders gone" and exits cleanly.
         heartbeat_task.abort();
+        if let Some(producer) = media_producer.as_ref() {
+            producer.shutdown();
+        }
         drop(writer_tx);
         let _ = writer_task.await;
 
@@ -417,6 +487,81 @@ impl WorkerSession {
         let stream = UnixStream::connect(socket_path).await?;
         let (reader, writer) = tokio::io::split(stream);
         Ok((reader, writer))
+    }
+}
+
+/// Connect to the daemon's media pipe (when `Init` carried a
+/// `media_pipe_name`) and build a [`MediaProducer`] on top of it.
+/// Returns `None` when no media pipe was configured *or* when the
+/// connect fails — the worker then runs without a media transport
+/// (event pipe and host control still work, but no encoded frames flow
+/// to the daemon).
+async fn build_media_producer_if_configured(
+    init: &WorkerInitPayload,
+    settings: &Arc<SharedSettings>,
+    error_tx: mpsc::UnboundedSender<WorkerToService>,
+) -> Option<MediaProducer> {
+    let media_pipe_name = init.media_pipe_name.as_ref()?;
+    info!("Worker connecting to media pipe: {media_pipe_name}");
+
+    let media_sender: Arc<dyn MediaSender> = match connect_media_pipe(media_pipe_name).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                "Worker failed to connect to media pipe {media_pipe_name}: {e}; \
+                 continuing without media transport"
+            );
+            return None;
+        }
+    };
+
+    let desk_settings = settings.read().await.desk.clone();
+    Some(MediaProducer::new(desk_settings, media_sender, error_tx))
+}
+
+/// Open the daemon-side media pipe (Windows: named pipe; Unix: domain
+/// socket) and wrap the writer half in a [`MediaSender`] that flushes
+/// onto it via the framed transport from `desk-ipc-protocol`.
+///
+/// Reader half is dropped because the media transport is uni-
+/// directional in Arch IV (worker → daemon). The daemon does not push
+/// commands on this pipe — it uses the event pipe for that.
+async fn connect_media_pipe(
+    pipe_name: &str,
+) -> Result<Arc<dyn MediaSender>, Box<dyn std::error::Error>> {
+    #[cfg(target_os = "windows")]
+    {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
+        // Same retry loop as the event pipe — the daemon creates the
+        // pipe as part of `run_pipe_server` but a fast worker may dial
+        // before that point.
+        let client = {
+            let mut attempts = 0;
+            loop {
+                match ClientOptions::new().open(&pipe_path) {
+                    Ok(c) => break c,
+                    Err(e) if attempts < 10 => {
+                        attempts += 1;
+                        warn!(
+                            "Media pipe not ready (attempt {}), retrying in 200ms: {}",
+                            attempts, e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    }
+                    Err(e) => return Err(Box::new(e)),
+                }
+            }
+        };
+        let (_reader, writer) = tokio::io::split(client);
+        Ok(framed::spawn_media_sender(writer))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tokio::net::UnixStream;
+        let stream = UnixStream::connect(pipe_name).await?;
+        let (_reader, writer) = tokio::io::split(stream);
+        Ok(framed::spawn_media_sender(writer))
     }
 }
 

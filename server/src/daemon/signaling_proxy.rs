@@ -22,22 +22,24 @@ pub async fn run_signaling_proxy(
     worker_mgr: WorkerManager,
     host_control_hub: Arc<HostControlHub>,
     mut worker_rx: WorkerMessageReceiver,
+    pc_registry: PcRegistry,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
 
-    // Daemon-side per-connection PC registry (Arch IV cut 3b). One
-    // registry shared across every signaling endpoint (local / remote
-    // signaling / remote manager) so the same PC handles inbound
-    // messages regardless of which WS surfaced them.
-    let pc_registry = PcRegistry::new();
-
+    // The daemon constructs `pc_registry` once in `daemon::mod` and shares
+    // it with both `WorkerManager` (for the media-pipe receiver) and the
+    // signaling proxy (for inbound SDP/ICE handlers). Using a single
+    // registry across all signaling endpoints (local / remote signaling /
+    // remote manager) means the same PC handles inbound messages
+    // regardless of which WS surfaced them.
     let router_ctx = RouterContext {
         pc_registry: pc_registry.clone(),
         outbound_tx: outbound_tx.clone(),
         settings: settings.clone(),
         host_control_hub: host_control_hub.clone(),
+        worker_mgr: worker_mgr.clone(),
     };
 
     let local_handle = {
@@ -181,6 +183,18 @@ pub async fn run_signaling_proxy(
         match msg {
             WorkerToService::Ready => {
                 info!("[SignalingProxy] Worker is Ready");
+            }
+            WorkerToService::Capabilities(caps) => {
+                info!(
+                    "[SignalingProxy] Worker reported capabilities: video={:?}, audio={:?}, \
+                     desktop={:?}, has_tauri={}, is_admin={}",
+                    caps.video_codecs,
+                    caps.audio_codecs,
+                    caps.desktop_name,
+                    caps.has_tauri,
+                    caps.is_admin,
+                );
+                worker_mgr.set_worker_capabilities(caps);
             }
             WorkerToService::SignalingMessage(payload) => {
                 debug!(
@@ -478,16 +492,20 @@ mod tests {
     use crate::model::settings::{Settings, SharedSettings};
     use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 
-    fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
+    fn make_router_ctx_and_mgr() -> (RouterContext, broadcast::Sender<String>, WorkerManager) {
         let (outbound_tx, _) = broadcast::channel::<String>(16);
         let shared = SharedSettings::from(Settings::default());
+        let settings = web::Data::new(shared);
+        let pc_registry = PcRegistry::new();
+        let (worker_mgr, _rx) = WorkerManager::new(settings.clone(), pc_registry.clone());
         let ctx = RouterContext {
-            pc_registry: PcRegistry::new(),
+            pc_registry,
             outbound_tx: outbound_tx.clone(),
-            settings: web::Data::new(shared),
+            settings,
             host_control_hub: Arc::new(HostControlHub::new_local()),
+            worker_mgr: worker_mgr.clone(),
         };
-        (ctx, outbound_tx)
+        (ctx, outbound_tx, worker_mgr)
     }
 
     /// Worker-bound signaling without `from_connection_id` is dropped
@@ -496,9 +514,7 @@ mod tests {
     /// without a re-parse otherwise.
     #[tokio::test]
     async fn drops_worker_bound_message_without_from_connection_id() {
-        let (worker_mgr, _rx) =
-            WorkerManager::new(web::Data::new(SharedSettings::from(Settings::default())));
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
 
         // RequireControl is worker-owned (router returns ForwardToWorker)
         let model = SignalingModel::new(
@@ -522,9 +538,7 @@ mod tests {
     /// validated parse).
     #[tokio::test]
     async fn drops_malformed_json() {
-        let (worker_mgr, _rx) =
-            WorkerManager::new(web::Data::new(SharedSettings::from(Settings::default())));
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
 
         handle_inbound_signaling_text(
             "{ this is not valid json".to_string(),
@@ -540,9 +554,7 @@ mod tests {
     /// dispatcher should not promote that into a forward attempt.
     #[tokio::test]
     async fn handles_router_error_without_forwarding() {
-        let (worker_mgr, _rx) =
-            WorkerManager::new(web::Data::new(SharedSettings::from(Settings::default())));
-        let (router_ctx, _out_tx) = make_router_ctx();
+        let (router_ctx, _out_tx, worker_mgr) = make_router_ctx_and_mgr();
 
         let model = SignalingModel::new(
             "req-2",

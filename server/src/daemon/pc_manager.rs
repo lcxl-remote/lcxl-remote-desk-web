@@ -54,10 +54,18 @@ use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
+use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use crate::model::settings::{Settings, StartupMode, TraversalMode};
+use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
+use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
+use desk_ipc_protocol::message::{
+    MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, ServiceToWorker, StartMediaPayload,
+};
 use desk_signal_facade::model::signal::InitSignalingData;
+use std::time::Duration;
+use webrtc::media::Sample;
 
 /// Filter the request's ICE servers down to the ones this node should
 /// actually use given the local `traversal_mode` and `startup_mode`.
@@ -305,6 +313,7 @@ pub async fn handle_request_remote(
     settings: &Settings,
     user_name: &str,
     has_tauri: bool,
+    capabilities: Option<&MediaCapabilities>,
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
@@ -314,23 +323,51 @@ pub async fn handle_request_remote(
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
 
-    // Cut 3b Init reply: empty device lists. Cut 4 fills these from
-    // `WorkerToService::Capabilities` once the worker reports its
-    // codec / device matrix on Ready.
+    // Cut 4: populate the Init reply from the worker's
+    // `WorkerToService::Capabilities` snapshot when available; fall
+    // back to capture-engine's static factory enumerations for the
+    // codec lists when the worker hasn't reported yet (first-Init
+    // race window). Device lists stay empty in the fallback path —
+    // those genuinely require a live worker enumeration.
+    let (audio_encoder_list, video_encoder_list, is_admin_value) = if let Some(caps) = capabilities
+    {
+        (
+            caps.audio_codecs
+                .iter()
+                .filter_map(media_codec_to_str)
+                .collect::<Vec<_>>(),
+            caps.video_codecs
+                .iter()
+                .filter_map(media_codec_to_str)
+                .collect::<Vec<_>>(),
+            caps.is_admin,
+        )
+    } else {
+        (
+            list_audio_encoder(),
+            list_video_encoder(),
+            desk_utils::permission::is_admin(),
+        )
+    };
     let init_data = InitSignalingData {
         ice_servers: vec![],
         user_name: user_name.to_string(),
         audio_device_list: std::collections::BTreeMap::new(),
-        audio_encoder_list: vec![],
+        audio_encoder_list,
         video_device_list: std::collections::BTreeMap::new(),
-        video_encoder_list: vec![],
+        video_encoder_list,
         desk_settings: settings.desk.clone(),
         has_tauri,
-        is_admin: desk_utils::permission::is_admin(),
+        is_admin: is_admin_value,
     };
     log::info!(
-        "[pc_manager] Sending Init reply for {from_connection_id} (cut 3b: empty device list, \
-         worker Capabilities will fill in cut 4)"
+        "[pc_manager] Sending Init reply for {from_connection_id} \
+         (capabilities={})",
+        if capabilities.is_some() {
+            "from-worker"
+        } else {
+            "fallback"
+        }
     );
     send_response(
         outbound,
@@ -341,6 +378,30 @@ pub async fn handle_request_remote(
     )
 }
 
+/// Inverse of the worker-side codec mapping. Used by the Init reply
+/// path so the daemon's `audio_encoder_list` / `video_encoder_list`
+/// payloads carry the same string identifiers the legacy worker did.
+fn media_codec_to_str(c: &MediaCodec) -> Option<String> {
+    match c {
+        MediaCodec::H264 => Some("H264".to_string()),
+        MediaCodec::Vp8 => Some("VP8".to_string()),
+        MediaCodec::Vp9 => Some("VP9".to_string()),
+        MediaCodec::Av1 => Some("AV1".to_string()),
+        MediaCodec::Opus => Some("OPUS".to_string()),
+    }
+}
+
+/// Map the offer's `desk_settings.video_encoder` string to the IPC
+/// `MediaCodec`. Used by `handle_offer` to compose `StartMediaPayload`.
+fn video_encoder_to_media_codec(t: VideoEncoderType) -> MediaCodec {
+    match t {
+        VideoEncoderType::H264 | VideoEncoderType::X264 => MediaCodec::H264,
+        VideoEncoderType::VP8 => MediaCodec::Vp8,
+        VideoEncoderType::VP9 => MediaCodec::Vp9,
+        VideoEncoderType::AV1 => MediaCodec::Av1,
+    }
+}
+
 /// Daemon side of `SignalingType::Offer`. Adds video / audio tracks
 /// (when the offer SDP carries the matching m-lines) before running
 /// the SDP exchange so the answer comes back with proper media
@@ -348,6 +409,7 @@ pub async fn handle_request_remote(
 pub async fn handle_offer(
     registry: &PcRegistry,
     outbound: &OutboundSink,
+    worker_mgr: &WorkerManager,
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
@@ -430,6 +492,33 @@ pub async fn handle_offer(
             Some(&local_desc),
         )?;
     }
+
+    // Cut 4: now that the SDP exchange has populated tracks, tell the
+    // worker to start its per-`connection_id` encoder. Without this
+    // the daemon would have a video_track that nobody ever feeds.
+    // Audio codec defaults to OPUS — PR 3 picks the worker's chosen
+    // codec for real once the audio path lands.
+    let video_codec = video_encoder_to_media_codec(offer.desk_settings.get_video_encoder_type()?);
+    let start_media_payload = StartMediaPayload {
+        connection_id: from_connection_id.to_string(),
+        video_codec,
+        audio_codec: MediaCodec::Opus,
+        video_device: None,
+        audio_device: None,
+        fps: offer.desk_settings.video_fps,
+        bitrate_kbps: 0,
+        quality: offer.desk_settings.video_quality,
+    };
+    drop(ctx_guard);
+    if let Err(e) = worker_mgr
+        .send_to_worker(ServiceToWorker::StartMedia(start_media_payload))
+        .await
+    {
+        log::warn!(
+            "[pc_manager] Failed to issue StartMedia to worker for {from_connection_id}: {e} \
+             (PC is up but no media will flow until worker comes online)"
+        );
+    }
     Ok(())
 }
 
@@ -479,12 +568,86 @@ pub async fn handle_canid(registry: &PcRegistry, model: &SignalingModel) -> Resu
     Ok(())
 }
 
+// =====================================================================
+// MediaFrame ingestion (Arch IV cut 4)
+// =====================================================================
+
+/// Write one decoded `MediaFrame` to the appropriate per-`connection_id`
+/// `TrackLocalStaticSample`. Called from the daemon-side media-pipe
+/// receiver task spawned by `worker_manager::run_pipe_server`.
+///
+/// All errors are intentionally swallowed:
+///
+/// - **Unknown `connection_id`** — a race against `CloseControl` /
+///   browser drop. Logged at trace level so high-rate noise during
+///   normal teardown does not flood the operator.
+/// - **No `video_track` yet (Audio frame, or video before the first
+///   `Offer` arrived)** — same race window; debug-logged and skipped.
+/// - **`write_sample` failure** — surfaced as a warning. The sample is
+///   dropped; the next IDR will resync. We do not propagate the error
+///   because the caller is a long-running receiver loop and there is
+///   nothing useful to do at that level besides keep reading frames.
+///
+/// Cut 4 only handles video; audio is shaped through the same entry
+/// point so PR 3 can fill in the audio path without re-plumbing the
+/// receiver.
+pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
+    let ctx = match registry.get(&frame.connection_id).await {
+        Some(c) => c,
+        None => {
+            log::trace!(
+                "[pc_manager] dropping frame for unknown connection {}",
+                frame.connection_id
+            );
+            return;
+        }
+    };
+
+    // Hold the read guard only as long as we need the track Arc; clone
+    // it out before awaiting on `write_sample` so the daemon's offer /
+    // canid handlers (which take the write lock) are not blocked while
+    // the codec write completes.
+    let track_opt = match frame.kind {
+        MediaFrameKind::VideoI | MediaFrameKind::VideoP => ctx.read().await.video_track.clone(),
+        MediaFrameKind::Audio => ctx.read().await.audio_track.clone(),
+    };
+    let track = match track_opt {
+        Some(t) => t,
+        None => {
+            log::debug!(
+                "[pc_manager] dropping {:?} frame for {} — no matching track on PC yet \
+                 (offer not exchanged?)",
+                frame.kind,
+                frame.connection_id
+            );
+            return;
+        }
+    };
+
+    let sample = Sample {
+        data: bytes::Bytes::from(frame.payload),
+        duration: Duration::from_nanos(frame.duration_ns),
+        ..Default::default()
+    };
+    if let Err(e) = track.write_sample(&sample).await {
+        log::warn!(
+            "[pc_manager] write_sample failed for {} ({:?}): {e}",
+            frame.connection_id,
+            frame.kind
+        );
+    }
+}
+
 /// Daemon side of `SignalingType::CloseControl`. Removes the
-/// per-connection context and closes the PC. Cut 5 will additionally
-/// emit `ServiceToWorker::StopMedia { connection_id }` so the worker
-/// drops its encoder; until then there is no encoder to drop.
+/// per-connection context, closes the PC, and tells the worker to
+/// drop its per-`connection_id` encoder via
+/// `ServiceToWorker::StopMedia`. The StopMedia is best-effort — a
+/// dead worker will surface an error from `send_to_worker` which we
+/// log but don't propagate; the PC is already closed at that point
+/// so the daemon-side state is consistent regardless.
 pub async fn handle_close_control(
     registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
@@ -497,12 +660,24 @@ pub async fn handle_close_control(
     } else {
         log::warn!("[pc_manager] CloseControl from {from_connection_id} but no PC in registry");
     }
+
+    if let Err(e) = worker_mgr
+        .send_to_worker(ServiceToWorker::StopMedia(
+            desk_ipc_protocol::message::StopMediaPayload {
+                connection_id: from_connection_id.to_string(),
+            },
+        ))
+        .await
+    {
+        log::debug!("[pc_manager] StopMedia for {from_connection_id} could not reach worker: {e}");
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use desk_ipc_protocol::message::MediaCodec;
 
     fn ice(url: &str) -> LcxlRTCIceServer {
         LcxlRTCIceServer {
@@ -639,6 +814,223 @@ mod tests {
             Ok(_) => panic!("second create_for_request_remote should fail"),
         }
         assert_eq!(registry.len().await, 1);
+    }
+
+    /// Frames addressed to a connection that is not in the registry
+    /// (race against `CloseControl` / browser drop) must be silently
+    /// dropped — never panic. The daemon's media-receiver loop runs
+    /// for the lifetime of the worker and a single panic there would
+    /// kill all media flow.
+    #[tokio::test]
+    async fn write_video_frame_unknown_connection_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let frame = MediaFrame {
+            connection_id: "ghost".into(),
+            seq: 0,
+            ts_ns: 0,
+            duration_ns: 16_666_666,
+            kind: MediaFrameKind::VideoP,
+            codec: MediaCodec::H264,
+            payload: vec![0xAB; 32],
+        };
+        // Test passes if this does not panic and the receiver loop is
+        // free to keep reading.
+        write_video_frame(&registry, frame).await;
+    }
+
+    /// Frames arriving before the offer has populated the per-PC
+    /// `video_track` (race window during initial setup) are dropped
+    /// with a debug log, not propagated. Cut 4 must keep the receiver
+    /// task running through that window.
+    #[tokio::test]
+    async fn write_video_frame_no_track_yet_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-no-track", &request_remote, &s)
+            .await
+            .expect("create");
+        // Registry has the context, but `video_track` is still None
+        // because no Offer ran (Offer is what populates the tracks in
+        // cut 3b's `handle_offer`).
+        let frame = MediaFrame {
+            connection_id: "conn-no-track".into(),
+            seq: 0,
+            ts_ns: 0,
+            duration_ns: 16_666_666,
+            kind: MediaFrameKind::VideoI,
+            codec: MediaCodec::H264,
+            payload: vec![0xCD; 64],
+        };
+        write_video_frame(&registry, frame).await;
+    }
+
+    /// Audio frames go through the same entry point but route to
+    /// `audio_track` instead of `video_track`. Until PR 3 wires the
+    /// audio capture path, the daemon-side handler must still accept
+    /// the variant without panicking when no audio track exists.
+    #[tokio::test]
+    async fn write_video_frame_audio_kind_uses_audio_track_slot() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-audio", &request_remote, &s)
+            .await
+            .expect("create");
+        let frame = MediaFrame {
+            connection_id: "conn-audio".into(),
+            seq: 0,
+            ts_ns: 0,
+            duration_ns: 20_000_000,
+            kind: MediaFrameKind::Audio,
+            codec: MediaCodec::Opus,
+            payload: vec![0xEE; 96],
+        };
+        write_video_frame(&registry, frame).await;
+    }
+
+    /// `handle_request_remote` with a populated capabilities snapshot
+    /// uses the worker's reported codecs in the Init reply. This is
+    /// the path the daemon takes once the worker has sent its first
+    /// `WorkerToService::Capabilities`.
+    #[tokio::test]
+    async fn handle_request_remote_uses_worker_capabilities_when_present() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let caps = MediaCapabilities {
+            video_codecs: vec![MediaCodec::Vp9, MediaCodec::Av1],
+            audio_codecs: vec![MediaCodec::Opus],
+            video_devices: vec![],
+            audio_devices: vec![],
+            has_tauri: false,
+            is_admin: true,
+            desktop_name: "Default".to_string(),
+        };
+        let model = SignalingModel::new(
+            "req-init",
+            SignalingType::RequestRemote,
+            Some("conn-init".to_string()),
+            None,
+            Some(
+                serde_json::to_value(RequestRemoteModel {
+                    ice_servers: vec![],
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+
+        handle_request_remote(
+            &registry,
+            &outbound_tx,
+            &s,
+            "user-x",
+            false,
+            Some(&caps),
+            &model,
+        )
+        .await
+        .expect("handle ok");
+
+        let text = outbound_rx
+            .recv()
+            .await
+            .expect("init reply must be broadcast");
+        let reply: SignalingModel = serde_json::from_str(&text).expect("Init JSON must round-trip");
+        assert!(
+            matches!(reply.signaling_type, SignalingType::Init),
+            "got {:?}",
+            reply.signaling_type
+        );
+        let init: InitSignalingData = reply
+            .get_data::<InitSignalingData>()
+            .expect("Init payload present");
+        // Worker said Vp9, Av1 → daemon should ship those strings.
+        assert_eq!(init.video_encoder_list, vec!["VP9", "AV1"]);
+        assert_eq!(init.audio_encoder_list, vec!["OPUS"]);
+        assert!(init.is_admin, "init must mirror caps.is_admin");
+    }
+
+    /// `handle_request_remote` without capabilities (first connection
+    /// before the worker has reported) falls back to the static
+    /// capture-engine factory enumerations. This keeps the legacy
+    /// behaviour during the small race window between worker spawn
+    /// and first Capabilities IPC.
+    #[tokio::test]
+    async fn handle_request_remote_falls_back_when_no_capabilities() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let model = SignalingModel::new(
+            "req-init-2",
+            SignalingType::RequestRemote,
+            Some("conn-init-2".to_string()),
+            None,
+            Some(
+                serde_json::to_value(RequestRemoteModel {
+                    ice_servers: vec![],
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+
+        handle_request_remote(&registry, &outbound_tx, &s, "user-x", false, None, &model)
+            .await
+            .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("init reply");
+        let reply: SignalingModel = serde_json::from_str(&text).unwrap();
+        let init: InitSignalingData = reply.get_data::<InitSignalingData>().expect("Init payload");
+        // Static fallback comes from `list_video_encoder()` /
+        // `list_audio_encoder()` — both must be populated regardless
+        // of test platform; we only check non-emptiness rather than
+        // an exact platform-dependent list.
+        assert!(!init.video_encoder_list.is_empty());
+        assert!(!init.audio_encoder_list.is_empty());
+    }
+
+    /// Codec round-trip: every IPC `MediaCodec` must map to a
+    /// non-empty string for the Init reply path. Pin so adding a new
+    /// codec to the IPC enum forces an update on the daemon side.
+    #[test]
+    fn media_codec_to_str_is_total_over_known_codecs() {
+        for c in [
+            MediaCodec::H264,
+            MediaCodec::Vp8,
+            MediaCodec::Vp9,
+            MediaCodec::Av1,
+            MediaCodec::Opus,
+        ] {
+            let s = media_codec_to_str(&c).expect("known codec maps to a string");
+            assert!(!s.is_empty(), "{c:?}");
+        }
+    }
+
+    /// `video_encoder_to_media_codec` must collapse X264 + H264 to
+    /// the same `MediaCodec::H264` (both are H.264 encoders, the
+    /// daemon doesn't differentiate them on the wire).
+    #[test]
+    fn video_encoder_to_media_codec_collapses_x264_and_h264() {
+        assert_eq!(
+            video_encoder_to_media_codec(VideoEncoderType::X264),
+            MediaCodec::H264
+        );
+        assert_eq!(
+            video_encoder_to_media_codec(VideoEncoderType::H264),
+            MediaCodec::H264
+        );
+        assert_eq!(
+            video_encoder_to_media_codec(VideoEncoderType::VP8),
+            MediaCodec::Vp8
+        );
     }
 
     /// Multi-connection: independent contexts coexist; closing one

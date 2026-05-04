@@ -1,14 +1,16 @@
+use crate::daemon::pc_manager::PcRegistry;
 use crate::model::settings::SharedSettings;
 use actix_web::web;
 use desk_ipc_protocol::{
+    dual_transport::framed,
     message::{
-        ConnectionAcceptState, ServiceToWorker, SignalingPayload, WorkerInitPayload,
-        WorkerToService,
+        ConnectionAcceptState, MediaCapabilities, ServiceToWorker, SignalingPayload,
+        WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -40,6 +42,19 @@ pub struct WorkerManager {
     /// Uses `std::sync::Mutex` because every critical section is a short,
     /// synchronous map op with no `.await` inside the guard.
     active_connections: Arc<StdMutex<HashMap<String, ConnectionAcceptState>>>,
+    /// Daemon-side per-`connection_id` PeerConnection registry (Arch IV).
+    /// Held as a clonable handle so the media-pipe receiver task can
+    /// look up `video_track`s and call `write_sample` without going back
+    /// through `signaling_proxy`. The registry itself is shared with
+    /// `signaling_proxy`'s `RouterContext` — they refer to the same
+    /// underlying map.
+    pc_registry: PcRegistry,
+    /// Latest [`MediaCapabilities`] reported by the worker on Init
+    /// (`WorkerToService::Capabilities`). Cleared when the worker is
+    /// replaced; fresh capabilities arrive from the new worker as part
+    /// of its Init handshake. Read by `pc_manager::handle_request_remote`
+    /// to populate the daemon's `Init` reply with codec / device data.
+    worker_capabilities: Arc<StdMutex<Option<MediaCapabilities>>>,
 }
 
 struct WorkerManagerInner {
@@ -151,7 +166,10 @@ impl Drop for NativeWindowsChild {
 pub type WorkerMessageReceiver = mpsc::UnboundedReceiver<WorkerToService>;
 
 impl WorkerManager {
-    pub fn new(settings: web::Data<SharedSettings>) -> (Self, WorkerMessageReceiver) {
+    pub fn new(
+        settings: web::Data<SharedSettings>,
+        pc_registry: PcRegistry,
+    ) -> (Self, WorkerMessageReceiver) {
         let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
         let mgr = WorkerManager {
             settings,
@@ -160,6 +178,8 @@ impl WorkerManager {
             })),
             worker_msg_tx: Arc::new(tx),
             active_connections: Arc::new(StdMutex::new(HashMap::new())),
+            pc_registry,
+            worker_capabilities: Arc::new(StdMutex::new(None)),
         };
         (mgr, rx)
     }
@@ -170,6 +190,12 @@ impl WorkerManager {
         desktop_name: Option<String>,
         preapproved: Vec<(String, ConnectionAcceptState)>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Clear stale capabilities. The new worker re-sends them on its
+        // own Init handshake; until then the daemon ships an empty
+        // device list rather than an old (potentially wrong-desktop)
+        // snapshot.
+        *self.worker_capabilities.lock().unwrap() = None;
+
         let mut inner = self.inner.lock().await;
 
         if let Some(mut worker) = inner.active_worker.take() {
@@ -212,6 +238,7 @@ impl WorkerManager {
         let host_upstream_url_c = host_upstream_url.clone();
         let ipc_token_c = ipc_token.clone();
         let mgr_c = self.clone();
+        let pc_registry_c = self.pc_registry.clone();
         tokio::spawn(async move {
             if let Err(e) = run_pipe_server(
                 &pipe_name_c,
@@ -224,6 +251,7 @@ impl WorkerManager {
                 mgr_c,
                 host_upstream_url_c,
                 ipc_token_c,
+                pc_registry_c,
             )
             .await
             {
@@ -246,6 +274,23 @@ impl WorkerManager {
 
         info!("Worker started for session {session_id}");
         Ok(())
+    }
+
+    /// Stash the worker's last reported [`MediaCapabilities`]. Called
+    /// from `signaling_proxy` whenever the worker emits
+    /// `WorkerToService::Capabilities`. Subsequent `RequestRemote`
+    /// handling uses the snapshot to populate the Init reply.
+    pub fn set_worker_capabilities(&self, caps: MediaCapabilities) {
+        *self.worker_capabilities.lock().unwrap() = Some(caps);
+    }
+
+    /// Take a snapshot of the latest reported worker capabilities.
+    /// Returns `None` until the worker has sent Capabilities at least
+    /// once after Init; in that window the daemon ships an empty
+    /// device list, which is the same behaviour as Arch III on first
+    /// connection.
+    pub fn worker_capabilities(&self) -> Option<MediaCapabilities> {
+        self.worker_capabilities.lock().unwrap().clone()
     }
 
     pub async fn send_to_worker(&self, msg: ServiceToWorker) -> Result<(), String> {
@@ -714,9 +759,8 @@ async fn run_pipe_server(
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
+    pc_registry: PcRegistry,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::net::windows::named_pipe::ServerOptions;
-
     let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
     info!("Creating Named Pipe server: {pipe_path}");
 
@@ -737,44 +781,16 @@ async fn run_pipe_server(
     let sddl_str = crate::daemon::pipe_security::build_pipe_sddl(allowed_user_sid.as_deref());
     info!("Pipe ACL SDDL = '{sddl_str}'");
 
-    let server = unsafe {
-        use std::ffi::c_void;
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Foundation::{HLOCAL, LocalFree};
-        use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-        use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-        use windows_core::PCWSTR;
+    let server = create_named_pipe_with_sddl(&pipe_path, &sddl_str)?;
 
-        // SDDL must be a UTF-16 NUL-terminated buffer.
-        let sddl_w: Vec<u16> = std::ffi::OsStr::new(&sddl_str)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
-        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            PCWSTR(sddl_w.as_ptr()),
-            1, // SDDL_REVISION_1
-            &mut sd,
-            None,
-        )
-        .is_err()
-        {
-            return Err("Failed to convert SDDL to Security Descriptor".into());
-        }
-
-        let mut sa = SECURITY_ATTRIBUTES::default();
-        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
-        sa.lpSecurityDescriptor = sd.0 as *mut c_void;
-        sa.bInheritHandle = windows::Win32::Foundation::FALSE;
-
-        let srv_res = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create_with_security_attributes_raw(&pipe_path, &mut sa as *mut _ as *mut c_void);
-
-        let _ = LocalFree(Some(HLOCAL(sd.0)));
-        srv_res?
-    };
+    // Arch IV cut 4: pre-create the secondary "media" pipe under the
+    // same ACL so it exists by the time the worker (which receives the
+    // pipe name in Init) tries to connect. Creating both up-front means
+    // the worker never races against pipe creation; it only ever races
+    // against connect.
+    let media_pipe_name = format!("{pipe_name}-media");
+    let media_pipe_path = format!(r"\\.\pipe\{media_pipe_name}");
+    let media_server = create_named_pipe_with_sddl(&media_pipe_path, &sddl_str)?;
 
     let desktop_name_copy = desktop_name.clone();
 
@@ -825,13 +841,40 @@ async fn run_pipe_server(
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
             preapproved_connections: preapproved.clone(),
-            // Arch IV media pipe wiring lands in PR 2 cut 4. Until then
-            // the worker stays single-pipe (Arch III).
-            media_pipe_name: None,
+            media_pipe_name: Some(media_pipe_name.clone()),
         }),
     )
     .await?;
-    info!("Sent Init to Worker");
+    info!("Sent Init to Worker (media_pipe_name={})", media_pipe_name);
+
+    // Wait for the worker to dial back on the media pipe. The connect
+    // timeout is generous because some workers (Winlogon under SYSTEM
+    // token) take longer to spin up their media producer; on timeout we
+    // proceed *without* media so the rest of the IPC continues to work,
+    // and surface a warning so operators know media frames will not flow
+    // for this worker.
+    let media_handle =
+        match tokio::time::timeout(Duration::from_secs(15), media_server.connect()).await {
+            Ok(Ok(())) => {
+                info!("Worker connected on media pipe {media_pipe_path}");
+                let (media_reader, _media_writer) = tokio::io::split(media_server);
+                Some(spawn_media_receiver_task(media_reader, pc_registry.clone()))
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "Media pipe connect failed for {media_pipe_path}: {e}; \
+                 worker will run without media transport (no video frames will flow)"
+                );
+                None
+            }
+            Err(_) => {
+                warn!(
+                    "Timed out waiting for worker on media pipe {media_pipe_path}; \
+                 worker will run without media transport"
+                );
+                None
+            }
+        };
 
     for (id, _) in &preapproved {
         if let Some(json) = build_signaling_event_json(SignalingType::DesktopReady, id) {
@@ -845,11 +888,95 @@ async fn run_pipe_server(
     let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, pipe_name).await;
     info!("Pipe server for {pipe_name} exiting");
 
+    // Stop the media receiver so its read loop doesn't keep a reference
+    // to the now-dead worker pipe alive.
+    if let Some(handle) = media_handle {
+        handle.abort();
+    }
+
     if !expected {
         worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
     }
 
     Ok(())
+}
+
+/// Build a `tokio::net::windows::named_pipe::NamedPipeServer` whose
+/// DACL is derived from the supplied SDDL string. Pulled out so the
+/// event pipe and the Arch IV media pipe share exactly the same ACL
+/// path — the security analysis in `pipe_security` covers both.
+#[cfg(target_os = "windows")]
+fn create_named_pipe_with_sddl(
+    pipe_path: &str,
+    sddl_str: &str,
+) -> Result<tokio::net::windows::named_pipe::NamedPipeServer, Box<dyn std::error::Error>> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    unsafe {
+        use std::ffi::c_void;
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+        use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+        use windows_core::PCWSTR;
+
+        let sddl_w: Vec<u16> = std::ffi::OsStr::new(sddl_str)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut sd: PSECURITY_DESCRIPTOR = PSECURITY_DESCRIPTOR::default();
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl_w.as_ptr()),
+            1, // SDDL_REVISION_1
+            &mut sd,
+            None,
+        )
+        .is_err()
+        {
+            return Err("Failed to convert SDDL to Security Descriptor".into());
+        }
+
+        let mut sa = SECURITY_ATTRIBUTES::default();
+        sa.nLength = std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32;
+        sa.lpSecurityDescriptor = sd.0 as *mut c_void;
+        sa.bInheritHandle = windows::Win32::Foundation::FALSE;
+
+        let srv_res = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create_with_security_attributes_raw(pipe_path, &mut sa as *mut _ as *mut c_void);
+
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
+        Ok(srv_res?)
+    }
+}
+
+/// Spawn the daemon-side media receiver. The task owns the reader half
+/// of the connected media pipe, decodes incoming `MediaFrame`s and
+/// forwards each one to [`crate::daemon::pc_manager::write_video_frame`]
+/// for `track.write_sample(...)`. Exits when the worker closes the pipe
+/// (`recv_frame` returns `None`).
+fn spawn_media_receiver_task<R>(
+    media_reader: R,
+    pc_registry: PcRegistry,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut receiver = framed::make_media_receiver(media_reader);
+        info!("[MediaReceiver] starting");
+        while let Some(frame) = receiver.recv_frame().await {
+            debug!(
+                "[MediaReceiver] frame seq={} kind={:?} len={} for {}",
+                frame.seq,
+                frame.kind,
+                frame.payload.len(),
+                frame.connection_id
+            );
+            crate::daemon::pc_manager::write_video_frame(&pc_registry, frame).await;
+        }
+        info!("[MediaReceiver] exiting (transport closed)");
+    })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -865,6 +992,7 @@ async fn run_pipe_server(
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
+    _pc_registry: PcRegistry,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::net::UnixListener;
 
@@ -1097,7 +1225,7 @@ mod tests {
         let settings = web::Data::from(Arc::new(crate::model::settings::SharedSettings::from(
             crate::model::settings::Settings::default(),
         )));
-        WorkerManager::new(settings)
+        WorkerManager::new(settings, PcRegistry::new())
     }
 
     /// Track-then-update-then-drain round trip — the path used by
@@ -1126,6 +1254,37 @@ mod tests {
         // owns the drain side-effect.
         let drained_again = mgr.notify_desktop_switch().await;
         assert!(drained_again.is_empty());
+    }
+
+    /// Capabilities round-trip: `set_worker_capabilities` stores the
+    /// snapshot and `worker_capabilities()` returns it. The daemon's
+    /// signaling_proxy relies on this to bridge `WorkerToService::
+    /// Capabilities` into the `RequestRemote` Init reply path.
+    #[tokio::test]
+    async fn worker_capabilities_round_trip() {
+        let (mgr, _rx) = test_manager();
+        assert!(
+            mgr.worker_capabilities().is_none(),
+            "capabilities are None until the worker reports"
+        );
+        let caps = MediaCapabilities {
+            video_codecs: vec![
+                desk_ipc_protocol::message::MediaCodec::H264,
+                desk_ipc_protocol::message::MediaCodec::Vp9,
+            ],
+            audio_codecs: vec![desk_ipc_protocol::message::MediaCodec::Opus],
+            video_devices: vec!["display-1".to_string()],
+            audio_devices: vec!["mic-1".to_string()],
+            has_tauri: true,
+            is_admin: false,
+            desktop_name: "Default".to_string(),
+        };
+        mgr.set_worker_capabilities(caps.clone());
+        let got = mgr.worker_capabilities().expect("capabilities present");
+        assert_eq!(got.video_codecs, caps.video_codecs);
+        assert_eq!(got.audio_codecs, caps.audio_codecs);
+        assert_eq!(got.desktop_name, "Default");
+        assert!(got.has_tauri);
     }
 
     /// `update_connection_accept` on an unknown id is a silent no-op (race
