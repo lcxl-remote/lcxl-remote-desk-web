@@ -32,7 +32,11 @@
 use std::sync::Arc;
 
 use actix_web::web;
+use desk_ipc_protocol::message::{
+    EnablePrivateScreenPayload, ServiceToWorker, UpdateDeskSettingsPayload,
+};
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::private_screen::EnablePrivateScreenData;
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use tokio::sync::broadcast;
 
@@ -75,6 +79,30 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // confusing errors back to the browser).
         SignalingType::AcceptControl | SignalingType::DenyControl => RouteOwnership::Daemon,
 
+        // Batch 1 of the typed-IPC migration: types that only flow
+        // *outbound* from the host (worker → daemon → browser) or
+        // are dead enums no client/worker handles. An inbound copy
+        // is a protocol error from the browser; daemon swallows it
+        // here rather than bridging — the worker would either fall
+        // through to `UNKNOWN_SIGNALING_TYPE` (ChangeDisplaySettings:
+        // never wired up) or have no handler at all.
+        //
+        // - `ChangeDisplaySettings`: the front-end never emits it
+        //   and the worker's `DeskSession::handle_message` has no
+        //   arm; effectively a dead enum variant.
+        // - `PrivateScreenStateChanged`: worker → browser only;
+        //   emitted by `WorkerToService::PrivateScreenStateChanged`
+        //   typed IPC since this batch.
+        // - `AudioPlaybackError`: emitted from the PC's `on_track`
+        //   callback; in Arch IV daemon-worker mode the daemon's
+        //   pc_manager does not attach an `on_track` handler so the
+        //   variant is dead until that work lands. Portable mode
+        //   still produces it from `service::signaling`, but that
+        //   path bypasses the router entirely.
+        SignalingType::ChangeDisplaySettings
+        | SignalingType::PrivateScreenStateChanged
+        | SignalingType::AudioPlaybackError => RouteOwnership::Daemon,
+
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
         // rather than relay to the worker (which has no PC to act on).
@@ -89,10 +117,16 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         SignalingType::Heartbeat => RouteOwnership::Daemon,
 
         // ---- Worker-owned: user-session resources ----
-        SignalingType::ChangeDisplaySettings
-        | SignalingType::EnablePrivateScreen
-        | SignalingType::PrivateScreenStateChanged
-        | SignalingType::AudioPlaybackError
+        // `EnablePrivateScreen` and `UpdateDeskSettings` are still
+        // worker-owned (the actual handlers live in
+        // `service/signaling::DeskSession::handle_message`'s arms
+        // for those types) but as of batch 1 they ride typed
+        // [`ServiceToWorker::EnablePrivateScreen`] /
+        // [`ServiceToWorker::UpdateDeskSettings`] IPC instead of
+        // the legacy `SignalingMessage` opaque envelope. The router
+        // returns `HandledByDaemon` for both because the typed
+        // IPC send happens inline below.
+        SignalingType::EnablePrivateScreen
         | SignalingType::UpdateDeskSettings
         | SignalingType::ManagerSystemInfo
         | SignalingType::ManagerSystemStatue
@@ -254,15 +288,17 @@ pub async fn route(
             .await?;
             Ok(RouteOutcome::HandledByDaemon)
         }
-        // Daemon-emitted; the browser should never send these at us
-        // but if it does, swallow rather than relay to the worker.
-        // AcceptControl / DenyControl are reply variants emitted by
-        // `pc_manager::handle_require_control`; an inbound copy from
-        // the browser is a protocol error and gets dropped here.
+        // Daemon-emitted or dead inbound; the browser should never
+        // send these at us but if it does, swallow rather than relay
+        // to the worker. See classify() doc-comments for per-variant
+        // rationale.
         SignalingType::Answer
         | SignalingType::Init
         | SignalingType::AcceptControl
         | SignalingType::DenyControl
+        | SignalingType::ChangeDisplaySettings
+        | SignalingType::PrivateScreenStateChanged
+        | SignalingType::AudioPlaybackError
         | SignalingType::DesktopSwitching
         | SignalingType::DesktopReady
         | SignalingType::FetchConnections
@@ -274,44 +310,117 @@ pub async fn route(
             );
             Ok(RouteOutcome::HandledByDaemon)
         }
-        SignalingType::UpdateDeskSettings => {
-            // The worker's `DeskSession::handle_update_desk_settings`
-            // still owns non-media fields (wayland_control_mode,
-            // private_screen toggles, etc.), so we keep the
-            // SignalingMessage forward via `ForwardToWorker`. In
-            // addition, the daemon sniffs the media-relevant knobs
-            // here and fans them out as typed `UpdateMediaSettings`
-            // IPC so the per-connection encoder pipeline retunes
-            // live. Without this hop the worker's media_producer
-            // would never see the new fps / quality — its capture
-            // loop reads `merged_settings` locally and the legacy
-            // watch channel that DeskSession writes to does not
-            // drive the Arch IV pipeline.
-            match model.get_data::<DeskSettings>() {
-                Ok(settings) => {
-                    ctx.pc_registry
-                        .broadcast_media_settings_update(
-                            &ctx.worker_mgr,
-                            Some(settings.video_fps),
-                            None,
-                            Some(settings.video_quality),
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[router] UpdateDeskSettings payload parse failed: {e}; forwarding the \
-                         raw message to the worker but no media settings will be retuned"
-                    );
-                }
-            }
-            Ok(RouteOutcome::ForwardToWorker)
+        SignalingType::EnablePrivateScreen => {
+            handle_enable_private_screen_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
         }
-        // Worker-owned: cut 3c flips these to typed event-transport
-        // payloads; for now they keep flowing as raw SignalingMessage
-        // IPC over the legacy path.
+        SignalingType::UpdateDeskSettings => {
+            handle_update_desk_settings_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        // Worker-owned: subsequent batches will flip these to typed
+        // event-transport payloads; for now they keep flowing as raw
+        // SignalingMessage IPC over the legacy bridge.
         _ => Ok(RouteOutcome::ForwardToWorker),
     }
+}
+
+/// Batch 1: parse the inbound `EnablePrivateScreen` payload and ship
+/// it to the worker as typed [`ServiceToWorker::EnablePrivateScreen`].
+/// Replaces the legacy `SignalingMessage` opaque envelope.
+///
+/// Parse / send failures are non-fatal for the WS connection — they
+/// only prevent the toggle from reaching the worker, which is logged.
+async fn handle_enable_private_screen_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let from_connection_id = match model.from_connection_id.as_deref() {
+        Some(id) => id.to_string(),
+        None => {
+            log::warn!(
+                "[router] EnablePrivateScreen missing from_connection_id; ignoring \
+                 (request_id={})",
+                model.request_id,
+            );
+            return Ok(());
+        }
+    };
+    let data = match model.get_data::<EnablePrivateScreenData>() {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(
+                "[router] EnablePrivateScreen payload parse failed for {from_connection_id}: \
+                 {e}; ignoring"
+            );
+            return Ok(());
+        }
+    };
+    let payload = EnablePrivateScreenPayload {
+        connection_id: from_connection_id.clone(),
+        enable: data.enable,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::EnablePrivateScreen(payload))
+        .await
+    {
+        log::warn!(
+            "[router] failed to send typed EnablePrivateScreen for {from_connection_id}: {e}",
+        );
+    }
+    Ok(())
+}
+
+/// Batch 1: parse the inbound `UpdateDeskSettings` payload, fan out
+/// the media-relevant knobs as `UpdateMediaSettings` IPC (so the
+/// per-connection encoder pipeline retunes live), and ship the full
+/// settings to the worker as typed
+/// [`ServiceToWorker::UpdateDeskSettings`] so the worker's
+/// `handle_update_desk_settings` still applies non-media fields
+/// (`wayland_control_mode`, `private_screen` flags, ...).
+async fn handle_update_desk_settings_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let settings = match model.get_data::<DeskSettings>() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[router] UpdateDeskSettings payload parse failed: {e}; dropping \
+                 (no media retune, no worker forward)"
+            );
+            return Ok(());
+        }
+    };
+
+    ctx.pc_registry
+        .broadcast_media_settings_update(
+            &ctx.worker_mgr,
+            Some(settings.video_fps),
+            None,
+            Some(settings.video_quality),
+        )
+        .await;
+
+    let from_connection_id = model
+        .from_connection_id
+        .clone()
+        .unwrap_or_else(|| "<unscoped>".to_string());
+    let payload = UpdateDeskSettingsPayload {
+        connection_id: from_connection_id.clone(),
+        settings,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::UpdateDeskSettings(payload))
+        .await
+    {
+        log::warn!(
+            "[router] failed to send typed UpdateDeskSettings for {from_connection_id}: {e}",
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -335,6 +444,9 @@ mod tests {
             SignalingType::RequireControl,
             SignalingType::AcceptControl,
             SignalingType::DenyControl,
+            SignalingType::ChangeDisplaySettings,
+            SignalingType::PrivateScreenStateChanged,
+            SignalingType::AudioPlaybackError,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -354,10 +466,7 @@ mod tests {
     #[test]
     fn classify_worker_owned_types() {
         for t in [
-            SignalingType::ChangeDisplaySettings,
             SignalingType::EnablePrivateScreen,
-            SignalingType::PrivateScreenStateChanged,
-            SignalingType::AudioPlaybackError,
             SignalingType::UpdateDeskSettings,
             SignalingType::ManagerSystemInfo,
             SignalingType::ManagerSystemStatue,
@@ -401,14 +510,16 @@ mod tests {
         }
     }
 
-    /// Daemon-emitted-only variants (Answer / Init / AcceptControl /
-    /// DenyControl / DesktopSwitching / DesktopReady /
-    /// FetchConnections / ConnectionList / Heartbeat) arriving on
-    /// the inbound WS stream are swallowed — they MUST NOT reach
-    /// the worker (which has no PC to act on, and whose
-    /// `DeskSession::handle_message` would only return
-    /// `UNKNOWN_SIGNALING_TYPE` and bounce a confusing error to the
-    /// browser).
+    /// Daemon-emitted or dead inbound variants are swallowed — they
+    /// MUST NOT reach the worker (it has no PC to act on, and the
+    /// worker's `DeskSession::handle_message` would only return
+    /// `UNKNOWN_SIGNALING_TYPE` for the ones it can't handle and
+    /// bounce a confusing error to the browser).
+    ///
+    /// Batch 1 of the typed-IPC migration adds
+    /// `ChangeDisplaySettings` (dead enum), `PrivateScreenStateChanged`
+    /// (worker → browser only), and `AudioPlaybackError` (dead in
+    /// daemon-worker mode) to this list.
     #[tokio::test]
     async fn route_swallows_daemon_emitted_variants() {
         let ctx = make_ctx();
@@ -417,6 +528,9 @@ mod tests {
             SignalingType::Init,
             SignalingType::AcceptControl,
             SignalingType::DenyControl,
+            SignalingType::ChangeDisplaySettings,
+            SignalingType::PrivateScreenStateChanged,
+            SignalingType::AudioPlaybackError,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -459,16 +573,17 @@ mod tests {
         );
     }
 
-    /// Worker-owned variants still flow over the legacy IPC path
-    /// after cut 3b — cut 3c flips them to typed event-transport
-    /// payloads.
+    /// Worker-owned variants that haven't been typed-migrated yet
+    /// (manager plane / terminal — batches 2 and 3) still flow over
+    /// the legacy `SignalingMessage` IPC bridge.
     #[tokio::test]
-    async fn route_forwards_worker_owned_variants() {
+    async fn route_forwards_unmigrated_worker_owned_variants() {
         let ctx = make_ctx();
         for t in [
             SignalingType::ManagerFileList,
             SignalingType::ManagerSystemInfo,
-            SignalingType::EnablePrivateScreen,
+            SignalingType::StartTerminal,
+            SignalingType::SendDataToTerminal,
         ] {
             let model = SignalingModel::new("r", t, None, None, None, None);
             assert_eq!(
@@ -479,14 +594,63 @@ mod tests {
         }
     }
 
-    /// `UpdateDeskSettings` keeps flowing as `ForwardToWorker` (so
-    /// the worker's DeskSession sees `wayland_control_mode` etc.) and,
-    /// with a parseable DeskSettings payload, the daemon also fans
-    /// out a typed `UpdateMediaSettings` per active connection. The
-    /// fan-out is exercised over an empty pc_registry here — no panic
-    /// even when the inner loop iterates zero cached PCs.
+    /// Batch 1: `EnablePrivateScreen` is now handled inline by the
+    /// router (typed [`ServiceToWorker::EnablePrivateScreen`] IPC).
+    /// `route` returns `HandledByDaemon` — the legacy
+    /// `SignalingMessage` bridge no longer carries this type. With no
+    /// active worker the typed send is logged but the route call
+    /// itself still succeeds.
     #[tokio::test]
-    async fn route_update_desk_settings_forwards_and_broadcasts() {
+    async fn route_enable_private_screen_handled_inline_not_bridged() {
+        let ctx = make_ctx();
+        let data = desk_signal_facade::model::private_screen::EnablePrivateScreenData {
+            enable: true,
+        };
+        let model = SignalingModel::new(
+            "r-eps",
+            SignalingType::EnablePrivateScreen,
+            Some("conn-priv".to_string()),
+            None,
+            Some(serde_json::to_value(&data).unwrap()),
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(
+            outcome,
+            RouteOutcome::HandledByDaemon,
+            "EnablePrivateScreen must ride typed IPC, not the SignalingMessage bridge",
+        );
+    }
+
+    /// `EnablePrivateScreen` arriving without a `from_connection_id`
+    /// is a malformed message — daemon logs and drops, no panic, no
+    /// IPC send.
+    #[tokio::test]
+    async fn route_enable_private_screen_without_connection_id_is_noop() {
+        let ctx = make_ctx();
+        let data = desk_signal_facade::model::private_screen::EnablePrivateScreenData {
+            enable: false,
+        };
+        let model = SignalingModel::new(
+            "r-eps-noid",
+            SignalingType::EnablePrivateScreen,
+            None,
+            None,
+            Some(serde_json::to_value(&data).unwrap()),
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
+    }
+
+    /// Batch 1: `UpdateDeskSettings` is now fully handled by the
+    /// router — it both fans out the typed `UpdateMediaSettings` IPC
+    /// for the encoder pipeline AND ships the full settings to the
+    /// worker as typed [`ServiceToWorker::UpdateDeskSettings`]. The
+    /// route returns `HandledByDaemon`; the legacy SignalingMessage
+    /// bridge no longer carries this type.
+    #[tokio::test]
+    async fn route_update_desk_settings_handled_inline_not_bridged() {
         let ctx = make_ctx();
         let settings = desk_signal_facade::model::desk_settings::DeskSettings {
             video_fps: 45,
@@ -504,15 +668,13 @@ mod tests {
         let outcome = route(&model, &ctx).await.unwrap();
         assert_eq!(
             outcome,
-            RouteOutcome::ForwardToWorker,
-            "UpdateDeskSettings must still bridge to worker for non-media fields"
+            RouteOutcome::HandledByDaemon,
+            "UpdateDeskSettings must ride typed IPC, not the SignalingMessage bridge",
         );
     }
 
     /// Malformed `UpdateDeskSettings` payload (not a DeskSettings
-    /// object) must not crash the router — it should log and still
-    /// return `ForwardToWorker` so the worker's existing handler
-    /// gets a chance to log its own validation error.
+    /// object) must not crash the router — it should log and drop.
     #[tokio::test]
     async fn route_update_desk_settings_with_invalid_payload_still_forwards() {
         let ctx = make_ctx();
@@ -525,7 +687,12 @@ mod tests {
             None,
         );
         let outcome = route(&model, &ctx).await.unwrap();
-        assert_eq!(outcome, RouteOutcome::ForwardToWorker);
+        assert_eq!(
+            outcome,
+            RouteOutcome::HandledByDaemon,
+            "malformed UpdateDeskSettings is logged + dropped — no bridge fallback now \
+             that batch 1 carries it on typed IPC",
+        );
     }
 
     /// `CloseControl` against an empty registry doesn't error — the

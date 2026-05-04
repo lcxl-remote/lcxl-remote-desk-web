@@ -12,13 +12,17 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        DesktopChangedPayload, HeartbeatPayload, ServiceToWorker, SignalingPayload,
-        WorkerInitPayload, WorkerToService,
+        DesktopChangedPayload, EnablePrivateScreenPayload, HeartbeatPayload,
+        PrivateScreenStateChangedPayload, ServiceToWorker, SignalingPayload,
+        UpdateDeskSettingsPayload, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
 use desk_server_user::model::CurrentUser;
-use desk_signal_facade::model::signal::SignalingModel;
+use desk_signal_facade::model::private_screen::{
+    EnablePrivateScreenData, PrivateScreenStateChangedData,
+};
+use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use log::{error, info, warn};
 use std::{
     sync::Arc,
@@ -47,6 +51,102 @@ fn build_hub_from_init(
             (hub, Some((upstream, url, token)))
         }
         None => (Arc::new(HostControlHub::new_local()), None),
+    }
+}
+
+/// Typed-IPC migration helper: convert a typed `ServiceToWorker`
+/// payload back into a `SignalingModel` so the existing
+/// `DeskSession::handle_message` dispatch can run unchanged. Used by
+/// batch 1 (and subsequent batches) until each `handle_message` arm
+/// is fully migrated and the legacy dispatcher can be retired.
+///
+/// Build / serialise failures are non-fatal: they log + drop, same
+/// behaviour the previous `SignalingMessage` JSON-bridge path had on
+/// malformed input.
+async fn dispatch_typed_signaling<T>(
+    desk_session: &mut DeskSession,
+    signaling_type: SignalingType,
+    connection_id: String,
+    data: &T,
+) where
+    T: serde::Serialize + ?Sized,
+{
+    let signaling_data = match serde_json::to_value(data) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            warn!(
+                "Failed to serialise {signaling_type:?} payload for {connection_id}: {e}; \
+                 dropping",
+            );
+            return;
+        }
+    };
+    let model = SignalingModel::new(
+        // Typed IPC carries no request_id today — the SignalingModel
+        // request_id is only used for response correlation, which
+        // these one-way notifications don't need. A placeholder keeps
+        // logs scannable.
+        "typed-ipc",
+        signaling_type,
+        Some(connection_id.clone()),
+        None,
+        signaling_data,
+        None,
+    );
+    if let Err(e) = desk_session.handle_message(&model).await {
+        warn!(
+            "DeskSession handle_message error for typed {signaling_type:?}: {e}, \
+             connection_id={connection_id}",
+        );
+    }
+}
+
+/// Typed-IPC migration helper: classify an outbound signaling text
+/// blob produced by `DeskSession` and route it onto a typed
+/// `WorkerToService` variant when one exists, falling back to the
+/// legacy `SignalingMessage` opaque envelope for types not yet
+/// migrated.
+///
+/// Parsing failures and unmatched types fall through to
+/// `SignalingMessage` — the same behaviour the bridge had before
+/// batch 1, so a malformed inner JSON keeps the existing
+/// fail-soft semantics rather than dropping the message silently.
+fn build_outbound_payload_from_desk_text(text: String) -> WorkerToService {
+    match serde_json::from_str::<SignalingModel>(&text) {
+        Ok(model) => {
+            // `PrivateScreenStateChanged` is constructed via
+            // `SignalingModel::new_request(..., Some(connection_id), ...)`,
+            // which places the target connection in `to_connection_id`
+            // (server-initiated request to a specific browser). For the
+            // legacy SignalingMessage path we still ferry
+            // `from_connection_id` because that's what the existing
+            // daemon-side proxy uses to scope the rebroadcast.
+            if matches!(model.signaling_type, SignalingType::PrivateScreenStateChanged) {
+                if let Some(connection_id) = model.to_connection_id.clone()
+                    && let Ok(Some(data)) =
+                        model.get_data_with_type::<PrivateScreenStateChangedData>()
+                {
+                    return WorkerToService::PrivateScreenStateChanged(
+                        PrivateScreenStateChangedPayload {
+                            connection_id,
+                            data,
+                        },
+                    );
+                }
+                warn!(
+                    "PrivateScreenStateChanged outbound missing to_connection_id or \
+                     invalid payload; falling back to SignalingMessage bridge",
+                );
+            }
+            WorkerToService::SignalingMessage(SignalingPayload {
+                message: text,
+                connection_id: model.from_connection_id,
+            })
+        }
+        Err(_) => WorkerToService::SignalingMessage(SignalingPayload {
+            message: text,
+            connection_id: None,
+        }),
     }
 }
 
@@ -525,6 +625,39 @@ impl WorkerSession {
                                 ServiceToWorker::WhiteboardCommand(payload) => {
                                     whiteboard_dispatcher.handle_command(payload).await;
                                 }
+                                // Typed-IPC migration batch 1: replaces the
+                                // legacy `SignalingMessage` opaque envelope
+                                // for these two types. The worker still
+                                // dispatches through `DeskSession::
+                                // handle_message` because the actual
+                                // handlers in `service::signaling` are
+                                // shared with the portable / DeskServer WS
+                                // path and shouldn't be duplicated; we
+                                // rebuild a lightweight `SignalingModel`
+                                // from the typed payload so the existing
+                                // arms keep working unmodified. Subsequent
+                                // batches that retire `handle_message`
+                                // entirely will inline these calls.
+                                ServiceToWorker::EnablePrivateScreen(payload) => {
+                                    dispatch_typed_signaling(
+                                        &mut desk_session,
+                                        SignalingType::EnablePrivateScreen,
+                                        payload.connection_id,
+                                        &EnablePrivateScreenData {
+                                            enable: payload.enable,
+                                        },
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::UpdateDeskSettings(payload) => {
+                                    dispatch_typed_signaling(
+                                        &mut desk_session,
+                                        SignalingType::UpdateDeskSettings,
+                                        payload.connection_id,
+                                        &payload.settings,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         Some(None) => {
@@ -543,13 +676,15 @@ impl WorkerSession {
                         Some(DeskSessionMessage::Text(text)) => {
                             // Worker-emitted signaling reply (terminal
                             // output, manager queries, file/system
-                            // info responses). Daemon's signaling proxy
-                            // ships this onto the corresponding
-                            // outbound WS so the browser sees it.
-                            let payload = WorkerToService::SignalingMessage(SignalingPayload {
-                                message: text.to_string(),
-                                connection_id: None,
-                            });
+                            // info responses). Typed-IPC migration
+                            // batch 1 routes a few SignalingTypes
+                            // through dedicated IPC variants instead
+                            // of the legacy `SignalingMessage` opaque
+                            // envelope; everything else still flows
+                            // over the bridge until later batches
+                            // migrate it.
+                            let payload =
+                                build_outbound_payload_from_desk_text(text.to_string());
                             if writer_tx.send(payload).is_err() {
                                 error!("IPC writer task died; exiting main loop");
                                 break;
@@ -910,6 +1045,78 @@ mod tests {
             .await
             .expect("forwarder task must exit after senders drop")
             .expect("task panicked");
+    }
+
+    /// Typed-IPC migration batch 1: a `PrivateScreenStateChanged`
+    /// blob produced by `DeskSession`'s host-control-hub bridge is
+    /// classified into the typed `WorkerToService::PrivateScreenStateChanged`
+    /// variant, carrying the inner `PrivateScreenStateChangedData`
+    /// verbatim. This guards the rendering decision in
+    /// `build_outbound_payload_from_desk_text`.
+    #[test]
+    fn outbound_dispatch_routes_private_screen_state_changed_to_typed_variant() {
+        let data = PrivateScreenStateChangedData {
+            visible: true,
+            is_supported: true,
+            error_msg: None,
+        };
+        let model = SignalingModel::new_request(
+            SignalingType::PrivateScreenStateChanged,
+            Some("conn-pss".to_string()),
+            Some(&data),
+        )
+        .expect("build PrivateScreenStateChanged model");
+        let text = serde_json::to_string(&model).expect("serialise");
+        let routed = build_outbound_payload_from_desk_text(text);
+        match routed {
+            WorkerToService::PrivateScreenStateChanged(p) => {
+                assert_eq!(p.connection_id, "conn-pss");
+                assert!(p.data.visible);
+                assert!(p.data.is_supported);
+                assert!(p.data.error_msg.is_none());
+            }
+            other => panic!(
+                "PrivateScreenStateChanged must take the typed path, got {other:?}",
+            ),
+        }
+    }
+
+    /// Other signaling reply types still flow over the legacy
+    /// `SignalingMessage` opaque envelope (terminal output, manager
+    /// queries, ...) until later batches migrate them.
+    #[test]
+    fn outbound_dispatch_falls_back_to_signaling_message_for_unmigrated_types() {
+        let model = SignalingModel::new(
+            "term-1",
+            SignalingType::ReplyFromTerminal,
+            Some("conn-term".to_string()),
+            None,
+            Some(serde_json::json!({"output": "hello"})),
+            None,
+        );
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text.clone()) {
+            WorkerToService::SignalingMessage(p) => {
+                assert_eq!(p.message, text);
+                assert_eq!(p.connection_id.as_deref(), Some("conn-term"));
+            }
+            other => panic!("expected SignalingMessage fallback, got {other:?}"),
+        }
+    }
+
+    /// Malformed JSON stays on the SignalingMessage path so the
+    /// daemon's existing logging surfaces the parse error — same
+    /// fail-soft behaviour the bridge had before batch 1.
+    #[test]
+    fn outbound_dispatch_falls_back_when_payload_is_not_signaling_model() {
+        let raw = "not-a-signaling-model".to_string();
+        match build_outbound_payload_from_desk_text(raw.clone()) {
+            WorkerToService::SignalingMessage(p) => {
+                assert_eq!(p.message, raw);
+                assert!(p.connection_id.is_none());
+            }
+            other => panic!("expected SignalingMessage fallback, got {other:?}"),
+        }
     }
 
     /// Forwarder task exits immediately if the underlying transport returns

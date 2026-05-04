@@ -1,4 +1,6 @@
 use bincode::{Decode, Encode};
+use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
 use serde::{Deserialize, Serialize};
 
 /// Messages sent from Service Core (daemon) to Worker process over the
@@ -90,6 +92,23 @@ pub enum ServiceToWorker {
     /// browser DataChannel. Worker dispatches via the existing
     /// host_control forwarder.
     WhiteboardCommand(OpaqueConnectionPayload),
+
+    // ---------- Arch IV typed-IPC migration batch 1 ----------
+    /// Browser-issued private-screen toggle. Worker enables / disables
+    /// the per-connection private screen via its `host_control_helper`.
+    /// Replaces the legacy `EnablePrivateScreen` flow over the
+    /// `SignalingMessage` bridge.
+    EnablePrivateScreen(EnablePrivateScreenPayload),
+
+    /// Browser-issued desk-settings update. Carries the full
+    /// `DeskSettings` so the worker can apply non-media fields
+    /// (`wayland_control_mode`, `private_screen`, ...). The daemon
+    /// also sniffs the media-relevant knobs and fans them out as
+    /// [`Self::UpdateMediaSettings`] separately so the per-connection
+    /// encoder pipeline retunes live (see `pc_manager::
+    /// broadcast_media_settings_update`). Replaces the legacy
+    /// `UpdateDeskSettings` flow over the `SignalingMessage` bridge.
+    UpdateDeskSettings(UpdateDeskSettingsPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -146,6 +165,16 @@ pub enum WorkerToService {
     /// TransferError) or a binary frame (downloaded chunk) on the
     /// browser's `file_transfer_event` DataChannel.
     FileTransferData(FileTransferPayload),
+
+    // ---------- Arch IV typed-IPC migration batch 1 ----------
+    /// Worker → daemon notification that the per-connection private
+    /// screen visibility / support state changed. Sourced from the
+    /// worker's `HostControlHub::subscribe_state` broadcast bus.
+    /// The daemon forwards this to the browser as a
+    /// `SignalingType::PrivateScreenStateChanged` reply on the matching
+    /// signaling websocket. Replaces the legacy reverse path through
+    /// the `SignalingMessage` bridge.
+    PrivateScreenStateChanged(PrivateScreenStateChangedPayload),
 }
 
 // ==================== Payload Types ====================
@@ -397,6 +426,46 @@ pub struct ErrorPayload {
     /// for worker-wide errors that don't map to a single PC.
     #[serde(default)]
     pub connection_id: Option<String>,
+}
+
+// ---------- Arch IV typed-IPC migration batch 1 ----------
+
+/// Payload for [`ServiceToWorker::EnablePrivateScreen`]. Mirrors the
+/// JSON shape of `desk_signal_facade::model::private_screen::
+/// EnablePrivateScreenData` plus the `connection_id` the daemon
+/// already had at the WS-router boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct EnablePrivateScreenPayload {
+    pub connection_id: String,
+    pub enable: bool,
+}
+
+/// Payload for [`ServiceToWorker::UpdateDeskSettings`]. Carries the
+/// full `DeskSettings` struct so the worker applies every field; the
+/// daemon separately sniffs the media-relevant knobs and emits
+/// [`ServiceToWorker::UpdateMediaSettings`] for the encoder pipeline
+/// (see `pc_manager::broadcast_media_settings_update`).
+///
+/// `DeskSettings` itself does not derive [`Encode`]/[`Decode`] (it
+/// lives in `desk-signal-facade`, a leaf model crate that should not
+/// know about bincode); we ride bincode 2's `with_serde` field
+/// attribute to delegate to its serde impl on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct UpdateDeskSettingsPayload {
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub settings: DeskSettings,
+}
+
+/// Payload for [`WorkerToService::PrivateScreenStateChanged`].
+/// Mirrors `desk_signal_facade::model::private_screen::
+/// PrivateScreenStateChangedData` plus the `connection_id` the
+/// daemon needs to pick the right outbound signaling websocket.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct PrivateScreenStateChangedPayload {
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub data: PrivateScreenStateChangedData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -693,5 +762,82 @@ mod tests {
         assert_eq!(decoded.kind, MediaFrameKind::VideoP);
         assert_eq!(decoded.payload.len(), payload.len());
         assert_eq!(decoded.payload, payload);
+    }
+
+    // === Arch IV typed-IPC migration batch 1 — round-trip tests ===
+
+    /// `EnablePrivateScreen` carries the same bool the legacy
+    /// `EnablePrivateScreenData` JSON used. Round-tripping it under
+    /// bincode pins the wire shape — a reorder of `connection_id`
+    /// vs `enable` would silently flip enable-vs-disable on
+    /// matched-version daemon/worker pairs.
+    #[test]
+    fn enable_private_screen_round_trips_bincode() {
+        for enable in [true, false] {
+            let msg = ServiceToWorker::EnablePrivateScreen(EnablePrivateScreenPayload {
+                connection_id: "conn-priv".to_string(),
+                enable,
+            });
+            match bincode_round_trip(&msg) {
+                ServiceToWorker::EnablePrivateScreen(p) => {
+                    assert_eq!(p.connection_id, "conn-priv");
+                    assert_eq!(p.enable, enable);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
+    /// `UpdateDeskSettings` rides bincode 2's `with_serde` field
+    /// attribute to delegate to `DeskSettings`'s serde impl. Verify
+    /// non-default media + non-media fields both survive — these are
+    /// the ones the worker's `handle_update_desk_settings` and the
+    /// daemon's `broadcast_media_settings_update` both read.
+    #[test]
+    fn update_desk_settings_round_trips_bincode() {
+        let mut settings = DeskSettings::default();
+        settings.video_fps = 45;
+        settings.video_quality = 33;
+        settings.wayland_control_mode = Some("portal".to_string());
+        let msg = ServiceToWorker::UpdateDeskSettings(UpdateDeskSettingsPayload {
+            connection_id: "conn-uds".to_string(),
+            settings: settings.clone(),
+        });
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::UpdateDeskSettings(p) => {
+                assert_eq!(p.connection_id, "conn-uds");
+                assert_eq!(p.settings.video_fps, 45);
+                assert_eq!(p.settings.video_quality, 33);
+                assert_eq!(p.settings.wayland_control_mode.as_deref(), Some("portal"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `PrivateScreenStateChanged` is the reverse path (worker →
+    /// daemon → browser). Round-trip with `is_supported = false` +
+    /// an `error_msg` so a future schema change to
+    /// `PrivateScreenStateChangedData` shows up as a test failure
+    /// rather than as a silent wire-format drift.
+    #[test]
+    fn private_screen_state_changed_round_trips_bincode() {
+        let msg =
+            WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
+                connection_id: "conn-pss".to_string(),
+                data: PrivateScreenStateChangedData {
+                    visible: false,
+                    is_supported: false,
+                    error_msg: Some("hub denied".to_string()),
+                },
+            });
+        match bincode_round_trip(&msg) {
+            WorkerToService::PrivateScreenStateChanged(p) => {
+                assert_eq!(p.connection_id, "conn-pss");
+                assert!(!p.data.visible);
+                assert!(!p.data.is_supported);
+                assert_eq!(p.data.error_msg.as_deref(), Some("hub denied"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

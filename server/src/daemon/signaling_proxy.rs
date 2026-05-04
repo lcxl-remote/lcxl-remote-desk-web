@@ -9,7 +9,7 @@ use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, ServiceToWorker, SignalingPayload, WorkerToService,
 };
 use desk_signal_facade::model::{
-    signal::{RemoteDeskTypeEnum, SignalingModel},
+    signal::{RemoteDeskTypeEnum, SignalingModel, SignalingType},
     version::VersionInfo,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -331,6 +331,37 @@ pub async fn run_signaling_proxy(
             // `pc_manager::write_file_transfer_data`.
             WorkerToService::FileTransferData(payload) => {
                 crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload).await;
+            }
+            // Typed-IPC migration batch 1: replaces the legacy
+            // `WorkerToService::SignalingMessage` reverse path for
+            // private-screen state changes. Daemon constructs the
+            // outbound `SignalingType::PrivateScreenStateChanged`
+            // model (matching the wire shape the browser already
+            // expects) and broadcasts it through the same outbound
+            // channel the SignalingMessage path used. Build failures
+            // are non-fatal — log + drop, no panic on the bus.
+            WorkerToService::PrivateScreenStateChanged(payload) => {
+                match SignalingModel::new_request(
+                    SignalingType::PrivateScreenStateChanged,
+                    Some(payload.connection_id.clone()),
+                    Some(&payload.data),
+                ) {
+                    Ok(model) => match serde_json::to_string(&model) {
+                        Ok(text) => {
+                            let _ = outbound_tx.send(text);
+                        }
+                        Err(e) => warn!(
+                            "[SignalingProxy] Failed to serialise PrivateScreenStateChanged \
+                             for {}: {e}",
+                            payload.connection_id
+                        ),
+                    },
+                    Err(e) => warn!(
+                        "[SignalingProxy] Failed to build PrivateScreenStateChanged model \
+                         for {}: {e}",
+                        payload.connection_id
+                    ),
+                }
             }
         }
     }

@@ -2570,6 +2570,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "bytes",
+ "desk-signal-facade",
  "futures",
  "log",
  "serde",
