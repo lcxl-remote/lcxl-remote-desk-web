@@ -1,8 +1,9 @@
 use crate::daemon::pc_manager::PcRegistry;
-use crate::model::settings::SharedSettings;
+use crate::host_control::HostControlHub;
+use crate::model::settings::{Args, SharedSettings};
 use actix_web::web;
 use desk_ipc_protocol::{
-    dual_transport::framed,
+    dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
     message::{
         ConnectionAcceptState, MediaCapabilities, ServiceToWorker, SignalingPayload,
         WorkerInitPayload, WorkerToService,
@@ -273,6 +274,146 @@ impl WorkerManager {
         });
 
         info!("Worker started for session {session_id}");
+        Ok(())
+    }
+
+    /// In-process variant of [`Self::start_worker`] used by PR 5 portable
+    /// mode. Skips `CreateProcessAsUserW` and the named-pipe handshake;
+    /// instead constructs in-process tokio mpsc transports
+    /// ([`inprocess::make_event`] + [`inprocess::make_media`]) and spawns
+    /// the worker as an `actix_web::rt::spawn` task in the same process.
+    /// The worker shares the daemon's `Arc<HostControlHub>` directly — no
+    /// upstream ws bridge.
+    ///
+    /// Per-connection accept-state preservation across worker restarts
+    /// (relevant in named-pipe daemon mode for UAC / lock-screen swaps)
+    /// is intentionally absent here: portable mode does not switch
+    /// workers on desktop drift (it can't — single process owns the
+    /// capture session), so there is nothing to forward.
+    pub async fn start_inprocess_worker(
+        &self,
+        args: Args,
+        session_id: u32,
+        desktop_name: Option<String>,
+        host_control_hub: Arc<HostControlHub>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Mirror start_worker: a fresh worker re-reports capabilities on its
+        // own; clearing the cached snapshot avoids handing stale device data
+        // to a `RequestRemote` that lands between Init and the worker's
+        // first `Capabilities` emission.
+        *self.worker_capabilities.lock().unwrap() = None;
+
+        let mut inner = self.inner.lock().await;
+
+        if let Some(worker) = inner.active_worker.take() {
+            info!("Shutting down existing in-process worker before starting a new one");
+            let _ = worker.ipc_tx.send(ServiceToWorker::Shutdown);
+            // No process_handle in in-process mode — the worker task
+            // observes Shutdown on its event channel and unwinds on its
+            // own; we cannot `wait()` on it without storing the
+            // JoinHandle, which the rest of WorkerHandle isn't shaped
+            // for. The loose-end is acceptable in portable mode where
+            // restarts are rare (only on explicit caller request).
+        }
+
+        let pipe_name = format!("inprocess-{session_id}-{}", uuid::Uuid::new_v4());
+        let (ipc_cmd_tx, mut ipc_cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+
+        let config_json = {
+            let s = self.settings.read().await;
+            serde_json::to_string(&*s).map_err(|e| format!("Failed to serialize settings: {e}"))?
+        };
+
+        let init_payload = WorkerInitPayload {
+            session_id: format!("session-{session_id}"),
+            os_session_id: session_id,
+            desktop_name: desktop_name.clone(),
+            config_json,
+            signaling_url: None,
+            // No upstream WS — the worker shares the daemon's hub via
+            // the `shared_hub` parameter to `run_with_transports`.
+            auth_token: None,
+            host_upstream_url: None,
+            // Portable mode never swaps workers on UAC; nothing to
+            // preapprove (the daemon's accept-state cache stays empty
+            // for the entire process lifetime).
+            preapproved_connections: Vec::new(),
+            // Media transport is in-process below; no named pipe needed.
+            media_pipe_name: None,
+        };
+
+        // Build the three in-process transports:
+        // - bidirectional event pair (daemon ↔ worker)
+        // - uni-directional media (worker → daemon)
+        let (s2w_tx, s2w_rx) = inprocess::make_event::<ServiceToWorker>();
+        let (w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
+        let (media_tx, media_rx) = inprocess::make_media();
+
+        // Spawn the daemon-side bridge: drains `ipc_cmd_rx` → daemon
+        // EventSender (worker observes via its EventReceiver), and
+        // worker EventReceiver → `worker_msg_tx` (signaling_proxy
+        // observes via its drain loop). Reuses `bridge_event_transport`
+        // so the in-process and named-pipe paths share the
+        // shutdown / closed bookkeeping.
+        let pipe_name_for_bridge = pipe_name.clone();
+        let worker_msg_tx = (*self.worker_msg_tx).clone();
+        actix_web::rt::spawn(async move {
+            let _ = bridge_event_transport(
+                w2s_rx,
+                s2w_tx,
+                &mut ipc_cmd_rx,
+                &worker_msg_tx,
+                &pipe_name_for_bridge,
+            )
+            .await;
+        });
+
+        // Daemon-side media receiver: identical to the named-pipe path
+        // except the receiver is in-process (no decode work).
+        let _media_handle = spawn_media_receiver_task(media_rx, self.pc_registry.clone());
+
+        // Spawn the worker on `actix_web::rt::spawn` because
+        // `WorkerSession::run_with_transports` awaits actix-web internals
+        // (`DeskSession`, `awc::Client`, `actix_web::rt::spawn` from
+        // signaling handlers) which all require a `LocalSet` context.
+        // `tokio::spawn` would fail with "spawn_local called from
+        // outside of a `task::LocalSet`".
+        let worker_args = args;
+        let init_for_worker = init_payload;
+        let hub = host_control_hub;
+        actix_web::rt::spawn(async move {
+            let session = crate::worker::session::WorkerSession::new();
+            if let Err(e) = session
+                .run_with_transports(
+                    init_for_worker,
+                    s2w_rx,
+                    w2s_tx,
+                    Some(media_tx),
+                    Some(hub),
+                )
+                .await
+            {
+                error!("In-process worker exited with error: {e}");
+            }
+            info!("In-process worker task exited");
+            let _ = worker_args; // reserved for future per-mode toggles
+        });
+
+        inner.active_worker = Some(WorkerHandle {
+            pipe_name,
+            ipc_tx: ipc_cmd_tx,
+            // No OS process to track in in-process mode. The worker task
+            // is owned by the actix-rt System and will be cancelled when
+            // the System shuts down; we don't track its JoinHandle on the
+            // handle struct because the watchdog / restart paths key off
+            // `ipc_tx` alive-ness, not process state.
+            process_handle: None,
+            last_heartbeat_at: Instant::now(),
+            session_id,
+            desktop_name,
+        });
+
+        info!("In-process worker started for session {session_id}");
         Ok(())
     }
 
@@ -858,7 +999,8 @@ async fn run_pipe_server(
             Ok(Ok(())) => {
                 info!("Worker connected on media pipe {media_pipe_path}");
                 let (media_reader, _media_writer) = tokio::io::split(media_server);
-                Some(spawn_media_receiver_task(media_reader, pc_registry.clone()))
+                let receiver = framed::make_media_receiver(media_reader);
+                Some(spawn_media_receiver_task(receiver, pc_registry.clone()))
             }
             Ok(Err(e)) => {
                 warn!(
@@ -950,20 +1092,18 @@ fn create_named_pipe_with_sddl(
     }
 }
 
-/// Spawn the daemon-side media receiver. The task owns the reader half
-/// of the connected media pipe, decodes incoming `MediaFrame`s and
-/// forwards each one to [`crate::daemon::pc_manager::write_video_frame`]
-/// for `track.write_sample(...)`. Exits when the worker closes the pipe
-/// (`recv_frame` returns `None`).
-fn spawn_media_receiver_task<R>(
-    media_reader: R,
+/// Spawn the daemon-side media receiver. Owns a [`MediaReceiver`] (already
+/// constructed by the caller — `framed::make_media_receiver` for named-pipe
+/// mode, `inprocess::make_media` for the in-process portable path), decodes
+/// each [`MediaFrame`] and forwards to
+/// [`crate::daemon::pc_manager::write_video_frame`] for
+/// `track.write_sample(...)`. Exits when `recv_frame` returns `None`
+/// (transport closed).
+fn spawn_media_receiver_task(
+    mut receiver: Box<dyn MediaReceiver>,
     pc_registry: PcRegistry,
-) -> tokio::task::JoinHandle<()>
-where
-    R: tokio::io::AsyncRead + Unpin + Send + 'static,
-{
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut receiver = framed::make_media_receiver(media_reader);
         info!("[MediaReceiver] starting");
         while let Some(frame) = receiver.recv_frame().await {
             debug!(
@@ -1073,25 +1213,54 @@ async fn run_pipe_server(
     Ok(())
 }
 
+/// Named-pipe / Unix-socket bridge: wrap the byte-stream halves in framed
+/// event transports and delegate to [`bridge_event_transport`]. The
+/// transport-agnostic main loop is shared with the in-process portable
+/// path so behavioural differences (cmd → wire, wire → msg, daemon-
+/// initiated vs unexpected exit) live in exactly one place.
 async fn bridge_loop<R, W>(
-    mut reader: R,
-    mut writer: W,
+    reader: R,
+    writer: W,
     cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
     msg_tx: &mpsc::UnboundedSender<WorkerToService>,
     name: &str,
 ) -> bool
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
-    W: tokio::io::AsyncWrite + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let event_tx: Arc<dyn EventSender<ServiceToWorker>> = framed::spawn_event_sender(writer);
+    let event_rx: Box<dyn EventReceiver<WorkerToService>> = framed::make_event_receiver(reader);
+    bridge_event_transport(event_rx, event_tx, cmd_rx, msg_tx, name).await
+}
+
+/// Transport-agnostic bridge between the daemon's internal mpsc channels
+/// (`cmd_rx` for daemon → worker; `msg_tx` for worker → daemon) and the
+/// supplied event transport pair. Returns `true` when the daemon initiated
+/// the shutdown (Shutdown / DesktopSwitching command sent or cmd channel
+/// closed) and `false` when the worker side dropped first — the caller
+/// uses this to decide whether to trigger crash-recovery.
+async fn bridge_event_transport(
+    mut event_rx: Box<dyn EventReceiver<WorkerToService>>,
+    event_tx: Arc<dyn EventSender<ServiceToWorker>>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<ServiceToWorker>,
+    msg_tx: &mpsc::UnboundedSender<WorkerToService>,
+    name: &str,
+) -> bool {
     let (worker_msg_tx, mut worker_msg_rx) =
-        mpsc::unbounded_channel::<std::io::Result<WorkerToService>>();
+        mpsc::unbounded_channel::<Option<WorkerToService>>();
     tokio::spawn(async move {
         loop {
-            let result = read_message::<_, WorkerToService>(&mut reader).await;
-            let should_stop = result.is_err();
-            if worker_msg_tx.send(result).is_err() || should_stop {
-                break;
+            match event_rx.recv().await {
+                Some(m) => {
+                    if worker_msg_tx.send(Some(m)).is_err() {
+                        break;
+                    }
+                }
+                None => {
+                    let _ = worker_msg_tx.send(None);
+                    break;
+                }
             }
         }
     });
@@ -1108,8 +1277,8 @@ where
                         ) {
                             daemon_initiated = true;
                         }
-                        if let Err(e) = write_message(&mut writer, &msg).await {
-                            error!("Failed to write to Worker pipe [{name}]: {e}");
+                        if let Err(e) = event_tx.send(msg).await {
+                            error!("Failed to send to Worker [{name}]: {e}");
                             break;
                         }
                     }
@@ -1122,22 +1291,18 @@ where
             }
             msg_result = worker_msg_rx.recv() => {
                 match msg_result {
-                    Some(Ok(msg)) => {
+                    Some(Some(msg)) => {
                         if msg_tx.send(msg).is_err() {
                             error!("SignalingProxy receiver dropped for [{name}]");
                             break;
                         }
                     }
-                    Some(Err(e)) => {
-                        if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                            info!("Worker disconnected from [{name}]");
-                        } else {
-                            error!("Pipe read error [{name}]: {e}");
-                        }
+                    Some(None) => {
+                        info!("Worker event transport closed for [{name}]");
                         break;
                     }
                     None => {
-                        info!("Worker pipe reader stopped for [{name}]");
+                        info!("Worker reader task stopped for [{name}]");
                         break;
                     }
                 }
@@ -1371,5 +1536,139 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(120),
         ));
+    }
+}
+
+/// Cross-platform tests for the transport-agnostic bridge — exercises the
+/// in-process `EventSender` / `EventReceiver` path the PR 5 portable mode
+/// uses without needing Windows named pipes or a daemon process. The
+/// Windows-only `tests` module above stays gated because it pulls in
+/// `WTSQueryUserToken` / Windows token APIs.
+#[cfg(test)]
+mod bridge_tests {
+    use super::*;
+    use desk_ipc_protocol::dual_transport::inprocess;
+    use desk_ipc_protocol::message::{
+        ForceKeyframePayload, HeartbeatPayload, ServiceToWorker, WorkerToService,
+    };
+
+    /// `bridge_event_transport` shuttles a daemon command (cmd_rx →
+    /// EventSender) onto the worker's event transport. Verifies the
+    /// happy path before going on to lifecycle tests below.
+    #[tokio::test]
+    async fn bridge_forwards_cmd_to_worker() {
+        let (s2w_tx, mut s2w_rx) = inprocess::make_event::<ServiceToWorker>();
+        let (_w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+        let (msg_tx, _msg_rx) = mpsc::unbounded_channel::<WorkerToService>();
+
+        let handle = tokio::spawn(async move {
+            bridge_event_transport(w2s_rx, s2w_tx, &mut cmd_rx, &msg_tx, "bridge-test").await
+        });
+
+        cmd_tx
+            .send(ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                connection_id: "c1".to_string(),
+            }))
+            .expect("cmd send");
+
+        let received = tokio::time::timeout(tokio::time::Duration::from_secs(1), s2w_rx.recv())
+            .await
+            .expect("worker should receive cmd quickly")
+            .expect("transport open");
+        assert!(matches!(received, ServiceToWorker::ForceKeyframe(_)));
+
+        // Drop cmd_tx → bridge observes None on cmd channel and exits
+        // (daemon-initiated shutdown).
+        drop(cmd_tx);
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .expect("bridge must exit on cmd channel close")
+            .expect("task did not panic");
+        assert!(result, "cmd channel close counts as daemon-initiated");
+    }
+
+    /// `bridge_event_transport` forwards worker → daemon messages (worker
+    /// EventSender → daemon msg_tx). Daemon-side msg_rx must observe the
+    /// payload in order without re-encoding.
+    #[tokio::test]
+    async fn bridge_forwards_worker_msg_to_daemon() {
+        let (s2w_tx, _s2w_rx) = inprocess::make_event::<ServiceToWorker>();
+        let (w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
+        let (_cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<WorkerToService>();
+
+        let handle = tokio::spawn(async move {
+            bridge_event_transport(w2s_rx, s2w_tx, &mut cmd_rx, &msg_tx, "bridge-test").await
+        });
+
+        w2s_tx
+            .send(WorkerToService::Heartbeat(HeartbeatPayload {
+                timestamp_ms: 42,
+                active_connections: 0,
+                cpu_usage: None,
+                memory_usage: None,
+            }))
+            .await
+            .expect("worker send");
+
+        let observed = tokio::time::timeout(tokio::time::Duration::from_secs(1), msg_rx.recv())
+            .await
+            .expect("daemon should observe worker msg")
+            .expect("daemon msg channel open");
+        match observed {
+            WorkerToService::Heartbeat(p) => assert_eq!(p.timestamp_ms, 42),
+            other => panic!("expected Heartbeat, got {other:?}"),
+        }
+
+        // Drop the worker EventSender (mpsc closes) → bridge observes
+        // None on the worker side and exits with `daemon_initiated=false`
+        // (worker disconnected first; outer caller would trigger
+        // crash-recovery in the named-pipe path).
+        drop(w2s_tx);
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .expect("bridge must exit on worker close")
+            .expect("task did not panic");
+        assert!(
+            !result,
+            "worker close means worker initiated; daemon should treat as crash"
+        );
+    }
+
+    /// `Shutdown` command sent by the daemon must mark `daemon_initiated`
+    /// even when the worker side is still alive — that's the signal the
+    /// named-pipe `run_pipe_server` uses to skip crash-recovery.
+    #[tokio::test]
+    async fn bridge_shutdown_cmd_marks_daemon_initiated() {
+        let (s2w_tx, mut s2w_rx) = inprocess::make_event::<ServiceToWorker>();
+        let (_w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<ServiceToWorker>();
+        let (msg_tx, _msg_rx) = mpsc::unbounded_channel::<WorkerToService>();
+
+        let handle = tokio::spawn(async move {
+            bridge_event_transport(w2s_rx, s2w_tx, &mut cmd_rx, &msg_tx, "bridge-test").await
+        });
+
+        cmd_tx
+            .send(ServiceToWorker::Shutdown)
+            .expect("send Shutdown");
+
+        // Worker side must observe the Shutdown.
+        let observed = tokio::time::timeout(tokio::time::Duration::from_secs(1), s2w_rx.recv())
+            .await
+            .expect("worker should receive Shutdown")
+            .expect("transport open");
+        assert!(matches!(observed, ServiceToWorker::Shutdown));
+
+        // Drop cmd_tx so the bridge exits (Shutdown doesn't itself break
+        // the loop — it just flips the flag; the loop ends on cmd close
+        // or worker close).
+        drop(cmd_tx);
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .expect("bridge must exit")
+            .expect("task did not panic");
+        assert!(result, "Shutdown cmd must mark daemon-initiated");
     }
 }
