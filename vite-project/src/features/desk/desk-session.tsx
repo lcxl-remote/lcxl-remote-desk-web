@@ -37,8 +37,6 @@ import {
     SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN,
     SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED,
     SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR,
-    SIGNALING_TYPE_CODE_DESKTOP_SWITCHING,
-    SIGNALING_TYPE_CODE_DESKTOP_READY,
 } from "./constants"
 
 export default function DeskSession() {
@@ -91,19 +89,20 @@ export default function DeskSession() {
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
 
-    // Desktop-switch reconnect state
-    const [reconnectTimedOut, setReconnectTimedOut] = useState(false);
-
-    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, connectionPhase, closeRTC, rtcStats } = useDeskRTC({
+    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         lastMessage,
         sendMessage
     });
 
-    // Remember the last settings used so auto-reconnect can replay them
+    // PR 6 (Arch IV): the daemon keeps the WebRTC PC alive across worker
+    // swaps. The desktop-switch reconnect state machine
+    // (`reconnectTimedOut`, `autoReconnectRef`, `switchTimeoutRef`) is
+    // gone — the browser sees worker swaps as a brief frame freeze that
+    // resolves on the next IDR, with no React-level state to manage.
+    // `lastSettingsRef` survives because the non-reconnect parts of the
+    // adaptive-quality loop still consult it.
     const lastSettingsRef = useRef<DeskSettings | null>(null);
-    const autoReconnectRef = useRef(false);
-    const switchTimeoutRef = useRef<number | null>(null);
 
     // Adaptive quality state
     const statsWindowRef = useRef<Array<{ packetLoss: number; rtt: number }>>([]);
@@ -183,21 +182,6 @@ export default function DeskSession() {
                 console.error("Remote audio playback error:", data.error);
                 forceError(data.error);
             }
-        } else if (signaling_type === SIGNALING_TYPE_CODE_DESKTOP_SWITCHING) {
-            setReconnectTimedOut(false);
-            if (switchTimeoutRef.current) window.clearTimeout(switchTimeoutRef.current);
-            switchTimeoutRef.current = window.setTimeout(() => {
-                switchTimeoutRef.current = null;
-                autoReconnectRef.current = false;
-                setReconnectTimedOut(true);
-            }, 10000);
-        } else if (signaling_type === SIGNALING_TYPE_CODE_DESKTOP_READY) {
-            if (switchTimeoutRef.current) {
-                window.clearTimeout(switchTimeoutRef.current);
-                switchTimeoutRef.current = null;
-            }
-            autoReconnectRef.current = true;
-            sendMessage(SIGNALING_TYPE_CODE_REQUEST_REMOTE, { connection_id: deskId }, deskId);
         }
     }, [lastMessage, forceError, sendMessage, deskId]);
 
@@ -209,19 +193,16 @@ export default function DeskSession() {
         }
     }, [isConnected]);
 
-    // Wait for INIT data — auto-reconnect after desktop switch, or show config dialog
+    // Wait for INIT data, then show the config dialog so the user can
+    // pick capture settings. PR 6 (Arch IV): the auto-reconnect path
+    // that fired after `DesktopReady` is gone — the daemon-held PC
+    // survives worker swaps so INIT only ever arrives once per session.
     useEffect(() => {
-        if (initData && !isRTCConnected) {
-            if (autoReconnectRef.current && lastSettingsRef.current) {
-                console.log("[AutoReconnect] INIT received after desktop switch, reconnecting with last settings");
-                autoReconnectRef.current = false;
-                connect(lastSettingsRef.current);
-            } else if (!document.getElementById("desk-config-dialog")) {
-                console.log("Showing config dialog for remote connection");
-                setIsConfigOpen(true);
-            }
+        if (initData && !isRTCConnected && !document.getElementById("desk-config-dialog")) {
+            console.log("Showing config dialog for remote connection");
+            setIsConfigOpen(true);
         }
-    }, [initData, isRTCConnected, connect]);
+    }, [initData, isRTCConnected]);
 
     // Attach remote stream to video element
     useEffect(() => {
@@ -671,27 +652,11 @@ export default function DeskSession() {
                             </div>
                         )}
 
-                        {(connectionPhase === 'switching' || connectionPhase === 'reconnecting') && !reconnectTimedOut && (
-                            <div className="absolute inset-0 z-50 bg-black/70 flex flex-col items-center justify-center gap-3 text-white backdrop-blur-sm">
-                                <Loader2 className="h-10 w-10 animate-spin text-blue-400" />
-                                <span className="text-lg font-medium">
-                                    {connectionPhase === 'switching'
-                                        ? t('pages.desk.reconnect.switching', 'Desktop switching, please wait...')
-                                        : t('pages.desk.reconnect.reconnecting', 'Reconnecting...')}
-                                </span>
-                            </div>
-                        )}
-
-                        {reconnectTimedOut && (
-                            <div className="absolute inset-0 z-50 bg-black/70 flex flex-col items-center justify-center gap-3 text-white backdrop-blur-sm">
-                                <span className="text-lg font-medium text-red-400">
-                                    {t('pages.desk.reconnect.timeout', 'Reconnection timed out. Please disconnect and try again.')}
-                                </span>
-                                <Button variant="destructive" onClick={handleDisconnect}>
-                                    {t('pages.desk.disconnect', 'Disconnect')}
-                                </Button>
-                            </div>
-                        )}
+                        {/* PR 6 (Arch IV): the desktop-switching /
+                         * reconnecting / reconnect-timeout overlays were
+                         * removed when the daemon-side keep-PC swap path
+                         * landed — worker swaps no longer tear down the
+                         * browser PC, so there is nothing to overlay. */}
 
                         {isWaitingApproval && (
                             <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80 text-white px-6 py-4 rounded-lg shadow-2xl backdrop-blur-md border border-white/10 flex flex-col items-center gap-4 animate-in fade-in slide-in-from-bottom-4">

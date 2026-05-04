@@ -6,18 +6,8 @@ import {
     SIGNALING_TYPE_CODE_ANSWER,
     SIGNALING_TYPE_CODE_CANID,
     SIGNALING_TYPE_CODE_ERROR,
-    SIGNALING_TYPE_CODE_DESKTOP_SWITCHING,
-    SIGNALING_TYPE_CODE_DESKTOP_READY,
 } from './constants';
 import type { SignalingMessage } from './use-desk-signaling';
-
-/** Connection lifecycle phase for desktop-switch reconnect support. */
-export type RTCConnectionPhase =
-    | 'idle'          // Not connected
-    | 'connected'     // WebRTC fully connected
-    | 'switching'     // DesktopSwitching received — waiting for DesktopReady
-    | 'reconnecting'  // DesktopReady received — reconnecting in progress
-    | 'failed';       // Unexpected ICE failure (not a desktop switch)
 
 type UseDeskRTCProps = {
     deskId: string | null;
@@ -49,9 +39,6 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
     const whiteboardChannel = useRef<RTCDataChannel | null>(null);
     const cursorSyncChannel = useRef<RTCDataChannel | null>(null);
     const [isRTCConnected, setIsRTCConnected] = useState(false);
-    const [connectionPhase, setConnectionPhase] = useState<RTCConnectionPhase>('idle');
-    // Tracks whether the current disconnection is an expected desktop switch
-    const isDesktopSwitchingRef = useRef(false);
 
     const [rtcStats, setRtcStats] = useState<RTCStatsData>({
         fps: 0, bitrate: 0, rtt: 0,
@@ -72,34 +59,11 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         const { signaling_type, signaling_data } = lastMessage;
 
         const handleSignaling = async () => {
-            if (signaling_type === SIGNALING_TYPE_CODE_DESKTOP_SWITCHING) {
-                console.log('[WebRTC] DesktopSwitching received — closing existing PeerConnection');
-                isDesktopSwitchingRef.current = true;
-                setConnectionPhase('switching');
-                if (peerConnection.current) {
-                    peerConnection.current.close();
-                    peerConnection.current = null;
-                }
-                setIsRTCConnected(false);
-                setRemoteStream(null);
-                // Drop the old worker's INIT payload too. desk-session.tsx
-                // gates "auto-reconnect vs show config dialog" on
-                // (initData && !isRTCConnected); without clearing initData,
-                // the `setIsRTCConnected(false)` above would re-fire that
-                // useEffect on the *previous* INIT before DESKTOP_READY
-                // arrives to set autoReconnectRef = true, causing the
-                // config dialog to flash open on every desktop switch.
-                setInitData(null);
-                return;
-            }
-
-            if (signaling_type === SIGNALING_TYPE_CODE_DESKTOP_READY) {
-                console.log('[WebRTC] DesktopReady received — triggering reconnect');
-                isDesktopSwitchingRef.current = false;
-                setConnectionPhase('reconnecting');
-                return;
-            }
-
+            // PR 6 (Arch IV): the daemon now owns the WebRTC PC and
+            // keeps it alive across worker swaps (UAC / lock screen /
+            // session change). Browser-facing DesktopSwitching /
+            // DesktopReady signals are no longer emitted, so the
+            // tear-down-and-reconnect path that lived here is gone.
             if (signaling_type === SIGNALING_TYPE_CODE_INIT) {
                 console.log('Received INIT', signaling_data);
                 setInitData(signaling_data);
@@ -169,14 +133,8 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
             console.log(`[WebRTC] ICE Connection State changed to: ${pc.iceConnectionState}`);
             if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                 setIsRTCConnected(true);
-                setConnectionPhase('connected');
-                isDesktopSwitchingRef.current = false;
             } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
                 setIsRTCConnected(false);
-                // Only mark as failed if this is NOT an expected desktop switch
-                if (!isDesktopSwitchingRef.current) {
-                    setConnectionPhase('failed');
-                }
             }
         }
 
@@ -401,7 +359,6 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         whiteboardChannel,
         cursorSyncChannel,
         isRTCConnected,
-        connectionPhase,
         rtcStats
     };
 }
