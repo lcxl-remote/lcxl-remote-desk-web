@@ -33,6 +33,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use desk_signal_facade::model::signal::{
     LcxlRTCIceServer, OfferModel, RequestRemoteModel, SignalingModel, SignalingState,
@@ -201,6 +202,21 @@ pub struct PeerConnectionContext {
     /// chunks and control messages still flow through the standard
     /// router as `ServiceToWorker::FileTransferCommand`.
     pub file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    /// PR 6: pause flag set by [`PcRegistry::pause_all_media`] before a
+    /// worker swap. While set, [`write_video_frame`] drops samples so
+    /// `webrtc-rs` does not push frames the new encoder hasn't anchored
+    /// yet. The first `MediaFrameKind::VideoI` after the pause clears
+    /// the flag in-line, giving the browser a clean IDR-aligned
+    /// resync. Audio falls under the same flag — the brief silence is
+    /// preferable to playing audio against a frozen video frame.
+    pub media_paused: Arc<AtomicBool>,
+    /// PR 6: cached payload from the most recent `handle_offer` for
+    /// this connection. After a worker swap [`PcRegistry::resume_active_media`]
+    /// re-issues this (plus a `ForceKeyframe`) so the new worker
+    /// re-arms its per-`connection_id` encoder without a fresh SDP
+    /// round-trip. `None` means the offer hasn't been exchanged yet
+    /// (PC up but no media negotiated) — resume is a no-op for those.
+    pub cached_start_media: Arc<RwLock<Option<StartMediaPayload>>>,
 }
 
 /// Daemon-wide registry of active per-browser
@@ -283,6 +299,8 @@ impl PcRegistry {
             cursor_data_channel: Arc::new(RwLock::new(None)),
             clipboard_data_channel: Arc::new(RwLock::new(None)),
             file_transfer_data_channel: Arc::new(RwLock::new(None)),
+            media_paused: Arc::new(AtomicBool::new(false)),
+            cached_start_media: Arc::new(RwLock::new(None)),
         }));
 
         self.inner
@@ -291,6 +309,66 @@ impl PcRegistry {
             .insert(connection_id.to_string(), Arc::clone(&ctx));
 
         Ok(ctx)
+    }
+
+    /// PR 6: mark every active PC as paused before a worker swap.
+    /// Subsequent `write_video_frame` calls drop frames per PC until the
+    /// first `MediaFrameKind::VideoI` after the swap clears the flag in
+    /// place. Counterpart to [`Self::resume_active_media`] which re-issues
+    /// the cached `StartMediaPayload` to the freshly spawned worker.
+    pub async fn pause_all_media(&self) {
+        let map = self.inner.read().await;
+        for (id, ctx) in map.iter() {
+            let ctx = ctx.read().await;
+            ctx.media_paused.store(true, Ordering::Relaxed);
+            log::debug!("[pc_manager] paused media for {id} (worker swap)");
+        }
+    }
+
+    /// PR 6: re-issue the cached `StartMediaPayload` + a `ForceKeyframe`
+    /// to the worker for every PC that already negotiated an offer.
+    /// Called by `signaling_proxy` once the new worker reports
+    /// `Capabilities` after a desktop / crash swap. PCs without a cached
+    /// offer (request_remote arrived but offer didn't yet) are skipped —
+    /// the standard `handle_offer` path still owns first-time StartMedia.
+    pub async fn resume_active_media(&self, worker_mgr: &WorkerManager) {
+        let snapshot: Vec<(String, Option<StartMediaPayload>)> = {
+            let map = self.inner.read().await;
+            let mut out = Vec::with_capacity(map.len());
+            for (id, ctx) in map.iter() {
+                let cached = ctx.read().await.cached_start_media.read().await.clone();
+                out.push((id.clone(), cached));
+            }
+            out
+        };
+        for (id, payload) in snapshot {
+            let payload = match payload {
+                Some(p) => p,
+                None => {
+                    log::debug!(
+                        "[pc_manager] resume: no cached StartMedia for {id} (offer not exchanged \
+                         yet) — skipping"
+                    );
+                    continue;
+                }
+            };
+            log::info!("[pc_manager] resume: re-issuing StartMedia + ForceKeyframe for {id}");
+            if let Err(e) = worker_mgr
+                .send_to_worker(ServiceToWorker::StartMedia(payload))
+                .await
+            {
+                log::warn!("[pc_manager] resume StartMedia for {id} failed: {e}");
+                continue;
+            }
+            if let Err(e) = worker_mgr
+                .send_to_worker(ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                    connection_id: id.clone(),
+                }))
+                .await
+            {
+                log::warn!("[pc_manager] resume ForceKeyframe for {id} failed: {e}");
+            }
+        }
     }
 }
 
@@ -877,7 +955,13 @@ pub async fn handle_offer(
         bitrate_kbps: 0,
         quality: offer.desk_settings.video_quality,
     };
+    // PR 6: stash the payload so a worker swap can re-issue it via
+    // `resume_active_media` without forcing the browser through a fresh
+    // SDP offer. Done before `drop(ctx_guard)` so the cache is published
+    // ahead of any concurrent resume that races the swap.
+    let cache_slot = ctx_guard.cached_start_media.clone();
     drop(ctx_guard);
+    *cache_slot.write().await = Some(start_media_payload.clone());
     if let Err(e) = worker_mgr
         .send_to_worker(ServiceToWorker::StartMedia(start_media_payload))
         .await
@@ -971,14 +1055,50 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
         }
     };
 
-    // Hold the read guard only as long as we need the track Arc; clone
-    // it out before awaiting on `write_sample` so the daemon's offer /
-    // canid handlers (which take the write lock) are not blocked while
-    // the codec write completes.
-    let track_opt = match frame.kind {
-        MediaFrameKind::VideoI | MediaFrameKind::VideoP => ctx.read().await.video_track.clone(),
-        MediaFrameKind::Audio => ctx.read().await.audio_track.clone(),
+    // Hold the read guard only as long as we need the track Arc + the
+    // pause flag; clone them out before awaiting on `write_sample` so
+    // the daemon's offer / canid handlers (which take the write lock)
+    // are not blocked while the codec write completes.
+    let (track_opt, paused) = {
+        let g = ctx.read().await;
+        let t = match frame.kind {
+            MediaFrameKind::VideoI | MediaFrameKind::VideoP => g.video_track.clone(),
+            MediaFrameKind::Audio => g.audio_track.clone(),
+        };
+        (t, g.media_paused.clone())
     };
+
+    // PR 6: while a worker swap is in progress every frame except the
+    // first IDR is dropped. Writing P frames or audio against the
+    // browser's existing reference would either decode wrong (P) or
+    // play sound against a frozen video frame (audio). The first
+    // VideoI clears the flag in place — single store per swap, no
+    // central coordinator needed because the same task that observes
+    // `paused == true` is the one that flips it back. The flag-flip
+    // happens BEFORE the track-presence check so the resume contract
+    // (an IDR always re-arms the PC) holds even in the unusual case
+    // where the offer hasn't reinstalled the track yet.
+    if paused.load(Ordering::Relaxed) {
+        match frame.kind {
+            MediaFrameKind::VideoI => {
+                paused.store(false, Ordering::Relaxed);
+                log::info!(
+                    "[pc_manager] {} resumed media (first IDR after worker swap)",
+                    frame.connection_id
+                );
+                // fall through to write_sample
+            }
+            MediaFrameKind::VideoP | MediaFrameKind::Audio => {
+                log::trace!(
+                    "[pc_manager] dropping {:?} for {} during worker swap (waiting for IDR)",
+                    frame.kind,
+                    frame.connection_id
+                );
+                return;
+            }
+        }
+    }
+
     let track = match track_opt {
         Some(t) => t,
         None => {
@@ -1626,6 +1746,159 @@ mod tests {
             payload: vec![0xCD; 64],
         };
         write_video_frame(&registry, frame).await;
+    }
+
+    /// PR 6: `pause_all_media` flips the per-PC flag for every
+    /// connection in the registry. Test isolates the registry-side
+    /// behaviour without involving worker IPC.
+    #[tokio::test]
+    async fn pause_all_media_marks_every_pc() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        for id in ["alpha", "beta", "gamma"] {
+            registry
+                .create_for_request_remote(id, &request_remote, &s)
+                .await
+                .expect("create");
+        }
+
+        // Sanity: nothing is paused at construction.
+        for id in ["alpha", "beta", "gamma"] {
+            let ctx = registry.get(id).await.unwrap();
+            assert!(!ctx.read().await.media_paused.load(Ordering::Relaxed));
+        }
+
+        registry.pause_all_media().await;
+
+        for id in ["alpha", "beta", "gamma"] {
+            let ctx = registry.get(id).await.unwrap();
+            assert!(
+                ctx.read().await.media_paused.load(Ordering::Relaxed),
+                "pause_all_media should mark {id}"
+            );
+        }
+    }
+
+    /// PR 6: with `media_paused = true`, a P frame must be dropped and
+    /// the flag must remain set (next IDR is the resync barrier).
+    /// Verified by checking the flag stays `true` after the call —
+    /// `write_video_frame` swallows errors silently so we can't observe
+    /// the drop directly without instrumenting the track.
+    #[tokio::test]
+    async fn write_video_frame_paused_p_frame_keeps_flag_set() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-pause-p", &request_remote, &s)
+            .await
+            .expect("create");
+        registry.pause_all_media().await;
+
+        let frame = MediaFrame {
+            connection_id: "conn-pause-p".into(),
+            seq: 0,
+            ts_ns: 0,
+            duration_ns: 16_666_666,
+            kind: MediaFrameKind::VideoP,
+            codec: MediaCodec::H264,
+            payload: vec![0x11; 16],
+        };
+        write_video_frame(&registry, frame).await;
+
+        let ctx = registry.get("conn-pause-p").await.unwrap();
+        assert!(
+            ctx.read().await.media_paused.load(Ordering::Relaxed),
+            "P frame during pause must not clear the flag"
+        );
+    }
+
+    /// PR 6: `MediaFrameKind::VideoI` arriving while paused clears the
+    /// flag in place. Subsequent frames flow normally. We cannot
+    /// observe the actual write_sample call (no track set), but the
+    /// flag transition is the contract that gates resume — verifying
+    /// it is sufficient.
+    #[tokio::test]
+    async fn write_video_frame_paused_i_frame_clears_flag() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-pause-i", &request_remote, &s)
+            .await
+            .expect("create");
+        registry.pause_all_media().await;
+
+        let frame = MediaFrame {
+            connection_id: "conn-pause-i".into(),
+            seq: 0,
+            ts_ns: 0,
+            duration_ns: 16_666_666,
+            kind: MediaFrameKind::VideoI,
+            codec: MediaCodec::H264,
+            payload: vec![0x22; 32],
+        };
+        write_video_frame(&registry, frame).await;
+
+        let ctx = registry.get("conn-pause-i").await.unwrap();
+        assert!(
+            !ctx.read().await.media_paused.load(Ordering::Relaxed),
+            "first IDR while paused must clear the flag"
+        );
+    }
+
+    /// PR 6: `resume_active_media` over an empty registry must be a
+    /// silent no-op (no WorkerManager IPC, no panic). Guards the
+    /// post-shutdown / pre-first-RequestRemote race window.
+    #[tokio::test]
+    async fn resume_active_media_empty_registry_is_noop() {
+        let registry = PcRegistry::new();
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        // No PCs registered, no worker active — resume must just iterate
+        // zero entries and return cleanly.
+        registry.resume_active_media(&worker_mgr).await;
+    }
+
+    /// PR 6: a PC that hasn't yet received an Offer has
+    /// `cached_start_media = None`; resume must skip it (rather than
+    /// trying to send a default StartMedia, which would tell the
+    /// worker to start an encoder for a connection that hasn't
+    /// negotiated codecs yet).
+    #[tokio::test]
+    async fn resume_active_media_skips_pc_without_cached_offer() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-no-offer", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        // The worker_mgr has no active worker so any send_to_worker
+        // would log a warning, but the snapshot loop must skip the PC
+        // entirely because cached_start_media is None.
+        registry.resume_active_media(&worker_mgr).await;
+
+        // Cached slot stays None.
+        let ctx = registry.get("conn-no-offer").await.unwrap();
+        assert!(ctx.read().await.cached_start_media.read().await.is_none());
     }
 
     /// Audio frames go through the same entry point but route to
