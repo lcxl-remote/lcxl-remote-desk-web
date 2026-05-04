@@ -501,10 +501,27 @@ impl WorkerSession {
         let shared_settings = Arc::new(SharedSettings::from(settings));
         let shared_settings_data = web::Data::from(shared_settings.clone());
 
-        // Initialize telemetry for SessionWorker mode (using actual startup mode enum variable instead of args to ensure correct log naming)
-        let _guard =
+        // Telemetry init policy:
+        //
+        // - Named-pipe SessionWorker mode: the worker is a separate OS process
+        //   spawned via `CreateProcessAsUserW`; it must install its own global
+        //   tracing subscriber so log events / OTLP spans flow correctly.
+        // - In-process portable / DeskServer mode: the host process
+        //   (`crate::run`) already called `init_telemetry`, which sets the
+        //   single per-process global default subscriber. A second
+        //   `init_telemetry` here would panic with `SetGlobalDefaultError`.
+        //
+        // `shared_hub.is_some()` is the canonical in-process indicator (see
+        // the host-control hub branch immediately below), so we reuse it.
+        let _guard = if should_init_worker_telemetry(shared_hub.is_some()) {
             crate::telemetry::init_telemetry(shared_settings.clone(), &StartupMode::SessionWorker)
-                .await?;
+                .await?
+        } else {
+            info!(
+                "In-process worker: skipping telemetry init (host process already installed global subscriber)"
+            );
+            None
+        };
 
         let (desk_tx, mut desk_rx) = mpsc::unbounded_channel::<DeskSessionMessage>();
         let session_sender = DeskSessionSender {
@@ -1144,6 +1161,22 @@ async fn connect_media_pipe(
     }
 }
 
+/// Whether [`WorkerSession::run_with_transports`] should call
+/// [`crate::telemetry::init_telemetry`] for itself.
+///
+/// `shared_hub_is_some` is `true` whenever the worker runs in-process inside
+/// the host (portable / DeskServer modes); `false` for the named-pipe
+/// SessionWorker path that runs in a dedicated OS process.
+///
+/// Telemetry init installs the **global default** tracing subscriber, which
+/// can only be set once per process. Calling it again from an in-process
+/// worker panics with `SetGlobalDefaultError`. Conversely, the named-pipe
+/// worker is a separate process whose subscriber slot is empty, so it must
+/// init.
+fn should_init_worker_telemetry(shared_hub_is_some: bool) -> bool {
+    !shared_hub_is_some
+}
+
 /// Spawn a task that drains the dispatcher-facing mpsc and forwards each
 /// message onto the supplied [`EventSender`]. Replaces the old byte-stream
 /// writer task so the same forwarder works for the named-pipe path (where
@@ -1242,6 +1275,21 @@ mod tests {
         let (hub, spec) = build_hub_from_init(&payload);
         assert_eq!(hub.mode(), HubMode::Local);
         assert!(spec.is_none());
+    }
+
+    /// Telemetry must initialize for the named-pipe SessionWorker path
+    /// (`shared_hub == None`, the worker is its own OS process) and must NOT
+    /// initialize for the in-process portable / DeskServer path
+    /// (`shared_hub == Some(_)`, the host process already installed the
+    /// global tracing subscriber). A double-init in the in-process path
+    /// would panic with `SetGlobalDefaultError`, which is exactly the bug
+    /// surfaced when portable mode tried to spawn an in-process worker.
+    #[test]
+    fn telemetry_init_skipped_when_shared_hub_present() {
+        // In-process worker: host already inited → must skip.
+        assert!(!should_init_worker_telemetry(true));
+        // Named-pipe worker: separate process → must init.
+        assert!(should_init_worker_telemetry(false));
     }
 
     /// Forwarder hub built without an auth token still works (passes empty
