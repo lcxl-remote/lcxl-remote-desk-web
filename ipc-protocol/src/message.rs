@@ -4,6 +4,9 @@ use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileLi
 use desk_signal_facade::model::private_screen::PrivateScreenStateChangedData;
 use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
+use desk_signal_facade::model::terminal::{
+    StartTerminalSession, TerminalInputData, TerminalList, TerminalOutputData, TerminalResizeData,
+};
 use serde::{Deserialize, Serialize};
 
 /// Messages sent from Service Core (daemon) to Worker process over the
@@ -136,6 +139,35 @@ pub enum ServiceToWorker {
     /// persists the new values and replies via
     /// [`WorkerToService::ManagerUpdateSettingsResponse`] (empty body).
     ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload),
+
+    // ---------- Arch IV typed-IPC migration batch 3 (terminal plane) ----------
+    /// Browser → worker request to launch a new PTY-backed terminal
+    /// session. Worker replies via
+    /// [`WorkerToService::TerminalStarted`] (empty body) on success;
+    /// failures fall through to the legacy `Error` enum. The PTY
+    /// reader thread emits `ReplyFromTerminal` chunks until the child
+    /// exits, at which point the monitor task emits `TerminalClosed`.
+    /// Replaces the legacy `StartTerminal` flow over the
+    /// `SignalingMessage` bridge.
+    StartTerminalRequest(StartTerminalRequestPayload),
+
+    /// Browser → worker keystroke / paste write to a running terminal.
+    /// One-way — no response variant.
+    SendDataToTerminalRequest(SendDataToTerminalPayload),
+
+    /// Browser → worker terminal window resize. One-way.
+    ResizeTerminalRequest(ResizeTerminalPayload),
+
+    /// Browser → worker terminal close (force-kills the child process
+    /// tree by OS-session id). One-way; `TerminalClosed` is emitted by
+    /// the monitor task when the child actually exits.
+    CloseTerminalRequest(CloseTerminalPayload),
+
+    /// Browser → worker request for the list of available shells on
+    /// this host. Worker replies via
+    /// [`WorkerToService::ListTerminalResponse`] (carries
+    /// [`TerminalList`]).
+    ListTerminalRequest(ListTerminalRequestPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -227,6 +259,33 @@ pub enum WorkerToService {
     /// [`ServiceToWorker::ManagerUpdateSettingsRequest`] (empty
     /// body — settings persistence happens on the worker side).
     ManagerUpdateSettingsResponse(ManagerResponseRefPayload),
+
+    // ---------- Arch IV typed-IPC migration batch 3 (terminal plane) ----------
+    /// Worker → daemon success reply for
+    /// [`ServiceToWorker::StartTerminalRequest`]. Empty body — the
+    /// `request_id` correlates with the original request. The daemon
+    /// rebuilds the matching `SignalingType::TerminalStarted` outbound
+    /// model and writes it to the browser's signaling WS.
+    TerminalStarted(TerminalStartedPayload),
+
+    /// Worker → daemon notification that the PTY child process exited
+    /// (either a clean exit observed by the monitor task or a forced
+    /// close via [`ServiceToWorker::CloseTerminalRequest`]). No
+    /// `request_id` because this is a server-initiated notification
+    /// rather than a response to any specific request.
+    TerminalClosed(TerminalClosedPayload),
+
+    /// Worker → daemon stdout chunk from the PTY reader thread.
+    /// High-frequency keystroke-by-keystroke; chunks are 1 KB max.
+    /// Travels on the event pipe (event traffic only — no media
+    /// pressure on this path).
+    ReplyFromTerminal(ReplyFromTerminalPayload),
+
+    /// Worker → daemon response to
+    /// [`ServiceToWorker::ListTerminalRequest`]. Carries the
+    /// [`TerminalList`] (available shells + the configured default
+    /// index).
+    ListTerminalResponse(ListTerminalResponsePayload),
 }
 
 // ==================== Payload Types ====================
@@ -604,6 +663,94 @@ pub struct ManagerQuerySettingsResponsePayload {
     pub settings: RemoteSystemSettings,
 }
 
+// ---------- Arch IV typed-IPC migration batch 3 (terminal plane) ----------
+
+/// Payload for [`ServiceToWorker::StartTerminalRequest`]. Carries the
+/// browser-supplied [`StartTerminalSession`] (the comma-separated
+/// command + args string the worker splits in
+/// `handle_manager_terminal_start`). `request_id` is echoed back on
+/// the [`WorkerToService::TerminalStarted`] reply.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct StartTerminalRequestPayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub session: StartTerminalSession,
+}
+
+/// Payload for [`ServiceToWorker::SendDataToTerminalRequest`]. One-way —
+/// no `request_id` because the worker does not reply.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct SendDataToTerminalPayload {
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub data: TerminalInputData,
+}
+
+/// Payload for [`ServiceToWorker::ResizeTerminalRequest`]. One-way.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ResizeTerminalPayload {
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub data: TerminalResizeData,
+}
+
+/// Payload for [`ServiceToWorker::CloseTerminalRequest`]. Body-less
+/// (the only thing the worker needs is the connection id). Distinct
+/// from [`ConnectionRefPayload`] / [`TerminalClosedPayload`] so the
+/// terminal-plane direction is symmetric at the type level.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct CloseTerminalPayload {
+    pub connection_id: String,
+}
+
+/// Payload for [`ServiceToWorker::ListTerminalRequest`]. Body-less;
+/// `request_id` is echoed back on the
+/// [`WorkerToService::ListTerminalResponse`].
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ListTerminalRequestPayload {
+    pub request_id: String,
+    pub connection_id: String,
+}
+
+/// Payload for [`WorkerToService::TerminalStarted`]. Empty body —
+/// `request_id` correlates with the originating
+/// [`ServiceToWorker::StartTerminalRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct TerminalStartedPayload {
+    pub request_id: String,
+    pub connection_id: String,
+}
+
+/// Payload for [`WorkerToService::TerminalClosed`]. No `request_id` —
+/// this is a notification fired by the worker's monitor task when
+/// the PTY child process exits, not a response to a specific request.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct TerminalClosedPayload {
+    pub connection_id: String,
+}
+
+/// Payload for [`WorkerToService::ReplyFromTerminal`]. Each chunk is
+/// at most ~1 KB (the worker's PTY reader buffer size), so the event
+/// pipe handles the rate fine without competing with media frames.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ReplyFromTerminalPayload {
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub data: TerminalOutputData,
+}
+
+/// Payload for [`WorkerToService::ListTerminalResponse`]. Carries the
+/// fully resolved [`TerminalList`] the worker built from
+/// `which::which`/`which_re` lookups.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct ListTerminalResponsePayload {
+    pub request_id: String,
+    pub connection_id: String,
+    #[bincode(with_serde)]
+    pub terminals: TerminalList,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct DesktopChangedPayload {
     /// New input desktop name as returned by `OpenInputDesktop` +
@@ -931,10 +1078,12 @@ mod tests {
     /// daemon's `broadcast_media_settings_update` both read.
     #[test]
     fn update_desk_settings_round_trips_bincode() {
-        let mut settings = DeskSettings::default();
-        settings.video_fps = 45;
-        settings.video_quality = 33;
-        settings.wayland_control_mode = Some("portal".to_string());
+        let settings = DeskSettings {
+            video_fps: 45,
+            video_quality: 33,
+            wayland_control_mode: Some("portal".to_string()),
+            ..DeskSettings::default()
+        };
         let msg = ServiceToWorker::UpdateDeskSettings(UpdateDeskSettingsPayload {
             connection_id: "conn-uds".to_string(),
             settings: settings.clone(),
@@ -999,7 +1148,7 @@ mod tests {
 
     /// `ManagerFileListRequest` rides bincode 2's `with_serde` field
     /// attribute on `FileListParams`. Use a non-default page_count
-    /// + filename filter so a stripped field shows up as a test
+    /// (and filename filter) so a stripped field shows up as a test
     /// failure.
     #[test]
     fn manager_file_list_request_round_trips_bincode() {
@@ -1089,9 +1238,11 @@ mod tests {
     /// round-trip regression points).
     #[test]
     fn manager_system_info_response_round_trips_bincode() {
-        let mut info = SystemInfo::default();
-        info.name = Some("alice-pc".to_string());
-        info.is_admin = Some(true);
+        let info = SystemInfo {
+            name: Some("alice-pc".to_string()),
+            is_admin: Some(true),
+            ..SystemInfo::default()
+        };
         let msg = WorkerToService::ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload {
             request_id: "req-info".to_string(),
             connection_id: "conn-info".to_string(),
@@ -1102,6 +1253,187 @@ mod tests {
                 assert_eq!(p.request_id, "req-info");
                 assert_eq!(p.info.name.as_deref(), Some("alice-pc"));
                 assert_eq!(p.info.is_admin, Some(true));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // === Arch IV typed-IPC migration batch 3 — round-trip tests ===
+
+    /// `StartTerminalRequest` rides bincode 2's `with_serde` field
+    /// attribute on `StartTerminalSession`. A non-trivial `command`
+    /// (with comma-separated args) survives the round-trip — a
+    /// stripped or reordered field would break terminal launch on
+    /// matched-version daemon/worker pairs.
+    #[test]
+    fn start_terminal_request_round_trips_bincode() {
+        let msg = ServiceToWorker::StartTerminalRequest(StartTerminalRequestPayload {
+            request_id: "req-start".to_string(),
+            connection_id: "conn-term".to_string(),
+            session: StartTerminalSession {
+                command: "C:\\Windows\\System32\\cmd.exe,/k,echo,hello".to_string(),
+            },
+        });
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::StartTerminalRequest(p) => {
+                assert_eq!(p.request_id, "req-start");
+                assert_eq!(p.connection_id, "conn-term");
+                assert_eq!(
+                    p.session.command,
+                    "C:\\Windows\\System32\\cmd.exe,/k,echo,hello"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `SendDataToTerminalRequest` is the keystroke / paste path —
+    /// arbitrary UTF-8 (including newlines + escape codes) must
+    /// round-trip verbatim.
+    #[test]
+    fn send_data_to_terminal_request_round_trips_bincode() {
+        let msg = ServiceToWorker::SendDataToTerminalRequest(SendDataToTerminalPayload {
+            connection_id: "conn-term".to_string(),
+            data: TerminalInputData {
+                content: "ls -la\n\x1b[1;31mred\x1b[0m\n".to_string(),
+            },
+        });
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::SendDataToTerminalRequest(p) => {
+                assert_eq!(p.connection_id, "conn-term");
+                assert_eq!(p.data.content, "ls -la\n\x1b[1;31mred\x1b[0m\n");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ResizeTerminalRequest` carries a u16 rows × cols pair; pin
+    /// the round-trip so a future field reorder does not silently
+    /// swap rows and cols at the wire.
+    #[test]
+    fn resize_terminal_request_round_trips_bincode() {
+        let msg = ServiceToWorker::ResizeTerminalRequest(ResizeTerminalPayload {
+            connection_id: "conn-term".to_string(),
+            data: TerminalResizeData {
+                rows: 50,
+                cols: 200,
+            },
+        });
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::ResizeTerminalRequest(p) => {
+                assert_eq!(p.connection_id, "conn-term");
+                assert_eq!(p.data.rows, 50);
+                assert_eq!(p.data.cols, 200);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `CloseTerminalRequest` and `ListTerminalRequest` are body-less;
+    /// verify the variant tag survives bincode (a reorder of the
+    /// terminal-plane variants would silently misroute one onto the
+    /// other on matched-version pairs).
+    #[test]
+    fn close_and_list_terminal_requests_round_trip_bincode() {
+        let close = ServiceToWorker::CloseTerminalRequest(CloseTerminalPayload {
+            connection_id: "conn-term".to_string(),
+        });
+        assert!(matches!(
+            bincode_round_trip(&close),
+            ServiceToWorker::CloseTerminalRequest(_)
+        ));
+
+        let list = ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
+            request_id: "req-list".to_string(),
+            connection_id: "conn-list".to_string(),
+        });
+        match bincode_round_trip(&list) {
+            ServiceToWorker::ListTerminalRequest(p) => {
+                assert_eq!(p.request_id, "req-list");
+                assert_eq!(p.connection_id, "conn-list");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `TerminalStarted` is the success response for `StartTerminal`.
+    /// Empty body — `request_id` correlates back to the original
+    /// `StartTerminalRequest`. Verify the variant survives bincode
+    /// alongside `TerminalClosed` (notification, no `request_id`)
+    /// so the daemon's reverse-direction code can keep them
+    /// straight.
+    #[test]
+    fn terminal_started_and_closed_round_trip_bincode() {
+        let started = WorkerToService::TerminalStarted(TerminalStartedPayload {
+            request_id: "req-start".to_string(),
+            connection_id: "conn-term".to_string(),
+        });
+        match bincode_round_trip(&started) {
+            WorkerToService::TerminalStarted(p) => {
+                assert_eq!(p.request_id, "req-start");
+                assert_eq!(p.connection_id, "conn-term");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let closed = WorkerToService::TerminalClosed(TerminalClosedPayload {
+            connection_id: "conn-term".to_string(),
+        });
+        match bincode_round_trip(&closed) {
+            WorkerToService::TerminalClosed(p) => {
+                assert_eq!(p.connection_id, "conn-term");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ReplyFromTerminal` is the high-frequency PTY-output path.
+    /// Verify a reasonably large chunk (4 KB — well above the
+    /// worker's 1 KB read buffer to leave headroom) survives bincode
+    /// without truncation.
+    #[test]
+    fn reply_from_terminal_round_trips_bincode_with_large_chunk() {
+        let body = "abcdefgh".repeat(512); // 4 KB
+        let msg = WorkerToService::ReplyFromTerminal(ReplyFromTerminalPayload {
+            connection_id: "conn-term".to_string(),
+            data: TerminalOutputData {
+                content: body.clone(),
+            },
+        });
+        match bincode_round_trip(&msg) {
+            WorkerToService::ReplyFromTerminal(p) => {
+                assert_eq!(p.connection_id, "conn-term");
+                assert_eq!(p.data.content.len(), body.len());
+                assert_eq!(p.data.content, body);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ListTerminalResponse` rides `TerminalList` over `with_serde`.
+    /// Round-trip a non-empty list so a stripped field shows up as a
+    /// test failure rather than a silent wire-format drift.
+    #[test]
+    fn list_terminal_response_round_trips_bincode() {
+        let terminals = TerminalList {
+            commands: vec![
+                vec!["C:\\Windows\\System32\\cmd.exe".to_string()],
+                vec!["C:\\Program Files\\PowerShell\\7\\pwsh.exe".to_string()],
+            ],
+            current: 1,
+        };
+        let msg = WorkerToService::ListTerminalResponse(ListTerminalResponsePayload {
+            request_id: "req-list".to_string(),
+            connection_id: "conn-list".to_string(),
+            terminals,
+        });
+        match bincode_round_trip(&msg) {
+            WorkerToService::ListTerminalResponse(p) => {
+                assert_eq!(p.request_id, "req-list");
+                assert_eq!(p.connection_id, "conn-list");
+                assert_eq!(p.terminals.commands.len(), 2);
+                assert_eq!(p.terminals.current, 1);
+                assert_eq!(p.terminals.commands[0][0], "C:\\Windows\\System32\\cmd.exe");
             }
             other => panic!("unexpected: {other:?}"),
         }

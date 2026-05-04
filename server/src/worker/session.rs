@@ -12,24 +12,24 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        DesktopChangedPayload, EnablePrivateScreenPayload, HeartbeatPayload,
-        ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload,
+        DesktopChangedPayload, HeartbeatPayload, ListTerminalResponsePayload,
         ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
-        ManagerRequestRefPayload, ManagerResponseRefPayload,
-        ManagerSystemInfoResponsePayload, ManagerUpdateSettingsRequestPayload,
-        PrivateScreenStateChangedPayload, ServiceToWorker, SignalingPayload,
-        UpdateDeskSettingsPayload, WorkerInitPayload, WorkerToService,
+        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
+        PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
+        SignalingPayload, TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
 use desk_server_user::model::CurrentUser;
-use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
+use desk_signal_facade::model::files::FileListResponse;
 use desk_signal_facade::model::private_screen::{
     EnablePrivateScreenData, PrivateScreenStateChangedData,
 };
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
+use desk_signal_facade::model::terminal::{TerminalList, TerminalOutputData};
 use log::{error, info, warn};
 use std::{
     sync::Arc,
@@ -258,6 +258,48 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
                 ManagerResponseRefPayload {
                     request_id: model.request_id.clone(),
                     connection_id,
+                },
+            ))
+        }
+        // Batch 3: terminal-plane responses + notifications. The
+        // worker's terminal handlers always set the target browser in
+        // `to_connection_id` (either via `success_response` for
+        // `TerminalStarted` / `ListTerminal`, or via `new_request` for
+        // server-initiated `ReplyFromTerminal` / `TerminalClosed`).
+        SignalingType::TerminalStarted => {
+            let connection_id = model.to_connection_id.clone()?;
+            Some(WorkerToService::TerminalStarted(TerminalStartedPayload {
+                request_id: model.request_id.clone(),
+                connection_id,
+            }))
+        }
+        SignalingType::TerminalClosed => {
+            let connection_id = model.to_connection_id.clone()?;
+            Some(WorkerToService::TerminalClosed(TerminalClosedPayload {
+                connection_id,
+            }))
+        }
+        SignalingType::ReplyFromTerminal => {
+            let connection_id = model.to_connection_id.clone()?;
+            let data = model
+                .get_data_with_type::<TerminalOutputData>()
+                .ok()
+                .flatten()?;
+            Some(WorkerToService::ReplyFromTerminal(
+                ReplyFromTerminalPayload {
+                    connection_id,
+                    data,
+                },
+            ))
+        }
+        SignalingType::ListTerminal => {
+            let connection_id = model.to_connection_id.clone()?;
+            let terminals = model.get_data_with_type::<TerminalList>().ok().flatten()?;
+            Some(WorkerToService::ListTerminalResponse(
+                ListTerminalResponsePayload {
+                    request_id: model.request_id.clone(),
+                    connection_id,
+                    terminals,
                 },
             ))
         }
@@ -831,6 +873,75 @@ impl WorkerSession {
                                     )
                                     .await;
                                 }
+                                // Typed-IPC migration batch 3: terminal
+                                // plane requests. Worker rebuilds a
+                                // SignalingModel with the original
+                                // request_id (where applicable) so
+                                // DeskSession::handle_message produces
+                                // a response carrying that same id,
+                                // which the desk_rx outbound classifier
+                                // turns into the matching typed
+                                // `WorkerToService::TerminalStarted` /
+                                // `ListTerminalResponse`. The body-less
+                                // request types (`SendDataToTerminal`,
+                                // `ResizeTerminal`, `CloseTerminal`)
+                                // ride `dispatch_typed_signaling`
+                                // because the worker emits no response.
+                                ServiceToWorker::StartTerminalRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::StartTerminal,
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        Some(&payload.session),
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::SendDataToTerminalRequest(payload) => {
+                                    dispatch_typed_signaling(
+                                        &mut desk_session,
+                                        SignalingType::SendDataToTerminal,
+                                        payload.connection_id,
+                                        &payload.data,
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::ResizeTerminalRequest(payload) => {
+                                    dispatch_typed_signaling(
+                                        &mut desk_session,
+                                        SignalingType::ResizeTerminal,
+                                        payload.connection_id,
+                                        &payload.data,
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::CloseTerminalRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::CloseTerminal,
+                                        // CloseTerminal has no response body
+                                        // but the legacy handler still calls
+                                        // `check_and_get_from_connection_id`
+                                        // for logging — `dispatch_typed_*`
+                                        // both feed it; we use the explicit
+                                        // form so a future test can pin the
+                                        // request_id surface in trace logs.
+                                        "typed-ipc".to_string(),
+                                        payload.connection_id,
+                                        Option::<&()>::None,
+                                    )
+                                    .await;
+                                }
+                                ServiceToWorker::ListTerminalRequest(payload) => {
+                                    dispatch_typed_signaling_with_request_id(
+                                        &mut desk_session,
+                                        SignalingType::ListTerminal,
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        Option::<&()>::None,
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         Some(None) => {
@@ -1254,24 +1365,27 @@ mod tests {
         }
     }
 
-    /// Other signaling reply types still flow over the legacy
-    /// `SignalingMessage` opaque envelope (terminal output, manager
-    /// queries, ...) until later batches migrate them.
+    /// After batch 3 every worker-emitted signaling type that the
+    /// daemon expects to surface to the browser rides a typed IPC
+    /// variant. Unrecognised reply types (errors, an `Unknown`
+    /// envelope, etc.) still fall back to the `SignalingMessage`
+    /// bridge so the daemon's existing logging and parse-and-rebroadcast
+    /// can still attempt delivery — better than silently dropping.
     #[test]
-    fn outbound_dispatch_falls_back_to_signaling_message_for_unmigrated_types() {
+    fn outbound_dispatch_falls_back_to_signaling_message_for_unrecognised_types() {
         let model = SignalingModel::new(
-            "term-1",
-            SignalingType::ReplyFromTerminal,
-            Some("conn-term".to_string()),
+            "errno",
+            SignalingType::Error,
+            Some("conn-x".to_string()),
             None,
-            Some(serde_json::json!({"output": "hello"})),
+            Some(serde_json::json!({"code": -1, "message": "boom"})),
             None,
         );
         let text = serde_json::to_string(&model).expect("serialise");
         match build_outbound_payload_from_desk_text(text.clone()) {
             WorkerToService::SignalingMessage(p) => {
                 assert_eq!(p.message, text);
-                assert_eq!(p.connection_id.as_deref(), Some("conn-term"));
+                assert_eq!(p.connection_id.as_deref(), Some("conn-x"));
             }
             other => panic!("expected SignalingMessage fallback, got {other:?}"),
         }
@@ -1300,9 +1414,11 @@ mod tests {
     /// happy path.
     #[test]
     fn outbound_dispatch_routes_manager_system_info_response_to_typed_variant() {
-        let mut info = SystemInfo::default();
-        info.name = Some("alice-pc".to_string());
-        info.is_admin = Some(true);
+        let info = SystemInfo {
+            name: Some("alice-pc".to_string()),
+            is_admin: Some(true),
+            ..SystemInfo::default()
+        };
         let model = SignalingModel::success_response(
             "req-info-1",
             SignalingType::ManagerSystemInfo,
@@ -1365,6 +1481,108 @@ mod tests {
                     panic!("expected {expected}, got {other:?}");
                 }
             }
+        }
+    }
+
+    /// Batch 3: a `TerminalStarted` blob built by the worker's
+    /// `handle_manager_terminal_start` (success_response with the
+    /// original request_id) gets routed onto
+    /// `WorkerToService::TerminalStarted` carrying the request_id +
+    /// connection_id; daemon's send_manager_response rebuilds it
+    /// back to the browser as a SignalingType::TerminalStarted
+    /// response with that same id.
+    #[test]
+    fn outbound_dispatch_routes_terminal_started_to_typed_variant() {
+        let model = SignalingModel::success_response::<()>(
+            "req-start",
+            SignalingType::TerminalStarted,
+            None,
+            Some("conn-term".to_string()),
+            None,
+        )
+        .expect("build response");
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text) {
+            WorkerToService::TerminalStarted(p) => {
+                assert_eq!(p.request_id, "req-start");
+                assert_eq!(p.connection_id, "conn-term");
+            }
+            other => panic!("expected TerminalStarted, got {other:?}"),
+        }
+    }
+
+    /// Batch 3: `TerminalClosed` is a server-initiated notification
+    /// (`new_request`) — `request_id` is auto-minted, no correlation
+    /// needed; the typed payload carries only `connection_id`.
+    #[test]
+    fn outbound_dispatch_routes_terminal_closed_to_typed_variant() {
+        let model = SignalingModel::new_request::<()>(
+            SignalingType::TerminalClosed,
+            Some("conn-term".to_string()),
+            None,
+        )
+        .expect("build new_request");
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text) {
+            WorkerToService::TerminalClosed(p) => {
+                assert_eq!(p.connection_id, "conn-term");
+            }
+            other => panic!("expected TerminalClosed, got {other:?}"),
+        }
+    }
+
+    /// Batch 3: `ReplyFromTerminal` is the high-frequency PTY-output
+    /// path. The PTY reader thread builds it via `new_request` with a
+    /// `TerminalOutputData` body; verify the body survives the typed
+    /// route + the connection_id is read from `to_connection_id`
+    /// (server-initiated request, target browser is the destination).
+    #[test]
+    fn outbound_dispatch_routes_reply_from_terminal_to_typed_variant() {
+        let body = TerminalOutputData {
+            content: "hello\r\nworld\r\n".to_string(),
+        };
+        let model = SignalingModel::new_request(
+            SignalingType::ReplyFromTerminal,
+            Some("conn-term".to_string()),
+            Some(&body),
+        )
+        .expect("build new_request");
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text) {
+            WorkerToService::ReplyFromTerminal(p) => {
+                assert_eq!(p.connection_id, "conn-term");
+                assert_eq!(p.data.content, "hello\r\nworld\r\n");
+            }
+            other => panic!("expected ReplyFromTerminal, got {other:?}"),
+        }
+    }
+
+    /// Batch 3: `ListTerminal` response carries the `TerminalList` in
+    /// the body. `handle_list_terminals` uses `send_response` which
+    /// writes `to_connection_id` + the original request_id.
+    #[test]
+    fn outbound_dispatch_routes_list_terminal_to_typed_variant() {
+        let terminals = TerminalList {
+            commands: vec![vec!["C:\\Windows\\System32\\cmd.exe".to_string()]],
+            current: 0,
+        };
+        let model = SignalingModel::success_response(
+            "req-list",
+            SignalingType::ListTerminal,
+            None,
+            Some("conn-list".to_string()),
+            Some(&terminals),
+        )
+        .expect("build response");
+        let text = serde_json::to_string(&model).expect("serialise");
+        match build_outbound_payload_from_desk_text(text) {
+            WorkerToService::ListTerminalResponse(p) => {
+                assert_eq!(p.request_id, "req-list");
+                assert_eq!(p.connection_id, "conn-list");
+                assert_eq!(p.terminals.commands.len(), 1);
+                assert_eq!(p.terminals.current, 0);
+            }
+            other => panic!("expected ListTerminalResponse, got {other:?}"),
         }
     }
 

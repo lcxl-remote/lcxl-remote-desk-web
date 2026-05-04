@@ -421,6 +421,54 @@ pub async fn run_signaling_proxy(
                     Option::<&()>::None,
                 );
             }
+            // Batch 3 of the typed-IPC migration — terminal plane.
+            // Each `Terminal*` variant rebuilds the matching outbound
+            // `SignalingType::*` model and writes it onto the
+            // outbound channel for the WS sinks to ship to the
+            // browser. `TerminalStarted` is a `success_response`
+            // (StartTerminal correlation); `TerminalClosed` and
+            // `ReplyFromTerminal` are server-initiated `new_request`
+            // notifications (no `request_id` correlation);
+            // `ListTerminalResponse` is a `success_response` for
+            // `ListTerminal`.
+            WorkerToService::TerminalStarted(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "TerminalStarted",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::TerminalStarted,
+                    Option::<&()>::None,
+                );
+            }
+            WorkerToService::TerminalClosed(payload) => {
+                send_terminal_notification(
+                    &outbound_tx,
+                    "TerminalClosed",
+                    &payload.connection_id,
+                    SignalingType::TerminalClosed,
+                    Option::<&()>::None,
+                );
+            }
+            WorkerToService::ReplyFromTerminal(payload) => {
+                send_terminal_notification(
+                    &outbound_tx,
+                    "ReplyFromTerminal",
+                    &payload.connection_id,
+                    SignalingType::ReplyFromTerminal,
+                    Some(&payload.data),
+                );
+            }
+            WorkerToService::ListTerminalResponse(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "ListTerminal",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::ListTerminal,
+                    Some(&payload.terminals),
+                );
+            }
         }
     }
 
@@ -470,6 +518,41 @@ fn send_manager_response<T>(
         Err(e) => warn!(
             "[SignalingProxy] Failed to build {type_name} response model for {connection_id}: \
              {e} (request_id={request_id})"
+        ),
+    }
+}
+
+/// Helper for batch 3 of the typed-IPC migration: build a
+/// server-initiated `new_request` `SignalingModel` (no `request_id`
+/// correlation — the daemon mints a fresh one inside `new_request`)
+/// for terminal-plane notifications (`ReplyFromTerminal`,
+/// `TerminalClosed`) and broadcast it to the browser via
+/// `outbound_tx`. Build / serialise failures are non-fatal —
+/// log + drop, no panic on the bus. Mirrors the shape
+/// `service::terminal` used to construct directly when worker still
+/// owned the WS path.
+fn send_terminal_notification<T>(
+    outbound_tx: &broadcast::Sender<String>,
+    type_name: &'static str,
+    connection_id: &str,
+    signaling_type: SignalingType,
+    data: Option<&T>,
+) where
+    T: serde::Serialize + ?Sized,
+{
+    match SignalingModel::new_request(signaling_type, Some(connection_id.to_string()), data) {
+        Ok(model) => match serde_json::to_string(&model) {
+            Ok(text) => {
+                let _ = outbound_tx.send(text);
+            }
+            Err(e) => warn!(
+                "[SignalingProxy] Failed to serialise {type_name} notification for \
+                 {connection_id}: {e}"
+            ),
+        },
+        Err(e) => warn!(
+            "[SignalingProxy] Failed to build {type_name} notification model for \
+             {connection_id}: {e}"
         ),
     }
 }

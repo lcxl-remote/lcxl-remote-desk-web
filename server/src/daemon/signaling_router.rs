@@ -33,15 +33,19 @@ use std::sync::Arc;
 
 use actix_web::web;
 use desk_ipc_protocol::message::{
-    EnablePrivateScreenPayload, ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload,
-    ManagerRequestRefPayload, ManagerUpdateSettingsRequestPayload, ServiceToWorker,
-    UpdateDeskSettingsPayload,
+    CloseTerminalPayload, EnablePrivateScreenPayload, ListTerminalRequestPayload,
+    ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload, ManagerRequestRefPayload,
+    ManagerUpdateSettingsRequestPayload, ResizeTerminalPayload, SendDataToTerminalPayload,
+    ServiceToWorker, StartTerminalRequestPayload, UpdateDeskSettingsPayload,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
 use desk_signal_facade::model::private_screen::EnablePrivateScreenData;
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
+use desk_signal_facade::model::terminal::{
+    StartTerminalSession, TerminalInputData, TerminalResizeData,
+};
 use tokio::sync::broadcast;
 
 use crate::daemon::pc_manager::{self, PcRegistry};
@@ -108,10 +112,22 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   front-end never emits it. Swallow the same way batch 0
         //   handled AcceptControl / DenyControl and batch 1 handled
         //   ChangeDisplaySettings.
+        // - `ReplyFromTerminal` / `TerminalStarted` / `TerminalClosed`
+        //   (batch 3): worker → browser only. Worker emits them via
+        //   typed `WorkerToService::ReplyFromTerminal` /
+        //   `TerminalStarted` / `TerminalClosed`; the browser never
+        //   echoes them back. A stray inbound copy is a protocol
+        //   error from the browser — daemon swallows it rather than
+        //   bridging to the worker (which has no `handle_message`
+        //   arm for these and would only return
+        //   `UNKNOWN_SIGNALING_TYPE`).
         SignalingType::ChangeDisplaySettings
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
-        | SignalingType::ManagerSystemStatue => RouteOwnership::Daemon,
+        | SignalingType::ManagerSystemStatue
+        | SignalingType::ReplyFromTerminal
+        | SignalingType::TerminalStarted
+        | SignalingType::TerminalClosed => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -131,9 +147,10 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // the user-session worker process". Whether the message
         // crosses the legacy `SignalingMessage` opaque-envelope
         // bridge or rides a typed IPC variant is a routing detail
-        // decided in `route` below. As of batch 2 the manager-plane
-        // request types ride typed IPC; terminal management still
-        // bridges over `SignalingMessage` (batch 3).
+        // decided in `route` below. As of batch 3 the manager-plane
+        // request types AND the terminal-plane request types both
+        // ride typed IPC; the legacy bridge is no longer used by
+        // any inbound type.
         SignalingType::EnablePrivateScreen
         | SignalingType::UpdateDeskSettings
         | SignalingType::ManagerSystemInfo
@@ -143,10 +160,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::SendDataToTerminal
         | SignalingType::ResizeTerminal
         | SignalingType::CloseTerminal
-        | SignalingType::ReplyFromTerminal
         | SignalingType::ListTerminal
-        | SignalingType::TerminalStarted
-        | SignalingType::TerminalClosed
         | SignalingType::ManagerQuerySettings
         | SignalingType::ManagerUpdateSettings => RouteOwnership::Worker,
 
@@ -307,6 +321,9 @@ pub async fn route(
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
         | SignalingType::ManagerSystemStatue
+        | SignalingType::ReplyFromTerminal
+        | SignalingType::TerminalStarted
+        | SignalingType::TerminalClosed
         | SignalingType::DesktopSwitching
         | SignalingType::DesktopReady
         | SignalingType::FetchConnections
@@ -347,9 +364,32 @@ pub async fn route(
             handle_manager_update_settings_inbound(ctx, model).await?;
             Ok(RouteOutcome::HandledByDaemon)
         }
-        // Worker-owned: subsequent batches will flip these to typed
-        // event-transport payloads; for now they keep flowing as raw
-        // SignalingMessage IPC over the legacy bridge.
+        // Batch 3 of the typed-IPC migration — terminal plane.
+        SignalingType::StartTerminal => {
+            handle_start_terminal_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::SendDataToTerminal => {
+            handle_send_data_to_terminal_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::ResizeTerminal => {
+            handle_resize_terminal_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::CloseTerminal => {
+            handle_close_terminal_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        SignalingType::ListTerminal => {
+            handle_list_terminal_inbound(ctx, model).await?;
+            Ok(RouteOutcome::HandledByDaemon)
+        }
+        // Worker-owned: every inbound type now rides typed IPC
+        // (batches 1–3); the legacy `SignalingMessage` bridge no
+        // longer carries any inbound traffic. This catch-all stays
+        // as a safety net — Error / Unknown surface here and we
+        // forward them to the worker which logs and drops.
         _ => Ok(RouteOutcome::ForwardToWorker),
     }
 }
@@ -627,6 +667,159 @@ async fn handle_manager_update_settings_inbound(
     Ok(())
 }
 
+// ---- Batch 3: terminal-plane typed-IPC dispatch helpers ----
+//
+// The 5 inbound terminal request types share the same skeleton as the
+// manager-plane helpers — pull `from_connection_id`, build the typed
+// `ServiceToWorker::*Request` payload, ship it via
+// `WorkerManager::send_to_worker`. Differences are only in payload
+// type and whether the inbound model carries a body / a request_id.
+// Errors are non-fatal for the WS connection: parse / send failures
+// log + drop.
+
+async fn handle_start_terminal_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "StartTerminal") else {
+        return Ok(());
+    };
+    let session = match model.get_data::<StartTerminalSession>() {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "[router] StartTerminal payload parse failed for {connection_id}: {e}; \
+                 dropping (request_id={})",
+                model.request_id,
+            );
+            return Ok(());
+        }
+    };
+    let payload = StartTerminalRequestPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+        session,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::StartTerminalRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed StartTerminalRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_send_data_to_terminal_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "SendDataToTerminal") else {
+        return Ok(());
+    };
+    let data = match model.get_data_with_type::<TerminalInputData>() {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            // Empty payload — match the legacy handler's silent ignore.
+            return Ok(());
+        }
+        Err(e) => {
+            log::warn!(
+                "[router] SendDataToTerminal payload parse failed for {connection_id}: {e}; \
+                 dropping (request_id={})",
+                model.request_id,
+            );
+            return Ok(());
+        }
+    };
+    let payload = SendDataToTerminalPayload {
+        connection_id: connection_id.to_string(),
+        data,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::SendDataToTerminalRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed SendDataToTerminalRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_resize_terminal_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "ResizeTerminal") else {
+        return Ok(());
+    };
+    let data = match model.get_data_with_type::<TerminalResizeData>() {
+        Ok(Some(d)) => d,
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            log::warn!(
+                "[router] ResizeTerminal payload parse failed for {connection_id}: {e}; \
+                 dropping (request_id={})",
+                model.request_id,
+            );
+            return Ok(());
+        }
+    };
+    let payload = ResizeTerminalPayload {
+        connection_id: connection_id.to_string(),
+        data,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ResizeTerminalRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed ResizeTerminalRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_close_terminal_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "CloseTerminal") else {
+        return Ok(());
+    };
+    let payload = CloseTerminalPayload {
+        connection_id: connection_id.to_string(),
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::CloseTerminalRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed CloseTerminalRequest: {e}");
+    }
+    Ok(())
+}
+
+async fn handle_list_terminal_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(connection_id) = require_from_connection_id(model, "ListTerminal") else {
+        return Ok(());
+    };
+    let payload = ListTerminalRequestPayload {
+        request_id: model.request_id.clone(),
+        connection_id: connection_id.to_string(),
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ListTerminalRequest(payload))
+        .await
+    {
+        log::warn!("[router] failed to send typed ListTerminalRequest: {e}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,6 +845,9 @@ mod tests {
             SignalingType::PrivateScreenStateChanged,
             SignalingType::AudioPlaybackError,
             SignalingType::ManagerSystemStatue,
+            SignalingType::ReplyFromTerminal,
+            SignalingType::TerminalStarted,
+            SignalingType::TerminalClosed,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -666,8 +862,12 @@ mod tests {
         }
     }
 
-    /// Worker-owned: user-session resources (files, terminal,
-    /// settings, overlays, approval, manager queries).
+    /// Worker-owned: user-session resources (files, terminal request
+    /// types, settings, overlays, approval, manager queries). The 3
+    /// terminal *reverse* notification types (`ReplyFromTerminal`,
+    /// `TerminalStarted`, `TerminalClosed`) are classified as
+    /// daemon-owned because they only flow worker → browser; an
+    /// inbound copy is a protocol error to swallow.
     #[test]
     fn classify_worker_owned_types() {
         for t in [
@@ -680,10 +880,7 @@ mod tests {
             SignalingType::SendDataToTerminal,
             SignalingType::ResizeTerminal,
             SignalingType::CloseTerminal,
-            SignalingType::ReplyFromTerminal,
             SignalingType::ListTerminal,
-            SignalingType::TerminalStarted,
-            SignalingType::TerminalClosed,
             SignalingType::ManagerQuerySettings,
             SignalingType::ManagerUpdateSettings,
             SignalingType::Error,
@@ -736,6 +933,9 @@ mod tests {
             SignalingType::PrivateScreenStateChanged,
             SignalingType::AudioPlaybackError,
             SignalingType::ManagerSystemStatue,
+            SignalingType::ReplyFromTerminal,
+            SignalingType::TerminalStarted,
+            SignalingType::TerminalClosed,
             SignalingType::DesktopSwitching,
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
@@ -778,11 +978,64 @@ mod tests {
         );
     }
 
-    /// Worker-owned variants that haven't been typed-migrated yet
-    /// (terminal — batch 3) still flow over the legacy
-    /// `SignalingMessage` IPC bridge.
+    /// Batch 3: every terminal-plane request type is now handled
+    /// inline via typed `ServiceToWorker::*Request` IPC. The
+    /// legacy `SignalingMessage` bridge no longer carries any
+    /// terminal traffic. Without an active worker the typed send
+    /// is logged but the route call itself still succeeds —
+    /// `route` returns `HandledByDaemon`.
     #[tokio::test]
-    async fn route_forwards_unmigrated_worker_owned_variants() {
+    async fn route_terminal_requests_handled_inline_not_bridged() {
+        let ctx = make_ctx();
+        let cases = [
+            (
+                SignalingType::StartTerminal,
+                serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
+                    command: "C:\\Windows\\System32\\cmd.exe".to_string(),
+                })
+                .unwrap(),
+            ),
+            (
+                SignalingType::SendDataToTerminal,
+                serde_json::to_value(desk_signal_facade::model::terminal::TerminalInputData {
+                    content: "echo hi\n".to_string(),
+                })
+                .unwrap(),
+            ),
+            (
+                SignalingType::ResizeTerminal,
+                serde_json::to_value(desk_signal_facade::model::terminal::TerminalResizeData {
+                    rows: 30,
+                    cols: 100,
+                })
+                .unwrap(),
+            ),
+            (SignalingType::CloseTerminal, serde_json::Value::Null),
+            (SignalingType::ListTerminal, serde_json::Value::Null),
+        ];
+        for (t, body) in cases {
+            let signaling_data = if body.is_null() { None } else { Some(body) };
+            let model = SignalingModel::new(
+                "req-term",
+                t,
+                Some("conn-term".to_string()),
+                None,
+                signaling_data,
+                None,
+            );
+            let outcome = route(&model, &ctx).await.unwrap();
+            assert_eq!(
+                outcome,
+                RouteOutcome::HandledByDaemon,
+                "{t:?} must ride typed IPC, not the SignalingMessage bridge",
+            );
+        }
+    }
+
+    /// Terminal requests without a `from_connection_id` are protocol
+    /// errors — daemon logs and drops, no panic, no IPC send.
+    #[tokio::test]
+    async fn route_terminal_request_without_connection_id_is_noop() {
         let ctx = make_ctx();
         for t in [
             SignalingType::StartTerminal,
@@ -791,13 +1044,30 @@ mod tests {
             SignalingType::CloseTerminal,
             SignalingType::ListTerminal,
         ] {
-            let model = SignalingModel::new("r", t, None, None, None, None);
-            assert_eq!(
-                route(&model, &ctx).await.unwrap(),
-                RouteOutcome::ForwardToWorker,
-                "{t:?}",
-            );
+            let model = SignalingModel::new("req-noid", t, None, None, None, None);
+            let outcome = route(&model, &ctx).await.unwrap();
+            assert_eq!(outcome, RouteOutcome::HandledByDaemon, "{t:?}");
         }
+    }
+
+    /// Malformed `StartTerminal` body (not a `StartTerminalSession`
+    /// JSON object) must not crash the router — it should log + drop.
+    /// The `SendDataToTerminal` / `ResizeTerminal` analogues take the
+    /// `get_data_with_type` path which already returns `Ok(None)` on
+    /// missing data; this case verifies a parse-failure surface.
+    #[tokio::test]
+    async fn route_start_terminal_with_invalid_payload_is_dropped() {
+        let ctx = make_ctx();
+        let model = SignalingModel::new(
+            "req-start-bad",
+            SignalingType::StartTerminal,
+            Some("conn-term".to_string()),
+            None,
+            Some(serde_json::json!("not start terminal session")),
+            None,
+        );
+        let outcome = route(&model, &ctx).await.unwrap();
+        assert_eq!(outcome, RouteOutcome::HandledByDaemon);
     }
 
     /// Batch 2: manager-plane requests are now handled inline by the
