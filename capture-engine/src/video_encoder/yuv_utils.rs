@@ -102,8 +102,13 @@ fn clamp(x: i32) -> u8 {
 /// regions need to be re-converted from BGRA.
 ///
 /// Memory layout: [Y plane | U plane | V plane] contiguous in a single Vec<u8>.
-/// Strides are tight (y_stride = width, u/v_stride = width/2), so the full slice
-/// is also a valid contiguous I420 buffer (needed by the VPX encoder).
+/// Strides match the libvpx / yuv-crate I420 convention: `y_stride = width`,
+/// `u/v_stride = ceil(width / 2)` and chroma rows = `ceil(height / 2)`. Using
+/// `ceil` (not floor) matters when width or height is odd — the yuv crate's
+/// `YuvPlanarImageMut::alloc` allocates chroma with `div_ceil(2)`, so a floor
+/// here would mismatch the source slice in `update_full` and panic from
+/// `copy_from_slice` (e.g. captured frame 1568x789 → src u_plane=309680
+/// vs dest=308896, panic at yuv_utils.rs).
 pub struct PersistentYuvBuffer {
     data: Vec<u8>,
     pub width: u32,
@@ -118,8 +123,12 @@ pub struct PersistentYuvBuffer {
 
 impl PersistentYuvBuffer {
     pub fn new(width: u32, height: u32) -> Self {
-        let y_size = (width * height) as usize;
-        let uv_size = ((width / 2) * (height / 2)) as usize;
+        let y_size = (width as usize) * (height as usize);
+        // div_ceil so chroma allocation matches the yuv crate's
+        // YuvPlanarImageMut::alloc behaviour for odd dimensions.
+        let chroma_w = (width as usize).div_ceil(2);
+        let chroma_h = (height as usize).div_ceil(2);
+        let uv_size = chroma_w * chroma_h;
         Self {
             data: vec![0u8; y_size + 2 * uv_size],
             width,
@@ -128,8 +137,8 @@ impl PersistentYuvBuffer {
             u_offset: y_size,
             v_offset: y_size + uv_size,
             y_stride: width,
-            u_stride: width / 2,
-            v_stride: width / 2,
+            u_stride: chroma_w as u32,
+            v_stride: chroma_w as u32,
         }
     }
 
@@ -265,5 +274,94 @@ impl PersistentYuvBuffer {
             Some(rects) if rects.is_empty() => Ok(()),
             Some(rects) => self.update_partial(image_info, rects),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal `ImageInfo` impl for unit tests — owns a BGRA buffer at the
+    /// given dimensions, no dirty-rect info so `update_full` is exercised.
+    struct StubBgraImage {
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    }
+
+    impl StubBgraImage {
+        fn new(width: u32, height: u32) -> Self {
+            Self {
+                width,
+                height,
+                data: vec![0x80u8; (width as usize) * (height as usize) * 4],
+            }
+        }
+    }
+
+    impl ImageInfo for StubBgraImage {
+        fn get_type(&self) -> ImageType {
+            ImageType::BGRA
+        }
+        fn get_data(&self) -> &[u8] {
+            &self.data
+        }
+        fn get_width(&self) -> u32 {
+            self.width
+        }
+        fn get_height(&self) -> u32 {
+            self.height
+        }
+    }
+
+    /// `PersistentYuvBuffer::new(width, height)` must allocate chroma planes
+    /// large enough to receive a `YuvPlanarImageMut::alloc` of the same
+    /// dimensions, regardless of parity. Pre-fix the chroma allocation used
+    /// `width / 2` (floor), which mismatched yuv-crate's `div_ceil(2)` and
+    /// panicked from `copy_from_slice` whenever capture produced an odd-sided
+    /// frame (observed live: 1568x789 from adaptive resolution).
+    #[test]
+    fn new_allocates_chroma_to_match_yuv_crate_alloc_for_odd_dimensions() {
+        let buf = PersistentYuvBuffer::new(1568, 789);
+        let temp = YuvPlanarImageMut::<u8>::alloc(1568, 789, YuvChromaSubsampling::Yuv420);
+        assert_eq!(
+            buf.v_offset - buf.u_offset,
+            temp.u_plane.borrow().len(),
+            "self.U slice must equal yuv-crate U plane length so update_full can copy_from_slice"
+        );
+        assert_eq!(
+            buf.data.len() - buf.v_offset,
+            temp.v_plane.borrow().len(),
+            "self.V slice must equal yuv-crate V plane length"
+        );
+        assert_eq!(buf.u_stride, temp.u_stride);
+        assert_eq!(buf.v_stride, temp.v_stride);
+    }
+
+    /// Regression: `update_full` panicked at the U-plane copy when the
+    /// captured frame had odd width or height. Test exercises both axes
+    /// odd (the worst case) by running the actual conversion path.
+    #[test]
+    fn update_full_does_not_panic_on_odd_dimensions() {
+        for (w, h) in [(1568u32, 789u32), (101, 51), (3, 3), (1920, 1081)] {
+            let img = StubBgraImage::new(w, h);
+            let mut buf = PersistentYuvBuffer::new(w, h);
+            buf.update_full(&img)
+                .unwrap_or_else(|e| panic!("update_full({w}x{h}) returned error: {e:?}"));
+        }
+    }
+
+    /// Even-dimension path is the common case and must keep its tight I420
+    /// layout (Y=W*H, U=V=(W/2)*(H/2)) — change-detector for any future
+    /// refactor that accidentally inflates the buffer.
+    #[test]
+    fn new_keeps_tight_layout_for_even_dimensions() {
+        let buf = PersistentYuvBuffer::new(1920, 1080);
+        assert_eq!(buf.y_stride, 1920);
+        assert_eq!(buf.u_stride, 960);
+        assert_eq!(buf.v_stride, 960);
+        assert_eq!(buf.u_offset, 1920 * 1080);
+        assert_eq!(buf.v_offset - buf.u_offset, 960 * 540);
+        assert_eq!(buf.data.len(), 1920 * 1080 + 2 * 960 * 540);
     }
 }
