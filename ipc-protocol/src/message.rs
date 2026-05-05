@@ -449,6 +449,25 @@ pub struct StartMediaPayload {
     pub bitrate_kbps: u32,
     /// Encoder quality knob (codec-specific 0–100; 0 = default).
     pub quality: u32,
+    /// Whether the connection's SDP offer included an `m=video` section.
+    /// `false` means the worker should *not* spawn the video pipeline
+    /// (DXGI capture + encoder) for this connection — typical for the
+    /// browser file-management page, which opens a PC purely for the
+    /// `file_transfer_event` DataChannel and never wants screen capture.
+    /// Defaults to `true` for back-compat with older daemons that did not
+    /// thread through SDP track presence.
+    #[serde(default = "default_true")]
+    pub start_video: bool,
+    /// Whether the connection's SDP offer included an `m=audio` section.
+    /// `false` means the worker should *not* spawn the audio pipeline
+    /// (WASAPI capture + Opus encoder) for this connection. Defaults to
+    /// `true` for back-compat (see `start_video`).
+    #[serde(default = "default_true")]
+    pub start_audio: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
@@ -884,6 +903,8 @@ mod tests {
             fps: 60,
             bitrate_kbps: 6_000,
             quality: 0,
+            start_video: true,
+            start_audio: true,
         });
         match bincode_round_trip(&msg) {
             ServiceToWorker::StartMedia(p) => {
@@ -891,9 +912,60 @@ mod tests {
                 assert_eq!(p.video_codec, MediaCodec::H264);
                 assert_eq!(p.audio_codec, MediaCodec::Opus);
                 assert_eq!(p.fps, 60);
+                assert!(p.start_video);
+                assert!(p.start_audio);
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// DataChannel-only connections (browser file-management UI) ship
+    /// `start_video=false, start_audio=false` so the worker skips both
+    /// capture pipelines. Round-trip the negative case so a bincode
+    /// schema bump that drops the new fields is caught here.
+    #[test]
+    fn start_media_data_channel_only_round_trips() {
+        let msg = ServiceToWorker::StartMedia(StartMediaPayload {
+            connection_id: "conn-files".to_string(),
+            video_codec: MediaCodec::H264,
+            audio_codec: MediaCodec::Opus,
+            video_device: None,
+            audio_device: None,
+            fps: 0,
+            bitrate_kbps: 0,
+            quality: 0,
+            start_video: false,
+            start_audio: false,
+        });
+        match bincode_round_trip(&msg) {
+            ServiceToWorker::StartMedia(p) => {
+                assert!(!p.start_video, "start_video=false must round-trip");
+                assert!(!p.start_audio, "start_audio=false must round-trip");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `default_true` exists for the JSON deserialisation back-compat
+    /// path: a payload missing both fields must default to "media on"
+    /// so an old daemon talking to a new worker keeps the legacy
+    /// behaviour. Bincode is positional and will not exercise this
+    /// branch, so this test pokes the JSON path directly.
+    #[test]
+    fn start_media_json_missing_flags_defaults_to_media_on() {
+        let json = r#"{
+            "connection_id": "conn-legacy",
+            "video_codec": "H264",
+            "audio_codec": "Opus",
+            "video_device": null,
+            "audio_device": null,
+            "fps": 30,
+            "bitrate_kbps": 0,
+            "quality": 0
+        }"#;
+        let payload: StartMediaPayload = serde_json::from_str(json).expect("parse");
+        assert!(payload.start_video, "missing start_video must default to true");
+        assert!(payload.start_audio, "missing start_audio must default to true");
     }
 
     #[test]

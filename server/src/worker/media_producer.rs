@@ -153,6 +153,18 @@ impl MediaProducer {
     /// Start a per-connection capture + encode pipeline. Idempotent on
     /// duplicate `connection_id` — duplicates log a warning and are
     /// ignored (the daemon should never legitimately double-start).
+    ///
+    /// `payload.start_video` / `payload.start_audio` mirror the
+    /// `m=video` / `m=audio` sections in the connection's SDP offer.
+    /// When *both* are false the connection is a pure DataChannel
+    /// session (e.g. the browser file-management page, which only
+    /// opens `file_transfer_event`) and we skip both pipelines —
+    /// otherwise we would spin up DXGI capture + WASAPI capture for a
+    /// connection that never asked for media, costing CPU and locking
+    /// the audio device against UAC-survival even on idle. The
+    /// connection still gets a `ConnectionTask` slot so that
+    /// `stop_media` is symmetric and so a future protocol-level
+    /// renegotiation could light up media on the existing entry.
     pub fn start_media(&self, payload: StartMediaPayload) {
         let connection_id = payload.connection_id.clone();
         let mut map = self.inner.lock().expect("media producer lock poisoned");
@@ -165,37 +177,75 @@ impl MediaProducer {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let keyframe_requested = Arc::new(AtomicBool::new(false));
         let (settings_tx, settings_rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
-        let video_handle = spawn_video_pipeline_thread(
-            self.desk_settings.clone(),
-            payload.clone(),
-            Arc::clone(&self.media_sender),
-            self.error_tx.clone(),
-            Arc::clone(&stop_flag),
-            Arc::clone(&keyframe_requested),
-            settings_rx,
-        );
+        if !payload.start_video && !payload.start_audio {
+            info!(
+                "[MediaProducer] StartMedia for {connection_id} requests neither video nor \
+                 audio (DataChannel-only connection); skipping capture pipelines"
+            );
+        }
+        let video_handle = if payload.start_video {
+            Some(spawn_video_pipeline_thread(
+                self.desk_settings.clone(),
+                payload.clone(),
+                Arc::clone(&self.media_sender),
+                self.error_tx.clone(),
+                Arc::clone(&stop_flag),
+                Arc::clone(&keyframe_requested),
+                settings_rx,
+            ))
+        } else {
+            // Drain the receiver end so settings updates targeted at this
+            // connection don't accumulate unbounded; closing it here is
+            // symmetric with not spawning a consumer.
+            drop(settings_rx);
+            debug!(
+                "[MediaProducer] {connection_id}: skipping video pipeline (start_video=false)"
+            );
+            None
+        };
         // PR 3: audio pipeline runs in its own dedicated thread (WASAPI
         // / PipeWire / SCKit handles are COM/system-thread-bound the
         // same way as the video capture, so a separate thread + a
         // current-thread Tokio runtime is the right shape — same
         // pattern Arch III used in `capture_audio_task`).
-        let audio_handle = spawn_audio_pipeline_thread(
-            self.desk_settings.clone(),
-            payload,
-            Arc::clone(&self.media_sender),
-            self.error_tx.clone(),
-            Arc::clone(&stop_flag),
-        );
+        let audio_handle = if payload.start_audio {
+            Some(spawn_audio_pipeline_thread(
+                self.desk_settings.clone(),
+                payload,
+                Arc::clone(&self.media_sender),
+                self.error_tx.clone(),
+                Arc::clone(&stop_flag),
+            ))
+        } else {
+            debug!(
+                "[MediaProducer] {connection_id}: skipping audio pipeline (start_audio=false)"
+            );
+            None
+        };
         map.insert(
             connection_id,
             ConnectionTask {
                 stop_flag,
                 keyframe_requested,
                 settings_tx,
-                video_handle: Some(video_handle),
-                audio_handle: Some(audio_handle),
+                video_handle,
+                audio_handle,
             },
         );
+    }
+
+    /// Test-only: snapshot per-connection state.
+    /// Returns `(present, has_video_handle, has_audio_handle)`.
+    /// Used to verify that DataChannel-only `StartMedia` payloads
+    /// register a `ConnectionTask` slot but do not spawn any pipeline.
+    #[cfg(test)]
+    pub(crate) fn connection_pipeline_state(
+        &self,
+        connection_id: &str,
+    ) -> Option<(bool, bool)> {
+        let map = self.inner.lock().expect("media producer lock poisoned");
+        map.get(connection_id)
+            .map(|t| (t.video_handle.is_some(), t.audio_handle.is_some()))
     }
 
     /// Stop a per-connection pipeline. No-op on unknown id.
@@ -1013,6 +1063,8 @@ mod tests {
             fps: 60,
             bitrate_kbps: 0,
             quality: 0,
+            start_video: true,
+            start_audio: true,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.video_encoder.as_deref(), Some("VP9"));
@@ -1038,9 +1090,55 @@ mod tests {
             fps: 0,
             bitrate_kbps: 0,
             quality: 0,
+            start_video: true,
+            start_audio: true,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.video_fps, 24);
+    }
+
+    /// Regression: a `StartMedia` payload with `start_video = false`
+    /// and `start_audio = false` must register a `ConnectionTask`
+    /// slot (so subsequent `StopMedia` / `ForceKeyframe` find it) but
+    /// must NOT spawn either pipeline thread. Bug fix 2026-05-05:
+    /// previously the worker always lit up DXGI + WASAPI capture for
+    /// every PC, including the browser file-management page that
+    /// negotiates a DataChannel-only PC.
+    #[test]
+    fn start_media_data_channel_only_skips_both_pipelines() {
+        let (sender, _rx) = inprocess::make_media();
+        let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
+        producer.start_media(StartMediaPayload {
+            connection_id: "files".into(),
+            video_codec: MediaCodec::H264,
+            audio_codec: MediaCodec::Opus,
+            video_device: None,
+            audio_device: None,
+            fps: 0,
+            bitrate_kbps: 0,
+            quality: 0,
+            start_video: false,
+            start_audio: false,
+        });
+        let state = producer
+            .connection_pipeline_state("files")
+            .expect("DataChannel-only StartMedia must still register the connection slot");
+        assert_eq!(
+            state,
+            (false, false),
+            "DataChannel-only StartMedia must not spawn video or audio pipeline"
+        );
+        // StopMedia must find the entry and clean it up; pre-fix this
+        // would have logged a debug "unknown connection" — the test
+        // passes either way but keeps the symmetry pinned.
+        producer.stop_media(&StopMediaPayload {
+            connection_id: "files".into(),
+        });
+        assert!(
+            producer.connection_pipeline_state("files").is_none(),
+            "stop_media must drop the slot"
+        );
     }
 
     /// Force-keyframe / stop-media on an unknown connection must be a

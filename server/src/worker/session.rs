@@ -545,6 +545,11 @@ impl WorkerSession {
         // both ends share the same `Arc`. Standalone / test runs (no
         // upstream and no shared hub) fall back to a Local hub whose
         // approvals deny-fast.
+        // Portable / in-process mode is identified by the caller passing a
+        // pre-built `shared_hub` (mirrors `should_init_worker_telemetry`).
+        // We latch the bool here because `shared_hub` is consumed by the
+        // match arms below.
+        let is_inprocess_worker = shared_hub.is_some();
         let host_control_hub = match shared_hub {
             Some(h) => {
                 info!("Using shared host-control hub (in-process portable mode)");
@@ -693,8 +698,25 @@ impl WorkerSession {
         // drifted state are suppressed inside the monitor so we don't
         // flood the IPC, and a return to the bound desktop re-arms it for
         // the next drift.
+        //
+        // Portable / in-process mode (single process under a user token):
+        // the daemon side already no-ops `DesktopChanged` because we
+        // can't `CreateProcessAsUserW` ourselves out of session 0 — so
+        // running the 1 Hz `OpenInputDesktop` poll just costs CPU and
+        // produces a confusing "drift detected" log when UAC fires.
+        // Skip the spawn; dropping `desktop_change_tx` immediately
+        // closes the channel so the corresponding `select!` arm
+        // disables itself and never fires.
         let (desktop_change_tx, mut desktop_change_rx) = mpsc::unbounded_channel::<String>();
-        desktop_monitor::spawn(init_payload.desktop_name.clone(), desktop_change_tx);
+        if is_inprocess_worker {
+            info!(
+                "Portable mode: skipping desktop_monitor (single-process worker cannot \
+                 cross window stations; daemon-side DesktopChanged is a no-op anyway)"
+            );
+            drop(desktop_change_tx);
+        } else {
+            desktop_monitor::spawn(init_payload.desktop_name.clone(), desktop_change_tx);
+        }
 
         loop {
             tokio::select! {

@@ -1097,6 +1097,13 @@ pub async fn handle_offer(
         fps: offer.desk_settings.video_fps,
         bitrate_kbps: 0,
         quality: offer.desk_settings.video_quality,
+        // Track presence in the offer drives whether the worker spawns
+        // each capture pipeline. The browser file-management page
+        // negotiates a DataChannel-only PC (no `m=video`, no `m=audio`)
+        // and must not trigger DXGI / WASAPI capture — see the worker
+        // `start_media` doc comment for the rationale.
+        start_video: has_video,
+        start_audio: has_audio,
     };
     // PR 6: stash the payload so a worker swap can re-issue it via
     // `resume_active_media` without forcing the browser through a fresh
