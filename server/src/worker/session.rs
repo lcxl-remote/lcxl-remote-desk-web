@@ -483,6 +483,15 @@ impl WorkerSession {
                 // so set the mode explicitly to satisfy DeskServer-specific checks
                 // (e.g. TURN ICE server inclusion in signaling.rs).
                 s.args.startup_mode = StartupMode::DeskServer;
+                // Restore `config_file_path` from the Init payload so any
+                // worker-side `Settings::save()` (e.g. persisting a "remember"
+                // choice from a security approval dialog) writes back to the
+                // exact file the daemon loaded. Without this the worker's
+                // `args.config_file_path` is the empty string and `save()`
+                // fails with `FILE_PATH_NOT_FOUND`.
+                if let Some(p) = init_payload.config_file_path.as_deref() {
+                    s.args.config_file_path = p.to_owned();
+                }
                 s
             }
             Err(e) => {
@@ -612,8 +621,16 @@ impl WorkerSession {
             }
         };
         // PR 4 cut 2: file transfer dispatcher. Always constructible —
-        // it owns no resource that can fail at init time.
-        let file_transfer_dispatcher = FileTransferDispatcher::new(writer_tx.clone());
+        // it owns no resource that can fail at init time. Holds the
+        // shared settings + host-control hub so it can run the per-
+        // connection `allow_file_transfer` gate (which the daemon-side
+        // DC router intentionally passes through; see the bug fix
+        // notes in `handle_command`).
+        let file_transfer_dispatcher = FileTransferDispatcher::new(
+            writer_tx.clone(),
+            shared_settings.clone(),
+            Arc::clone(&host_control_hub),
+        );
         // PR 4 cut 3: whiteboard dispatcher. Spawns a bridge thread to
         // the host_control_hub on construction; reuses the same hub
         // the DeskSession (legacy / portable path) uses so messages
@@ -1247,6 +1264,7 @@ mod tests {
             auth_token,
             host_upstream_url,
             media_pipe_name: None,
+            config_file_path: None,
         }
     }
 

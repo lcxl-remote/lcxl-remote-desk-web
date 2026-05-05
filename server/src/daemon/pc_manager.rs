@@ -601,17 +601,29 @@ fn route_to_service_msg(
 /// per-handler gating that lived in the worker's `handle_*_event`
 /// functions in Arch III; consolidating it here means the worker can
 /// trust every IPC variant it receives — gating is a daemon-side
-/// concern only. `CursorSync` is filtered out before this is called.
+/// concern only for routes whose access category lines up with a
+/// SignalingState flag. `CursorSync` is filtered out before this is
+/// called.
+///
+/// File transfer is its own access category (`allow_file_transfer`),
+/// independent of `accept_control` which governs mouse/keyboard. The
+/// browser file-management UI opens a *fresh* WebRTC connection that
+/// has never requested control, so any daemon-side gate keyed on
+/// `accept_control` would silently drop every download/upload. We let
+/// file_transfer_event traffic through here and the worker's
+/// `FileTransferDispatcher` runs the actual `check_security_permission`
+/// per connection (matching Arch III's per-DC permission cache).
 async fn route_is_permitted(route: DcRoute, state: &Arc<RwLock<SignalingState>>) -> bool {
     let s = state.read().await;
     match route {
         DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard => s.accept_control,
         DcRoute::Clipboard => s.accept_clipboard_sync,
-        // File / whiteboard ride on the control grant in Arch III; PR
-        // 4 may split file_transfer onto its own switch but cut 5
-        // matches Arch III's behaviour exactly to avoid behaviour
-        // regressions during the cutover.
-        DcRoute::FileTransfer | DcRoute::Whiteboard => s.accept_control,
+        DcRoute::FileTransfer => true,
+        // Whiteboard rides on the control grant in Arch III; PR 4 may
+        // split it onto its own switch but cut 5 matches Arch III's
+        // behaviour exactly to avoid behaviour regressions during the
+        // cutover.
+        DcRoute::Whiteboard => s.accept_control,
         DcRoute::CursorSync => unreachable!("CursorSync DC has no message route"),
     }
 }
@@ -2432,10 +2444,35 @@ mod tests {
         assert!(!route_is_permitted(DcRoute::Mouse, &state).await);
         assert!(!route_is_permitted(DcRoute::MouseMove, &state).await);
         assert!(!route_is_permitted(DcRoute::Keyboard, &state).await);
-        assert!(!route_is_permitted(DcRoute::FileTransfer, &state).await);
         assert!(!route_is_permitted(DcRoute::Whiteboard, &state).await);
         // Clipboard rides on its own gate, not control.
         assert!(route_is_permitted(DcRoute::Clipboard, &state).await);
+        // FileTransfer is on `allow_file_transfer` (worker-side gate),
+        // independent of accept_control. The browser file-management UI
+        // opens a fresh PC that has never requested control, so any
+        // accept_control gate here would silently drop every download.
+        assert!(route_is_permitted(DcRoute::FileTransfer, &state).await);
+    }
+
+    /// File transfer must pass the daemon gate regardless of
+    /// `accept_control` / `accept_clipboard_sync`; the worker
+    /// dispatcher runs the actual `allow_file_transfer` security check.
+    /// Regression guard for the portable-mode "download stuck" bug.
+    #[tokio::test]
+    async fn route_is_permitted_passes_file_transfer_unconditionally() {
+        let denied = Arc::new(RwLock::new(SignalingState {
+            accept_control: false,
+            accept_clipboard_sync: false,
+            ..SignalingState::default()
+        }));
+        assert!(route_is_permitted(DcRoute::FileTransfer, &denied).await);
+
+        let accepted = Arc::new(RwLock::new(SignalingState {
+            accept_control: true,
+            accept_clipboard_sync: true,
+            ..SignalingState::default()
+        }));
+        assert!(route_is_permitted(DcRoute::FileTransfer, &accepted).await);
     }
 
     /// `accept_clipboard_sync = false` blocks Clipboard even when

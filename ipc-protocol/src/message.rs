@@ -314,6 +314,23 @@ pub struct WorkerInitPayload {
     /// mode" until the cut that wires media_producer (PR 2 / cut 4).
     #[serde(default)]
     pub media_pipe_name: Option<String>,
+
+    /// Absolute path of the on-disk settings file the daemon is using.
+    ///
+    /// `Settings.args` carries `#[serde(skip)]`, so when the worker
+    /// deserializes `config_json` it cannot recover `args.config_file_path`
+    /// from the wire payload — and any worker-side `Settings::save()` call
+    /// (e.g. when the user picks "remember" on a security approval prompt)
+    /// would fall back to the default empty path and fail with
+    /// `FILE_PATH_NOT_FOUND`.
+    ///
+    /// The daemon fills this with `args.config_file_path.clone()` so the
+    /// worker writes back to the exact same on-disk file the daemon
+    /// loaded. `Option<String>` with `#[serde(default)]` keeps backwards
+    /// compatibility with older daemons whose Init payloads predate the
+    /// field.
+    #[serde(default)]
+    pub config_file_path: Option<String>,
 }
 
 /// Payload for [`WorkerToService::SignalingError`]. Carries the
@@ -797,6 +814,7 @@ mod tests {
             auth_token: Some("ipc-token".to_string()),
             host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
             media_pipe_name: Some(r"\\.\pipe\lcxl-desk-ipc-7-uuid-media".to_string()),
+            config_file_path: Some(r"C:\ProgramData\lcxl\settings.toml".to_string()),
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: WorkerInitPayload = serde_json::from_str(&json).unwrap();
@@ -805,6 +823,7 @@ mod tests {
         assert_eq!(decoded.auth_token, original.auth_token);
         assert_eq!(decoded.host_upstream_url, original.host_upstream_url);
         assert_eq!(decoded.media_pipe_name, original.media_pipe_name);
+        assert_eq!(decoded.config_file_path, original.config_file_path);
     }
 
     /// `DesktopChanged` round-trips with the same JSON shape the IPC reader
@@ -823,8 +842,8 @@ mod tests {
     }
 
     /// Older daemons that don't yet emit `host_upstream_url` /
-    /// `media_pipe_name` must still be accepted by newer workers (both
-    /// fields carry `#[serde(default)]`).
+    /// `media_pipe_name` / `config_file_path` must still be accepted by
+    /// newer workers (all three fields carry `#[serde(default)]`).
     #[test]
     fn worker_init_payload_accepts_missing_optional_fields() {
         let legacy = serde_json::json!({
@@ -839,6 +858,7 @@ mod tests {
         assert!(decoded.host_upstream_url.is_none());
         assert!(decoded.auth_token.is_none());
         assert!(decoded.media_pipe_name.is_none());
+        assert!(decoded.config_file_path.is_none());
     }
 
     // ============== Arch IV variants — bincode v2 round-trips ==============

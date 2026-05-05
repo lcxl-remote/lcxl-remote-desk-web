@@ -61,7 +61,10 @@ use log::{debug, error, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 
+use crate::host_control::HostControlHub;
 use crate::model::file_transfer::*;
+use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
+use crate::model::settings::SharedSettings;
 
 const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 60 * 1024;
 const YIELD_EVERY_N_CHUNKS: u32 = 100;
@@ -78,6 +81,13 @@ struct DispatcherInner {
     upload_states: HashMap<String, UploadState>,
     cancelled_transfers: HashSet<String>,
     active_connections: HashSet<String>,
+    /// Per-connection cached `allow_file_transfer` decision. Mirrors the
+    /// per-DC permission cache from Arch III's
+    /// `service::file_transfer::handle_file_transfer_event` so each
+    /// connection only triggers the Tauri approval prompt at most once,
+    /// regardless of how many DownloadRequest / UploadRequest /
+    /// chunk frames flow over its `file_transfer_event` DC.
+    permission_cache: HashMap<String, bool>,
 }
 
 impl DispatcherInner {
@@ -86,6 +96,7 @@ impl DispatcherInner {
             upload_states: HashMap::new(),
             cancelled_transfers: HashSet::new(),
             active_connections: HashSet::new(),
+            permission_cache: HashMap::new(),
         }
     }
 }
@@ -96,14 +107,66 @@ impl DispatcherInner {
 pub struct FileTransferDispatcher {
     inner: Arc<TokioMutex<DispatcherInner>>,
     error_tx: mpsc::UnboundedSender<WorkerToService>,
+    /// Shared settings used by the permission gate to read
+    /// `security.allow_file_transfer` and (when the user picks
+    /// "remember") to persist the choice via `Settings::save()`.
+    settings: Arc<SharedSettings>,
+    /// Host-control hub used by `check_security_permission` to surface
+    /// the approval prompt in the Tauri shell. In portable mode this is
+    /// the daemon's hub directly (shared in-process); in named-pipe
+    /// mode it's the worker's Forwarder hub that bridges back to the
+    /// daemon's aggregator over ws.
+    hub: Arc<HostControlHub>,
 }
 
 impl FileTransferDispatcher {
-    pub fn new(error_tx: mpsc::UnboundedSender<WorkerToService>) -> Self {
+    pub fn new(
+        error_tx: mpsc::UnboundedSender<WorkerToService>,
+        settings: Arc<SharedSettings>,
+        hub: Arc<HostControlHub>,
+    ) -> Self {
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner::new())),
             error_tx,
+            settings,
+            hub,
         }
+    }
+
+    /// Resolve the `allow_file_transfer` decision for a connection.
+    ///
+    /// Returns the cached value if a previous command on the same
+    /// connection already established one. Otherwise calls
+    /// [`check_security_permission`] (which prompts the user via Tauri
+    /// when the saved preference is `None`) and stores the result.
+    ///
+    /// Race tolerance: two concurrent commands on a fresh connection
+    /// can both miss the cache and call into `check_security_permission`.
+    /// Tauri dedups identical pending requests by req-id, so the user
+    /// sees one prompt; the two callers receive the same answer and
+    /// race to write the same value into the cache. Either ordering
+    /// is correct.
+    async fn permission_for(&self, connection_id: &str) -> bool {
+        {
+            let inner = self.inner.lock().await;
+            if let Some(&v) = inner.permission_cache.get(connection_id) {
+                return v;
+            }
+        }
+        let allow_transfer = self.settings.read().await.security.allow_file_transfer;
+        let approved = check_security_permission(
+            &self.settings,
+            &self.hub,
+            allow_transfer,
+            SecurityPermissionType::FileTransfer,
+            Some(connection_id.to_string()),
+        )
+        .await;
+        let mut inner = self.inner.lock().await;
+        inner
+            .permission_cache
+            .insert(connection_id.to_string(), approved);
+        approved
     }
 
     /// Add a connection to the active set. Subsequent
@@ -143,6 +206,12 @@ impl FileTransferDispatcher {
                 inner.active_connections.len()
             );
         }
+        // Drop the cached permission so a subsequent connection (which
+        // may be from a different browser session) re-prompts. The
+        // settings-level "allow_file_transfer = Some(true)" remembered
+        // choice still short-circuits the prompt without user
+        // interaction, so this is cheap correctness, not a UX cost.
+        inner.permission_cache.remove(&payload.connection_id);
     }
 
     /// Drop every connection + every in-flight transfer state. Called
@@ -153,6 +222,7 @@ impl FileTransferDispatcher {
         inner.active_connections.clear();
         inner.upload_states.clear();
         inner.cancelled_transfers.clear();
+        inner.permission_cache.clear();
     }
 
     /// Apply an incoming file-transfer command. The bytes are either
@@ -172,6 +242,23 @@ impl FileTransferDispatcher {
                 );
                 return;
             }
+        }
+        // Permission gate: file transfer is on its own access category
+        // (`allow_file_transfer`), independent of `accept_control` which
+        // governs mouse/keyboard. The daemon's DC router used to gate
+        // `file_transfer_event` on `accept_control`; that was wrong —
+        // the file management UI in the browser opens a fresh WebRTC
+        // connection that has never requested control, so every
+        // download/upload would be silently dropped at the daemon.
+        // The daemon now passes file_transfer through unconditionally
+        // and we do the actual permission check here, mirroring Arch
+        // III's behavior in `service::file_transfer::handle_file_transfer_event`.
+        if !self.permission_for(&payload.connection_id).await {
+            warn!(
+                "[FileTransferDispatcher] {}: permission denied — dropping command",
+                payload.connection_id
+            );
+            return;
         }
         if payload.is_text {
             self.handle_text(payload).await;
@@ -479,15 +566,35 @@ impl FileTransferDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::settings::Settings;
     use desk_ipc_protocol::message::MediaCodec;
     use tempfile::TempDir;
 
+    /// Build a dispatcher whose permission gate auto-passes
+    /// (`allow_file_transfer = Some(true)`) so tests focus on the
+    /// dispatch / IO logic rather than the Tauri approval prompt.
+    /// Tests that need to assert the permission deny path can build a
+    /// dispatcher with `allow_file_transfer = Some(false)` via
+    /// `dispatcher_with_setting` instead.
     fn dispatcher() -> (
         FileTransferDispatcher,
         mpsc::UnboundedReceiver<WorkerToService>,
     ) {
+        dispatcher_with_setting(Some(true))
+    }
+
+    fn dispatcher_with_setting(
+        allow_file_transfer: Option<bool>,
+    ) -> (
+        FileTransferDispatcher,
+        mpsc::UnboundedReceiver<WorkerToService>,
+    ) {
+        let mut settings = Settings::default();
+        settings.security.allow_file_transfer = allow_file_transfer;
+        let shared = Arc::new(SharedSettings::from(settings));
+        let hub = Arc::new(HostControlHub::new_local());
         let (tx, rx) = mpsc::unbounded_channel();
-        (FileTransferDispatcher::new(tx), rx)
+        (FileTransferDispatcher::new(tx, shared, hub), rx)
     }
 
     fn start_payload(connection_id: &str) -> StartMediaPayload {
@@ -546,6 +653,70 @@ mod tests {
         assert!(g.active_connections.is_empty());
         assert!(g.upload_states.is_empty());
         assert!(g.cancelled_transfers.is_empty());
+        assert!(g.permission_cache.is_empty());
+    }
+
+    /// Permission gate: when `allow_file_transfer` is `Some(false)`, the
+    /// dispatcher silently drops commands for active connections (the
+    /// liveness gate would otherwise let them through). Reproduces the
+    /// portable-mode bug where the daemon's accept_control gate dropped
+    /// every download — by moving the check here, an explicit deny still
+    /// blocks but the daemon no longer affects file_transfer routing.
+    #[tokio::test]
+    async fn handle_command_drops_when_permission_denied() {
+        let (d, mut rx) = dispatcher_with_setting(Some(false));
+        d.start_connection(&start_payload("c1")).await;
+        let payload = FileTransferPayload {
+            connection_id: "c1".into(),
+            data: br#"{"type":"download_request","transfer_id":"t","file_path":"x"}"#.to_vec(),
+            is_text: true,
+        };
+        d.handle_command(payload).await;
+        tokio::task::yield_now().await;
+        assert!(
+            rx.try_recv().is_err(),
+            "denied command must not produce IPC output"
+        );
+        // Cache is populated so subsequent commands short-circuit.
+        let g = d.inner.lock().await;
+        assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
+    }
+
+    /// Permission gate: when `allow_file_transfer` is `Some(true)`, the
+    /// dispatcher routes commands normally and caches the decision.
+    #[tokio::test]
+    async fn handle_command_caches_allowed_permission() {
+        let (d, _rx) = dispatcher_with_setting(Some(true));
+        d.start_connection(&start_payload("c1")).await;
+        let payload = FileTransferPayload {
+            connection_id: "c1".into(),
+            data: br#"{"type":"transfer_complete","transfer_id":"t"}"#.to_vec(),
+            is_text: true,
+        };
+        d.handle_command(payload).await;
+        let g = d.inner.lock().await;
+        assert_eq!(g.permission_cache.get("c1").copied(), Some(true));
+    }
+
+    /// Permission cache is wiped on `stop_connection` so a future
+    /// connection reuse with the same id re-prompts (or re-checks
+    /// settings).
+    #[tokio::test]
+    async fn stop_connection_clears_permission_cache() {
+        let (d, _rx) = dispatcher_with_setting(Some(true));
+        d.start_connection(&start_payload("c1")).await;
+        let payload = FileTransferPayload {
+            connection_id: "c1".into(),
+            data: br#"{"type":"transfer_complete","transfer_id":"t"}"#.to_vec(),
+            is_text: true,
+        };
+        d.handle_command(payload).await;
+        d.stop_connection(&StopMediaPayload {
+            connection_id: "c1".into(),
+        })
+        .await;
+        let g = d.inner.lock().await;
+        assert!(g.permission_cache.get("c1").is_none());
     }
 
     /// Download path: serve_download reads file from disk, emits a
