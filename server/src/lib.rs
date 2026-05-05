@@ -70,6 +70,7 @@ use desk_utils::{error::DeskErrorCode, network::check_ipv6_available, rest::Rest
 use error::DeskError;
 use log::{error, info, warn};
 use model::settings::{Args, Settings, SharedSettings, StartupMode};
+use tracing_appender::non_blocking::WorkerGuard;
 
 use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
@@ -253,7 +254,13 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
-pub async fn run() -> Result<Server, DeskError> {
+/// Returned alongside the running [`Server`]. The caller MUST keep this guard
+/// alive until `server.await` completes — dropping it earlier shuts down the
+/// `tracing_appender` non-blocking writer thread, after which every log line
+/// the running server emits is silently discarded.
+pub type ServerHandle = (Server, Option<WorkerGuard>);
+
+pub async fn run() -> Result<ServerHandle, DeskError> {
     let args = Args::parse();
     let settings = Settings::new(&args)?;
     run_with_hub(&settings, None).await
@@ -270,7 +277,7 @@ pub async fn run() -> Result<Server, DeskError> {
 pub async fn run_with_hub(
     settings: &Settings,
     host_control_hub: Option<Arc<host_control::HostControlHub>>,
-) -> Result<Server, DeskError> {
+) -> Result<ServerHandle, DeskError> {
     // Create a lock file to prevent multiple instances of the server from running simultaneously.
     let lock_file_path = env::temp_dir().join("lcxl_remote_desk_server.lock");
     let lock_file = File::create(lock_file_path)?;
@@ -295,8 +302,12 @@ pub async fn run_with_hub(
     // determine startup mode
     let startup_mode = settings.args.startup_mode.clone();
 
-    // Initialize telemetry
-    let _guard = telemetry::init_telemetry(shared_settings.clone(), &startup_mode).await?;
+    // Initialize telemetry. The returned `WorkerGuard` is propagated back to
+    // the caller through `ServerHandle` so it lives as long as the running
+    // server. Holding it inside this function would drop it on `Ok(server)`,
+    // which closes the non-blocking writer thread before any request-time
+    // logs make it to disk.
+    let telemetry_guard = telemetry::init_telemetry(shared_settings.clone(), &startup_mode).await?;
 
     // init desk_signal db
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
@@ -661,7 +672,7 @@ pub async fn run_with_hub(
         );
     }
     let server = http_server.run();
-    Ok(server)
+    Ok((server, telemetry_guard))
 }
 
 #[cfg(test)]
@@ -710,5 +721,21 @@ mod tests {
         assert!(b.verify_and_consume("via-a"));
         // After consuming via b, a sees the consumed (empty) state too.
         assert!(!a.verify_and_consume("via-a"));
+    }
+
+    // Lock down the `ServerHandle` contract: the second tuple slot MUST be
+    // `Option<WorkerGuard>` so callers can keep the `tracing_appender`
+    // non-blocking writer alive for the entire `server.await` lifetime. The
+    // earlier shape was `Result<Server, _>`, which let `run_with_hub` drop
+    // its locally-bound guard at function return — closing the writer thread
+    // and silently discarding every subsequent log line emitted by the
+    // running server. Regressing the type (e.g. removing the guard slot or
+    // returning a bare `Server`) breaks this assignment at compile time.
+    #[test]
+    fn server_handle_alias_carries_telemetry_worker_guard() {
+        fn _shape_check(handle: ServerHandle) -> (Server, Option<WorkerGuard>) {
+            handle
+        }
+        let _coerce: fn(ServerHandle) -> (Server, Option<WorkerGuard>) = _shape_check;
     }
 }

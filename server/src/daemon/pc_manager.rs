@@ -1653,9 +1653,7 @@ async fn cleanup_pc(
         }
         log::info!("[pc_manager] Closed PC for {connection_id} (reason: {reason})");
     } else {
-        log::debug!(
-            "[pc_manager] cleanup_pc({connection_id}, {reason}): registry already empty"
-        );
+        log::debug!("[pc_manager] cleanup_pc({connection_id}, {reason}): registry already empty");
     }
 
     if let Err(e) = worker_mgr
@@ -2500,8 +2498,8 @@ mod tests {
         loop {
             match timeout(deadline, outbound_rx.recv()).await {
                 Ok(Ok(text)) => {
-                    let m: SignalingModel =
-                        serde_json::from_str(&text).expect("outbound text must be a SignalingModel");
+                    let m: SignalingModel = serde_json::from_str(&text)
+                        .expect("outbound text must be a SignalingModel");
                     if !matches!(m.signaling_type, SignalingType::Canid) {
                         continue;
                     }
@@ -2586,10 +2584,7 @@ mod tests {
             let g = ctx.read().await;
             Arc::clone(&g.pc)
         };
-        let _dc = pc
-            .create_data_channel("trickle", None)
-            .await
-            .expect("dc");
+        let _dc = pc.create_data_channel("trickle", None).await.expect("dc");
         let offer = pc.create_offer(None).await.expect("offer");
         pc.set_local_description(offer).await.expect("set local");
 

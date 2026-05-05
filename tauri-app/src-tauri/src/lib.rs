@@ -438,7 +438,11 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                     )
                     .await
                     {
-                        Ok(server) => {
+                        Ok((server, _telemetry_guard)) => {
+                            // Hold _telemetry_guard until server.await
+                            // completes; dropping earlier closes the
+                            // non-blocking log writer thread and silently
+                            // discards all subsequent lines.
                             if let Err(e) = server.await {
                                 log::error!("Server error: {}", e);
                             }

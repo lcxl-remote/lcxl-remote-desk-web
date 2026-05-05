@@ -60,7 +60,10 @@ fn main() {
             let system = actix_web::rt::System::new();
             let exit_code = system.block_on(async {
                 match lcxl_remote_desk_server::run().await {
-                    Ok(server) => {
+                    Ok((server, _telemetry_guard)) => {
+                        // Hold _telemetry_guard until server.await completes;
+                        // dropping earlier closes the non-blocking log writer
+                        // thread and silently discards all subsequent lines.
                         if let Err(e) = server.await {
                             eprintln!("Server error: {e}");
                             1

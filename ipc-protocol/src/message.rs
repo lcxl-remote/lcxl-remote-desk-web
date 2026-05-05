@@ -964,8 +964,14 @@ mod tests {
             "quality": 0
         }"#;
         let payload: StartMediaPayload = serde_json::from_str(json).expect("parse");
-        assert!(payload.start_video, "missing start_video must default to true");
-        assert!(payload.start_audio, "missing start_audio must default to true");
+        assert!(
+            payload.start_video,
+            "missing start_video must default to true"
+        );
+        assert!(
+            payload.start_audio,
+            "missing start_audio must default to true"
+        );
     }
 
     #[test]

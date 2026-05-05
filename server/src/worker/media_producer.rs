@@ -198,9 +198,7 @@ impl MediaProducer {
             // connection don't accumulate unbounded; closing it here is
             // symmetric with not spawning a consumer.
             drop(settings_rx);
-            debug!(
-                "[MediaProducer] {connection_id}: skipping video pipeline (start_video=false)"
-            );
+            debug!("[MediaProducer] {connection_id}: skipping video pipeline (start_video=false)");
             None
         };
         // PR 3: audio pipeline runs in its own dedicated thread (WASAPI
@@ -217,9 +215,7 @@ impl MediaProducer {
                 Arc::clone(&stop_flag),
             ))
         } else {
-            debug!(
-                "[MediaProducer] {connection_id}: skipping audio pipeline (start_audio=false)"
-            );
+            debug!("[MediaProducer] {connection_id}: skipping audio pipeline (start_audio=false)");
             None
         };
         map.insert(
@@ -239,10 +235,7 @@ impl MediaProducer {
     /// Used to verify that DataChannel-only `StartMedia` payloads
     /// register a `ConnectionTask` slot but do not spawn any pipeline.
     #[cfg(test)]
-    pub(crate) fn connection_pipeline_state(
-        &self,
-        connection_id: &str,
-    ) -> Option<(bool, bool)> {
+    pub(crate) fn connection_pipeline_state(&self, connection_id: &str) -> Option<(bool, bool)> {
         let map = self.inner.lock().expect("media producer lock poisoned");
         map.get(connection_id)
             .map(|t| (t.video_handle.is_some(), t.audio_handle.is_some()))
