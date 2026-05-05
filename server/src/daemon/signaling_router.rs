@@ -61,7 +61,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::Offer
         | SignalingType::Answer
         | SignalingType::Canid
-        | SignalingType::CloseControl => RouteOwnership::Daemon,
+        | SignalingType::CloseControl
+        | SignalingType::ConnectionRemoved => RouteOwnership::Daemon,
 
         // Cut 6: daemon owns SignalingState now, so the per-connection
         // accept-control flow runs daemon-side (browser → daemon →
@@ -258,6 +259,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         }
         SignalingType::CloseControl => {
             pc_manager::handle_close_control(&ctx.pc_registry, &ctx.worker_mgr, model).await?;
+            Ok(())
+        }
+        SignalingType::ConnectionRemoved => {
+            pc_manager::handle_connection_removed(&ctx.pc_registry, &ctx.worker_mgr, model).await?;
             Ok(())
         }
         SignalingType::RequireControl => {
@@ -781,6 +786,7 @@ mod tests {
             SignalingType::DesktopReady,
             SignalingType::FetchConnections,
             SignalingType::ConnectionList,
+            SignalingType::ConnectionRemoved,
             SignalingType::Heartbeat,
             // Batch 4: Error / Unknown are daemon-owned now.
             SignalingType::Error,

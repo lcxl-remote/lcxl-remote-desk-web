@@ -37,6 +37,16 @@ pub enum SignalingType {
     /// Response session list
     ConnectionList = 22,
 
+    /// Signaling server → Server peers: a connection has just left the
+    /// server's connection map. The signaling server fans this out
+    /// (currently only when a `Browser` peer exits) so the daemon-side
+    /// PC manager can release per-`connection_id` resources (DXGI
+    /// duplication, encoder, IPC senders, …) immediately, without
+    /// waiting for the multi-second ICE `disconnected → failed`
+    /// fallback. Carries the departed peer's `connection_id` in
+    /// `from_connection_id`; data payload is intentionally empty.
+    ConnectionRemoved = 23,
+
     /// WebRTC request remote access
     RequestRemote = 100,
     /// WebRTC init signaling type

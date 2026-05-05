@@ -17,8 +17,8 @@ use crate::{
     model::{
         connection::{ConnectionList, ConnectionModel, ConnectionState, SharedConnectionMap},
         signal::{
-            ForwardSignalingSender, InitSignalingData, RequestRemoteModel, SignalingModel,
-            SignalingType, SignalingUser, TurnProvider,
+            ForwardSignalingSender, InitSignalingData, RemoteDeskTypeEnum, RequestRemoteModel,
+            SignalingModel, SignalingType, SignalingUser, TurnProvider,
         },
         version::VersionInfo,
     },
@@ -151,8 +151,9 @@ impl<U: SignalingUser> Drop for SignalingHandler<U> {
         };
         let connection_id = self.connection_state.model.connection_id.clone();
         let connection_map = self.connection_map.clone();
+        let blocking_handle = handle.clone();
         let removed_value = futures::executor::block_on(async move {
-            handle
+            blocking_handle
                 .spawn_blocking(move || connection_map.blocking_write().remove(&connection_id))
                 .await
         });
@@ -165,6 +166,77 @@ impl<U: SignalingUser> Drop for SignalingHandler<U> {
                 log::info!("Removed connection from map: {:?}", connection_state.model)
             }
             Err(err) => log::error!("Failed to remove connection from map: {:?}", err),
+        }
+
+        // Active cleanup signal: a Browser leaving has broken every PC
+        // it was the remote of. Fan a `ConnectionRemoved` out to all
+        // remaining `Server`-type peers so their daemon-side PC
+        // managers can release per-`connection_id` resources (DXGI
+        // duplication, encoder, IPC senders) immediately, instead of
+        // waiting for the multi-second ICE `disconnected → failed`
+        // fallback. Run in a background task so a slow / blocked peer
+        // can't stall the drop path. We only fan out for Browser
+        // departures: a Server leaving means there's nothing on the
+        // other side that still cares; a signaling-only or manager
+        // peer never owned PC state in the first place.
+        if self.connection_state.model.version_info.remote_desk_type == RemoteDeskTypeEnum::Browser
+        {
+            let connection_id = self.connection_state.model.connection_id.clone();
+            let connection_map = self.connection_map.clone();
+            handle.spawn(async move {
+                broadcast_connection_removed_to_servers(&connection_id, &connection_map).await;
+            });
+        }
+    }
+}
+
+/// Fan a `SignalingType::ConnectionRemoved` notification out to every
+/// `Server`-type connection currently in the map, identifying the
+/// departed peer via `connection_id` (placed in the outgoing model's
+/// `from_connection_id`). Failures per peer are logged at WARN — they
+/// can't be propagated up because this runs detached from the drop
+/// path.
+///
+/// Pulled out of `SignalingHandler::drop` so the broadcast stays
+/// testable in isolation and the drop body itself doesn't grow more
+/// async logic.
+pub async fn broadcast_connection_removed_to_servers(
+    connection_id: &str,
+    connection_map: &SharedConnectionMap,
+) {
+    let server_states: Vec<ConnectionState> = {
+        let map_guard = connection_map.read().await;
+        map_guard
+            .values()
+            .filter(|s| s.model.version_info.remote_desk_type == RemoteDeskTypeEnum::Server)
+            .cloned()
+            .collect()
+    };
+
+    if server_states.is_empty() {
+        log::debug!(
+            "ConnectionRemoved for {connection_id}: no Server peers in map, skipping broadcast"
+        );
+        return;
+    }
+
+    // Build the inert template once; `send_to_peer` rewrites the
+    // `from`/`to` fields per recipient when serialising.
+    let template = SignalingModel::new(
+        &uuid::Uuid::new_v4().to_string(),
+        SignalingType::ConnectionRemoved,
+        None,
+        None,
+        None,
+        None,
+    );
+
+    for state in server_states {
+        if let Err(e) = state.send_to_peer(connection_id, &template).await {
+            log::warn!(
+                "ConnectionRemoved fan-out for {connection_id} → {}: {e}",
+                state.model.connection_id,
+            );
         }
     }
 }
@@ -330,6 +402,18 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 log::warn!(
                     "Received connection list signaling type: {}, it should not be received",
                     signaling_model.signaling_type
+                );
+            }
+            SignalingType::ConnectionRemoved => {
+                // ConnectionRemoved is server → peer only — emitted from
+                // `SignalingHandler::drop` via
+                // `broadcast_connection_removed_to_servers`. A client
+                // sending it inbound is a protocol error; swallow with
+                // a warning so daemon-side cleanup state can't be
+                // forged.
+                log::warn!(
+                    "Received connection removed signaling type from client {}, ignoring",
+                    self.connection_state.model.connection_id
                 );
             }
             SignalingType::SendDataToTerminal => {
@@ -573,5 +657,48 @@ impl<U: SignalingUser> SignalingHandler<U> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ConnectionRemoved` is the wire-level marker the daemon's
+    /// signaling router keys off to release per-`connection_id`
+    /// resources. The integer discriminant must stay stable across
+    /// releases — bumping it would silently desync browsers /
+    /// daemons running mismatched builds, and the active cleanup
+    /// path the daemon depends on would just drop on the floor at
+    /// `SignalingType::Unknown`. Pin both the discriminant and the
+    /// JSON wire form.
+    #[test]
+    fn signaling_type_connection_removed_wire_format_is_stable() {
+        // Discriminant: integer 23 is what the JSON deserializer reads.
+        // Hard-coded both sides so a `repr(i32)` reorder breaks the test
+        // instead of silently shifting the enum's wire value.
+        assert_eq!(SignalingType::ConnectionRemoved as i32, 23);
+
+        let json = serde_json::to_string(&SignalingType::ConnectionRemoved)
+            .expect("serialize ConnectionRemoved");
+        assert_eq!(json, "23");
+
+        let parsed: SignalingType =
+            serde_json::from_str("23").expect("deserialize 23 -> ConnectionRemoved");
+        assert!(matches!(parsed, SignalingType::ConnectionRemoved));
+    }
+
+    /// Empty map (no `Server`-type peers around) must skip the
+    /// broadcast cleanly. This covers the early-exit path that keeps
+    /// the helper safe to call from a `Drop` background task — even
+    /// when the connection map has already been drained.
+    #[tokio::test]
+    async fn broadcast_connection_removed_to_servers_no_op_on_empty_map() {
+        let empty = SharedConnectionMap::new();
+        // Should return without blocking on anything; the assertion is
+        // simply that the future completes promptly under the test
+        // runtime's default no-IO budget.
+        broadcast_connection_removed_to_servers("conn-bye", &empty).await;
+        assert_eq!(empty.read().await.len(), 0);
     }
 }

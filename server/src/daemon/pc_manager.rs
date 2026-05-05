@@ -1778,6 +1778,36 @@ pub async fn handle_close_control(
     Ok(())
 }
 
+/// Daemon side of `SignalingType::ConnectionRemoved`. Sent by the
+/// signaling server when a `Browser`-type peer leaves its connection
+/// map (typically because the browser tab closed and the WS
+/// disconnected). The signal arrives milliseconds after the browser
+/// goes away, well before webrtc-rs would notice through ICE consent
+/// freshness — so this is the primary cleanup path for the
+/// "user closed the tab" case. The matching ICE
+/// `disconnected → failed` timeouts (see [`build_peer_connection`]
+/// callers) only run when the signaling channel is gone too.
+///
+/// Idempotent: if no PC exists for `from_connection_id` the call is
+/// a logged no-op (e.g. the browser never finished SDP, or another
+/// cleanup path already fired). The departed peer's id rides in
+/// `from_connection_id`; the data payload is intentionally empty.
+pub async fn handle_connection_removed(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    model: &SignalingModel,
+) -> Result<(), DeskError> {
+    let from_connection_id = model.check_and_get_from_connection_id()?;
+    cleanup_pc(
+        registry,
+        worker_mgr,
+        from_connection_id,
+        "peer_signaling_closed",
+    )
+    .await;
+    Ok(())
+}
+
 /// Daemon side of `SignalingType::RequireControl`. Mirrors the
 /// worker-side `DeskSession::handle_request_control` from Arch III but
 /// runs against the daemon-held PC. The browser sends this to either
@@ -2893,6 +2923,74 @@ mod tests {
         cleanup_pc(&registry, &worker_mgr, "conn-x", "test").await;
 
         assert!(!registry.contains("conn-x").await);
+    }
+
+    /// `handle_connection_removed` is the active cleanup path —
+    /// the signaling server fans out `ConnectionRemoved` the moment
+    /// a Browser peer's WS dies. Verify it tears down the daemon-side
+    /// PC for the named `from_connection_id` so the worker's DXGI
+    /// duplication is released before any reopen attempt races for it.
+    #[tokio::test]
+    async fn handle_connection_removed_clears_registry_for_existing_pc() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-bye", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        let model = SignalingModel::new(
+            "req-conn-removed",
+            SignalingType::ConnectionRemoved,
+            Some("conn-bye".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        handle_connection_removed(&registry, &worker_mgr, &model)
+            .await
+            .expect("handler must not error on a known connection");
+
+        assert!(!registry.contains("conn-bye").await);
+    }
+
+    /// `ConnectionRemoved` for a connection the daemon never
+    /// registered (e.g. a browser that never finished SDP) must be a
+    /// no-op rather than an error. The signaling broadcast is
+    /// best-effort and arrives at every Server peer in the
+    /// connection map regardless of whether the recipient was paired
+    /// with the departed browser; daemons that weren't involved
+    /// would otherwise log spurious failures every time any Browser
+    /// disconnects.
+    #[tokio::test]
+    async fn handle_connection_removed_unknown_connection_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        let model = SignalingModel::new(
+            "req-conn-removed",
+            SignalingType::ConnectionRemoved,
+            Some("ghost-connection".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        handle_connection_removed(&registry, &worker_mgr, &model)
+            .await
+            .expect("handler must accept unknown ids without erroring");
+        assert_eq!(registry.len().await, 0);
     }
 
     /// Codec round-trip: every IPC `MediaCodec` must map to a
