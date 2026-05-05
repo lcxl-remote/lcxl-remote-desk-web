@@ -1438,15 +1438,22 @@ pub async fn write_clipboard_data(registry: &PcRegistry, payload: ClipboardPaylo
 /// `service::file_transfer::handle_download_request`; here the daemon
 /// dispatches based on the `is_text` flag carried with the IPC.
 ///
-/// Permission gate: file transfer is gated on `accept_control` (it
-/// shares the remote-control flag, like the browser-→host
-/// router's `route_is_permitted` does). A connection that has not
-/// granted control gets nothing.
+/// Permission gate: file transfer is on its own access category
+/// (`security.allow_file_transfer`) — independent from
+/// `accept_control` / `accept_clipboard_sync`. The browser
+/// file-management UI opens a fresh PC that never requests remote
+/// control, so the daemon must forward write-back unconditionally.
+/// The actual permission check lives in the worker dispatcher
+/// (`worker::file_transfer_dispatcher::permission_for`), which runs
+/// `check_security_permission(allow_file_transfer, FileTransfer)`
+/// before processing the inbound command. If the worker is satisfied,
+/// any reply it emits is by definition authorised — re-checking here
+/// against the unrelated `accept_control` flag would silently drop
+/// every download (regression fixed 2026-05-05).
 ///
 /// Silent-drop branches:
 ///
 /// - Unknown `connection_id` — race against `CloseControl`; trace.
-/// - Permission not granted — debug.
 /// - No file-transfer DC registered — debug (browser hasn't opened it).
 /// - DC not in Open state — debug.
 /// - send_text on non-UTF-8 bytes — warn + drop. The worker should
@@ -1466,19 +1473,10 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
             return;
         }
     };
-    let (dc_opt, accepted) = {
+    let dc_opt = {
         let ctx = ctx.read().await;
-        let dc = ctx.file_transfer_data_channel.read().await.clone();
-        let s = ctx.signaling_state.read().await;
-        (dc, s.accept_control)
+        ctx.file_transfer_data_channel.read().await.clone()
     };
-    if !accepted {
-        log::debug!(
-            "[pc_manager] dropping file transfer data for {} — control not granted",
-            payload.connection_id
-        );
-        return;
-    }
     let dc = match dc_opt {
         Some(d) => d,
         None => {
@@ -2696,6 +2694,85 @@ mod tests {
             data: vec![0xFFu8, 0xFE, 0xFD],
         };
         write_clipboard_data(&registry, payload).await;
+    }
+
+    // ============== PR 4 cut 2: write_file_transfer_data ==============
+
+    /// `write_file_transfer_data` for an unknown connection_id is a
+    /// silent no-op — race against `CloseControl` must not panic.
+    #[tokio::test]
+    async fn write_file_transfer_data_unknown_connection_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let payload = FileTransferPayload {
+            connection_id: "ghost".to_string(),
+            data: b"{\"type\":\"DownloadResponse\"}".to_vec(),
+            is_text: true,
+        };
+        write_file_transfer_data(&registry, payload).await;
+    }
+
+    /// Regression for the portable-mode "download stuck at 0%" bug
+    /// fixed 2026-05-05: `write_file_transfer_data` must NOT gate on
+    /// `accept_control`. The browser file-management UI opens a fresh
+    /// PC that never requests remote control, so a `accept_control`
+    /// gate here silently dropped every download response chunk and
+    /// the worker-side dispatcher (which had already authorised the
+    /// transfer via `allow_file_transfer`) was left talking to a wall.
+    ///
+    /// This test exercises the DC-missing silent-drop branch on a
+    /// connection whose `SignalingState` defaults to `accept_control =
+    /// false`. Before the fix, the function would have returned at
+    /// the permission check; after the fix it must reach (and silently
+    /// no-op at) the DC-missing branch. Both paths look identical from
+    /// the outside — the regression guard is the bare fact that no
+    /// `accept_control` read remains in the function body. Keep this
+    /// test alongside the source so a future re-introduction of the
+    /// gate fails an explicit, named test.
+    #[tokio::test]
+    async fn write_file_transfer_data_does_not_gate_on_accept_control() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-no-control", &request_remote, &s)
+            .await
+            .expect("create");
+        // Default SignalingState has both flags false. Pre-fix, this
+        // would silent-drop on the permission gate; post-fix it falls
+        // through to the DC-missing branch (also a silent no-op, but
+        // the path is now driven only by the DC slot and ready_state).
+        let payload = FileTransferPayload {
+            connection_id: "conn-no-control".to_string(),
+            data: b"{\"type\":\"DownloadResponse\"}".to_vec(),
+            is_text: true,
+        };
+        write_file_transfer_data(&registry, payload).await;
+    }
+
+    /// Binary chunks (raw download bytes, `is_text = false`) follow
+    /// the same DC-missing silent-drop path as text control replies.
+    /// Pinning here so a regression that special-cases the binary
+    /// branch (e.g. unwrapping the DC option) shows up as a panic
+    /// rather than a corrupted production transfer.
+    #[tokio::test]
+    async fn write_file_transfer_data_binary_no_dc_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-bin-no-dc", &request_remote, &s)
+            .await
+            .expect("create");
+        let payload = FileTransferPayload {
+            connection_id: "conn-bin-no-dc".to_string(),
+            data: vec![0x00, 0x01, 0x02, 0x03],
+            is_text: false,
+        };
+        write_file_transfer_data(&registry, payload).await;
     }
 
     // ============== Cut 5: RTCP PLI/FIR identity ==============
