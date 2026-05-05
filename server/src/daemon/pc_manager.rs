@@ -48,7 +48,7 @@ use webrtc::api::media_engine::{
 };
 use webrtc::api::setting_engine::{SctpMaxMessageSize, SettingEngine};
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::{RTCPeerConnection, configuration::RTCConfiguration};
@@ -850,6 +850,78 @@ fn send_response<T: serde::Serialize + ?Sized>(
     Ok(())
 }
 
+/// Forward locally-gathered ICE candidates back to the browser via the
+/// signaling channel. Mirrors the Arch III worker behaviour where each
+/// host / srflx / relay candidate emitted by libwebrtc was wrapped in a
+/// `SignalingType::Canid` message — without this the browser only ever
+/// learns about the daemon's transport addresses through peer-reflexive
+/// discovery, which only works for single-m-line PCs (DataChannel-only
+/// file transfer) and consistently times out for video+audio+DC PCs in
+/// 30 s of `checking`. Trickle ICE friendly: each candidate ships
+/// independently as a fresh `new_request`.
+fn register_local_ice_candidate_forwarder(
+    pc: Arc<RTCPeerConnection>,
+    outbound: OutboundSink,
+    from_connection_id: String,
+) {
+    pc.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
+        let outbound = outbound.clone();
+        let from_connection_id = from_connection_id.clone();
+        Box::pin(async move {
+            // None signals end-of-candidates; nothing to ship in that case.
+            let Some(candidate) = c else {
+                log::debug!(
+                    "[pc_manager] ICE gathering complete for {from_connection_id} \
+                     (end-of-candidates)"
+                );
+                return;
+            };
+            let init = match candidate.to_json() {
+                Ok(j) => j,
+                Err(e) => {
+                    log::warn!(
+                        "[pc_manager] candidate.to_json failed for {from_connection_id}: {e}"
+                    );
+                    return;
+                }
+            };
+            let model = match SignalingModel::new_request(
+                SignalingType::Canid,
+                Some(from_connection_id.clone()),
+                Some(&init),
+            ) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!(
+                        "[pc_manager] candidate model build failed for {from_connection_id}: {e}"
+                    );
+                    return;
+                }
+            };
+            match serde_json::to_string(&model) {
+                Ok(text) => {
+                    log::debug!(
+                        "[pc_manager] forwarding local ICE candidate for {from_connection_id}: \
+                         {}",
+                        init.candidate
+                    );
+                    if let Err(e) = outbound.send(text) {
+                        log::warn!(
+                            "[pc_manager] outbound send (Canid) failed for \
+                             {from_connection_id}: {e}"
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[pc_manager] candidate JSON encode failed for {from_connection_id}: {e}"
+                    );
+                }
+            }
+        })
+    }));
+}
+
 /// Daemon side of `SignalingType::RequestRemote`. Creates the PC and
 /// emits the matching `Init` reply. Mirrors the worker's
 /// `init_ptc_peer_connection` minus the Arch III preapproved
@@ -873,6 +945,19 @@ pub async fn handle_request_remote(
     let ctx = registry
         .create_for_request_remote(from_connection_id, &request_remote, settings)
         .await?;
+
+    // Forward locally-gathered ICE candidates back to the browser. Must
+    // happen before the Offer arrives (and definitely before
+    // `set_local_description` triggers gathering) so that no host / srflx
+    // candidate is silently dropped during the handshake window.
+    {
+        let ctx_guard = ctx.read().await;
+        register_local_ice_candidate_forwarder(
+            Arc::clone(&ctx_guard.pc),
+            outbound.clone(),
+            from_connection_id.to_string(),
+        );
+    }
 
     // Cut 5: install the daemon-side `on_data_channel` router on the
     // freshly-created PC. Done before the Offer arrives so any
@@ -2294,6 +2379,158 @@ mod tests {
         // an exact platform-dependent list.
         assert!(!init.video_encoder_list.is_empty());
         assert!(!init.audio_encoder_list.is_empty());
+    }
+
+    /// Regression: the daemon-side PC must publish locally-gathered
+    /// ICE candidates back through the signaling channel as
+    /// `SignalingType::Canid`. Without this the browser only learns
+    /// about the daemon's transport addresses via peer-reflexive
+    /// discovery, which times out after 30 s of `checking` for
+    /// multi-m-line PCs (video+audio+DC). The portable mode log
+    /// signature was: file-management (DC-only) connected, but the
+    /// remote-desktop page consistently failed ICE.
+    #[tokio::test]
+    async fn local_ice_candidate_forwarder_publishes_canid_to_outbound() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let pc = Arc::new(build_peer_connection(vec![]).await.expect("build pc"));
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(32);
+        register_local_ice_candidate_forwarder(
+            Arc::clone(&pc),
+            outbound_tx,
+            "conn-trickle".to_string(),
+        );
+
+        // Trigger ICE gathering: any local SDP with at least one
+        // m-section starts the gatherer. A DataChannel is the
+        // cheapest such trigger (no transceiver bookkeeping).
+        let _dc = pc
+            .create_data_channel("trickle-test", None)
+            .await
+            .expect("create dc");
+        let offer = pc.create_offer(None).await.expect("create offer");
+        pc.set_local_description(offer)
+            .await
+            .expect("set local desc starts gathering");
+
+        let mut canid_count = 0usize;
+        let deadline = Duration::from_secs(5);
+        loop {
+            match timeout(deadline, outbound_rx.recv()).await {
+                Ok(Ok(text)) => {
+                    let m: SignalingModel =
+                        serde_json::from_str(&text).expect("outbound text must be a SignalingModel");
+                    if !matches!(m.signaling_type, SignalingType::Canid) {
+                        continue;
+                    }
+                    assert_eq!(
+                        m.to_connection_id.as_deref(),
+                        Some("conn-trickle"),
+                        "Canid must target the originating browser connection"
+                    );
+                    let init: RTCIceCandidateInit = m
+                        .get_data::<RTCIceCandidateInit>()
+                        .expect("Canid payload must be RTCIceCandidateInit");
+                    assert!(
+                        !init.candidate.is_empty(),
+                        "forwarded candidate string must be non-empty"
+                    );
+                    canid_count += 1;
+                    // Stop after the first one to keep the test fast;
+                    // counting the rest only adds flakiness.
+                    break;
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            canid_count >= 1,
+            "register_local_ice_candidate_forwarder must publish at least one Canid \
+             after set_local_description triggers gathering; got {canid_count}"
+        );
+    }
+
+    /// Regression: `handle_request_remote` must wire the on_ice_candidate
+    /// forwarder onto the freshly-created PC so that subsequent gathering
+    /// (kicked off by the browser's Offer) ships candidates back to the
+    /// browser. We exercise this end-to-end by manually triggering
+    /// gathering on the registry-stored PC after `handle_request_remote`
+    /// returns and asserting Canid messages arrive on `outbound`.
+    #[tokio::test]
+    async fn handle_request_remote_registers_ice_candidate_forwarder() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(32);
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let model = SignalingModel::new(
+            "req-init-ice",
+            SignalingType::RequestRemote,
+            Some("conn-init-ice".to_string()),
+            None,
+            Some(
+                serde_json::to_value(RequestRemoteModel {
+                    ice_servers: vec![],
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+
+        handle_request_remote(
+            &registry,
+            &outbound_tx,
+            &s,
+            "user-x",
+            false,
+            None,
+            None,
+            &model,
+        )
+        .await
+        .expect("handle ok");
+
+        // Drain the Init reply.
+        let init_text = outbound_rx.recv().await.expect("init reply");
+        let init_reply: SignalingModel = serde_json::from_str(&init_text).unwrap();
+        assert!(matches!(init_reply.signaling_type, SignalingType::Init));
+
+        // Now trigger gathering on the PC the registry holds. This is
+        // what the Offer handler does in production; we do it directly
+        // here because the unit test is scoped to handle_request_remote.
+        let ctx = registry.get("conn-init-ice").await.expect("ctx exists");
+        let pc = {
+            let g = ctx.read().await;
+            Arc::clone(&g.pc)
+        };
+        let _dc = pc
+            .create_data_channel("trickle", None)
+            .await
+            .expect("dc");
+        let offer = pc.create_offer(None).await.expect("offer");
+        pc.set_local_description(offer).await.expect("set local");
+
+        let mut got_canid = false;
+        let deadline = Duration::from_secs(5);
+        loop {
+            match timeout(deadline, outbound_rx.recv()).await {
+                Ok(Ok(text)) => {
+                    let m: SignalingModel = serde_json::from_str(&text).unwrap();
+                    if matches!(m.signaling_type, SignalingType::Canid) {
+                        assert_eq!(m.to_connection_id.as_deref(), Some("conn-init-ice"));
+                        got_canid = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            got_canid,
+            "handle_request_remote must register the ICE forwarder so gathering ships Canid"
+        );
     }
 
     /// Codec round-trip: every IPC `MediaCodec` must map to a
