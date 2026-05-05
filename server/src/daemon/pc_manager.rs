@@ -51,7 +51,10 @@ use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::{RTCPeerConnection, configuration::RTCConfiguration};
+use webrtc::peer_connection::{
+    RTCPeerConnection, configuration::RTCConfiguration,
+    peer_connection_state::RTCPeerConnectionState,
+};
 use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
@@ -900,7 +903,7 @@ fn register_local_ice_candidate_forwarder(
             };
             match serde_json::to_string(&model) {
                 Ok(text) => {
-                    log::debug!(
+                    log::info!(
                         "[pc_manager] forwarding local ICE candidate for {from_connection_id}: \
                          {}",
                         init.candidate
@@ -975,6 +978,18 @@ pub async fn handle_request_remote(
             Arc::clone(&ctx_guard.clipboard_data_channel),
             Arc::clone(&ctx_guard.file_transfer_data_channel),
             mgr.clone(),
+        );
+        // Cleanup hook: when ICE detects the browser is gone (Failed) or
+        // the PC is explicitly closed, drop the registry entry and tell
+        // the worker to release its per-connection encoder + DXGI /
+        // WASAPI capture. Without this the worker keeps DuplicateOutput
+        // held and the next remote-desktop attempt hits 0x80070057 from
+        // a second concurrent DuplicateOutput on the same monitor.
+        register_peer_connection_state_cleanup(
+            Arc::clone(&ctx_guard.pc),
+            registry.clone(),
+            mgr.clone(),
+            from_connection_id.to_string(),
         );
     }
 
@@ -1611,6 +1626,91 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
     }
 }
 
+/// Centralised teardown for one browser-side PC. Removes the registry
+/// entry (so subsequent ICE / DC events for that connection short-circuit),
+/// closes the underlying [`RTCPeerConnection`] (idempotent — safe even if
+/// already closed by webrtc-rs internals), and ships `StopMedia` to the
+/// worker so its per-connection encoder + DXGI duplication / WASAPI capture
+/// release immediately. Used by:
+///
+/// 1. [`handle_close_control`] — explicit browser CloseControl.
+/// 2. The on_peer_connection_state_change hook installed in
+///    [`register_peer_connection_state_cleanup`] — fires when ICE
+///    detects the browser is gone (Failed/Closed/Disconnected).
+///
+/// All errors swallowed: a dead worker / already-closed PC are normal
+/// teardown paths, not failure modes the caller can recover from.
+async fn cleanup_pc(
+    registry: &PcRegistry,
+    worker_mgr: &WorkerManager,
+    connection_id: &str,
+    reason: &str,
+) {
+    if let Some(ctx) = registry.remove(connection_id).await {
+        let ctx = ctx.read().await;
+        if let Err(e) = ctx.pc.close().await {
+            log::warn!("[pc_manager] PC close failed for {connection_id}: {e}");
+        }
+        log::info!("[pc_manager] Closed PC for {connection_id} (reason: {reason})");
+    } else {
+        log::debug!(
+            "[pc_manager] cleanup_pc({connection_id}, {reason}): registry already empty"
+        );
+    }
+
+    if let Err(e) = worker_mgr
+        .send_to_worker(ServiceToWorker::StopMedia(
+            desk_ipc_protocol::message::StopMediaPayload {
+                connection_id: connection_id.to_string(),
+            },
+        ))
+        .await
+    {
+        log::debug!("[pc_manager] StopMedia for {connection_id} could not reach worker: {e}");
+    }
+}
+
+/// Wire the daemon-side cleanup path onto `pc.on_peer_connection_state_change`
+/// so a browser disconnect / network drop / explicit close releases the
+/// worker's encoder + capture resources promptly.
+///
+/// Without this hook the worker keeps the per-connection encoder running and
+/// the per-output DXGI duplication held; the next browser to connect then
+/// hits `DuplicateOutput → 0x80070057 (E_INVALIDARG)` because Windows only
+/// allows one duplication per (process, output) pair. Mirrors the Arch III
+/// `peer_state_change_sender → DeskSessionMessage::WebRTCDropped` chain
+/// that lived in `service::signaling::DeskSession::init_ptc_peer_connection`.
+///
+/// Only `Failed` and `Closed` trigger cleanup. `Disconnected` is transient
+/// (a momentary network blip can recover) and webrtc-rs will follow it
+/// with `Failed` after its internal disconnected-timeout if the peer
+/// stays gone, so reacting to `Disconnected` would tear down working
+/// connections during normal jitter.
+fn register_peer_connection_state_cleanup(
+    pc: Arc<RTCPeerConnection>,
+    registry: PcRegistry,
+    worker_mgr: WorkerManager,
+    connection_id: String,
+) {
+    pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+        let registry = registry.clone();
+        let worker_mgr = worker_mgr.clone();
+        let connection_id = connection_id.clone();
+        Box::pin(async move {
+            match state {
+                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+                    log::info!(
+                        "[pc_manager] PC for {connection_id} reached terminal state {state:?}; \
+                         tearing down daemon-side context + StopMedia to worker"
+                    );
+                    cleanup_pc(&registry, &worker_mgr, &connection_id, "pc_state_terminal").await;
+                }
+                _ => {}
+            }
+        })
+    }));
+}
+
 /// Daemon side of `SignalingType::CloseControl`. Removes the
 /// per-connection context, closes the PC, and tells the worker to
 /// drop its per-`connection_id` encoder via
@@ -1624,26 +1724,7 @@ pub async fn handle_close_control(
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
-    if let Some(ctx) = registry.remove(from_connection_id).await {
-        let ctx = ctx.read().await;
-        if let Err(e) = ctx.pc.close().await {
-            log::warn!("[pc_manager] PC close failed for {from_connection_id}: {e}");
-        }
-        log::info!("[pc_manager] Closed PC for {from_connection_id}");
-    } else {
-        log::warn!("[pc_manager] CloseControl from {from_connection_id} but no PC in registry");
-    }
-
-    if let Err(e) = worker_mgr
-        .send_to_worker(ServiceToWorker::StopMedia(
-            desk_ipc_protocol::message::StopMediaPayload {
-                connection_id: from_connection_id.to_string(),
-            },
-        ))
-        .await
-    {
-        log::debug!("[pc_manager] StopMedia for {from_connection_id} could not reach worker: {e}");
-    }
+    cleanup_pc(registry, worker_mgr, from_connection_id, "close_control").await;
     Ok(())
 }
 
@@ -2531,6 +2612,111 @@ mod tests {
             got_canid,
             "handle_request_remote must register the ICE forwarder so gathering ships Canid"
         );
+    }
+
+    /// Regression: when the browser-side PC reaches a terminal state
+    /// (Failed / Closed) the daemon must release the registry slot and
+    /// ship `StopMedia` to the worker. Without this the worker keeps the
+    /// per-connection encoder running and the per-output DXGI duplication
+    /// held; the next remote-desktop attempt then hits
+    /// `DuplicateOutput → 0x80070057 (E_INVALIDARG)` because Windows only
+    /// permits one duplication per (process, output) pair.
+    ///
+    /// This test simulates terminal state via `pc.close()`, waits for the
+    /// async callback to fire, and asserts the registry entry is gone.
+    #[tokio::test]
+    async fn peer_connection_state_change_terminal_removes_registry_entry() {
+        use std::time::Duration;
+        use tokio::time::sleep;
+
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let ctx = registry
+            .create_for_request_remote("conn-cleanup", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        let pc = {
+            let g = ctx.read().await;
+            Arc::clone(&g.pc)
+        };
+        register_peer_connection_state_cleanup(
+            Arc::clone(&pc),
+            registry.clone(),
+            worker_mgr,
+            "conn-cleanup".to_string(),
+        );
+
+        assert!(
+            registry.contains("conn-cleanup").await,
+            "registry must hold the PC before close()"
+        );
+
+        // Trigger terminal state. webrtc-rs schedules the state-change
+        // callback asynchronously; poll the registry with a generous
+        // 5 s budget so this test stays robust under heavy CI load.
+        pc.close().await.expect("close pc");
+
+        let deadline = Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        while registry.contains("conn-cleanup").await {
+            if start.elapsed() > deadline {
+                panic!(
+                    "register_peer_connection_state_cleanup must remove the registry entry \
+                     after pc.close() drives the PC to Closed; entry still present after 5s"
+                );
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// `cleanup_pc` on an unknown connection_id must be a silent no-op:
+    /// the on_peer_connection_state_change callback can race a manual
+    /// CloseControl, and we don't want one path's success to drag the
+    /// other into a panic / error log spam.
+    #[tokio::test]
+    async fn cleanup_pc_unknown_connection_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        // No PC registered at all. Must not panic.
+        cleanup_pc(&registry, &worker_mgr, "ghost-connection", "test").await;
+        assert_eq!(registry.len().await, 0);
+    }
+
+    /// `cleanup_pc` removes the PC entry even when no worker is active.
+    /// The StopMedia send returns Err("No active worker") which is logged
+    /// at debug level and otherwise swallowed — pinning so a refactor that
+    /// converts the StopMedia send into an unwrap doesn't ship.
+    #[tokio::test]
+    async fn cleanup_pc_removes_registry_entry_even_without_worker() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-x", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        cleanup_pc(&registry, &worker_mgr, "conn-x", "test").await;
+
+        assert!(!registry.contains("conn-x").await);
     }
 
     /// Codec round-trip: every IPC `MediaCodec` must map to a
