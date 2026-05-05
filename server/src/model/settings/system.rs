@@ -119,6 +119,36 @@ pub struct SystemSettings {
     /// roughly 6 missed beats of slack so transient spikes don't
     /// trigger spurious restarts.
     pub worker_heartbeat_timeout_secs: Option<u64>,
+
+    /// Override for the daemon-side WebRTC ICE `disconnected` timeout
+    /// (the duration without ICE traffic before an agent flips
+    /// `Connected → Disconnected`). `None` means use the built-in
+    /// default; see `pc_manager::DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS`.
+    ///
+    /// Lowering it makes the daemon-side cleanup hook fire sooner when
+    /// a browser closes the tab, which is what frees the worker's DXGI
+    /// duplication for the next session. Lower it too far and a real
+    /// network blip will tear down a healthy session.
+    ///
+    /// Not surfaced in the settings UI yet — edit the config file
+    /// directly or rely on the default.
+    pub webrtc_ice_disconnected_timeout_secs: Option<u64>,
+
+    /// Override for the daemon-side WebRTC ICE `failed` timeout (the
+    /// duration in `Disconnected` before an agent flips to `Failed`).
+    /// `None` means use the built-in default; see
+    /// `pc_manager::DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS`.
+    ///
+    /// Together with `webrtc_ice_disconnected_timeout_secs` this caps
+    /// how long the daemon waits before reclaiming the
+    /// per-`connection_id` resources. The pair-active signaling-side
+    /// `ConnectionRemoved` notification (when present) bypasses both
+    /// timeouts and triggers cleanup in milliseconds; this fallback
+    /// only matters when signaling itself is gone too.
+    ///
+    /// Not surfaced in the settings UI yet — edit the config file
+    /// directly or rely on the default.
+    pub webrtc_ice_failed_timeout_secs: Option<u64>,
 }
 
 impl SystemSettings {
@@ -170,6 +200,8 @@ impl Default for SystemSettings {
             session_secret_key: None,
             worker_heartbeat_watchdog_enabled: None,
             worker_heartbeat_timeout_secs: None,
+            webrtc_ice_disconnected_timeout_secs: None,
+            webrtc_ice_failed_timeout_secs: None,
         }
     }
 }

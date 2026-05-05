@@ -67,7 +67,9 @@ use crate::error::DeskError;
 use crate::host_control::HostControlHub;
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
-use crate::model::settings::{Settings, SharedSettings, StartupMode, TraversalMode};
+use crate::model::settings::{
+    Settings, SharedSettings, StartupMode, SystemSettings, TraversalMode,
+};
 use crate::service::signaling::{should_short_circuit_clipboard, should_short_circuit_control};
 use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
@@ -122,38 +124,45 @@ pub fn filter_ice_servers(
     filtered
 }
 
-/// ICE timeout shorter than the webrtc-rs default (5 s) used to flip an
-/// agent from `Connected` → `Disconnected`. We override the default so
-/// the daemon-side terminal-state cleanup hook fires before a browser
-/// reopens the remote-desktop tab and races the worker for DXGI
-/// duplication.
-///
-/// See [`DAEMON_ICE_FAILED_TIMEOUT`] for the matching second-stage
-/// timeout and the rationale for the combined budget.
-pub const DAEMON_ICE_DISCONNECTED_TIMEOUT: Duration = Duration::from_secs(2);
+/// Built-in default for the ICE `disconnected` timeout, used when
+/// `system.webrtc_ice_disconnected_timeout_secs` is `None`. Equals the
+/// webrtc-rs library default — the daemon doesn't lean on this layer
+/// for fast cleanup. The signaling-layer `ConnectionRemoved`
+/// notification (delivered the moment a browser closes its WS) is the
+/// primary path that triggers daemon-side `cleanup_pc`. ICE timeouts
+/// here are the fallback for the case where signaling itself is gone
+/// too — at which point we want to behave like a normal WebRTC peer
+/// and absorb realistic network jitter.
+pub const DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS: u64 = 5;
 
-/// ICE timeout shorter than the webrtc-rs default (25 s) used to flip
-/// an agent from `Disconnected` → `Failed`. Combined with
-/// [`DAEMON_ICE_DISCONNECTED_TIMEOUT`] this gives a 5 s budget from
-/// "stopped seeing peer traffic" to PC `Failed` — at which point the
-/// `register_peer_connection_state_cleanup` hook tears the PC down and
-/// `cleanup_pc` ships `StopMedia` to the worker so the per-output
-/// `DxgiImageCapture` releases its duplication.
-///
-/// Without this override the default 5 s + 25 s = 30 s wait left the
-/// previous session's DXGI duplication alive long after the browser
-/// closed the tab. A 3-4 s reopen — well within typical user
-/// behaviour — would then see the worker creating a second
-/// `DxgiImageCapture` while the first was still running, and Windows
-/// only permits one `DuplicateOutput` per (process, output): the
-/// second call returns `0x80070057 (E_INVALIDARG)` and the new
-/// session's video pipeline never starts.
-///
-/// Total budget intentionally trades absolute jitter tolerance for
-/// fast resource release: 5 s easily absorbs the typical loopback /
-/// LAN ping flutter we care about, while keeping the registry clean
-/// before the next user-driven reconnect.
-pub const DAEMON_ICE_FAILED_TIMEOUT: Duration = Duration::from_secs(3);
+/// Built-in default for the ICE `failed` timeout, used when
+/// `system.webrtc_ice_failed_timeout_secs` is `None`. Tightened from
+/// the webrtc-rs default of 25 s to 15 s: combined budget of 20 s
+/// (default disconnected + failed) caps how long the worker's DXGI
+/// duplication stays alive after both signaling and ICE have gone
+/// silent. The webrtc-rs default of 30 s was demonstrably long enough
+/// for a user-driven reopen (3-4 s) to race the still-running capture
+/// loop and crash the new pipeline with `0x80070057 (E_INVALIDARG)`
+/// from a second `DuplicateOutput` call.
+pub const DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS: u64 = 15;
+
+/// Resolve the effective ICE timeouts from settings, falling back to
+/// the built-in defaults above when the operator hasn't set explicit
+/// overrides. Pulled out so `build_peer_connection` and the unit
+/// tests share the same resolution path.
+fn resolve_ice_timeouts(system: &SystemSettings) -> (Duration, Duration) {
+    let disconnected = Duration::from_secs(
+        system
+            .webrtc_ice_disconnected_timeout_secs
+            .unwrap_or(DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS),
+    );
+    let failed = Duration::from_secs(
+        system
+            .webrtc_ice_failed_timeout_secs
+            .unwrap_or(DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS),
+    );
+    (disconnected, failed)
+}
 
 /// Build an `RTCPeerConnection` with the lcxl-remote-desk daemon
 /// defaults:
@@ -164,26 +173,25 @@ pub const DAEMON_ICE_FAILED_TIMEOUT: Duration = Duration::from_secs(3);
 /// - SCTP `max_message_size_can_send` is set to `Unbounded` so large
 ///   DataChannel payloads (file-transfer, large clipboard) do not
 ///   fragment.
-/// - ICE disconnected / failed timeouts are tightened from the
-///   webrtc-rs defaults so the cleanup hook releases the worker's
-///   DXGI duplication before the next browser session races for it
-///   (see [`DAEMON_ICE_DISCONNECTED_TIMEOUT`] /
-///   [`DAEMON_ICE_FAILED_TIMEOUT`]).
+/// - ICE disconnected / failed timeouts come from
+///   [`resolve_ice_timeouts`] — operator-tunable via settings, defaults
+///   tighter than webrtc-rs so the cleanup fallback eventually fires
+///   even when signaling is also gone. Active cleanup runs through
+///   the signaling-side `ConnectionRemoved` hook and is unaffected by
+///   these.
 /// - Default codec set + default interceptor registry.
 ///
 /// `ice_servers` is the already-filtered list (see
 /// [`filter_ice_servers`]); pass `vec![]` for no ICE servers.
 pub async fn build_peer_connection(
     ice_servers: Vec<RTCIceServer>,
+    settings: &Settings,
 ) -> Result<RTCPeerConnection, DeskError> {
+    let (ice_disconnected, ice_failed) = resolve_ice_timeouts(&settings.system);
     let mut setting_engine = SettingEngine::default();
     setting_engine.set_sctp_max_message_size_can_send(SctpMaxMessageSize::Unbounded);
     setting_engine.set_include_loopback_candidate(true);
-    setting_engine.set_ice_timeouts(
-        Some(DAEMON_ICE_DISCONNECTED_TIMEOUT),
-        Some(DAEMON_ICE_FAILED_TIMEOUT),
-        None,
-    );
+    setting_engine.set_ice_timeouts(Some(ice_disconnected), Some(ice_failed), None);
 
     let mut m = MediaEngine::default();
     m.register_default_codecs()?;
@@ -334,7 +342,8 @@ impl PcRegistry {
             local_settings.args.startup_mode.clone(),
         );
 
-        let pc = build_peer_connection(filtered.iter().map(Into::into).collect()).await?;
+        let pc = build_peer_connection(filtered.iter().map(Into::into).collect(), local_settings)
+            .await?;
 
         let ctx = Arc::new(RwLock::new(PeerConnectionContext {
             connection_id: connection_id.to_string(),
@@ -1922,55 +1931,101 @@ mod tests {
         }
     }
 
-    /// The two ICE timeout overrides are the entire reason the daemon's
-    /// terminal-state cleanup races a browser-reopen instead of losing
-    /// it. webrtc-rs default `disconnected_timeout` is 5 s and
-    /// `failed_timeout` is 25 s (constants
-    /// `DEFAULT_DISCONNECTED_TIMEOUT` / `DEFAULT_FAILED_TIMEOUT` in
-    /// `webrtc-ice/src/agent/agent_config.rs`); together that's a 30 s
-    /// gap during which the previous session's
-    /// `DxgiImageCapture::DuplicateOutput` stays alive. A second
-    /// duplication on the same output then returns `0x80070057
-    /// (E_INVALIDARG)` and the new session's video pipeline never
-    /// starts. Pin the overrides:
+    /// The active cleanup path (signaling-side `ConnectionRemoved`)
+    /// handles the typical "user closed the tab" case in
+    /// milliseconds. The ICE timeouts here are the fallback for the
+    /// case where signaling itself is gone too — at which point we
+    /// behave like a normal WebRTC peer and absorb realistic network
+    /// jitter. Pin the defaults:
     ///
-    /// 1. Each override is strictly *less* than the webrtc-rs default —
-    ///    any regression that drops the override or raises it past the
-    ///    library default reintroduces the 30 s window and would make
-    ///    the bug reappear in production.
-    /// 2. Combined budget stays small enough (≤ 5 s) that a 3-4 s
-    ///    user-driven reopen finds the registry already cleaned by
-    ///    `register_peer_connection_state_cleanup`.
+    /// 1. `failed` budget shorter than the webrtc-rs default (25 s).
+    ///    The library default 5 s + 25 s = 30 s window once let a
+    ///    user-driven reopen race the worker's still-running
+    ///    `DxgiImageCapture::DuplicateOutput` and crash the new
+    ///    pipeline with `0x80070057 (E_INVALIDARG)`.
+    /// 2. `disconnected` matches the webrtc-rs default — we don't
+    ///    lean on this layer to react to graceful disconnects (the
+    ///    signaling-side notification does that) and tightening it
+    ///    further would make brief network jitter look like a real
+    ///    failure under slow / lossy networks.
+    /// 3. Combined budget kept ≤ 25 s so the fallback still fires
+    ///    long before users would normally retry, while staying
+    ///    above the 5-10 s range where loopback / LAN jitter routinely
+    ///    sits.
     #[test]
-    fn daemon_ice_timeouts_are_shorter_than_webrtc_rs_defaults() {
+    fn default_daemon_ice_timeouts_match_recovery_budget() {
         // webrtc-ice's `DEFAULT_DISCONNECTED_TIMEOUT` / `DEFAULT_FAILED_TIMEOUT`.
         // Hard-coded here rather than imported because the library exports
         // them with `pub(crate)` visibility.
-        const WEBRTC_DEFAULT_DISCONNECTED_TIMEOUT: Duration = Duration::from_secs(5);
-        const WEBRTC_DEFAULT_FAILED_TIMEOUT: Duration = Duration::from_secs(25);
+        const WEBRTC_DEFAULT_DISCONNECTED_SECS: u64 = 5;
+        const WEBRTC_DEFAULT_FAILED_SECS: u64 = 25;
 
         assert!(
-            DAEMON_ICE_DISCONNECTED_TIMEOUT < WEBRTC_DEFAULT_DISCONNECTED_TIMEOUT,
-            "DAEMON_ICE_DISCONNECTED_TIMEOUT must be < webrtc-rs default ({:?}); \
-             got {:?}",
-            WEBRTC_DEFAULT_DISCONNECTED_TIMEOUT,
-            DAEMON_ICE_DISCONNECTED_TIMEOUT,
+            DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS <= WEBRTC_DEFAULT_DISCONNECTED_SECS,
+            "DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS must not exceed the \
+             webrtc-rs default ({WEBRTC_DEFAULT_DISCONNECTED_SECS}s); \
+             got {DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS}s",
         );
         assert!(
-            DAEMON_ICE_FAILED_TIMEOUT < WEBRTC_DEFAULT_FAILED_TIMEOUT,
-            "DAEMON_ICE_FAILED_TIMEOUT must be < webrtc-rs default ({:?}); \
-             got {:?}",
-            WEBRTC_DEFAULT_FAILED_TIMEOUT,
-            DAEMON_ICE_FAILED_TIMEOUT,
+            DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS < WEBRTC_DEFAULT_FAILED_SECS,
+            "DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS must be strictly less than \
+             the webrtc-rs default ({WEBRTC_DEFAULT_FAILED_SECS}s); \
+             got {DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS}s",
         );
 
-        let total = DAEMON_ICE_DISCONNECTED_TIMEOUT + DAEMON_ICE_FAILED_TIMEOUT;
+        let total =
+            DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS + DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS;
         assert!(
-            total <= Duration::from_secs(5),
-            "Combined disconnected+failed budget must stay ≤ 5 s so a \
-             3-4 s user-driven browser reopen finds the registry cleaned; \
-             got {:?}",
-            total,
+            total <= 25,
+            "Combined disconnected+failed budget must stay ≤ 25 s so the \
+             fallback fires before a typical retry interval; got {total}s",
+        );
+    }
+
+    /// `resolve_ice_timeouts` is what `build_peer_connection` reads to
+    /// decide what gets handed to webrtc-rs `SettingEngine`. Pin both
+    /// branches: `None` falls back to the daemon defaults, `Some`
+    /// values flow through verbatim. Without this, an operator override
+    /// could silently get dropped without anything in the daemon
+    /// noticing.
+    #[test]
+    fn resolve_ice_timeouts_falls_back_to_defaults_when_unset() {
+        let mut sys = SystemSettings::default();
+        sys.webrtc_ice_disconnected_timeout_secs = None;
+        sys.webrtc_ice_failed_timeout_secs = None;
+        let (disconnected, failed) = resolve_ice_timeouts(&sys);
+        assert_eq!(
+            disconnected,
+            Duration::from_secs(DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS),
+        );
+        assert_eq!(
+            failed,
+            Duration::from_secs(DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS),
+        );
+    }
+
+    #[test]
+    fn resolve_ice_timeouts_honours_explicit_overrides() {
+        let mut sys = SystemSettings::default();
+        sys.webrtc_ice_disconnected_timeout_secs = Some(11);
+        sys.webrtc_ice_failed_timeout_secs = Some(47);
+        let (disconnected, failed) = resolve_ice_timeouts(&sys);
+        assert_eq!(disconnected, Duration::from_secs(11));
+        assert_eq!(failed, Duration::from_secs(47));
+    }
+
+    #[test]
+    fn resolve_ice_timeouts_resolves_each_field_independently() {
+        // Mixed: disconnected overridden, failed left at default. Catches
+        // accidental cross-field copy/paste in `resolve_ice_timeouts`.
+        let mut sys = SystemSettings::default();
+        sys.webrtc_ice_disconnected_timeout_secs = Some(99);
+        sys.webrtc_ice_failed_timeout_secs = None;
+        let (disconnected, failed) = resolve_ice_timeouts(&sys);
+        assert_eq!(disconnected, Duration::from_secs(99));
+        assert_eq!(
+            failed,
+            Duration::from_secs(DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS),
         );
     }
 
@@ -1987,7 +2042,8 @@ mod tests {
     /// SettingEngine wiring.
     #[tokio::test]
     async fn build_peer_connection_succeeds_with_tightened_ice_timeouts() {
-        let pc = build_peer_connection(vec![])
+        let settings = Settings::default();
+        let pc = build_peer_connection(vec![], &settings)
             .await
             .expect("build_peer_connection must succeed with the daemon defaults");
         // Closing here is best-effort; the test is about the build path,
@@ -2061,7 +2117,10 @@ mod tests {
     /// list (the daemon ICE-only-host case for portable mode).
     #[tokio::test]
     async fn build_peer_connection_succeeds_with_no_ice_servers() {
-        let pc = build_peer_connection(vec![]).await.expect("build pc");
+        let settings = Settings::default();
+        let pc = build_peer_connection(vec![], &settings)
+            .await
+            .expect("build pc");
         // Just confirm we got a usable handle back; tear down via Drop.
         assert_eq!(
             pc.connection_state(),
@@ -2590,7 +2649,12 @@ mod tests {
         use std::time::Duration;
         use tokio::time::timeout;
 
-        let pc = Arc::new(build_peer_connection(vec![]).await.expect("build pc"));
+        let settings = Settings::default();
+        let pc = Arc::new(
+            build_peer_connection(vec![], &settings)
+                .await
+                .expect("build pc"),
+        );
         let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(32);
         register_local_ice_candidate_forwarder(
             Arc::clone(&pc),
@@ -3059,7 +3123,8 @@ mod tests {
     async fn register_data_channel_router_smoke() {
         use crate::model::settings::SharedSettings;
 
-        let pc = build_peer_connection(vec![]).await.expect("pc");
+        let settings = Settings::default();
+        let pc = build_peer_connection(vec![], &settings).await.expect("pc");
         let signaling_state = Arc::new(RwLock::new(SignalingState::default()));
         let cursor_dc = Arc::new(RwLock::new(None));
         let clipboard_dc = Arc::new(RwLock::new(None));
