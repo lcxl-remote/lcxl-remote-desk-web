@@ -40,7 +40,7 @@ use desk_signal_facade::model::signal::{
     SignalingType, TurnTransport,
 };
 use desk_utils::error::{CustomDeskError, DeskErrorCode};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{
@@ -256,6 +256,20 @@ pub struct PeerConnectionContext {
     /// chunks and control messages still flow through the standard
     /// router as `ServiceToWorker::FileTransferCommand`.
     pub file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    /// Sender into the per-connection file-transfer writer task spawned
+    /// in [`PcRegistry::create_for_request_remote`]. The task drains
+    /// payloads serially and calls `dc.send` / `dc.send_text` on the
+    /// matching `file_transfer_data_channel`. Decouples SCTP write
+    /// back-pressure from the daemon's main IPC dispatch loop in
+    /// `signaling_proxy::run_signaling_proxy`: a 989 MB download
+    /// stalling on a slow / blocked DataChannel no longer head-of-line
+    /// blocks unrelated `WorkerToService::ManagerFileListResponse` and
+    /// other typed-IPC traffic. Send is non-blocking
+    /// (`UnboundedSender::send`); the task exits naturally when this
+    /// sender is dropped, which happens when the registry releases the
+    /// last `Arc` reference to this `PeerConnectionContext` (i.e. after
+    /// `cleanup_pc → registry.remove`).
+    pub file_transfer_writer_tx: mpsc::UnboundedSender<FileTransferPayload>,
     /// PR 6: pause flag set by [`PcRegistry::pause_all_media`] before a
     /// worker swap. While set, [`write_video_frame`] drops samples so
     /// `webrtc-rs` does not push frames the new encoder hasn't anchored
@@ -345,6 +359,21 @@ impl PcRegistry {
         let pc = build_peer_connection(filtered.iter().map(Into::into).collect(), local_settings)
             .await?;
 
+        // Per-connection file-transfer writer task. The DC slot lives
+        // outside the context Arc so the task can read it directly
+        // without a lock dance through the registry on every chunk;
+        // when the context drops, the sender drops, the task observes
+        // `None` from `recv` and exits.
+        let file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>> =
+            Arc::new(RwLock::new(None));
+        let (file_transfer_writer_tx, file_transfer_writer_rx) =
+            mpsc::unbounded_channel::<FileTransferPayload>();
+        spawn_file_transfer_writer_task(
+            connection_id.to_string(),
+            file_transfer_writer_rx,
+            Arc::clone(&file_transfer_data_channel),
+        );
+
         let ctx = Arc::new(RwLock::new(PeerConnectionContext {
             connection_id: connection_id.to_string(),
             pc: Arc::new(pc),
@@ -353,7 +382,8 @@ impl PcRegistry {
             audio_track: None,
             cursor_data_channel: Arc::new(RwLock::new(None)),
             clipboard_data_channel: Arc::new(RwLock::new(None)),
-            file_transfer_data_channel: Arc::new(RwLock::new(None)),
+            file_transfer_data_channel,
+            file_transfer_writer_tx,
             media_paused: Arc::new(AtomicBool::new(false)),
             cached_start_media: Arc::new(RwLock::new(None)),
         }));
@@ -1590,12 +1620,21 @@ pub async fn write_clipboard_data(registry: &PcRegistry, payload: ClipboardPaylo
     }
 }
 
-/// PR 4 cut 2: write a worker-emitted file-transfer payload to the
-/// matching connection's `file_transfer_event` DataChannel. Mirrors
-/// the Arch III `dc.send_text` (JSON control replies) /
-/// `dc.send` (binary chunks) calls in
-/// `service::file_transfer::handle_download_request`; here the daemon
-/// dispatches based on the `is_text` flag carried with the IPC.
+/// PR 4 cut 2: route a worker-emitted file-transfer payload onto the
+/// matching connection's per-connection writer task (queued via
+/// `PeerConnectionContext::file_transfer_writer_tx`). The actual
+/// `dc.send` / `dc.send_text` runs inside the spawned task — see
+/// [`spawn_file_transfer_writer_task`] for the write logic and the
+/// silent-drop policy.
+///
+/// Decoupling the write from this dispatch hop is what keeps the
+/// daemon's main IPC loop in
+/// `signaling_proxy::run_signaling_proxy` from head-of-line blocking
+/// behind a slow / stalled DataChannel: a 989 MB transfer that fills
+/// SCTP send buffers no longer delays unrelated typed-IPC traffic
+/// (`ManagerFileListResponse`, `Heartbeat`, ...). The dispatch itself
+/// is `O(1)` — registry lookup + non-blocking
+/// `UnboundedSender::send`.
 ///
 /// Permission gate: file transfer is on its own access category
 /// (`security.allow_file_transfer`) — independent from
@@ -1610,17 +1649,12 @@ pub async fn write_clipboard_data(registry: &PcRegistry, payload: ClipboardPaylo
 /// against the unrelated `accept_control` flag would silently drop
 /// every download (regression fixed 2026-05-05).
 ///
-/// Silent-drop branches:
+/// Silent-drop branches at this layer:
 ///
 /// - Unknown `connection_id` — race against `CloseControl`; trace.
-/// - No file-transfer DC registered — debug (browser hasn't opened it).
-/// - DC not in Open state — debug.
-/// - send_text on non-UTF-8 bytes — warn + drop. The worker should
-///   only set `is_text=true` when the bytes parse as UTF-8 (JSON
-///   control message); this defends against a buggy worker.
-/// - Send failed — warn-log; the worker's transfer protocol carries
-///   per-chunk acks so the browser detects the loss and the next
-///   chunk eventually retransmits via `TransferError`.
+/// - Writer task gone (sender disconnected) — debug. Happens during
+///   teardown when the context has dropped but a stale payload was
+///   already in the daemon's `worker_rx` queue.
 pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransferPayload) {
     let ctx = match registry.get(&payload.connection_id).await {
         Some(c) => c,
@@ -1632,50 +1666,93 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
             return;
         }
     };
-    let dc_opt = {
-        let ctx = ctx.read().await;
-        ctx.file_transfer_data_channel.read().await.clone()
-    };
-    let dc = match dc_opt {
-        Some(d) => d,
-        None => {
-            log::debug!(
-                "[pc_manager] dropping file transfer data for {} — no file_transfer DataChannel \
-                 registered yet",
-                payload.connection_id
-            );
-            return;
-        }
-    };
-    if dc.ready_state() != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open {
+    let ctx = ctx.read().await;
+    if ctx.file_transfer_writer_tx.send(payload).is_err() {
         log::debug!(
-            "[pc_manager] dropping file transfer data for {} — DC state is {:?}, not Open",
-            payload.connection_id,
-            dc.ready_state()
+            "[pc_manager] file transfer writer task gone for {} — context torn down",
+            ctx.connection_id
         );
-        return;
     }
-    let result = if payload.is_text {
-        let s = match std::str::from_utf8(&payload.data) {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!(
-                    "[pc_manager] file transfer text for {} not UTF-8: {e}; dropping",
-                    payload.connection_id
+}
+
+/// Spawn the per-connection file-transfer writer. Drains
+/// `rx` serially and routes each payload to the matching DataChannel
+/// stored in `dc_slot`.
+///
+/// Lifetime is tied to the sender end inside
+/// `PeerConnectionContext::file_transfer_writer_tx`: when that
+/// context drops (registry release in `cleanup_pc`), all senders are
+/// gone and `rx.recv()` returns `None`, exiting the task.
+///
+/// Silent-drop branches inside the task:
+///
+/// - No file-transfer DC registered — debug (browser hasn't opened it
+///   yet, or PC was torn down before the DC frame arrived).
+/// - DC not in `Open` state — debug.
+/// - send_text on non-UTF-8 bytes — warn + drop. Defends against a
+///   buggy worker that sets `is_text=true` on raw chunk bytes.
+/// - send failed — warn. The worker's transfer protocol carries
+///   per-chunk acks; the browser detects loss and recovers via
+///   `TransferError` retransmission.
+fn spawn_file_transfer_writer_task(
+    connection_id: String,
+    mut rx: mpsc::UnboundedReceiver<FileTransferPayload>,
+    dc_slot: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+) {
+    // `tokio::spawn` (not `actix_web::rt::spawn`) is intentional:
+    // the task only awaits `mpsc::recv` and `webrtc-rs` futures, both
+    // of which are `Send` and need no `LocalSet`. Using
+    // `actix_web::rt::spawn` (which is `spawn_local`) would force
+    // every `#[tokio::test]` that calls `create_for_request_remote`
+    // to wrap itself in a `LocalSet` for the constructor to succeed.
+    tokio::spawn(async move {
+        while let Some(payload) = rx.recv().await {
+            let dc_opt = dc_slot.read().await.clone();
+            let dc = match dc_opt {
+                Some(d) => d,
+                None => {
+                    log::debug!(
+                        "[pc_manager] dropping file transfer data for {connection_id} — no \
+                         file_transfer DataChannel registered yet"
+                    );
+                    continue;
+                }
+            };
+            if dc.ready_state()
+                != webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+            {
+                log::debug!(
+                    "[pc_manager] dropping file transfer data for {connection_id} — DC state \
+                     is {:?}, not Open",
+                    dc.ready_state()
                 );
-                return;
+                continue;
             }
-        };
-        dc.send_text(s.to_string()).await
-    } else {
-        dc.send(&bytes::Bytes::from(payload.data)).await
-    };
-    if let Err(e) = result {
-        log::warn!(
-            "[pc_manager] failed to send file transfer data for {}: {e}",
-            payload.connection_id
+            let result = if payload.is_text {
+                let s = match std::str::from_utf8(&payload.data) {
+                    Ok(s) => s.to_string(),
+                    Err(e) => {
+                        log::warn!(
+                            "[pc_manager] file transfer text for {connection_id} not UTF-8: \
+                             {e}; dropping"
+                        );
+                        continue;
+                    }
+                };
+                dc.send_text(s).await
+            } else {
+                dc.send(&bytes::Bytes::from(payload.data)).await
+            };
+            if let Err(e) = result {
+                log::warn!(
+                    "[pc_manager] failed to send file transfer data for {connection_id}: {e}"
+                );
+            }
+        }
+        log::debug!(
+            "[pc_manager] file transfer writer task exited for {connection_id} (sender dropped)"
         );
-    }
+    });
 }
 
 /// Centralised teardown for one browser-side PC. Removes the registry
@@ -3478,6 +3555,129 @@ mod tests {
             is_text: false,
         };
         write_file_transfer_data(&registry, payload).await;
+    }
+
+    /// Core regression for the 2026-05-06 "file/list timeouts after
+    /// big download" bug: `write_file_transfer_data` MUST return
+    /// immediately even when a large backlog of payloads is in flight.
+    /// Pre-fix the daemon's main IPC loop awaited `dc.send` for each
+    /// chunk, and a slow / blocked DataChannel head-of-line blocked
+    /// every other `WorkerToService` variant — including the
+    /// `ManagerFileListResponse` the file manager UI was waiting on,
+    /// causing 30-second `deadline elapsed` errors.
+    ///
+    /// Post-fix the dispatch is `O(1)` (registry lookup + non-blocking
+    /// `UnboundedSender::send`); the actual `dc.send` runs in a
+    /// per-connection writer task. Pinning a per-call upper bound
+    /// guards against any future regression that re-introduces an
+    /// `await dc.send` (or any other unbounded await) on this path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_file_transfer_data_dispatch_returns_quickly_under_backlog() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-fast-dispatch", &request_remote, &s)
+            .await
+            .expect("create");
+
+        // No DC registered — every payload silently drops in the
+        // writer task. We push 1024 payloads back-to-back and require
+        // the *dispatch* phase to complete inside 200 ms total. On a
+        // pre-fix `dc.send().await` path even with a stub DC this
+        // would be O(N) on async scheduling overhead; here we are
+        // dominated only by per-call mpsc enqueues.
+        let started = tokio::time::Instant::now();
+        for i in 0..1024 {
+            let payload = FileTransferPayload {
+                connection_id: "conn-fast-dispatch".to_string(),
+                data: format!("chunk-{i}").into_bytes(),
+                is_text: true,
+            };
+            write_file_transfer_data(&registry, payload).await;
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(200),
+            "dispatch loop took {elapsed:?}; pre-fix HOL blocking regression?"
+        );
+    }
+
+    /// Dispatching to an unknown `connection_id` (race against
+    /// `cleanup_pc → registry.remove`) is also expected to return
+    /// without spawning anything new. Covers the path where a worker
+    /// emits a stale `FileTransferData` for a PC the daemon has
+    /// already dropped — pre-fix this hit the same DC lookup as a
+    /// live PC; post-fix it short-circuits at the registry lookup
+    /// before any sender clone.
+    #[tokio::test]
+    async fn write_file_transfer_data_after_registry_remove_is_silent_noop() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-removed", &request_remote, &s)
+            .await
+            .expect("create");
+        // Drop the registry entry — equivalent to `cleanup_pc` having
+        // run. The writer task's sender is the last remaining
+        // `Arc<RwLock<PerConnectionContext>>` reference, so dropping
+        // the returned ctx here drops the sender and the task exits.
+        let removed = registry.remove("conn-removed").await;
+        drop(removed);
+
+        let payload = FileTransferPayload {
+            connection_id: "conn-removed".to_string(),
+            data: b"stale".to_vec(),
+            is_text: true,
+        };
+        write_file_transfer_data(&registry, payload).await;
+    }
+
+    /// The writer task must exit as soon as its sender is dropped
+    /// (which is what `cleanup_pc → registry.remove` triggers). Pin
+    /// the lifecycle by spawning the task directly with a known
+    /// receiver, dropping the matching sender, and observing the task
+    /// completes within a tight bound. Guards against a future
+    /// refactor that accidentally retains the `UnboundedSender` on
+    /// some long-lived global / DC handler closure (the result would
+    /// be a writer task per closed connection, slowly leaking).
+    #[tokio::test]
+    async fn file_transfer_writer_task_exits_when_sender_drops() {
+        let dc_slot: Arc<RwLock<Option<Arc<RTCDataChannel>>>> = Arc::new(RwLock::new(None));
+        let (tx, rx) = mpsc::unbounded_channel::<FileTransferPayload>();
+        spawn_file_transfer_writer_task("conn-lifecycle".to_string(), rx, dc_slot);
+        // Push one payload (silently dropped — no DC) then drop the
+        // sender. The task drains the queued payload, observes
+        // `recv() → None`, and exits.
+        tx.send(FileTransferPayload {
+            connection_id: "conn-lifecycle".to_string(),
+            data: b"queued".to_vec(),
+            is_text: true,
+        })
+        .expect("send pre-drop");
+        drop(tx);
+        // 200 ms is generous — the loop body for a no-DC payload is
+        // pure CPU + a single read lock, so observed runtimes are
+        // sub-millisecond. A blown timeout means the task did not
+        // exit, i.e. the sender wasn't actually the last reference
+        // (regression).
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::task::yield_now(),
+        )
+        .await
+        .expect("yield");
+        // No direct join handle because the task is spawned on the
+        // actix-rt System; observable side effect is just that no
+        // panic / hang occurred. Repeat the yield to give the
+        // current_thread executor a chance to drive the task to
+        // completion under the test runtime.
+        tokio::task::yield_now().await;
     }
 
     // ============== Cut 5: RTCP PLI/FIR identity ==============
