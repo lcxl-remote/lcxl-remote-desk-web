@@ -85,6 +85,28 @@ export default function DeskSession() {
 
     const [showStats, setShowStats] = useState(false);
 
+    // Adaptive-quality opt-in (client-only, persisted in localStorage so
+    // the user's preference survives reloads). When `false` the
+    // packet-loss / RTT driven encoder-rebuild loop below short-circuits
+    // and `video_quality` stays at whatever the config dialog last sent.
+    // Default `true` preserves the historical behaviour.
+    const [adaptiveQualityEnabled, setAdaptiveQualityEnabled] = useState<boolean>(() => {
+        try {
+            const raw = localStorage.getItem("lcxl-desk-adaptive-quality-enabled");
+            return raw === null ? true : raw === "true";
+        } catch {
+            return true;
+        }
+    });
+    useEffect(() => {
+        try {
+            localStorage.setItem("lcxl-desk-adaptive-quality-enabled", String(adaptiveQualityEnabled));
+        } catch {
+            // Ignore quota / private-mode errors — runtime state is still
+            // correct, only persistence is lost.
+        }
+    }, [adaptiveQualityEnabled]);
+
     // Privacy screen state
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
@@ -237,6 +259,13 @@ export default function DeskSession() {
     // Adaptive quality: adjust video_quality based on packet loss and RTT
     useEffect(() => {
         if (!isRTCConnected || !deskId || !lastSettingsRef.current) return;
+        // User-toggleable: when disabled, no UpdateDeskSettings is sent
+        // from this loop and the encoder is never rebuilt for ABR
+        // reasons.
+        if (!adaptiveQualityEnabled) {
+            statsWindowRef.current = [];
+            return;
+        }
 
         // Do not trigger adaptive quality if we haven't received any data yet or the stream is currently paused/stalled
         if (rtcStats.fps === 0 && rtcStats.bitrate === 0) {
@@ -270,7 +299,7 @@ export default function DeskSession() {
             statsWindowRef.current = [];
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [rtcStats]);
+    }, [rtcStats, adaptiveQualityEnabled]);
 
     const handleConfigSubmit = (settings: DeskSettings) => {
         lastSettingsRef.current = settings;
@@ -483,6 +512,8 @@ export default function DeskSession() {
                 initData={initData}
                 onSubmit={handleConfigSubmit}
                 onCancel={handleConfigCancel}
+                adaptiveQualityEnabled={adaptiveQualityEnabled}
+                onAdaptiveQualityChange={setAdaptiveQualityEnabled}
             />
             <div className="flex items-center justify-between border-b p-4">
                 <h2 className="text-lg font-semibold">{t('pages.desk.title', 'Remote Desk')} - {deskId}</h2>

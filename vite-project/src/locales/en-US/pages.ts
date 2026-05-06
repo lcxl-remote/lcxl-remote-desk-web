@@ -335,6 +335,8 @@ export default {
   'pages.desk.displayDeviceRequired': 'Please select a display device!',
   'pages.desk.showRemoteMouse': 'Show Remote Mouse',
   'pages.desk.adaptiveResolution': 'Adaptive Web Page Resolution',
+  'pages.desk.adaptiveQuality': 'Adaptive Video Quality',
+  'pages.desk.adaptiveQualityDescription': 'Auto-tune video quality based on packet loss and RTT',
   'pages.desk.remoteResolutionScale': 'Remote Resolution Scale',
   'pages.desk.audioConfig': 'Audio Configuration',
   'pages.desk.captureAudio': 'Capture Audio',

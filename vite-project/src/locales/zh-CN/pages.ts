@@ -333,6 +333,8 @@ export default {
   'pages.desk.displayDeviceRequired': '请选择一个显示设备!',
   'pages.desk.showRemoteMouse': '显示远程鼠标',
   'pages.desk.adaptiveResolution': '自适应网页分辨率',
+  'pages.desk.adaptiveQuality': '自适应画质',
+  'pages.desk.adaptiveQualityDescription': '根据丢包率和 RTT 自动调整画质',
   'pages.desk.remoteResolutionScale': '远程分辨率缩放',
   'pages.desk.audioConfig': '音频配置',
   'pages.desk.captureAudio': '捕获音频',

@@ -43,6 +43,17 @@ interface DeskConfigDialogProps {
     initData: InitSignalingData | null
     onSubmit: (settings: DeskSettings) => void
     onCancel: () => void
+    /**
+     * Browser-side adaptive video quality toggle. Owned by the parent
+     * (persisted in localStorage there) and surfaced in this dialog so
+     * the user can disable the packet-loss / RTT driven encoder
+     * rebuild loop. Not part of `DeskSettings` because it never
+     * crosses the signaling boundary — it only gates whether the
+     * browser sends `UpdateDeskSettings(video_quality=...)` from the
+     * stats observer.
+     */
+    adaptiveQualityEnabled: boolean
+    onAdaptiveQualityChange: (enabled: boolean) => void
 }
 
 export function DeskConfigDialog({
@@ -50,7 +61,9 @@ export function DeskConfigDialog({
     onOpenChange,
     initData,
     onSubmit,
-    onCancel
+    onCancel,
+    adaptiveQualityEnabled,
+    onAdaptiveQualityChange,
 }: DeskConfigDialogProps) {
     const { t } = useTranslation()
 
@@ -269,6 +282,37 @@ export function DeskConfigDialog({
                                         </FormItem>
                                     )}
                                 />
+
+                                {/* Client-only adaptive video quality
+                                    toggle. Lives outside the form
+                                    because the value never crosses
+                                    the signaling boundary — it only
+                                    gates whether the browser-side
+                                    stats observer issues
+                                    UpdateDeskSettings(video_quality)
+                                    based on packet loss / RTT. Default
+                                    on. */}
+                                <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
+                                    <FormControl>
+                                        <Checkbox
+                                            checked={adaptiveQualityEnabled}
+                                            onCheckedChange={(checked) =>
+                                                onAdaptiveQualityChange(checked === true)
+                                            }
+                                        />
+                                    </FormControl>
+                                    <div className="space-y-1 leading-none">
+                                        <FormLabel>
+                                            {t('pages.desk.adaptiveQuality', 'Adaptive Video Quality')}
+                                        </FormLabel>
+                                        <p className="text-xs text-muted-foreground">
+                                            {t(
+                                                'pages.desk.adaptiveQualityDescription',
+                                                'Auto-tune video quality based on packet loss and RTT'
+                                            )}
+                                        </p>
+                                    </div>
+                                </FormItem>
 
                                 <FormField
                                     control={form.control}
