@@ -618,6 +618,17 @@ async fn video_pipeline_loop(
         .as_nanos()
         .min(u64::MAX as u128) as u64;
     let mut last_send_time = std::time::Instant::now();
+    // Diagnostic flag: set whenever the encoder is freshly built (initial
+    // construction, settings_changed rebuild, or keyframe_requested
+    // rebuild). The first emission pass after the rebuild logs a single
+    // INFO line describing whether the rebuild produced an IDR or P
+    // labelled frame, and what NAL type the encoder actually emitted —
+    // used to investigate the "screen turns green after a while" bug
+    // (root cause hypothesis: rebuild lands on a static-desktop tick,
+    // `encode_cached` returns vec![] because the new encoder's
+    // `yuv_buffer` is None, then a follow-up moving frame is mis-labelled
+    // VideoP because `next_pass_is_idr` was consumed earlier).
+    let mut rebuild_pending = true;
 
     while !stop_flag.load(Ordering::Relaxed) {
         ticker.tick().await;
@@ -648,6 +659,7 @@ async fn video_pipeline_loop(
             encoder = create_video_encoder(&merged_settings, &display_info)
                 .map_err(|e| format!("{e}"))?;
             next_pass_is_idr = true;
+            rebuild_pending = true;
         }
 
         if keyframe_requested.swap(false, Ordering::Relaxed) {
@@ -658,6 +670,7 @@ async fn video_pipeline_loop(
             encoder = create_video_encoder(&merged_settings, &display_info)
                 .map_err(|e| format!("{e}"))?;
             next_pass_is_idr = true;
+            rebuild_pending = true;
         }
 
         // PR 3 cursor sync: prefer SyncNative when the capture
@@ -732,7 +745,25 @@ async fn video_pipeline_loop(
                     continue;
                 }
             };
+            if rebuild_pending && nal_info_vec.is_empty() {
+                warn!(
+                    "[MediaProducer:{connection_id}] post-rebuild heartbeat tick produced 0 \
+                     NALs (encoder yuv_buffer is None on a freshly built encoder); browser \
+                     will see no frames until the next non-static capture tick"
+                );
+            }
             for nal in nal_info_vec {
+                if rebuild_pending {
+                    log_post_rebuild_emit(
+                        &connection_id,
+                        "heartbeat",
+                        codec,
+                        MediaFrameKind::VideoP,
+                        next_pass_is_idr,
+                        nal.nal_bytes.as_ref(),
+                    );
+                    rebuild_pending = false;
+                }
                 let frame = build_media_frame(
                     &connection_id,
                     seq,
@@ -762,8 +793,20 @@ async fn video_pipeline_loop(
         } else {
             MediaFrameKind::VideoP
         };
+        let was_idr_flag = next_pass_is_idr;
         next_pass_is_idr = false;
         for nal in nal_info_vec {
+            if rebuild_pending {
+                log_post_rebuild_emit(
+                    &connection_id,
+                    "encode",
+                    codec,
+                    kind_for_pass,
+                    was_idr_flag,
+                    nal.nal_bytes.as_ref(),
+                );
+                rebuild_pending = false;
+            }
             let frame = build_media_frame(
                 &connection_id,
                 seq,
@@ -922,6 +965,85 @@ async fn audio_pipeline_loop(
     Ok(())
 }
 
+/// Diagnostic helper: emit one INFO line describing what the encoder
+/// produced on the first emit pass after a fresh build (initial start,
+/// settings_changed rebuild, or keyframe_requested rebuild). Helps
+/// confirm whether `next_pass_is_idr=true` actually translated into an
+/// IDR / SPS / PPS NAL on the wire vs. a non-IDR slice mis-labelled
+/// VideoI. Decodes H.264 NAL unit type (`byte & 0x1F` after the
+/// startcode); for other codecs only the first 8 payload bytes are
+/// dumped — operators reading the log can correlate against codec
+/// specs as needed.
+fn log_post_rebuild_emit(
+    connection_id: &str,
+    path: &str,
+    codec: MediaCodec,
+    kind: MediaFrameKind,
+    next_pass_is_idr: bool,
+    nal_bytes: &[u8],
+) {
+    let head_hex: String = nal_bytes
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let codec_specific = match codec {
+        MediaCodec::H264 => {
+            let nal_header = h264_first_nal_header(nal_bytes);
+            match nal_header {
+                Some(byte) => {
+                    let unit_type = byte & 0x1F;
+                    let label = match unit_type {
+                        1 => "non-IDR slice",
+                        5 => "IDR slice",
+                        6 => "SEI",
+                        7 => "SPS",
+                        8 => "PPS",
+                        9 => "AccessUnitDelim",
+                        _ => "other",
+                    };
+                    format!(", h264_nal_unit_type={unit_type} ({label})")
+                }
+                None => ", h264_nal_unit_type=<no startcode>".to_string(),
+            }
+        }
+        MediaCodec::Vp8 | MediaCodec::Vp9 => {
+            let kf_bit = nal_bytes.first().map(|b| b & 0x01);
+            match kf_bit {
+                Some(0) => ", vpx_frame_type=key".to_string(),
+                Some(_) => ", vpx_frame_type=inter".to_string(),
+                None => ", vpx_frame_type=<empty>".to_string(),
+            }
+        }
+        _ => String::new(),
+    };
+    info!(
+        "[MediaProducer:{connection_id}] post-rebuild first emit (path={path}, kind={kind:?}, \
+         next_pass_is_idr={next_pass_is_idr}, codec={codec:?}, payload_len={}, head={head_hex}{codec_specific})",
+        nal_bytes.len()
+    );
+}
+
+/// Locate the first NAL header byte after an Annex-B startcode in an
+/// H.264 byte stream. Returns `None` if no startcode is present in the
+/// first 8 bytes. Used purely for logging.
+fn h264_first_nal_header(nal_bytes: &[u8]) -> Option<u8> {
+    // Look for `00 00 00 01` or `00 00 01` in the first few bytes.
+    let scan_to = nal_bytes.len().min(8);
+    for i in 0..scan_to.saturating_sub(3) {
+        if nal_bytes[i] == 0 && nal_bytes[i + 1] == 0 {
+            if nal_bytes[i + 2] == 1 && i + 3 < nal_bytes.len() {
+                return Some(nal_bytes[i + 3]);
+            }
+            if nal_bytes[i + 2] == 0 && nal_bytes[i + 3] == 1 && i + 4 < nal_bytes.len() {
+                return Some(nal_bytes[i + 4]);
+            }
+        }
+    }
+    None
+}
+
 fn build_media_frame(
     connection_id: &str,
     seq: u64,
@@ -1003,6 +1125,49 @@ mod tests {
     use super::*;
     use desk_ipc_protocol::dual_transport::inprocess;
     use desk_signal_facade::model::desk_settings::DeskSettings;
+
+    /// Diagnostic helper: 4-byte Annex-B startcode followed by an IDR
+    /// slice header byte (`0x65` = `nal_ref_idc=3, nal_unit_type=5`).
+    /// This is what x264 / OpenH264 emit at the head of an IDR access
+    /// unit and the case the bug investigation cares about most.
+    #[test]
+    fn h264_first_nal_header_extracts_idr_after_4byte_startcode() {
+        let bytes = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB];
+        assert_eq!(h264_first_nal_header(&bytes), Some(0x65));
+        assert_eq!(0x65 & 0x1F, 5, "extracted unit_type must equal IDR slice");
+    }
+
+    /// 3-byte startcode variant (`00 00 01`) used by some encoders mid-
+    /// stream. SPS header byte `0x67` decodes to nal_unit_type=7.
+    #[test]
+    fn h264_first_nal_header_extracts_sps_after_3byte_startcode() {
+        let bytes = [0x00, 0x00, 0x01, 0x67, 0x42];
+        assert_eq!(h264_first_nal_header(&bytes), Some(0x67));
+        assert_eq!(0x67 & 0x1F, 7, "extracted unit_type must equal SPS");
+    }
+
+    /// No startcode in the first 8 bytes -> None. Guards against the
+    /// helper accidentally reading past the buffer when the byte stream
+    /// is mis-framed (e.g. some other codec routed through the H264
+    /// branch by mistake).
+    #[test]
+    fn h264_first_nal_header_returns_none_when_no_startcode() {
+        let bytes = [0xAA, 0xBB, 0xCC, 0xDD];
+        assert_eq!(h264_first_nal_header(&bytes), None);
+    }
+
+    /// Empty or too-short buffer must not panic — startcode lookup
+    /// degrades to None.
+    #[test]
+    fn h264_first_nal_header_handles_short_buffers() {
+        assert_eq!(h264_first_nal_header(&[]), None);
+        assert_eq!(h264_first_nal_header(&[0x00]), None);
+        assert_eq!(h264_first_nal_header(&[0x00, 0x00, 0x00]), None);
+        // 4-byte buffer with a 4-byte startcode but no header byte
+        // following — must not access nal_bytes[i + 3] when i + 3 ==
+        // len.
+        assert_eq!(h264_first_nal_header(&[0x00, 0x00, 0x00, 0x01]), None);
+    }
 
     /// Codec round-trip: the strings emitted by the encoder factory map
     /// back to the IPC enum without surprises.
