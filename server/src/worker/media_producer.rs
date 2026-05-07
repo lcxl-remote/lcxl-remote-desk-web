@@ -984,28 +984,40 @@ fn log_post_rebuild_emit(
 ) {
     let head_hex: String = nal_bytes
         .iter()
-        .take(8)
+        .take(16)
         .map(|b| format!("{b:02x}"))
         .collect::<Vec<_>>()
         .join(" ");
     let codec_specific = match codec {
         MediaCodec::H264 => {
-            let nal_header = h264_first_nal_header(nal_bytes);
-            match nal_header {
-                Some(byte) => {
-                    let unit_type = byte & 0x1F;
-                    let label = match unit_type {
-                        1 => "non-IDR slice",
-                        5 => "IDR slice",
-                        6 => "SEI",
-                        7 => "SPS",
-                        8 => "PPS",
-                        9 => "AccessUnitDelim",
-                        _ => "other",
-                    };
-                    format!(", h264_nal_unit_type={unit_type} ({label})")
-                }
-                None => ", h264_nal_unit_type=<no startcode>".to_string(),
+            // Walk all NAL units in the bytestream and list type +
+            // length of each. The "screen turns green" investigation
+            // hinges on whether a rebuild-IDR frame is `SPS + PPS +
+            // real IDR slice` (~tens of KB for 1280x800) or `SPS +
+            // PPS + empty / dummy slice` (only a few KB), so the
+            // first-NAL-only summary isn't enough — we need every
+            // NAL's identity to tell those apart.
+            let nals = h264_walk_nals(nal_bytes);
+            if nals.is_empty() {
+                ", h264_nals=<no startcode>".to_string()
+            } else {
+                let parts: Vec<String> = nals
+                    .iter()
+                    .map(|(byte, len)| {
+                        let unit_type = byte & 0x1F;
+                        let label = match unit_type {
+                            1 => "non-IDR",
+                            5 => "IDR",
+                            6 => "SEI",
+                            7 => "SPS",
+                            8 => "PPS",
+                            9 => "AUD",
+                            _ => "?",
+                        };
+                        format!("{unit_type}({label}):{len}")
+                    })
+                    .collect();
+                format!(", h264_nals=[{}]", parts.join(", "))
             }
         }
         MediaCodec::Vp8 | MediaCodec::Vp9 => {
@@ -1025,23 +1037,46 @@ fn log_post_rebuild_emit(
     );
 }
 
-/// Locate the first NAL header byte after an Annex-B startcode in an
-/// H.264 byte stream. Returns `None` if no startcode is present in the
-/// first 8 bytes. Used purely for logging.
-fn h264_first_nal_header(nal_bytes: &[u8]) -> Option<u8> {
-    // Look for `00 00 00 01` or `00 00 01` in the first few bytes.
-    let scan_to = nal_bytes.len().min(8);
-    for i in 0..scan_to.saturating_sub(3) {
+/// Walk an Annex-B H.264 bytestream and return `(header_byte, payload_len)`
+/// for each NAL unit found. `payload_len` is the size of the NAL itself
+/// (excluding the leading startcode), measured up to the next startcode
+/// or end-of-buffer. Used purely for diagnostic logging.
+fn h264_walk_nals(nal_bytes: &[u8]) -> Vec<(u8, usize)> {
+    let mut nals: Vec<(u8, usize)> = Vec::new();
+    // Locate every Annex-B startcode (`00 00 00 01` or `00 00 01`) and
+    // record its position + the size of the startcode prefix so we can
+    // measure each NAL's payload length as the distance to the next
+    // startcode (or end of buffer).
+    let mut starts: Vec<(usize, usize)> = Vec::new(); // (offset_after_startcode, prefix_len)
+    let mut i = 0;
+    while i + 2 < nal_bytes.len() {
         if nal_bytes[i] == 0 && nal_bytes[i + 1] == 0 {
-            if nal_bytes[i + 2] == 1 && i + 3 < nal_bytes.len() {
-                return Some(nal_bytes[i + 3]);
+            if i + 3 < nal_bytes.len() && nal_bytes[i + 2] == 0 && nal_bytes[i + 3] == 1 {
+                starts.push((i + 4, 4));
+                i += 4;
+                continue;
             }
-            if nal_bytes[i + 2] == 0 && nal_bytes[i + 3] == 1 && i + 4 < nal_bytes.len() {
-                return Some(nal_bytes[i + 4]);
+            if nal_bytes[i + 2] == 1 {
+                starts.push((i + 3, 3));
+                i += 3;
+                continue;
             }
         }
+        i += 1;
     }
-    None
+    for (idx, (off, prefix)) in starts.iter().enumerate() {
+        if *off >= nal_bytes.len() {
+            continue;
+        }
+        let header_byte = nal_bytes[*off];
+        let next_start = starts
+            .get(idx + 1)
+            .map(|(o, p)| o.saturating_sub(*p))
+            .unwrap_or(nal_bytes.len());
+        let payload_len = next_start.saturating_sub(*off);
+        nals.push((header_byte, payload_len));
+    }
+    nals
 }
 
 fn build_media_frame(
@@ -1126,47 +1161,57 @@ mod tests {
     use desk_ipc_protocol::dual_transport::inprocess;
     use desk_signal_facade::model::desk_settings::DeskSettings;
 
-    /// Diagnostic helper: 4-byte Annex-B startcode followed by an IDR
-    /// slice header byte (`0x65` = `nal_ref_idc=3, nal_unit_type=5`).
-    /// This is what x264 / OpenH264 emit at the head of an IDR access
-    /// unit and the case the bug investigation cares about most.
+    /// Walk a typical IDR access unit (SPS + PPS + IDR slice) and verify
+    /// each NAL's header + payload length is reported. This is the
+    /// shape we expect on a healthy initial frame, and the diff between
+    /// "real IDR slice = many KB" and "dummy slice = few bytes" is the
+    /// signal we're after when the screen turns green after a rebuild.
     #[test]
-    fn h264_first_nal_header_extracts_idr_after_4byte_startcode() {
-        let bytes = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB];
-        assert_eq!(h264_first_nal_header(&bytes), Some(0x65));
-        assert_eq!(0x65 & 0x1F, 5, "extracted unit_type must equal IDR slice");
+    fn h264_walk_nals_lists_sps_pps_idr() {
+        let mut bytes: Vec<u8> = Vec::new();
+        // SPS (3 bytes payload incl header)
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xC0]);
+        // PPS (3 bytes payload incl header)
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x3C]);
+        // IDR slice (5 bytes payload incl header)
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 0x65, 0xB8, 0x00, 0x04, 0x00]);
+        let nals = h264_walk_nals(&bytes);
+        assert_eq!(nals.len(), 3, "expected 3 NAL units (SPS + PPS + IDR)");
+        assert_eq!(nals[0].0 & 0x1F, 7, "first NAL must be SPS");
+        assert_eq!(nals[0].1, 3);
+        assert_eq!(nals[1].0 & 0x1F, 8, "second NAL must be PPS");
+        assert_eq!(nals[1].1, 3);
+        assert_eq!(nals[2].0 & 0x1F, 5, "third NAL must be IDR");
+        assert_eq!(nals[2].1, 5);
     }
 
-    /// 3-byte startcode variant (`00 00 01`) used by some encoders mid-
-    /// stream. SPS header byte `0x67` decodes to nal_unit_type=7.
+    /// Mixed 3-byte and 4-byte startcodes are both recognised. The
+    /// trailing NAL's length must extend to end-of-buffer.
     #[test]
-    fn h264_first_nal_header_extracts_sps_after_3byte_startcode() {
-        let bytes = [0x00, 0x00, 0x01, 0x67, 0x42];
-        assert_eq!(h264_first_nal_header(&bytes), Some(0x67));
-        assert_eq!(0x67 & 0x1F, 7, "extracted unit_type must equal SPS");
+    fn h264_walk_nals_handles_mixed_startcodes() {
+        // 4-byte startcode + AUD (1 byte) + 3-byte startcode + SEI (4
+        // bytes to end-of-buffer)
+        let bytes: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x01, 0x09, 0x00, 0x00, 0x01, 0x06, 0x05, 0xFF, 0x80,
+        ];
+        let nals = h264_walk_nals(&bytes);
+        assert_eq!(nals.len(), 2);
+        assert_eq!(nals[0].0 & 0x1F, 9, "AccessUnitDelim");
+        assert_eq!(nals[0].1, 1);
+        assert_eq!(nals[1].0 & 0x1F, 6, "SEI");
+        assert_eq!(nals[1].1, 4);
     }
 
-    /// No startcode in the first 8 bytes -> None. Guards against the
-    /// helper accidentally reading past the buffer when the byte stream
-    /// is mis-framed (e.g. some other codec routed through the H264
-    /// branch by mistake).
+    /// Empty / mis-framed buffers must yield an empty list rather than
+    /// panicking. Guards the diagnostic against poisoning the event
+    /// pipeline if a non-H264 stream lands in the H264 branch.
     #[test]
-    fn h264_first_nal_header_returns_none_when_no_startcode() {
-        let bytes = [0xAA, 0xBB, 0xCC, 0xDD];
-        assert_eq!(h264_first_nal_header(&bytes), None);
-    }
-
-    /// Empty or too-short buffer must not panic — startcode lookup
-    /// degrades to None.
-    #[test]
-    fn h264_first_nal_header_handles_short_buffers() {
-        assert_eq!(h264_first_nal_header(&[]), None);
-        assert_eq!(h264_first_nal_header(&[0x00]), None);
-        assert_eq!(h264_first_nal_header(&[0x00, 0x00, 0x00]), None);
-        // 4-byte buffer with a 4-byte startcode but no header byte
-        // following — must not access nal_bytes[i + 3] when i + 3 ==
-        // len.
-        assert_eq!(h264_first_nal_header(&[0x00, 0x00, 0x00, 0x01]), None);
+    fn h264_walk_nals_handles_short_or_missing() {
+        assert!(h264_walk_nals(&[]).is_empty());
+        assert!(h264_walk_nals(&[0xAA, 0xBB, 0xCC]).is_empty());
+        // Only a startcode, no header byte after — also empty (the
+        // walker skips entries whose header offset is past the end).
+        assert!(h264_walk_nals(&[0x00, 0x00, 0x00, 0x01]).is_empty());
     }
 
     /// Codec round-trip: the strings emitted by the encoder factory map

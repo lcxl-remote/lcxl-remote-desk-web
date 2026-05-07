@@ -119,6 +119,17 @@ pub struct PersistentYuvBuffer {
     pub y_stride: u32,
     pub u_stride: u32,
     pub v_stride: u32,
+    /// True once a full-frame conversion has populated `data`. Until
+    /// then, `update()` must ignore the `dirty_rects` hint and run a
+    /// full conversion anyway — partial-only updates against a
+    /// freshly-allocated zero buffer leave large regions as Y=U=V=0,
+    /// which decodes as a green wash on Limited-range BT.601 once the
+    /// stream lands in the browser. This is exactly the "screen turns
+    /// green after a few seconds" failure observed when the encoder is
+    /// rebuilt on an ABR quality change (encoder rebuild → yuv_buffer
+    /// reset to None → next capture gives a small dirty rect → only
+    /// that rect is populated, the rest stays zero).
+    initialized: bool,
 }
 
 impl PersistentYuvBuffer {
@@ -139,6 +150,7 @@ impl PersistentYuvBuffer {
             y_stride: width,
             u_stride: chroma_w as u32,
             v_stride: chroma_w as u32,
+            initialized: false,
         }
     }
 
@@ -160,6 +172,8 @@ impl PersistentYuvBuffer {
     }
 
     /// Converts the full frame from BGRA to YUV420 and stores it.
+    /// Marks the buffer as initialised so subsequent `update()` calls
+    /// can honour the dirty-rect hint.
     pub fn update_full(&mut self, image_info: &dyn ImageInfo) -> Result<(), CaptureError> {
         let convert_timer = CONVERT_TO_YUV_HISTOGRAM.start_timer();
         let src_stride = image_info.get_stride();
@@ -186,6 +200,7 @@ impl PersistentYuvBuffer {
         self.data[self.y_offset..self.u_offset].copy_from_slice(temp.y_plane.borrow());
         self.data[self.u_offset..self.v_offset].copy_from_slice(temp.u_plane.borrow());
         self.data[self.v_offset..].copy_from_slice(temp.v_plane.borrow());
+        self.initialized = true;
         convert_timer.stop_and_record();
         Ok(())
     }
@@ -268,7 +283,17 @@ impl PersistentYuvBuffer {
     /// - `get_dirty_rects() == None`       → full-frame update
     /// - `get_dirty_rects() == Some([])`   → no change, skip
     /// - `get_dirty_rects() == Some(rects)` → partial update
+    ///
+    /// **Exception**: until the buffer has been seeded with at least
+    /// one full-frame conversion, every call upgrades to a full
+    /// update regardless of `get_dirty_rects()`. Otherwise the
+    /// untouched regions of the freshly-allocated zero buffer leak
+    /// into the encoder as Y=U=V=0 and the decoded frame shows a
+    /// green wash for everything outside the first dirty rect.
     pub fn update(&mut self, image_info: &dyn ImageInfo) -> Result<(), CaptureError> {
+        if !self.initialized {
+            return self.update_full(image_info);
+        }
         match image_info.get_dirty_rects() {
             None => self.update_full(image_info),
             Some(rects) if rects.is_empty() => Ok(()),
@@ -363,5 +388,147 @@ mod tests {
         assert_eq!(buf.u_offset, 1920 * 1080);
         assert_eq!(buf.v_offset - buf.u_offset, 960 * 540);
         assert_eq!(buf.data.len(), 1920 * 1080 + 2 * 960 * 540);
+    }
+
+    /// `ImageInfo` stub that lets a test specify `get_dirty_rects()`
+    /// — the regression that drives the green-screen bug only fires
+    /// when the very first capture supplies dirty-rect metadata
+    /// (DXGI's typical mode), so a `Some([rect])` stub is the
+    /// simplest reproducer.
+    struct StubBgraImageWithRects {
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+        rects: Vec<DirtyRect>,
+    }
+
+    impl StubBgraImageWithRects {
+        fn solid(width: u32, height: u32, fill: u8, rects: Vec<DirtyRect>) -> Self {
+            Self {
+                width,
+                height,
+                data: vec![fill; (width as usize) * (height as usize) * 4],
+                rects,
+            }
+        }
+    }
+
+    impl ImageInfo for StubBgraImageWithRects {
+        fn get_type(&self) -> ImageType {
+            ImageType::BGRA
+        }
+        fn get_data(&self) -> &[u8] {
+            &self.data
+        }
+        fn get_width(&self) -> u32 {
+            self.width
+        }
+        fn get_height(&self) -> u32 {
+            self.height
+        }
+        fn get_dirty_rects(&self) -> Option<&[DirtyRect]> {
+            Some(&self.rects)
+        }
+    }
+
+    /// Regression for the "screen turns green after a few seconds"
+    /// bug. Pre-fix: a freshly-allocated `PersistentYuvBuffer` is full
+    /// of zeros (decodes as green under Limited-range BT.601), and
+    /// the very first `update()` only patched the supplied dirty
+    /// rect — so any region outside that rect stayed zero in the
+    /// buffer fed to the encoder. Post-fix: the first `update()`
+    /// must do a full conversion regardless of `get_dirty_rects()`,
+    /// so untouched regions reflect real captured pixels (here a
+    /// non-zero `0x80` BGRA fill, which converts to non-zero
+    /// luma/chroma).
+    #[test]
+    fn first_update_with_dirty_rects_seeds_full_frame_not_just_rect() {
+        let img = StubBgraImageWithRects::solid(
+            64,
+            64,
+            0x80,
+            vec![DirtyRect {
+                x: 0,
+                y: 0,
+                width: 8,
+                height: 8,
+            }],
+        );
+        let mut buf = PersistentYuvBuffer::new(64, 64);
+        buf.update(&img).unwrap();
+
+        // Sample the Y plane at (50, 50) — well outside the dirty
+        // rect (0..8, 0..8). Pre-fix this byte was 0; post-fix it
+        // must equal whatever BGRA(0x80, 0x80, 0x80) converts to
+        // under Limited BT.601 (a non-zero mid-grey luma).
+        let y_outside_rect = buf.y_plane()[50 * (buf.y_stride as usize) + 50];
+        assert!(
+            y_outside_rect != 0,
+            "Y plane outside dirty rect must be populated by the first update — \
+             leaving it at zero produces the green-screen artifact in the encoder. \
+             y_outside_rect={y_outside_rect}"
+        );
+    }
+
+    /// After the buffer is initialised, the dirty-rect optimisation
+    /// must still kick in — a `Some([])` hint should be a no-op
+    /// (skip the conversion entirely), preserving whatever was
+    /// converted on the prior frame. Without this guard the green-
+    /// screen fix would regress capture performance back to
+    /// full-frame conversion every tick.
+    #[test]
+    fn empty_dirty_rects_after_init_skips_conversion() {
+        // Seed with a full conversion at fill=0x40.
+        let seed = StubBgraImageWithRects::solid(8, 8, 0x40, vec![]);
+        let mut buf = PersistentYuvBuffer::new(8, 8);
+        buf.update(&seed).unwrap();
+        let seeded_y0 = buf.y_plane()[0];
+
+        // Now hand a different fill (0xC0) but with `Some([])` — the
+        // updated path must skip and leave the prior Y plane intact.
+        let no_change = StubBgraImageWithRects::solid(8, 8, 0xC0, vec![]);
+        buf.update(&no_change).unwrap();
+        assert_eq!(
+            buf.y_plane()[0],
+            seeded_y0,
+            "Some([]) after init must skip — Y plane should still reflect the seed"
+        );
+    }
+
+    /// After the buffer is initialised, partial updates must apply
+    /// only to the listed rect. Confirms the post-init dirty-rect
+    /// path was not damaged by the first-update upgrade.
+    #[test]
+    fn partial_dirty_rect_after_init_only_patches_rect() {
+        // Seed with fill=0x40 full-frame.
+        let seed = StubBgraImageWithRects::solid(16, 16, 0x40, vec![]);
+        let mut buf = PersistentYuvBuffer::new(16, 16);
+        buf.update(&seed).unwrap();
+
+        // Partial update with fill=0xFF on a 4x4 top-left rect. The
+        // outside-rect Y must remain at the seed's mid-grey value.
+        let patch = StubBgraImageWithRects::solid(
+            16,
+            16,
+            0xFF,
+            vec![DirtyRect {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+            }],
+        );
+        let prior_outside = buf.y_plane()[10 * 16 + 10];
+        buf.update(&patch).unwrap();
+        let after_outside = buf.y_plane()[10 * 16 + 10];
+        let after_inside = buf.y_plane()[2 * 16 + 2];
+        assert_eq!(
+            after_outside, prior_outside,
+            "outside-rect Y must be untouched by a partial update"
+        );
+        assert!(
+            after_inside > prior_outside,
+            "inside-rect Y must reflect the brighter patch (0xFF vs 0x40)"
+        );
     }
 }
