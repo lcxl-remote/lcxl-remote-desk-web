@@ -1286,6 +1286,12 @@ pub async fn handle_offer(
         // `start_media` doc comment for the rationale.
         start_video: has_video,
         start_audio: has_audio,
+        // Per-connection backend choice — propagating it lets a
+        // second browser pick a different backend (e.g. one DXGI +
+        // one GDI) without colliding on the first connection's
+        // DuplicateOutput. The worker falls back to its own settings
+        // when this is `None`.
+        image_capture: offer.desk_settings.image_capture.clone(),
     };
     // PR 6: stash the payload so a worker swap can re-issue it via
     // `resume_active_media` without forcing the browser through a fresh

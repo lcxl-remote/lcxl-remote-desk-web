@@ -464,6 +464,16 @@ pub struct StartMediaPayload {
     /// `true` for back-compat (see `start_video`).
     #[serde(default = "default_true")]
     pub start_audio: bool,
+    /// Per-connection image-capture backend choice (e.g. "DXGI", "GDI"
+    /// on Windows). `None` lets the worker fall back to its
+    /// startup-time `DeskSettings.image_capture` (which itself
+    /// defaults to the platform's preferred backend). Threading the
+    /// per-connection choice through the IPC payload is required
+    /// because the worker's base settings are a snapshot taken at
+    /// worker spawn — without this field, a browser opening a second
+    /// connection cannot pick a different backend than the first.
+    #[serde(default)]
+    pub image_capture: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -905,6 +915,7 @@ mod tests {
             quality: 0,
             start_video: true,
             start_audio: true,
+            image_capture: None,
         });
         match bincode_round_trip(&msg) {
             ServiceToWorker::StartMedia(p) => {
@@ -936,6 +947,7 @@ mod tests {
             quality: 0,
             start_video: false,
             start_audio: false,
+            image_capture: None,
         });
         match bincode_round_trip(&msg) {
             ServiceToWorker::StartMedia(p) => {

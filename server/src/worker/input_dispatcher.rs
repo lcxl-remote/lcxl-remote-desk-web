@@ -311,6 +311,7 @@ mod tests {
             quality: 0,
             start_video: true,
             start_audio: true,
+            image_capture: None,
         }
     }
 

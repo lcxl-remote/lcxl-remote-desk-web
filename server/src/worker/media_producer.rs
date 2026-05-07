@@ -46,16 +46,27 @@
 //!   TODO breadcrumb in `drain_settings_updates`); the UI today only
 //!   surfaces a quality slider so this gap is invisible.
 //!
-//! ## Out-of-scope (deferred)
+//! ## Capture sharing across connections
 //!
-//! - **Capture sharing across connections** — plan calls for a single
-//!   capture broadcast feeding multiple encoders. Cut 4 takes the
-//!   simpler one-capture-per-connection path because (a) the more
-//!   common steady state is one browser at a time, and (b) DXGI
-//!   duplications can coexist when targeting the same output, so
-//!   correctness does not depend on sharing. The shared-capture
-//!   optimisation lands in a follow-up cut once the multi-browser
-//!   stress path actually warrants it.
+//! Each per-connection `video_pipeline_loop` subscribes to the
+//! worker-wide `SharedCaptureRegistry` (see `worker::shared_capture`)
+//! keyed by `(backend, output_index)`. Connections asking for the
+//! same key reuse one capture loop and one OS-level capture
+//! instance; the broadcast channel fans frames out to each encoder
+//! thread. This is the **correctness** layer for the multi-browser
+//! scenario, not just an optimisation: the cut 4 docstring claimed
+//! "DXGI duplications can coexist when targeting the same output",
+//! which is false — `IDXGIOutputDuplication::DuplicateOutput()`
+//! returns `E_INVALIDARG` on the second call, taking the second
+//! browser's video pipeline straight to a black screen.
+//!
+//! Connections that pick *different* backends or *different* output
+//! indices each get their own capture loop, so e.g. one DXGI + one
+//! GDI on the same display coexist on two threads. fps is honoured
+//! per-connection by frame skipping in `video_pipeline_loop` (the
+//! shared loop runs at the OS refresh rate); cursor metadata is
+//! forwarded to each connection's `cursor_sync_event` DC iff that
+//! connection's `show_mouse` is on.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,10 +80,8 @@ use desk_capture_engine::audio_capture::audio_capture_factory::{
 use desk_capture_engine::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
-use desk_capture_engine::image_capture::image_capture_factory::{
-    create_image_capture, list_image_capture,
-};
-use desk_capture_engine::model::image_capture::{CaptureRequest, CursorCaptureMode};
+use desk_capture_engine::image_capture::image_capture_factory::list_image_capture;
+use desk_capture_engine::model::image_capture::ImageInfo;
 use desk_capture_engine::model::video_encoder::VideoEncoder;
 use desk_capture_engine::video_encoder::video_encoder_factory::{
     create_video_encoder, list_video_encoder,
@@ -85,7 +94,9 @@ use desk_ipc_protocol::message::{
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use log::{debug, error, info, warn};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
+
+use crate::worker::shared_capture::SharedCaptureRegistry;
 
 /// Per-connection media context. Holds the dedicated threads running
 /// the capture + encode loops (one for video, one for audio) plus the
@@ -133,6 +144,15 @@ pub struct MediaProducer {
     /// daemon can decide whether to issue a `StopMedia`+`StartMedia`
     /// reset; the producer never self-decides to abort.
     error_tx: mpsc::UnboundedSender<WorkerToService>,
+    /// Worker-wide shared capture registry. Multi-browser scenario:
+    /// two connections asking for the same `(backend, output_index)`
+    /// reuse a single capture loop and broadcast frames to both
+    /// per-connection encoder threads. Pre-fix each connection
+    /// spawned its own `DxgiImageCapture`, and the second
+    /// `DuplicateOutput` against the same output returned
+    /// `E_INVALIDARG`, taking the second connection's video pipeline
+    /// down to a black screen.
+    capture_registry: Arc<SharedCaptureRegistry>,
     inner: StdMutex<HashMap<String, ConnectionTask>>,
 }
 
@@ -146,6 +166,7 @@ impl MediaProducer {
             desk_settings,
             media_sender,
             error_tx,
+            capture_registry: SharedCaptureRegistry::new(),
             inner: StdMutex::new(HashMap::new()),
         }
     }
@@ -192,6 +213,7 @@ impl MediaProducer {
                 Arc::clone(&stop_flag),
                 Arc::clone(&keyframe_requested),
                 settings_rx,
+                Arc::clone(&self.capture_registry),
             ))
         } else {
             // Drain the receiver end so settings updates targeted at this
@@ -406,7 +428,7 @@ fn drain_settings_updates(
     connection_id: &str,
     settings_rx: &mut mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
     merged_settings: &mut DeskSettings,
-    ticker: &mut tokio::time::Interval,
+    frame_interval: &mut Duration,
     frame_duration_ns: &mut u64,
 ) -> bool {
     let mut changed = false;
@@ -416,11 +438,8 @@ fn drain_settings_updates(
             && fps != merged_settings.video_fps
         {
             merged_settings.video_fps = fps;
-            *ticker = tokio::time::interval(merged_settings.get_duration_by_video_fps());
-            *frame_duration_ns = merged_settings
-                .get_duration_by_video_fps()
-                .as_nanos()
-                .min(u64::MAX as u128) as u64;
+            *frame_interval = merged_settings.get_duration_by_video_fps();
+            *frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
             changed = true;
         }
         if let Some(q) = payload.quality
@@ -461,6 +480,15 @@ fn payload_overrides(base: &DeskSettings, payload: &StartMediaPayload) -> DeskSe
     if payload.fps > 0 {
         s.video_fps = payload.fps;
     }
+    // Per-connection backend choice: when the daemon thread-throughs
+    // a value (typically the per-connection `desk_settings.image_capture`
+    // from the SDP offer), it overrides the worker's startup snapshot.
+    // Without this override the worker would always see `base.image_capture`
+    // and a second browser could not pick a different backend than the
+    // first — see the IPC field's doc comment for the failure mode.
+    if let Some(backend) = payload.image_capture.as_deref() {
+        s.image_capture = Some(backend.to_string());
+    }
     // Cut 4: `video_device` IPC field maps to `\\\\.\\DISPLAY-N` style strings
     // but `DeskSettings.video_device_index` is a numeric index. Without a
     // device → index lookup table the safest behaviour is to ignore the IPC
@@ -494,6 +522,7 @@ fn spawn_video_pipeline_thread(
     stop_flag: Arc<AtomicBool>,
     keyframe_requested: Arc<AtomicBool>,
     settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
+    capture_registry: Arc<SharedCaptureRegistry>,
 ) -> thread::JoinHandle<()> {
     let connection_id = payload.connection_id.clone();
     let thread_name = format!("media-video-{}", &connection_id);
@@ -523,6 +552,7 @@ fn spawn_video_pipeline_thread(
                     stop_flag,
                     keyframe_requested,
                     settings_rx,
+                    capture_registry,
                 )
                 .await
                 {
@@ -583,11 +613,14 @@ fn spawn_audio_pipeline_thread(
         .expect("spawn media audio pipeline thread")
 }
 
-/// Inner async loop for video. Builds capture + encoder, then
-/// iterates: capture, honour keyframe flag (recreate encoder so the
-/// next encode emits an IDR), encode, push every NAL as a `MediaFrame`.
-/// Heartbeat-frame behaviour mirrors Arch III: on a static desktop
-/// emit one cached frame per second so the receiver does not stall.
+/// Inner async loop for video. Subscribes to the worker-wide
+/// `SharedCaptureRegistry` for its `(backend, output_index)` and
+/// pumps frames from the broadcast channel into a per-connection
+/// encoder. fps is honoured by per-connection throttling — the
+/// shared capture loop runs at the OS refresh rate; this loop drops
+/// frames when its own quality knob asks for a lower rate. Heartbeat-
+/// frame behaviour mirrors Arch III: on a static desktop emit one
+/// cached frame per second so the receiver does not stall.
 async fn video_pipeline_loop(
     base_settings: DeskSettings,
     payload: StartMediaPayload,
@@ -596,6 +629,7 @@ async fn video_pipeline_loop(
     stop_flag: Arc<AtomicBool>,
     keyframe_requested: Arc<AtomicBool>,
     mut settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
+    capture_registry: Arc<SharedCaptureRegistry>,
 ) -> Result<(), String> {
     let connection_id = payload.connection_id.clone();
     let codec = payload.video_codec;
@@ -606,48 +640,80 @@ async fn video_pipeline_loop(
         merged_settings.video_fps
     );
 
-    let mut capture = create_image_capture(&merged_settings).map_err(|e| format!("{e}"))?;
-    let display_info = capture.get_current_output().map_err(|e| format!("{e}"))?;
+    // Subscribe to the shared capture loop for this `(backend,
+    // output)`. If no loop exists the registry spawns one;
+    // otherwise the existing loop's broadcast sender hands us a
+    // fresh receiver. `display_info` is published by the registry
+    // (the capture instance owns it) so we don't need our own
+    // capture handle to re-derive resolution.
+    let capture_handle = capture_registry
+        .subscribe(&merged_settings)
+        .map_err(|e| format!("{e}"))?;
+    let mut frame_rx = capture_handle.subscribe();
+    let display_info = capture_handle.display_info().clone();
+
     let mut encoder: Box<dyn VideoEncoder> =
         create_video_encoder(&merged_settings, &display_info).map_err(|e| format!("{e}"))?;
     let mut next_pass_is_idr = true; // first frame is always I (encoder emits SPS/PPS+IDR)
     let mut seq: u64 = 0;
-    let mut ticker = tokio::time::interval(merged_settings.get_duration_by_video_fps());
-    let mut frame_duration_ns = merged_settings
-        .get_duration_by_video_fps()
-        .as_nanos()
-        .min(u64::MAX as u128) as u64;
+    let mut frame_interval = merged_settings.get_duration_by_video_fps();
+    let mut frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
     let mut last_send_time = std::time::Instant::now();
+    // Force the first emitted frame to bypass the throttle gate so
+    // the browser sees an IDR immediately on connect (initial
+    // `last_emit_for_throttle = now - frame_interval` lets the very
+    // first non-heartbeat tick pass).
+    let mut last_emit_for_throttle = std::time::Instant::now()
+        .checked_sub(frame_interval)
+        .unwrap_or_else(std::time::Instant::now);
     // Diagnostic flag: set whenever the encoder is freshly built (initial
     // construction, settings_changed rebuild, or keyframe_requested
     // rebuild). The first emission pass after the rebuild logs a single
-    // INFO line describing whether the rebuild produced an IDR or P
-    // labelled frame, and what NAL type the encoder actually emitted —
-    // used to investigate the "screen turns green after a while" bug
-    // (root cause hypothesis: rebuild lands on a static-desktop tick,
-    // `encode_cached` returns vec![] because the new encoder's
-    // `yuv_buffer` is None, then a follow-up moving frame is mis-labelled
-    // VideoP because `next_pass_is_idr` was consumed earlier).
+    // INFO line describing the resulting NAL layout — used to triage
+    // bugs like the "screen turns green after a while" failure.
     let mut rebuild_pending = true;
 
     while !stop_flag.load(Ordering::Relaxed) {
-        ticker.tick().await;
+        // Wait for the next shared frame. The capture loop runs as
+        // fast as the backend yields; this loop's fps throttle gates
+        // whether the frame is encoded or skipped.
+        let shared_frame = match frame_rx.recv().await {
+            Ok(f) => f,
+            Err(broadcast::error::RecvError::Closed) => {
+                warn!(
+                    "[MediaProducer:{connection_id}] shared-capture broadcast closed; pipeline \
+                     exiting"
+                );
+                return Ok(());
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                // Slow consumer fell behind — the broadcast ring
+                // dropped `n` frames. Resync via a fresh keyframe so
+                // the browser does not display a stale picture
+                // forever.
+                warn!(
+                    "[MediaProducer:{connection_id}] shared-capture broadcast lagged by {n} \
+                     frames; requesting keyframe and resyncing"
+                );
+                keyframe_requested.store(true, Ordering::Relaxed);
+                continue;
+            }
+        };
         if stop_flag.load(Ordering::Relaxed) {
             break;
         }
 
-        // Apply any pending live-update settings before honouring the
-        // keyframe flag. We drain `try_recv` so a burst of settings
-        // changes coalesces into a single rebuild on this tick. The
-        // helper returns whether anything actionable changed; if so we
-        // rebuild the encoder (which will naturally emit an IDR on its
-        // first frame, satisfying the same `next_pass_is_idr`
-        // contract that `keyframe_requested` triggers).
+        // Apply any pending live-update settings before honouring
+        // the keyframe flag. Coalesce a burst into a single
+        // rebuild. NB: backend / output_index changes are out of
+        // scope here — they would require resubscribing to a
+        // different `CaptureKey`, and the live-settings stream
+        // currently does not include them.
         let settings_changed = drain_settings_updates(
             &connection_id,
             &mut settings_rx,
             &mut merged_settings,
-            &mut ticker,
+            &mut frame_interval,
             &mut frame_duration_ns,
         );
         if settings_changed {
@@ -660,6 +726,12 @@ async fn video_pipeline_loop(
                 .map_err(|e| format!("{e}"))?;
             next_pass_is_idr = true;
             rebuild_pending = true;
+            // Reset throttle so the new encoder's first IDR is
+            // emitted on the very next non-heartbeat frame, not
+            // delayed by `frame_interval`.
+            last_emit_for_throttle = std::time::Instant::now()
+                .checked_sub(frame_interval)
+                .unwrap_or_else(std::time::Instant::now);
         }
 
         if keyframe_requested.swap(false, Ordering::Relaxed) {
@@ -671,44 +743,20 @@ async fn video_pipeline_loop(
                 .map_err(|e| format!("{e}"))?;
             next_pass_is_idr = true;
             rebuild_pending = true;
+            last_emit_for_throttle = std::time::Instant::now()
+                .checked_sub(frame_interval)
+                .unwrap_or_else(std::time::Instant::now);
         }
 
-        // PR 3 cursor sync: prefer SyncNative when the capture
-        // backend supports it so the worker can ship cursor shape /
-        // position updates over the dedicated `cursor_sync_event`
-        // DC. Backends that don't support cursor sync fall back to
-        // RenderInFrame, where the cursor is baked into the encoded
-        // video and no cursor IPC is emitted.
-        //
-        // Trade-off: when the daemon hasn't registered a cursor DC
-        // (browser hasn't opened it because control isn't granted),
-        // `write_cursor_data` silently drops the IPC payload and the
-        // browser sees no cursor at all. Arch III handled this by
-        // dynamically flipping cursor_mode based on accept_control,
-        // which would require a new daemon→worker IPC notify. Worth
-        // it only if the no-control no-cursor regression matters;
-        // until then the simpler path is enough.
-        let cursor_mode = if capture.supports_cursor_sync() && merged_settings.show_mouse {
-            CursorCaptureMode::SyncNative
-        } else if !merged_settings.show_mouse {
-            CursorCaptureMode::Disable
-        } else {
-            CursorCaptureMode::RenderInFrame
-        };
-        let capture_result = match capture.capture(CaptureRequest { cursor_mode }) {
-            Ok(r) => r,
-            Err(e) => {
-                debug!("[MediaProducer:{connection_id}] capture error: {e}; continuing");
-                continue;
-            }
-        };
-
-        // Push cursor IPC whenever the capture surfaced an update and
-        // we asked for SyncNative. The error_tx is the worker's event
-        // pipe (not the media transport), so cursor packets do not
-        // compete with video frames for the bounded media channel.
-        if matches!(cursor_mode, CursorCaptureMode::SyncNative)
-            && let Some(cursor) = &capture_result.cursor_update
+        // Cursor sync: the shared capture loop is hard-pinned to
+        // SyncNative, so cursor metadata is always present (when the
+        // backend has an update). Per-connection `show_mouse`
+        // decides whether to forward it on this connection's
+        // dedicated `cursor_sync_event` DC. This is how two browsers
+        // sharing a capture can independently choose to display or
+        // suppress the cursor.
+        if merged_settings.show_mouse
+            && let Some(cursor) = &shared_frame.cursor_update
         {
             match serde_json::to_vec(cursor) {
                 Ok(bytes) => {
@@ -717,8 +765,6 @@ async fn video_pipeline_loop(
                         data: bytes,
                     };
                     if error_tx.send(WorkerToService::CursorData(payload)).is_err() {
-                        // Event pipe gone — the worker is shutting
-                        // down. Let the next stop_flag check drop us.
                         debug!(
                             "[MediaProducer:{connection_id}] event pipe closed; \
                              cursor IPC will not flow"
@@ -731,10 +777,14 @@ async fn video_pipeline_loop(
             }
         }
 
-        if !capture_result.content_changed {
+        let now = std::time::Instant::now();
+
+        if !shared_frame.content_changed {
             // Static-desktop heartbeat: emit one cached frame per
-            // second so the daemon-side track keeps producing RTP and
-            // the browser decoder does not declare the stream dead.
+            // second so the daemon-side track keeps producing RTP
+            // and the browser decoder does not declare the stream
+            // dead. Heartbeats bypass the fps throttle (one per
+            // second is well below any sensible fps anyway).
             if last_send_time.elapsed() <= Duration::from_secs(1) {
                 continue;
             }
@@ -777,11 +827,19 @@ async fn video_pipeline_loop(
                     return Ok(());
                 }
             }
-            last_send_time = std::time::Instant::now();
+            last_send_time = now;
             continue;
         }
 
-        let nal_info_vec = match encoder.encode(capture_result.image.as_ref()) {
+        // fps throttle: skip the frame entirely if our last emit was
+        // less than `frame_interval` ago. The shared capture loop
+        // produces frames at the OS refresh rate; a 30 fps
+        // connection effectively takes every other frame at 60 Hz.
+        if now.duration_since(last_emit_for_throttle) < frame_interval {
+            continue;
+        }
+
+        let nal_info_vec = match encoder.encode(shared_frame.as_ref() as &dyn ImageInfo) {
             Ok(v) => v,
             Err(e) => {
                 warn!("[MediaProducer:{connection_id}] encode error: {e}; continuing");
@@ -820,7 +878,8 @@ async fn video_pipeline_loop(
                 return Ok(());
             }
         }
-        last_send_time = std::time::Instant::now();
+        last_send_time = now;
+        last_emit_for_throttle = now;
     }
 
     info!("[MediaProducer:{connection_id}] Pipeline exiting (stop_flag observed)");
@@ -1268,6 +1327,7 @@ mod tests {
             quality: 0,
             start_video: true,
             start_audio: true,
+            image_capture: None,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.video_encoder.as_deref(), Some("VP9"));
@@ -1276,6 +1336,67 @@ mod tests {
         // the daemon wires a name→index lookup. Pin so the next change to
         // payload_overrides doesn't silently start interpreting it.
         assert_eq!(merged.video_device_index, base.video_device_index);
+    }
+
+    /// Per-connection `image_capture` choice from the daemon overrides
+    /// the worker's startup snapshot. Regression for the
+    /// "second-browser-can't-pick-GDI" bug: pre-fix `payload_overrides`
+    /// dropped the field on the floor and every connection inherited
+    /// the worker's base backend (DXGI by default), causing the second
+    /// connection to hit `DuplicateOutput` E_INVALIDARG against the
+    /// first connection's already-active duplication.
+    #[test]
+    fn payload_overrides_apply_per_connection_image_capture() {
+        let base = DeskSettings {
+            image_capture: Some("DXGI".into()),
+            ..DeskSettings::default()
+        };
+        let payload = StartMediaPayload {
+            connection_id: "c2".into(),
+            video_codec: MediaCodec::H264,
+            audio_codec: MediaCodec::Opus,
+            video_device: None,
+            audio_device: None,
+            fps: 0,
+            bitrate_kbps: 0,
+            quality: 0,
+            start_video: true,
+            start_audio: true,
+            image_capture: Some("GDI".into()),
+        };
+        let merged = payload_overrides(&base, &payload);
+        assert_eq!(
+            merged.image_capture.as_deref(),
+            Some("GDI"),
+            "per-connection override must replace the worker's base backend"
+        );
+    }
+
+    /// Conversely, when the daemon does not specify a backend (e.g. an
+    /// older daemon that predates the IPC field, or an offer with no
+    /// preference), the worker must keep its base setting unchanged so
+    /// the platform default still applies.
+    #[test]
+    fn payload_overrides_image_capture_none_preserves_base() {
+        let base = DeskSettings {
+            image_capture: Some("DXGI".into()),
+            ..DeskSettings::default()
+        };
+        let payload = StartMediaPayload {
+            connection_id: "c3".into(),
+            video_codec: MediaCodec::H264,
+            audio_codec: MediaCodec::Opus,
+            video_device: None,
+            audio_device: None,
+            fps: 0,
+            bitrate_kbps: 0,
+            quality: 0,
+            start_video: true,
+            start_audio: true,
+            image_capture: None,
+        };
+        let merged = payload_overrides(&base, &payload);
+        assert_eq!(merged.image_capture.as_deref(), Some("DXGI"));
     }
 
     #[test]
@@ -1295,6 +1416,7 @@ mod tests {
             quality: 0,
             start_video: true,
             start_audio: true,
+            image_capture: None,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.video_fps, 24);
@@ -1323,6 +1445,7 @@ mod tests {
             quality: 0,
             start_video: false,
             start_audio: false,
+            image_capture: None,
         });
         let state = producer
             .connection_pipeline_state("files")
@@ -1390,18 +1513,15 @@ mod tests {
             video_quality: 22,
             ..DeskSettings::default()
         };
-        let mut ticker = tokio::time::interval(merged.get_duration_by_video_fps());
-        let mut frame_duration_ns = merged
-            .get_duration_by_video_fps()
-            .as_nanos()
-            .min(u64::MAX as u128) as u64;
+        let mut frame_interval = merged.get_duration_by_video_fps();
+        let mut frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
 
         // No pending update → returns false, leaves state untouched.
         let changed = drain_settings_updates(
             "c1",
             &mut rx,
             &mut merged,
-            &mut ticker,
+            &mut frame_interval,
             &mut frame_duration_ns,
         );
         assert!(!changed);
@@ -1420,7 +1540,7 @@ mod tests {
             "c1",
             &mut rx,
             &mut merged,
-            &mut ticker,
+            &mut frame_interval,
             &mut frame_duration_ns,
         );
         assert!(changed);
@@ -1447,7 +1567,7 @@ mod tests {
             "c1",
             &mut rx,
             &mut merged,
-            &mut ticker,
+            &mut frame_interval,
             &mut frame_duration_ns,
         );
         assert!(!changed);
@@ -1465,7 +1585,7 @@ mod tests {
             video_quality: 22,
             ..DeskSettings::default()
         };
-        let mut ticker = tokio::time::interval(merged.get_duration_by_video_fps());
+        let mut frame_interval = merged.get_duration_by_video_fps();
         let mut frame_duration_ns = 0u64;
 
         tx.send(UpdateMediaSettingsPayload {
@@ -1479,7 +1599,7 @@ mod tests {
             "c1",
             &mut rx,
             &mut merged,
-            &mut ticker,
+            &mut frame_interval,
             &mut frame_duration_ns,
         );
         assert!(!changed, "fps=0 + bitrate alone must be a no-op today");
