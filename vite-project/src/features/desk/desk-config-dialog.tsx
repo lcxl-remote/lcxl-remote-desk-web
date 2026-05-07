@@ -31,6 +31,7 @@ import {
     TabsTrigger,
 } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
 import { Slider } from "@/components/ui/slider"
 import { Input } from "@/components/ui/input"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -291,20 +292,23 @@ export function DeskConfigDialog({
                                     stats observer issues
                                     UpdateDeskSettings(video_quality)
                                     based on packet loss / RTT. Default
-                                    on. */}
-                                <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
-                                    <FormControl>
-                                        <Checkbox
-                                            checked={adaptiveQualityEnabled}
-                                            onCheckedChange={(checked) =>
-                                                onAdaptiveQualityChange(checked === true)
-                                            }
-                                        />
-                                    </FormControl>
+                                    on. Plain div + Label here (NOT
+                                    FormItem/FormControl/FormLabel),
+                                    because those primitives call
+                                    useFormField() and require an
+                                    enclosing <FormField>. */}
+                                <div className="flex flex-row items-start space-x-3 p-2 rounded-md border">
+                                    <Checkbox
+                                        id="adaptive-quality-toggle"
+                                        checked={adaptiveQualityEnabled}
+                                        onCheckedChange={(checked) =>
+                                            onAdaptiveQualityChange(checked === true)
+                                        }
+                                    />
                                     <div className="space-y-1 leading-none">
-                                        <FormLabel>
+                                        <Label htmlFor="adaptive-quality-toggle">
                                             {t('pages.desk.adaptiveQuality', 'Adaptive Video Quality')}
-                                        </FormLabel>
+                                        </Label>
                                         <p className="text-xs text-muted-foreground">
                                             {t(
                                                 'pages.desk.adaptiveQualityDescription',
@@ -312,7 +316,7 @@ export function DeskConfigDialog({
                                             )}
                                         </p>
                                     </div>
-                                </FormItem>
+                                </div>
 
                                 <FormField
                                     control={form.control}
