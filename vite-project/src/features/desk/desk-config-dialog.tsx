@@ -284,40 +284,6 @@ export function DeskConfigDialog({
                                     )}
                                 />
 
-                                {/* Client-only adaptive video quality
-                                    toggle. Lives outside the form
-                                    because the value never crosses
-                                    the signaling boundary — it only
-                                    gates whether the browser-side
-                                    stats observer issues
-                                    UpdateDeskSettings(video_quality)
-                                    based on packet loss / RTT. Default
-                                    on. Plain div + Label here (NOT
-                                    FormItem/FormControl/FormLabel),
-                                    because those primitives call
-                                    useFormField() and require an
-                                    enclosing <FormField>. */}
-                                <div className="flex flex-row items-start space-x-3 p-2 rounded-md border">
-                                    <Checkbox
-                                        id="adaptive-quality-toggle"
-                                        checked={adaptiveQualityEnabled}
-                                        onCheckedChange={(checked) =>
-                                            onAdaptiveQualityChange(checked === true)
-                                        }
-                                    />
-                                    <div className="space-y-1 leading-none">
-                                        <Label htmlFor="adaptive-quality-toggle">
-                                            {t('pages.desk.adaptiveQuality', 'Adaptive Video Quality')}
-                                        </Label>
-                                        <p className="text-xs text-muted-foreground">
-                                            {t(
-                                                'pages.desk.adaptiveQualityDescription',
-                                                'Auto-tune video quality based on packet loss and RTT'
-                                            )}
-                                        </p>
-                                    </div>
-                                </div>
-
                                 <FormField
                                     control={form.control}
                                     name="video_zoom_ratio"
@@ -587,6 +553,40 @@ export function DeskConfigDialog({
                                         </FormItem>
                                     )}
                                 />
+
+                                {/* Client-only adaptive video quality
+                                    toggle. Lives outside the form
+                                    because the value never crosses
+                                    the signaling boundary — it only
+                                    gates whether the browser-side
+                                    stats observer issues
+                                    UpdateDeskSettings(video_quality)
+                                    based on packet loss / RTT. Default
+                                    on. Plain div + Label here (NOT
+                                    FormItem/FormControl/FormLabel),
+                                    because those primitives call
+                                    useFormField() and require an
+                                    enclosing <FormField>. */}
+                                <div className="flex flex-row items-start space-x-3 p-2 rounded-md border">
+                                    <Checkbox
+                                        id="adaptive-quality-toggle"
+                                        checked={adaptiveQualityEnabled}
+                                        onCheckedChange={(checked) =>
+                                            onAdaptiveQualityChange(checked === true)
+                                        }
+                                    />
+                                    <div className="space-y-1 leading-none">
+                                        <Label htmlFor="adaptive-quality-toggle">
+                                            {t('pages.desk.adaptiveQuality', 'Adaptive Video Quality')}
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground">
+                                            {t(
+                                                'pages.desk.adaptiveQualityDescription',
+                                                'Auto-tune video quality based on packet loss and RTT'
+                                            )}
+                                        </p>
+                                    </div>
+                                </div>
 
                                 <FormField
                                     control={form.control}
