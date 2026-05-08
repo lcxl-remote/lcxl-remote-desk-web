@@ -282,6 +282,7 @@ export default {
   'pages.desk.statsPanel.freezeCount': 'Freeze Count',
   'pages.desk.statsPanel.totalFreezeDuration': 'Total Freeze Duration',
   'pages.desk.statsPanel.jitter': 'Jitter',
+  'pages.desk.statsPanel.jitterHint': 'Static desktop drops to ~1 fps; RFC 3550 jitter is unreliable at low packet rates',
   'pages.desk.initializingCapture': 'Initializing remote capture...',
   'pages.desk.waitingPermission': 'Waiting for host authorization dialog.',
   'pages.desk.openWhiteboard': 'Open Whiteboard',

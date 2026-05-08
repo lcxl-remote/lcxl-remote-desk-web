@@ -280,6 +280,7 @@ export default {
   'pages.desk.statsPanel.freezeCount': '卡顿次数',
   'pages.desk.statsPanel.totalFreezeDuration': '总卡顿时长',
   'pages.desk.statsPanel.jitter': '抖动',
+  'pages.desk.statsPanel.jitterHint': '静态画面降至 ~1 fps，RFC 3550 抖动公式在低包率下不可靠',
   'pages.desk.initializingCapture': '正在初始化远程画面...',
   'pages.desk.waitingPermission': '正在等待被控端授权弹窗确认。',
   'pages.desk.openWhiteboard': '打开白板',

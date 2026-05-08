@@ -815,6 +815,16 @@ export default function DeskSession() {
                                     <span className="text-gray-400">{t('pages.desk.statsPanel.jitter', 'Jitter')}:</span>
                                     <span className={`font-bold ${rtcStats.jitterMs > 50 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.jitterMs} ms</span>
                                 </div>
+                                {/* RFC 3550 interarrival jitter is an EWMA over packet interarrival
+                                    deltas. Worker drops to ~1 fps on a static desktop, and at that
+                                    packet rate any single OS scheduling blip dominates the EWMA, so
+                                    the value drifts up to hundreds of ms. Once the screen moves and
+                                    fps recovers, the EWMA snaps back within a couple of seconds.
+                                    Surface this so operators don't mistake it for a real network
+                                    fault. */}
+                                <div className="text-[10px] italic text-gray-500 mt-0.5 leading-tight">
+                                    {t('pages.desk.statsPanel.jitterHint', 'Static desktop drops to ~1 fps; RFC 3550 jitter is unreliable at low packet rates')}
+                                </div>
                             </div>
                         )}
 
