@@ -242,9 +242,12 @@ impl DeskSettings {
         }
 
         encoder_settings.bps = bps;
-        // Default to 30 frames between IDR keyframes; gop=0 means only the first frame
-        // is IDR, causing seek/recovery failures on packet loss
-        encoder_settings.gop = 30;
+        // Default GOP to 120 frames. WebRTC recovers from loss via PLI/FIR,
+        // so we don't need a tight periodic IDR; a wider GOP spreads the
+        // ~25 KB IDR cost over more frames and reduces bandwidth spikes.
+        // gop=0 would mean only the first frame is IDR, causing
+        // seek/recovery failures on packet loss.
+        encoder_settings.gop = 120;
         encoder_settings
     }
 

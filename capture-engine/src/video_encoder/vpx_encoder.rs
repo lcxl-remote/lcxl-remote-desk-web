@@ -64,6 +64,7 @@ impl VpxEncoder {
             let frame_type_str = if packet.key { "key" } else { "non_key" };
             encoded.push(NalInfo {
                 nal_bytes: bytes::Bytes::from(packet.data.to_vec()),
+                is_keyframe: packet.key,
             });
             ENCODE_TO_VPX_HISTOGRAM
                 .with_label_values(&[codec, frame_type_str])

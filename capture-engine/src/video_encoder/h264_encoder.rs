@@ -120,7 +120,8 @@ impl H264Encoder {
         let encode_to_h264_timer = Instant::now();
         let yuv_source = PersistentYuvView(yuv);
         let encoded_bit_stream = encoder.encode(&yuv_source)?;
-        let frame_type_str = match encoded_bit_stream.frame_type() {
+        let frame_type = encoded_bit_stream.frame_type();
+        let frame_type_str = match frame_type {
             openh264::encoder::FrameType::Invalid => "Invalid",
             openh264::encoder::FrameType::IDR => "IDR",
             openh264::encoder::FrameType::I => "I",
@@ -128,6 +129,9 @@ impl H264Encoder {
             openh264::encoder::FrameType::Skip => "Skip",
             openh264::encoder::FrameType::IPMixed => "IPMixed",
         };
+        // Only IDR is a true keyframe in WebRTC's eyes — `I` (non-IDR
+        // intra) does not reset the decoder's reference state.
+        let is_keyframe = matches!(frame_type, openh264::encoder::FrameType::IDR);
         log::trace!("Encoded to H.264 format");
         let encoded_bit_bytes = bytes::Bytes::from(encoded_bit_stream.to_vec());
         log::trace!(
@@ -142,6 +146,7 @@ impl H264Encoder {
             ));
         Ok(vec![NalInfo {
             nal_bytes: encoded_bit_bytes,
+            is_keyframe,
         }])
     }
 }

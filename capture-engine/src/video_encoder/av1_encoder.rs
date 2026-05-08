@@ -75,10 +75,8 @@ impl Av1Encoder {
         loop {
             match ctx.receive_packet() {
                 Ok(packet) => {
-                    let frame_type_str = match packet.frame_type {
-                        FrameType::KEY => "key",
-                        _ => "inter",
-                    };
+                    let is_keyframe = matches!(packet.frame_type, FrameType::KEY);
+                    let frame_type_str = if is_keyframe { "key" } else { "inter" };
                     ENCODE_TO_AV1_HISTOGRAM
                         .with_label_values(&[frame_type_str])
                         .observe(duration_to_seconds(
@@ -86,6 +84,7 @@ impl Av1Encoder {
                         ));
                     nal_infos.push(NalInfo {
                         nal_bytes: bytes::Bytes::from(packet.data),
+                        is_keyframe,
                     });
                 }
                 Err(EncoderStatus::NeedMoreData) => break,

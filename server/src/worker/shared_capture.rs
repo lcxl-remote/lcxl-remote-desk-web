@@ -477,10 +477,7 @@ mod tests {
             gco_count: Arc<AtomicUsize>,
         }
         impl ImageCapture for CountingCapture {
-            fn capture(
-                &mut self,
-                _r: CaptureRequest,
-            ) -> Result<CaptureResult, CaptureError> {
+            fn capture(&mut self, _r: CaptureRequest) -> Result<CaptureResult, CaptureError> {
                 // Sleep so the broadcast ring (capacity 64 below) has no
                 // chance of wrapping before the test finishes recv'ing
                 // its 5 frames; this keeps the test deterministic on

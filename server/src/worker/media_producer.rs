@@ -463,11 +463,34 @@ fn compute_emit_duration_ns(
     default_ns: u64,
 ) -> u64 {
     match prev_emit {
-        Some(prev) => now
-            .duration_since(prev)
-            .as_nanos()
-            .min(u64::MAX as u128) as u64,
+        Some(prev) => now.duration_since(prev).as_nanos().min(u64::MAX as u128) as u64,
         None => default_ns,
+    }
+}
+
+/// Classify the `MediaFrameKind` for an outgoing video access unit.
+/// Returns `VideoI` if either:
+///   - The worker just rebuilt the encoder (`next_pass_is_idr=true`,
+///     covers initial start, settings_changed rebuild, ForceKeyframe
+///     rebuild) — the very first encoder output is by construction
+///     SPS+PPS+IDR.
+///   - Any NAL in this access unit reports `is_keyframe=true` from
+///     the encoder's own frame-type signal — covers the periodic
+///     internal-GOP IDR that the encoder emits without any worker
+///     rebuild (with the default GOP=120 this happens roughly every
+///     2 s at 60 fps).
+/// Pinned as a helper so the "encoder GOP IDR is also VideoI" contract
+/// is unit-testable independently of the surrounding async loop.
+#[inline]
+fn classify_video_frame_kind(
+    nals: &[desk_capture_engine::model::video_encoder::NalInfo],
+    next_pass_is_idr: bool,
+) -> MediaFrameKind {
+    let any_keyframe = nals.iter().any(|n| n.is_keyframe);
+    if next_pass_is_idr || any_keyframe {
+        MediaFrameKind::VideoI
+    } else {
+        MediaFrameKind::VideoP
     }
 }
 
@@ -902,14 +925,22 @@ async fn video_pipeline_loop(
             // the same access unit.
             let actual_duration_ns =
                 compute_emit_duration_ns(last_emit_wall, now, frame_duration_ns);
+            // Honour the encoder's native frame-type signal: an
+            // internal-GOP IDR mid-heartbeat must surface as VideoI so
+            // the daemon's paused-write_sample latch (after a worker
+            // swap) can clear on a natural IDR, and so host-side I-frame
+            // counts match what the browser decoder reports.
+            let kind_for_pass = classify_video_frame_kind(&nal_info_vec, next_pass_is_idr);
+            let was_idr_flag = next_pass_is_idr;
+            next_pass_is_idr = false;
             for (i, nal) in nal_info_vec.into_iter().enumerate() {
                 if rebuild_pending {
                     log_post_rebuild_emit(
                         &connection_id,
                         "heartbeat",
                         codec,
-                        MediaFrameKind::VideoP,
-                        next_pass_is_idr,
+                        kind_for_pass,
+                        was_idr_flag,
                         nal.nal_bytes.as_ref(),
                     );
                     rebuild_pending = false;
@@ -918,7 +949,7 @@ async fn video_pipeline_loop(
                     &connection_id,
                     seq,
                     if i == 0 { actual_duration_ns } else { 0 },
-                    MediaFrameKind::VideoP,
+                    kind_for_pass,
                     codec,
                     nal.nal_bytes.to_vec(),
                 );
@@ -947,11 +978,13 @@ async fn video_pipeline_loop(
                 continue;
             }
         };
-        let kind_for_pass = if next_pass_is_idr {
-            MediaFrameKind::VideoI
-        } else {
-            MediaFrameKind::VideoP
-        };
+        // Honour the encoder's native frame-type signal alongside our
+        // own `next_pass_is_idr` rebuild marker. With a wider GOP
+        // (default 120) the encoder still emits periodic IDRs without
+        // any worker-side rebuild — those need to be labelled VideoI
+        // so the daemon's paused-write_sample latch can clear on them
+        // and host-side keyframe counts align with the browser.
+        let kind_for_pass = classify_video_frame_kind(&nal_info_vec, next_pass_is_idr);
         let was_idr_flag = next_pass_is_idr;
         next_pass_is_idr = false;
         // Same dynamic-duration treatment as the heartbeat path:
@@ -1789,7 +1822,9 @@ mod tests {
             caps.video_codecs
         );
         assert!(
-            caps.audio_encoders.iter().any(|s| s.eq_ignore_ascii_case("OPUS")),
+            caps.audio_encoders
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("OPUS")),
             "audio_encoders must include Opus: {:?}",
             caps.audio_encoders
         );
@@ -1905,6 +1940,96 @@ mod tests {
             next > 0,
             "post-lag recv returns the latest available input — encoder's \
              internal reference chain is preserved"
+        );
+    }
+
+    /// Regression: with the default GOP widened to 120 frames, the
+    /// encoder still emits periodic IDR access units without any
+    /// worker-side rebuild (`next_pass_is_idr` stays false). The
+    /// emit path must label those VideoI based on the encoder's
+    /// own `is_keyframe` signal so host-side keyframe counts align
+    /// with what the browser decoder reports and the daemon's
+    /// paused-write_sample latch (after a worker swap) can clear
+    /// on a natural IDR rather than waiting for the next
+    /// ForceKeyframe round-trip.
+    #[test]
+    fn classify_video_frame_kind_treats_internal_gop_idr_as_video_i() {
+        use desk_capture_engine::model::video_encoder::NalInfo;
+        let idr_nal = NalInfo {
+            nal_bytes: bytes::Bytes::from_static(&[0; 16]),
+            is_keyframe: true,
+        };
+        // No worker-side rebuild flag, but the encoder reports a
+        // keyframe — must surface as VideoI.
+        let kind = classify_video_frame_kind(&[idr_nal], false);
+        assert_eq!(
+            kind,
+            MediaFrameKind::VideoI,
+            "encoder-reported keyframe must surface as VideoI even when next_pass_is_idr=false"
+        );
+    }
+
+    /// Pin the inverse: when the encoder reports a P frame and the
+    /// worker has no pending rebuild, the emit path must label it
+    /// VideoP. Mis-labelling a P frame as VideoI would defeat the
+    /// daemon's paused-write_sample correctness check (it would
+    /// resume on the wrong frame and the browser would see corrupt
+    /// video until the next real IDR clears the buffer).
+    #[test]
+    fn classify_video_frame_kind_p_frame_stays_video_p() {
+        use desk_capture_engine::model::video_encoder::NalInfo;
+        let p_nal = NalInfo {
+            nal_bytes: bytes::Bytes::from_static(&[0; 16]),
+            is_keyframe: false,
+        };
+        let kind = classify_video_frame_kind(&[p_nal], false);
+        assert_eq!(kind, MediaFrameKind::VideoP);
+    }
+
+    /// Pin the rebuild path: even if the encoder happens to report
+    /// is_keyframe=false on the very first emission after a
+    /// settings_changed / ForceKeyframe rebuild (this should not
+    /// happen in practice — the rebuilt encoder always emits
+    /// SPS+PPS+IDR first — but we keep the explicit `next_pass_is_idr`
+    /// belt-and-braces flag), the emit path must still mark VideoI
+    /// because the worker just rebuilt the encoder.
+    #[test]
+    fn classify_video_frame_kind_next_pass_is_idr_overrides() {
+        use desk_capture_engine::model::video_encoder::NalInfo;
+        let nal = NalInfo {
+            nal_bytes: bytes::Bytes::from_static(&[0; 16]),
+            is_keyframe: false,
+        };
+        let kind = classify_video_frame_kind(&[nal], true);
+        assert_eq!(
+            kind,
+            MediaFrameKind::VideoI,
+            "next_pass_is_idr=true is the rebuild marker; first post-rebuild emit must be \
+             VideoI even if the NAL header check disagrees"
+        );
+    }
+
+    /// Mixed-NAL access unit: any single keyframe NAL anywhere in
+    /// the access unit promotes the whole emit to VideoI. This
+    /// matches H.264's wire reality where one access unit can be
+    /// SPS + PPS + IDR slice (3 NALs, only the third one carries
+    /// the IDR semantics) but the entire unit is a keyframe.
+    #[test]
+    fn classify_video_frame_kind_any_keyframe_in_access_unit_wins() {
+        use desk_capture_engine::model::video_encoder::NalInfo;
+        let nals = vec![
+            NalInfo {
+                nal_bytes: bytes::Bytes::from_static(&[0; 4]),
+                is_keyframe: false,
+            },
+            NalInfo {
+                nal_bytes: bytes::Bytes::from_static(&[0; 4]),
+                is_keyframe: true,
+            },
+        ];
+        assert_eq!(
+            classify_video_frame_kind(&nals, false),
+            MediaFrameKind::VideoI
         );
     }
 

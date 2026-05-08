@@ -74,18 +74,22 @@ impl X264Encoder {
         ];
 
         let image = Image::new(Colorspace::I420, width, yuv.height as i32, &planes);
-        let (res, _out_picture) = encoder.encode(*pts, image).map_err(|e| {
+        let (res, out_picture) = encoder.encode(*pts, image).map_err(|e| {
             CaptureError::AnyhowError(anyhow::anyhow!("x264 encode error: {:?}", e))
         })?;
         *pts += 1;
 
         let data = bytes::Bytes::copy_from_slice(res.entirety());
+        let is_keyframe = out_picture.keyframe();
         ENCODE_TO_X264_HISTOGRAM
             .with_label_values(&["encoded"])
             .observe(duration_to_seconds(
                 Instant::now().saturating_duration_since(encode_timer),
             ));
-        Ok(vec![NalInfo { nal_bytes: data }])
+        Ok(vec![NalInfo {
+            nal_bytes: data,
+            is_keyframe,
+        }])
     }
 }
 

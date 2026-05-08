@@ -5,6 +5,13 @@ use crate::model::image_capture::ImageInfo;
 
 pub struct NalInfo {
     pub nal_bytes: bytes::Bytes,
+    /// True if this NAL belongs to a keyframe access unit (IDR for H.264,
+    /// key frame for VP8/VP9/AV1). Set by the encoder using its native
+    /// frame-type signal (no NAL byte scanning at the call site). Lets the
+    /// emit path label `MediaFrameKind::VideoI` accurately for both
+    /// rebuild-driven IDRs and the encoder's internal periodic IDRs, so
+    /// stats logged on the host match what the browser decoder counts.
+    pub is_keyframe: bool,
 }
 
 pub trait VideoEncoder {

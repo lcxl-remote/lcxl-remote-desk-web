@@ -2786,11 +2786,7 @@ mod tests {
             video_codecs: vec![MediaCodec::H264, MediaCodec::Vp9],
             audio_codecs: vec![MediaCodec::Opus],
             // UI layer: both implementations remain distinct.
-            video_encoders: vec![
-                "X264".to_string(),
-                "VP9".to_string(),
-                "H264".to_string(),
-            ],
+            video_encoders: vec!["X264".to_string(), "VP9".to_string(), "H264".to_string()],
             audio_encoders: vec!["OPUS".to_string()],
             video_device_list: std::collections::BTreeMap::new(),
             audio_device_list: std::collections::BTreeMap::new(),
