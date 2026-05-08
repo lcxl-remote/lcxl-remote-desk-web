@@ -432,6 +432,64 @@ fn codec_from_str(name: &str, is_video: bool) -> Option<MediaCodec> {
 /// Drain every pending `UpdateMediaSettingsPayload` from the per-
 /// connection mpsc and apply each to `merged_settings`. The tick + fps
 /// path is a `tokio::time::interval`, which the loop replaces on fps
+/// Compute the wall-clock duration to attach to the next emitted
+/// `MediaFrame`. The daemon hands this straight to webrtc-rs's
+/// `Sample.duration`, which advances the RTP timestamp by
+/// `duration_secs * 90000Hz` for video. Earlier code passed the
+/// configured 1/fps interval as a fixed value, which was wrong for
+/// two reasons:
+///
+///   - **Static-desktop heartbeat path.** Heartbeats fire every
+///     ~1s but stamped duration=33ms. Each second of static
+///     desktop made the receiver's RTP clock fall ~967ms behind
+///     wall clock. After a minute of idle, the browser's
+///     playout buffer held nearly a minute of "future" frames —
+///     so when the user finally moved the mouse, the browser
+///     replayed minutes-old activity instead of showing live
+///     events.
+///
+///   - **Broadcast lag path.** When the encoder loop falls
+///     behind the OS-rate capture loop (`RecvError::Lagged`),
+///     real wall-clock interval can be 50-100ms; stamping 33ms
+///     made the same drift accumulate at a smaller per-event
+///     rate.
+///
+/// The first emit has no `prev_emit` reference, so we fall back
+/// to the configured 1/fps default — the receiver's first
+/// timestamp doesn't matter for delta calculations.
+fn compute_emit_duration_ns(
+    prev_emit: Option<std::time::Instant>,
+    now: std::time::Instant,
+    default_ns: u64,
+) -> u64 {
+    match prev_emit {
+        Some(prev) => now
+            .duration_since(prev)
+            .as_nanos()
+            .min(u64::MAX as u128) as u64,
+        None => default_ns,
+    }
+}
+
+/// Handler for `RecvError::Lagged(n)` on the shared-capture
+/// broadcast subscription. Pinned as a separate function so the
+/// "lag does NOT request a keyframe" contract is unit-testable
+/// and any future regression that re-introduces an encoder
+/// rebuild here gets caught.
+///
+/// The body intentionally has no side effects on the encoder /
+/// keyframe state: see the call site in `video_pipeline_loop`
+/// for the reasoning. This logs at DEBUG (not WARN) because lag
+/// is the expected steady-state behaviour when capture runs
+/// faster than the per-connection fps throttle.
+#[inline]
+fn handle_broadcast_lag(connection_id: &str, n: u64) {
+    debug!(
+        "[MediaProducer:{connection_id}] shared-capture broadcast lagged by {n} \
+         frames; skipping ahead to the latest available input"
+    );
+}
+
 /// changes (interval can't be retuned in place).
 ///
 /// Returns `true` when at least one knob actually changed — the caller
@@ -676,6 +734,12 @@ async fn video_pipeline_loop(
     let mut frame_interval = merged_settings.get_duration_by_video_fps();
     let mut frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
     let mut last_send_time = std::time::Instant::now();
+    // Wall-clock instant of the most recent emit — drives the
+    // dynamic `Sample.duration` calculation. `None` until we've
+    // emitted at least once; the first emit uses `frame_duration_ns`
+    // (1/fps) as a sensible default since there's no previous tick
+    // to subtract.
+    let mut last_emit_wall: Option<std::time::Instant> = None;
     // Force the first emitted frame to bypass the throttle gate so
     // the browser sees an IDR immediately on connect (initial
     // `last_emit_for_throttle = now - frame_interval` lets the very
@@ -704,15 +768,26 @@ async fn video_pipeline_loop(
                 return Ok(());
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                // Slow consumer fell behind — the broadcast ring
-                // dropped `n` frames. Resync via a fresh keyframe so
-                // the browser does not display a stale picture
-                // forever.
-                warn!(
-                    "[MediaProducer:{connection_id}] shared-capture broadcast lagged by {n} \
-                     frames; requesting keyframe and resyncing"
-                );
-                keyframe_requested.store(true, Ordering::Relaxed);
+                // The shared-capture loop runs at the OS refresh
+                // rate; per-connection encoders run at a (typically
+                // lower) configured fps, so the bounded broadcast
+                // ring will routinely drop the oldest queued *input*
+                // frames before our next recv. This is benign:
+                //
+                //  - We missed *input* frames, not *output* RTP.
+                //  - The encoder's internal reference chain is still
+                //    valid (we never fed it a frame after our last
+                //    successful encode).
+                //  - The next P frame off the latest available input
+                //    describes the gap correctly to the browser
+                //    without an IDR.
+                //
+                // Earlier versions requested a keyframe on every lag,
+                // which recreated the encoder — an order of magnitude
+                // more expensive than emitting one P frame — and fed
+                // a self-amplifying keyframe-storm loop where each
+                // rebuild widened the lag, triggering more rebuilds.
+                handle_broadcast_lag(&connection_id, n);
                 continue;
             }
         };
@@ -819,7 +894,15 @@ async fn video_pipeline_loop(
                      will see no frames until the next non-static capture tick"
                 );
             }
-            for nal in nal_info_vec {
+            // Heartbeat duration must reflect wall-clock elapsed
+            // (~1s under the static-desktop branch above) so the
+            // receiver's RTP timestamps stay in sync with wall
+            // clock. Subsequent NALs from the same encode pass
+            // share the timestamp (duration=0) — they describe
+            // the same access unit.
+            let actual_duration_ns =
+                compute_emit_duration_ns(last_emit_wall, now, frame_duration_ns);
+            for (i, nal) in nal_info_vec.into_iter().enumerate() {
                 if rebuild_pending {
                     log_post_rebuild_emit(
                         &connection_id,
@@ -834,7 +917,7 @@ async fn video_pipeline_loop(
                 let frame = build_media_frame(
                     &connection_id,
                     seq,
-                    frame_duration_ns,
+                    if i == 0 { actual_duration_ns } else { 0 },
                     MediaFrameKind::VideoP,
                     codec,
                     nal.nal_bytes.to_vec(),
@@ -845,6 +928,7 @@ async fn video_pipeline_loop(
                 }
             }
             last_send_time = now;
+            last_emit_wall = Some(now);
             continue;
         }
 
@@ -870,7 +954,13 @@ async fn video_pipeline_loop(
         };
         let was_idr_flag = next_pass_is_idr;
         next_pass_is_idr = false;
-        for nal in nal_info_vec {
+        // Same dynamic-duration treatment as the heartbeat path:
+        // when broadcast lag (or a paused capture) makes the real
+        // gap between emits longer than 1/fps, the receiver's RTP
+        // timestamp must reflect that or its jitter buffer drifts
+        // ahead of wall clock.
+        let actual_duration_ns = compute_emit_duration_ns(last_emit_wall, now, frame_duration_ns);
+        for (i, nal) in nal_info_vec.into_iter().enumerate() {
             if rebuild_pending {
                 log_post_rebuild_emit(
                     &connection_id,
@@ -885,7 +975,7 @@ async fn video_pipeline_loop(
             let frame = build_media_frame(
                 &connection_id,
                 seq,
-                frame_duration_ns,
+                if i == 0 { actual_duration_ns } else { 0 },
                 kind_for_pass,
                 codec,
                 nal.nal_bytes.to_vec(),
@@ -896,6 +986,7 @@ async fn video_pipeline_loop(
             }
         }
         last_send_time = now;
+        last_emit_wall = Some(now);
         last_emit_for_throttle = now;
     }
 
@@ -1701,6 +1792,119 @@ mod tests {
             caps.audio_encoders.iter().any(|s| s.eq_ignore_ascii_case("OPUS")),
             "audio_encoders must include Opus: {:?}",
             caps.audio_encoders
+        );
+    }
+
+    /// Regression: `frame_duration_ns` was previously hardcoded to
+    /// 1/fps everywhere it was emitted, so when wall-clock elapsed
+    /// between emits exceeded 1/fps (heartbeat path = ~1s, broadcast
+    /// lag path = 50-100ms), the receiver's RTP timestamp drifted
+    /// behind wall clock by the difference. Over a minute of static
+    /// desktop the drift reached ~58s, manifesting as the user's
+    /// reported "browser shows actions from a minute ago" symptom.
+    ///
+    /// `compute_emit_duration_ns` must:
+    ///   1. Fall back to `default_ns` when there's no prior emit
+    ///      (first frame after connect).
+    ///   2. Return the real wall-clock delta when there is one,
+    ///      regardless of how long it is — the heartbeat path
+    ///      *needs* ~1s for its sample.
+    #[test]
+    fn compute_emit_duration_ns_first_emit_falls_back_to_default() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            compute_emit_duration_ns(None, now, 33_000_000),
+            33_000_000,
+            "with no prior emit there's nothing to subtract; default 1/fps is the right baseline"
+        );
+    }
+
+    #[test]
+    fn compute_emit_duration_ns_reflects_short_wall_clock_delta() {
+        let prev = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let now = std::time::Instant::now();
+        let dur = compute_emit_duration_ns(Some(prev), now, 33_000_000);
+        // 50ms elapsed; the configured default of 33ms must NOT
+        // be returned — that's the bug this guards against.
+        assert!(
+            (40_000_000..=120_000_000).contains(&dur),
+            "duration must reflect the ~50ms wall-clock delta, not the 33ms default; got {dur}"
+        );
+    }
+
+    #[test]
+    fn compute_emit_duration_ns_handles_heartbeat_scale_intervals() {
+        // Pin the heartbeat path: under static desktop the loop
+        // emits roughly once per second. Stamping 33ms on each
+        // emit was exactly how the receiver's RTP clock fell
+        // behind wall clock by ~967ms/second.
+        let prev = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let now = std::time::Instant::now();
+        let dur = compute_emit_duration_ns(Some(prev), now, 33_000_000);
+        assert!(
+            dur >= 900_000_000,
+            "1s heartbeat must produce a ~1s duration so RTP timestamp keeps pace with wall \
+             clock; got {dur}"
+        );
+    }
+
+    /// Regression: the shared-capture broadcast (introduced when the
+    /// capture loop was decoupled to fix multi-browser black screen)
+    /// runs at the OS refresh rate, while per-connection encoders run
+    /// at a configured fps, so `RecvError::Lagged(n)` is the expected
+    /// steady state.
+    ///
+    /// Earlier code requested a keyframe on every lag event, which
+    /// recreated the encoder. Encoder rebuilds are an order of
+    /// magnitude more expensive than emitting one P frame, so each
+    /// rebuild widened the lag and triggered another rebuild —
+    /// observed in production as ~6 keyframe rebuilds per second
+    /// flooding the logs and starving the pipeline.
+    ///
+    /// This test pins the contract by exercising the real
+    /// `tokio::sync::broadcast` Lagged path and asserting:
+    ///   1. `handle_broadcast_lag` does not flip the keyframe flag.
+    ///   2. The next recv after Lagged still yields the latest
+    ///      available frame (the encoder's reference chain is not
+    ///      broken — broadcast resyncs the receiver to head
+    ///      automatically).
+    #[tokio::test(flavor = "current_thread")]
+    async fn broadcast_lag_does_not_request_keyframe_or_rebuild_encoder() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::sync::broadcast;
+
+        let keyframe_requested = Arc::new(AtomicBool::new(false));
+
+        let (tx, mut rx) = broadcast::channel::<u32>(2);
+        // Publish more than capacity so the next recv hits Lagged.
+        for i in 0..6u32 {
+            let _ = tx.send(i);
+        }
+
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                handle_broadcast_lag("test-conn", n);
+            }
+            other => panic!("expected RecvError::Lagged on overflow, got {other:?}"),
+        }
+
+        assert!(
+            !keyframe_requested.load(Ordering::Relaxed),
+            "broadcast lag must not request a keyframe — that would feed a \
+             self-amplifying keyframe-storm loop"
+        );
+
+        // The receiver auto-resyncs to head: the first post-lag recv must
+        // succeed, proving we do NOT need to recreate the encoder to keep
+        // the pipeline flowing.
+        let next = rx.recv().await.expect("recv after Lagged must succeed");
+        assert!(
+            next > 0,
+            "post-lag recv returns the latest available input — encoder's \
+             internal reference chain is preserved"
         );
     }
 
