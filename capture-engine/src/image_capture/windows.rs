@@ -21,7 +21,11 @@ pub fn enum_display_resolutions(device_name: &str) -> Result<Vec<Resolution>, Ca
         if !enum_result.as_bool() {
             break;
         }
-        log::info!(
+        // DEBUG, not INFO: this loop runs once per supported display
+        // mode for every `enum_display_resolutions` call. Hot-path
+        // callers (e.g. anyone re-querying display info per frame)
+        // would otherwise emit hundreds of INFO lines per second.
+        log::debug!(
             "Found display mode, width: {}, height: {}, bits per pixel: {}, display frequency: {}",
             devmode.dmPelsWidth,
             devmode.dmPelsHeight,

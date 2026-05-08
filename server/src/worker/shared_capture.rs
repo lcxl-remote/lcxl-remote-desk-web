@@ -213,6 +213,7 @@ impl SharedCaptureRegistry {
         let sender_for_thread = sender.clone();
         let stop_for_thread = Arc::clone(&stop_flag);
         let key_for_thread = key.clone();
+        let display_info_for_thread = display_info.clone();
         let join = thread::Builder::new()
             .name(format!(
                 "shared-capture-{}-{}",
@@ -224,6 +225,7 @@ impl SharedCaptureRegistry {
                     sender_for_thread,
                     stop_for_thread,
                     key_for_thread,
+                    display_info_for_thread,
                 );
             })
             .expect("spawn shared capture thread");
@@ -285,6 +287,7 @@ fn run_capture_loop(
     sender: broadcast::Sender<Arc<SharedFrame>>,
     stop_flag: Arc<AtomicBool>,
     key: CaptureKey,
+    initial_display_info: DisplayInfo,
 ) {
     info!(
         "[SharedCapture:{}/{}] capture loop starting",
@@ -298,6 +301,25 @@ fn run_capture_loop(
     let request = CaptureRequest {
         cursor_mode: CursorCaptureMode::SyncNative,
     };
+    // We grab `display_info` once at loop start and reuse it for every
+    // frame's `SharedFrame::display_info`. Earlier code re-queried via
+    // `capture.get_current_output()` on every tick "in case the user
+    // resized the source display", but:
+    //
+    //   1. No downstream consumer reads `SharedFrame.display_info` —
+    //      `media_producer` already snapshots `display_info` once at
+    //      pipeline start via `SharedCaptureHandle::display_info()`.
+    //   2. On Windows, `get_current_output` calls `EnumOutputs` +
+    //      `EnumDisplayDevicesW` + `EnumDisplaySettingsW` per call,
+    //      each emitting INFO logs from `desk-capture-engine`. At the
+    //      OS refresh rate (60+ Hz) this floods the log file at
+    //      ~20-25 enumerate-events/second per active capture, which
+    //      is what the user observed.
+    //
+    // Per-frame `width`/`height`/`stride` continue to come from
+    // `result.image`, so a runtime resolution change is still
+    // reflected in the frame payload — only the unused
+    // `display_info` re-query is removed.
     while !stop_flag.load(Ordering::Acquire) {
         let result = match capture.capture(request) {
             Ok(r) => r,
@@ -322,21 +344,6 @@ fn run_capture_loop(
         let image_type = result.image.get_type();
         let data = Bytes::copy_from_slice(result.image.get_data());
 
-        // `display_info` is captured fresh each tick because the
-        // backend may report a resolution change (e.g. the user
-        // resized the source display). Subscribers latch on this
-        // through the `SharedFrame` payload.
-        let display_info = match capture.get_current_output() {
-            Ok(d) => d,
-            Err(e) => {
-                debug!(
-                    "[SharedCapture:{}/{}] get_current_output failed: {e}; skipping frame",
-                    key.backend, key.output_index
-                );
-                continue;
-            }
-        };
-
         let frame = Arc::new(SharedFrame {
             data,
             width,
@@ -346,7 +353,7 @@ fn run_capture_loop(
             dirty_rects: result.dirty_rects,
             content_changed: result.content_changed,
             cursor_update: result.cursor_update,
-            display_info,
+            display_info: initial_display_info.clone(),
         });
 
         // No subscribers right now is OK — the capture loop only
@@ -423,6 +430,138 @@ mod tests {
         assert_ne!(
             k_dxgi_0, k_dxgi_1,
             "different output indices must hash separately"
+        );
+    }
+
+    /// Regression: `run_capture_loop` used to call
+    /// `capture.get_current_output()` on every tick to refresh
+    /// `SharedFrame.display_info` — but no downstream consumer reads
+    /// that field, while on Windows DXGI each call enumerates display
+    /// devices + display modes, each emitting INFO logs from
+    /// `desk-capture-engine`. At the OS refresh rate this floods the
+    /// log file (observed ~20-25 enumerate-events/s/capture in
+    /// production).
+    ///
+    /// This test pins the contract via a counting mock: the loop must
+    /// emit frames and reuse the initial `DisplayInfo` without ever
+    /// re-querying the backend.
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_loop_does_not_query_display_info_per_frame() {
+        use desk_capture_engine::model::image_capture::{
+            CaptureRequest, CaptureResult, ImageCapture, ImageCaptureType, ImageInfo, ImageType,
+        };
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        struct MockImage(Vec<u8>);
+        impl ImageInfo for MockImage {
+            fn get_type(&self) -> ImageType {
+                ImageType::BGRA
+            }
+            fn get_data(&self) -> &[u8] {
+                &self.0
+            }
+            fn get_width(&self) -> u32 {
+                4
+            }
+            fn get_height(&self) -> u32 {
+                4
+            }
+            fn get_stride(&self) -> u32 {
+                16
+            }
+        }
+
+        struct CountingCapture {
+            cap_count: Arc<AtomicUsize>,
+            gco_count: Arc<AtomicUsize>,
+        }
+        impl ImageCapture for CountingCapture {
+            fn capture(
+                &mut self,
+                _r: CaptureRequest,
+            ) -> Result<CaptureResult, CaptureError> {
+                // Sleep so the broadcast ring (capacity 64 below) has no
+                // chance of wrapping before the test finishes recv'ing
+                // its 5 frames; this keeps the test deterministic on
+                // any host without depending on scheduler latency.
+                std::thread::sleep(Duration::from_millis(5));
+                self.cap_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(CaptureResult {
+                    image: Box::new(MockImage(vec![0u8; 64])),
+                    cursor_update: None,
+                    content_changed: true,
+                    dirty_rects: None,
+                })
+            }
+            fn get_capture_type(&self) -> ImageCaptureType {
+                unreachable!("run_capture_loop must not call get_capture_type")
+            }
+            fn get_current_output(&self) -> Result<DisplayInfo, CaptureError> {
+                self.gco_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(DisplayInfo::default())
+            }
+        }
+
+        let cap_count = Arc::new(AtomicUsize::new(0));
+        let gco_count = Arc::new(AtomicUsize::new(0));
+        let mock = Box::new(CountingCapture {
+            cap_count: Arc::clone(&cap_count),
+            gco_count: Arc::clone(&gco_count),
+        });
+
+        let (sender, mut rx) = broadcast::channel::<Arc<SharedFrame>>(64);
+        let stop = Arc::new(AtomicBool::new(false));
+        let key = CaptureKey {
+            backend: "TEST".into(),
+            output_index: 0,
+        };
+        let initial = DisplayInfo {
+            device_name: "test-display".into(),
+            ..DisplayInfo::default()
+        };
+
+        let stop_for_thread = Arc::clone(&stop);
+        let initial_for_thread = initial.clone();
+        let key_for_thread = key.clone();
+        let join = std::thread::spawn(move || {
+            run_capture_loop(
+                mock,
+                sender,
+                stop_for_thread,
+                key_for_thread,
+                initial_for_thread,
+            );
+        });
+
+        for i in 0..5 {
+            let frame = rx.recv().await.expect("recv frame");
+            assert_eq!(
+                frame.display_info.device_name, "test-display",
+                "frame #{i} display_info must come from the loop's initial \
+                 snapshot — re-querying per frame is what we removed"
+            );
+        }
+
+        stop.store(true, Ordering::Release);
+        tokio::task::spawn_blocking(move || join.join().expect("capture loop join"))
+            .await
+            .expect("spawn_blocking");
+
+        let cap = cap_count.load(std::sync::atomic::Ordering::Relaxed);
+        let gco = gco_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            cap >= 5,
+            "capture must have been driven at least 5 times: got {cap}"
+        );
+        assert_eq!(
+            gco, 0,
+            "regression: run_capture_loop must NOT invoke get_current_output \
+             per frame — each call enumerates display devices on Windows \
+             DXGI and floods the log at the OS refresh rate (got {gco} \
+             calls in 5 frames)"
         );
     }
 }

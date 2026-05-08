@@ -217,7 +217,13 @@ pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
         )
     };
     let display_device_name = if succeed.as_bool() {
-        log::info!(
+        // DEBUG, not INFO: this is on the per-frame `get_current_output`
+        // path for any caller that re-queries display info each tick;
+        // emitting at INFO floods the log. Static metadata on the
+        // adapter is logged once at capture construction in
+        // `ScreenRecordManager`, which is the appropriate place for
+        // operator-visible enumeration output.
+        log::debug!(
             "Successfully enumerated display device: {:?}",
             display_device
         );
@@ -238,7 +244,10 @@ pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
     let attached_to_desktop = output_desc.AttachedToDesktop.as_bool();
     let rotation = output_desc.Rotation.0;
 
-    log::info!(
+    // DEBUG, not INFO: see rationale on the `Successfully enumerated
+    // display device` log just above. Per-frame callers would otherwise
+    // emit this at the OS refresh rate.
+    log::debug!(
         "Found output, name={}, display_device_name={:?}, desktop_coordinates={:?}, attached_to_desktop={}, rotation={}",
         device_name,
         display_device_name,
