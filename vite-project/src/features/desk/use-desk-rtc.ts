@@ -25,6 +25,33 @@ export type RTCStatsData = {
     audioCodec: string;
     packetLoss: number;
     networkType: string;
+    // Frame-level diagnostics surfaced from the browser's
+    // `RTCInboundRtpStreamStats`. These are the closest signal we have
+    // for "what is actually arriving and decoding" — a backend-side
+    // counter would give the encoder's view, but for triage of the
+    // P/I-frame storm class of bugs the receiver's view is the one
+    // that matters.
+    framesDecoded: number;       // total decoded video frames since start
+    keyFramesDecoded: number;    // I frames (the absolute counter)
+    pFramesDecoded: number;      // derived = framesDecoded - keyFramesDecoded
+    framesDecodedDelta: number;  // framesDecoded change over the last sample window (~1s)
+    keyFramesDelta: number;      // I-frame rate (per sample window)
+    pliCount: number;            // total PLI we've sent to the sender
+    nackCount: number;
+    firCount: number;
+    pliDelta: number;            // PLI rate (per sample window)
+    framesDropped: number;
+    // `qpSum / framesDecoded` — lower is sharper. `null` means the
+    // browser did not report `qpSum` for this codec/decoder path,
+    // which is expected on Chromium with GPU-accelerated H.264 on
+    // many Windows GPUs (NVDEC / QuickSync drivers don't expose QP
+    // out of the hw decoder). Distinguish that from "0 frames decoded
+    // yet" so the UI can render "N/A" honestly instead of a misleading
+    // "0" or "-".
+    avgQp: number | null;
+    freezeCount: number;
+    totalFreezesDurationMs: number;
+    jitterMs: number;
 };
 
 export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps) {
@@ -44,13 +71,28 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         fps: 0, bitrate: 0, rtt: 0,
         width: 0, height: 0,
         videoCodec: '', audioCodec: '',
-        packetLoss: 0, networkType: ''
+        packetLoss: 0, networkType: '',
+        framesDecoded: 0, keyFramesDecoded: 0, pFramesDecoded: 0,
+        framesDecodedDelta: 0, keyFramesDelta: 0,
+        pliCount: 0, nackCount: 0, firCount: 0, pliDelta: 0,
+        framesDropped: 0, avgQp: null,
+        freezeCount: 0, totalFreezesDurationMs: 0,
+        jitterMs: 0,
     });
     const remoteCandidatesQueue = useRef<RTCIceCandidateInit[]>([]);
     const lastBytesReceivedRef = useRef<number>(0);
     const lastStatsTimeRef = useRef<number>(0);
     const lastPacketsLostRef = useRef<number>(0);
     const lastPacketsReceivedRef = useRef<number>(0);
+    // Snapshots of monotonically-increasing video counters so we can
+    // derive per-sample-window deltas. We display both the absolute
+    // total (e.g. "120 I frames since start") and the rate (e.g.
+    // "2 I frames/sample") because an absolute number is needed for
+    // long-running diagnostics while the delta tells you the *current*
+    // behaviour at a glance.
+    const lastFramesDecodedRef = useRef<number>(0);
+    const lastKeyFramesRef = useRef<number>(0);
+    const lastPliCountRef = useRef<number>(0);
 
     // Handle incoming signaling messages
     useEffect(() => {
@@ -243,6 +285,26 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
                 let audioCodecId = '';
                 let localCandidateId = '';
 
+                // Frame-level counters latched from the inbound video
+                // report. Defaulted to the previous sample's values so
+                // a brief absence of the report (e.g. mid-renegotiation)
+                // doesn't reset the displayed totals to 0.
+                let framesDecoded = 0;
+                let keyFramesDecoded = 0;
+                let pliCount = 0;
+                let nackCount = 0;
+                let firCount = 0;
+                let framesDropped = 0;
+                // `undefined` here means the browser did NOT include
+                // `qpSum` in its inbound-rtp report (codec/decoder path
+                // that doesn't expose it). Tracked separately from
+                // "qpSum present and equal to 0" so the UI can render
+                // "N/A" only when truly unreported.
+                let qpSum: number | undefined = undefined;
+                let freezeCount = 0;
+                let totalFreezesDurationMs = 0;
+                let jitterMs = 0;
+
                 stats.forEach(report => {
                     if (report.type === 'inbound-rtp' && report.kind === 'video') {
                         if (report.framesPerSecond !== undefined) {
@@ -251,6 +313,20 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
                         if (report.frameWidth !== undefined) currentWidth = report.frameWidth;
                         if (report.frameHeight !== undefined) currentHeight = report.frameHeight;
                         if (report.codecId) videoCodecId = report.codecId;
+
+                        // Frame-level counters: these are monotonically
+                        // increasing in browsers that implement them.
+                        // Spec: https://www.w3.org/TR/webrtc-stats/#dom-rtcinboundrtpstreamstats
+                        framesDecoded = report.framesDecoded ?? 0;
+                        keyFramesDecoded = report.keyFramesDecoded ?? 0;
+                        pliCount = report.pliCount ?? 0;
+                        nackCount = report.nackCount ?? 0;
+                        firCount = report.firCount ?? 0;
+                        framesDropped = report.framesDropped ?? 0;
+                        qpSum = report.qpSum;
+                        freezeCount = report.freezeCount ?? 0;
+                        totalFreezesDurationMs = Math.round((report.totalFreezesDuration ?? 0) * 1000);
+                        jitterMs = Math.round((report.jitter ?? 0) * 1000);
 
                         const bytes = report.bytesReceived;
                         const now = report.timestamp;
@@ -311,6 +387,25 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
                     });
                 }
 
+                // Derive per-sample-window deltas. First sample after
+                // (re)connect will read 0 deltas because the refs are
+                // still at their initial 0 — that's the correct
+                // behaviour: we don't have a baseline to subtract.
+                const framesDecodedDelta = Math.max(0, framesDecoded - lastFramesDecodedRef.current);
+                const keyFramesDelta = Math.max(0, keyFramesDecoded - lastKeyFramesRef.current);
+                const pliDelta = Math.max(0, pliCount - lastPliCountRef.current);
+                lastFramesDecodedRef.current = framesDecoded;
+                lastKeyFramesRef.current = keyFramesDecoded;
+                lastPliCountRef.current = pliCount;
+                const pFramesDecoded = Math.max(0, framesDecoded - keyFramesDecoded);
+                // null preserves the "browser didn't report it" signal
+                // even after frames have been decoded. We only round
+                // to an integer when both sides of the ratio are
+                // meaningful.
+                const avgQp = qpSum !== undefined && framesDecoded > 0
+                    ? Math.round(qpSum / framesDecoded)
+                    : null;
+
                 setRtcStats(prev => ({
                     ...prev,
                     fps: currentFps || prev.fps,
@@ -321,7 +416,21 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
                     videoCodec: currentVideoCodec || prev.videoCodec,
                     audioCodec: currentAudioCodec || prev.audioCodec,
                     packetLoss: currentPacketLoss || prev.packetLoss,
-                    networkType: currentNetworkType || prev.networkType
+                    networkType: currentNetworkType || prev.networkType,
+                    framesDecoded,
+                    keyFramesDecoded,
+                    pFramesDecoded,
+                    framesDecodedDelta,
+                    keyFramesDelta,
+                    pliCount,
+                    nackCount,
+                    firCount,
+                    pliDelta,
+                    framesDropped,
+                    avgQp,
+                    freezeCount,
+                    totalFreezesDurationMs,
+                    jitterMs,
                 }));
 
             } catch (err) {

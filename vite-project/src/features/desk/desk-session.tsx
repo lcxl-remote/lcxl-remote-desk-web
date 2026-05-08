@@ -129,6 +129,14 @@ export default function DeskSession() {
     // Adaptive quality state
     const statsWindowRef = useRef<Array<{ packetLoss: number; rtt: number }>>([]);
     const lastQualityAdjustRef = useRef<number>(0);
+    // How many times the adaptive loop has rebuilt the encoder so far.
+    // Surfaced in the metrics panel as the headline "is the controller
+    // oscillating?" signal — a healthy run converges to a stable value
+    // and the count grows slowly; a thrashing run pumps this every few
+    // seconds. Lives in a ref because the stats panel re-renders every
+    // second on `rtcStats` updates already, so reading the ref there
+    // is fresh without an extra setState round-trip.
+    const qualityAdjustmentCountRef = useRef<number>(0);
 
     const { cursorStyle } = useCursorSync(cursorSyncChannel, videoRef, isRTCConnected && hasControl);
 
@@ -297,6 +305,7 @@ export default function DeskSession() {
             sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, newSettings, deskId);
             lastQualityAdjustRef.current = now;
             statsWindowRef.current = [];
+            qualityAdjustmentCountRef.current += 1;
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [rtcStats, adaptiveQualityEnabled]);
@@ -639,46 +648,172 @@ export default function DeskSession() {
                         </div>
 
                         {showStats && isConnected && (
-                            <div className="absolute top-4 left-4 z-50 bg-black/60 text-white p-3 rounded-lg text-sm font-mono backdrop-blur-md border border-white/20 select-none min-w-[200px]">
+                            <div className="absolute top-4 left-4 z-50 bg-black/60 text-white p-3 rounded-lg text-xs font-mono backdrop-blur-md border border-white/20 select-none min-w-[260px] max-h-[80vh] overflow-y-auto">
+                                <div className="text-sm font-bold text-white/90 mb-2 pb-1 border-b border-white/15">
+                                    {t('pages.desk.statsPanel.title', 'Remote Desk Metrics')}
+                                </div>
+
+                                {/* Network section — what was the original "Network Stats" panel. */}
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">FPS:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.fps', 'FPS')}:</span>
                                     <span className="font-bold text-green-400">{rtcStats.fps}</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">Resolution:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.resolution', 'Resolution')}:</span>
                                     <span className="font-bold text-white">{rtcStats.width}x{rtcStats.height}</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">Bitrate:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.bitrate', 'Bitrate')}:</span>
                                     <span className="font-bold text-blue-400">{rtcStats.bitrate} kbps</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">Video Codec:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.videoCodec', 'Video Codec')}:</span>
                                     <span className="font-bold text-purple-400">{rtcStats.videoCodec || 'Unknown'}</span>
                                 </div>
                                 {rtcStats.audioCodec && (
                                     <div className="flex justify-between gap-4 mb-1">
-                                        <span className="text-gray-400">Audio Codec:</span>
+                                        <span className="text-gray-400">{t('pages.desk.statsPanel.audioCodec', 'Audio Codec')}:</span>
                                         <span className="font-bold text-purple-400">{rtcStats.audioCodec}</span>
                                     </div>
                                 )}
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">Latency:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.latency', 'Latency')}:</span>
                                     <span className={`font-bold ${rtcStats.rtt > 150 ? 'text-red-400' : rtcStats.rtt > 80 ? 'text-yellow-400' : 'text-green-400'}`}>
                                         {rtcStats.rtt} ms
                                     </span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">Packet Loss:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.packetLoss', 'Packet Loss')}:</span>
                                     <span className={`font-bold ${rtcStats.packetLoss > 5 ? 'text-red-400' : rtcStats.packetLoss > 1 ? 'text-yellow-400' : 'text-green-400'}`}>
                                         {rtcStats.packetLoss}%
                                     </span>
                                 </div>
-                                <div className="flex justify-between gap-4">
-                                    <span className="text-gray-400">Network:</span>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.network', 'Network')}:</span>
                                     <span className="font-bold text-orange-400 uppercase">
                                         {rtcStats.networkType || 'Unknown'}
                                     </span>
+                                </div>
+
+                                {/* Video frame section — derived from RTCInboundRtpStreamStats. */}
+                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
+                                    {t('pages.desk.statsPanel.frameSection', 'Video Frames')}
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDecoded', 'Frames Decoded')}:</span>
+                                    <span className="font-bold text-white">{rtcStats.framesDecoded} (+{rtcStats.framesDecodedDelta})</span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.keyFrames', 'I Frames')}:</span>
+                                    {/* High keyframe rate = encoder churn / frequent PLI / wasted bandwidth.
+                                        Highlight when more than ~1 IDR/s (the symptom we just hunted in the broadcast-lag bug). */}
+                                    <span className={`font-bold ${rtcStats.keyFramesDelta > 1 ? 'text-red-400' : 'text-yellow-300'}`}>
+                                        {rtcStats.keyFramesDecoded} (+{rtcStats.keyFramesDelta})
+                                    </span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pFrames', 'P Frames')}:</span>
+                                    <span className="font-bold text-white">{rtcStats.pFramesDecoded}</span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDropped', 'Frames Dropped')}:</span>
+                                    <span className={`font-bold ${rtcStats.framesDropped > 0 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.framesDropped}</span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.avgQp', 'Avg QP')}:</span>
+                                    {/* `null` means the browser doesn't report `qpSum` for this
+                                        codec/decoder path. Common on Chromium with H.264
+                                        hardware decoding (NVDEC / QuickSync) — not a bug, just
+                                        a metric that isn't available. */}
+                                    <span className={`font-bold ${rtcStats.avgQp === null ? 'text-gray-500 italic' : 'text-white'}`}>
+                                        {rtcStats.avgQp === null
+                                            ? t('pages.desk.statsPanel.avgQpUnavailable', 'N/A (hw decode)')
+                                            : rtcStats.avgQp}
+                                    </span>
+                                </div>
+
+                                {/* RTCP feedback — receiver-initiated requests for keyframes / NACK / FIR. */}
+                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
+                                    {t('pages.desk.statsPanel.feedbackSection', 'RTCP Feedback')}
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pliCount', 'PLI Sent')}:</span>
+                                    {/* PLI rate > 0 every sample window means the browser is repeatedly
+                                        asking for keyframes — e.g. heavy packet loss or decoder reset. */}
+                                    <span className={`font-bold ${rtcStats.pliDelta > 0 ? 'text-red-400' : 'text-white'}`}>
+                                        {rtcStats.pliCount} (+{rtcStats.pliDelta})
+                                    </span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.nackCount', 'NACK Sent')}:</span>
+                                    <span className="font-bold text-white">{rtcStats.nackCount}</span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.firCount', 'FIR Sent')}:</span>
+                                    <span className="font-bold text-white">{rtcStats.firCount}</span>
+                                </div>
+
+                                {/* Encoder quality — sender-side knob the adaptive loop drives.
+                                    The headline question this section answers is "is adaptive
+                                    quality oscillating?" Read straight off the refs because the
+                                    enclosing component already re-renders every second when
+                                    `rtcStats` updates, so the values are fresh without an
+                                    extra setState. */}
+                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
+                                    {t('pages.desk.statsPanel.encoderSection', 'Encoder Quality')}
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.currentQuality', 'Current Quality')}:</span>
+                                    {/* video_quality is QP-style: 0-63, lower is sharper.
+                                        Mirror the same colour buckets as Avg QP so the two are visually comparable. */}
+                                    <span className={`font-bold ${
+                                        (lastSettingsRef.current?.video_quality ?? 22) > 40
+                                            ? 'text-red-400'
+                                            : (lastSettingsRef.current?.video_quality ?? 22) > 30
+                                                ? 'text-yellow-300'
+                                                : 'text-green-400'
+                                    }`}>
+                                        {lastSettingsRef.current?.video_quality ?? '-'}
+                                    </span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.qualityAdjustments', 'Adaptive Adjustments')}:</span>
+                                    {/* If the count grows by more than ~1/min the controller is
+                                        thrashing. Highlight when adaptive is even on so the user
+                                        can tell at a glance whether the toggle has any effect. */}
+                                    <span className={`font-bold ${
+                                        adaptiveQualityEnabled
+                                            ? qualityAdjustmentCountRef.current > 5 ? 'text-yellow-300' : 'text-white'
+                                            : 'text-gray-500'
+                                    }`}>
+                                        {qualityAdjustmentCountRef.current}
+                                        {!adaptiveQualityEnabled && ' (off)'}
+                                    </span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.lastAdjustedAgo', 'Last Adjusted')}:</span>
+                                    <span className="font-bold text-white">
+                                        {qualityAdjustmentCountRef.current === 0
+                                            ? '-'
+                                            : `${Math.max(0, Math.round((Date.now() - lastQualityAdjustRef.current) / 1000))} s`}
+                                    </span>
+                                </div>
+
+                                {/* Playback quality — perceived smoothness signals. */}
+                                <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
+                                    {t('pages.desk.statsPanel.qualitySection', 'Playback Quality')}
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.freezeCount', 'Freeze Count')}:</span>
+                                    <span className={`font-bold ${rtcStats.freezeCount > 0 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.freezeCount}</span>
+                                </div>
+                                <div className="flex justify-between gap-4 mb-1">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.totalFreezeDuration', 'Total Freeze Duration')}:</span>
+                                    <span className="font-bold text-white">{rtcStats.totalFreezesDurationMs} ms</span>
+                                </div>
+                                <div className="flex justify-between gap-4">
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.jitter', 'Jitter')}:</span>
+                                    <span className={`font-bold ${rtcStats.jitterMs > 50 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.jitterMs} ms</span>
                                 </div>
                             </div>
                         )}
