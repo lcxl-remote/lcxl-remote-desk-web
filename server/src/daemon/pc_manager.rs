@@ -1090,15 +1090,31 @@ pub async fn handle_request_remote(
         video_device_list,
         is_admin_value,
     ) = if let Some(caps) = capabilities {
-        (
-            caps.audio_codecs
-                .iter()
-                .filter_map(media_codec_to_str)
-                .collect::<Vec<_>>(),
+        // Prefer the verbatim encoder identifiers reported by the worker
+        // so the UI sees the X264 (libx264) vs H264 (OpenH264)
+        // distinction; collapsing them through `media_codec_to_str` would
+        // produce two indistinguishable "H264" entries. Fall back to the
+        // codec-derived list only when the worker predates this field
+        // (empty default on the wire).
+        let video_encoder_list = if caps.video_encoders.is_empty() {
             caps.video_codecs
                 .iter()
                 .filter_map(media_codec_to_str)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
+        } else {
+            caps.video_encoders.clone()
+        };
+        let audio_encoder_list = if caps.audio_encoders.is_empty() {
+            caps.audio_codecs
+                .iter()
+                .filter_map(media_codec_to_str)
+                .collect::<Vec<_>>()
+        } else {
+            caps.audio_encoders.clone()
+        };
+        (
+            audio_encoder_list,
+            video_encoder_list,
             caps.audio_device_list.clone(),
             caps.video_device_list.clone(),
             caps.is_admin,
@@ -2649,6 +2665,8 @@ mod tests {
         let caps = MediaCapabilities {
             video_codecs: vec![MediaCodec::Vp9, MediaCodec::Av1],
             audio_codecs: vec![MediaCodec::Opus],
+            video_encoders: vec!["VP9".to_string(), "AV1".to_string()],
+            audio_encoders: vec!["OPUS".to_string()],
             video_device_list: std::collections::BTreeMap::new(),
             audio_device_list: std::collections::BTreeMap::new(),
             has_tauri: false,
@@ -2747,6 +2765,76 @@ mod tests {
         // an exact platform-dependent list.
         assert!(!init.video_encoder_list.is_empty());
         assert!(!init.audio_encoder_list.is_empty());
+    }
+
+    /// Regression: when the worker reports `X264` and `H264` as two
+    /// separate concrete encoders (libx264 vs OpenH264), the daemon
+    /// must surface both strings in `InitSignalingData::
+    /// video_encoder_list`. Previously `video_codecs` (used for SDP
+    /// negotiation) collapsed both onto `MediaCodec::H264`, and the
+    /// daemon mapped that back through `media_codec_to_str` to two
+    /// indistinguishable "H264" entries. The fix routes the UI list
+    /// through `caps.video_encoders` instead.
+    #[tokio::test]
+    async fn handle_request_remote_preserves_x264_h264_distinction_in_encoder_list() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let caps = MediaCapabilities {
+            // SDP layer: only one H.264 entry (both implementations
+            // produce equivalent H.264 wire format).
+            video_codecs: vec![MediaCodec::H264, MediaCodec::Vp9],
+            audio_codecs: vec![MediaCodec::Opus],
+            // UI layer: both implementations remain distinct.
+            video_encoders: vec![
+                "X264".to_string(),
+                "VP9".to_string(),
+                "H264".to_string(),
+            ],
+            audio_encoders: vec!["OPUS".to_string()],
+            video_device_list: std::collections::BTreeMap::new(),
+            audio_device_list: std::collections::BTreeMap::new(),
+            has_tauri: false,
+            is_admin: false,
+            desktop_name: "Default".to_string(),
+        };
+        let model = SignalingModel::new(
+            "req-init-3",
+            SignalingType::RequestRemote,
+            Some("conn-init-3".to_string()),
+            None,
+            Some(
+                serde_json::to_value(RequestRemoteModel {
+                    ice_servers: vec![],
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+
+        handle_request_remote(
+            &registry,
+            &outbound_tx,
+            &s,
+            "user-x",
+            false,
+            Some(&caps),
+            None,
+            &model,
+        )
+        .await
+        .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("init reply");
+        let reply: SignalingModel = serde_json::from_str(&text).unwrap();
+        let init: InitSignalingData = reply.get_data::<InitSignalingData>().expect("Init payload");
+        assert_eq!(
+            init.video_encoder_list,
+            vec!["X264", "VP9", "H264"],
+            "X264 and H264 must remain separate encoder choices for the UI \
+             rather than collapsing to two indistinguishable 'H264' entries"
+        );
+        assert_eq!(init.audio_encoder_list, vec!["OPUS"]);
     }
 
     /// Regression: the daemon-side PC must publish locally-gathered

@@ -359,14 +359,29 @@ impl MediaProducer {
     /// daemon can populate the next `RequestRemote` Init reply with
     /// real codec / device data.
     pub fn build_capabilities(desktop_name: Option<&str>, has_tauri: bool) -> MediaCapabilities {
-        let video_codecs = list_video_encoder()
-            .into_iter()
-            .filter_map(|s| codec_from_str(&s, true))
-            .collect::<Vec<_>>();
-        let audio_codecs = list_audio_encoder()
-            .into_iter()
-            .filter_map(|s| codec_from_str(&s, false))
-            .collect::<Vec<_>>();
+        // Verbatim encoder identifiers from capture-engine. We carry both
+        // the raw strings (for the UI's encoder picker — preserves the
+        // X264 vs H264/OpenH264 distinction) and a deduplicated
+        // `MediaCodec` list (for SDP m-line negotiation, where both
+        // encoders produce the same H.264 wire format).
+        let video_encoders = list_video_encoder();
+        let audio_encoders = list_audio_encoder();
+        let mut video_codecs: Vec<MediaCodec> = Vec::new();
+        for name in &video_encoders {
+            if let Some(c) = codec_from_str(name, true)
+                && !video_codecs.contains(&c)
+            {
+                video_codecs.push(c);
+            }
+        }
+        let mut audio_codecs: Vec<MediaCodec> = Vec::new();
+        for name in &audio_encoders {
+            if let Some(c) = codec_from_str(name, false)
+                && !audio_codecs.contains(&c)
+            {
+                audio_codecs.push(c);
+            }
+        }
         // Daemon's `pc_manager` echoes these maps verbatim into
         // `InitSignalingData::{video,audio}_device_list`, so the
         // browser's capture-source picker keeps the per-driver
@@ -376,6 +391,8 @@ impl MediaProducer {
         MediaCapabilities {
             video_codecs,
             audio_codecs,
+            video_encoders,
+            audio_encoders,
             video_device_list,
             audio_device_list,
             has_tauri,
@@ -1646,6 +1663,45 @@ mod tests {
         );
         assert_eq!(caps.desktop_name, "Default");
         assert!(!caps.has_tauri);
+    }
+
+    /// Regression: the UI used to render two indistinguishable "H264"
+    /// entries because the daemon mapped `MediaCodec::H264` back to a
+    /// single string for both X264 (libx264) and H264 (OpenH264). The
+    /// fix carries the verbatim encoder identifiers in
+    /// `video_encoders` alongside the SDP-level `video_codecs`. This
+    /// test pins the contract: every capture-engine encoder name
+    /// surfaces independently in `video_encoders`, while the
+    /// `video_codecs` list collapses on SDP-equivalent duplicates.
+    #[test]
+    fn build_capabilities_preserves_x264_h264_distinction() {
+        let caps = MediaProducer::build_capabilities(Some("Default"), false);
+        assert!(
+            caps.video_encoders.contains(&"X264".to_string()),
+            "X264 must appear in video_encoders: {:?}",
+            caps.video_encoders
+        );
+        assert!(
+            caps.video_encoders.contains(&"H264".to_string()),
+            "H264 must appear in video_encoders: {:?}",
+            caps.video_encoders
+        );
+        let h264_codec_count = caps
+            .video_codecs
+            .iter()
+            .filter(|c| matches!(c, MediaCodec::H264))
+            .count();
+        assert_eq!(
+            h264_codec_count, 1,
+            "video_codecs collapses both H.264 implementations onto one MediaCodec::H264 \
+             for SDP m-line negotiation: {:?}",
+            caps.video_codecs
+        );
+        assert!(
+            caps.audio_encoders.iter().any(|s| s.eq_ignore_ascii_case("OPUS")),
+            "audio_encoders must include Opus: {:?}",
+            caps.audio_encoders
+        );
     }
 
     // ============== PR 3 audio + cursor sync tests ==============

@@ -417,6 +417,21 @@ pub enum MediaCodec {
 pub struct MediaCapabilities {
     pub video_codecs: Vec<MediaCodec>,
     pub audio_codecs: Vec<MediaCodec>,
+    /// Concrete video-encoder identifiers reported verbatim from the
+    /// capture-engine factory (e.g. `["X264", "VP8", "VP9", "H264",
+    /// "AV1"]`). Distinct from `video_codecs` because the latter
+    /// collapses every H.264 implementation onto a single
+    /// `MediaCodec::H264` for SDP m-line negotiation, while this list
+    /// preserves the per-implementation distinction the UI needs (so
+    /// the user can pick libx264 vs OpenH264). The daemon copies this
+    /// straight into `InitSignalingData::video_encoder_list`.
+    #[serde(default)]
+    pub video_encoders: Vec<String>,
+    /// Audio counterpart of `video_encoders`. Today only `"OPUS"` is
+    /// reported, but kept symmetrical so a future encoder addition
+    /// doesn't need a wire-format bump.
+    #[serde(default)]
+    pub audio_encoders: Vec<String>,
     /// Per-backend display map (e.g. `"dxgi" -> [DISPLAY1, DISPLAY2]`).
     /// `#[bincode(with_serde)]` because the value type lives in
     /// `desk-signal-facade` and only carries a serde derive.
@@ -1073,6 +1088,8 @@ mod tests {
         let msg = WorkerToService::Capabilities(MediaCapabilities {
             video_codecs: vec![MediaCodec::H264, MediaCodec::Vp9],
             audio_codecs: vec![MediaCodec::Opus],
+            video_encoders: vec!["X264".to_string(), "H264".to_string(), "VP9".to_string()],
+            audio_encoders: vec!["OPUS".to_string()],
             video_device_list: video_device_list.clone(),
             audio_device_list: audio_device_list.clone(),
             has_tauri: true,
@@ -1082,6 +1099,13 @@ mod tests {
         match bincode_round_trip(&msg) {
             WorkerToService::Capabilities(c) => {
                 assert_eq!(c.video_codecs, vec![MediaCodec::H264, MediaCodec::Vp9]);
+                assert_eq!(
+                    c.video_encoders,
+                    vec!["X264".to_string(), "H264".to_string(), "VP9".to_string()],
+                    "X264 and H264 must remain distinct entries — the UI \
+                     needs them to expose the libx264 vs OpenH264 choice"
+                );
+                assert_eq!(c.audio_encoders, vec!["OPUS".to_string()]);
                 assert_eq!(c.video_device_list.len(), 1);
                 assert_eq!(
                     c.video_device_list["dxgi"][0].device_name,

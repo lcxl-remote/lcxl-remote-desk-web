@@ -1432,6 +1432,8 @@ mod tests {
                 desk_ipc_protocol::message::MediaCodec::Vp9,
             ],
             audio_codecs: vec![desk_ipc_protocol::message::MediaCodec::Opus],
+            video_encoders: vec!["X264".to_string(), "H264".to_string(), "VP9".to_string()],
+            audio_encoders: vec!["OPUS".to_string()],
             video_device_list: std::collections::BTreeMap::new(),
             audio_device_list: std::collections::BTreeMap::new(),
             has_tauri: true,
