@@ -1949,7 +1949,12 @@ mod tests {
         Ok(())
     }
 
+    // Disabled by default: hangs on `Barrier::wait` waiting for an
+    // interactive desktop switch that doesn't happen under
+    // `cargo test --workspace`. Re-enable with `cargo test -- --ignored`
+    // when investigating desktop-switch behaviour manually.
     #[test]
+    #[ignore]
     fn test_switch_desktop() -> Result<(), CaptureError> {
         initialize();
         let current_thread_id = unsafe { GetCurrentThreadId() };

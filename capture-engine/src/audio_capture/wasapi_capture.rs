@@ -491,7 +491,12 @@ mod tests {
         Ok(())
     }
 
+    // Disabled by default: requires a working default audio render
+    // device (returns HRESULT 0x80070490 "Element not found" on hosts
+    // with no audio hardware, e.g. headless CI). Re-enable with
+    // `cargo test -- --ignored` when validating audio capture manually.
     #[test]
+    #[ignore]
     fn test_write_wav() -> Result<(), CaptureError> {
         initialize();
         let desk_settings = DeskSettings::default();
