@@ -267,6 +267,7 @@ export default {
   'pages.desk.statsPanel.framesDecoded': 'Frames Decoded (total)',
   'pages.desk.statsPanel.keyFrames': 'I Frames (total / last sec)',
   'pages.desk.statsPanel.pFrames': 'P Frames (total)',
+  'pages.desk.statsPanel.vp9FrameTypeHint': 'VP9 RTP packetizer does not tag P frames; the browser counts every frame as an I frame. Encoder-side GOP is unaffected.',
   'pages.desk.statsPanel.framesDropped': 'Frames Dropped',
   'pages.desk.statsPanel.avgQp': 'Avg QP',
   'pages.desk.statsPanel.avgQpUnavailable': 'N/A (hw decode)',

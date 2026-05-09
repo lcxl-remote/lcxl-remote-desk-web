@@ -265,6 +265,7 @@ export default {
   'pages.desk.statsPanel.framesDecoded': '已解码帧 (合计)',
   'pages.desk.statsPanel.keyFrames': 'I 帧 (合计 / 本秒)',
   'pages.desk.statsPanel.pFrames': 'P 帧 (合计)',
+  'pages.desk.statsPanel.vp9FrameTypeHint': 'VP9 的 RTP 打包器未标记 P 帧，浏览器会把每帧都计为 I 帧；编码侧 GOP 不受影响',
   'pages.desk.statsPanel.framesDropped': '丢弃帧',
   'pages.desk.statsPanel.avgQp': '平均 QP',
   'pages.desk.statsPanel.avgQpUnavailable': '不支持 (硬解)',

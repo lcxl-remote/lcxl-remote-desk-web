@@ -715,6 +715,21 @@ export default function DeskSession() {
                                     <span className="text-gray-400">{t('pages.desk.statsPanel.pFrames', 'P Frames')}:</span>
                                     <span className="font-bold text-white">{rtcStats.pFramesDecoded}</span>
                                 </div>
+                                {/* webrtc-rs 0.17.x's VP9 RTP packetizer hard-codes the
+                                    payload-header byte to 0x90 and never sets the P bit
+                                    (`rtp-0.17.1/src/codecs/vp9/mod.rs:110`). The browser
+                                    therefore reads every VP9 packet as a keyframe, so
+                                    `keyFramesDecoded ≈ framesDecoded` regardless of the
+                                    encoder's actual GOP. The encoder side (server logs,
+                                    `MediaFrameKind::VideoI` counters) is unaffected, and
+                                    bytes/bitrate stats reflect real payload size. Surface
+                                    this only when VP9 is actually negotiated to avoid
+                                    confusing operators on other codecs. */}
+                                {rtcStats.videoCodec === 'VP9' && (
+                                    <div className="text-[10px] italic text-gray-500 mt-0.5 leading-tight">
+                                        {t('pages.desk.statsPanel.vp9FrameTypeHint', 'VP9 RTP packetizer does not tag P frames; the browser counts every frame as an I frame. Encoder-side GOP is unaffected.')}
+                                    </div>
+                                )}
                                 <div className="flex justify-between gap-4 mb-1">
                                     <span className="text-gray-400">{t('pages.desk.statsPanel.framesDropped', 'Frames Dropped')}:</span>
                                     <span className={`font-bold ${rtcStats.framesDropped > 0 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.framesDropped}</span>
