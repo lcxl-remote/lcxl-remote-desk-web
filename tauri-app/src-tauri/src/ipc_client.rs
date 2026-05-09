@@ -115,6 +115,12 @@ pub async fn run_ipc_loop(
                 }
 
                 log::warn!("[IpcClient] Session ended, reconnecting in 3 s...");
+                // The server-side hub may have lost (or restarted past) any
+                // pending approvals from this session, so no Finish will ever
+                // match the req_ids we already reported to the manager.
+                // Telling it to reset releases always-on-top instead of
+                // leaving the window pinned until the next live dialog.
+                let _ = sa_tx.send(SecurityApprovalCommand::Reset);
             }
             Err(e) => {
                 log::warn!("[IpcClient] Connection failed: {e:?}, retrying in 3 s...");
@@ -175,6 +181,9 @@ fn handle_server_msg(
                 from_connection_id,
             };
             let _ = sa_tx.send(SecurityApprovalCommand::Request(req));
+        }
+        HostControlMessage::SecurityApprovalFinished { req_id } => {
+            let _ = sa_tx.send(SecurityApprovalCommand::Finish { req_id });
         }
         HostControlMessage::ServiceOp { op, install_path } => {
             let svc_op = match op {

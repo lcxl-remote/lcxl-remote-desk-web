@@ -67,8 +67,16 @@ pub struct SecurityApprovalEventPayload {
 pub enum SecurityApprovalCommand {
     /// Show a new approval request
     Request(SecurityApprovalRequest),
-    /// Finish all current approvals (unset always_on_top)
-    Finish,
+    /// One previously-shown approval has finished. The Tauri side keeps a set
+    /// of in-flight req_ids and only releases UI affordances (e.g. unsetting
+    /// always-on-top) when the set becomes empty, so concurrent dialogs do not
+    /// release the focus boost prematurely.
+    Finish { req_id: String },
+    /// Drop every locally-tracked pending request and release UI affordances.
+    /// Sent by the Tauri-side IPC client when the ws link to the server breaks,
+    /// so a server-side restart does not leave Tauri pinned with a HashSet that
+    /// no Finish will ever match.
+    Reset,
 }
 
 /// Legacy mpsc Tauri-bridge channel types. Retained while the daemon's tauri_ipc

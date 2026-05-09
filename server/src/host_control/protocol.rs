@@ -92,6 +92,12 @@ pub enum HostControlMessage {
         from_connection_id: Option<String>,
     },
 
+    /// Notify Tauri that a previously requested approval has finished
+    /// (resolved by the user or cancelled by the server). The Tauri shell
+    /// uses this to release UI affordances (e.g. always-on-top) once the
+    /// last pending dialog is gone.
+    SecurityApprovalFinished { req_id: String },
+
     /// Service install / uninstall (UAC elevation needed on the Tauri side).
     ServiceOp {
         op: ServiceOpKind,
@@ -151,6 +157,7 @@ impl HostControlMessage {
     pub fn req_id(&self) -> Option<&str> {
         match self {
             Self::SecurityApprovalRequest { req_id, .. }
+            | Self::SecurityApprovalFinished { req_id }
             | Self::SecurityApprovalSubmit { req_id, .. }
             | Self::SecurityApprovalCancel { req_id }
             | Self::SecurityApprovalResolved { req_id } => Some(req_id.as_str()),
@@ -195,6 +202,9 @@ mod tests {
                 req_id: "r1".to_string(),
                 permission_type: SecurityPermissionType::RemoteControl,
                 from_connection_id: Some("c1".to_string()),
+            },
+            HostControlMessage::SecurityApprovalFinished {
+                req_id: "r1".to_string(),
             },
             HostControlMessage::SecurityApprovalSubmit {
                 req_id: "r1".to_string(),
@@ -313,6 +323,11 @@ mod tests {
             req_id: "r1".to_string(),
         };
         assert_eq!(msg.req_id(), Some("r1"));
+
+        let msg = HostControlMessage::SecurityApprovalFinished {
+            req_id: "rf".to_string(),
+        };
+        assert_eq!(msg.req_id(), Some("rf"));
 
         let msg = HostControlMessage::PrivateScreenShow {
             connection_id: "c1".to_string(),

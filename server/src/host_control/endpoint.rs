@@ -278,6 +278,7 @@ fn is_outbound_for_role(msg: &HostControlMessage, role: Option<ClientRole>) -> b
             | HostControlMessage::WhiteboardDraw { .. }
             | HostControlMessage::WhiteboardHide { .. }
             | HostControlMessage::SecurityApprovalRequest { .. }
+            | HostControlMessage::SecurityApprovalFinished { .. }
             | HostControlMessage::ServiceOp { .. },
         ) => true,
         // Forwarder-bound broadcast: only Cancel + state changes.
@@ -497,6 +498,12 @@ mod tests {
             },
             role
         ));
+        assert!(is_outbound_for_role(
+            &HostControlMessage::SecurityApprovalFinished {
+                req_id: "r1".into(),
+            },
+            role
+        ));
         assert!(!is_outbound_for_role(
             &HostControlMessage::SecurityApprovalSubmit {
                 req_id: "r1".into(),
@@ -524,6 +531,14 @@ mod tests {
         assert!(is_outbound_for_role(
             &HostControlMessage::SecurityApprovalCancel {
                 req_id: "r1".into()
+            },
+            role
+        ));
+        // Finished is a Tauri-bound notification; it must not leak to forwarder
+        // sessions on the broadcast path.
+        assert!(!is_outbound_for_role(
+            &HostControlMessage::SecurityApprovalFinished {
+                req_id: "r1".into(),
             },
             role
         ));

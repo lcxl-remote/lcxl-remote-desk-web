@@ -374,7 +374,11 @@ impl HostControlHub {
                 approved: response.approved,
                 remember: response.remember,
             };
-            return self.route_to_forwarder(session_id, msg);
+            let dispatched = self.route_to_forwarder(session_id, msg);
+            if dispatched {
+                self.notify_tauri_finished(req_id);
+            }
+            return dispatched;
         }
 
         // Local / Forwarder: resolve the locally held oneshot.
@@ -383,10 +387,22 @@ impl HostControlHub {
             Some(PendingEntry { response_tx, .. }) => {
                 let _ = response_tx.send(response);
                 self.inner.pending_replay.lock().unwrap().remove(req_id);
+                if self.inner.mode == HubMode::Local {
+                    self.notify_tauri_finished(req_id);
+                }
                 true
             }
             None => false,
         }
+    }
+
+    /// Local / Aggregator helper: tell every Tauri shell that an approval has
+    /// finished so it can release UI state (e.g. always-on-top) keyed on the
+    /// request id. No-op on Forwarder (Tauri is upstream of the aggregator).
+    fn notify_tauri_finished(&self, req_id: &str) {
+        let _ = self.send_command(HostControlMessage::SecurityApprovalFinished {
+            req_id: req_id.to_string(),
+        });
     }
 
     /// Aggregator-only: register the outbound mpsc for a freshly-handshaken
@@ -818,6 +834,116 @@ mod tests {
         assert_eq!(hub.pending_replay_count(), 0);
     }
 
+    // Regression: Local submit_approval must broadcast a SecurityApprovalFinished
+    // so the Tauri shell can release always-on-top once the dialog closes.
+    #[tokio::test]
+    async fn local_submit_broadcasts_finished_to_tauri() {
+        let hub = HostControlHub::new_local();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task =
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Drain the original Request so the next recv() observes Finished cleanly.
+        match tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+            .await
+            .expect("Request must be broadcast")
+            .expect("channel ok")
+        {
+            HostControlMessage::SecurityApprovalRequest { req_id, .. } => assert_eq!(req_id, "r1"),
+            other => panic!("expected SecurityApprovalRequest, got {other:?}"),
+        }
+
+        assert!(hub.submit_approval(
+            "r1",
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            }
+        ));
+        let resp = tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("oneshot must resolve")
+            .unwrap();
+        assert!(resp.approved);
+
+        let finished = tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+            .await
+            .expect("Finished must be broadcast")
+            .expect("channel ok");
+        match finished {
+            HostControlMessage::SecurityApprovalFinished { req_id } => assert_eq!(req_id, "r1"),
+            other => panic!("expected SecurityApprovalFinished, got {other:?}"),
+        }
+    }
+
+    // Local submit_approval for an unknown req_id must NOT broadcast Finished —
+    // otherwise a duplicate user click could spuriously release always-on-top
+    // while another dialog is still up.
+    #[tokio::test]
+    async fn local_unknown_submit_does_not_broadcast_finished() {
+        let hub = HostControlHub::new_local();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        assert!(!hub.submit_approval("ghost", ApprovalResponse::deny()));
+        let bcast = tokio::time::timeout(Duration::from_millis(50), outbound_rx.recv()).await;
+        assert!(
+            bcast.is_err(),
+            "no message expected when no pending entry matched"
+        );
+    }
+
+    // Aggregator submit_approval also notifies Tauri so the shell can drop
+    // always-on-top symmetrically with the Local path.
+    #[tokio::test]
+    async fn aggregator_submit_broadcasts_finished_to_tauri() {
+        let hub = HostControlHub::new_aggregator();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+        let (tx, mut rx_fwd) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(1, tx);
+
+        // Simulate the upstream worker registering an in-flight approval.
+        hub.register_upstream_request(
+            "r1".to_string(),
+            1,
+            SecurityPermissionType::RemoteControl,
+            None,
+        );
+
+        assert!(hub.submit_approval(
+            "r1",
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            }
+        ));
+
+        // Forwarder gets the directional Submit.
+        match tokio::time::timeout(Duration::from_millis(100), rx_fwd.recv())
+            .await
+            .expect("forwarder must receive submit")
+            .expect("mpsc ok")
+        {
+            HostControlMessage::SecurityApprovalSubmit { req_id, .. } => assert_eq!(req_id, "r1"),
+            other => panic!("expected SecurityApprovalSubmit, got {other:?}"),
+        }
+
+        // Tauri broadcast carries Finished.
+        match tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+            .await
+            .expect("Finished must be broadcast")
+            .expect("channel ok")
+        {
+            HostControlMessage::SecurityApprovalFinished { req_id } => assert_eq!(req_id, "r1"),
+            other => panic!("expected SecurityApprovalFinished, got {other:?}"),
+        }
+    }
+
     // U-4: Submit with mismatched req_id is no-op; existing pending unaffected.
     #[tokio::test]
     async fn u4_submit_unknown_req_id_is_noop() {
@@ -1150,12 +1276,20 @@ mod tests {
         let other = tokio::time::timeout(Duration::from_millis(50), rx_b.recv()).await;
         assert!(other.is_err(), "session 2 must not receive r1's submit");
 
-        // Outbound broadcast must NOT carry SubmitApproval either.
-        let bcast = tokio::time::timeout(Duration::from_millis(50), outbound_rx.recv()).await;
-        assert!(
-            bcast.is_err(),
-            "broadcast must stay quiet for directional submit"
-        );
+        // Outbound broadcast must NOT carry SubmitApproval; it carries the
+        // Tauri-bound Finished notification instead so the shell can release
+        // its dialog UI affordances.
+        let bcast = tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+            .await
+            .expect("Finished broadcast expected")
+            .expect("channel ok");
+        match bcast {
+            HostControlMessage::SecurityApprovalFinished { req_id } => assert_eq!(req_id, "r1"),
+            other @ HostControlMessage::SecurityApprovalSubmit { .. } => {
+                panic!("Submit must not appear on broadcast: {other:?}")
+            }
+            other => panic!("unexpected broadcast frame: {other:?}"),
+        }
 
         // Replay/route entries for r1 are removed.
         assert_eq!(hub.pending_replay_count(), 1);
