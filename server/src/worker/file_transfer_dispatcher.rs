@@ -32,12 +32,17 @@
 //! ## Permission gating
 //!
 //! The daemon's DC router gates browser→worker forwarding on
-//! `accept_control` (see `pc_manager::route_is_permitted`). The
-//! Arch III handler additionally cached
-//! `check_security_permission(allow_file_transfer, FileTransfer)` on
-//! a per-DC basis; restoring that finer-grained gate is left for a
-//! follow-up. For PR 4 cut 2 the worker trusts the daemon's gate and
-//! does not re-check.
+//! `accept_control` (see `pc_manager::route_is_permitted`). On top of
+//! that the worker re-checks the finer-grained
+//! `check_security_permission(allow_file_transfer, FileTransfer)` gate
+//! once per connection — see `permission_for` and the
+//! `DispatcherInner::permission_cache` field. The cache mirrors Arch
+//! III's per-DC behaviour: each connection prompts at most once
+//! (further commands hit the cache), the entry is dropped on
+//! `stop_connection`, and the whole map clears on `shutdown`. The
+//! settings-level "remember = allow" / "remember = deny" choice
+//! still short-circuits the prompt entirely without user
+//! interaction.
 //!
 //! ## Backpressure
 //!

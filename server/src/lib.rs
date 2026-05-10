@@ -106,10 +106,9 @@ pub struct ApiRouteConfig {
 /// own utoipa-wrapped registration for OpenAPI doc generation in
 /// `run_with_hub` — keep both registrations in sync when adding endpoints.
 ///
-/// Excluded in all modes: signaling WS, TURN management, device-code admin.
+/// Excluded in all modes: signaling WS, TURN management.
 /// (Signaling WS is registered separately by the caller before this fn;
-/// TURN endpoints stay in the embedded portable server only; device-code admin
-/// follows the same — daemon mode does not expose them yet.)
+/// TURN endpoints stay in the embedded portable server only.)
 pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig) {
     use crate::controller::{
         info::{query_backend_info, query_server_info, query_sysinfo},
@@ -127,6 +126,10 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
     };
     use desk_signal::controller::{
         connection::list_connections,
+        device_code::{
+            batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
+            update_device_code,
+        },
         terminal::{list_terminal, open_terminal_session},
     };
     use desk_signal_facade::controller::files::{delete_file, list_files};
@@ -200,12 +203,25 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
                         // to the user-session worker. Mirrors the
                         // utoipa registration in `run_with_hub` so
                         // portable + ServiceDaemon expose the same
-                        // surface; `device_code` admin endpoints are
-                        // intentionally still portable-only.
+                        // surface.
                         .service(list_terminal)
                         .service(open_terminal_session)
                         .service(list_files)
-                        .service(delete_file),
+                        .service(delete_file)
+                        // Device-code admin (CRUD over `/device_codes`).
+                        // Safe in ServiceDaemon mode because
+                        // `daemon::run_service_daemon_inner` initialises
+                        // the same Sea-ORM signal database the portable
+                        // server uses (see `desk_signal::db::init_db`),
+                        // and the handlers only touch that DB plus the
+                        // already-registered `SharedConnectionMap` for
+                        // online-state lookups. No additional state is
+                        // required.
+                        .service(list_device_codes)
+                        .service(create_device_code)
+                        .service(update_device_code)
+                        .service(delete_device_code)
+                        .service(batch_delete_device_codes),
                 ),
         )
         .configure(move |inner| {
@@ -835,6 +851,82 @@ mod tests {
                     // from `reject_anonymous_users`) means the route
                     // matched — which is the success criterion of this
                     // regression test.
+                }
+            }
+        }
+    }
+
+    /// Regression: the five device-code admin endpoints
+    /// (`/api/desk/device_codes` CRUD + `/api/desk/device_codes/batch_delete`)
+    /// must be registered by `configure_api_routes` so the daemon's 8082
+    /// HTTP App exposes them on the manager UI. Earlier revisions
+    /// intentionally restricted device-code admin to portable
+    /// (`Default | Signaling`) modes, leaving daemon installations with
+    /// `404` whenever an operator opened the device-code page. The
+    /// daemon does initialise the same Sea-ORM signal database as the
+    /// portable server (see `desk_signal::db::init_db` invocation in
+    /// `daemon::run_service_daemon_inner`), so re-using the same
+    /// handlers is safe. We do not authenticate here — the request
+    /// lacks a session cookie and `reject_anonymous_users` will reject
+    /// before the handler runs (and before any `get_db()` call), which
+    /// is sufficient to prove the route matched (vs a `404 Not Found`).
+    #[actix_web::test]
+    async fn configure_api_routes_registers_device_code_endpoints() {
+        use crate::model::settings::Settings;
+        use actix_web::test;
+        use desk_signal::model::SharedConnectionMap;
+
+        let settings = Arc::new(crate::model::settings::SharedSettings::from(
+            Settings::default(),
+        ));
+        let route_config = ApiRouteConfig {
+            settings: web::Data::from(settings),
+            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
+            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
+            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
+            tauri_is_admin: None,
+        };
+
+        let secret_key = Key::generate();
+        let app = test::init_service(
+            App::new()
+                .wrap(
+                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
+                        .cookie_secure(false)
+                        .build(),
+                )
+                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
+        )
+        .await;
+
+        let probes = [
+            ("GET", "/api/desk/device_codes"),
+            ("POST", "/api/desk/device_codes"),
+            ("PUT", "/api/desk/device_codes/1"),
+            ("DELETE", "/api/desk/device_codes/1"),
+            ("POST", "/api/desk/device_codes/batch_delete"),
+        ];
+        for (method, uri) in probes {
+            let req = match method {
+                "GET" => test::TestRequest::get().uri(uri).to_request(),
+                "POST" => test::TestRequest::post().uri(uri).to_request(),
+                "PUT" => test::TestRequest::put().uri(uri).to_request(),
+                "DELETE" => test::TestRequest::delete().uri(uri).to_request(),
+                _ => unreachable!(),
+            };
+            match test::try_call_service(&app, req).await {
+                Ok(resp) => assert_ne!(
+                    resp.status(),
+                    actix_web::http::StatusCode::NOT_FOUND,
+                    "{method} {uri} returned 404 — route must be \
+                     registered by configure_api_routes (it was \
+                     previously restricted to portable modes and broke \
+                     device-code admin on the daemon's 8082 port)",
+                ),
+                Err(_) => {
+                    // Same convention as
+                    // `configure_api_routes_registers_terminal_and_file_endpoints`:
+                    // a middleware-level rejection means the route matched.
                 }
             }
         }
