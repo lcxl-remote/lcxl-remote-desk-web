@@ -193,9 +193,15 @@ mod tests {
     #[test]
     fn first_request_pins_and_last_finish_releases() {
         let mut p = HashSet::new();
-        assert_eq!(reduce_pending(&mut p, &req("a")), PendingEffect::SetAlwaysOnTop);
+        assert_eq!(
+            reduce_pending(&mut p, &req("a")),
+            PendingEffect::SetAlwaysOnTop
+        );
         assert_eq!(p.len(), 1);
-        assert_eq!(reduce_pending(&mut p, &fin("a")), PendingEffect::UnsetAlwaysOnTop);
+        assert_eq!(
+            reduce_pending(&mut p, &fin("a")),
+            PendingEffect::UnsetAlwaysOnTop
+        );
         assert!(p.is_empty());
     }
 
@@ -205,11 +211,17 @@ mod tests {
     #[test]
     fn concurrent_requests_only_release_on_last_finish() {
         let mut p = HashSet::new();
-        assert_eq!(reduce_pending(&mut p, &req("a")), PendingEffect::SetAlwaysOnTop);
+        assert_eq!(
+            reduce_pending(&mut p, &req("a")),
+            PendingEffect::SetAlwaysOnTop
+        );
         assert_eq!(reduce_pending(&mut p, &req("b")), PendingEffect::NoChange);
         assert_eq!(reduce_pending(&mut p, &fin("a")), PendingEffect::NoChange);
         assert_eq!(p.len(), 1);
-        assert_eq!(reduce_pending(&mut p, &fin("b")), PendingEffect::UnsetAlwaysOnTop);
+        assert_eq!(
+            reduce_pending(&mut p, &fin("b")),
+            PendingEffect::UnsetAlwaysOnTop
+        );
         assert!(p.is_empty());
     }
 
@@ -218,7 +230,10 @@ mod tests {
     #[test]
     fn duplicate_request_is_idempotent() {
         let mut p = HashSet::new();
-        assert_eq!(reduce_pending(&mut p, &req("a")), PendingEffect::SetAlwaysOnTop);
+        assert_eq!(
+            reduce_pending(&mut p, &req("a")),
+            PendingEffect::SetAlwaysOnTop
+        );
         assert_eq!(reduce_pending(&mut p, &req("a")), PendingEffect::NoChange);
         assert_eq!(p.len(), 1);
     }
@@ -229,7 +244,10 @@ mod tests {
     fn unknown_finish_does_not_release() {
         let mut p = HashSet::new();
         reduce_pending(&mut p, &req("a"));
-        assert_eq!(reduce_pending(&mut p, &fin("ghost")), PendingEffect::NoChange);
+        assert_eq!(
+            reduce_pending(&mut p, &fin("ghost")),
+            PendingEffect::NoChange
+        );
         assert_eq!(p.len(), 1);
     }
 
