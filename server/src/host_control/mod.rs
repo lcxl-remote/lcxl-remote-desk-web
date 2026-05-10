@@ -255,16 +255,23 @@ impl HostControlHub {
     }
 
     /// Request the user's approval. Returns `ApprovalResponse::deny()` immediately
-    /// when no UI is available (Local with no subscribers / Forwarder with offline
-    /// upstream). Otherwise awaits the user's response.
+    /// when no UI is available (Local / Aggregator with no Tauri shell connected,
+    /// or Forwarder with offline upstream). Otherwise awaits the user's response.
+    ///
+    /// Aggregator note: under Arch IV the daemon process owns the WebRTC PC and
+    /// therefore originates `RequireControl`-driven approvals itself (in addition
+    /// to relaying worker-originated requests via `handle_upstream_approval_request`).
+    /// The two sources share the same broadcast → Tauri path and are disambiguated
+    /// at submit time: routes registered via `register_upstream_request` win the
+    /// directional dispatch, otherwise the local oneshot is resolved.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalResponse {
         // Fail-fast when no UI can serve the request.
         match self.inner.mode {
-            HubMode::Local => {
+            HubMode::Local | HubMode::Aggregator => {
                 if !self.has_tauri_ui() {
                     debug!(
-                        "[Hub/Local] No Tauri subscriber; denying approval req_id={}",
-                        req.req_id
+                        "[Hub/{:?}] No Tauri subscriber; denying approval req_id={}",
+                        self.inner.mode, req.req_id
                     );
                     return ApprovalResponse::deny();
                 }
@@ -283,13 +290,6 @@ impl HostControlHub {
                     );
                     return ApprovalResponse::deny();
                 }
-            }
-            HubMode::Aggregator => {
-                // The aggregator is a router — it does not originate requests.
-                warn!(
-                    "[Hub/Aggregator] request_approval invoked — denying (aggregator should not request)"
-                );
-                return ApprovalResponse::deny();
             }
         }
 
@@ -313,9 +313,11 @@ impl HostControlHub {
             );
         }
 
-        // Local hubs cache the request so that a Tauri shell that reconnects mid-flight
-        // can resume the dialog. Forwarder does not cache (the worker is authoritative).
-        if matches!(self.inner.mode, HubMode::Local) {
+        // Local & Aggregator (daemon-self) hubs cache the request so a Tauri shell
+        // reconnecting mid-flight can resume the dialog. Forwarder does not cache
+        // (the worker is authoritative). Worker-originated Aggregator requests use
+        // the separate `register_upstream_request` path which also populates replay.
+        if matches!(self.inner.mode, HubMode::Local | HubMode::Aggregator) {
             self.inner
                 .pending_replay
                 .lock()
@@ -352,47 +354,58 @@ impl HostControlHub {
         }
     }
 
-    /// Resolve an approval. The dispatch depends on hub mode:
+    /// Resolve an approval. The dispatch depends on hub mode and request origin:
     /// - Local / Forwarder: look up local oneshot and send the response.
-    /// - Aggregator: pop the upstream route for `req_id` and send a directional
-    ///   `SecurityApprovalSubmit` to that forwarder's session — never broadcast.
+    /// - Aggregator with a worker-originated request (`pending_routes` hit):
+    ///   send a directional `SecurityApprovalSubmit` to that forwarder's session
+    ///   — never broadcast.
+    /// - Aggregator with a daemon-self request (no route, but local oneshot in
+    ///   `pending_approvals`): resolve the oneshot directly. This is the Arch IV
+    ///   path where the daemon owns the WebRTC PC and originates the approval.
     ///
     /// Returns `true` if the response was successfully dispatched (oneshot
     /// resolved locally, or directional message handed to a registered forwarder
-    /// session). Returns `false` if `req_id` is unknown or the routed forwarder
-    /// has already disconnected.
+    /// session). Returns `false` if `req_id` is unknown to both routing tables.
     pub fn submit_approval(&self, req_id: &str, response: ApprovalResponse) -> bool {
         if self.inner.mode == HubMode::Aggregator {
-            // Plan review #6/#7: Aggregator must route directionally via
-            // pending_routes — never broadcast SecurityApprovalSubmit.
-            let Some(session_id) = self.pop_upstream_for_req(req_id) else {
-                debug!("[Hub/Aggregator] submit_approval: unknown req_id={req_id} (no route)");
-                return false;
-            };
-            let msg = HostControlMessage::SecurityApprovalSubmit {
-                req_id: req_id.to_string(),
-                approved: response.approved,
-                remember: response.remember,
-            };
-            let dispatched = self.route_to_forwarder(session_id, msg);
-            if dispatched {
-                self.notify_tauri_finished(req_id);
+            // Worker-originated requests: route directionally via pending_routes —
+            // never broadcast SecurityApprovalSubmit (plan review #6/#7).
+            if let Some(session_id) = self.pop_upstream_for_req(req_id) {
+                let msg = HostControlMessage::SecurityApprovalSubmit {
+                    req_id: req_id.to_string(),
+                    approved: response.approved,
+                    remember: response.remember,
+                };
+                let dispatched = self.route_to_forwarder(session_id, msg);
+                if dispatched {
+                    self.notify_tauri_finished(req_id);
+                }
+                return dispatched;
             }
-            return dispatched;
+            // Fall through to the local-oneshot path below for daemon-self
+            // requests originated via `request_approval`.
         }
 
-        // Local / Forwarder: resolve the locally held oneshot.
+        // Local / Forwarder, or Aggregator daemon-self: resolve the locally held
+        // oneshot.
         let entry = self.inner.pending_approvals.lock().unwrap().remove(req_id);
         match entry {
             Some(PendingEntry { response_tx, .. }) => {
                 let _ = response_tx.send(response);
                 self.inner.pending_replay.lock().unwrap().remove(req_id);
-                if self.inner.mode == HubMode::Local {
+                if matches!(self.inner.mode, HubMode::Local | HubMode::Aggregator) {
                     self.notify_tauri_finished(req_id);
                 }
                 true
             }
-            None => false,
+            None => {
+                if self.inner.mode == HubMode::Aggregator {
+                    debug!(
+                        "[Hub/Aggregator] submit_approval: unknown req_id={req_id} (no route, no local pending)"
+                    );
+                }
+                false
+            }
         }
     }
 
@@ -595,10 +608,16 @@ impl HostControlHub {
     }
 
     /// Aggregator-only: cancel every in-flight approval because the last Tauri
-    /// shell has disconnected. For each pending request a directional
-    /// `SecurityApprovalCancel` is delivered to its originating forwarder, and
-    /// the routing / replay tables are cleared. Returns the list of req_ids that
-    /// were cancelled.
+    /// shell has disconnected. Two pending sources are cleaned up:
+    /// 1. Worker-originated (`pending_routes` entries): a directional
+    ///    `SecurityApprovalCancel` is delivered to the originating forwarder.
+    /// 2. Daemon-self (`pending_approvals` entries owned by this hub): the
+    ///    oneshot is resolved with `deny()` so business code unblocks
+    ///    immediately rather than hanging on a UI that is no longer reachable.
+    ///
+    /// The routing / replay tables are cleared in either case. Returns the
+    /// concatenated list of req_ids that were cancelled (worker-originated)
+    /// or denied (daemon-self).
     ///
     /// Idempotent: subsequent calls with empty pending tables are no-ops.
     pub fn cancel_all_for_tauri_loss(&self) -> Vec<String> {
@@ -611,6 +630,16 @@ impl HostControlHub {
             r.clear();
             snapshot
         };
+        // Daemon-self pending: drained from pending_approvals and resolved as
+        // deny so request_approval() callers wake up promptly. deny_all_pending
+        // also clears the replay table for any local oneshots.
+        let daemon_self_count = self.inner.pending_approvals.lock().unwrap().len();
+        if daemon_self_count > 0 {
+            self.deny_all_pending();
+        }
+        // deny_all_pending clears the replay map for daemon-self entries; we
+        // also need to clear any worker-route replay snapshots that
+        // pending_routes used.
         self.inner.pending_replay.lock().unwrap().clear();
 
         let mut cancelled = Vec::with_capacity(routes.len());
@@ -621,10 +650,11 @@ impl HostControlHub {
             self.route_to_forwarder(session_id, msg);
             cancelled.push(req_id);
         }
-        if !cancelled.is_empty() {
+        if !cancelled.is_empty() || daemon_self_count > 0 {
             warn!(
-                "[Hub/Aggregator] Tauri lost — cancelled {} in-flight approval(s)",
-                cancelled.len()
+                "[Hub/Aggregator] Tauri lost — cancelled {} worker-originated and denied {} daemon-self approval(s)",
+                cancelled.len(),
+                daemon_self_count
             );
         }
         cancelled
@@ -1213,12 +1243,204 @@ mod tests {
         }
     }
 
-    // Aggregator request_approval is a no-op deny (it's a router, not a request source).
+    // Arch IV: Aggregator now originates daemon-self approvals (the daemon owns
+    // the WebRTC PC and runs `check_security_permission` for RequireControl).
+    // Without a Tauri shell connected the request denies fast — same shape as
+    // the Local-no-subscriber path.
     #[tokio::test]
-    async fn aggregator_request_approval_denies() {
+    async fn aggregator_request_approval_no_tauri_denies_fast() {
         let hub = HostControlHub::new_aggregator();
-        let resp = hub.request_approval(approval_req("r1")).await;
+        let started = std::time::Instant::now();
+        let resp = tokio::time::timeout(
+            Duration::from_millis(200),
+            hub.request_approval(approval_req("r1")),
+        )
+        .await
+        .expect("must not block");
         assert!(!resp.approved);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(hub.pending_replay_count(), 0);
+    }
+
+    // Arch IV regression: Aggregator with a Tauri shell present must broadcast
+    // the SecurityApprovalRequest and pend until submit_approval resolves the
+    // oneshot. This is the exact path RequireControl takes after PR 2 moved the
+    // PC into daemon — before the fix it hit the old "router does not request"
+    // hard-deny and the Tauri shell never saw a dialog.
+    #[tokio::test]
+    async fn aggregator_request_approval_pends_until_submit() {
+        let hub = HostControlHub::new_aggregator();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task =
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Replay snapshot recorded so a reconnecting Tauri can resume the dialog.
+        assert_eq!(hub.pending_replay_count(), 1);
+        let replay = hub.replay_messages_for_tauri();
+        assert_eq!(replay.len(), 1);
+        match &replay[0] {
+            HostControlMessage::SecurityApprovalRequest { req_id, .. } => assert_eq!(req_id, "r1"),
+            other => panic!("unexpected replay frame: {other:?}"),
+        }
+
+        // Tauri saw the broadcast.
+        let bcast = tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+            .await
+            .expect("Request must be broadcast")
+            .expect("channel ok");
+        match bcast {
+            HostControlMessage::SecurityApprovalRequest { req_id, .. } => assert_eq!(req_id, "r1"),
+            other => panic!("expected SecurityApprovalRequest, got {other:?}"),
+        }
+
+        let solved = hub.submit_approval(
+            "r1",
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            },
+        );
+        assert!(solved, "daemon-self submit must resolve the local oneshot");
+
+        let resp = tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("oneshot must resolve")
+            .expect("task ok");
+        assert!(resp.approved);
+        assert_eq!(hub.pending_replay_count(), 0);
+
+        // Finished frame is broadcast too so the Tauri shell drops always-on-top.
+        let finished = tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+            .await
+            .expect("Finished must be broadcast")
+            .expect("channel ok");
+        match finished {
+            HostControlMessage::SecurityApprovalFinished { req_id } => assert_eq!(req_id, "r1"),
+            other => panic!("expected SecurityApprovalFinished, got {other:?}"),
+        }
+    }
+
+    // Mixed sources: Aggregator handles a daemon-self request and a worker-
+    // originated request concurrently. Each submit must reach exactly the right
+    // resolver — the daemon-self oneshot for the daemon req, the originating
+    // forwarder's mpsc for the worker req. They must NOT cross-contaminate.
+    #[tokio::test]
+    async fn aggregator_mixed_daemon_self_and_worker_routes_correctly() {
+        let hub = HostControlHub::new_aggregator();
+        hub.mark_tauri_connected();
+        let _outbound_rx = hub.subscribe_outbound();
+
+        // Worker-originated request via upstream registration.
+        let (tx_w, mut rx_w) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(7, tx_w);
+        hub.register_upstream_request(
+            "r-worker".to_string(),
+            7,
+            SecurityPermissionType::Terminal,
+            None,
+        );
+
+        // Daemon-self request via request_approval.
+        let hub_clone = hub.clone();
+        let task =
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r-daemon")).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(hub.pending_replay_count(), 2);
+
+        // Submit the worker req — forwarder mpsc must get the directional Submit.
+        assert!(hub.submit_approval(
+            "r-worker",
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            }
+        ));
+        match tokio::time::timeout(Duration::from_millis(100), rx_w.recv())
+            .await
+            .expect("forwarder must receive")
+            .expect("mpsc ok")
+        {
+            HostControlMessage::SecurityApprovalSubmit { req_id, .. } => {
+                assert_eq!(req_id, "r-worker")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Daemon-self task must still be pending — the worker submit must not
+        // accidentally resolve it.
+        assert!(!task.is_finished());
+
+        // Submit the daemon req — local oneshot resolves.
+        assert!(hub.submit_approval(
+            "r-daemon",
+            ApprovalResponse {
+                approved: false,
+                remember: true,
+            }
+        ));
+        let resp = tokio::time::timeout(Duration::from_millis(200), task)
+            .await
+            .expect("oneshot must resolve")
+            .expect("task ok");
+        assert!(!resp.approved);
+        assert!(resp.remember);
+
+        // Forwarder must NOT have received anything else.
+        let stray = tokio::time::timeout(Duration::from_millis(50), rx_w.recv()).await;
+        assert!(stray.is_err(), "forwarder must not see r-daemon submit");
+
+        assert_eq!(hub.pending_replay_count(), 0);
+    }
+
+    // When the last Tauri shell drops, daemon-self pending approvals must be
+    // resolved as deny (so request_approval callers unblock) in addition to the
+    // existing forwarder-cancel path.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn aggregator_tauri_loss_denies_daemon_self_pending() {
+        let hub = HostControlHub::new_aggregator();
+        hub.mark_tauri_connected();
+        let _outbound_rx = hub.subscribe_outbound();
+
+        // One worker req + one daemon-self req in flight.
+        let (tx_w, mut rx_w) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(3, tx_w);
+        hub.register_upstream_request(
+            "r-worker".to_string(),
+            3,
+            SecurityPermissionType::FileTransfer,
+            None,
+        );
+        let h = hub.clone();
+        let task = tokio::spawn(async move { h.request_approval(approval_req("r-daemon")).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(hub.pending_replay_count(), 2);
+
+        // Tauri lost.
+        let cancelled = hub.cancel_all_for_tauri_loss();
+        assert_eq!(cancelled, vec!["r-worker".to_string()]);
+
+        // Daemon-self oneshot resolved as deny (does not appear in `cancelled`
+        // because that list reports worker-originated cancels by contract).
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("daemon oneshot must resolve")
+            .expect("task ok");
+        assert!(!resp.approved);
+
+        // Worker forwarder received the directional Cancel.
+        match tokio::time::timeout(Duration::from_millis(100), rx_w.recv())
+            .await
+            .expect("forwarder must receive")
+            .expect("mpsc ok")
+        {
+            HostControlMessage::SecurityApprovalCancel { req_id } => assert_eq!(req_id, "r-worker"),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        assert_eq!(hub.pending_replay_count(), 0);
     }
 
     // U-14b: Aggregator submit_approval routes the response directionally to
