@@ -103,10 +103,13 @@ pub struct ApiRouteConfig {
 
 /// Register the core API routes onto `cfg` using plain actix-web (no utoipa).
 /// Used by the ServiceDaemon local API. The embedded portable server keeps its
-/// own utoipa-wrapped registration for OpenAPI doc generation.
+/// own utoipa-wrapped registration for OpenAPI doc generation in
+/// `run_with_hub` — keep both registrations in sync when adding endpoints.
 ///
-/// Excluded in all modes: signaling WS, TURN management.
-/// Excluded in ServiceDaemon mode: terminal, file management, device codes.
+/// Excluded in all modes: signaling WS, TURN management, device-code admin.
+/// (Signaling WS is registered separately by the caller before this fn;
+/// TURN endpoints stay in the embedded portable server only; device-code admin
+/// follows the same — daemon mode does not expose them yet.)
 pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig) {
     use crate::controller::{
         info::{query_backend_info, query_server_info, query_sysinfo},
@@ -122,7 +125,11 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
         },
         user::{get_current_user, reject_anonymous_users},
     };
-    use desk_signal::controller::connection::list_connections;
+    use desk_signal::controller::{
+        connection::list_connections,
+        terminal::{list_terminal, open_terminal_session},
+    };
+    use desk_signal_facade::controller::files::{delete_file, list_files};
 
     let ApiRouteConfig {
         settings,
@@ -183,7 +190,22 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
                         .service(update_telemetry_consent)
                         .service(list_connections)
                         .service(query_sysinfo)
-                        .service(query_backend_info),
+                        .service(query_backend_info)
+                        // Remote terminal + file management. The browser
+                        // hits these on the daemon's 8082 port; the
+                        // controllers go through the local
+                        // `connection_map` (populated by the daemon's own
+                        // `signaling_proxy` self-loop client) and the
+                        // request rides typed `ServiceToWorker::*` IPC
+                        // to the user-session worker. Mirrors the
+                        // utoipa registration in `run_with_hub` so
+                        // portable + ServiceDaemon expose the same
+                        // surface; `device_code` admin endpoints are
+                        // intentionally still portable-only.
+                        .service(list_terminal)
+                        .service(open_terminal_session)
+                        .service(list_files)
+                        .service(delete_file),
                 ),
         )
         .configure(move |inner| {
@@ -737,5 +759,84 @@ mod tests {
             handle
         }
         let _coerce: fn(ServerHandle) -> (Server, Option<WorkerGuard>) = _shape_check;
+    }
+
+    /// Regression: the four browser-facing endpoints for the remote terminal
+    /// and remote file management features must be registered by
+    /// `configure_api_routes` so the daemon's 8082 HTTP App exposes them. An
+    /// earlier revision intentionally excluded these in ServiceDaemon mode,
+    /// which left users with `404` from
+    /// `GET /api/desk/file/list?connection_id=...` and an empty shell list
+    /// from `GET /api/desk/terminals/{id}` even though the typed-IPC chain
+    /// to the worker was fully wired. We do not check authentication here —
+    /// the request lacks a session cookie and the `reject_anonymous_users`
+    /// middleware will return `401 Unauthorized`, which is sufficient to
+    /// prove the route matched (vs the `404 Not Found` failure mode).
+    #[actix_web::test]
+    async fn configure_api_routes_registers_terminal_and_file_endpoints() {
+        use crate::model::settings::Settings;
+        use actix_web::test;
+        use desk_signal::model::SharedConnectionMap;
+
+        let settings = Arc::new(crate::model::settings::SharedSettings::from(
+            Settings::default(),
+        ));
+        let route_config = ApiRouteConfig {
+            settings: web::Data::from(settings),
+            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
+            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
+            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
+            tauri_is_admin: None,
+        };
+
+        let secret_key = Key::generate();
+        let app = test::init_service(
+            App::new()
+                .wrap(
+                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
+                        .cookie_secure(false)
+                        .build(),
+                )
+                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
+        )
+        .await;
+
+        // The four routes that ServiceDaemon mode used to drop. Each one
+        // should at least *match* — `reject_anonymous_users` middleware
+        // will then return `Err(ErrorUnauthorized)` because no session
+        // cookie is present, but emphatically NOT a `Ok(404)`. Use
+        // `try_call_service` so the `Err` path doesn't panic the test —
+        // an `Err` here means the route matched and the middleware ran,
+        // which is exactly what we want to prove.
+        let probes = [
+            ("GET", "/api/desk/file/list?connection_id=test"),
+            ("GET", "/api/desk/terminals/test"),
+            ("GET", "/api/desk/terminal/test?command=cmd"),
+            ("DELETE", "/api/desk/file"),
+        ];
+        for (method, uri) in probes {
+            let req = match method {
+                "GET" => test::TestRequest::get().uri(uri).to_request(),
+                "DELETE" => test::TestRequest::delete().uri(uri).to_request(),
+                _ => unreachable!(),
+            };
+            match test::try_call_service(&app, req).await {
+                Ok(resp) => assert_ne!(
+                    resp.status(),
+                    actix_web::http::StatusCode::NOT_FOUND,
+                    "{method} {uri} returned 404 — route must be \
+                     registered by configure_api_routes (it was \
+                     previously excluded in ServiceDaemon mode and \
+                     broke remote terminal + file management on the \
+                     daemon's 8082 port)",
+                ),
+                Err(_) => {
+                    // Middleware-level rejection (e.g. 401 Unauthorized
+                    // from `reject_anonymous_users`) means the route
+                    // matched — which is the success criterion of this
+                    // regression test.
+                }
+            }
+        }
     }
 }
