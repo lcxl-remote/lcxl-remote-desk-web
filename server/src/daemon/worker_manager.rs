@@ -4,14 +4,17 @@ use crate::model::settings::{Args, SharedSettings};
 use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
-    message::{MediaCapabilities, ServiceToWorker, WorkerInitPayload, WorkerToService},
+    message::{
+        FileTransferPayload, MediaCapabilities, ServiceToWorker, WorkerInitPayload,
+        WorkerToService,
+    },
     transport::{read_message, write_message},
 };
 use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 
 /// Default heartbeat-watchdog grace period when settings don't override
 /// it. Worker heartbeats every 5s, so 30s ≈ 6 missed beats — wide
@@ -70,6 +73,22 @@ struct WorkerHandle {
     /// `handle_crash_recovery` when it triggers a restart.
     session_id: u32,
     desktop_name: Option<String>,
+    /// Late-publish slot for the daemon→worker file-lane sender.
+    ///
+    /// Populated:
+    /// - in named-pipe mode: by `run_pipe_server` after the worker
+    ///   dials in on the dedicated file pipe and the framed sender
+    ///   is constructed.
+    /// - in in-process mode: by `start_inprocess_worker` immediately
+    ///   after constructing the `make_file_inprocess` pair.
+    ///
+    /// Readers ([`WorkerManager::send_file_to_worker`]) MUST clone the
+    /// `Arc` and drop the manager-level guard before awaiting the
+    /// nested `RwLock`: a bounded `send().await` on the sender can
+    /// pause for SCTP backpressure, and holding `WorkerManagerInner`
+    /// across that wait would block worker-recovery /
+    /// heartbeat / `send_to_worker` for the duration of the stall.
+    file_sender_tx: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>>,
 }
 
 enum ProcessHandle {
@@ -248,6 +267,14 @@ impl WorkerManager {
         let ipc_token_c = ipc_token.clone();
         let mgr_c = self.clone();
         let pc_registry_c = self.pc_registry.clone();
+        // Late-publish slot for the file-lane sender. The pipe-server
+        // task writes into this once the worker accepts the dedicated
+        // file pipe; the WorkerHandle below holds a clone so DC
+        // forwarder lookups via `send_file_to_worker` see the sender as
+        // soon as it is ready.
+        let file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>> =
+            Arc::new(RwLock::new(None));
+        let file_sender_slot_c = Arc::clone(&file_sender_slot);
         tokio::spawn(async move {
             if let Err(e) = run_pipe_server(
                 &pipe_name_c,
@@ -261,6 +288,7 @@ impl WorkerManager {
                 host_upstream_url_c,
                 ipc_token_c,
                 pc_registry_c,
+                file_sender_slot_c,
             )
             .await
             {
@@ -279,6 +307,7 @@ impl WorkerManager {
             last_heartbeat_at: Instant::now(),
             session_id,
             desktop_name: desktop_name.clone(),
+            file_sender_tx: file_sender_slot,
         });
 
         info!("Worker started for session {session_id}");
@@ -354,6 +383,13 @@ impl WorkerManager {
             host_upstream_url: None,
             // Media transport is in-process below; no named pipe needed.
             media_pipe_name: None,
+            // File transport is also in-process: the file pair is
+            // handed directly to `run_with_transports`, no pipe name.
+            // The worker's named-pipe-mode `file_pipe_name == None`
+            // fail-fast does not run on this path because
+            // `run_with_transports` is invoked directly (no `ipc_loop`
+            // handshake which is where that check lives).
+            file_pipe_name: None,
             // In-process portable / DeskServer modes share the daemon's
             // settings file path so worker-side `Settings::save()` (e.g.
             // for a "remember" auth approval) writes back to the same
@@ -365,12 +401,24 @@ impl WorkerManager {
             },
         };
 
-        // Build the three in-process transports:
+        // Build the four in-process transports:
         // - bidirectional event pair (daemon ↔ worker)
         // - uni-directional media (worker → daemon)
+        // - bidirectional file pair (daemon ↔ worker), bounded at
+        //   `FILE_QUEUE_CAP = 32` per direction so SCTP backpressure
+        //   propagates end-to-end through the file lane without
+        //   spilling into the event lane.
         let (s2w_tx, s2w_rx) = inprocess::make_event::<ServiceToWorker>();
         let (w2s_tx, w2s_rx) = inprocess::make_event::<WorkerToService>();
         let (media_tx, media_rx) = inprocess::make_media();
+        // daemon → worker: daemon emits, worker drains in its file
+        // dispatcher loop.
+        let (file_d2w_tx, file_d2w_rx) =
+            inprocess::make_file_inprocess::<FileTransferPayload>();
+        // worker → daemon: worker dispatcher emits, daemon drains
+        // straight into `pc_manager::write_file_transfer_data`.
+        let (file_w2d_tx, mut file_w2d_rx) =
+            inprocess::make_file_inprocess::<FileTransferPayload>();
 
         // Spawn the daemon-side bridge: drains `ipc_cmd_rx` → daemon
         // EventSender (worker observes via its EventReceiver), and
@@ -395,6 +443,23 @@ impl WorkerManager {
         // except the receiver is in-process (no decode work).
         let _media_handle = spawn_media_receiver_task(media_rx, self.pc_registry.clone());
 
+        // Daemon-side file-lane drain task: each worker → daemon
+        // payload feeds into `pc_manager::write_file_transfer_data`,
+        // which routes by `connection_id` to the matching browser DC.
+        // Serial single-task drain accepts cross-connection HOL as a
+        // known trade-off (see `dual_transport.rs` module docs).
+        {
+            let pc_registry = self.pc_registry.clone();
+            tokio::spawn(async move {
+                info!("[worker_manager] in-process file-lane drain starting");
+                while let Some(payload) = file_w2d_rx.recv().await {
+                    crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload)
+                        .await;
+                }
+                info!("[worker_manager] in-process file-lane drain exiting (closed)");
+            });
+        }
+
         // Spawn the worker on `actix_web::rt::spawn` because
         // `WorkerSession::run_with_transports` awaits actix-web internals
         // (`DeskSession`, `awc::Client`, `actix_web::rt::spawn` from
@@ -407,7 +472,15 @@ impl WorkerManager {
         actix_web::rt::spawn(async move {
             let session = crate::worker::session::WorkerSession::new();
             if let Err(e) = session
-                .run_with_transports(init_for_worker, s2w_rx, w2s_tx, Some(media_tx), Some(hub))
+                .run_with_transports(
+                    init_for_worker,
+                    s2w_rx,
+                    w2s_tx,
+                    Some(media_tx),
+                    file_w2d_tx,
+                    file_d2w_rx,
+                    Some(hub),
+                )
                 .await
             {
                 error!("In-process worker exited with error: {e}");
@@ -415,6 +488,12 @@ impl WorkerManager {
             info!("In-process worker task exited");
             let _ = worker_args; // reserved for future per-mode toggles
         });
+
+        // Pre-populate the file_sender slot for in-process mode: there
+        // is no async accept step, so the daemon→worker file sender is
+        // ready the instant we hand it to the worker above.
+        let file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>> =
+            Arc::new(RwLock::new(Some(file_d2w_tx)));
 
         inner.active_worker = Some(WorkerHandle {
             pipe_name,
@@ -428,6 +507,7 @@ impl WorkerManager {
             last_heartbeat_at: Instant::now(),
             session_id,
             desktop_name,
+            file_sender_tx: file_sender_slot,
         });
 
         info!("In-process worker started for session {session_id}");
@@ -461,6 +541,42 @@ impl WorkerManager {
         } else {
             Err("No active worker".to_string())
         }
+    }
+
+    /// Send a `FileTransferPayload` over the dedicated file lane to the
+    /// active worker. Used by `pc_manager`'s DC forwarder when a
+    /// browser pushes a `file_transfer_event` chunk / control frame.
+    ///
+    /// **Locking discipline**: clones the file-sender `Arc` under each
+    /// guard then drops the guard *before* awaiting the bounded
+    /// `send()`. A full file lane parks `send().await` until the worker
+    /// drains; holding either `WorkerManagerInner` or the slot
+    /// `RwLock` across that wait would head-of-line block worker
+    /// recovery / heartbeat / `send_to_worker` for the same window
+    /// the SCTP backpressure runs.
+    pub async fn send_file_to_worker(&self, payload: FileTransferPayload) -> Result<(), String> {
+        // Step 1: clone the slot Arc under the manager mutex, drop guard.
+        let slot = {
+            let inner = self.inner.lock().await;
+            match inner.active_worker.as_ref() {
+                Some(w) => Arc::clone(&w.file_sender_tx),
+                None => return Err("No active worker".to_string()),
+            }
+        };
+        // Step 2: clone the inner sender Arc under the slot RwLock, drop guard.
+        let sender = {
+            let guard = slot.read().await;
+            match guard.as_ref() {
+                Some(s) => Arc::clone(s),
+                None => {
+                    return Err(
+                        "File lane not yet ready (pipe not yet accepted)".to_string()
+                    );
+                }
+            }
+        };
+        // Step 3: bounded send().await runs with no daemon-side locks held.
+        sender.send(payload).await.map_err(|e| format!("{e}"))
     }
 
     /// Record that the daemon just received an IPC message from the
@@ -893,6 +1009,7 @@ async fn run_pipe_server(
     host_upstream_url: String,
     ipc_token: Option<String>,
     pc_registry: PcRegistry,
+    file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
     info!("Creating Named Pipe server: {pipe_path}");
@@ -924,6 +1041,15 @@ async fn run_pipe_server(
     let media_pipe_name = format!("{pipe_name}-media");
     let media_pipe_path = format!(r"\\.\pipe\{media_pipe_name}");
     let media_server = create_named_pipe_with_sddl(&media_pipe_path, &sddl_str)?;
+
+    // Arch IV file lane: third dedicated pipe for file-transfer data
+    // (download chunks / control replies / upload chunks / cancels)
+    // running independent of event + media so SCTP backpressure on a
+    // slow browser DC propagates end-to-end without HOL-blocking
+    // heartbeat or signaling.
+    let file_pipe_name = format!("{pipe_name}-file");
+    let file_pipe_path = format!(r"\\.\pipe\{file_pipe_name}");
+    let file_server = create_named_pipe_with_sddl(&file_pipe_path, &sddl_str)?;
 
     let desktop_name_copy = desktop_name.clone();
 
@@ -960,6 +1086,7 @@ async fn run_pipe_server(
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
             media_pipe_name: Some(media_pipe_name.clone()),
+            file_pipe_name: Some(file_pipe_name.clone()),
             // Carry the daemon's settings file path so worker-side
             // `Settings::save()` (e.g. for "remember" auth approvals)
             // writes back to the same on-disk file the daemon loaded.
@@ -967,7 +1094,10 @@ async fn run_pipe_server(
         }),
     )
     .await?;
-    info!("Sent Init to Worker (media_pipe_name={})", media_pipe_name);
+    info!(
+        "Sent Init to Worker (media_pipe_name={}, file_pipe_name={})",
+        media_pipe_name, file_pipe_name
+    );
 
     // Wait for the worker to dial back on the media pipe. The connect
     // timeout is generous because some workers (Winlogon under SYSTEM
@@ -999,6 +1129,51 @@ async fn run_pipe_server(
             }
         };
 
+    // Wait for the worker to dial back on the file pipe. Unlike media,
+    // the file lane is mandatory: file_transfer is the only way the
+    // browser's file UI talks to the host worker, and routing it onto
+    // the event lane on failure would silently restore the HOL bug
+    // fix-2026-05-05 was supposed to prevent. On accept failure we
+    // surface a warning and drop into recovery rather than degrading.
+    let file_drain_handle = match tokio::time::timeout(
+        Duration::from_secs(15),
+        file_server.connect(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            info!("Worker connected on file pipe {file_pipe_path}");
+            let (file_reader, file_writer) = tokio::io::split(file_server);
+            let sender = framed::spawn_file_sender::<_, FileTransferPayload>(file_writer);
+            // Publish the sender into the slot so DC forwarders'
+            // `WorkerManager::send_file_to_worker` look-ups resolve.
+            *file_sender_slot.write().await = Some(sender);
+            let receiver = framed::make_event_receiver::<_, FileTransferPayload>(file_reader);
+            // Daemon-side drain task: each worker→daemon payload feeds
+            // straight into `pc_manager::write_file_transfer_data`. A
+            // single serial drain accepts cross-connection HOL as a
+            // documented trade-off; per-connection lanes can be added
+            // later if it becomes a problem.
+            Some(spawn_file_drain_task(receiver, pc_registry.clone()))
+        }
+        Ok(Err(e)) => {
+            warn!(
+                "File pipe connect failed for {file_pipe_path}: {e}; \
+                 dropping into recovery (no file lane = no file transfer)"
+            );
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            return Ok(());
+        }
+        Err(_) => {
+            warn!(
+                "Timed out waiting for worker on file pipe {file_pipe_path}; \
+                 dropping into recovery"
+            );
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            return Ok(());
+        }
+    };
+
     // Keep-PC semantics: browser-facing `SignalingType::DesktopReady` is
     // not emitted on worker (re)spawn. The browser's WebRTC PC stays up
     // across worker swaps; the daemon's `signaling_proxy` calls
@@ -1009,11 +1184,18 @@ async fn run_pipe_server(
     let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, pipe_name).await;
     info!("Pipe server for {pipe_name} exiting");
 
-    // Stop the media receiver so its read loop doesn't keep a reference
+    // Stop the auxiliary readers so their tasks don't keep a reference
     // to the now-dead worker pipe alive.
     if let Some(handle) = media_handle {
         handle.abort();
     }
+    if let Some(handle) = file_drain_handle {
+        handle.abort();
+    }
+    // Drop the file-lane sender so any in-flight `send_file_to_worker`
+    // call observes `Closed` instead of stalling indefinitely on the
+    // dead pipe writer.
+    *file_sender_slot.write().await = None;
 
     if !expected {
         worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
@@ -1098,6 +1280,25 @@ fn spawn_media_receiver_task(
     })
 }
 
+/// Spawn the daemon-side file-lane drain. Owns an
+/// `EventReceiver<FileTransferPayload>` and routes every payload to
+/// `pc_manager::write_file_transfer_data`, which dispatches by
+/// `connection_id` to the corresponding browser DC. Single drain task
+/// across all connections — cross-connection head-of-line is the
+/// known trade-off documented in `dual_transport.rs`.
+fn spawn_file_drain_task(
+    mut receiver: Box<dyn EventReceiver<FileTransferPayload>>,
+    pc_registry: PcRegistry,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        info!("[FileDrain] starting");
+        while let Some(payload) = receiver.recv().await {
+            crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload).await;
+        }
+        info!("[FileDrain] exiting (transport closed)");
+    })
+}
+
 #[cfg(not(target_os = "windows"))]
 #[allow(clippy::too_many_arguments)]
 async fn run_pipe_server(
@@ -1111,13 +1312,22 @@ async fn run_pipe_server(
     worker_mgr: WorkerManager,
     host_upstream_url: String,
     ipc_token: Option<String>,
-    _pc_registry: PcRegistry,
+    pc_registry: PcRegistry,
+    file_sender_slot: Arc<RwLock<Option<Arc<dyn EventSender<FileTransferPayload>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tokio::net::UnixListener;
 
     info!("Creating Unix socket server: {socket_path}");
     let _ = std::fs::remove_file(socket_path);
     let listener = UnixListener::bind(socket_path)?;
+
+    // Mirror the Windows path: dedicated file-lane Unix socket so SCTP
+    // backpressure on a slow browser DC does not head-of-line block
+    // event-lane traffic. Mandatory; on accept failure we fall into
+    // recovery rather than degrading to event-lane fallback.
+    let file_socket_path = format!("{socket_path}-file");
+    let _ = std::fs::remove_file(&file_socket_path);
+    let file_listener = UnixListener::bind(&file_socket_path)?;
 
     let desktop_name_copy = desktop_name.clone();
 
@@ -1131,12 +1341,14 @@ async fn run_pipe_server(
             error!("Unix socket accept error for {socket_path}: {e}");
             worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
             let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_file(&file_socket_path);
             return Ok(());
         }
         Err(_) => {
             warn!("Timed out waiting for worker to connect on {socket_path}; triggering recovery");
             worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
             let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_file(&file_socket_path);
             return Ok(());
         }
     };
@@ -1161,6 +1373,7 @@ async fn run_pipe_server(
             // Arch IV media pipe wiring lands in PR 2 cut 4. Until then
             // the worker stays single-pipe (Arch III).
             media_pipe_name: None,
+            file_pipe_name: Some(file_socket_path.clone()),
             // Carry the daemon's settings file path so worker-side
             // `Settings::save()` writes back to the same file.
             config_file_path,
@@ -1168,11 +1381,55 @@ async fn run_pipe_server(
     )
     .await?;
 
+    // Wait for the worker to dial back on the file Unix socket. Same
+    // policy as Windows: mandatory, recover on failure.
+    let file_drain_handle = match tokio::time::timeout(
+        Duration::from_secs(15),
+        file_listener.accept(),
+    )
+    .await
+    {
+        Ok(Ok((file_stream, _))) => {
+            info!("Worker connected on file socket {file_socket_path}");
+            let (file_reader, file_writer) = tokio::io::split(file_stream);
+            let sender = framed::spawn_file_sender::<_, FileTransferPayload>(file_writer);
+            *file_sender_slot.write().await = Some(sender);
+            let receiver = framed::make_event_receiver::<_, FileTransferPayload>(file_reader);
+            Some(spawn_file_drain_task(receiver, pc_registry.clone()))
+        }
+        Ok(Err(e)) => {
+            warn!(
+                "File socket accept failed for {file_socket_path}: {e}; \
+                 dropping into recovery (no file lane = no file transfer)"
+            );
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_file(&file_socket_path);
+            return Ok(());
+        }
+        Err(_) => {
+            warn!(
+                "Timed out waiting for worker on file socket {file_socket_path}; \
+                 dropping into recovery"
+            );
+            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+            let _ = std::fs::remove_file(socket_path);
+            let _ = std::fs::remove_file(&file_socket_path);
+            return Ok(());
+        }
+    };
+
     // Keep-PC: see the Windows path above; browser-facing DesktopReady is
     // not emitted on worker spawn.
 
     let expected = bridge_loop(reader, writer, &mut cmd_rx, &msg_tx, socket_path).await;
     let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_file(&file_socket_path);
+
+    if let Some(handle) = file_drain_handle {
+        handle.abort();
+    }
+    *file_sender_slot.write().await = None;
 
     if !expected {
         worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);

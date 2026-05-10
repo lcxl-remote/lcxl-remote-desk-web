@@ -2,24 +2,27 @@
 //!
 //! Mirrors the Arch III bidirectional protocol from
 //! `service::file_transfer::handle_file_transfer_event` but split
-//! across the daemon/worker IPC boundary:
+//! across the daemon/worker IPC boundary on a *dedicated* file lane —
+//! see [`desk_ipc_protocol::dual_transport`] for the three-pipe IPC
+//! topology (event / media / file).
 //!
 //! - **Browser → host (upload + download requests + cancels)**: the
 //!   daemon's `on_data_channel` router forwards the
-//!   `file_transfer_event` DC payload as
-//!   `ServiceToWorker::FileTransferCommand`. The IPC carries
-//!   `is_text` so the dispatcher knows whether to JSON-decode a
+//!   `file_transfer_event` DC payload onto the **file lane** via
+//!   `WorkerManager::send_file_to_worker`. Each frame carries `is_text`
+//!   so the dispatcher knows whether to JSON-decode a
 //!   `FileTransferMessage` (control frame) or treat the bytes as a
-//!   binary upload chunk.
+//!   binary upload chunk. The worker's session task runs a drain
+//!   loop on the file-lane receiver that calls into
+//!   [`FileTransferDispatcher::handle_command`].
 //!
 //! - **Host → browser (download chunks + control replies)**: the
-//!   dispatcher emits `WorkerToService::FileTransferData` with
-//!   `is_text=true` for JSON control replies (`DownloadResponse` /
-//!   `TransferComplete` / `TransferError`) and `is_text=false` for
-//!   binary chunk bodies. The daemon's
-//!   `pc_manager::write_file_transfer_data` writes them to the
-//!   matching browser's `file_transfer_event` DC using
-//!   `dc.send_text` or `dc.send` accordingly.
+//!   dispatcher's `emit_*` helpers send a [`FileTransferPayload`] over
+//!   the same file lane in the worker→daemon direction. The daemon's
+//!   file-lane drain task hands each payload to
+//!   `pc_manager::write_file_transfer_data`, which writes it to the
+//!   matching browser's `file_transfer_event` DC using `dc.send_text`
+//!   or `dc.send` according to `is_text`.
 //!
 //! ## Filesystem privilege
 //!
@@ -47,24 +50,29 @@
 //! ## Backpressure
 //!
 //! The Arch III handler watched `dc.buffered_amount()` to throttle
-//! download chunk emission when SCTP buffers grew above 2 MB. In
-//! Arch IV the worker can't observe that signal directly. PR 4 cut 2
-//! emits chunks unconditionally and relies on (a) typical files
-//! being under tens of MB, (b) `tokio::task::yield_now()` after
-//! every 100 chunks to let the IPC writer task drain. Restoring
-//! daemon-side buffered-amount throttling (via a back-pressure IPC)
-//! is a follow-up if large-file throughput regressions appear.
+//! download chunk emission when SCTP buffers grew above 2 MB. Arch IV
+//! re-establishes the same end-to-end backpressure by routing all
+//! file traffic over the dedicated file lane (`FILE_QUEUE_CAP = 32`
+//! per direction). When the browser DataChannel slows, SCTP fills →
+//! `dc.send().await` blocks → the daemon's per-connection bounded
+//! writer queue fills → its `write_file_transfer_data` drain blocks
+//! → the file pipe fills → the worker's `file_sender.send().await`
+//! in `emit_*` blocks → `serve_download` parks before the next
+//! `file.read()`. The chain holds the worker process at ~4 MB
+//! steady-state regardless of file size. `emit_*` returns
+//! [`TransportError::Closed`] when the file lane has gone away (peer
+//! restart / shutdown); callers fail-fast on that path so dangling
+//! file handles are released promptly.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use desk_ipc_protocol::message::{
-    FileTransferPayload, StartMediaPayload, StopMediaPayload, WorkerToService,
-};
+use desk_ipc_protocol::dual_transport::{EventSender, TransportError};
+use desk_ipc_protocol::message::{FileTransferPayload, StartMediaPayload, StopMediaPayload};
 use log::{debug, error, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::host_control::HostControlHub;
 use crate::model::file_transfer::*;
@@ -111,7 +119,13 @@ impl DispatcherInner {
 #[derive(Clone)]
 pub struct FileTransferDispatcher {
     inner: Arc<TokioMutex<DispatcherInner>>,
-    error_tx: mpsc::UnboundedSender<WorkerToService>,
+    /// Dedicated file-lane sender (worker → daemon) for download
+    /// chunks and control replies. Bounded (`FILE_QUEUE_CAP = 32`); a
+    /// full lane parks `send().await` so the chain
+    /// `dc.send().await` ↔ daemon writer queue ↔ file pipe ↔ this
+    /// sender ↔ `serve_download` loop applies end-to-end backpressure
+    /// without spilling file bytes onto the event lane.
+    file_sender: Arc<dyn EventSender<FileTransferPayload>>,
     /// Shared settings used by the permission gate to read
     /// `security.allow_file_transfer` and (when the user picks
     /// "remember") to persist the choice via `Settings::save()`.
@@ -126,13 +140,13 @@ pub struct FileTransferDispatcher {
 
 impl FileTransferDispatcher {
     pub fn new(
-        error_tx: mpsc::UnboundedSender<WorkerToService>,
+        file_sender: Arc<dyn EventSender<FileTransferPayload>>,
         settings: Arc<SharedSettings>,
         hub: Arc<HostControlHub>,
     ) -> Self {
         Self {
             inner: Arc::new(TokioMutex::new(DispatcherInner::new())),
-            error_tx,
+            file_sender,
             settings,
             hub,
         }
@@ -174,9 +188,9 @@ impl FileTransferDispatcher {
         approved
     }
 
-    /// Add a connection to the active set. Subsequent
-    /// `FileTransferCommand` IPC for this `connection_id` will be
-    /// processed; commands for inactive connections are dropped.
+    /// Add a connection to the active set. Subsequent file-lane
+    /// commands for this `connection_id` will be processed; commands
+    /// for inactive connections are dropped.
     pub async fn start_connection(&self, payload: &StartMediaPayload) {
         let mut inner = self.inner.lock().await;
         let inserted = inner
@@ -391,14 +405,23 @@ impl FileTransferDispatcher {
                 );
             }
             drop(state);
-            // Drop the lock before emitting IPC.
+            // Drop the lock before emitting IPC: emit_text awaits on the
+            // bounded file lane and must not hold inner across that wait.
             drop(inner);
-            self.emit_text(
-                &connection_id,
-                FileTransferMessage::TransferComplete(TransferComplete {
-                    transfer_id: transfer_id.clone(),
-                }),
-            );
+            if let Err(e) = self
+                .emit_text(
+                    &connection_id,
+                    FileTransferMessage::TransferComplete(TransferComplete {
+                        transfer_id: transfer_id.clone(),
+                    }),
+                )
+                .await
+            {
+                warn!(
+                    "[FileTransferDispatcher] upload {transfer_id} complete ack drop: {e}"
+                );
+                return;
+            }
             info!(
                 "[FileTransferDispatcher] upload {} completed successfully",
                 transfer_id
@@ -413,13 +436,24 @@ impl FileTransferDispatcher {
     ) -> std::io::Result<()> {
         let target_dir = PathBuf::from(&req.target_dir);
         if !target_dir.exists() || !target_dir.is_dir() {
-            self.emit_text(
-                &connection_id,
-                FileTransferMessage::TransferError(TransferError {
-                    transfer_id: req.transfer_id.clone(),
-                    message: format!("Target directory not found: {}", req.target_dir),
-                }),
-            );
+            // Best-effort error notification to the browser. If the
+            // file lane is closed there is nothing to clean up (no file
+            // opened yet) — just log and return.
+            if let Err(e) = self
+                .emit_text(
+                    &connection_id,
+                    FileTransferMessage::TransferError(TransferError {
+                        transfer_id: req.transfer_id.clone(),
+                        message: format!("Target directory not found: {}", req.target_dir),
+                    }),
+                )
+                .await
+            {
+                warn!(
+                    "[FileTransferDispatcher] {}: failed to emit TransferError for {}: {e}",
+                    connection_id, req.transfer_id
+                );
+            }
             return Ok(());
         }
         let file_path = target_dir.join(&req.file_name);
@@ -442,14 +476,42 @@ impl FileTransferDispatcher {
             let mut inner = self.inner.lock().await;
             inner.upload_states.insert(req.transfer_id.clone(), state);
         }
-        self.emit_text(
-            &connection_id,
-            FileTransferMessage::UploadResponse(UploadResponse {
-                transfer_id: req.transfer_id,
-                accepted: true,
-                message: None,
-            }),
-        );
+        if let Err(e) = self
+            .emit_text(
+                &connection_id,
+                FileTransferMessage::UploadResponse(UploadResponse {
+                    transfer_id: req.transfer_id.clone(),
+                    accepted: true,
+                    message: None,
+                }),
+            )
+            .await
+        {
+            // File lane closed before the browser could receive the
+            // accept ack — no chunks will arrive. Drop the in-flight
+            // state and remove the empty placeholder file we just
+            // created, otherwise it would orphan on disk.
+            warn!(
+                "[FileTransferDispatcher] {}: UploadResponse emit failed for {}: {e} \
+                 — releasing in-flight state",
+                connection_id, req.transfer_id
+            );
+            let removed = {
+                let mut inner = self.inner.lock().await;
+                inner.upload_states.remove(&req.transfer_id)
+            };
+            if let Some(state) = removed {
+                let path = state.file_path.clone();
+                drop(state);
+                if let Err(rm_err) = tokio::fs::remove_file(&path).await {
+                    warn!(
+                        "[FileTransferDispatcher] failed to clean up {} after upload \
+                         abort: {rm_err}",
+                        path.display()
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -460,13 +522,21 @@ impl FileTransferDispatcher {
     ) -> std::io::Result<()> {
         let path = PathBuf::from(&req.file_path);
         if !path.exists() || !path.is_file() {
-            self.emit_text(
-                &connection_id,
-                FileTransferMessage::TransferError(TransferError {
-                    transfer_id: req.transfer_id.clone(),
-                    message: format!("File not found: {}", req.file_path),
-                }),
-            );
+            if let Err(e) = self
+                .emit_text(
+                    &connection_id,
+                    FileTransferMessage::TransferError(TransferError {
+                        transfer_id: req.transfer_id.clone(),
+                        message: format!("File not found: {}", req.file_path),
+                    }),
+                )
+                .await
+            {
+                warn!(
+                    "[FileTransferDispatcher] {}: failed to emit TransferError for {}: {e}",
+                    connection_id, req.transfer_id
+                );
+            }
             return Ok(());
         }
         let metadata = tokio::fs::metadata(&path).await?;
@@ -479,16 +549,25 @@ impl FileTransferDispatcher {
         let chunk_size = FILE_TRANSFER_CHUNK_SIZE_TX;
         let total_chunks = file_size.div_ceil(chunk_size as u64);
 
-        self.emit_text(
-            &connection_id,
-            FileTransferMessage::DownloadResponse(DownloadResponse {
-                transfer_id: req.transfer_id.clone(),
-                file_name: file_name.clone(),
-                file_size,
-                chunk_size,
-                total_chunks,
-            }),
-        );
+        if let Err(e) = self
+            .emit_text(
+                &connection_id,
+                FileTransferMessage::DownloadResponse(DownloadResponse {
+                    transfer_id: req.transfer_id.clone(),
+                    file_name: file_name.clone(),
+                    file_size,
+                    chunk_size,
+                    total_chunks,
+                }),
+            )
+            .await
+        {
+            warn!(
+                "[FileTransferDispatcher] {}: download {} aborted before open: {e}",
+                connection_id, req.transfer_id
+            );
+            return Ok(());
+        }
 
         let mut file = tokio::fs::File::open(&path).await?;
         let mut buf = vec![0u8; chunk_size];
@@ -514,18 +593,36 @@ impl FileTransferDispatcher {
                 break;
             }
             let chunk_bytes = build_binary_chunk(&req.transfer_id, chunk_index, &buf[..n]);
-            self.emit_binary(&connection_id, chunk_bytes);
+            // Fail-fast on file-lane closure: dropping `file` here
+            // releases the OS handle promptly. Continuing to read
+            // would just fill memory while no one drains.
+            if let Err(e) = self.emit_binary(&connection_id, chunk_bytes).await {
+                warn!(
+                    "[FileTransferDispatcher] {}: download {} aborted at chunk {}: {e}",
+                    connection_id, req.transfer_id, chunk_index
+                );
+                return Ok(());
+            }
             chunk_index += 1;
             if chunk_index.is_multiple_of(YIELD_EVERY_N_CHUNKS) {
                 tokio::task::yield_now().await;
             }
         }
-        self.emit_text(
-            &connection_id,
-            FileTransferMessage::TransferComplete(TransferComplete {
-                transfer_id: req.transfer_id.clone(),
-            }),
-        );
+        if let Err(e) = self
+            .emit_text(
+                &connection_id,
+                FileTransferMessage::TransferComplete(TransferComplete {
+                    transfer_id: req.transfer_id.clone(),
+                }),
+            )
+            .await
+        {
+            warn!(
+                "[FileTransferDispatcher] {}: TransferComplete emit failed for {}: {e}",
+                connection_id, req.transfer_id
+            );
+            return Ok(());
+        }
         info!(
             "[FileTransferDispatcher] download {} completed: {} bytes, {} chunks",
             req.transfer_id, file_size, chunk_index
@@ -533,38 +630,51 @@ impl FileTransferDispatcher {
         Ok(())
     }
 
-    fn emit_text(&self, connection_id: &str, msg: FileTransferMessage) {
+    /// Emit a JSON-encoded control message over the file lane. Returns
+    /// [`TransportError::Closed`] if the lane has gone away; serialization
+    /// failures are programmer bugs (`FileTransferMessage` is plain
+    /// serde) and are logged + dropped without surfacing as a transport
+    /// error.
+    async fn emit_text(
+        &self,
+        connection_id: &str,
+        msg: FileTransferMessage,
+    ) -> Result<(), TransportError> {
         let json = match serde_json::to_vec(&msg) {
             Ok(b) => b,
             Err(e) => {
                 error!("[FileTransferDispatcher] serialize control message failed: {e}");
-                return;
+                return Ok(());
             }
         };
-        self.emit_payload(connection_id, json, true);
+        self.emit_payload(connection_id, json, true).await
     }
 
-    fn emit_binary(&self, connection_id: &str, data: Vec<u8>) {
-        self.emit_payload(connection_id, data, false);
+    async fn emit_binary(
+        &self,
+        connection_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), TransportError> {
+        self.emit_payload(connection_id, data, false).await
     }
 
-    fn emit_payload(&self, connection_id: &str, data: Vec<u8>, is_text: bool) {
+    async fn emit_payload(
+        &self,
+        connection_id: &str,
+        data: Vec<u8>,
+        is_text: bool,
+    ) -> Result<(), TransportError> {
         let payload = FileTransferPayload {
             connection_id: connection_id.to_string(),
             data,
             is_text,
         };
-        if self
-            .error_tx
-            .send(WorkerToService::FileTransferData(payload))
-            .is_err()
-        {
-            warn!(
-                "[FileTransferDispatcher] failed to forward file transfer data for {} \
-                 (IPC writer gone)",
-                connection_id
-            );
-        }
+        // `send().await` parks on a full file lane (FILE_QUEUE_CAP = 32),
+        // which is exactly the backpressure we want — see module docs.
+        // It only returns `Err(Closed)` when the daemon-side receiver
+        // has dropped (peer crash / shutdown), in which case callers
+        // should fail-fast and release any open file handle.
+        self.file_sender.send(payload).await
     }
 }
 
@@ -572,6 +682,7 @@ impl FileTransferDispatcher {
 mod tests {
     use super::*;
     use crate::model::settings::Settings;
+    use desk_ipc_protocol::dual_transport::{EventReceiver, inprocess};
     use desk_ipc_protocol::message::MediaCodec;
     use tempfile::TempDir;
 
@@ -583,7 +694,7 @@ mod tests {
     /// `dispatcher_with_setting` instead.
     fn dispatcher() -> (
         FileTransferDispatcher,
-        mpsc::UnboundedReceiver<WorkerToService>,
+        Box<dyn EventReceiver<FileTransferPayload>>,
     ) {
         dispatcher_with_setting(Some(true))
     }
@@ -592,14 +703,44 @@ mod tests {
         allow_file_transfer: Option<bool>,
     ) -> (
         FileTransferDispatcher,
-        mpsc::UnboundedReceiver<WorkerToService>,
+        Box<dyn EventReceiver<FileTransferPayload>>,
+    ) {
+        // Use the default file-lane capacity for general-purpose tests.
+        // Tests that need to stress backpressure paths construct their
+        // own pair via `dispatcher_with_file_cap`.
+        dispatcher_with_file_cap(allow_file_transfer, FILE_QUEUE_CAP_FOR_TESTS_DEFAULT)
+    }
+
+    /// Default cap used by `dispatcher_with_setting`. Mirrors the
+    /// production `FILE_QUEUE_CAP = 32` — large enough that no test
+    /// in this module accidentally trips backpressure.
+    const FILE_QUEUE_CAP_FOR_TESTS_DEFAULT: usize = 256;
+
+    fn dispatcher_with_file_cap(
+        allow_file_transfer: Option<bool>,
+        file_cap: usize,
+    ) -> (
+        FileTransferDispatcher,
+        Box<dyn EventReceiver<FileTransferPayload>>,
     ) {
         let mut settings = Settings::default();
         settings.security.allow_file_transfer = allow_file_transfer;
         let shared = Arc::new(SharedSettings::from(settings));
         let hub = Arc::new(HostControlHub::new_local());
-        let (tx, rx) = mpsc::unbounded_channel();
-        (FileTransferDispatcher::new(tx, shared, hub), rx)
+        let (file_tx, file_rx) =
+            inprocess::make_event_inprocess_with_cap::<FileTransferPayload>(file_cap);
+        (FileTransferDispatcher::new(file_tx, shared, hub), file_rx)
+    }
+
+    /// Helper: assert the file lane has no pending payload within a
+    /// short window. `EventReceiver` is async-only (`recv -> Option<M>`)
+    /// so we approximate `try_recv` with a tiny timeout.
+    async fn assert_no_message(rx: &mut Box<dyn EventReceiver<FileTransferPayload>>) {
+        let res = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(
+            res.is_err(),
+            "expected file lane to be empty but got a message"
+        );
     }
 
     fn start_payload(connection_id: &str) -> StartMediaPayload {
@@ -629,9 +770,11 @@ mod tests {
             is_text: true,
         };
         d.handle_command(payload).await;
-        // Yield + try_recv to ensure no spawned download task emitted.
+        // Yield then assert nothing arrived: the spawned download
+        // task (if any) had a window to emit; an empty file lane
+        // means the liveness gate held.
         tokio::task::yield_now().await;
-        assert!(rx.try_recv().is_err());
+        assert_no_message(&mut rx).await;
     }
 
     /// `start_connection` then `stop_connection` flips active_connections.
@@ -681,10 +824,7 @@ mod tests {
         };
         d.handle_command(payload).await;
         tokio::task::yield_now().await;
-        assert!(
-            rx.try_recv().is_err(),
-            "denied command must not produce IPC output"
-        );
+        assert_no_message(&mut rx).await;
         // Cache is populated so subsequent commands short-circuit.
         let g = d.inner.lock().await;
         assert_eq!(g.permission_cache.get("c1").copied(), Some(false));
@@ -746,41 +886,32 @@ mod tests {
         };
         d.serve_download("c1".into(), req).await.expect("serve ok");
         // First message: DownloadResponse (text)
-        let m = rx.recv().await.expect("download response");
-        match m {
-            WorkerToService::FileTransferData(p) => {
-                assert!(p.is_text);
-                let s = String::from_utf8(p.data).unwrap();
-                let msg: FileTransferMessage = serde_json::from_str(&s).unwrap();
-                match msg {
-                    FileTransferMessage::DownloadResponse(r) => {
-                        assert_eq!(r.file_size as usize, payload_size);
-                        assert!(r.total_chunks >= 2);
-                    }
-                    other => panic!("expected DownloadResponse, got {other:?}"),
-                }
+        let p = rx.recv().await.expect("download response");
+        assert!(p.is_text);
+        let s = String::from_utf8(p.data).unwrap();
+        let msg: FileTransferMessage = serde_json::from_str(&s).unwrap();
+        match msg {
+            FileTransferMessage::DownloadResponse(r) => {
+                assert_eq!(r.file_size as usize, payload_size);
+                assert!(r.total_chunks >= 2);
             }
-            other => panic!("expected FileTransferData, got {other:?}"),
+            other => panic!("expected DownloadResponse, got {other:?}"),
         }
         // Followed by ≥2 binary chunks then a TransferComplete text.
         let mut binary_count = 0;
         let mut saw_complete = false;
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                WorkerToService::FileTransferData(p) if !p.is_text => {
-                    binary_count += 1;
-                    let (tid, _idx, body) = parse_binary_chunk(&p.data).expect("chunk parse");
-                    assert_eq!(tid, "00000000-0000-0000-0000-000000000001");
-                    assert!(!body.is_empty());
+        while let Some(p) = rx.recv().await {
+            if !p.is_text {
+                binary_count += 1;
+                let (tid, _idx, body) = parse_binary_chunk(&p.data).expect("chunk parse");
+                assert_eq!(tid, "00000000-0000-0000-0000-000000000001");
+                assert!(!body.is_empty());
+            } else {
+                let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+                if matches!(m, FileTransferMessage::TransferComplete(_)) {
+                    saw_complete = true;
+                    break;
                 }
-                WorkerToService::FileTransferData(p) if p.is_text => {
-                    let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
-                    if matches!(m, FileTransferMessage::TransferComplete(_)) {
-                        saw_complete = true;
-                        break;
-                    }
-                }
-                other => panic!("unexpected: {other:?}"),
             }
         }
         assert!(binary_count >= 2, "expected ≥2 chunks, got {binary_count}");
@@ -814,15 +945,10 @@ mod tests {
         })
         .await;
         // Expect UploadResponse text first
-        let resp = rx.recv().await.unwrap();
-        match resp {
-            WorkerToService::FileTransferData(p) => {
-                assert!(p.is_text);
-                let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
-                assert!(matches!(m, FileTransferMessage::UploadResponse(_)));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        let p = rx.recv().await.unwrap();
+        assert!(p.is_text);
+        let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+        assert!(matches!(m, FileTransferMessage::UploadResponse(_)));
         // Send 2 chunks
         for i in 0..total_chunks as u32 {
             let chunk_bytes =
@@ -835,18 +961,13 @@ mod tests {
             .await;
         }
         // Expect TransferComplete text
-        let complete = rx.recv().await.unwrap();
-        match complete {
-            WorkerToService::FileTransferData(p) => {
-                assert!(p.is_text);
-                let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
-                assert!(
-                    matches!(m, FileTransferMessage::TransferComplete(_)),
-                    "expected TransferComplete, got {m:?}"
-                );
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        let p = rx.recv().await.unwrap();
+        assert!(p.is_text);
+        let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+        assert!(
+            matches!(m, FileTransferMessage::TransferComplete(_)),
+            "expected TransferComplete, got {m:?}"
+        );
         // File on disk has the merged contents
         let written = tokio::fs::read(tmp.path().join("uploaded.bin"))
             .await
@@ -882,19 +1003,14 @@ mod tests {
         d.serve_download("c1".into(), req).await.unwrap();
         // Should have emitted only the DownloadResponse, no chunks,
         // no TransferComplete.
-        let mut messages = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            messages.push(msg);
-        }
-        assert_eq!(messages.len(), 1, "expected only DownloadResponse");
-        match &messages[0] {
-            WorkerToService::FileTransferData(p) => {
-                assert!(p.is_text);
-                let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
-                assert!(matches!(m, FileTransferMessage::DownloadResponse(_)));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        let p = rx.recv().await.expect("DownloadResponse");
+        assert!(p.is_text);
+        let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+        assert!(matches!(m, FileTransferMessage::DownloadResponse(_)));
+        // Nothing else should follow on the lane: cancel-check fires
+        // on the first loop iteration and returns before any chunk
+        // or TransferComplete is emitted.
+        assert_no_message(&mut rx).await;
     }
 
     /// Download for a non-existent file emits TransferError, not panic.
@@ -907,15 +1023,10 @@ mod tests {
             file_path: "/definitely/not/here.txt".into(),
         };
         d.serve_download("c1".into(), req).await.unwrap();
-        let m = rx.recv().await.unwrap();
-        match m {
-            WorkerToService::FileTransferData(p) => {
-                assert!(p.is_text);
-                let parsed: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
-                assert!(matches!(parsed, FileTransferMessage::TransferError(_)));
-            }
-            other => panic!("unexpected: {other:?}"),
-        }
+        let p = rx.recv().await.unwrap();
+        assert!(p.is_text);
+        let parsed: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+        assert!(matches!(parsed, FileTransferMessage::TransferError(_)));
     }
 
     /// Binary chunk shorter than the 40-byte header is silently
@@ -931,7 +1042,7 @@ mod tests {
             is_text: false,
         })
         .await;
-        assert!(rx.try_recv().is_err());
+        assert_no_message(&mut rx).await;
     }
 
     /// Binary chunk for an unknown transfer_id is dropped without
@@ -947,6 +1058,58 @@ mod tests {
             is_text: false,
         })
         .await;
-        assert!(rx.try_recv().is_err());
+        assert_no_message(&mut rx).await;
+    }
+
+    /// Backpressure regression: when the file lane is saturated, the
+    /// download loop must park on `emit_binary().await` instead of
+    /// reading the rest of the file into memory. Exercises the
+    /// end-to-end backpressure chain that fix #2026-05-10 was supposed
+    /// to restore — pre-fix the daemon's unbounded mpsc swallowed
+    /// every chunk and let the worker scan a 989 MB file straight
+    /// into the IPC queue.
+    #[tokio::test]
+    async fn download_blocks_when_file_lane_full() {
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("blocked.bin");
+        // Multi-chunk file so the loop has work to do beyond the
+        // initial DownloadResponse.
+        let payload_size = FILE_TRANSFER_CHUNK_SIZE_TX * 5;
+        let body = vec![b'x'; payload_size];
+        tokio::fs::write(&file_path, &body).await.unwrap();
+        // cap = 2: DownloadResponse + the very first chunk fill the
+        // lane. The second chunk's `emit_binary` must block.
+        let (d, mut rx) = dispatcher_with_file_cap(Some(true), 2);
+        d.start_connection(&start_payload("c1")).await;
+        let req = DownloadRequest {
+            transfer_id: "00000000-0000-0000-0000-000000000010".into(),
+            file_path: file_path.to_string_lossy().to_string(),
+        };
+        let dispatcher_clone = d.clone();
+        let download_handle =
+            tokio::spawn(
+                async move { dispatcher_clone.serve_download("c1".into(), req).await },
+            );
+        // Drain the first two emits so the spawn has time to push
+        // them. Each must arrive promptly.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("first emit (DownloadResponse) timed out — dispatcher stuck before lane fill")
+            .expect("file lane closed unexpectedly");
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("second emit (chunk 0) timed out")
+            .expect("file lane closed unexpectedly");
+        // Stop draining. The download should still be running —
+        // parked on `emit_binary().await` for chunk 1. Awaiting the
+        // join handle must time out: a completed serve_download here
+        // would prove the backpressure chain is broken.
+        let still_running =
+            tokio::time::timeout(std::time::Duration::from_millis(300), download_handle).await;
+        assert!(
+            still_running.is_err(),
+            "serve_download completed while file lane was saturated; \
+             backpressure chain is broken: {still_running:?}"
+        );
     }
 }

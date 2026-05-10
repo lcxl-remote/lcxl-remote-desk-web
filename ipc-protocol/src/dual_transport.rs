@@ -1,6 +1,6 @@
-//! # Dual-pipe IPC transport (Arch IV)
+//! # Multi-pipe IPC transport (Arch IV)
 //!
-//! Two independent transports run in parallel between daemon and worker:
+//! Three independent transports run in parallel between daemon and worker:
 //!
 //! 1. **`MediaTransport`** — single-direction, worker → daemon. Carries
 //!    encoded video / audio frames ([`MediaFrame`]). Bounded capacity,
@@ -16,6 +16,23 @@
 //!    eliminates head-of-line blocking under 4K extreme load (POC found
 //!    mouse latency dropped from 10 ms max to 0.56 ms P99 once the two
 //!    were on independent pipes).
+//!
+//! 3. **`FileTransport`** — bidirectional, carries
+//!    [`FileTransferPayload`](crate::message::FileTransferPayload).
+//!    Same wire shape as the event transport but at a smaller capacity
+//!    (`FILE_QUEUE_CAP = 32`) and on its own dedicated pipe. Carved
+//!    out so SCTP-level backpressure on a slow browser DataChannel can
+//!    propagate end-to-end (DC `dc.send().await` → daemon writer task
+//!    → per-connection bounded queue → file lane → worker download
+//!    loop → `file.read` blocks). Putting file-transfer on the event
+//!    lane would mean a slow GB-scale download head-of-line blocks
+//!    `ManagerFileListResponse` / `Heartbeat` / desktop switches —
+//!    fix-2026-05-05 (`pc_manager.rs` regression test
+//!    `event_lane_unaffected_by_file_lane_backlog`) explicitly forbids
+//!    that. The trade-off: a stalled connection will hold up *other*
+//!    connections' file transfers (single file lane, single drain
+//!    task). Acceptable today; if it becomes a problem,
+//!    per-connection sharding or fan-out spawn would be the next step.
 //!
 //! ## Design notes
 //!
@@ -82,6 +99,17 @@ pub const MEDIA_QUEUE_CAP: usize = 8;
 /// occasional one-shots). Sized so legitimate bursts never trigger the
 /// `await-on-full` backpressure path.
 pub const EVENT_QUEUE_CAP: usize = 256;
+
+/// Bounded capacity of the file-transfer transport queue (per direction).
+///
+/// File transfer rides its own dedicated lane so SCTP-level
+/// backpressure on the browser DataChannel can propagate end-to-end
+/// (DC `dc.send().await` → daemon writer task → per-connection bounded
+/// queue → file lane → worker download / upload loop) without
+/// head-of-line blocking the event lane (heartbeat, signaling, manager
+/// responses). 32 chunks × 60 KB ≈ 1.9 MB single-direction buffer
+/// cap, mirroring the Arch III high-watermark.
+pub const FILE_QUEUE_CAP: usize = 32;
 
 /// Default I-frame send timeout. If the media queue is full and an
 /// I-frame send blocks for this long, the worker treats it as a stuck
@@ -239,14 +267,35 @@ pub mod inprocess {
         )
     }
 
-    /// Construct an in-process event transport. Returns
-    /// `(sender, receiver)`.
-    pub fn make_event<M: Send + 'static>() -> (Arc<dyn EventSender<M>>, Box<dyn EventReceiver<M>>) {
-        let (tx, rx) = mpsc::channel::<M>(EVENT_QUEUE_CAP);
+    /// Construct an in-process event transport with a custom queue
+    /// capacity. The default `make_event` / `make_file_inprocess`
+    /// helpers should be preferred; this is exposed primarily so tests
+    /// can stress backpressure paths with a tiny capacity (e.g. 2)
+    /// without flooding the queue with thousands of payloads.
+    pub fn make_event_inprocess_with_cap<M: Send + 'static>(
+        cap: usize,
+    ) -> (Arc<dyn EventSender<M>>, Box<dyn EventReceiver<M>>) {
+        let (tx, rx) = mpsc::channel::<M>(cap);
         (
             Arc::new(InProcessEventSender { tx }),
             Box::new(InProcessEventReceiver { rx }),
         )
+    }
+
+    /// Construct an in-process event transport at the default
+    /// `EVENT_QUEUE_CAP`. Returns `(sender, receiver)`.
+    pub fn make_event<M: Send + 'static>() -> (Arc<dyn EventSender<M>>, Box<dyn EventReceiver<M>>) {
+        make_event_inprocess_with_cap(EVENT_QUEUE_CAP)
+    }
+
+    /// Construct an in-process file-transfer transport at
+    /// `FILE_QUEUE_CAP`. The semantics are identical to `make_event`
+    /// (await-backpressure, never-drop) but with the smaller capacity
+    /// reserved for the file lane so each direction's buffer is
+    /// bounded near the Arch III watermark.
+    pub fn make_file_inprocess<M: Send + 'static>()
+    -> (Arc<dyn EventSender<M>>, Box<dyn EventReceiver<M>>) {
+        make_event_inprocess_with_cap(FILE_QUEUE_CAP)
     }
 
     pub struct InProcessMediaSender {
@@ -433,14 +482,16 @@ pub mod framed {
 
     // ---- Event (bi-directional, generic over message type) ----
 
-    /// Spawn an event writer task. Mirrors [`spawn_media_sender`] but
-    /// uses `EVENT_QUEUE_CAP` and the never-drop `send().await` policy.
-    pub fn spawn_event_sender<W, M>(writer_io: W) -> Arc<dyn EventSender<M>>
+    /// Spawn an event writer task with a custom queue capacity.
+    /// Mirrors [`spawn_media_sender`] but uses the never-drop
+    /// `send().await` policy. The default helpers `spawn_event_sender`
+    /// / `spawn_file_sender` should be preferred.
+    pub fn spawn_event_sender_with_cap<W, M>(writer_io: W, cap: usize) -> Arc<dyn EventSender<M>>
     where
         W: AsyncWrite + Unpin + Send + 'static,
         M: Encode + Send + 'static,
     {
-        let (tx, mut rx) = mpsc::channel::<M>(EVENT_QUEUE_CAP);
+        let (tx, mut rx) = mpsc::channel::<M>(cap);
         tokio::spawn(async move {
             let mut sink = Framed::new(writer_io, make_codec());
             while let Some(msg) = rx.recv().await {
@@ -458,6 +509,27 @@ pub mod framed {
             }
         });
         Arc::new(FramedEventSender { tx })
+    }
+
+    /// Spawn an event writer task at the default `EVENT_QUEUE_CAP`.
+    pub fn spawn_event_sender<W, M>(writer_io: W) -> Arc<dyn EventSender<M>>
+    where
+        W: AsyncWrite + Unpin + Send + 'static,
+        M: Encode + Send + 'static,
+    {
+        spawn_event_sender_with_cap(writer_io, EVENT_QUEUE_CAP)
+    }
+
+    /// Spawn a file-transfer writer task at `FILE_QUEUE_CAP`. Same
+    /// wire format and semantics as `spawn_event_sender`; carved out
+    /// so the file lane can run its own bounded queue independent of
+    /// the event lane.
+    pub fn spawn_file_sender<W, M>(writer_io: W) -> Arc<dyn EventSender<M>>
+    where
+        W: AsyncWrite + Unpin + Send + 'static,
+        M: Encode + Send + 'static,
+    {
+        spawn_event_sender_with_cap(writer_io, FILE_QUEUE_CAP)
     }
 
     pub fn make_event_receiver<R, M>(reader_io: R) -> Box<dyn EventReceiver<M>>
@@ -668,5 +740,69 @@ mod tests {
             receiver.recv().await,
             Some(ServiceToWorker::Shutdown)
         ));
+    }
+
+    // ---------------- File lane (separate bounded queue) ----------------
+
+    /// `make_event_inprocess_with_cap` honors a custom capacity. We
+    /// fill it with `cap` payloads, then assert the next send is
+    /// observably blocked (timeout) until the consumer drains one
+    /// slot. This is the testing primitive
+    /// `download_blocks_when_file_lane_full` in the worker dispatcher
+    /// will rely on.
+    #[tokio::test]
+    async fn file_lane_blocks_when_full_and_unblocks_on_drain() {
+        let (tx, mut rx) = inprocess::make_event_inprocess_with_cap::<ServiceToWorker>(2);
+        // Fill capacity.
+        tx.send(ServiceToWorker::Shutdown).await.unwrap();
+        tx.send(ServiceToWorker::Shutdown).await.unwrap();
+
+        // Third send must NOT complete within a short timeout.
+        let third = tx.send(ServiceToWorker::Shutdown);
+        let res = tokio::time::timeout(Duration::from_millis(50), third).await;
+        assert!(
+            res.is_err(),
+            "third send should be backpressured, got: {res:?}"
+        );
+
+        // Drain one; the (currently parked) third send is allowed to
+        // complete on its own task. Spawn a fresh send and verify it
+        // resolves quickly once a slot frees.
+        rx.recv().await.expect("first drain");
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(Duration::from_millis(100), tx.send(ServiceToWorker::Shutdown))
+            .await
+            .expect("send timed out post-drain")
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "send took too long after drain: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `make_file_inprocess` returns a transport at exactly
+    /// `FILE_QUEUE_CAP`. Saturate it and confirm the (cap+1)-th send
+    /// is observably blocked.
+    #[tokio::test]
+    async fn make_file_inprocess_uses_file_queue_cap() {
+        let (tx, mut _rx) = inprocess::make_file_inprocess::<ServiceToWorker>();
+        // Fill exactly FILE_QUEUE_CAP slots without consuming.
+        for _ in 0..FILE_QUEUE_CAP {
+            tokio::time::timeout(Duration::from_millis(50), tx.send(ServiceToWorker::Shutdown))
+                .await
+                .expect("send-within-cap should not block")
+                .unwrap();
+        }
+        // (cap + 1)-th must block.
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(50),
+            tx.send(ServiceToWorker::Shutdown),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "send beyond FILE_QUEUE_CAP should block, got: {blocked:?}"
+        );
     }
 }

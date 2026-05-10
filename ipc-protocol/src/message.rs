@@ -76,15 +76,9 @@ pub enum ServiceToWorker {
     /// Worker replies via [`WorkerToService::ClipboardRead`].
     ClipboardRequest(ConnectionRefPayload),
 
-    // ---------- Arch IV file / whiteboard pass-through ----------
-    /// Opaque file-transfer command from the browser DataChannel. Worker
-    /// dispatches into its existing `file_transfer` module. Carries
-    /// `is_text` so the worker can distinguish JSON control frames
-    /// (download/upload requests, completion ack) from binary chunk
-    /// uploads, matching the Arch III `DataChannelMessage::is_string`
-    /// dispatch in `service::file_transfer::handle_file_transfer_event`.
-    FileTransferCommand(FileTransferPayload),
-
+    // ---------- Arch IV whiteboard pass-through ----------
+    // (File-transfer commands moved to a dedicated file lane; see
+    // `dual_transport::FILE_QUEUE_CAP` and `WorkerInitPayload::file_pipe_name`.)
     /// Opaque whiteboard / private-screen / Tauri-shell command from the
     /// browser DataChannel. Worker dispatches via the existing
     /// host_control forwarder.
@@ -210,12 +204,8 @@ pub enum WorkerToService {
     /// Routed by daemon to the per-connection `cursor_sync` DC.
     CursorData(CursorDataPayload),
 
-    /// Worker → daemon response for file-transfer commands. Carries
-    /// `is_text` so the daemon writes the bytes as a text frame (JSON
-    /// control message — DownloadResponse / TransferComplete /
-    /// TransferError) or a binary frame (downloaded chunk) on the
-    /// browser's `file_transfer_event` DataChannel.
-    FileTransferData(FileTransferPayload),
+    // (File-transfer responses moved to a dedicated file lane; see
+    // `dual_transport::FILE_QUEUE_CAP` and `WorkerInitPayload::file_pipe_name`.)
 
     // ---------- Arch IV typed-IPC migration batch 1 ----------
     /// Worker → daemon notification that the per-connection private
@@ -314,6 +304,20 @@ pub struct WorkerInitPayload {
     /// mode" until the cut that wires media_producer (PR 2 / cut 4).
     #[serde(default)]
     pub media_pipe_name: Option<String>,
+
+    /// Arch IV file-transfer pipe name. The worker connects to this
+    /// pipe in addition to the event + media pipes so file-transfer
+    /// chunks (download responses, upload commands) travel over a
+    /// dedicated bidirectional transport. Carries
+    /// [`FileTransferPayload`] in both directions at
+    /// `FILE_QUEUE_CAP = 32` per direction. `None` only in portable /
+    /// in-process mode where the daemon constructs an in-process
+    /// channel pair instead — in named-pipe `ServiceDaemon` mode the
+    /// daemon **must** populate this field; the worker treats a
+    /// missing `file_pipe_name` in that mode as a fatal init error
+    /// and exits via `WorkerToService::Error`.
+    #[serde(default)]
+    pub file_pipe_name: Option<String>,
 
     /// Absolute path of the on-disk settings file the daemon is using.
     ///
@@ -858,6 +862,7 @@ mod tests {
             auth_token: Some("ipc-token".to_string()),
             host_upstream_url: Some("ws://127.0.0.1:8082/ws/host_upstream".to_string()),
             media_pipe_name: Some(r"\\.\pipe\lcxl-desk-ipc-7-uuid-media".to_string()),
+            file_pipe_name: Some(r"\\.\pipe\lcxl-desk-file-ipc-7-uuid".to_string()),
             config_file_path: Some(r"C:\ProgramData\lcxl\settings.toml".to_string()),
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -867,6 +872,7 @@ mod tests {
         assert_eq!(decoded.auth_token, original.auth_token);
         assert_eq!(decoded.host_upstream_url, original.host_upstream_url);
         assert_eq!(decoded.media_pipe_name, original.media_pipe_name);
+        assert_eq!(decoded.file_pipe_name, original.file_pipe_name);
         assert_eq!(decoded.config_file_path, original.config_file_path);
     }
 
@@ -886,8 +892,9 @@ mod tests {
     }
 
     /// Older daemons that don't yet emit `host_upstream_url` /
-    /// `media_pipe_name` / `config_file_path` must still be accepted by
-    /// newer workers (all three fields carry `#[serde(default)]`).
+    /// `media_pipe_name` / `file_pipe_name` / `config_file_path` must
+    /// still be accepted by newer workers (all four fields carry
+    /// `#[serde(default)]`).
     #[test]
     fn worker_init_payload_accepts_missing_optional_fields() {
         let legacy = serde_json::json!({
@@ -902,6 +909,7 @@ mod tests {
         assert!(decoded.host_upstream_url.is_none());
         assert!(decoded.auth_token.is_none());
         assert!(decoded.media_pipe_name.is_none());
+        assert!(decoded.file_pipe_name.is_none());
         assert!(decoded.config_file_path.is_none());
     }
 
@@ -1121,39 +1129,29 @@ mod tests {
         }
     }
 
-    /// PR 4 cut 2: `FileTransferPayload` carries an `is_text` flag
-    /// alongside `connection_id` + `data`. Verify both true and false
-    /// survive round-trip — a flipped bit would break the daemon's
+    /// `FileTransferPayload` carries an `is_text` flag alongside
+    /// `connection_id` + `data`. Verify both true and false survive
+    /// round-trip — a flipped bit would break the daemon's
     /// `dc.send_text` vs `dc.send` decision and corrupt downloads.
+    /// Since the file-transfer payload now rides its own dedicated
+    /// IPC lane (see `dual_transport::FILE_QUEUE_CAP`), this round-trip
+    /// is on the bare `FileTransferPayload` struct rather than a
+    /// `WorkerToService` / `ServiceToWorker` enum wrapper.
     #[test]
     fn file_transfer_payload_round_trip_preserves_is_text_flag() {
+        let config = bincode::config::standard();
         for is_text in [true, false] {
-            let cmd = ServiceToWorker::FileTransferCommand(FileTransferPayload {
+            let original = FileTransferPayload {
                 connection_id: "ft-1".to_string(),
                 data: vec![1, 2, 3],
                 is_text,
-            });
-            match bincode_round_trip(&cmd) {
-                ServiceToWorker::FileTransferCommand(p) => {
-                    assert_eq!(p.connection_id, "ft-1");
-                    assert_eq!(p.data, vec![1, 2, 3]);
-                    assert_eq!(p.is_text, is_text);
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
-            let resp = WorkerToService::FileTransferData(FileTransferPayload {
-                connection_id: "ft-1".to_string(),
-                data: vec![9, 8, 7],
-                is_text,
-            });
-            match bincode_round_trip(&resp) {
-                WorkerToService::FileTransferData(p) => {
-                    assert_eq!(p.connection_id, "ft-1");
-                    assert_eq!(p.data, vec![9, 8, 7]);
-                    assert_eq!(p.is_text, is_text);
-                }
-                other => panic!("unexpected: {other:?}"),
-            }
+            };
+            let bytes = bincode::encode_to_vec(&original, config).expect("encode");
+            let (decoded, _): (FileTransferPayload, _) =
+                bincode::decode_from_slice(&bytes, config).expect("decode");
+            assert_eq!(decoded.connection_id, "ft-1");
+            assert_eq!(decoded.data, vec![1, 2, 3]);
+            assert_eq!(decoded.is_text, is_text);
         }
     }
 

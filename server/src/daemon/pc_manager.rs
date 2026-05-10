@@ -83,6 +83,22 @@ use desk_signal_facade::model::signal::InitSignalingData;
 use std::time::Duration;
 use webrtc::media::Sample;
 
+/// Bounded capacity of the per-connection file-transfer writer queue.
+///
+/// Sized just above the SCTP-internal high-watermark so the daemon's
+/// drain task `await`s on a full queue (= the worker's file lane is
+/// being drained faster than the browser's DC accepts). The
+/// `await`-on-full propagates back through the file pipe to the
+/// worker's `emit_*` helpers, which ultimately blocks
+/// `serve_download` before reading the next disk chunk — the central
+/// piece of the end-to-end backpressure chain re-established for
+/// daemon mode.
+///
+/// Choosing 16 rather than something larger keeps the per-PC memory
+/// footprint bounded at ~960 KB (16 × 60 KB chunk) regardless of
+/// active downloads.
+const FILE_TRANSFER_WRITER_QUEUE_CAP: usize = 16;
+
 /// Filter the request's ICE servers down to the ones this node should
 /// actually use given the local `traversal_mode` and `startup_mode`.
 ///
@@ -250,26 +266,32 @@ pub struct PeerConnectionContext {
     /// `ServiceToWorker::ClipboardWrite`).
     pub clipboard_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     /// Set when the browser opens the `file_transfer_event`
-    /// DataChannel. PR 4 cut 2 wires worker-side
-    /// `WorkerToService::FileTransferData` to `dc.send_text(...)` /
-    /// `dc.send(...)` (per-payload `is_text`) here. Browser→worker
-    /// chunks and control messages still flow through the standard
-    /// router as `ServiceToWorker::FileTransferCommand`.
+    /// DataChannel. PR 4 cut 2 wires worker-side download chunks +
+    /// control replies (received over the **file lane** — see
+    /// `desk-ipc-protocol::dual_transport`) to `dc.send_text(...)` /
+    /// `dc.send(...)` here. Browser→worker chunks and control
+    /// messages do **not** flow through `ServiceToWorker` anymore;
+    /// they ride the file lane via
+    /// [`crate::daemon::worker_manager::WorkerManager::send_file_to_worker`].
     pub file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     /// Sender into the per-connection file-transfer writer task spawned
     /// in [`PcRegistry::create_for_request_remote`]. The task drains
     /// payloads serially and calls `dc.send` / `dc.send_text` on the
-    /// matching `file_transfer_data_channel`. Decouples SCTP write
-    /// back-pressure from the daemon's main IPC dispatch loop in
-    /// `signaling_proxy::run_signaling_proxy`: a 989 MB download
-    /// stalling on a slow / blocked DataChannel no longer head-of-line
-    /// blocks unrelated `WorkerToService::ManagerFileListResponse` and
-    /// other typed-IPC traffic. Send is non-blocking
-    /// (`UnboundedSender::send`); the task exits naturally when this
-    /// sender is dropped, which happens when the registry releases the
-    /// last `Arc` reference to this `PeerConnectionContext` (i.e. after
+    /// matching `file_transfer_data_channel`.
+    ///
+    /// Bounded at [`FILE_TRANSFER_WRITER_QUEUE_CAP`] = 16 so a slow
+    /// browser DC head-of-line blocks the file-lane drain rather than
+    /// silently buffering unbounded chunks (the regression that drove
+    /// fix-2026-05-05): the daemon-side file-lane drain task awaits
+    /// on this `Sender::send().await` when full, which in turn parks
+    /// the next worker→daemon file-lane payload, which in turn parks
+    /// `dispatcher.emit_binary().await` inside the worker's
+    /// `serve_download` loop. End-to-end SCTP backpressure restored.
+    /// The task exits naturally when this sender is dropped, which
+    /// happens when the registry releases the last `Arc` reference to
+    /// this `PeerConnectionContext` (i.e. after
     /// `cleanup_pc → registry.remove`).
-    pub file_transfer_writer_tx: mpsc::UnboundedSender<FileTransferPayload>,
+    pub file_transfer_writer_tx: mpsc::Sender<FileTransferPayload>,
     /// PR 6: pause flag set by [`PcRegistry::pause_all_media`] before a
     /// worker swap. While set, [`write_video_frame`] drops samples so
     /// `webrtc-rs` does not push frames the new encoder hasn't anchored
@@ -367,7 +389,7 @@ impl PcRegistry {
         let file_transfer_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>> =
             Arc::new(RwLock::new(None));
         let (file_transfer_writer_tx, file_transfer_writer_rx) =
-            mpsc::unbounded_channel::<FileTransferPayload>();
+            mpsc::channel::<FileTransferPayload>(FILE_TRANSFER_WRITER_QUEUE_CAP);
         spawn_file_transfer_writer_task(
             connection_id.to_string(),
             file_transfer_writer_rx,
@@ -643,7 +665,12 @@ fn route_to_service_msg(
     route: DcRoute,
     connection_id: &str,
     data: Vec<u8>,
-    is_text: bool,
+    // Retained on the signature so call sites keep parity with the
+    // browser-side wire shape (text vs binary). Currently unused
+    // because the only route that cared — FileTransfer — was carved
+    // out onto its own dedicated lane; kept here for future routes
+    // (e.g. whiteboard binary blobs) without churning every call site.
+    _is_text: bool,
 ) -> ServiceToWorker {
     match route {
         DcRoute::Mouse => ServiceToWorker::MouseInput(InputPayload {
@@ -662,15 +689,14 @@ fn route_to_service_msg(
             connection_id: connection_id.to_string(),
             data,
         }),
-        // PR 4 cut 2: file_transfer carries the text/binary
-        // discriminator so the worker dispatches to the JSON-control
-        // path or the binary-chunk path correctly. Other routes ignore
-        // `is_text` (their wire shape is text-only on the browser side).
-        DcRoute::FileTransfer => ServiceToWorker::FileTransferCommand(FileTransferPayload {
-            connection_id: connection_id.to_string(),
-            data,
-            is_text,
-        }),
+        // FileTransfer is handled separately in
+        // `install_browser_dc_message_forwarder` and never reaches
+        // `route_to_service_msg`: it rides its own dedicated file lane
+        // (see `desk-ipc-protocol::dual_transport`), not the event lane.
+        DcRoute::FileTransfer => unreachable!(
+            "FileTransfer is routed through WorkerManager::send_file_to_worker, \
+             not the event lane"
+        ),
         DcRoute::Whiteboard => ServiceToWorker::WhiteboardCommand(OpaqueConnectionPayload {
             connection_id: connection_id.to_string(),
             data,
@@ -784,8 +810,10 @@ pub fn register_data_channel_router(
                      for PR 4 worker→daemon file write-back"
                 );
                 // Fall through to install the on_message forwarder so
-                // browser→host commands and chunks still flow as
-                // FileTransferCommand IPC.
+                // browser→host commands and chunks flow over the
+                // dedicated file lane (not the event lane) via
+                // `WorkerManager::send_file_to_worker` — see the
+                // FileTransfer special case inside the forwarder.
             }
             install_browser_dc_message_forwarder(
                 dc,
@@ -822,6 +850,31 @@ fn install_browser_dc_message_forwarder(
                     log::debug!(
                         "[DcRouter] {connection_id}: dropped {route:?} message (permission denied)"
                     );
+                    return;
+                }
+                // FileTransfer rides its own dedicated lane — see
+                // `desk-ipc-protocol::dual_transport`. Routing it
+                // through `send_to_worker` (event lane) would put the
+                // GB-scale download bytes back into the same queue as
+                // heartbeats / manager responses, which is exactly the
+                // HOL-blocking regression fix-2026-05-05 forbids.
+                if route == DcRoute::FileTransfer {
+                    let payload = FileTransferPayload {
+                        connection_id: connection_id.clone(),
+                        data: bytes,
+                        is_text,
+                    };
+                    if let Err(e) = worker_mgr.send_file_to_worker(payload).await {
+                        // Possible causes: worker not yet up (file lane
+                        // not yet ready) or peer crashed mid-stream.
+                        // Either way the browser's SCTP timeout will
+                        // surface the failure to the user; we simply
+                        // log and drop the command here.
+                        log::warn!(
+                            "[DcRouter] {connection_id}: failed to forward FileTransfer \
+                             to worker via file lane: {e}"
+                        );
+                    }
                     return;
                 }
                 let svc_msg = route_to_service_msg(route, &connection_id, bytes, is_text);
@@ -1678,7 +1731,7 @@ pub async fn write_clipboard_data(registry: &PcRegistry, payload: ClipboardPaylo
 ///   teardown when the context has dropped but a stale payload was
 ///   already in the daemon's `worker_rx` queue.
 pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransferPayload) {
-    let ctx = match registry.get(&payload.connection_id).await {
+    let ctx_arc = match registry.get(&payload.connection_id).await {
         Some(c) => c,
         None => {
             log::trace!(
@@ -1688,11 +1741,19 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
             return;
         }
     };
-    let ctx = ctx.read().await;
-    if ctx.file_transfer_writer_tx.send(payload).is_err() {
+    // Clone the writer + connection_id under the read guard, then DROP
+    // the guard before awaiting `Sender::send`. Holding the read guard
+    // across the bounded send would block every other reader of this
+    // PeerConnectionContext (clipboard / signaling state / ...) for the
+    // entire SCTP-backpressure pause — the daemon's main IPC drain
+    // would also park, defeating the lane-separation guarantee.
+    let (writer_tx, conn_id) = {
+        let ctx = ctx_arc.read().await;
+        (ctx.file_transfer_writer_tx.clone(), ctx.connection_id.clone())
+    };
+    if let Err(e) = writer_tx.send(payload).await {
         log::debug!(
-            "[pc_manager] file transfer writer task gone for {} — context torn down",
-            ctx.connection_id
+            "[pc_manager] file transfer writer task gone for {conn_id}: {e}"
         );
     }
 }
@@ -1718,7 +1779,7 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
 ///   `TransferError` retransmission.
 fn spawn_file_transfer_writer_task(
     connection_id: String,
-    mut rx: mpsc::UnboundedReceiver<FileTransferPayload>,
+    mut rx: mpsc::Receiver<FileTransferPayload>,
     dc_slot: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
 ) {
     // `tokio::spawn` (not `actix_web::rt::spawn`) is intentional:
@@ -3259,33 +3320,9 @@ mod tests {
             ServiceToWorker::ClipboardWrite(p) => assert_eq!(p.data, data),
             other => panic!("expected ClipboardWrite, got {other:?}"),
         }
-        match route_to_service_msg(DcRoute::FileTransfer, cid, data.clone(), true) {
-            ServiceToWorker::FileTransferCommand(p) => {
-                assert_eq!(p.data, data);
-                assert!(p.is_text, "is_text=true must propagate to payload");
-            }
-            other => panic!("expected FileTransferCommand, got {other:?}"),
-        }
         match route_to_service_msg(DcRoute::Whiteboard, cid, data.clone(), true) {
             ServiceToWorker::WhiteboardCommand(p) => assert_eq!(p.data, data),
             other => panic!("expected WhiteboardCommand, got {other:?}"),
-        }
-    }
-
-    /// PR 4 cut 2: when the browser sends a binary file-transfer
-    /// chunk, the daemon must forward `is_text=false` so the worker
-    /// dispatches into the chunk-write path rather than trying to
-    /// parse JSON.
-    #[test]
-    fn route_to_service_msg_file_transfer_preserves_binary_flag() {
-        let cid = "conn-binary";
-        let data = vec![0xFFu8, 0x00, 0xAA, 0x55];
-        match route_to_service_msg(DcRoute::FileTransfer, cid, data.clone(), false) {
-            ServiceToWorker::FileTransferCommand(p) => {
-                assert_eq!(p.data, data);
-                assert!(!p.is_text, "is_text=false must propagate for binary chunks");
-            }
-            other => panic!("expected FileTransferCommand, got {other:?}"),
         }
     }
 
@@ -3297,6 +3334,20 @@ mod tests {
     #[should_panic(expected = "CursorSync DC has no upstream message variant")]
     fn route_to_service_msg_cursor_sync_panics() {
         let _ = route_to_service_msg(DcRoute::CursorSync, "c", vec![], true);
+    }
+
+    /// FileTransfer rides the dedicated file lane (see
+    /// `desk-ipc-protocol::dual_transport`), not the event-lane
+    /// `route_to_service_msg`. Calling the router on it is a
+    /// programmer error and must panic — the production forwarder
+    /// special-cases FileTransfer before calling
+    /// `route_to_service_msg`. Pinning the panic message guards
+    /// against a future arm being added that silently moves file
+    /// bytes back onto the event lane.
+    #[test]
+    #[should_panic(expected = "FileTransfer is routed through")]
+    fn route_to_service_msg_file_transfer_panics() {
+        let _ = route_to_service_msg(DcRoute::FileTransfer, "c", vec![], true);
     }
 
     /// `accept_control = false` blocks Mouse / MouseMove / Keyboard
@@ -3697,11 +3748,11 @@ mod tests {
 
     /// Dispatching to an unknown `connection_id` (race against
     /// `cleanup_pc → registry.remove`) is also expected to return
-    /// without spawning anything new. Covers the path where a worker
-    /// emits a stale `FileTransferData` for a PC the daemon has
-    /// already dropped — pre-fix this hit the same DC lookup as a
-    /// live PC; post-fix it short-circuits at the registry lookup
-    /// before any sender clone.
+    /// without spawning anything new. Covers the path where the
+    /// daemon's file-lane drain task picks up a stale payload for a
+    /// PC the registry already removed — pre-fix this hit the same DC
+    /// lookup as a live PC; post-fix it short-circuits at the registry
+    /// lookup before any sender clone.
     #[tokio::test]
     async fn write_file_transfer_data_after_registry_remove_is_silent_noop() {
         let registry = PcRegistry::new();
@@ -3739,7 +3790,7 @@ mod tests {
     #[tokio::test]
     async fn file_transfer_writer_task_exits_when_sender_drops() {
         let dc_slot: Arc<RwLock<Option<Arc<RTCDataChannel>>>> = Arc::new(RwLock::new(None));
-        let (tx, rx) = mpsc::unbounded_channel::<FileTransferPayload>();
+        let (tx, rx) = mpsc::channel::<FileTransferPayload>(2);
         spawn_file_transfer_writer_task("conn-lifecycle".to_string(), rx, dc_slot);
         // Push one payload (silently dropped — no DC) then drop the
         // sender. The task drains the queued payload, observes
@@ -3749,6 +3800,7 @@ mod tests {
             data: b"queued".to_vec(),
             is_text: true,
         })
+        .await
         .expect("send pre-drop");
         drop(tx);
         // 200 ms is generous — the loop body for a no-DC payload is
@@ -3768,6 +3820,75 @@ mod tests {
         // current_thread executor a chance to drive the task to
         // completion under the test runtime.
         tokio::task::yield_now().await;
+    }
+
+    /// Backpressure regression for the daemon side: when the
+    /// per-connection writer queue saturates,
+    /// `write_file_transfer_data` must `await` on the bounded
+    /// `Sender::send` instead of dropping silently. Pre-fix the queue
+    /// was unbounded so it always succeeded immediately, defeating the
+    /// chain that pushes backpressure back through the file lane to
+    /// the worker's `serve_download` loop.
+    ///
+    /// We swap the writer sender on a registered PC for a tiny
+    /// (cap = 2) channel whose receiver we never drain, then assert
+    /// the third dispatch parks for at least 100 ms before draining
+    /// frees a slot.
+    #[tokio::test]
+    async fn write_file_transfer_data_awaits_when_writer_queue_full() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-bp", &request_remote, &s)
+            .await
+            .expect("create");
+        // Hijack the writer slot with a starving channel.
+        let (slow_tx, mut slow_rx) = mpsc::channel::<FileTransferPayload>(2);
+        {
+            let ctx_arc = registry.get("conn-bp").await.unwrap();
+            let mut ctx = ctx_arc.write().await;
+            ctx.file_transfer_writer_tx = slow_tx;
+        }
+        let mk = |tag: &str| FileTransferPayload {
+            connection_id: "conn-bp".to_string(),
+            data: tag.as_bytes().to_vec(),
+            is_text: true,
+        };
+        // First two writes fill the queue and return promptly.
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            write_file_transfer_data(&registry, mk("p1")),
+        )
+        .await
+        .expect("first write should not block");
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            write_file_transfer_data(&registry, mk("p2")),
+        )
+        .await
+        .expect("second write should not block");
+        // Third must park on `Sender::send().await` — assert it
+        // doesn't return inside the timeout.
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            write_file_transfer_data(&registry, mk("p3")),
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "third write should backpressure on bounded queue, got: {blocked:?}"
+        );
+        // Drain one slot — a fresh write completes promptly.
+        slow_rx.recv().await.expect("drain p1");
+        tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            write_file_transfer_data(&registry, mk("p4")),
+        )
+        .await
+        .expect("post-drain write should complete");
     }
 
     // ============== Cut 5: RTCP PLI/FIR identity ==============

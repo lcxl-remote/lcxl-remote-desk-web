@@ -12,12 +12,12 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        DesktopChangedPayload, HeartbeatPayload, ListTerminalResponsePayload,
-        ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
-        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
-        PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
-        SignalingErrorPayload, TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload,
-        WorkerToService,
+        DesktopChangedPayload, FileTransferPayload, HeartbeatPayload,
+        ListTerminalResponsePayload, ManagerFileListResponsePayload,
+        ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
+        ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
+        ReplyFromTerminalPayload, ServiceToWorker, SignalingErrorPayload,
+        TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -439,10 +439,46 @@ impl WorkerSession {
             None => None,
         };
 
+        // Arch IV file lane: dedicated bidirectional pipe for download
+        // chunks / control replies / upload chunks / cancels — split
+        // off from the event lane so SCTP backpressure on a slow
+        // browser DataChannel does not head-of-line block heartbeats /
+        // manager responses. The daemon always provisions this pipe
+        // for named-pipe workers, so a missing `file_pipe_name` is a
+        // fatal init error: the worker surfaces an `Error` and exits
+        // (no fallback, since that would silently put file bytes back
+        // on the event lane).
+        let file_pipe_name = match init_payload.file_pipe_name.as_deref() {
+            Some(name) => name,
+            None => {
+                let msg = "WorkerInit lacked file_pipe_name in named-pipe mode; \
+                           daemon must provision a dedicated file lane";
+                error!("{msg}");
+                let err = WorkerToService::Error(desk_ipc_protocol::message::ErrorPayload {
+                    code: -1,
+                    message: msg.to_string(),
+                    recoverable: false,
+                    connection_id: None,
+                });
+                let _ = event_tx.send(err).await;
+                return Err(msg.into());
+            }
+        };
+        info!("Worker connecting to file pipe: {file_pipe_name}");
+        let (file_sender, file_receiver) = connect_file_pipe(file_pipe_name).await?;
+
         // Named-pipe path: no shared hub — worker constructs its own
         // (Forwarder if `host_upstream_url` is set, Local otherwise).
-        self.run_with_transports(init_payload, event_rx, event_tx, media_sender, None)
-            .await
+        self.run_with_transports(
+            init_payload,
+            event_rx,
+            event_tx,
+            media_sender,
+            file_sender,
+            file_receiver,
+            None,
+        )
+        .await
     }
 
     /// Transport-agnostic main loop. Used by both:
@@ -474,6 +510,8 @@ impl WorkerSession {
         mut event_rx: Box<dyn EventReceiver<ServiceToWorker>>,
         event_tx: Arc<dyn EventSender<WorkerToService>>,
         media_sender: Option<Arc<dyn MediaSender>>,
+        file_sender: Arc<dyn EventSender<FileTransferPayload>>,
+        mut file_receiver: Box<dyn EventReceiver<FileTransferPayload>>,
         shared_hub: Option<Arc<HostControlHub>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let settings = match serde_json::from_str::<Settings>(&init_payload.config_json) {
@@ -630,9 +668,13 @@ impl WorkerSession {
         // shared settings + host-control hub so it can run the per-
         // connection `allow_file_transfer` gate (which the daemon-side
         // DC router intentionally passes through; see the bug fix
-        // notes in `handle_command`).
+        // notes in `handle_command`). The dispatcher emits download
+        // chunks / control replies onto the dedicated file lane via
+        // `file_sender`; daemon-bound traffic never goes through the
+        // event lane (`writer_tx`) anymore — that path was retired
+        // when fix-2026-05-05 demonstrated the head-of-line risk.
         let file_transfer_dispatcher = FileTransferDispatcher::new(
-            writer_tx.clone(),
+            file_sender,
             shared_settings.clone(),
             Arc::clone(&host_control_hub),
         );
@@ -682,6 +724,26 @@ impl WorkerSession {
                 }
             }
         });
+
+        // File-lane drain task: hands inbound `FileTransferPayload`
+        // frames straight to the dispatcher. Runs independent of the
+        // event main loop so a long `serve_download` / `accept_upload`
+        // never head-of-line blocks heartbeats or signaling — and so
+        // `dispatcher.handle_command(...).await` (which is internally
+        // serial because it `lock`s `inner`) reflects exactly the
+        // browser DC arrival order without an extra hop. Exits on
+        // `None` from `recv()` (lane closed → daemon vanished);
+        // worker shutdown happens through the event lane so this
+        // task is allowed to terminate quietly.
+        {
+            let dispatcher = file_transfer_dispatcher.clone();
+            tokio::spawn(async move {
+                while let Some(payload) = file_receiver.recv().await {
+                    dispatcher.handle_command(payload).await;
+                }
+                info!("File-lane drain task exiting (peer closed)");
+            });
+        }
 
         // Independent heartbeat task: pushes `Heartbeat` to the writer queue
         // every 5 s regardless of what the main loop is doing.
@@ -830,9 +892,6 @@ impl WorkerSession {
                                             "ClipboardRequest dropped — no clipboard backend on this worker"
                                         );
                                     }
-                                }
-                                ServiceToWorker::FileTransferCommand(payload) => {
-                                    file_transfer_dispatcher.handle_command(payload).await;
                                 }
                                 ServiceToWorker::WhiteboardCommand(payload) => {
                                     whiteboard_dispatcher.handle_command(payload).await;
@@ -1200,6 +1259,59 @@ async fn connect_media_pipe(
     }
 }
 
+/// Open the daemon-side **file-transfer** pipe (Windows: named pipe;
+/// Unix: domain socket). Unlike [`connect_media_pipe`] this transport
+/// is **bidirectional**: the worker emits download chunks / control
+/// replies on the writer half, and consumes upload chunks / control
+/// commands on the reader half. The framed sender uses
+/// `FILE_QUEUE_CAP = 32` so backpressure surfaces at the worker as a
+/// parked `send().await` inside the dispatcher's `emit_*` helpers.
+async fn connect_file_pipe(
+    pipe_name: &str,
+) -> Result<
+    (
+        Arc<dyn EventSender<FileTransferPayload>>,
+        Box<dyn EventReceiver<FileTransferPayload>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    #[cfg(target_os = "windows")]
+    {
+        use tokio::net::windows::named_pipe::ClientOptions;
+        let pipe_path = format!(r"\\.\pipe\{}", pipe_name);
+        let client = {
+            let mut attempts = 0;
+            loop {
+                match ClientOptions::new().open(&pipe_path) {
+                    Ok(c) => break c,
+                    Err(e) if attempts < 10 => {
+                        attempts += 1;
+                        warn!(
+                            "File pipe not ready (attempt {}), retrying in 200ms: {}",
+                            attempts, e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                    }
+                    Err(e) => return Err(Box::new(e)),
+                }
+            }
+        };
+        let (reader, writer) = tokio::io::split(client);
+        let sender = framed::spawn_file_sender::<_, FileTransferPayload>(writer);
+        let receiver = framed::make_event_receiver::<_, FileTransferPayload>(reader);
+        Ok((sender, receiver))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tokio::net::UnixStream;
+        let stream = UnixStream::connect(pipe_name).await?;
+        let (reader, writer) = tokio::io::split(stream);
+        let sender = framed::spawn_file_sender::<_, FileTransferPayload>(writer);
+        let receiver = framed::make_event_receiver::<_, FileTransferPayload>(reader);
+        Ok((sender, receiver))
+    }
+}
+
 /// Whether [`WorkerSession::run_with_transports`] should call
 /// [`crate::telemetry::init_telemetry`] for itself.
 ///
@@ -1286,6 +1398,7 @@ mod tests {
             auth_token,
             host_upstream_url,
             media_pipe_name: None,
+            file_pipe_name: None,
             config_file_path: None,
         }
     }

@@ -98,6 +98,7 @@ mod tests {
             auth_token: None,
             host_upstream_url: None,
             media_pipe_name: None,
+            file_pipe_name: None,
             config_file_path: None,
         });
 
@@ -156,6 +157,7 @@ mod tests {
             auth_token: None,
             host_upstream_url: None,
             media_pipe_name: None,
+            file_pipe_name: None,
             config_file_path: None,
         });
         let mut buf = Vec::new();

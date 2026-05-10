@@ -328,17 +328,6 @@ pub async fn run_signaling_proxy(
             WorkerToService::ClipboardRead(payload) => {
                 crate::daemon::pc_manager::write_clipboard_data(&pc_registry, payload).await;
             }
-            // PR 4 cut 2 file-transfer write-back: worker emits
-            // FileTransferData for each download response chunk and
-            // for upload completion replies; daemon writes the bytes
-            // to the matching browser's `file_transfer_event` DC,
-            // dispatching on `is_text` to choose `send_text` vs
-            // `send` (binary). Permission gate
-            // (`accept_control`) lives in
-            // `pc_manager::write_file_transfer_data`.
-            WorkerToService::FileTransferData(payload) => {
-                crate::daemon::pc_manager::write_file_transfer_data(&pc_registry, payload).await;
-            }
             // Typed-IPC migration batch 1: replaces the legacy
             // `WorkerToService::SignalingMessage` reverse path for
             // private-screen state changes. Daemon constructs the
