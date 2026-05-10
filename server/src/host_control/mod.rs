@@ -1,16 +1,41 @@
 //! Host Control Hub — unified Tauri-side bridge across all server deployment modes.
 //!
-//! See `agent_works/web/2026-04-30_host-control-hub-unification.md` (planned) for
-//! the architectural rationale. In short:
+//! See `agent_works/web/2026-04-30_host-control-hub-unification.md` for the
+//! original architectural rationale, and
+//! `agent_works/web/2026-05-10_aggregator-daemon-self-approval-fix.md` for the
+//! Arch IV update to the Aggregator contract described below. In short:
 //!
 //! - **Local** (portable): the embedded server publishes commands to its own ws
 //!   endpoint; the embedded Tauri shell is a ws client.
-//! - **Aggregator** (ServiceDaemon): the daemon process owns no business logic
-//!   itself but routes between the worker forwarder client and the Tauri client.
+//! - **Aggregator** (ServiceDaemon): under Arch IV the daemon plays *two* roles
+//!   simultaneously — it is both a router for worker→Tauri approval traffic
+//!   *and* the originator of daemon-self approvals (the WebRTC PeerConnection
+//!   was moved into the daemon process by Arch IV PR 2, so `RequireControl`
+//!   driven approvals are now raised by `daemon::pc_manager` directly through
+//!   `request_approval`). Pre-Arch IV docs that described the aggregator as
+//!   "owns no business logic, only routes" are obsolete.
 //! - **Forwarder** (SessionWorker): the worker server connects to the daemon as
-//!   a ws client and forwards all host-control commands upstream.
+//!   a ws client and forwards business approvals (FileBrowse / FileTransfer /
+//!   Terminal / Whiteboard / FileTransfer dispatcher cache) upstream.
 //!
 //! Business code talks to a single `HostControlHub` API regardless of mode.
+//!
+//! ## Aggregator approval-source bookkeeping
+//!
+//! Two approval sources share the broadcast-to-Tauri path but never mix at
+//! submit time. Disambiguation is by which internal table holds state:
+//!
+//! | Table | Owner | Populated by | Consumed by |
+//! |---|---|---|---|
+//! | `pending_routes` | worker-originated only | `register_upstream_request` (called from the `/ws/host_upstream` endpoint on `SecurityApprovalRequest` from a Forwarder) | `pop_upstream_for_req` in `submit_approval`, `drain_upstream_pending` on forwarder disconnect, `cancel_all_for_tauri_loss` on last-Tauri-disconnect |
+//! | `pending_approvals` | daemon-self only | `request_approval` (called from `daemon::pc_manager` via `check_security_permission`) | `submit_approval` local-oneshot fallback, `deny_all_pending` from `cancel_all_for_tauri_loss` |
+//! | `pending_replay` | shared by both sources | both `request_approval` and `register_upstream_request` insert; both submit/drain paths remove | `replay_messages_for_tauri` on Tauri (re)connect |
+//!
+//! `submit_approval` looks up `pending_routes` first; a hit means the request
+//! came from a worker and the response is dispatched directionally to that
+//! Forwarder via `route_to_forwarder` (never broadcast). A miss falls through
+//! to the local oneshot in `pending_approvals` (daemon-self origin). A double
+//! miss is logged at `debug` and ignored.
 
 pub mod bridge;
 pub mod endpoint;
@@ -476,7 +501,17 @@ impl HostControlHub {
         Some(id)
     }
 
-    /// Aggregator-only: register a new approval request originated from `upstream_id`.
+    /// Aggregator-only: register a new approval request originated from
+    /// `upstream_id`.
+    ///
+    /// "upstream" here refers strictly to a worker Forwarder session connected
+    /// over `/ws/host_upstream`. Daemon-self approvals raised inside the
+    /// aggregator process (Arch IV `daemon::pc_manager` path) do **not** call
+    /// this API — they go through `request_approval` and store their oneshot
+    /// in `pending_approvals` instead. Keeping the two sources in separate
+    /// tables (`pending_routes` for upstream, `pending_approvals` for
+    /// daemon-self) is what lets `submit_approval` route correctly without
+    /// either broadcasting a worker reply or losing a daemon-self resolution.
     pub fn register_upstream_request(
         &self,
         req_id: String,
@@ -506,6 +541,12 @@ impl HostControlHub {
     /// immediately routes a deny response back to the originating forwarder so
     /// the worker doesn't sit blocked waiting for a UI that will never arrive
     /// (and ultimately get killed by the heartbeat watchdog).
+    ///
+    /// "upstream" here means the worker Forwarder ws session — this API is
+    /// **only** for worker-originated approvals. Daemon-self approvals raised
+    /// by `daemon::pc_manager` under Arch IV are issued via `request_approval`
+    /// directly and never enter this path; the no-Tauri-deny short-circuit for
+    /// daemon-self lives in `request_approval` itself.
     ///
     /// Returns `true` if the request was queued for Tauri review, `false` if
     /// it was denied immediately.
