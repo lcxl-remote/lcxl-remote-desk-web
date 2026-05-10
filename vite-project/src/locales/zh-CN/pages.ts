@@ -339,6 +339,8 @@ export default {
   'pages.fileManager.deleteDoubleConfirm.description': '永久删除操作不可逆，确定要继续吗？',
   'pages.fileManager.deleteSuccess': '删除成功',
   'pages.fileManager.deleteFailed': '删除失败: {{error}}',
+  'pages.fileManager.daemonMappedDriveHint.title': '映射的网络驱动器在此模式下不可见',
+  'pages.fileManager.daemonMappedDriveHint.description': '服务模式下，工作进程跑在用户提权后的 token 上，与资源管理器映射网络驱动器时使用的 token 属于不同的登录会话，因此 GetLogicalDriveStringsW 看不到 Z: 之类的映射盘。可使用 UNC 路径（如 \\\\server\\share）直接访问，或在 HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System 下创建 DWORD 值 EnableLinkedConnections=1 并重启系统，让两个 token 共享映射盘。',
   'common.name': '名称',
   'common.size': '大小',
   'common.modified': '修改时间',

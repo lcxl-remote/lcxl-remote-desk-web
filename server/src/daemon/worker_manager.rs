@@ -718,6 +718,31 @@ fn launch_worker_as_user(
                 Ok(()) => {
                     info!("WTSQueryUserToken succeeded for session {session_id}");
 
+                    // Swap the WTS-returned filtered (UAC-limited) token for the
+                    // user's elevated linked token when one exists. The reason
+                    // this matters for a remote-desktop daemon is UIPI: a
+                    // medium-IL process cannot `SendInput` into a higher-IL
+                    // window, so without elevation the worker's mouse / keyboard
+                    // injection silently no-ops the moment the user moves focus
+                    // onto an admin-elevated window (admin cmd, Task Manager,
+                    // Registry Editor, ...). Remote control would freeze on
+                    // those windows even though the screen capture still
+                    // updates. UAC's secure desktop is a separate concern —
+                    // captured by `force_system_token` (Winlogon path), which
+                    // does not depend on this branch.
+                    //
+                    // Trade-off: filtered and elevated linked tokens belong to
+                    // *different* logon sessions (LUIDs). Mapped network drives
+                    // (`net use Z: ...`, Explorer "Map Network Drive") are bound
+                    // to the LUID where they were created — typically the
+                    // filtered LUID — so the elevated worker's
+                    // `GetLogicalDriveStringsW` will *not* surface them.
+                    // Operators who need the worker to see mapped drives on top
+                    // of UIPI injection have one OS-level escape hatch:
+                    // `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\EnableLinkedConnections = 1`
+                    // (admin + reboot), which mirrors mapped drives across both
+                    // tokens. We surface this in the file-management UI when
+                    // running under ServiceDaemon.
                     use windows::Win32::Security::{
                         GetTokenInformation, TOKEN_LINKED_TOKEN, TokenLinkedToken,
                     };
@@ -737,6 +762,12 @@ fn launch_worker_as_user(
                         let _ = CloseHandle(user_token);
                         user_token = linked_token.LinkedToken;
                     } else {
+                        // No linked token (already elevated, standard user with
+                        // no admin token, or UAC disabled). Either path keeps
+                        // mapped drives visible because we stay on the original
+                        // LUID; UIPI injection only works against same-or-lower
+                        // IL windows, but for non-admin users that's the entire
+                        // window set anyway.
                         info!("Could not retrieve LinkedToken, using default user token");
                     }
 

@@ -2,11 +2,12 @@
 import { useState, useRef, useEffect } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2 } from "lucide-react"
+import { FileIcon, FolderIcon, ArrowUp, RefreshCw, Home, ArrowLeft, Download, Upload, Loader2, CheckCircle2, XCircle, X, ChevronLeft, ChevronRight, Trash2, Info } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
     AlertDialog,
     AlertDialogAction,
@@ -34,6 +35,7 @@ import {
 import { Progress } from "@/components/ui/progress"
 import { useListFiles } from "@/services/hooks/undefinedController/useListFiles"
 import { useDeleteFile } from "@/services/hooks/undefinedController/useDeleteFile"
+import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
 import { useFileTransfer, type TransferProgress } from "./use-file-transfer"
@@ -67,6 +69,19 @@ export default function FileList() {
         page_no: page as any,
         page_count: pageSize as any
     })
+
+    // Daemon-mode (Windows service) workers run on the user's elevated linked
+    // token so that `SendInput` can cross UIPI into admin windows during remote
+    // control. The trade-off is that the elevated token lives in a different
+    // logon session from the filtered token Explorer uses to map network
+    // drives, so `GetLogicalDriveStringsW` will not surface mapped drives
+    // unless the OS-wide `EnableLinkedConnections` policy is on. We surface a
+    // hint at the drive-list root so users do not assume the feature is
+    // broken — see `worker_manager::launch_worker_as_user` for the token-
+    // selection rationale on the backend side.
+    const { data: serverInfoResp } = useQueryServerInfo()
+    const showDaemonMappedDriveHint =
+        currentPath === "" && serverInfoResp?.data?.startup_mode === "service-daemon"
 
     const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
     const [deleteDoubleConfirmOpen, setDeleteDoubleConfirmOpen] = useState(false)
@@ -317,6 +332,16 @@ export default function FileList() {
                         </div>
                     ))}
                 </div>
+            )}
+
+            {showDaemonMappedDriveHint && (
+                <Alert className="mx-4">
+                    <Info className="h-4 w-4" />
+                    <AlertTitle>{t('pages.fileManager.daemonMappedDriveHint.title')}</AlertTitle>
+                    <AlertDescription>
+                        {t('pages.fileManager.daemonMappedDriveHint.description')}
+                    </AlertDescription>
+                </Alert>
             )}
 
             <div className="flex-1 overflow-auto">

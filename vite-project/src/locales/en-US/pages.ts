@@ -341,6 +341,8 @@ export default {
   'pages.fileManager.deleteDoubleConfirm.description': 'This operation is irreversible. Are you absolutely sure?',
   'pages.fileManager.deleteSuccess': 'Deleted successfully',
   'pages.fileManager.deleteFailed': 'Delete failed: {{error}}',
+  'pages.fileManager.daemonMappedDriveHint.title': 'Mapped network drives are not visible in service mode',
+  'pages.fileManager.daemonMappedDriveHint.description': 'In service mode the worker process runs on the user\'s elevated token, which lives in a different logon session from the one Explorer uses when mapping network drives. As a result, GetLogicalDriveStringsW cannot see drives like Z:. You can still access them via UNC paths such as \\\\server\\share, or create a DWORD value EnableLinkedConnections = 1 under HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System and reboot so the two tokens share the same mapped drives.',
   'common.name': 'Name',
   'common.size': 'Size',
   'common.modified': 'Modified',
