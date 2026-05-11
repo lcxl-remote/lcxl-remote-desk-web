@@ -21,20 +21,38 @@ use crate::{
 };
 
 #[derive(
-    Copy, Clone, Debug, Display, FromRepr, ToSchema_repr, Serialize_repr, Deserialize_repr,
+    Copy,
+    Clone,
+    Debug,
+    Display,
+    FromRepr,
+    ToSchema_repr,
+    Serialize_repr,
+    Deserialize_repr,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
 )]
 /// Signaling Type
 #[repr(i32)]
+// wincode's default `u32` positional tag would silently disagree with the
+// `Serialize_repr` JSON form (which emits the explicit `i32` discriminant).
+// Lock the wincode tag to the same `i32` encoding so the daemon ↔ worker
+// wire bytes and the browser-facing JSON identify the same variant by the
+// same number.
+#[wincode(tag_encoding = "i32")]
 pub enum SignalingType {
     /// Heartbeat for keeping WebSocket alive through reverse proxies
+    #[wincode(tag = 1)]
     Heartbeat = 1,
 
     // /// API version, should not be used
     // Version = 11,
     /// Request list connections
+    #[wincode(tag = 21)]
     FetchConnections = 21,
 
     /// Response session list
+    #[wincode(tag = 22)]
     ConnectionList = 22,
 
     /// Signaling server → Server peers: a connection has just left the
@@ -45,69 +63,106 @@ pub enum SignalingType {
     /// waiting for the multi-second ICE `disconnected → failed`
     /// fallback. Carries the departed peer's `connection_id` in
     /// `from_connection_id`; data payload is intentionally empty.
+    #[wincode(tag = 23)]
     ConnectionRemoved = 23,
 
     /// WebRTC request remote access
+    #[wincode(tag = 100)]
     RequestRemote = 100,
     /// WebRTC init signaling type
+    #[wincode(tag = 101)]
     Init = 101,
     /// WebRTC offer signaling type
+    #[wincode(tag = 102)]
     Offer = 102,
     /// WebRTC answer signaling type
+    #[wincode(tag = 103)]
     Answer = 103,
     /// WebRTC CANID signaling type
+    #[wincode(tag = 104)]
     Canid = 104,
 
+    #[wincode(tag = 201)]
     RequireControl = 201,
+    #[wincode(tag = 202)]
     AcceptControl = 202,
+    #[wincode(tag = 203)]
     DenyControl = 203,
+    #[wincode(tag = 204)]
     CloseControl = 204,
+    #[wincode(tag = 205)]
     ChangeDisplaySettings = 205,
 
     /// Enable or disable private screen mode
+    #[wincode(tag = 206)]
     EnablePrivateScreen = 206,
     /// Private screen state changed notification
+    #[wincode(tag = 207)]
     PrivateScreenStateChanged = 207,
     /// Audio playback error notification
+    #[wincode(tag = 208)]
     AudioPlaybackError = 208,
 
+    #[wincode(tag = 301)]
     UpdateDeskSettings = 301,
 
+    #[wincode(tag = 10003)]
     ManagerSystemInfo = 10003,
+    #[wincode(tag = 10004)]
     ManagerSystemStatue = 10004,
 
+    #[wincode(tag = 10005)]
     ManagerFileList = 10005,
+    #[wincode(tag = 10006)]
     ManagerFileDelete = 10006,
     /// Start terminal
+    #[wincode(tag = 10007)]
     StartTerminal = 10007,
     /// Send data to terminal
+    #[wincode(tag = 10008)]
     SendDataToTerminal = 10008,
     /// Resize terminal
+    #[wincode(tag = 10009)]
     ResizeTerminal = 10009,
     /// Close terminal
+    #[wincode(tag = 10010)]
     CloseTerminal = 10010,
     /// Reply from terminal
+    #[wincode(tag = 10011)]
     ReplyFromTerminal = 10011,
     /// List terminal
+    #[wincode(tag = 10012)]
     ListTerminal = 10012,
     /// Terminal started
+    #[wincode(tag = 10013)]
     TerminalStarted = 10013,
     /// Terminal closed
+    #[wincode(tag = 10014)]
     TerminalClosed = 10014,
     /// Query remote system settings via signaling
+    #[wincode(tag = 10015)]
     ManagerQuerySettings = 10015,
     /// Update remote system settings via signaling
+    #[wincode(tag = 10016)]
     ManagerUpdateSettings = 10016,
 
     /// ServiceDaemon → Browser: desktop is switching, WebRTC will drop shortly
+    #[wincode(tag = 500)]
     DesktopSwitching = 500,
     /// ServiceDaemon → Browser: new Worker is ready, reconnect now
+    #[wincode(tag = 501)]
     DesktopReady = 501,
 
     /// Error
+    #[wincode(tag = -1)]
     Error = -1,
-    /// Unrecognized signaling type will map to this
+    /// Unrecognized signaling type will map to this on the JSON path
+    /// (via `#[serde(other)]`). The wincode wire never emits this
+    /// variant — daemon and worker are version-locked so an "unknown"
+    /// discriminant cannot reach the IPC boundary. We still assign it
+    /// a wincode tag so the type implements `SchemaWrite` / `SchemaRead`.
     #[serde(other)]
+    #[wincode(tag = -100)]
     Unknown = -100,
 }
 
@@ -608,4 +663,117 @@ pub trait SignalingUser: Send + Sync {
 
 pub trait TurnProvider: Send + Sync {
     fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer;
+}
+
+#[cfg(test)]
+mod wincode_tests {
+    //! Wincode `SignalingType` coverage. The enum has 36 variants with
+    //! explicit `#[repr(i32)]` discriminants, and the wincode tag is
+    //! locked to `i32` via `#[wincode(tag_encoding = "i32")]` so the
+    //! daemon ↔ worker wire bytes use the same number the JSON wire
+    //! emits (via `Serialize_repr`).
+    //!
+    //! Two tests cover this from different angles:
+    //!
+    //!   * `signaling_type_round_trips_wincode` — encode + decode each
+    //!     variant and assert the decoded value matches the input. This
+    //!     catches "did we forget to add `#[derive(...)]` or
+    //!     `#[wincode(tag_encoding = ...)]`?" kinds of bugs.
+    //!
+    //!   * `signaling_type_wire_tag_matches_discriminant_for_all_variants`
+    //!     — encode each variant and assert the *first four bytes* of
+    //!     the encoded payload equal `(variant as i32).to_le_bytes()`.
+    //!     This is the byte-level check the migration plan and code
+    //!     review both call out: a round-trip test pairs encode and
+    //!     decode, so a `#[wincode(tag = N)]` that silently disagrees
+    //!     with the `repr(i32)` discriminant for a single variant
+    //!     (e.g. typo `tag = 101` on a `= 102` variant) would still
+    //!     pass round-trip — encode + decode would both use the same
+    //!     wrong tag. Only by asserting against the *expected*
+    //!     discriminant separately do we catch tag drift.
+    use super::*;
+    use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
+
+    fn unbounded_config() -> Configuration<true, PREALLOCATION_SIZE_LIMIT_DISABLED> {
+        Configuration::new()
+    }
+
+    /// Table of every `SignalingType` variant paired with the explicit
+    /// `i32` discriminant it carries. When a new variant is added to
+    /// the enum, this table must be extended — leaving it incomplete
+    /// is precisely the regression `signaling_type_wire_tag_matches_…`
+    /// is built to catch.
+    fn all_variants_with_tag() -> [(SignalingType, i32); 36] {
+        [
+            (SignalingType::Heartbeat, 1),
+            (SignalingType::FetchConnections, 21),
+            (SignalingType::ConnectionList, 22),
+            (SignalingType::ConnectionRemoved, 23),
+            (SignalingType::RequestRemote, 100),
+            (SignalingType::Init, 101),
+            (SignalingType::Offer, 102),
+            (SignalingType::Answer, 103),
+            (SignalingType::Canid, 104),
+            (SignalingType::RequireControl, 201),
+            (SignalingType::AcceptControl, 202),
+            (SignalingType::DenyControl, 203),
+            (SignalingType::CloseControl, 204),
+            (SignalingType::ChangeDisplaySettings, 205),
+            (SignalingType::EnablePrivateScreen, 206),
+            (SignalingType::PrivateScreenStateChanged, 207),
+            (SignalingType::AudioPlaybackError, 208),
+            (SignalingType::UpdateDeskSettings, 301),
+            (SignalingType::DesktopSwitching, 500),
+            (SignalingType::DesktopReady, 501),
+            (SignalingType::ManagerSystemInfo, 10003),
+            (SignalingType::ManagerSystemStatue, 10004),
+            (SignalingType::ManagerFileList, 10005),
+            (SignalingType::ManagerFileDelete, 10006),
+            (SignalingType::StartTerminal, 10007),
+            (SignalingType::SendDataToTerminal, 10008),
+            (SignalingType::ResizeTerminal, 10009),
+            (SignalingType::CloseTerminal, 10010),
+            (SignalingType::ReplyFromTerminal, 10011),
+            (SignalingType::ListTerminal, 10012),
+            (SignalingType::TerminalStarted, 10013),
+            (SignalingType::TerminalClosed, 10014),
+            (SignalingType::ManagerQuerySettings, 10015),
+            (SignalingType::ManagerUpdateSettings, 10016),
+            (SignalingType::Error, -1),
+            (SignalingType::Unknown, -100),
+        ]
+    }
+
+    #[test]
+    fn signaling_type_round_trips_wincode() {
+        let config = unbounded_config();
+        for (variant, _expected) in all_variants_with_tag() {
+            let bytes = wincode::config::serialize(&variant, config)
+                .unwrap_or_else(|err| panic!("encode {variant:?}: {err}"));
+            let back: SignalingType = wincode::config::deserialize(&bytes, config)
+                .unwrap_or_else(|err| panic!("decode {variant:?}: {err}"));
+            assert_eq!(
+                back as i32, variant as i32,
+                "round-trip mismatch for {variant:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn signaling_type_wire_tag_matches_discriminant_for_all_variants() {
+        let config = unbounded_config();
+        for (variant, expected_tag) in all_variants_with_tag() {
+            let bytes = wincode::config::serialize(&variant, config)
+                .unwrap_or_else(|err| panic!("encode {variant:?}: {err}"));
+            assert!(
+                bytes.len() >= 4,
+                "{variant:?} produced fewer than 4 bytes",
+            );
+            let tag = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            assert_eq!(
+                tag, expected_tag,
+                "wincode wire tag for {variant:?} does not match its repr(i32) discriminant",
+            );
+        }
+    }
 }

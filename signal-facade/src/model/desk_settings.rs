@@ -6,7 +6,16 @@ use utoipa::ToSchema;
 use crate::model::{audio_capture::SelectedAudioDevice, image_capture::DisplayInfo};
 
 /// X264 encoder settings
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Deserialize,
+    Serialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 pub struct X264EncoderSettings {
     /// Quality (CRF), 0-51, default is 22. Lower is better.
@@ -24,7 +33,16 @@ impl Default for X264EncoderSettings {
     }
 }
 /// H264 encoder settings
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Deserialize,
+    Serialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 pub struct H264EncoderSettings {
     /// Bitrate in bps (bits per second), default is 10,000,000 bps (10 Mbps)
@@ -43,7 +61,16 @@ impl Default for H264EncoderSettings {
 }
 
 /// VPX encoder settings
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Deserialize,
+    Serialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 pub struct VpxEncoderSettings {
     /// Bitrate in bps (bits per second), default is 50,000,000 bps (50 Mbps)
@@ -62,7 +89,16 @@ impl Default for VpxEncoderSettings {
 }
 
 /// AV1 encoder settings (rav1e)
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Deserialize,
+    Serialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 pub struct Av1EncoderSettings {
     /// Quality (Quantizer), 0-255, default is 100. Lower is better quality.
@@ -81,7 +117,16 @@ impl Default for Av1EncoderSettings {
 }
 
 /// Opus encoder settings
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Deserialize,
+    Serialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 pub struct OpusEncoderSettings {
     pub sample_rate: u32,
@@ -99,7 +144,16 @@ impl Default for OpusEncoderSettings {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 pub struct HotkeySettings {
     /// HOT_KEY_MODIFIERS
@@ -118,7 +172,16 @@ impl Default for HotkeySettings {
 }
 
 /// Private screen settings
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 #[derive(Default)]
 pub struct PrivateScreenSettings {
@@ -135,7 +198,16 @@ pub struct PrivateScreenSettings {
 }
 
 /// Desk settings
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, ToSchema)]
+#[derive(
+    Clone,
+    Debug,
+    Deserialize,
+    Serialize,
+    PartialEq,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
+)]
 #[serde(default)]
 pub struct DeskSettings {
     /// Enable D3D debug mode
@@ -362,5 +434,100 @@ mod tests {
         display_info.desktop_coordinates.right = 4000;
         let h264_hit_cap = settings.get_h264_encoder_settings(&display_info);
         assert_eq!(h264_hit_cap.bps, 100_000_000);
+    }
+}
+
+#[cfg(test)]
+mod wincode_tests {
+    use super::*;
+    use crate::model::audio_capture::{AudioDataFlow, SelectedAudioDevice};
+    use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
+
+    fn unbounded_config() -> Configuration<true, PREALLOCATION_SIZE_LIMIT_DISABLED> {
+        Configuration::new()
+    }
+
+    /// `DeskSettings` reaches the deepest type graph in the facade —
+    /// `Option<SelectedAudioDevice>` plus five `Option<*EncoderSettings>`
+    /// plus nested `PrivateScreenSettings` plus nested
+    /// `Option<HotkeySettings>`. Build an instance that *populates*
+    /// every nested Option so any missed-derive surfaces here as a
+    /// compile or round-trip failure rather than as a silent
+    /// encode-empty further downstream.
+    #[test]
+    fn desk_settings_round_trips_wincode_with_nested_options_populated() {
+        let original = DeskSettings {
+            enable_d3d_debug: true,
+            video_device_index: 1,
+            video_quality: 33,
+            adaptive_web_page_resolution: true,
+            video_zoom_ratio: 75,
+            video_fps: 45,
+            show_mouse: false,
+            image_capture: Some("dxgi".to_string()),
+            audio_capture: Some("wasapi".to_string()),
+            video_encoder: Some("X264".to_string()),
+            audio_device: Some(SelectedAudioDevice {
+                audio_data_flow: AudioDataFlow::Render,
+                audio_device_id: Some("device-1".to_string()),
+            }),
+            audio_encoder: Some("OPUS".to_string()),
+            x264_encoder: Some(X264EncoderSettings {
+                quality: 18,
+                gop: 240,
+            }),
+            h264_encoder: Some(H264EncoderSettings {
+                bps: 8_000_000,
+                gop: 60,
+            }),
+            vp8_encoder: Some(VpxEncoderSettings {
+                bps: 5_000_000,
+                quality: 30,
+            }),
+            vp9_encoder: Some(VpxEncoderSettings {
+                bps: 6_000_000,
+                quality: 28,
+            }),
+            opus_encoder: Some(OpusEncoderSettings {
+                sample_rate: 48_000,
+                channels: 2,
+                application: "Voip".to_string(),
+            }),
+            av1_encoder: Some(Av1EncoderSettings {
+                quality: 100,
+                speed: 8,
+            }),
+            private_screen: PrivateScreenSettings {
+                image_path: Some(r"C:\private.png".to_string()),
+                window_style: Some(0x12345678),
+                window_ex_style: None,
+                hotkey: Some(HotkeySettings {
+                    fsmodifiers: 5,
+                    vk: 'P' as u32,
+                }),
+                enabled: true,
+            },
+            display_name: Some("\\\\.\\DISPLAY2".to_string()),
+            wayland_control_mode: Some("portal".to_string()),
+        };
+        let config = unbounded_config();
+        let bytes = wincode::config::serialize(&original, config).expect("encode");
+        let back: DeskSettings = wincode::config::deserialize(&bytes, config).expect("decode");
+        assert_eq!(back, original);
+    }
+
+    /// The all-`None` extreme — every Option field is `None`, every
+    /// nested Option-inside-PrivateScreenSettings is `None` — must
+    /// also round-trip. This is the case JSON deserialisation hits
+    /// via `#[serde(default)]`; wincode's positional encoding makes
+    /// it a separate concern (each Option gets its tag byte on the
+    /// wire regardless of the default).
+    #[test]
+    fn desk_settings_default_round_trips_wincode() {
+        let original = DeskSettings::default();
+        let config = unbounded_config();
+        let bytes = wincode::config::serialize(&original, config).expect("encode");
+        let back: DeskSettings = wincode::config::deserialize(&bytes, config).expect("decode");
+        assert_eq!(back, original);
     }
 }
