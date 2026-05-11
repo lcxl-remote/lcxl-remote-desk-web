@@ -67,6 +67,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use desk_ipc_protocol::dual_transport::{EventSender, TransportError};
 use desk_ipc_protocol::message::{FileTransferPayload, StartMediaPayload, StopMediaPayload};
@@ -82,12 +83,179 @@ use crate::model::settings::SharedSettings;
 const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 60 * 1024;
 const YIELD_EVERY_N_CHUNKS: u32 = 100;
 
+/// Window size (in chunks) for file-transfer throughput / latency
+/// breakdown logging. Each window flushes one `[ft-metrics]` INFO line
+/// with per-stage timings + instant throughput. Sized so a 60 KB chunk
+/// pipeline emits one line per ~15 MB transferred, which keeps log
+/// volume sane on multi-GB transfers while still surfacing transient
+/// stalls (a 256-chunk window at 2 MB/s is ~7.5 s, well within the
+/// "user complains it's slow" window). The daemon writer task mirrors
+/// this constant for its own `[ft-metrics-daemon]` lines so the two
+/// halves can be cross-referenced by `transfer_id` / `connection_id`.
+pub(crate) const FT_METRICS_WINDOW_CHUNKS: u32 = 256;
+
+/// Rolling per-window accumulator for the download (host → browser)
+/// path. Pure data + arithmetic — all timing samples are pushed in
+/// from `serve_download`. Exists as a separate struct so the
+/// flush / throughput math is unit-testable without spinning up a
+/// dispatcher / tokio runtime.
+///
+/// Throughput is computed against `wall_ns` (loop iteration wall time)
+/// rather than the sum of stage timings, because the dominant stall
+/// in this pipeline is `emit_binary().await` parking on a full file
+/// lane — that's wall time, not CPU time, and showing it as such is
+/// the entire point of the metric.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DownloadWindow {
+    pub chunks: u32,
+    pub bytes: u64,
+    pub disk_read_ns: u64,
+    pub build_chunk_ns: u64,
+    pub emit_await_ns: u64,
+    pub wall_ns: u64,
+}
+
+impl DownloadWindow {
+    pub(crate) fn record(
+        &mut self,
+        bytes: u64,
+        disk_read: Duration,
+        build: Duration,
+        emit_await: Duration,
+        wall: Duration,
+    ) {
+        self.chunks = self.chunks.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.disk_read_ns = self.disk_read_ns.saturating_add(duration_ns(disk_read));
+        self.build_chunk_ns = self.build_chunk_ns.saturating_add(duration_ns(build));
+        self.emit_await_ns = self.emit_await_ns.saturating_add(duration_ns(emit_await));
+        self.wall_ns = self.wall_ns.saturating_add(duration_ns(wall));
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.chunks >= FT_METRICS_WINDOW_CHUNKS
+    }
+
+    /// Render one INFO line summarising the window. Returns `None`
+    /// when there is nothing to report (called on an empty accumulator
+    /// at shutdown). The caller resets the window after logging.
+    pub(crate) fn flush_line(&self, transfer_id: &str, tag: &'static str) -> Option<String> {
+        if self.chunks == 0 {
+            return None;
+        }
+        let mbps = throughput_mbps(self.bytes, self.wall_ns);
+        Some(format!(
+            "[{tag}] tid={tid} chunks={c} bytes={b} wall={wm:.2}ms \
+             disk_read={dm:.2}ms build={bm:.2}ms emit_await={em:.2}ms \
+             throughput={mbps:.2}MB/s",
+            tid = transfer_id,
+            c = self.chunks,
+            b = self.bytes,
+            wm = ns_to_ms(self.wall_ns),
+            dm = ns_to_ms(self.disk_read_ns),
+            bm = ns_to_ms(self.build_chunk_ns),
+            em = ns_to_ms(self.emit_await_ns),
+        ))
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Rolling per-window accumulator for the upload (browser → host)
+/// path. Mirrors [`DownloadWindow`] but tracks the upload-specific
+/// stages: time spent waiting on the dispatcher inner mutex (`lock_ns`)
+/// and time spent in `state.file.write_all().await` (`disk_write_ns`).
+/// The lock wait surfaces lock contention between the upload chunk
+/// path and concurrent control messages / cancels; the disk write
+/// surfaces filesystem-level stalls.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UploadWindow {
+    pub chunks: u32,
+    pub bytes: u64,
+    pub lock_ns: u64,
+    pub disk_write_ns: u64,
+    pub wall_ns: u64,
+}
+
+impl UploadWindow {
+    pub(crate) fn record(
+        &mut self,
+        bytes: u64,
+        lock_wait: Duration,
+        disk_write: Duration,
+        wall: Duration,
+    ) {
+        self.chunks = self.chunks.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.lock_ns = self.lock_ns.saturating_add(duration_ns(lock_wait));
+        self.disk_write_ns = self.disk_write_ns.saturating_add(duration_ns(disk_write));
+        self.wall_ns = self.wall_ns.saturating_add(duration_ns(wall));
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.chunks >= FT_METRICS_WINDOW_CHUNKS
+    }
+
+    pub(crate) fn flush_line(&self, transfer_id: &str, tag: &'static str) -> Option<String> {
+        if self.chunks == 0 {
+            return None;
+        }
+        let mbps = throughput_mbps(self.bytes, self.wall_ns);
+        Some(format!(
+            "[{tag}] tid={tid} chunks={c} bytes={b} wall={wm:.2}ms \
+             lock_wait={lm:.2}ms disk_write={dm:.2}ms throughput={mbps:.2}MB/s",
+            tid = transfer_id,
+            c = self.chunks,
+            b = self.bytes,
+            wm = ns_to_ms(self.wall_ns),
+            lm = ns_to_ms(self.lock_ns),
+            dm = ns_to_ms(self.disk_write_ns),
+        ))
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Convert a [`Duration`] to ns saturating at `u64::MAX`. `Duration::as_nanos`
+/// returns u128 because the type covers ~584 years; the metric windows
+/// here cover a few seconds at most, so the truncation is a no-op in
+/// practice and lets the accumulators stay on plain `u64`. Exposed at
+/// `pub(crate)` so the daemon-side `DaemonFtWindow` reuses the same
+/// saturating-cast policy without duplicating the helper.
+pub(crate) fn duration_ns(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn ns_to_ms(ns: u64) -> f64 {
+    (ns as f64) / 1_000_000.0
+}
+
+/// Compute MB/s (decimal megabytes, matching the user-visible UI in
+/// `use-file-transfer.ts`) from a byte count and a wall-time duration
+/// in nanoseconds. Returns `0.0` when `wall_ns == 0` to avoid the
+/// `0/0` case at startup.
+pub(crate) fn throughput_mbps(bytes: u64, wall_ns: u64) -> f64 {
+    if wall_ns == 0 {
+        return 0.0;
+    }
+    // bytes / wall_secs / 1e6 = bytes * 1e9 / wall_ns / 1e6 = bytes * 1000 / wall_ns
+    (bytes as f64) * 1_000.0 / (wall_ns as f64)
+}
+
 /// Per-transfer in-flight upload state (browser uploading to host).
 struct UploadState {
     file: tokio::fs::File,
     file_path: PathBuf,
     total_chunks: u64,
     received_chunks: u64,
+    /// Per-transfer metrics window. Flushed every
+    /// [`FT_METRICS_WINDOW_CHUNKS`] chunks and once more on completion
+    /// so the final partial window does not get lost.
+    metrics: UploadWindow,
 }
 
 struct DispatcherInner {
@@ -362,6 +530,7 @@ impl FileTransferDispatcher {
     }
 
     async fn handle_binary(&self, payload: FileTransferPayload) {
+        let iter_start = Instant::now();
         let (transfer_id, chunk_index, chunk_data) = match parse_binary_chunk(&payload.data) {
             Some(t) => t,
             None => {
@@ -375,10 +544,14 @@ impl FileTransferDispatcher {
         };
         let transfer_id = transfer_id.to_string();
         let chunk_data = chunk_data.to_vec();
+        let chunk_len = chunk_data.len() as u64;
         let connection_id = payload.connection_id.clone();
+        let lock_start = Instant::now();
         let mut inner = self.inner.lock().await;
+        let lock_elapsed = lock_start.elapsed();
         let complete = match inner.upload_states.get_mut(&transfer_id) {
             Some(state) => {
+                let write_start = Instant::now();
                 if let Err(e) = state.file.write_all(&chunk_data).await {
                     error!(
                         "[FileTransferDispatcher] {}: write chunk {} for {} failed: {e}",
@@ -386,7 +559,17 @@ impl FileTransferDispatcher {
                     );
                     return;
                 }
+                let write_elapsed = write_start.elapsed();
                 state.received_chunks += 1;
+                state
+                    .metrics
+                    .record(chunk_len, lock_elapsed, write_elapsed, iter_start.elapsed());
+                if state.metrics.is_full() {
+                    if let Some(line) = state.metrics.flush_line(&transfer_id, "ft-metrics") {
+                        info!("{line}");
+                    }
+                    state.metrics.reset();
+                }
                 state.received_chunks >= state.total_chunks
             }
             None => {
@@ -404,6 +587,11 @@ impl FileTransferDispatcher {
                     connection_id, transfer_id
                 );
             }
+            // Trailing partial-window flush mirrors the download path so
+            // the last <256 chunks of an upload do not vanish from the log.
+            if let Some(line) = state.metrics.flush_line(&transfer_id, "ft-metrics") {
+                info!("{line}");
+            }
             drop(state);
             // Drop the lock before emitting IPC: emit_text awaits on the
             // bounded file lane and must not hold inner across that wait.
@@ -417,9 +605,7 @@ impl FileTransferDispatcher {
                 )
                 .await
             {
-                warn!(
-                    "[FileTransferDispatcher] upload {transfer_id} complete ack drop: {e}"
-                );
+                warn!("[FileTransferDispatcher] upload {transfer_id} complete ack drop: {e}");
                 return;
             }
             info!(
@@ -471,6 +657,7 @@ impl FileTransferDispatcher {
             file_path: file_path.clone(),
             total_chunks: req.total_chunks,
             received_chunks: 0,
+            metrics: UploadWindow::default(),
         };
         {
             let mut inner = self.inner.lock().await;
@@ -572,6 +759,7 @@ impl FileTransferDispatcher {
         let mut file = tokio::fs::File::open(&path).await?;
         let mut buf = vec![0u8; chunk_size];
         let mut chunk_index: u32 = 0;
+        let mut window = DownloadWindow::default();
         info!(
             "[FileTransferDispatcher] download {} starting: {} chunks",
             req.transfer_id, total_chunks
@@ -588,14 +776,20 @@ impl FileTransferDispatcher {
                     return Ok(());
                 }
             }
+            let iter_start = Instant::now();
+            let read_start = Instant::now();
             let n = file.read(&mut buf).await?;
+            let read_elapsed = read_start.elapsed();
             if n == 0 {
                 break;
             }
+            let build_start = Instant::now();
             let chunk_bytes = build_binary_chunk(&req.transfer_id, chunk_index, &buf[..n]);
+            let build_elapsed = build_start.elapsed();
             // Fail-fast on file-lane closure: dropping `file` here
             // releases the OS handle promptly. Continuing to read
             // would just fill memory while no one drains.
+            let emit_start = Instant::now();
             if let Err(e) = self.emit_binary(&connection_id, chunk_bytes).await {
                 warn!(
                     "[FileTransferDispatcher] {}: download {} aborted at chunk {}: {e}",
@@ -603,10 +797,29 @@ impl FileTransferDispatcher {
                 );
                 return Ok(());
             }
+            let emit_elapsed = emit_start.elapsed();
+            window.record(
+                n as u64,
+                read_elapsed,
+                build_elapsed,
+                emit_elapsed,
+                iter_start.elapsed(),
+            );
+            if window.is_full() {
+                if let Some(line) = window.flush_line(&req.transfer_id, "ft-metrics") {
+                    info!("{line}");
+                }
+                window.reset();
+            }
             chunk_index += 1;
             if chunk_index.is_multiple_of(YIELD_EVERY_N_CHUNKS) {
                 tokio::task::yield_now().await;
             }
+        }
+        // Flush any trailing partial window so a small file or the
+        // last few chunks of a large file still surface in the log.
+        if let Some(line) = window.flush_line(&req.transfer_id, "ft-metrics") {
+            info!("{line}");
         }
         if let Err(e) = self
             .emit_text(
@@ -650,11 +863,7 @@ impl FileTransferDispatcher {
         self.emit_payload(connection_id, json, true).await
     }
 
-    async fn emit_binary(
-        &self,
-        connection_id: &str,
-        data: Vec<u8>,
-    ) -> Result<(), TransportError> {
+    async fn emit_binary(&self, connection_id: &str, data: Vec<u8>) -> Result<(), TransportError> {
         self.emit_payload(connection_id, data, false).await
     }
 
@@ -685,6 +894,196 @@ mod tests {
     use desk_ipc_protocol::dual_transport::{EventReceiver, inprocess};
     use desk_ipc_protocol::message::MediaCodec;
     use tempfile::TempDir;
+
+    // ============== ft-metrics helpers ==============
+
+    /// `throughput_mbps` returns 0 when wall time is zero, matching the
+    /// "no samples yet" case. Without this guard the first emit on a
+    /// freshly-reset window would compute 0/0 and print `NaN MB/s`,
+    /// which is meaningless and triggers a downstream log-parsing
+    /// surprise.
+    #[test]
+    fn throughput_mbps_zero_wall_returns_zero() {
+        assert_eq!(throughput_mbps(0, 0), 0.0);
+        assert_eq!(throughput_mbps(60 * 1024, 0), 0.0);
+    }
+
+    /// `throughput_mbps` against a known synthetic sample:
+    /// 1 MB transferred in exactly 1 second = 1.048576 MB/s in
+    /// binary-megabyte terms, but we use *decimal* MB (matches the
+    /// browser UI in `use-file-transfer.ts`), so 1 048 576 bytes /
+    /// 1 s = 1.048576 MB/s. Pick a round-number sample so the test
+    /// is obviously correct on inspection: 10 MB (decimal) in 1 s
+    /// should be exactly 10 MB/s.
+    #[test]
+    fn throughput_mbps_known_sample() {
+        let bytes = 10 * 1_000_000;
+        let wall_ns = 1_000_000_000; // 1 s
+        let result = throughput_mbps(bytes, wall_ns);
+        assert!(
+            (result - 10.0).abs() < 1e-9,
+            "expected 10 MB/s, got {result}"
+        );
+    }
+
+    /// `duration_ns` saturates rather than overflowing on absurd
+    /// inputs — guards against an inadvertent `u128 → u64` panic if
+    /// a future caller passes a `Duration::MAX`.
+    #[test]
+    fn duration_ns_saturates() {
+        assert_eq!(duration_ns(Duration::from_nanos(1)), 1);
+        assert_eq!(duration_ns(Duration::ZERO), 0);
+        // Duration::MAX > u64::MAX nanos — must saturate, not panic.
+        assert_eq!(duration_ns(Duration::MAX), u64::MAX);
+    }
+
+    // ============== DownloadWindow ==============
+
+    /// A fresh window is empty: `chunks == 0`, `is_full() == false`,
+    /// `flush_line` returns `None`. The `None` flush is what protects
+    /// the trailing-flush call sites from emitting a useless empty
+    /// log line when a download has exactly 0 chunks or the loop
+    /// breaks before the first iteration.
+    #[test]
+    fn download_window_empty_flush_is_none() {
+        let w = DownloadWindow::default();
+        assert_eq!(w.chunks, 0);
+        assert!(!w.is_full());
+        assert!(w.flush_line("tid", "ft-metrics").is_none());
+    }
+
+    /// Recording one sample updates all stage accumulators and bumps
+    /// `chunks` / `bytes`. A single chunk is well below the window
+    /// boundary, so `is_full()` remains `false`.
+    #[test]
+    fn download_window_records_single_sample() {
+        let mut w = DownloadWindow::default();
+        w.record(
+            60 * 1024,
+            Duration::from_micros(100),
+            Duration::from_micros(50),
+            Duration::from_millis(2),
+            Duration::from_millis(3),
+        );
+        assert_eq!(w.chunks, 1);
+        assert_eq!(w.bytes, 60 * 1024);
+        assert_eq!(w.disk_read_ns, 100_000);
+        assert_eq!(w.build_chunk_ns, 50_000);
+        assert_eq!(w.emit_await_ns, 2_000_000);
+        assert_eq!(w.wall_ns, 3_000_000);
+        assert!(!w.is_full());
+        let line = w
+            .flush_line("tid", "ft-metrics")
+            .expect("non-empty window must produce a line");
+        assert!(line.starts_with("[ft-metrics] tid=tid"));
+        assert!(line.contains("chunks=1"));
+        assert!(line.contains("bytes=61440"));
+    }
+
+    /// `is_full()` flips at exactly `FT_METRICS_WINDOW_CHUNKS` —
+    /// guards the inverse off-by-one (firing one chunk too early or
+    /// too late would shift every metric line by ~60 KB on a 60 KB
+    /// chunk pipeline).
+    #[test]
+    fn download_window_boundary_is_full() {
+        let mut w = DownloadWindow::default();
+        for _ in 0..(FT_METRICS_WINDOW_CHUNKS - 1) {
+            w.record(
+                1024,
+                Duration::from_nanos(1),
+                Duration::from_nanos(1),
+                Duration::from_nanos(1),
+                Duration::from_nanos(1),
+            );
+        }
+        assert!(!w.is_full(), "one short of the boundary must NOT be full");
+        w.record(
+            1024,
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+        );
+        assert!(w.is_full(), "exactly at the boundary must be full");
+    }
+
+    /// `reset()` clears every field back to the `Default::default()`
+    /// state so a second window starts clean. Required for the
+    /// `is_full → flush → reset` cadence in `serve_download` to not
+    /// accumulate stale totals across windows.
+    #[test]
+    fn download_window_reset_clears_state() {
+        let mut w = DownloadWindow::default();
+        w.record(
+            512,
+            Duration::from_nanos(10),
+            Duration::from_nanos(10),
+            Duration::from_nanos(10),
+            Duration::from_nanos(10),
+        );
+        assert!(w.chunks > 0);
+        w.reset();
+        assert_eq!(w, DownloadWindow::default());
+    }
+
+    // ============== UploadWindow ==============
+
+    /// Mirror of `download_window_empty_flush_is_none` for the upload
+    /// accumulator: the trailing-flush path on `TransferComplete` must
+    /// be a no-op when the window has never recorded a sample (e.g.
+    /// an upload that gets cancelled before any chunk arrives).
+    #[test]
+    fn upload_window_empty_flush_is_none() {
+        let w = UploadWindow::default();
+        assert!(w.flush_line("tid", "ft-metrics").is_none());
+    }
+
+    /// A single recorded sample produces a line containing the bytes
+    /// and lock-wait/disk-write breakdown. The format is asserted
+    /// loosely (substring) because the exact `.2f` formatting can
+    /// shift under different locales (we want the metric, not a
+    /// pixel-perfect format spec).
+    #[test]
+    fn upload_window_records_and_flushes() {
+        let mut w = UploadWindow::default();
+        w.record(
+            60 * 1024,
+            Duration::from_micros(20),
+            Duration::from_millis(1),
+            Duration::from_millis(2),
+        );
+        assert_eq!(w.chunks, 1);
+        assert_eq!(w.bytes, 60 * 1024);
+        assert_eq!(w.lock_ns, 20_000);
+        assert_eq!(w.disk_write_ns, 1_000_000);
+        assert_eq!(w.wall_ns, 2_000_000);
+        let line = w.flush_line("tid", "ft-metrics").unwrap();
+        assert!(line.contains("tid=tid"));
+        assert!(line.contains("bytes=61440"));
+        assert!(line.contains("lock_wait="));
+        assert!(line.contains("disk_write="));
+    }
+
+    /// Upload-side `is_full()` shares the same `FT_METRICS_WINDOW_CHUNKS`
+    /// boundary as the download side — protects against a refactor that
+    /// might accidentally diverge the two windows' cadences (which
+    /// would make the worker / daemon logs harder to correlate by
+    /// chunk count).
+    #[test]
+    fn upload_window_boundary_is_full() {
+        let mut w = UploadWindow::default();
+        for _ in 0..FT_METRICS_WINDOW_CHUNKS {
+            w.record(
+                1,
+                Duration::from_nanos(1),
+                Duration::from_nanos(1),
+                Duration::from_nanos(1),
+            );
+        }
+        assert!(w.is_full());
+        w.reset();
+        assert_eq!(w, UploadWindow::default());
+    }
 
     /// Build a dispatcher whose permission gate auto-passes
     /// (`allow_file_transfer = Some(true)`) so tests focus on the
@@ -1087,9 +1486,7 @@ mod tests {
         };
         let dispatcher_clone = d.clone();
         let download_handle =
-            tokio::spawn(
-                async move { dispatcher_clone.serve_download("c1".into(), req).await },
-            );
+            tokio::spawn(async move { dispatcher_clone.serve_download("c1".into(), req).await });
         // Drain the first two emits so the spawn has time to push
         // them. Each must arrive promptly.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())

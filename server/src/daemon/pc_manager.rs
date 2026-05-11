@@ -99,6 +99,110 @@ use webrtc::media::Sample;
 /// active downloads.
 const FILE_TRANSFER_WRITER_QUEUE_CAP: usize = 16;
 
+/// Rolling per-window accumulator for the daemon-side file-transfer
+/// writer task. Each window flushes one `[ft-metrics-daemon]` INFO
+/// line cross-referenceable with the worker's `[ft-metrics]` line via
+/// `connection_id`. The fields surface the two suspected daemon-side
+/// hot spots:
+///
+/// - `dc_send_ns` — time spent inside `webrtc-rs` `dc.send().await`,
+///   the SCTP-encoding hot path and the prime suspect when the daemon
+///   pegs a CPU core during a download.
+/// - `buffered_*_bytes` — SCTP transmit buffer occupancy at the start
+///   of each `dc.send`; if these stay high we are pipelining behind
+///   the browser's SCTP receiver and `serve_download` is correctly
+///   parked by the file-lane backpressure chain. If they stay near
+///   zero while throughput is low, the bottleneck is upstream of the
+///   DataChannel (worker / IPC / disk).
+/// - `recv_idle_ns` — gap between the previous `dc.send` completing
+///   and the next payload arriving on `mpsc::Receiver`. A large idle
+///   gap when throughput is low points at upstream starvation, not
+///   the SCTP send path.
+///
+/// Kept as a plain struct alongside [`FILE_TRANSFER_WRITER_QUEUE_CAP`]
+/// (rather than under `worker::`) so the daemon module owns it and
+/// the unit tests can construct it without pulling in dispatcher
+/// state.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DaemonFtWindow {
+    pub frames: u32,
+    pub bytes: u64,
+    pub text_frames: u32,
+    pub recv_idle_ns: u64,
+    pub dc_send_ns: u64,
+    pub buffered_max_bytes: u64,
+    pub buffered_sum_bytes: u64,
+    pub buffered_samples: u32,
+}
+
+impl DaemonFtWindow {
+    pub(crate) fn record(
+        &mut self,
+        bytes: u64,
+        is_text: bool,
+        recv_idle: Duration,
+        dc_send: Duration,
+        buffered_before_send: u64,
+    ) {
+        self.frames = self.frames.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        if is_text {
+            self.text_frames = self.text_frames.saturating_add(1);
+        }
+        self.recv_idle_ns =
+            self.recv_idle_ns
+                .saturating_add(crate::worker::file_transfer_dispatcher::duration_ns(
+                    recv_idle,
+                ));
+        self.dc_send_ns =
+            self.dc_send_ns
+                .saturating_add(crate::worker::file_transfer_dispatcher::duration_ns(
+                    dc_send,
+                ));
+        if buffered_before_send > self.buffered_max_bytes {
+            self.buffered_max_bytes = buffered_before_send;
+        }
+        self.buffered_sum_bytes = self.buffered_sum_bytes.saturating_add(buffered_before_send);
+        self.buffered_samples = self.buffered_samples.saturating_add(1);
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.frames >= crate::worker::file_transfer_dispatcher::FT_METRICS_WINDOW_CHUNKS
+    }
+
+    pub(crate) fn flush_line(&self, connection_id: &str) -> Option<String> {
+        if self.frames == 0 {
+            return None;
+        }
+        let mbps =
+            crate::worker::file_transfer_dispatcher::throughput_mbps(self.bytes, self.dc_send_ns);
+        let buffered_avg = if self.buffered_samples > 0 {
+            self.buffered_sum_bytes / (self.buffered_samples as u64)
+        } else {
+            0
+        };
+        let send_ms = (self.dc_send_ns as f64) / 1_000_000.0;
+        let idle_ms = (self.recv_idle_ns as f64) / 1_000_000.0;
+        Some(format!(
+            "[ft-metrics-daemon] cid={cid} frames={f} text={t} bytes={b} \
+             dc_send={sm:.2}ms recv_idle={im:.2}ms buffered_max={bm} \
+             buffered_avg={ba} dc_throughput={mbps:.2}MB/s",
+            cid = connection_id,
+            f = self.frames,
+            t = self.text_frames,
+            b = self.bytes,
+            sm = send_ms,
+            im = idle_ms,
+            bm = self.buffered_max_bytes,
+            ba = buffered_avg,
+        ))
+    }
+
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// Filter the request's ICE servers down to the ones this node should
 /// actually use given the local `traversal_mode` and `startup_mode`.
 ///
@@ -1749,12 +1853,13 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
     // would also park, defeating the lane-separation guarantee.
     let (writer_tx, conn_id) = {
         let ctx = ctx_arc.read().await;
-        (ctx.file_transfer_writer_tx.clone(), ctx.connection_id.clone())
+        (
+            ctx.file_transfer_writer_tx.clone(),
+            ctx.connection_id.clone(),
+        )
     };
     if let Err(e) = writer_tx.send(payload).await {
-        log::debug!(
-            "[pc_manager] file transfer writer task gone for {conn_id}: {e}"
-        );
+        log::debug!("[pc_manager] file transfer writer task gone for {conn_id}: {e}");
     }
 }
 
@@ -1789,7 +1894,19 @@ fn spawn_file_transfer_writer_task(
     // every `#[tokio::test]` that calls `create_for_request_remote`
     // to wrap itself in a `LocalSet` for the constructor to succeed.
     tokio::spawn(async move {
+        let mut window = DaemonFtWindow::default();
+        // `last_send_done` anchors the `recv_idle` measurement: time
+        // between completing one `dc.send` and pulling the next
+        // payload off the bounded queue. A persistently large idle
+        // gap during a slow transfer is the smoking gun for an
+        // upstream stall (worker / IPC / disk); a near-zero gap with
+        // long `dc_send` points the finger at SCTP / webrtc-rs.
+        // Initialised to `Instant::now()` so the very first sample's
+        // idle gap measures from task start, not from a previous send
+        // that never happened.
+        let mut last_send_done = std::time::Instant::now();
         while let Some(payload) = rx.recv().await {
+            let recv_idle = last_send_done.elapsed();
             let dc_opt = dc_slot.read().await.clone();
             let dc = match dc_opt {
                 Some(d) => d,
@@ -1811,7 +1928,16 @@ fn spawn_file_transfer_writer_task(
                 );
                 continue;
             }
-            let result = if payload.is_text {
+            // Sample the SCTP transmit buffer occupancy BEFORE the
+            // send so the window's `buffered_max` / `buffered_avg`
+            // reflect what we hand off to webrtc-rs (post-send the
+            // number can momentarily drop as bytes get flushed onto
+            // the wire, which would mask sustained occupancy).
+            let buffered_before = dc.buffered_amount().await as u64;
+            let payload_len = payload.data.len() as u64;
+            let is_text = payload.is_text;
+            let send_start = std::time::Instant::now();
+            let result = if is_text {
                 let s = match std::str::from_utf8(&payload.data) {
                     Ok(s) => s.to_string(),
                     Err(e) => {
@@ -1826,11 +1952,33 @@ fn spawn_file_transfer_writer_task(
             } else {
                 dc.send(&bytes::Bytes::from(payload.data)).await
             };
+            let dc_send_elapsed = send_start.elapsed();
+            last_send_done = std::time::Instant::now();
             if let Err(e) = result {
                 log::warn!(
                     "[pc_manager] failed to send file transfer data for {connection_id}: {e}"
                 );
+                // Still account for the failed send in the window so
+                // the next flush surfaces the failure latency.
             }
+            window.record(
+                payload_len,
+                is_text,
+                recv_idle,
+                dc_send_elapsed,
+                buffered_before,
+            );
+            if window.is_full() {
+                if let Some(line) = window.flush_line(&connection_id) {
+                    log::info!("{line}");
+                }
+                window.reset();
+            }
+        }
+        // Trailing flush so the last partial window does not vanish
+        // when the sender drops on PC teardown.
+        if let Some(line) = window.flush_line(&connection_id) {
+            log::info!("{line}");
         }
         log::debug!(
             "[pc_manager] file transfer writer task exited for {connection_id} (sender dropped)"
@@ -2112,6 +2260,135 @@ pub async fn handle_require_control(
 mod tests {
     use super::*;
     use desk_ipc_protocol::message::MediaCodec;
+
+    // ============== DaemonFtWindow ==============
+
+    /// An empty daemon window must not produce a log line — same
+    /// contract as the worker-side windows. The trailing flush at
+    /// task exit calls `flush_line` unconditionally; without this
+    /// guard, every PC teardown would emit an empty
+    /// `[ft-metrics-daemon] frames=0 bytes=0 ...` line.
+    #[test]
+    fn daemon_ft_window_empty_flush_is_none() {
+        let w = DaemonFtWindow::default();
+        assert_eq!(w.frames, 0);
+        assert!(!w.is_full());
+        assert!(w.flush_line("cid").is_none());
+    }
+
+    /// One recorded send populates frames/bytes/dc_send_ns and
+    /// updates `buffered_max` / `buffered_sum`. Verifies the
+    /// `is_text` accounting: a text frame increments `text_frames`.
+    #[test]
+    fn daemon_ft_window_records_text_and_binary() {
+        let mut w = DaemonFtWindow::default();
+        // Binary chunk (the dominant case for downloads).
+        w.record(
+            60 * 1024,
+            false,
+            Duration::from_micros(50),
+            Duration::from_millis(1),
+            128 * 1024,
+        );
+        // Control message (e.g. DownloadResponse JSON).
+        w.record(
+            200,
+            true,
+            Duration::from_micros(10),
+            Duration::from_micros(80),
+            64 * 1024,
+        );
+        assert_eq!(w.frames, 2);
+        assert_eq!(w.bytes, 60 * 1024 + 200);
+        assert_eq!(w.text_frames, 1);
+        assert_eq!(w.recv_idle_ns, 50_000 + 10_000);
+        assert_eq!(w.dc_send_ns, 1_000_000 + 80_000);
+        assert_eq!(w.buffered_max_bytes, 128 * 1024);
+        assert_eq!(w.buffered_sum_bytes, (128 + 64) * 1024);
+        assert_eq!(w.buffered_samples, 2);
+        let line = w.flush_line("cid-abc").unwrap();
+        assert!(line.contains("cid=cid-abc"));
+        assert!(line.contains("frames=2"));
+        assert!(line.contains("text=1"));
+        assert!(line.contains("buffered_max=131072"));
+        assert!(line.contains("buffered_avg=98304"));
+    }
+
+    /// `is_full()` flips at the shared `FT_METRICS_WINDOW_CHUNKS`
+    /// boundary so the daemon log cadence stays synchronised with
+    /// the worker log cadence (one daemon line per worker line under
+    /// steady-state download).
+    #[test]
+    fn daemon_ft_window_boundary_is_full() {
+        let mut w = DaemonFtWindow::default();
+        let boundary = crate::worker::file_transfer_dispatcher::FT_METRICS_WINDOW_CHUNKS;
+        for _ in 0..(boundary - 1) {
+            w.record(
+                1,
+                false,
+                Duration::from_nanos(1),
+                Duration::from_nanos(1),
+                0,
+            );
+        }
+        assert!(!w.is_full());
+        w.record(
+            1,
+            false,
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+            0,
+        );
+        assert!(w.is_full());
+    }
+
+    /// `reset()` clears every field back to `Default::default()` so
+    /// the next window does not double-count. Required for the
+    /// `is_full → flush → reset` cadence in
+    /// `spawn_file_transfer_writer_task` to remain consistent.
+    #[test]
+    fn daemon_ft_window_reset_clears_state() {
+        let mut w = DaemonFtWindow::default();
+        w.record(
+            100,
+            false,
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+            42,
+        );
+        assert!(w.frames > 0);
+        w.reset();
+        assert_eq!(w, DaemonFtWindow::default());
+    }
+
+    /// `buffered_avg` rounds down on integer division — guard against
+    /// a refactor that switches to f64 mid-way (the log format is
+    /// `buffered_avg={u64}`, not `{:.2}`, because we want a clean
+    /// byte count for grep / awk).
+    #[test]
+    fn daemon_ft_window_buffered_avg_integer_rounding() {
+        let mut w = DaemonFtWindow::default();
+        w.record(
+            1,
+            false,
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+            100,
+        );
+        w.record(
+            1,
+            false,
+            Duration::from_nanos(1),
+            Duration::from_nanos(1),
+            101,
+        );
+        // (100 + 101) / 2 = 100 (integer div). f64 would be 100.5.
+        let line = w.flush_line("cid").unwrap();
+        assert!(
+            line.contains("buffered_avg=100"),
+            "expected buffered_avg=100 (integer rounding), got: {line}"
+        );
+    }
 
     fn ice(url: &str) -> LcxlRTCIceServer {
         LcxlRTCIceServer {
