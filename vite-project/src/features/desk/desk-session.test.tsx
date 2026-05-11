@@ -78,6 +78,8 @@ globalThis.ResizeObserver = class ResizeObserver {
   disconnect() {}
 } as any;
 
+declare const require: any;
+
 // Mock Popover to reliably test onOpenChange
 vi.mock('@/components/ui/popover', () => {
   const React = require('react');
