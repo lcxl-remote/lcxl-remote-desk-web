@@ -653,8 +653,17 @@ export default function DeskSession() {
 
                         {showStats && isConnected && (
                             <div className="absolute top-4 left-4 z-50 bg-black/60 text-white p-3 rounded-lg text-xs font-mono backdrop-blur-md border border-white/20 select-none min-w-[260px] max-h-[80vh] overflow-y-auto">
-                                <div className="text-sm font-bold text-white/90 mb-2 pb-1 border-b border-white/15">
-                                    {t('pages.desk.statsPanel.title', 'Remote Desk Metrics')}
+                                <div className="flex justify-between items-center mb-2 pb-1 border-b border-white/15">
+                                    <div className="text-sm font-bold text-white/90">
+                                        {t('pages.desk.statsPanel.title', 'Remote Desk Metrics')}
+                                    </div>
+                                    <button 
+                                        onClick={() => setShowStats(false)} 
+                                        className="text-gray-400 hover:text-white transition-colors"
+                                        aria-label={t('pages.desk.closeStats', 'Close')}
+                                    >
+                                        <XSquare className="w-4 h-4" />
+                                    </button>
                                 </div>
 
                                 {/* Network section — what was the original "Network Stats" panel. */}
