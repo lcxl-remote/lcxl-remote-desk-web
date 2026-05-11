@@ -48,7 +48,6 @@
     bottom: 16px;
     left: 50%;
     transform: translateX(-50%) translateY(0);
-    cursor: move;
     background: rgba(0, 0, 0, 0.72);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
@@ -58,34 +57,59 @@
         0 8px 32px rgba(0, 0, 0, 0.4),
         0 2px 8px rgba(0, 0, 0, 0.2),
         inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    padding: 10px 16px;
+    padding: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    z-index: 20;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.controlBarDragHandle {
+    width: 40px;
+    height: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 12px;
-    min-width: 180px;
-    z-index: 20;
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition:
-        opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-        transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-        visibility 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    transform: translateX(-50%) translateY(10px);
+    cursor: move;
+    border-radius: 10px;
+    color: rgba(255, 255, 255, 0.9);
+    transition: background 0.2s ease, color 0.2s ease;
 }
 
-.videoWrapper:hover .controlBar {
+.controlBarDragHandle:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+.controlBarContent {
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    transition: max-width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s ease, margin 0.3s ease;
+}
+
+.controlBarContent.collapsed {
+    max-width: 0;
+    opacity: 0;
+    margin-left: 0;
+    pointer-events: none;
+    visibility: hidden;
+}
+
+.controlBarContent.expanded {
+    max-width: 800px;
     opacity: 1;
-    visibility: visible;
+    margin-left: 4px;
     pointer-events: auto;
-    transform: translateX(-50%) translateY(0);
+    visibility: visible;
 }
 
 .controlButtons {
     display: flex;
     align-items: center;
     gap: 8px;
+    padding-right: 6px;
 }
 
 .controlButton {

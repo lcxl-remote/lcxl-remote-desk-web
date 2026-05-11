@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -84,6 +84,10 @@ export default function DeskSession() {
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
     const [showStats, setShowStats] = useState(false);
+
+    const [isControlBarHovered, setIsControlBarHovered] = useState(false);
+    const [isControlBarMenuOpen, setIsControlBarMenuOpen] = useState(false);
+    const isControlBarExpanded = isControlBarHovered || isControlBarMenuOpen || isDragging;
 
     // Adaptive-quality opt-in (client-only, persisted in localStorage so
     // the user's preference survives reloads). When `false` the
@@ -886,9 +890,27 @@ export default function DeskSession() {
                             <div
                                 ref={controlBarRef}
                                 className="controlBar"
-                                onMouseDown={handleDragStart}
+                                onMouseEnter={() => setIsControlBarHovered(true)}
+                                onMouseLeave={() => setIsControlBarHovered(false)}
                             >
-                                <div className="controlButtons">
+                                <div
+                                    className="controlBarDragHandle"
+                                    onMouseDown={handleDragStart}
+                                    onTouchStart={() => setIsControlBarHovered(!isControlBarHovered)}
+                                >
+                                    <Menu className="w-5 h-5" />
+                                </div>
+                                <div
+                                    className={`controlBarContent ${isControlBarExpanded ? 'expanded' : 'collapsed'}`}
+                                    onFocus={() => setIsControlBarHovered(true)}
+                                    onBlur={(e) => {
+                                        if (!controlBarRef.current?.contains(e.relatedTarget as Node)) {
+                                            setIsControlBarHovered(false);
+                                        }
+                                    }}
+                                    inert={!isControlBarExpanded ? true : undefined}
+                                >
+                                    <div className="controlButtons">
                                     <Tooltip>
                                         <TooltipTrigger asChild>
                                             <Button
@@ -1135,7 +1157,7 @@ export default function DeskSession() {
                                         </TooltipContent>
                                     </Tooltip>
 
-                                    <Popover>
+                                    <Popover onOpenChange={setIsControlBarMenuOpen}>
                                         <PopoverTrigger asChild>
                                             <Button
                                                 variant="ghost"
@@ -1172,6 +1194,7 @@ export default function DeskSession() {
                                             <p>{t('pages.desk.disconnect', 'Disconnect')}</p>
                                         </TooltipContent>
                                     </Tooltip>
+                                    </div>
                                 </div>
                             </div>
                         )}
