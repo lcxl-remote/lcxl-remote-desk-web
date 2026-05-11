@@ -11,8 +11,10 @@
 //!         (write_message / read_message in [`transport`])
 //! ```
 //!
-//! Wire format: little-endian `u32` length prefix + bincode v2 payload
-//! (`bincode::config::standard()`). Messages travel as
+//! Wire format: little-endian `u32` length prefix + wincode payload
+//! (FixInt + LittleEndian, preallocation limit disabled — see
+//! [`transport::IPC_CONFIG`]). Frame size cap: 16 MB enforced at the
+//! transport layer. Messages travel as
 //! [`message::ServiceToWorker`] / [`message::WorkerToService`].
 //!
 //! ## Arch IV (target, dual independent pipes)

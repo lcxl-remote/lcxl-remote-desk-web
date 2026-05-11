@@ -1,31 +1,40 @@
 use std::io;
 
-use bincode::{Decode, Encode};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
 
 /// Maximum message size: 16 MB
 const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
-fn bincode_config() -> bincode::config::Configuration {
-    bincode::config::standard()
-}
+/// Wincode `Configuration` used for every IPC frame on the daemon ↔ worker
+/// transport.
+///
+/// `PREALLOCATION_SIZE_LIMIT_DISABLED` is required: wincode's default 4 MiB
+/// preallocation guard fires on both encode and decode, so a 4K IDR frame
+/// (~2 MB) plus a multi-MB whiteboard / file blob (up to the
+/// transport-layer 16 MB ceiling) would otherwise be rejected by the
+/// serializer before `MAX_MESSAGE_SIZE` ever sees it. We rely on the
+/// transport-layer `MAX_MESSAGE_SIZE` check below for the upper bound and
+/// disable the wincode-internal guard.
+pub type IpcConfigType = Configuration<true, PREALLOCATION_SIZE_LIMIT_DISABLED>;
+pub const IPC_CONFIG: IpcConfigType = Configuration::new();
 
-/// Write a length-prefixed bincode v2 message to an async writer.
+/// Write a length-prefixed wincode message to an async writer.
 ///
 /// Wire format: little-endian `u32` length, followed by `length` bytes of
-/// bincode-v2-encoded payload (`bincode::config::standard()` — fixed-int +
-/// little-endian + no length-limit).
+/// wincode-encoded payload (FixInt + little-endian, preallocation limit
+/// disabled — see [`IPC_CONFIG`]).
 ///
 /// Frame size cap: `MAX_MESSAGE_SIZE` (16 MB).
 pub async fn write_message<W, M>(writer: &mut W, message: &M) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
-    M: Encode,
+    M: wincode::SchemaWrite<IpcConfigType, Src = M>,
 {
-    let bytes = bincode::encode_to_vec(message, bincode_config()).map_err(|e| {
+    let bytes = wincode::config::serialize(message, IPC_CONFIG).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to encode message (bincode): {e}"),
+            format!("Failed to encode message (wincode): {e}"),
         )
     })?;
 
@@ -48,13 +57,13 @@ where
     Ok(())
 }
 
-/// Read a length-prefixed bincode v2 message from an async reader.
+/// Read a length-prefixed wincode message from an async reader.
 ///
 /// See [`write_message`] for the wire format.
 pub async fn read_message<R, M>(reader: &mut R) -> io::Result<M>
 where
     R: AsyncRead + Unpin,
-    M: Decode<()>,
+    M: for<'de> wincode::SchemaRead<'de, IpcConfigType, Dst = M>,
 {
     let mut len_buf = [0u8; 4];
     reader.read_exact(&mut len_buf).await?;
@@ -73,10 +82,10 @@ where
     let mut buf = vec![0u8; len as usize];
     reader.read_exact(&mut buf).await?;
 
-    let (msg, _) = bincode::decode_from_slice(&buf, bincode_config()).map_err(|e| {
+    let msg = wincode::config::deserialize(&buf, IPC_CONFIG).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to decode message (bincode): {e}"),
+            format!("Failed to decode message (wincode): {e}"),
         )
     })?;
     Ok(msg)
@@ -85,7 +94,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ServiceToWorker, WorkerInitPayload, WorkerToService};
+    use crate::message::{
+        OpaqueConnectionPayload, ServiceToWorker, WorkerInitPayload, WorkerToService,
+    };
 
     #[tokio::test]
     async fn roundtrip_init() {
@@ -146,7 +157,7 @@ mod tests {
     /// time, before any bytes go on the wire.
     #[tokio::test]
     async fn write_rejects_oversized_frame() {
-        // Construct a payload that, after bincode encoding, exceeds 16 MB.
+        // Construct a payload that, after wincode encoding, exceeds 16 MB.
         let huge_blob = "x".repeat(20 * 1024 * 1024);
         let msg = ServiceToWorker::Init(WorkerInitPayload {
             session_id: "s".to_string(),
@@ -183,5 +194,45 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         // No bytes beyond the prefix should have been consumed.
         wire.clear();
+    }
+
+    /// PR-2 G1 — A payload comfortably above wincode's 4 MiB default
+    /// preallocation guard but below the 16 MB transport ceiling must
+    /// round-trip via `write_message` + `read_message`. If anything in
+    /// the IPC path falls back to a default `wincode::serialize` /
+    /// `wincode::deserialize` (instead of `wincode::config::serialize`
+    /// + [`IPC_CONFIG`]), the preallocation guard fires on encode and
+    /// this test fails — that is the "did we wire `IPC_CONFIG` in
+    /// everywhere" gold-standard assertion.
+    #[tokio::test]
+    async fn frame_between_4mib_and_16mb_round_trips() {
+        let payload = vec![0xABu8; 8 * 1024 * 1024]; // 8 MiB
+        let original = ServiceToWorker::WhiteboardCommand(OpaqueConnectionPayload {
+            connection_id: "conn-large".to_string(),
+            data: payload.clone(),
+        });
+
+        let mut buf = Vec::new();
+        write_message(&mut buf, &original).await.expect("write");
+        assert!(
+            buf.len() > 4 * 1024 * 1024,
+            "wire frame should exceed 4 MiB to exercise the preallocation guard"
+        );
+        assert!(
+            buf.len() < MAX_MESSAGE_SIZE as usize,
+            "wire frame should stay below the 16 MB transport ceiling"
+        );
+
+        let mut cursor = std::io::Cursor::new(buf);
+        let decoded: ServiceToWorker = read_message(&mut cursor).await.expect("read");
+        match decoded {
+            ServiceToWorker::WhiteboardCommand(p) => {
+                assert_eq!(p.connection_id, "conn-large");
+                assert_eq!(p.data.len(), payload.len());
+                assert_eq!(&p.data[..16], &payload[..16]);
+                assert_eq!(&p.data[p.data.len() - 16..], &payload[payload.len() - 16..]);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

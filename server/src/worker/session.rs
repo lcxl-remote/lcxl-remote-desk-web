@@ -373,8 +373,8 @@ impl WorkerSession {
     }
 
     /// Named-pipe / Unix-socket entry. Performs the Ready / Init handshake
-    /// directly on the byte stream (so the pre-handshake protocol stays
-    /// length-prefix bincode v2 — same as Arch III), then wraps the remaining
+    /// directly on the byte stream (length-prefixed wincode payload — see
+    /// [`desk_ipc_protocol::transport::IPC_CONFIG`]), then wraps the remaining
     /// stream in `framed` event transports and connects the optional media
     /// pipe before delegating to [`Self::run_with_transports`]. The
     /// transport-agnostic main loop is shared with the in-process portable
@@ -412,9 +412,10 @@ impl WorkerSession {
         };
 
         // Wrap the post-handshake bytes in framed event transports. The
-        // wire format (`LengthDelimitedCodec` + bincode v2) is binary
-        // compatible with the `read_message` / `write_message` calls above
-        // — both speak length-prefixed bincode-v2 with a 16 MB cap.
+        // wire format (`LengthDelimitedCodec` + wincode payload, see
+        // `desk_ipc_protocol::transport::IPC_CONFIG`) is binary compatible
+        // with the `read_message` / `write_message` calls above — both speak
+        // length-prefixed wincode with the same 16 MB cap.
         let event_tx: Arc<dyn EventSender<WorkerToService>> = framed::spawn_event_sender(writer);
         let event_rx: Box<dyn EventReceiver<ServiceToWorker>> = framed::make_event_receiver(reader);
 

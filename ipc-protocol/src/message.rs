@@ -1,4 +1,4 @@
-use bincode::{Decode, Encode};
+use wincode::{SchemaRead, SchemaWrite};
 use desk_signal_facade::model::audio_capture::AudioDevice;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 /// `connection_id` field so the worker can route to the right
 /// per-connection encoder / state. ID-less variants (`Init`, `Shutdown`,
 /// etc.) are worker-process-wide.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 #[serde(tag = "type", content = "payload")]
 pub enum ServiceToWorker {
     /// Initialize the worker with session and configuration info
@@ -151,7 +151,7 @@ pub enum ServiceToWorker {
 
 /// Messages sent from Worker process to Service Core (daemon) over the
 /// **event** transport.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 #[serde(tag = "type", content = "payload")]
 pub enum WorkerToService {
     /// Worker has started and is ready to accept connections
@@ -271,7 +271,7 @@ pub enum WorkerToService {
 
 // ==================== Payload Types ====================
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct WorkerInitPayload {
     /// Session ID for this worker instance
     pub session_id: String,
@@ -343,16 +343,10 @@ pub struct WorkerInitPayload {
 /// outbound `SignalingModel::error(...)` wire shape from these fields
 /// — `signaling_type` is what the browser keys off when matching the
 /// reply to its pending request.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct SignalingErrorPayload {
     pub request_id: String,
     pub connection_id: String,
-    /// `SignalingType` rides bincode 2's `with_serde` field attribute
-    /// because the facade enum is `Serialize_repr` / `Deserialize_repr`
-    /// (i32 discriminant) — bincode's derived impl wouldn't know
-    /// about the explicit `#[repr(i32)]` discriminant numbers, so we
-    /// delegate to its serde impl on the wire.
-    #[bincode(with_serde)]
     pub signaling_type: SignalingType,
     pub error_code: i32,
     pub error_message: Option<String>,
@@ -369,7 +363,7 @@ pub struct SignalingErrorPayload {
 /// `now_ns - ts_ns` for one-way latency telemetry only — RTP timestamps
 /// for `webrtc-rs::TrackLocalStaticSample` are derived from the per-frame
 /// `duration` field separately.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct MediaFrame {
     pub connection_id: String,
     pub seq: u64,
@@ -388,7 +382,7 @@ pub struct MediaFrame {
 /// Frame classification on the media transport. The daemon uses this
 /// (a) to know whether to suppress write_sample during worker swaps
 /// (resume only on `VideoI`), and (b) to record latency histograms.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash)]
 pub enum MediaFrameKind {
     VideoI,
     VideoP,
@@ -397,7 +391,7 @@ pub enum MediaFrameKind {
 
 /// Encoder identity. Stays an enum (not free-form string) so we don't end
 /// up with case-sensitive mismatches between worker and daemon.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Encode, Decode, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash)]
 pub enum MediaCodec {
     H264,
     Vp8,
@@ -417,7 +411,7 @@ pub enum MediaCodec {
 /// `list_audio_capture` produce so the daemon can pass them through to
 /// `InitSignalingData::{video,audio}_device_list` without losing any
 /// per-driver grouping or device metadata.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct MediaCapabilities {
     pub video_codecs: Vec<MediaCodec>,
     pub audio_codecs: Vec<MediaCodec>,
@@ -437,12 +431,8 @@ pub struct MediaCapabilities {
     #[serde(default)]
     pub audio_encoders: Vec<String>,
     /// Per-backend display map (e.g. `"dxgi" -> [DISPLAY1, DISPLAY2]`).
-    /// `#[bincode(with_serde)]` because the value type lives in
-    /// `desk-signal-facade` and only carries a serde derive.
-    #[bincode(with_serde)]
     pub video_device_list: BTreeMap<String, Vec<DisplayInfo>>,
     /// Per-backend audio device map.
-    #[bincode(with_serde)]
     pub audio_device_list: BTreeMap<String, Vec<AudioDevice>>,
     /// Whether this worker can talk to a Tauri shell on the same desktop
     /// (for whiteboard / private-screen rendering).
@@ -455,7 +445,7 @@ pub struct MediaCapabilities {
     pub desktop_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct StartMediaPayload {
     pub connection_id: String,
     pub video_codec: MediaCodec,
@@ -499,12 +489,12 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct StopMediaPayload {
     pub connection_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct UpdateMediaSettingsPayload {
     pub connection_id: String,
     pub fps: Option<u32>,
@@ -512,7 +502,7 @@ pub struct UpdateMediaSettingsPayload {
     pub quality: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ForceKeyframePayload {
     pub connection_id: String,
 }
@@ -522,13 +512,13 @@ pub struct ForceKeyframePayload {
 /// payload as received from the browser; the worker's existing handlers
 /// continue to deserialize JSON / bincode internally so we don't have to
 /// duplicate every event schema in the IPC layer.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct InputPayload {
     pub connection_id: String,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ClipboardPayload {
     pub connection_id: String,
     pub data: Vec<u8>,
@@ -536,7 +526,7 @@ pub struct ClipboardPayload {
 
 /// Per-connection request that carries no payload of its own (e.g.
 /// `ClipboardRequest`).
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ConnectionRefPayload {
     pub connection_id: String,
 }
@@ -545,7 +535,7 @@ pub struct ConnectionRefPayload {
 /// (file-transfer / whiteboard) where the worker dispatches into a
 /// handler module by re-decoding `data`. Distinct type alias keeps the
 /// callsite intent explicit.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct OpaqueConnectionPayload {
     pub connection_id: String,
     pub data: Vec<u8>,
@@ -558,20 +548,20 @@ pub struct OpaqueConnectionPayload {
 /// control messages travel as text, file chunks travel as binary —
 /// so the IPC has to preserve that bit for the daemon's `dc.send_text`
 /// vs `dc.send` decision.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct FileTransferPayload {
     pub connection_id: String,
     pub data: Vec<u8>,
     pub is_text: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct CursorDataPayload {
     pub connection_id: String,
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct HeartbeatPayload {
     /// Current timestamp
     pub timestamp_ms: u64,
@@ -594,7 +584,7 @@ pub struct HeartbeatPayload {
 /// error codes.
 pub const ERROR_CODE_MEDIA_TRANSPORT_STUCK: i32 = -1001;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ErrorPayload {
     /// Error code
     pub code: i32,
@@ -616,7 +606,7 @@ pub struct ErrorPayload {
 /// JSON shape of `desk_signal_facade::model::private_screen::
 /// EnablePrivateScreenData` plus the `connection_id` the daemon
 /// already had at the WS-router boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct EnablePrivateScreenPayload {
     pub connection_id: String,
     pub enable: bool,
@@ -627,15 +617,9 @@ pub struct EnablePrivateScreenPayload {
 /// daemon separately sniffs the media-relevant knobs and emits
 /// [`ServiceToWorker::UpdateMediaSettings`] for the encoder pipeline
 /// (see `pc_manager::broadcast_media_settings_update`).
-///
-/// `DeskSettings` itself does not derive [`Encode`]/[`Decode`] (it
-/// lives in `desk-signal-facade`, a leaf model crate that should not
-/// know about bincode); we ride bincode 2's `with_serde` field
-/// attribute to delegate to its serde impl on the wire.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct UpdateDeskSettingsPayload {
     pub connection_id: String,
-    #[bincode(with_serde)]
     pub settings: DeskSettings,
 }
 
@@ -643,10 +627,9 @@ pub struct UpdateDeskSettingsPayload {
 /// Mirrors `desk_signal_facade::model::private_screen::
 /// PrivateScreenStateChangedData` plus the `connection_id` the
 /// daemon needs to pick the right outbound signaling websocket.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct PrivateScreenStateChangedPayload {
     pub connection_id: String,
-    #[bincode(with_serde)]
     pub data: PrivateScreenStateChangedData,
 }
 
@@ -663,7 +646,7 @@ pub struct PrivateScreenStateChangedPayload {
 /// `connection.request_peer_with_callback`) carry no `from_connection_id`
 /// — the daemon correlates the response by `request_id` alone in that
 /// path.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerRequestRefPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
@@ -675,7 +658,7 @@ pub struct ManagerRequestRefPayload {
 /// the daemon's response-direction code is symmetric with the
 /// request-direction code at the type-system level. `connection_id`
 /// is `Option` for the same reason — see that type's docstring.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerResponseRefPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
@@ -686,29 +669,26 @@ pub struct ManagerResponseRefPayload {
 /// browser-issued signaling envelope. `connection_id` is `Option`
 /// because manager-plane queries can be HTTP-API-triggered (no
 /// originating browser PC) — see [`ManagerRequestRefPayload`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerFileListRequestPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    #[bincode(with_serde)]
     pub params: FileListParams,
 }
 
 /// Payload for [`ServiceToWorker::ManagerFileDeleteRequest`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerFileDeleteRequestPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    #[bincode(with_serde)]
     pub request: DeleteFileRequest,
 }
 
 /// Payload for [`ServiceToWorker::ManagerUpdateSettingsRequest`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerUpdateSettingsRequestPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    #[bincode(with_serde)]
     pub settings: RemoteSystemSettings,
 }
 
@@ -718,29 +698,26 @@ pub struct ManagerUpdateSettingsRequestPayload {
 /// `send_response`. `connection_id` is `Option` because the matching
 /// request can be HTTP-API-triggered with no `from_connection_id` —
 /// see [`ManagerRequestRefPayload`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerSystemInfoResponsePayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    #[bincode(with_serde)]
     pub info: SystemInfo,
 }
 
 /// Payload for [`WorkerToService::ManagerFileListResponse`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerFileListResponsePayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    #[bincode(with_serde)]
     pub response: FileListResponse,
 }
 
 /// Payload for [`WorkerToService::ManagerQuerySettingsResponse`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ManagerQuerySettingsResponsePayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    #[bincode(with_serde)]
     pub settings: RemoteSystemSettings,
 }
 
@@ -751,28 +728,25 @@ pub struct ManagerQuerySettingsResponsePayload {
 /// command + args string the worker splits in
 /// `handle_manager_terminal_start`). `request_id` is echoed back on
 /// the [`WorkerToService::TerminalStarted`] reply.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct StartTerminalRequestPayload {
     pub request_id: String,
     pub connection_id: String,
-    #[bincode(with_serde)]
     pub session: StartTerminalSession,
 }
 
 /// Payload for [`ServiceToWorker::SendDataToTerminalRequest`]. One-way —
 /// no `request_id` because the worker does not reply.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct SendDataToTerminalPayload {
     pub connection_id: String,
-    #[bincode(with_serde)]
     pub data: TerminalInputData,
 }
 
 /// Payload for [`ServiceToWorker::ResizeTerminalRequest`]. One-way.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ResizeTerminalPayload {
     pub connection_id: String,
-    #[bincode(with_serde)]
     pub data: TerminalResizeData,
 }
 
@@ -780,7 +754,7 @@ pub struct ResizeTerminalPayload {
 /// (the only thing the worker needs is the connection id). Distinct
 /// from [`ConnectionRefPayload`] / [`TerminalClosedPayload`] so the
 /// terminal-plane direction is symmetric at the type level.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct CloseTerminalPayload {
     pub connection_id: String,
 }
@@ -792,7 +766,7 @@ pub struct CloseTerminalPayload {
 /// dispatches via `connection.request_peer_with_callback` with no
 /// originating browser PC — the response is correlated by
 /// `request_id`.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ListTerminalRequestPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
@@ -801,7 +775,7 @@ pub struct ListTerminalRequestPayload {
 /// Payload for [`WorkerToService::TerminalStarted`]. Empty body —
 /// `request_id` correlates with the originating
 /// [`ServiceToWorker::StartTerminalRequest`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct TerminalStartedPayload {
     pub request_id: String,
     pub connection_id: String,
@@ -810,7 +784,7 @@ pub struct TerminalStartedPayload {
 /// Payload for [`WorkerToService::TerminalClosed`]. No `request_id` —
 /// this is a notification fired by the worker's monitor task when
 /// the PTY child process exits, not a response to a specific request.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct TerminalClosedPayload {
     pub connection_id: String,
 }
@@ -818,10 +792,9 @@ pub struct TerminalClosedPayload {
 /// Payload for [`WorkerToService::ReplyFromTerminal`]. Each chunk is
 /// at most ~1 KB (the worker's PTY reader buffer size), so the event
 /// pipe handles the rate fine without competing with media frames.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ReplyFromTerminalPayload {
     pub connection_id: String,
-    #[bincode(with_serde)]
     pub data: TerminalOutputData,
 }
 
@@ -829,15 +802,14 @@ pub struct ReplyFromTerminalPayload {
 /// fully resolved [`TerminalList`] the worker built from
 /// `which::which`/`which_re` lookups. `connection_id` is `Option` for
 /// the same reason as [`ListTerminalRequestPayload`].
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct ListTerminalResponsePayload {
     pub request_id: String,
     pub connection_id: Option<String>,
-    #[bincode(with_serde)]
     pub terminals: TerminalList,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct DesktopChangedPayload {
     /// New input desktop name as returned by `OpenInputDesktop` +
     /// `GetUserObjectInformationW(UOI_NAME)`. Examples: "Default", "Winlogon",
@@ -913,20 +885,29 @@ mod tests {
         assert!(decoded.config_file_path.is_none());
     }
 
-    // ============== Arch IV variants — bincode v2 round-trips ==============
+    // ============== Arch IV variants — wincode round-trips ==============
 
-    fn bincode_round_trip<T>(value: &T) -> T
+    use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
+
+    /// Unbounded wincode `Configuration` matching the production IPC
+    /// path (`IPC_CONFIG` in `transport.rs` / `dual_transport.rs`):
+    /// preallocation limit disabled so encode + decode accept the full
+    /// 16 MB transport-layer ceiling without firing the 4 MiB default
+    /// safety net.
+    type WincodeUnbounded = Configuration<true, PREALLOCATION_SIZE_LIMIT_DISABLED>;
+
+    fn wincode_round_trip<T>(value: &T) -> T
     where
-        T: bincode::Encode + bincode::Decode<()>,
+        T: wincode::SchemaWrite<WincodeUnbounded, Src = T>
+            + for<'de> wincode::SchemaRead<'de, WincodeUnbounded, Dst = T>,
     {
-        let bytes = bincode::encode_to_vec(value, bincode::config::standard()).unwrap();
-        let (decoded, _) =
-            bincode::decode_from_slice::<T, _>(&bytes, bincode::config::standard()).unwrap();
-        decoded
+        let config: WincodeUnbounded = Configuration::new();
+        let bytes = wincode::config::serialize(value, config).expect("encode");
+        wincode::config::deserialize(&bytes, config).expect("decode")
     }
 
     #[test]
-    fn start_media_round_trips_bincode() {
+    fn start_media_round_trips_wincode() {
         let msg = ServiceToWorker::StartMedia(StartMediaPayload {
             connection_id: "conn-1".to_string(),
             video_codec: MediaCodec::H264,
@@ -940,7 +921,7 @@ mod tests {
             start_audio: true,
             image_capture: None,
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::StartMedia(p) => {
                 assert_eq!(p.connection_id, "conn-1");
                 assert_eq!(p.video_codec, MediaCodec::H264);
@@ -955,7 +936,7 @@ mod tests {
 
     /// DataChannel-only connections (browser file-management UI) ship
     /// `start_video=false, start_audio=false` so the worker skips both
-    /// capture pipelines. Round-trip the negative case so a bincode
+    /// capture pipelines. Round-trip the negative case so a wincode
     /// schema bump that drops the new fields is caught here.
     #[test]
     fn start_media_data_channel_only_round_trips() {
@@ -972,7 +953,7 @@ mod tests {
             start_audio: false,
             image_capture: None,
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::StartMedia(p) => {
                 assert!(!p.start_video, "start_video=false must round-trip");
                 assert!(!p.start_audio, "start_audio=false must round-trip");
@@ -1010,29 +991,29 @@ mod tests {
     }
 
     #[test]
-    fn stop_media_round_trips_bincode() {
+    fn stop_media_round_trips_wincode() {
         let msg = ServiceToWorker::StopMedia(StopMediaPayload {
             connection_id: "conn-2".to_string(),
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::StopMedia(p) => assert_eq!(p.connection_id, "conn-2"),
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
-    fn force_keyframe_round_trips_bincode() {
+    fn force_keyframe_round_trips_wincode() {
         let msg = ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
             connection_id: "conn-3".to_string(),
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::ForceKeyframe(p) => assert_eq!(p.connection_id, "conn-3"),
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     /// MouseInput / MouseMoveInput / KeyboardInput share `InputPayload` —
-    /// verify the variant tag survives round-trip (bincode discriminant).
+    /// verify the variant tag survives round-trip (wincode discriminant).
     #[test]
     fn input_variants_distinguishable_after_round_trip() {
         let mouse = ServiceToWorker::MouseInput(InputPayload {
@@ -1048,21 +1029,21 @@ mod tests {
             data: vec![1, 2, 3],
         });
         assert!(matches!(
-            bincode_round_trip(&mouse),
+            wincode_round_trip(&mouse),
             ServiceToWorker::MouseInput(_)
         ));
         assert!(matches!(
-            bincode_round_trip(&mouse_move),
+            wincode_round_trip(&mouse_move),
             ServiceToWorker::MouseMoveInput(_)
         ));
         assert!(matches!(
-            bincode_round_trip(&keyboard),
+            wincode_round_trip(&keyboard),
             ServiceToWorker::KeyboardInput(_)
         ));
     }
 
     #[test]
-    fn capabilities_round_trips_bincode() {
+    fn capabilities_round_trips_wincode() {
         use desk_signal_facade::model::audio_capture::{AudioDataFlow, AudioDevice};
         use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
 
@@ -1104,7 +1085,7 @@ mod tests {
             is_admin: false,
             desktop_name: "Default".to_string(),
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::Capabilities(c) => {
                 assert_eq!(c.video_codecs, vec![MediaCodec::H264, MediaCodec::Vp9]);
                 assert_eq!(
@@ -1139,35 +1120,32 @@ mod tests {
     /// `WorkerToService` / `ServiceToWorker` enum wrapper.
     #[test]
     fn file_transfer_payload_round_trip_preserves_is_text_flag() {
-        let config = bincode::config::standard();
         for is_text in [true, false] {
             let original = FileTransferPayload {
                 connection_id: "ft-1".to_string(),
                 data: vec![1, 2, 3],
                 is_text,
             };
-            let bytes = bincode::encode_to_vec(&original, config).expect("encode");
-            let (decoded, _): (FileTransferPayload, _) =
-                bincode::decode_from_slice(&bytes, config).expect("decode");
+            let decoded = wincode_round_trip(&original);
             assert_eq!(decoded.connection_id, "ft-1");
             assert_eq!(decoded.data, vec![1, 2, 3]);
             assert_eq!(decoded.is_text, is_text);
         }
     }
 
-    /// `ErrorPayload.connection_id` survives a bincode round-trip in
+    /// `ErrorPayload.connection_id` survives a wincode round-trip in
     /// both `Some` and `None` forms. The daemon's `MediaTransportStuck`
     /// recovery path keys off this field — losing it would silently
     /// regress the self-heal we just wired up.
     #[test]
-    fn error_payload_connection_id_round_trips_bincode() {
+    fn error_payload_connection_id_round_trips_wincode() {
         let scoped = WorkerToService::Error(ErrorPayload {
             code: ERROR_CODE_MEDIA_TRANSPORT_STUCK,
             message: "stuck".to_string(),
             recoverable: true,
             connection_id: Some("conn-7".to_string()),
         });
-        match bincode_round_trip(&scoped) {
+        match wincode_round_trip(&scoped) {
             WorkerToService::Error(p) => {
                 assert_eq!(p.code, ERROR_CODE_MEDIA_TRANSPORT_STUCK);
                 assert_eq!(p.connection_id.as_deref(), Some("conn-7"));
@@ -1182,7 +1160,7 @@ mod tests {
             recoverable: false,
             connection_id: None,
         });
-        match bincode_round_trip(&global) {
+        match wincode_round_trip(&global) {
             WorkerToService::Error(p) => {
                 assert_eq!(p.code, -1);
                 assert!(p.connection_id.is_none());
@@ -1218,7 +1196,7 @@ mod tests {
     /// `MediaFrame` is the hot path on the media transport — sanity check
     /// 200 KB P-frame size encodes/decodes cleanly.
     #[test]
-    fn media_frame_round_trips_bincode_200kb() {
+    fn media_frame_round_trips_wincode_200kb() {
         let payload = vec![0xABu8; 200 * 1024];
         let original = MediaFrame {
             connection_id: "conn-1".to_string(),
@@ -1229,7 +1207,7 @@ mod tests {
             codec: MediaCodec::H264,
             payload: payload.clone(),
         };
-        let decoded = bincode_round_trip(&original);
+        let decoded = wincode_round_trip(&original);
         assert_eq!(decoded.connection_id, "conn-1");
         assert_eq!(decoded.seq, 42);
         assert_eq!(decoded.kind, MediaFrameKind::VideoP);
@@ -1241,17 +1219,17 @@ mod tests {
 
     /// `EnablePrivateScreen` carries the same bool the legacy
     /// `EnablePrivateScreenData` JSON used. Round-tripping it under
-    /// bincode pins the wire shape — a reorder of `connection_id`
+    /// wincode pins the wire shape — a reorder of `connection_id`
     /// vs `enable` would silently flip enable-vs-disable on
     /// matched-version daemon/worker pairs.
     #[test]
-    fn enable_private_screen_round_trips_bincode() {
+    fn enable_private_screen_round_trips_wincode() {
         for enable in [true, false] {
             let msg = ServiceToWorker::EnablePrivateScreen(EnablePrivateScreenPayload {
                 connection_id: "conn-priv".to_string(),
                 enable,
             });
-            match bincode_round_trip(&msg) {
+            match wincode_round_trip(&msg) {
                 ServiceToWorker::EnablePrivateScreen(p) => {
                     assert_eq!(p.connection_id, "conn-priv");
                     assert_eq!(p.enable, enable);
@@ -1261,13 +1239,13 @@ mod tests {
         }
     }
 
-    /// `UpdateDeskSettings` rides bincode 2's `with_serde` field
-    /// attribute to delegate to `DeskSettings`'s serde impl. Verify
-    /// non-default media + non-media fields both survive — these are
-    /// the ones the worker's `handle_update_desk_settings` and the
-    /// daemon's `broadcast_media_settings_update` both read.
+    /// `UpdateDeskSettings` ferries `DeskSettings` over the wincode
+    /// derive added in PR-1B. Verify non-default media + non-media
+    /// fields both survive — these are the ones the worker's
+    /// `handle_update_desk_settings` and the daemon's
+    /// `broadcast_media_settings_update` both read.
     #[test]
-    fn update_desk_settings_round_trips_bincode() {
+    fn update_desk_settings_round_trips_wincode() {
         let settings = DeskSettings {
             video_fps: 45,
             video_quality: 33,
@@ -1278,7 +1256,7 @@ mod tests {
             connection_id: "conn-uds".to_string(),
             settings: settings.clone(),
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::UpdateDeskSettings(p) => {
                 assert_eq!(p.connection_id, "conn-uds");
                 assert_eq!(p.settings.video_fps, 45);
@@ -1295,7 +1273,7 @@ mod tests {
     /// `PrivateScreenStateChangedData` shows up as a test failure
     /// rather than as a silent wire-format drift.
     #[test]
-    fn private_screen_state_changed_round_trips_bincode() {
+    fn private_screen_state_changed_round_trips_wincode() {
         let msg = WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
             connection_id: "conn-pss".to_string(),
             data: PrivateScreenStateChangedData {
@@ -1304,7 +1282,7 @@ mod tests {
                 error_msg: Some("hub denied".to_string()),
             },
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::PrivateScreenStateChanged(p) => {
                 assert_eq!(p.connection_id, "conn-pss");
                 assert!(!p.data.visible);
@@ -1318,15 +1296,15 @@ mod tests {
     // === Arch IV typed-IPC migration batch 2 — round-trip tests ===
 
     /// Body-less manager request envelopes carry only `request_id` +
-    /// `connection_id`; verify the field order survives bincode (a
+    /// `connection_id`; verify the field order survives wincode (a
     /// reorder would silently swap them on matched-version pairs).
     #[test]
-    fn manager_request_ref_round_trips_bincode() {
+    fn manager_request_ref_round_trips_wincode() {
         let msg = ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
             request_id: "req-info-1".to_string(),
             connection_id: Some("conn-mgr".to_string()),
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::ManagerSystemInfoRequest(p) => {
                 assert_eq!(p.request_id, "req-info-1");
                 assert_eq!(p.connection_id.as_deref(), Some("conn-mgr"));
@@ -1342,7 +1320,7 @@ mod tests {
             request_id: "req-info-no-conn".to_string(),
             connection_id: None,
         });
-        match bincode_round_trip(&none_msg) {
+        match wincode_round_trip(&none_msg) {
             ServiceToWorker::ManagerSystemInfoRequest(p) => {
                 assert!(p.connection_id.is_none());
             }
@@ -1350,12 +1328,12 @@ mod tests {
         }
     }
 
-    /// `ManagerFileListRequest` rides bincode 2's `with_serde` field
-    /// attribute on `FileListParams`. Use a non-default page_count
-    /// (and filename filter) so a stripped field shows up as a test
-    /// failure.
+    /// `ManagerFileListRequest` ferries `FileListParams` (carries 4
+    /// `Option<DateTime<Local>>` fields via the wincode chrono adapter
+    /// added in PR-1B). Use a non-default page_count (and filename
+    /// filter) so a stripped field shows up as a test failure.
     #[test]
-    fn manager_file_list_request_round_trips_bincode() {
+    fn manager_file_list_request_round_trips_wincode() {
         let params = FileListParams {
             path: "C:\\Users".to_string(),
             page_no: 2,
@@ -1368,7 +1346,7 @@ mod tests {
             connection_id: Some("conn-fl".to_string()),
             params,
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::ManagerFileListRequest(p) => {
                 assert_eq!(p.request_id, "req-fl");
                 assert_eq!(p.connection_id.as_deref(), Some("conn-fl"));
@@ -1381,12 +1359,12 @@ mod tests {
         }
     }
 
-    /// `ManagerUpdateSettingsRequest` rides `RemoteSystemSettings`
-    /// over `with_serde`. Round-trip a non-default payload so a
-    /// reorder/strip in the facade struct trips here rather than
-    /// silently corrupting persisted settings.
+    /// `ManagerUpdateSettingsRequest` ferries `RemoteSystemSettings`
+    /// over the wincode derive added in PR-1B. Round-trip a
+    /// non-default payload so a reorder/strip in the facade struct
+    /// trips here rather than silently corrupting persisted settings.
     #[test]
-    fn manager_update_settings_request_round_trips_bincode() {
+    fn manager_update_settings_request_round_trips_wincode() {
         let settings = RemoteSystemSettings {
             enable_ipv6: true,
             port: 8443,
@@ -1405,7 +1383,7 @@ mod tests {
                 connection_id: Some("conn-upd".to_string()),
                 settings,
             });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::ManagerUpdateSettingsRequest(p) => {
                 assert_eq!(p.request_id, "req-upd");
                 assert!(p.settings.enable_ipv6);
@@ -1421,12 +1399,12 @@ mod tests {
     /// Body-less manager response envelopes are distinct from request
     /// envelopes at the type level; round-trip pins the variant tag.
     #[test]
-    fn manager_response_ref_round_trips_bincode() {
+    fn manager_response_ref_round_trips_wincode() {
         let msg = WorkerToService::ManagerFileDeleteResponse(ManagerResponseRefPayload {
             request_id: "req-del".to_string(),
             connection_id: Some("conn-del".to_string()),
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::ManagerFileDeleteResponse(p) => {
                 assert_eq!(p.request_id, "req-del");
                 assert_eq!(p.connection_id.as_deref(), Some("conn-del"));
@@ -1440,7 +1418,7 @@ mod tests {
     /// handler set both at runtime so they are the most likely
     /// round-trip regression points).
     #[test]
-    fn manager_system_info_response_round_trips_bincode() {
+    fn manager_system_info_response_round_trips_wincode() {
         let info = SystemInfo {
             name: Some("alice-pc".to_string()),
             is_admin: Some(true),
@@ -1451,7 +1429,7 @@ mod tests {
             connection_id: Some("conn-info".to_string()),
             info,
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::ManagerSystemInfoResponse(p) => {
                 assert_eq!(p.request_id, "req-info");
                 assert_eq!(p.info.name.as_deref(), Some("alice-pc"));
@@ -1463,13 +1441,13 @@ mod tests {
 
     // === Arch IV typed-IPC migration batch 3 — round-trip tests ===
 
-    /// `StartTerminalRequest` rides bincode 2's `with_serde` field
-    /// attribute on `StartTerminalSession`. A non-trivial `command`
-    /// (with comma-separated args) survives the round-trip — a
-    /// stripped or reordered field would break terminal launch on
-    /// matched-version daemon/worker pairs.
+    /// `StartTerminalRequest` ferries `StartTerminalSession` over the
+    /// wincode derive added in PR-1B. A non-trivial `command` (with
+    /// comma-separated args) survives the round-trip — a stripped or
+    /// reordered field would break terminal launch on matched-version
+    /// daemon/worker pairs.
     #[test]
-    fn start_terminal_request_round_trips_bincode() {
+    fn start_terminal_request_round_trips_wincode() {
         let msg = ServiceToWorker::StartTerminalRequest(StartTerminalRequestPayload {
             request_id: "req-start".to_string(),
             connection_id: "conn-term".to_string(),
@@ -1477,7 +1455,7 @@ mod tests {
                 command: "C:\\Windows\\System32\\cmd.exe,/k,echo,hello".to_string(),
             },
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::StartTerminalRequest(p) => {
                 assert_eq!(p.request_id, "req-start");
                 assert_eq!(p.connection_id, "conn-term");
@@ -1494,14 +1472,14 @@ mod tests {
     /// arbitrary UTF-8 (including newlines + escape codes) must
     /// round-trip verbatim.
     #[test]
-    fn send_data_to_terminal_request_round_trips_bincode() {
+    fn send_data_to_terminal_request_round_trips_wincode() {
         let msg = ServiceToWorker::SendDataToTerminalRequest(SendDataToTerminalPayload {
             connection_id: "conn-term".to_string(),
             data: TerminalInputData {
                 content: "ls -la\n\x1b[1;31mred\x1b[0m\n".to_string(),
             },
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::SendDataToTerminalRequest(p) => {
                 assert_eq!(p.connection_id, "conn-term");
                 assert_eq!(p.data.content, "ls -la\n\x1b[1;31mred\x1b[0m\n");
@@ -1514,7 +1492,7 @@ mod tests {
     /// the round-trip so a future field reorder does not silently
     /// swap rows and cols at the wire.
     #[test]
-    fn resize_terminal_request_round_trips_bincode() {
+    fn resize_terminal_request_round_trips_wincode() {
         let msg = ServiceToWorker::ResizeTerminalRequest(ResizeTerminalPayload {
             connection_id: "conn-term".to_string(),
             data: TerminalResizeData {
@@ -1522,7 +1500,7 @@ mod tests {
                 cols: 200,
             },
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             ServiceToWorker::ResizeTerminalRequest(p) => {
                 assert_eq!(p.connection_id, "conn-term");
                 assert_eq!(p.data.rows, 50);
@@ -1533,16 +1511,16 @@ mod tests {
     }
 
     /// `CloseTerminalRequest` and `ListTerminalRequest` are body-less;
-    /// verify the variant tag survives bincode (a reorder of the
+    /// verify the variant tag survives wincode (a reorder of the
     /// terminal-plane variants would silently misroute one onto the
     /// other on matched-version pairs).
     #[test]
-    fn close_and_list_terminal_requests_round_trip_bincode() {
+    fn close_and_list_terminal_requests_round_trip_wincode() {
         let close = ServiceToWorker::CloseTerminalRequest(CloseTerminalPayload {
             connection_id: "conn-term".to_string(),
         });
         assert!(matches!(
-            bincode_round_trip(&close),
+            wincode_round_trip(&close),
             ServiceToWorker::CloseTerminalRequest(_)
         ));
 
@@ -1550,7 +1528,7 @@ mod tests {
             request_id: "req-list".to_string(),
             connection_id: Some("conn-list".to_string()),
         });
-        match bincode_round_trip(&list) {
+        match wincode_round_trip(&list) {
             ServiceToWorker::ListTerminalRequest(p) => {
                 assert_eq!(p.request_id, "req-list");
                 assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
@@ -1566,7 +1544,7 @@ mod tests {
             request_id: "req-list-no-conn".to_string(),
             connection_id: None,
         });
-        match bincode_round_trip(&list_no_conn) {
+        match wincode_round_trip(&list_no_conn) {
             ServiceToWorker::ListTerminalRequest(p) => {
                 assert!(p.connection_id.is_none());
             }
@@ -1576,17 +1554,17 @@ mod tests {
 
     /// `TerminalStarted` is the success response for `StartTerminal`.
     /// Empty body — `request_id` correlates back to the original
-    /// `StartTerminalRequest`. Verify the variant survives bincode
+    /// `StartTerminalRequest`. Verify the variant survives wincode
     /// alongside `TerminalClosed` (notification, no `request_id`)
     /// so the daemon's reverse-direction code can keep them
     /// straight.
     #[test]
-    fn terminal_started_and_closed_round_trip_bincode() {
+    fn terminal_started_and_closed_round_trip_wincode() {
         let started = WorkerToService::TerminalStarted(TerminalStartedPayload {
             request_id: "req-start".to_string(),
             connection_id: "conn-term".to_string(),
         });
-        match bincode_round_trip(&started) {
+        match wincode_round_trip(&started) {
             WorkerToService::TerminalStarted(p) => {
                 assert_eq!(p.request_id, "req-start");
                 assert_eq!(p.connection_id, "conn-term");
@@ -1597,7 +1575,7 @@ mod tests {
         let closed = WorkerToService::TerminalClosed(TerminalClosedPayload {
             connection_id: "conn-term".to_string(),
         });
-        match bincode_round_trip(&closed) {
+        match wincode_round_trip(&closed) {
             WorkerToService::TerminalClosed(p) => {
                 assert_eq!(p.connection_id, "conn-term");
             }
@@ -1607,10 +1585,10 @@ mod tests {
 
     /// `ReplyFromTerminal` is the high-frequency PTY-output path.
     /// Verify a reasonably large chunk (4 KB — well above the
-    /// worker's 1 KB read buffer to leave headroom) survives bincode
+    /// worker's 1 KB read buffer to leave headroom) survives wincode
     /// without truncation.
     #[test]
-    fn reply_from_terminal_round_trips_bincode_with_large_chunk() {
+    fn reply_from_terminal_round_trips_wincode_with_large_chunk() {
         let body = "abcdefgh".repeat(512); // 4 KB
         let msg = WorkerToService::ReplyFromTerminal(ReplyFromTerminalPayload {
             connection_id: "conn-term".to_string(),
@@ -1618,7 +1596,7 @@ mod tests {
                 content: body.clone(),
             },
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::ReplyFromTerminal(p) => {
                 assert_eq!(p.connection_id, "conn-term");
                 assert_eq!(p.data.content.len(), body.len());
@@ -1630,15 +1608,15 @@ mod tests {
 
     // === Arch IV typed-IPC migration batch 4 — round-trip tests ===
 
-    /// `SignalingError` rides bincode 2's `with_serde` field attribute
-    /// on `SignalingType` (the facade enum is `Serialize_repr` /
-    /// `Deserialize_repr`). Round-trip a representative type +
-    /// non-zero `error_code` + an explicit message so a wire-format
-    /// drift on any field shows up as a test failure rather than a
-    /// silent corruption that swaps which `SignalingType` the browser
-    /// thinks the error belongs to.
+    /// `SignalingError.signaling_type` is `SignalingType`, a facade enum
+    /// whose wincode derive uses `tag_encoding = "i32"` matched to its
+    /// `#[repr(i32)]` discriminants (PR-1B). Round-trip a representative
+    /// type + non-zero `error_code` + an explicit message so a
+    /// wire-format drift on any field shows up as a test failure rather
+    /// than a silent corruption that swaps which `SignalingType` the
+    /// browser thinks the error belongs to.
     #[test]
-    fn signaling_error_round_trips_bincode() {
+    fn signaling_error_round_trips_wincode() {
         let msg = WorkerToService::SignalingError(SignalingErrorPayload {
             request_id: "req-err-1".to_string(),
             connection_id: "conn-err".to_string(),
@@ -1646,7 +1624,7 @@ mod tests {
             error_code: 401,
             error_message: Some("Permission denied".to_string()),
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::SignalingError(p) => {
                 assert_eq!(p.request_id, "req-err-1");
                 assert_eq!(p.connection_id, "conn-err");
@@ -1666,7 +1644,7 @@ mod tests {
             error_code: -1,
             error_message: None,
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::SignalingError(p) => {
                 assert_eq!(p.error_code, -1);
                 assert!(p.error_message.is_none());
@@ -1675,11 +1653,12 @@ mod tests {
         }
     }
 
-    /// `ListTerminalResponse` rides `TerminalList` over `with_serde`.
-    /// Round-trip a non-empty list so a stripped field shows up as a
-    /// test failure rather than a silent wire-format drift.
+    /// `ListTerminalResponse` ferries `TerminalList` over the wincode
+    /// derive added in PR-1B. Round-trip a non-empty list so a
+    /// stripped field shows up as a test failure rather than a silent
+    /// wire-format drift.
     #[test]
-    fn list_terminal_response_round_trips_bincode() {
+    fn list_terminal_response_round_trips_wincode() {
         let terminals = TerminalList {
             commands: vec![
                 vec!["C:\\Windows\\System32\\cmd.exe".to_string()],
@@ -1692,7 +1671,7 @@ mod tests {
             connection_id: Some("conn-list".to_string()),
             terminals,
         });
-        match bincode_round_trip(&msg) {
+        match wincode_round_trip(&msg) {
             WorkerToService::ListTerminalResponse(p) => {
                 assert_eq!(p.request_id, "req-list");
                 assert_eq!(p.connection_id.as_deref(), Some("conn-list"));
@@ -1701,6 +1680,327 @@ mod tests {
                 assert_eq!(p.terminals.commands[0][0], "C:\\Windows\\System32\\cmd.exe");
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // === PR-2 G2: ServiceToWorker / WorkerToService full-variant coverage ===
+
+    /// Exhaustive `ServiceToWorker` round-trip. Per-variant tests above
+    /// cover the field-level invariants for the high-traffic variants;
+    /// this table-driven test guarantees **every** variant — including
+    /// the body-less ones (`Shutdown`) and the manager / terminal
+    /// envelopes — has wincode `SchemaWrite` + `SchemaRead` wired up
+    /// before e2e. Any variant missing a derive or carrying a payload
+    /// without wincode support breaks here, not on the wire.
+    ///
+    /// If the compiler complains about a non-exhaustive `match` after a
+    /// new `ServiceToWorker` variant is added, extend the `cases`
+    /// vec **and** the matching round-trip discriminant check below.
+    #[test]
+    fn service_to_worker_all_variants_round_trip() {
+        let cases: Vec<ServiceToWorker> = vec![
+            ServiceToWorker::Init(WorkerInitPayload {
+                session_id: "s".to_string(),
+                os_session_id: 1,
+                desktop_name: Some("Default".to_string()),
+                config_json: "{}".to_string(),
+                signaling_url: None,
+                auth_token: None,
+                host_upstream_url: None,
+                media_pipe_name: None,
+                file_pipe_name: None,
+                config_file_path: None,
+            }),
+            ServiceToWorker::Shutdown,
+            ServiceToWorker::StartMedia(StartMediaPayload {
+                connection_id: "c".to_string(),
+                video_codec: MediaCodec::H264,
+                audio_codec: MediaCodec::Opus,
+                video_device: None,
+                audio_device: None,
+                fps: 30,
+                bitrate_kbps: 4_000,
+                quality: 0,
+                start_video: true,
+                start_audio: true,
+                image_capture: None,
+            }),
+            ServiceToWorker::StopMedia(StopMediaPayload {
+                connection_id: "c".to_string(),
+            }),
+            ServiceToWorker::UpdateMediaSettings(UpdateMediaSettingsPayload {
+                connection_id: "c".to_string(),
+                fps: Some(60),
+                bitrate_kbps: Some(6_000),
+                quality: Some(50),
+            }),
+            ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                connection_id: "c".to_string(),
+            }),
+            ServiceToWorker::MouseInput(InputPayload {
+                connection_id: "c".to_string(),
+                data: vec![1, 2, 3],
+            }),
+            ServiceToWorker::MouseMoveInput(InputPayload {
+                connection_id: "c".to_string(),
+                data: vec![4, 5, 6],
+            }),
+            ServiceToWorker::KeyboardInput(InputPayload {
+                connection_id: "c".to_string(),
+                data: vec![7, 8, 9],
+            }),
+            ServiceToWorker::ClipboardWrite(ClipboardPayload {
+                connection_id: "c".to_string(),
+                data: vec![0xAA],
+            }),
+            ServiceToWorker::ClipboardRequest(ConnectionRefPayload {
+                connection_id: "c".to_string(),
+            }),
+            ServiceToWorker::WhiteboardCommand(OpaqueConnectionPayload {
+                connection_id: "c".to_string(),
+                data: vec![0xBB, 0xCC],
+            }),
+            ServiceToWorker::EnablePrivateScreen(EnablePrivateScreenPayload {
+                connection_id: "c".to_string(),
+                enable: true,
+            }),
+            ServiceToWorker::UpdateDeskSettings(UpdateDeskSettingsPayload {
+                connection_id: "c".to_string(),
+                settings: DeskSettings::default(),
+            }),
+            ServiceToWorker::ManagerSystemInfoRequest(ManagerRequestRefPayload {
+                request_id: "r1".to_string(),
+                connection_id: Some("c".to_string()),
+            }),
+            ServiceToWorker::ManagerFileListRequest(ManagerFileListRequestPayload {
+                request_id: "r2".to_string(),
+                connection_id: Some("c".to_string()),
+                params: FileListParams::default(),
+            }),
+            ServiceToWorker::ManagerFileDeleteRequest(ManagerFileDeleteRequestPayload {
+                request_id: "r3".to_string(),
+                connection_id: Some("c".to_string()),
+                request: DeleteFileRequest::default(),
+            }),
+            ServiceToWorker::ManagerQuerySettingsRequest(ManagerRequestRefPayload {
+                request_id: "r4".to_string(),
+                connection_id: None,
+            }),
+            ServiceToWorker::ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload {
+                request_id: "r5".to_string(),
+                connection_id: Some("c".to_string()),
+                settings: RemoteSystemSettings::default(),
+            }),
+            ServiceToWorker::StartTerminalRequest(StartTerminalRequestPayload {
+                request_id: "r6".to_string(),
+                connection_id: "c".to_string(),
+                session: StartTerminalSession {
+                    command: "cmd.exe".to_string(),
+                },
+            }),
+            ServiceToWorker::SendDataToTerminalRequest(SendDataToTerminalPayload {
+                connection_id: "c".to_string(),
+                data: TerminalInputData {
+                    content: "ls\n".to_string(),
+                },
+            }),
+            ServiceToWorker::ResizeTerminalRequest(ResizeTerminalPayload {
+                connection_id: "c".to_string(),
+                data: TerminalResizeData { rows: 24, cols: 80 },
+            }),
+            ServiceToWorker::CloseTerminalRequest(CloseTerminalPayload {
+                connection_id: "c".to_string(),
+            }),
+            ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
+                request_id: "r7".to_string(),
+                connection_id: Some("c".to_string()),
+            }),
+        ];
+        for case in &cases {
+            let decoded = wincode_round_trip(case);
+            // Discriminant equality is enough — per-variant payload
+            // assertions live in the variant-specific tests above.
+            assert_eq!(
+                std::mem::discriminant(case),
+                std::mem::discriminant(&decoded),
+                "variant {case:?} did not round-trip to the same discriminant"
+            );
+        }
+    }
+
+    /// Exhaustive `WorkerToService` round-trip. See
+    /// [`service_to_worker_all_variants_round_trip`] for the rationale.
+    #[test]
+    fn worker_to_service_all_variants_round_trip() {
+        let cases: Vec<WorkerToService> = vec![
+            WorkerToService::Ready,
+            WorkerToService::Capabilities(MediaCapabilities::default()),
+            WorkerToService::SignalingError(SignalingErrorPayload {
+                request_id: "r".to_string(),
+                connection_id: "c".to_string(),
+                signaling_type: SignalingType::Error,
+                error_code: 1,
+                error_message: None,
+            }),
+            WorkerToService::Heartbeat(HeartbeatPayload {
+                timestamp_ms: 1,
+                active_connections: 0,
+                cpu_usage: None,
+                memory_usage: None,
+            }),
+            WorkerToService::DesktopChanged(DesktopChangedPayload {
+                name: "Default".to_string(),
+            }),
+            WorkerToService::Error(ErrorPayload {
+                code: -1,
+                message: "boom".to_string(),
+                recoverable: false,
+                connection_id: None,
+            }),
+            WorkerToService::ClipboardRead(ClipboardPayload {
+                connection_id: "c".to_string(),
+                data: vec![0xDE, 0xAD],
+            }),
+            WorkerToService::CursorData(CursorDataPayload {
+                connection_id: "c".to_string(),
+                data: vec![0xBE, 0xEF],
+            }),
+            WorkerToService::PrivateScreenStateChanged(PrivateScreenStateChangedPayload {
+                connection_id: "c".to_string(),
+                data: PrivateScreenStateChangedData {
+                    visible: true,
+                    is_supported: true,
+                    error_msg: None,
+                },
+            }),
+            WorkerToService::ManagerSystemInfoResponse(ManagerSystemInfoResponsePayload {
+                request_id: "r".to_string(),
+                connection_id: Some("c".to_string()),
+                info: SystemInfo::default(),
+            }),
+            WorkerToService::ManagerFileListResponse(ManagerFileListResponsePayload {
+                request_id: "r".to_string(),
+                connection_id: Some("c".to_string()),
+                response: FileListResponse {
+                    file_info_list: vec![],
+                    total_count: 0,
+                },
+            }),
+            WorkerToService::ManagerFileDeleteResponse(ManagerResponseRefPayload {
+                request_id: "r".to_string(),
+                connection_id: Some("c".to_string()),
+            }),
+            WorkerToService::ManagerQuerySettingsResponse(ManagerQuerySettingsResponsePayload {
+                request_id: "r".to_string(),
+                connection_id: None,
+                settings: RemoteSystemSettings::default(),
+            }),
+            WorkerToService::ManagerUpdateSettingsResponse(ManagerResponseRefPayload {
+                request_id: "r".to_string(),
+                connection_id: Some("c".to_string()),
+            }),
+            WorkerToService::TerminalStarted(TerminalStartedPayload {
+                request_id: "r".to_string(),
+                connection_id: "c".to_string(),
+            }),
+            WorkerToService::TerminalClosed(TerminalClosedPayload {
+                connection_id: "c".to_string(),
+            }),
+            WorkerToService::ReplyFromTerminal(ReplyFromTerminalPayload {
+                connection_id: "c".to_string(),
+                data: TerminalOutputData {
+                    content: "hi".to_string(),
+                },
+            }),
+            WorkerToService::ListTerminalResponse(ListTerminalResponsePayload {
+                request_id: "r".to_string(),
+                connection_id: Some("c".to_string()),
+                terminals: TerminalList {
+                    commands: vec![],
+                    current: 0,
+                },
+            }),
+        ];
+        for case in &cases {
+            let decoded = wincode_round_trip(case);
+            assert_eq!(
+                std::mem::discriminant(case),
+                std::mem::discriminant(&decoded),
+                "variant {case:?} did not round-trip to the same discriminant"
+            );
+        }
+    }
+
+    // === PR-2 G3: SignalingErrorPayload full SignalingType coverage ===
+
+    /// `SignalingErrorPayload.signaling_type` rides the wincode tag
+    /// PR-1B added to the `SignalingType` enum. Iterate every one of
+    /// the 36 variants so a missing `#[wincode(tag = N)]` (or a
+    /// wrongly-numbered one) surfaces here instead of as a silent
+    /// browser-side mismatch on a SignalingError reply.
+    #[test]
+    fn signaling_error_round_trips_wincode_for_every_signaling_type() {
+        let all_types = [
+            SignalingType::Heartbeat,
+            SignalingType::FetchConnections,
+            SignalingType::ConnectionList,
+            SignalingType::ConnectionRemoved,
+            SignalingType::RequestRemote,
+            SignalingType::Init,
+            SignalingType::Offer,
+            SignalingType::Answer,
+            SignalingType::Canid,
+            SignalingType::RequireControl,
+            SignalingType::AcceptControl,
+            SignalingType::DenyControl,
+            SignalingType::CloseControl,
+            SignalingType::ChangeDisplaySettings,
+            SignalingType::EnablePrivateScreen,
+            SignalingType::PrivateScreenStateChanged,
+            SignalingType::AudioPlaybackError,
+            SignalingType::UpdateDeskSettings,
+            SignalingType::ManagerSystemInfo,
+            SignalingType::ManagerSystemStatue,
+            SignalingType::ManagerFileList,
+            SignalingType::ManagerFileDelete,
+            SignalingType::StartTerminal,
+            SignalingType::SendDataToTerminal,
+            SignalingType::ResizeTerminal,
+            SignalingType::CloseTerminal,
+            SignalingType::ReplyFromTerminal,
+            SignalingType::ListTerminal,
+            SignalingType::TerminalStarted,
+            SignalingType::TerminalClosed,
+            SignalingType::ManagerQuerySettings,
+            SignalingType::ManagerUpdateSettings,
+            SignalingType::DesktopSwitching,
+            SignalingType::DesktopReady,
+            SignalingType::Error,
+            SignalingType::Unknown,
+        ];
+        assert_eq!(
+            all_types.len(),
+            36,
+            "SignalingType variant count drift — add new variant + tag here"
+        );
+        for ty in all_types {
+            let original = WorkerToService::SignalingError(SignalingErrorPayload {
+                request_id: format!("req-{}", ty as i32),
+                connection_id: "c".to_string(),
+                signaling_type: ty,
+                error_code: ty as i32,
+                error_message: Some(format!("{ty:?}")),
+            });
+            match wincode_round_trip(&original) {
+                WorkerToService::SignalingError(p) => {
+                    assert_eq!(
+                        p.signaling_type as i32, ty as i32,
+                        "signaling_type discriminant drift for {ty:?}"
+                    );
+                    assert_eq!(p.error_code, ty as i32);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
         }
     }
 }

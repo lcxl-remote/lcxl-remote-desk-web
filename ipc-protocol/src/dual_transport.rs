@@ -85,6 +85,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::message::{MediaFrame, MediaFrameKind};
+use crate::transport::{IPC_CONFIG, IpcConfigType};
 
 // ---------------------------- Capacities ----------------------------
 
@@ -137,12 +138,12 @@ pub enum TransportError {
     /// stuck consumer; worker should surface the failure to the daemon
     /// so the daemon can reset the channel.
     IFrameTimeout,
-    /// Wire-level encode failure (bincode). Indicates a bug; not
+    /// Wire-level encode failure (wincode). Indicates a bug; not
     /// retryable.
-    Encode(bincode::error::EncodeError),
-    /// Wire-level decode failure (bincode). Indicates wire corruption
+    Encode(wincode::error::WriteError),
+    /// Wire-level decode failure (wincode). Indicates wire corruption
     /// or a protocol-version mismatch; not retryable.
-    Decode(bincode::error::DecodeError),
+    Decode(wincode::error::ReadError),
     /// Underlying IO failure on a framed transport.
     Io(std::io::Error),
 }
@@ -180,13 +181,13 @@ impl From<std::io::Error> for TransportError {
         TransportError::Io(e)
     }
 }
-impl From<bincode::error::EncodeError> for TransportError {
-    fn from(e: bincode::error::EncodeError) -> Self {
+impl From<wincode::error::WriteError> for TransportError {
+    fn from(e: wincode::error::WriteError) -> Self {
         TransportError::Encode(e)
     }
 }
-impl From<bincode::error::DecodeError> for TransportError {
-    fn from(e: bincode::error::DecodeError) -> Self {
+impl From<wincode::error::ReadError> for TransportError {
+    fn from(e: wincode::error::ReadError) -> Self {
         TransportError::Decode(e)
     }
 }
@@ -360,7 +361,8 @@ pub mod inprocess {
 /// Framed transport built on top of any `AsyncRead + AsyncWrite` byte
 /// stream (e.g. a connected named pipe, a Unix domain socket, a tokio
 /// duplex pair in tests). Wire format: `LengthDelimitedCodec` with
-/// `max_frame_length = 16 MB`, payload is bincode v2.
+/// `max_frame_length = 16 MB`, payload is wincode (FixInt + LittleEndian,
+/// preallocation limit disabled — see [`IPC_CONFIG`]).
 ///
 /// Each direction needs its own internal mpsc + writer task: the writer
 /// task drains the mpsc and pushes onto the framed sink so the public
@@ -369,7 +371,6 @@ pub mod inprocess {
 /// backpressure).
 pub mod framed {
     use super::*;
-    use bincode::{Decode, Encode};
     use bytes::Bytes;
     use futures::{SinkExt, StreamExt};
     use tokio::io::{AsyncRead, AsyncWrite};
@@ -377,10 +378,6 @@ pub mod framed {
     use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
     const MAX_FRAME: usize = 16 * 1024 * 1024;
-
-    fn bincode_config() -> bincode::config::Configuration {
-        bincode::config::standard()
-    }
 
     fn make_codec() -> LengthDelimitedCodec {
         LengthDelimitedCodec::builder()
@@ -402,7 +399,7 @@ pub mod framed {
         tokio::spawn(async move {
             let mut sink = Framed::new(writer_io, make_codec());
             while let Some(frame) = rx.recv().await {
-                let bytes = match bincode::encode_to_vec(&frame, bincode_config()) {
+                let bytes = match wincode::config::serialize(&frame, IPC_CONFIG) {
                     Ok(v) => v,
                     Err(e) => {
                         log::error!("media writer encode failed: {e}");
@@ -470,8 +467,8 @@ pub mod framed {
                 }
                 None => return None,
             };
-            match bincode::decode_from_slice::<MediaFrame, _>(&bytes, bincode_config()) {
-                Ok((frame, _)) => Some(frame),
+            match wincode::config::deserialize::<MediaFrame, _>(&bytes, IPC_CONFIG) {
+                Ok(frame) => Some(frame),
                 Err(e) => {
                     log::error!("media receiver decode failed: {e}");
                     None
@@ -489,13 +486,13 @@ pub mod framed {
     pub fn spawn_event_sender_with_cap<W, M>(writer_io: W, cap: usize) -> Arc<dyn EventSender<M>>
     where
         W: AsyncWrite + Unpin + Send + 'static,
-        M: Encode + Send + 'static,
+        M: wincode::SchemaWrite<IpcConfigType, Src = M> + Send + 'static,
     {
         let (tx, mut rx) = mpsc::channel::<M>(cap);
         tokio::spawn(async move {
             let mut sink = Framed::new(writer_io, make_codec());
             while let Some(msg) = rx.recv().await {
-                let bytes = match bincode::encode_to_vec(&msg, bincode_config()) {
+                let bytes = match wincode::config::serialize(&msg, IPC_CONFIG) {
                     Ok(v) => v,
                     Err(e) => {
                         log::error!("event writer encode failed: {e}");
@@ -515,7 +512,7 @@ pub mod framed {
     pub fn spawn_event_sender<W, M>(writer_io: W) -> Arc<dyn EventSender<M>>
     where
         W: AsyncWrite + Unpin + Send + 'static,
-        M: Encode + Send + 'static,
+        M: wincode::SchemaWrite<IpcConfigType, Src = M> + Send + 'static,
     {
         spawn_event_sender_with_cap(writer_io, EVENT_QUEUE_CAP)
     }
@@ -527,7 +524,7 @@ pub mod framed {
     pub fn spawn_file_sender<W, M>(writer_io: W) -> Arc<dyn EventSender<M>>
     where
         W: AsyncWrite + Unpin + Send + 'static,
-        M: Encode + Send + 'static,
+        M: wincode::SchemaWrite<IpcConfigType, Src = M> + Send + 'static,
     {
         spawn_event_sender_with_cap(writer_io, FILE_QUEUE_CAP)
     }
@@ -535,7 +532,7 @@ pub mod framed {
     pub fn make_event_receiver<R, M>(reader_io: R) -> Box<dyn EventReceiver<M>>
     where
         R: AsyncRead + Unpin + Send + 'static,
-        M: Decode<()> + Send + 'static,
+        M: for<'de> wincode::SchemaRead<'de, IpcConfigType, Dst = M> + Send + 'static,
     {
         Box::new(FramedEventReceiver::<R, M> {
             stream: Framed::new(reader_io, make_codec()),
@@ -560,8 +557,10 @@ pub mod framed {
     }
 
     #[async_trait]
-    impl<R: AsyncRead + Unpin + Send, M: Decode<()> + Send + 'static> EventReceiver<M>
-        for FramedEventReceiver<R, M>
+    impl<
+        R: AsyncRead + Unpin + Send,
+        M: for<'de> wincode::SchemaRead<'de, IpcConfigType, Dst = M> + Send + 'static,
+    > EventReceiver<M> for FramedEventReceiver<R, M>
     {
         async fn recv(&mut self) -> Option<M> {
             let bytes = match self.stream.next().await {
@@ -572,8 +571,8 @@ pub mod framed {
                 }
                 None => return None,
             };
-            match bincode::decode_from_slice::<M, _>(&bytes, bincode_config()) {
-                Ok((msg, _)) => Some(msg),
+            match wincode::config::deserialize::<M, _>(&bytes, IPC_CONFIG) {
+                Ok(msg) => Some(msg),
                 Err(e) => {
                     log::error!("event receiver decode failed: {e}");
                     None
@@ -586,7 +585,9 @@ pub mod framed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{MediaCodec, MediaFrame, MediaFrameKind, ServiceToWorker};
+    use crate::message::{
+        MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload, ServiceToWorker,
+    };
 
     fn make_video_p(seq: u64, payload_bytes: usize) -> MediaFrame {
         MediaFrame {
@@ -803,6 +804,75 @@ mod tests {
         assert!(
             blocked.is_err(),
             "send beyond FILE_QUEUE_CAP should block, got: {blocked:?}"
+        );
+    }
+
+    // === PR-2 G1: production payload-size coverage on the framed path ===
+
+    /// PR-2 G1 — A wincode-encoded event payload comfortably above
+    /// wincode's 4 MiB default preallocation guard must round-trip
+    /// through the framed event lane. If `spawn_event_sender` or
+    /// `make_event_receiver` falls back to the default
+    /// `wincode::serialize` / `wincode::deserialize` instead of going
+    /// through [`crate::transport::IPC_CONFIG`], the preallocation
+    /// guard fires on encode and this test fails — that is the gold
+    /// standard "did we wire IPC_CONFIG into the framed path"
+    /// assertion (twin of `transport::tests::frame_between_4mib_and_16mb_round_trips`).
+    #[tokio::test]
+    async fn framed_event_above_4mib_round_trips() {
+        let (a, b) = tokio::io::duplex(32 * 1024 * 1024);
+        let sender = framed::spawn_event_sender::<_, ServiceToWorker>(a);
+        let mut receiver = framed::make_event_receiver::<_, ServiceToWorker>(b);
+
+        let payload = vec![0xCDu8; 8 * 1024 * 1024]; // 8 MiB
+        let original = ServiceToWorker::WhiteboardCommand(OpaqueConnectionPayload {
+            connection_id: "conn-large".to_string(),
+            data: payload.clone(),
+        });
+        sender.send(original).await.expect("send");
+        let received = receiver.recv().await.expect("recv");
+        match received {
+            ServiceToWorker::WhiteboardCommand(p) => {
+                assert_eq!(p.connection_id, "conn-large");
+                assert_eq!(p.data.len(), payload.len());
+                assert_eq!(&p.data[..16], &payload[..16]);
+                assert_eq!(&p.data[p.data.len() - 16..], &payload[payload.len() - 16..]);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// PR-2 G1 — A 2 MB I-frame (the upper-end of a 4K H.264 IDR seen
+    /// in the POC) must round-trip through the framed media lane.
+    /// Combined with `framed_event_above_4mib_round_trips`, this
+    /// covers both the media and event framed paths against the
+    /// 4 MiB preallocation default — the worker's real-world IDR
+    /// frame size is the load this lane was built for.
+    #[tokio::test]
+    async fn framed_media_round_trips_2mb_idr_frame() {
+        let (a, b) = tokio::io::duplex(16 * 1024 * 1024);
+        let sender = framed::spawn_media_sender(a);
+        let mut receiver = framed::make_media_receiver(b);
+
+        let payload = vec![0xEFu8; 2 * 1024 * 1024]; // 2 MB IDR
+        let frame = MediaFrame {
+            connection_id: "conn-idr".to_string(),
+            seq: 1,
+            ts_ns: 1_700_000_000_000_000_000,
+            duration_ns: 16_666_666,
+            kind: MediaFrameKind::VideoI,
+            codec: MediaCodec::H264,
+            payload: payload.clone(),
+        };
+        sender.send_frame(frame).await.expect("send");
+        let received = receiver.recv_frame().await.expect("recv");
+        assert_eq!(received.connection_id, "conn-idr");
+        assert_eq!(received.kind, MediaFrameKind::VideoI);
+        assert_eq!(received.payload.len(), payload.len());
+        assert_eq!(&received.payload[..16], &payload[..16]);
+        assert_eq!(
+            &received.payload[received.payload.len() - 16..],
+            &payload[payload.len() - 16..]
         );
     }
 }
