@@ -80,7 +80,35 @@ use crate::model::file_transfer::*;
 use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
 use crate::model::settings::SharedSettings;
 
-const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 60 * 1024;
+/// Per-chunk DC message size for downloads (host → browser).
+///
+/// Raised from 60 KB to 256 KB after the 2026-05-11 ft-metrics
+/// investigation pinned the bottleneck on `webrtc-rs` `dc.send` itself:
+/// every 60 KB frame burned ~20 ms of single-core CPU inside the SCTP
+/// stack while the browser-side SCTP receive buffer sat at <300 KB
+/// (i.e. the receiver was perpetually starved, not the sender's
+/// link). The per-message overhead (TSN allocation, EOR fragmentation
+/// bookkeeping, congestion-control work, interceptor pipeline)
+/// dominated the per-byte cost, so amortizing that fixed cost across
+/// a ~4× larger payload should lift throughput proportionally on
+/// CPU-bound LAN transfers.
+///
+/// Safe to raise because the daemon negotiates
+/// `SctpMaxMessageSize::Unbounded` (see `build_peer_connection` in
+/// `daemon::pc_manager`) and modern browsers advertise
+/// `max-message-size >= 256 KB` (Chrome ≥ 79 and Firefox ≥ 71
+/// advertise 256 KB by default; newer versions advertise 64 MB).
+///
+/// Downstream sizing impact:
+///
+/// - daemon `FILE_TRANSFER_WRITER_QUEUE_CAP = 16` → 16 × 256 KB =
+///   4 MB per-PC steady-state buffer (was 960 KB at 60 KB).
+/// - file-lane `FILE_QUEUE_CAP = 32` per direction → 32 × 256 KB =
+///   8 MB per direction (was 1.9 MB).
+///
+/// Both still well below any host memory pressure for a single
+/// active transfer.
+const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 256 * 1024;
 const YIELD_EVERY_N_CHUNKS: u32 = 100;
 
 /// Window size (in chunks) for file-transfer throughput / latency
@@ -1315,6 +1343,102 @@ mod tests {
         }
         assert!(binary_count >= 2, "expected ≥2 chunks, got {binary_count}");
         assert!(saw_complete, "expected TransferComplete");
+    }
+
+    /// Regression: pin the on-the-wire chunk size at 256 KiB and verify
+    /// the `chunk_size` and `total_chunks` fields of `DownloadResponse`
+    /// reflect that exact value, plus the `div_ceil` boundary math.
+    ///
+    /// Two failure modes this guards against:
+    ///
+    /// 1. Someone silently shrinks `FILE_TRANSFER_CHUNK_SIZE_TX` back
+    ///    toward 60 KB after seeing the windowed metrics improve — the
+    ///    whole point of the 2026-05-11 bump was to amortize the
+    ///    per-`dc.send` SCTP overhead, so a regression here re-tanks
+    ///    LAN throughput.
+    /// 2. The browser-side `FILE_TRANSFER_CHUNK_SIZE` in
+    ///    `use-file-transfer.ts` drifts out of sync with the server-side
+    ///    constant. The browser uses its own constant to chunk uploads,
+    ///    but it reads `chunk_size` from the server's
+    ///    `DownloadResponse` for download reassembly metadata, so the
+    ///    value travelling on the wire IS the contract.
+    #[tokio::test]
+    async fn download_response_advertises_256kib_chunk_size() {
+        const EXPECTED_CHUNK_SIZE: usize = 256 * 1024;
+        assert_eq!(
+            FILE_TRANSFER_CHUNK_SIZE_TX, EXPECTED_CHUNK_SIZE,
+            "chunk size constant regressed: see 2026-05-11 ft-metrics archive"
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("big.bin");
+        // 1 byte past one chunk so total_chunks = 2 exactly. This pins
+        // the `div_ceil(file_size, chunk_size)` math at the boundary
+        // where an off-by-one would surface (e.g. someone switching to
+        // `file_size / chunk_size` would compute 1 here, drop the
+        // tail byte, and only the regression test would catch it).
+        let payload_size = EXPECTED_CHUNK_SIZE + 1;
+        let body = vec![b'a'; payload_size];
+        tokio::fs::write(&file_path, &body).await.unwrap();
+
+        let (d, mut rx) = dispatcher();
+        d.start_connection(&start_payload("c1")).await;
+        let req = DownloadRequest {
+            transfer_id: "00000000-0000-0000-0000-000000000020".into(),
+            file_path: file_path.to_string_lossy().to_string(),
+        };
+        d.serve_download("c1".into(), req).await.expect("serve ok");
+
+        let p = rx.recv().await.expect("download response");
+        assert!(p.is_text);
+        let msg: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+        match msg {
+            FileTransferMessage::DownloadResponse(r) => {
+                assert_eq!(
+                    r.chunk_size, EXPECTED_CHUNK_SIZE,
+                    "DownloadResponse.chunk_size must match server constant"
+                );
+                assert_eq!(
+                    r.file_size as usize, payload_size,
+                    "DownloadResponse.file_size must equal source file size"
+                );
+                assert_eq!(
+                    r.total_chunks, 2,
+                    "boundary math: {} bytes / {} chunk = 2 chunks via div_ceil",
+                    payload_size, EXPECTED_CHUNK_SIZE
+                );
+            }
+            other => panic!("expected DownloadResponse, got {other:?}"),
+        }
+
+        // Drain the rest so the spawned download task doesn't leave
+        // dangling state when the test exits.
+        let mut total_body = 0usize;
+        let mut saw_complete = false;
+        while let Some(p) = rx.recv().await {
+            if !p.is_text {
+                let (_tid, _idx, body) = parse_binary_chunk(&p.data).expect("chunk parse");
+                total_body += body.len();
+                // Each emitted chunk must respect the advertised chunk_size cap.
+                assert!(
+                    body.len() <= EXPECTED_CHUNK_SIZE,
+                    "chunk body {} > advertised chunk_size {}",
+                    body.len(),
+                    EXPECTED_CHUNK_SIZE
+                );
+            } else {
+                let m: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+                if matches!(m, FileTransferMessage::TransferComplete(_)) {
+                    saw_complete = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_complete, "expected TransferComplete");
+        assert_eq!(
+            total_body, payload_size,
+            "concatenated chunk bodies must equal source file size"
+        );
     }
 
     /// Upload happy path: UploadRequest creates the file and emits
