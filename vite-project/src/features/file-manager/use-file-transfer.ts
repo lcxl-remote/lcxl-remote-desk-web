@@ -9,16 +9,18 @@ import {
     SIGNALING_TYPE_CODE_CLOSE_CONTROL,
 } from '../desk/constants';
 
-// Per-chunk DC message size for uploads (browser → host). Must stay in
+// Per-chunk DC payload size for uploads (browser → host). Must stay in
 // sync with `FILE_TRANSFER_CHUNK_SIZE_TX` in the Rust dispatcher
-// (`worker/file_transfer_dispatcher.rs`). Raised to 256 KB on
+// (`worker/file_transfer_dispatcher.rs`). Raised to 240 KiB on
 // 2026-05-11 after metrics showed `dc.send` per-message overhead
-// (TSN allocation + congestion bookkeeping + EOR fragmentation)
-// dominating throughput at the previous 60 KB. The host negotiates
-// `SctpMaxMessageSize::Unbounded`, and Chrome ≥ 79 / Firefox ≥ 71
-// advertise `max-message-size >= 256 KB` so the receiver side
-// accepts these natively.
-const FILE_TRANSFER_CHUNK_SIZE = 256 * 1024;
+// dominating throughput at the previous 60 KB. NOT 256 KiB because
+// the wire-level SCTP message is `payload + 40-byte header`, and a
+// 256 KiB payload yields a 262184-byte message that just barely
+// exceeds Chrome's typical `a=max-message-size:262144` SDP advertise
+// (host-side webrtc-sctp rejects with ErrOutboundPacketTooLarge).
+// 240 KiB leaves ~16 KiB of headroom for the header plus any future
+// protocol expansion.
+const FILE_TRANSFER_CHUNK_SIZE = 240 * 1024;
 
 const BINARY_HEADER_SIZE = 36 + 4; // UUID (36) + chunk_index (4)
 

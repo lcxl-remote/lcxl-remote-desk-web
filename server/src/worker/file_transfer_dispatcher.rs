@@ -80,9 +80,9 @@ use crate::model::file_transfer::*;
 use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
 use crate::model::settings::SharedSettings;
 
-/// Per-chunk DC message size for downloads (host → browser).
+/// Per-chunk DC payload size for downloads (host → browser).
 ///
-/// Raised from 60 KB to 256 KB after the 2026-05-11 ft-metrics
+/// Raised from 60 KB to 240 KiB after the 2026-05-11 ft-metrics
 /// investigation pinned the bottleneck on `webrtc-rs` `dc.send` itself:
 /// every 60 KB frame burned ~20 ms of single-core CPU inside the SCTP
 /// stack while the browser-side SCTP receive buffer sat at <300 KB
@@ -90,25 +90,51 @@ use crate::model::settings::SharedSettings;
 /// link). The per-message overhead (TSN allocation, EOR fragmentation
 /// bookkeeping, congestion-control work, interceptor pipeline)
 /// dominated the per-byte cost, so amortizing that fixed cost across
-/// a ~4× larger payload should lift throughput proportionally on
-/// CPU-bound LAN transfers.
+/// a ~4× larger payload lifts throughput proportionally on CPU-bound
+/// LAN transfers — empirically confirmed at ~230 MB/s on the worker
+/// side in the same investigation.
 ///
-/// Safe to raise because the daemon negotiates
-/// `SctpMaxMessageSize::Unbounded` (see `build_peer_connection` in
-/// `daemon::pc_manager`) and modern browsers advertise
-/// `max-message-size >= 256 KB` (Chrome ≥ 79 and Firefox ≥ 71
-/// advertise 256 KB by default; newer versions advertise 64 MB).
+/// ## Why exactly 240 KiB and not 256 KiB
 ///
-/// Downstream sizing impact:
+/// The first attempt used 256 KiB (262144) which corresponds *exactly*
+/// to Chrome's SDP-advertised `a=max-message-size:262144`. webrtc-sctp
+/// enforces that limit on the **wire-level message size**, which is
+/// `chunk_size + BINARY_HEADER_SIZE (40)`. A 256 KiB payload yields a
+/// 262184-byte SCTP message — **40 bytes over Chrome's advertise**.
+/// Every binary chunk was rejected with `ErrOutboundPacketTooLarge`;
+/// the daemon writer only logged a warn and continued draining, so the
+/// worker saw a clean "completed" while the browser received an empty
+/// blob (TransferComplete being a tiny text frame that fits within the
+/// limit got through, triggering the false-positive UI completion).
+/// Lesson: the limit is on the wire-level message size, not the
+/// payload.
 ///
-/// - daemon `FILE_TRANSFER_WRITER_QUEUE_CAP = 16` → 16 × 256 KB =
-///   4 MB per-PC steady-state buffer (was 960 KB at 60 KB).
-/// - file-lane `FILE_QUEUE_CAP = 32` per direction → 32 × 256 KB =
-///   8 MB per direction (was 1.9 MB).
+/// 240 KiB leaves ~16 KiB of headroom for the 40-byte header plus any
+/// future on-wire protocol field expansion and tolerates browsers that
+/// advertise slightly under 256 KiB (some older versions / forks).
+/// Throughput impact relative to the 256 KiB attempt is negligible
+/// (~6% smaller payload) but eliminates the rejection failure mode.
 ///
-/// Both still well below any host memory pressure for a single
+/// ## Browser compatibility
+///
+/// - Chrome ≥ 76 (Aug 2019): advertises `max-message-size:262144`.
+/// - Firefox: advertises `max-message-size:1073741823` (~1 GB).
+/// - Safari: ≥ 256 KiB on recent versions.
+///
+/// The daemon negotiates `SctpMaxMessageSize::Unbounded` (see
+/// `build_peer_connection` in `daemon::pc_manager`) so it does not
+/// further constrain the send size beyond what the remote advertises.
+///
+/// ## Downstream sizing impact
+///
+/// - daemon `FILE_TRANSFER_WRITER_QUEUE_CAP = 16` → 16 × 240 KiB ≈
+///   3.75 MB per-PC steady-state buffer (was 960 KB at 60 KB).
+/// - file-lane `FILE_QUEUE_CAP = 32` per direction → 32 × 240 KiB ≈
+///   7.5 MB per direction (was 1.9 MB).
+///
+/// Both still well below memory pressure thresholds for a single
 /// active transfer.
-const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 256 * 1024;
+const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 240 * 1024;
 const YIELD_EVERY_N_CHUNKS: u32 = 100;
 
 /// Window size (in chunks) for file-transfer throughput / latency
@@ -1345,29 +1371,57 @@ mod tests {
         assert!(saw_complete, "expected TransferComplete");
     }
 
-    /// Regression: pin the on-the-wire chunk size at 256 KiB and verify
-    /// the `chunk_size` and `total_chunks` fields of `DownloadResponse`
-    /// reflect that exact value, plus the `div_ceil` boundary math.
+    /// Regression: pin the on-the-wire chunk size at 240 KiB AND
+    /// guarantee `chunk_size + BINARY_HEADER_SIZE ≤ 262144` (Chrome's
+    /// typical `a=max-message-size:262144` SDP advertise). This is the
+    /// invariant that the first 256 KiB attempt violated — a 256 KiB
+    /// payload + 40-byte header = 262184-byte SCTP message just barely
+    /// exceeded the limit, and every binary chunk was silently rejected
+    /// at the daemon with `ErrOutboundPacketTooLarge` while the
+    /// TransferComplete control frame still got through, producing
+    /// false-positive "download complete, 0 bytes" in the browser.
     ///
-    /// Two failure modes this guards against:
+    /// Three failure modes this guards against:
     ///
     /// 1. Someone silently shrinks `FILE_TRANSFER_CHUNK_SIZE_TX` back
     ///    toward 60 KB after seeing the windowed metrics improve — the
     ///    whole point of the 2026-05-11 bump was to amortize the
     ///    per-`dc.send` SCTP overhead, so a regression here re-tanks
     ///    LAN throughput.
-    /// 2. The browser-side `FILE_TRANSFER_CHUNK_SIZE` in
+    /// 2. Someone raises the chunk size back toward 256 KiB without
+    ///    accounting for the 40-byte header — the SCTP-limit assertion
+    ///    will fail at test time instead of silently in production.
+    /// 3. The browser-side `FILE_TRANSFER_CHUNK_SIZE` in
     ///    `use-file-transfer.ts` drifts out of sync with the server-side
     ///    constant. The browser uses its own constant to chunk uploads,
     ///    but it reads `chunk_size` from the server's
     ///    `DownloadResponse` for download reassembly metadata, so the
     ///    value travelling on the wire IS the contract.
     #[tokio::test]
-    async fn download_response_advertises_256kib_chunk_size() {
-        const EXPECTED_CHUNK_SIZE: usize = 256 * 1024;
+    async fn download_response_advertises_240kib_chunk_size() {
+        const EXPECTED_CHUNK_SIZE: usize = 240 * 1024;
+        /// Chrome's typical SDP-advertised `a=max-message-size`. Lower
+        /// in some older Chromium forks and not formally guaranteed by
+        /// any spec — RFC 8841 only says "default 65536 when absent".
+        /// We use Chrome's value as the practical ceiling because
+        /// it's the most common deployment target and any browser
+        /// advertising higher (e.g. Firefox at ~1 GB) is by definition
+        /// more permissive.
+        const CHROME_MAX_MESSAGE_SIZE: usize = 262144;
         assert_eq!(
             FILE_TRANSFER_CHUNK_SIZE_TX, EXPECTED_CHUNK_SIZE,
             "chunk size constant regressed: see 2026-05-11 ft-metrics archive"
+        );
+        assert!(
+            FILE_TRANSFER_CHUNK_SIZE_TX + BINARY_HEADER_SIZE <= CHROME_MAX_MESSAGE_SIZE,
+            "wire-level SCTP message ({} payload + {} header = {} bytes) \
+             must not exceed Chrome's typical max-message-size advertise \
+             ({} bytes) — exceeding it silently drops every binary chunk \
+             at the daemon (regression fixed 2026-05-11)",
+            FILE_TRANSFER_CHUNK_SIZE_TX,
+            BINARY_HEADER_SIZE,
+            FILE_TRANSFER_CHUNK_SIZE_TX + BINARY_HEADER_SIZE,
+            CHROME_MAX_MESSAGE_SIZE,
         );
 
         let tmp = TempDir::new().unwrap();
