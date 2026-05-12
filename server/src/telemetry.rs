@@ -60,8 +60,16 @@ pub async fn init_telemetry(
 
     // 2. Setup Logging (Stdout + File)
     let log_level = &log_settings.log_level;
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+    // EnvFilter is attached per-layer (not at the Registry root) so the
+    // tokio-console `ConsoleLayer` registered further down can bypass it.
+    // tokio's spawn / runtime instrumentation events fire at TRACE level on
+    // targets like `tokio` and `runtime`; a global EnvFilter at INFO (the
+    // default `log_level`) silently drops them before the ConsoleLayer sees
+    // them, leaving the console UI with an empty task list. EnvFilter 0.3
+    // does not implement Clone, so we rebuild it per layer.
+    let make_env_filter = || {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level))
+    };
 
     // ServiceDaemon and SessionWorker are launched without an
     // interactive console (SCM / `CreateProcessAsUserW` from the
@@ -86,6 +94,7 @@ pub async fn init_telemetry(
             .with_filter(filter_fn(|metadata| {
                 LevelFilter::from_level(*metadata.level()) != LevelFilter::ERROR
             }))
+            .with_filter(make_env_filter())
     });
 
     let stdout_error = (!headless_mode).then(|| {
@@ -95,6 +104,7 @@ pub async fn init_telemetry(
             .with_target(true)
             .with_line_number(true)
             .with_filter(LevelFilter::ERROR)
+            .with_filter(make_env_filter())
     });
 
     let log_dir = log_directory();
@@ -109,7 +119,8 @@ pub async fn init_telemetry(
     let file_layer = fmt::layer()
         .with_ansi(false)
         .with_line_number(true)
-        .with_writer(non_blocking);
+        .with_writer(non_blocking)
+        .with_filter(make_env_filter());
 
     // 3. Setup OpenTelemetry (Optional based on consent)
     let otel_layer = if system_settings.telemetry_consent == Some(true) {
@@ -151,14 +162,20 @@ pub async fn init_telemetry(
 
         global::set_meter_provider(meter_provider);
 
-        Some(tracing_opentelemetry::layer().with_tracer(tracer))
+        Some(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(make_env_filter()),
+        )
     } else {
         None
     };
 
-    // 4. Combine layers
+    // 4. Combine layers. EnvFilter is intentionally NOT attached at the
+    // Registry root — see `make_env_filter` above. The ConsoleLayer below
+    // is registered without any filter so tokio's TRACE-level spawn /
+    // runtime instrumentation events reach it.
     let registry = Registry::default()
-        .with(env_filter)
         .with(stdout_general)
         .with(stdout_error)
         .with(file_layer)
@@ -426,6 +443,107 @@ mod tests {
         assert_eq!(
             log_file_name_for(&StartupMode::Signaling),
             "desk-server.log"
+        );
+    }
+
+    /// Regression guard for the tokio-console "empty task list" bug.
+    ///
+    /// tokio's spawn / runtime instrumentation (enabled by `--cfg
+    /// tokio_unstable` + the `tracing` feature) emits TRACE-level events on
+    /// targets like `tokio` and `runtime`. The `console_subscriber::ConsoleLayer`
+    /// reads those events to populate its task list. If an `EnvFilter` built
+    /// from the default INFO `log_level` is attached at the Registry root, it
+    /// drops those TRACE events for *every* layer below it — including the
+    /// ConsoleLayer — so tokio-console connects successfully but shows no
+    /// tasks.
+    ///
+    /// `init_telemetry` therefore attaches `EnvFilter` per-layer (stdout,
+    /// file, otel) and leaves the ConsoleLayer unfiltered. This test pins the
+    /// underlying tracing-subscriber behavior that makes that workaround
+    /// necessary: a per-layer EnvFilter at INFO blocks `tokio` TRACE events
+    /// from reaching its layer, while a sibling layer with no filter sees
+    /// them. If this ever stops being true, `init_telemetry` can be
+    /// simplified back to a global filter; until then, removing the
+    /// per-layer composition would silently re-break tokio-console.
+    #[test]
+    fn per_layer_env_filter_lets_unfiltered_sibling_see_tokio_trace_events() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::{Context, Layer};
+
+        #[derive(Clone)]
+        struct CountingLayer {
+            seen: Arc<Mutex<Vec<(String, tracing::Level)>>>,
+        }
+
+        impl<S> Layer<S> for CountingLayer
+        where
+            S: tracing::Subscriber,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let meta = event.metadata();
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((meta.target().to_string(), *meta.level()));
+            }
+        }
+
+        let filtered_seen: Arc<Mutex<Vec<(String, tracing::Level)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let unfiltered_seen: Arc<Mutex<Vec<(String, tracing::Level)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+
+        let filtered = CountingLayer {
+            seen: filtered_seen.clone(),
+        }
+        .with_filter(EnvFilter::new("info"));
+        let unfiltered = CountingLayer {
+            seen: unfiltered_seen.clone(),
+        };
+
+        let subscriber = Registry::default().with(filtered).with(unfiltered);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "tokio", "spawn event");
+            tracing::trace!(target: "runtime", "runtime event");
+            tracing::info!(target: "tokio", "info event");
+        });
+
+        let filtered_events = filtered_seen.lock().unwrap();
+        let unfiltered_events = unfiltered_seen.lock().unwrap();
+
+        // The filtered layer must NOT see TRACE-level events from tokio /
+        // runtime targets when EnvFilter is at INFO. INFO-level events still
+        // pass.
+        assert!(
+            !filtered_events
+                .iter()
+                .any(|(target, level)| (target == "tokio" || target == "runtime")
+                    && *level == tracing::Level::TRACE),
+            "EnvFilter at 'info' must drop TRACE-level tokio/runtime events; \
+             attaching it at the Registry root would silently empty tokio-console's task list. \
+             saw: {filtered_events:?}"
+        );
+        assert!(
+            filtered_events
+                .iter()
+                .any(|(target, level)| target == "tokio" && *level == tracing::Level::INFO),
+            "EnvFilter at 'info' should still pass INFO-level events. saw: {filtered_events:?}"
+        );
+
+        // The unfiltered layer (ConsoleLayer's role) must receive every
+        // event regardless of level.
+        assert!(
+            unfiltered_events
+                .iter()
+                .any(|(target, level)| target == "tokio" && *level == tracing::Level::TRACE),
+            "Unfiltered sibling layer must receive tokio TRACE events. saw: {unfiltered_events:?}"
+        );
+        assert!(
+            unfiltered_events
+                .iter()
+                .any(|(target, level)| target == "runtime" && *level == tracing::Level::TRACE),
+            "Unfiltered sibling layer must receive runtime TRACE events. saw: {unfiltered_events:?}"
         );
     }
 
