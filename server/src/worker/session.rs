@@ -12,12 +12,12 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        DesktopChangedPayload, FileTransferPayload, HeartbeatPayload,
-        ListTerminalResponsePayload, ManagerFileListResponsePayload,
-        ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
-        ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
-        ReplyFromTerminalPayload, ServiceToWorker, SignalingErrorPayload,
-        TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload, WorkerToService,
+        DesktopChangedPayload, FileTransferPayload, HeartbeatPayload, ListTerminalResponsePayload,
+        ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
+        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
+        PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
+        SignalingErrorPayload, TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -1056,6 +1056,18 @@ impl WorkerSession {
                                         Option::<&()>::None,
                                     )
                                     .await;
+                                }
+                                // F1: daemon-side `dc.send` failed. The
+                                // daemon already classified + logged the
+                                // wire error; the worker owns transfer
+                                // state and the browser-facing
+                                // `TransferError` JSON shape, so it
+                                // aborts the matching transfer and emits
+                                // a `TransferError` over its file lane.
+                                ServiceToWorker::FileTransferSendFailed(payload) => {
+                                    file_transfer_dispatcher
+                                        .handle_send_failed(payload)
+                                        .await;
                                 }
                             }
                         }

@@ -70,7 +70,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use desk_ipc_protocol::dual_transport::{EventSender, TransportError};
-use desk_ipc_protocol::message::{FileTransferPayload, StartMediaPayload, StopMediaPayload};
+use desk_ipc_protocol::message::{
+    FileTransferPayload, FileTransferSendErrorKind, FileTransferSendFailedPayload,
+    StartMediaPayload, StopMediaPayload,
+};
 use log::{debug, error, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex as TokioMutex;
@@ -134,7 +137,7 @@ use crate::model::settings::SharedSettings;
 ///
 /// Both still well below memory pressure thresholds for a single
 /// active transfer.
-const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 240 * 1024;
+pub(crate) const FILE_TRANSFER_CHUNK_SIZE_TX: usize = 240 * 1024;
 const YIELD_EVERY_N_CHUNKS: u32 = 100;
 
 /// Window size (in chunks) for file-transfer throughput / latency
@@ -508,6 +511,114 @@ impl FileTransferDispatcher {
         }
     }
 
+    /// React to a daemon-side `dc.send` failure
+    /// ([`ServiceToWorker::FileTransferSendFailed`]). The daemon has
+    /// already logged the wire error at an appropriate severity; here
+    /// we tear down the matching transfer state and tell the browser
+    /// what happened. The browser listens for `TransferError` and
+    /// surfaces it as a toast / cancels its progress bar.
+    ///
+    /// Abort scope:
+    ///
+    /// - `Some(transfer_id)` — abort just that transfer. Downloads
+    ///   stop emitting chunks on the next loop iteration via
+    ///   `cancelled_transfers`; uploads release any in-flight file
+    ///   handle and remove the partial file from disk so it doesn't
+    ///   orphan.
+    /// - `None` — fall back to aborting every in-flight upload + every
+    ///   download for `connection_id`. Used when the daemon could not
+    ///   attribute the failure to a specific transfer (legacy payload
+    ///   without `transfer_id`).
+    ///
+    /// The browser-facing `TransferError` message intentionally
+    /// includes the daemon's `kind` + `error` string so a user-visible
+    /// toast can distinguish "PacketTooLarge — please update the
+    /// server" from "TransportClosed — connection dropped". The
+    /// `chunk_index` (when present) goes into the message body for
+    /// easier log correlation against the worker's `ft-metrics` line.
+    pub async fn handle_send_failed(&self, payload: FileTransferSendFailedPayload) {
+        let FileTransferSendFailedPayload {
+            connection_id,
+            transfer_id,
+            chunk_index,
+            kind,
+            error,
+        } = payload;
+        let kind_label = match kind {
+            FileTransferSendErrorKind::PacketTooLarge => "PacketTooLarge",
+            FileTransferSendErrorKind::TransportClosed => "TransportClosed",
+            FileTransferSendErrorKind::Other => "Other",
+        };
+        let message = match chunk_index {
+            Some(idx) => format!("daemon dc.send failed [{kind_label}] at chunk {idx}: {error}"),
+            None => format!("daemon dc.send failed [{kind_label}]: {error}"),
+        };
+        // Collect every transfer_id we need to abort. With a specific
+        // transfer_id this is just `[id]`; with None we snapshot every
+        // active upload + every active download for this connection.
+        let aborted_ids: Vec<String> = {
+            let mut inner = self.inner.lock().await;
+            let ids: Vec<String> = match transfer_id.as_deref() {
+                Some(tid) => vec![tid.to_string()],
+                None => inner.upload_states.keys().cloned().collect(),
+            };
+            for tid in &ids {
+                inner.cancelled_transfers.insert(tid.clone());
+            }
+            ids
+        };
+        warn!(
+            "[FileTransferDispatcher] {}: send failure [{kind_label}] — aborting \
+             {} transfer(s); {}",
+            connection_id,
+            aborted_ids.len(),
+            error
+        );
+        // For uploads: release the file handle and remove the partial
+        // file so it doesn't orphan on disk. Mirrors the cleanup the
+        // TransferCancel arm already does.
+        let mut upload_paths_to_remove: Vec<std::path::PathBuf> = Vec::new();
+        {
+            let mut inner = self.inner.lock().await;
+            for tid in &aborted_ids {
+                if let Some(state) = inner.upload_states.remove(tid) {
+                    upload_paths_to_remove.push(state.file_path.clone());
+                }
+            }
+        }
+        for path in upload_paths_to_remove {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                debug!(
+                    "[FileTransferDispatcher] failed to remove partial upload {} after \
+                     send failure: {e}",
+                    path.display()
+                );
+            }
+        }
+        // Surface the failure back to the browser for each transfer.
+        // If the file lane itself is what's broken these emits may
+        // fail too — that's expected; the browser's SCTP timeout will
+        // eventually surface the disconnect on its own.
+        for tid in &aborted_ids {
+            if let Err(e) = self
+                .emit_text(
+                    &connection_id,
+                    FileTransferMessage::TransferError(TransferError {
+                        transfer_id: tid.clone(),
+                        message: message.clone(),
+                    }),
+                )
+                .await
+            {
+                debug!(
+                    "[FileTransferDispatcher] {}: emit TransferError for {} after send \
+                     failure also failed: {e}",
+                    connection_id, tid
+                );
+            }
+        }
+    }
+
     async fn handle_text(&self, payload: FileTransferPayload) {
         let s = match std::str::from_utf8(&payload.data) {
             Ok(s) => s,
@@ -844,7 +955,10 @@ impl FileTransferDispatcher {
             // releases the OS handle promptly. Continuing to read
             // would just fill memory while no one drains.
             let emit_start = Instant::now();
-            if let Err(e) = self.emit_binary(&connection_id, chunk_bytes).await {
+            if let Err(e) = self
+                .emit_binary(&connection_id, &req.transfer_id, chunk_bytes)
+                .await
+            {
                 warn!(
                     "[FileTransferDispatcher] {}: download {} aborted at chunk {}: {e}",
                     connection_id, req.transfer_id, chunk_index
@@ -907,6 +1021,7 @@ impl FileTransferDispatcher {
         connection_id: &str,
         msg: FileTransferMessage,
     ) -> Result<(), TransportError> {
+        let transfer_id = transfer_id_of(&msg).map(str::to_string);
         let json = match serde_json::to_vec(&msg) {
             Ok(b) => b,
             Err(e) => {
@@ -914,11 +1029,18 @@ impl FileTransferDispatcher {
                 return Ok(());
             }
         };
-        self.emit_payload(connection_id, json, true).await
+        self.emit_payload(connection_id, json, true, transfer_id)
+            .await
     }
 
-    async fn emit_binary(&self, connection_id: &str, data: Vec<u8>) -> Result<(), TransportError> {
-        self.emit_payload(connection_id, data, false).await
+    async fn emit_binary(
+        &self,
+        connection_id: &str,
+        transfer_id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), TransportError> {
+        self.emit_payload(connection_id, data, false, Some(transfer_id.to_string()))
+            .await
     }
 
     async fn emit_payload(
@@ -926,11 +1048,13 @@ impl FileTransferDispatcher {
         connection_id: &str,
         data: Vec<u8>,
         is_text: bool,
+        transfer_id: Option<String>,
     ) -> Result<(), TransportError> {
         let payload = FileTransferPayload {
             connection_id: connection_id.to_string(),
             data,
             is_text,
+            transfer_id,
         };
         // `send().await` parks on a full file lane (FILE_QUEUE_CAP = 32),
         // which is exactly the backpressure we want — see module docs.
@@ -938,6 +1062,24 @@ impl FileTransferDispatcher {
         // has dropped (peer crash / shutdown), in which case callers
         // should fail-fast and release any open file handle.
         self.file_sender.send(payload).await
+    }
+}
+
+/// Returns the `transfer_id` carried by every outbound
+/// [`FileTransferMessage`] variant. The daemon-side writer needs this to
+/// scope a `dc.send` failure to the right transfer when sending a
+/// [`ServiceToWorker::FileTransferSendFailed`] back; without it the
+/// failure can only be associated with the connection, forcing a coarse
+/// abort of every transfer on that PC.
+fn transfer_id_of(msg: &FileTransferMessage) -> Option<&str> {
+    match msg {
+        FileTransferMessage::DownloadRequest(m) => Some(&m.transfer_id),
+        FileTransferMessage::DownloadResponse(m) => Some(&m.transfer_id),
+        FileTransferMessage::UploadRequest(m) => Some(&m.transfer_id),
+        FileTransferMessage::UploadResponse(m) => Some(&m.transfer_id),
+        FileTransferMessage::TransferComplete(m) => Some(&m.transfer_id),
+        FileTransferMessage::TransferError(m) => Some(&m.transfer_id),
+        FileTransferMessage::TransferCancel(m) => Some(&m.transfer_id),
     }
 }
 
@@ -1221,6 +1363,7 @@ mod tests {
             connection_id: "ghost".into(),
             data: br#"{"type":"download_request","transfer_id":"t","file_path":"x"}"#.to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         d.handle_command(payload).await;
         // Yield then assert nothing arrived: the spawned download
@@ -1274,6 +1417,7 @@ mod tests {
             connection_id: "c1".into(),
             data: br#"{"type":"download_request","transfer_id":"t","file_path":"x"}"#.to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         d.handle_command(payload).await;
         tokio::task::yield_now().await;
@@ -1293,6 +1437,7 @@ mod tests {
             connection_id: "c1".into(),
             data: br#"{"type":"transfer_complete","transfer_id":"t"}"#.to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         d.handle_command(payload).await;
         let g = d.inner.lock().await;
@@ -1310,6 +1455,7 @@ mod tests {
             connection_id: "c1".into(),
             data: br#"{"type":"transfer_complete","transfer_id":"t"}"#.to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         d.handle_command(payload).await;
         d.stop_connection(&StopMediaPayload {
@@ -1519,6 +1665,7 @@ mod tests {
             connection_id: "c1".into(),
             data: serde_json::to_vec(&req_msg).unwrap(),
             is_text: true,
+            transfer_id: None,
         })
         .await;
         // Expect UploadResponse text first
@@ -1534,6 +1681,7 @@ mod tests {
                 connection_id: "c1".into(),
                 data: chunk_bytes,
                 is_text: false,
+                transfer_id: None,
             })
             .await;
         }
@@ -1617,6 +1765,7 @@ mod tests {
             connection_id: "c1".into(),
             data: vec![0u8; 10],
             is_text: false,
+            transfer_id: None,
         })
         .await;
         assert_no_message(&mut rx).await;
@@ -1633,6 +1782,7 @@ mod tests {
             connection_id: "c1".into(),
             data: chunk,
             is_text: false,
+            transfer_id: None,
         })
         .await;
         assert_no_message(&mut rx).await;
@@ -1686,5 +1836,171 @@ mod tests {
             "serve_download completed while file lane was saturated; \
              backpressure chain is broken: {still_running:?}"
         );
+    }
+
+    // ============== F1: handle_send_failed ==============
+
+    /// Targeted abort: with `transfer_id = Some(...)`, only that
+    /// upload's state is removed; an unrelated upload on the same
+    /// connection survives. Mirrors the daemon's fine-grained
+    /// `dc.send` failure attribution. Regression guard against a
+    /// future refactor that accidentally widens the abort scope.
+    #[tokio::test]
+    async fn handle_send_failed_aborts_only_targeted_upload() {
+        let tmp = TempDir::new().unwrap();
+        let (d, mut rx) = dispatcher();
+        d.start_connection(&start_payload("c1")).await;
+        // Stage two in-flight uploads so we can prove the failure
+        // notification scoped on `transfer_id_a` doesn't take `_b`
+        // with it.
+        let id_a = "00000000-0000-0000-0000-0000000000aa".to_string();
+        let id_b = "00000000-0000-0000-0000-0000000000bb".to_string();
+        for tid in [&id_a, &id_b] {
+            let req = UploadRequest {
+                transfer_id: tid.clone(),
+                target_dir: tmp.path().to_string_lossy().to_string(),
+                file_name: format!("up-{tid}.bin"),
+                file_size: 4,
+                chunk_size: 4,
+                total_chunks: 1,
+            };
+            d.handle_command(FileTransferPayload {
+                connection_id: "c1".into(),
+                data: serde_json::to_vec(&FileTransferMessage::UploadRequest(req)).unwrap(),
+                is_text: true,
+                transfer_id: None,
+            })
+            .await;
+            // Drain the UploadResponse so the lane stays clean for the
+            // TransferError we assert on below.
+            let _ = rx.recv().await.expect("UploadResponse");
+        }
+        d.handle_send_failed(FileTransferSendFailedPayload {
+            connection_id: "c1".into(),
+            transfer_id: Some(id_a.clone()),
+            chunk_index: Some(7),
+            kind: FileTransferSendErrorKind::PacketTooLarge,
+            error: "outbound packet too large".to_string(),
+        })
+        .await;
+        // Targeted abort: id_a is gone, id_b survives.
+        {
+            let inner = d.inner.lock().await;
+            assert!(!inner.upload_states.contains_key(&id_a));
+            assert!(inner.upload_states.contains_key(&id_b));
+            assert!(inner.cancelled_transfers.contains(&id_a));
+        }
+        // TransferError emitted for id_a only.
+        let p = rx.recv().await.expect("TransferError emit");
+        assert!(p.is_text);
+        let parsed: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+        match parsed {
+            FileTransferMessage::TransferError(e) => {
+                assert_eq!(e.transfer_id, id_a);
+                assert!(
+                    e.message.contains("PacketTooLarge"),
+                    "expected kind in message, got {:?}",
+                    e.message
+                );
+                assert!(
+                    e.message.contains("chunk 7"),
+                    "expected chunk index in message, got {:?}",
+                    e.message
+                );
+            }
+            other => panic!("expected TransferError, got {other:?}"),
+        }
+        assert_no_message(&mut rx).await;
+    }
+
+    /// Coarse abort: with `transfer_id = None`, every in-flight upload
+    /// on the connection is dropped + a TransferError is emitted per
+    /// transfer. This is the fallback when the daemon could not
+    /// attribute the failure (legacy payload without `transfer_id`).
+    #[tokio::test]
+    async fn handle_send_failed_without_transfer_id_aborts_all_uploads() {
+        let tmp = TempDir::new().unwrap();
+        let (d, mut rx) = dispatcher();
+        d.start_connection(&start_payload("c1")).await;
+        let id_a = "00000000-0000-0000-0000-0000000000a1".to_string();
+        let id_b = "00000000-0000-0000-0000-0000000000b2".to_string();
+        for tid in [&id_a, &id_b] {
+            let req = UploadRequest {
+                transfer_id: tid.clone(),
+                target_dir: tmp.path().to_string_lossy().to_string(),
+                file_name: format!("up-{tid}.bin"),
+                file_size: 4,
+                chunk_size: 4,
+                total_chunks: 1,
+            };
+            d.handle_command(FileTransferPayload {
+                connection_id: "c1".into(),
+                data: serde_json::to_vec(&FileTransferMessage::UploadRequest(req)).unwrap(),
+                is_text: true,
+                transfer_id: None,
+            })
+            .await;
+            let _ = rx.recv().await.expect("UploadResponse");
+        }
+        d.handle_send_failed(FileTransferSendFailedPayload {
+            connection_id: "c1".into(),
+            transfer_id: None,
+            chunk_index: None,
+            kind: FileTransferSendErrorKind::TransportClosed,
+            error: "channel closed".to_string(),
+        })
+        .await;
+        {
+            let inner = d.inner.lock().await;
+            assert!(
+                inner.upload_states.is_empty(),
+                "all uploads must be cleared"
+            );
+            assert!(inner.cancelled_transfers.contains(&id_a));
+            assert!(inner.cancelled_transfers.contains(&id_b));
+        }
+        // Two TransferError messages, one per aborted transfer.
+        // Order is HashMap-iteration-dependent so collect into a set.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let p = rx.recv().await.expect("TransferError emit");
+            assert!(p.is_text);
+            let parsed: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+            match parsed {
+                FileTransferMessage::TransferError(e) => {
+                    seen.insert(e.transfer_id);
+                }
+                other => panic!("expected TransferError, got {other:?}"),
+            }
+        }
+        assert!(seen.contains(&id_a));
+        assert!(seen.contains(&id_b));
+        assert_no_message(&mut rx).await;
+    }
+
+    /// Cancel flag is set even when the targeted transfer is a
+    /// download (no upload_states entry). serve_download polls the
+    /// flag on each loop iteration, so this is how a daemon-side
+    /// send failure aborts a download already in flight.
+    #[tokio::test]
+    async fn handle_send_failed_for_download_sets_cancel_flag() {
+        let (d, mut rx) = dispatcher();
+        d.start_connection(&start_payload("c1")).await;
+        let tid = "00000000-0000-0000-0000-0000000000dd".to_string();
+        d.handle_send_failed(FileTransferSendFailedPayload {
+            connection_id: "c1".into(),
+            transfer_id: Some(tid.clone()),
+            chunk_index: Some(0),
+            kind: FileTransferSendErrorKind::Other,
+            error: "boom".to_string(),
+        })
+        .await;
+        {
+            let inner = d.inner.lock().await;
+            assert!(inner.cancelled_transfers.contains(&tid));
+        }
+        let p = rx.recv().await.expect("TransferError emit");
+        let parsed: FileTransferMessage = serde_json::from_slice(&p.data).unwrap();
+        assert!(matches!(parsed, FileTransferMessage::TransferError(_)));
     }
 }

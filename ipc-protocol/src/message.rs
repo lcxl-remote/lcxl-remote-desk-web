@@ -1,4 +1,3 @@
-use wincode::{SchemaRead, SchemaWrite};
 use desk_signal_facade::model::audio_capture::AudioDevice;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
@@ -12,6 +11,7 @@ use desk_signal_facade::model::terminal::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use wincode::{SchemaRead, SchemaWrite};
 
 /// Messages sent from Service Core (daemon) to Worker process over the
 /// **event** transport (low-latency, never-drop). Large media payloads do
@@ -147,6 +147,21 @@ pub enum ServiceToWorker {
     /// [`WorkerToService::ListTerminalResponse`] (carries
     /// [`TerminalList`]).
     ListTerminalRequest(ListTerminalRequestPayload),
+
+    // ---------- Arch IV file-transfer error feedback (event pipe) ----------
+    /// Daemon → worker notification that a `dc.send` for a file-transfer
+    /// payload failed. The daemon writer task only sees the wire-level
+    /// SCTP send error; the worker owns transfer state (upload buffers,
+    /// download cancel flags) and the browser-facing `FileTransferMessage`
+    /// JSON shape, so the worker is responsible for aborting the affected
+    /// transfer and emitting a `TransferError` back to the browser.
+    ///
+    /// Routed on the *event* pipe rather than the file pipe so a stuck
+    /// browser DataChannel (which is what triggered the failure in the
+    /// first place) cannot also block the failure notification — putting
+    /// it on the file pipe would deadlock when the file lane is what's
+    /// already saturated.
+    FileTransferSendFailed(FileTransferSendFailedPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -382,7 +397,9 @@ pub struct MediaFrame {
 /// Frame classification on the media transport. The daemon uses this
 /// (a) to know whether to suppress write_sample during worker swaps
 /// (resume only on `VideoI`), and (b) to record latency histograms.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash,
+)]
 pub enum MediaFrameKind {
     VideoI,
     VideoP,
@@ -391,7 +408,9 @@ pub enum MediaFrameKind {
 
 /// Encoder identity. Stays an enum (not free-form string) so we don't end
 /// up with case-sensitive mismatches between worker and daemon.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash,
+)]
 pub enum MediaCodec {
     H264,
     Vp8,
@@ -548,11 +567,78 @@ pub struct OpaqueConnectionPayload {
 /// control messages travel as text, file chunks travel as binary —
 /// so the IPC has to preserve that bit for the daemon's `dc.send_text`
 /// vs `dc.send` decision.
+///
+/// `transfer_id` is populated by the worker so the daemon-side writer
+/// task can reference a specific transfer when reporting a `dc.send`
+/// failure back via [`ServiceToWorker::FileTransferSendFailed`]. The
+/// daemon itself never parses `data` (the binary chunk header /
+/// `FileTransferMessage` JSON shape lives in the worker), so without
+/// this field the daemon would only know the failing `connection_id`
+/// and the worker would have to abort *every* in-flight transfer on
+/// that PC. The field is optional so legacy binaries / synthetic test
+/// payloads still decode cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct FileTransferPayload {
     pub connection_id: String,
     pub data: Vec<u8>,
     pub is_text: bool,
+    #[serde(default)]
+    pub transfer_id: Option<String>,
+}
+
+/// Classification of a `dc.send` failure observed by the daemon's
+/// per-connection file-transfer writer task. The worker uses this to
+/// pick its abort policy and to log the failure at an appropriate
+/// severity:
+///
+/// - `PacketTooLarge` is a programmer / configuration bug — the chosen
+///   chunk size exceeds the remote `a=max-message-size` SCTP advertise.
+///   The whole transfer is doomed (every subsequent chunk will trip the
+///   same check) so the worker must abort the transfer and surface a
+///   `TransferError` to the browser. Logged at `error!` so it gets
+///   investigated rather than absorbed into the warning noise.
+/// - `TransportClosed` is normal teardown (peer disconnected /
+///   `RTCPeerConnection` closed mid-transfer). Logged at `debug!` —
+///   the failure is expected during shutdown and the transfer cleanup
+///   is already on its way via `cleanup_pc`.
+/// - `Other` is any unclassified `webrtc::Error`. Logged at `warn!`
+///   so it surfaces in production but doesn't pollute the error budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub enum FileTransferSendErrorKind {
+    /// The serialized message exceeded SCTP `max_message_size` for the
+    /// outbound stream. Caused by chunk_size + binary-header > remote
+    /// SDP advertise. Always fatal for the transfer.
+    PacketTooLarge,
+    /// The DataChannel / SCTP transport was closed before the send
+    /// completed. Normal during teardown / peer disconnect.
+    TransportClosed,
+    /// Any unclassified error returned by `webrtc-rs`. Treated as
+    /// transport-level failure for abort purposes but logged at a
+    /// lower severity than `PacketTooLarge`.
+    Other,
+}
+
+/// Daemon → worker payload carried by
+/// [`ServiceToWorker::FileTransferSendFailed`]. The worker uses the
+/// `transfer_id` (when present) to scope the abort to a single
+/// in-flight transfer; if it's `None`, the worker falls back to
+/// aborting every transfer on `connection_id` (legacy / unscoped
+/// chunks emitted before the worker started populating `transfer_id`
+/// on the file lane).
+///
+/// `chunk_index` is informational — the worker doesn't need it to abort,
+/// but it goes straight into the `TransferError.message` so logs and
+/// the browser-side toast can show exactly which chunk tripped the
+/// failure.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct FileTransferSendFailedPayload {
+    pub connection_id: String,
+    #[serde(default)]
+    pub transfer_id: Option<String>,
+    #[serde(default)]
+    pub chunk_index: Option<u32>,
+    pub kind: FileTransferSendErrorKind,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
@@ -1125,12 +1211,118 @@ mod tests {
                 connection_id: "ft-1".to_string(),
                 data: vec![1, 2, 3],
                 is_text,
+                transfer_id: None,
             };
             let decoded = wincode_round_trip(&original);
             assert_eq!(decoded.connection_id, "ft-1");
             assert_eq!(decoded.data, vec![1, 2, 3]);
             assert_eq!(decoded.is_text, is_text);
+            assert!(decoded.transfer_id.is_none());
         }
+    }
+
+    /// `transfer_id` survives wincode round-trip in both `Some` and
+    /// `None` form. The daemon-side writer task reads this field on
+    /// `dc.send` failure and forwards it via
+    /// [`ServiceToWorker::FileTransferSendFailed`] so the worker can
+    /// abort the specific transfer rather than all transfers on the
+    /// PC; losing the field would silently coarsen the abort scope.
+    #[test]
+    fn file_transfer_payload_transfer_id_round_trips_wincode() {
+        for transfer_id in [
+            None,
+            Some("11111111-2222-3333-4444-555555555555".to_string()),
+        ] {
+            let original = FileTransferPayload {
+                connection_id: "ft-1".to_string(),
+                data: vec![1, 2, 3],
+                is_text: false,
+                transfer_id: transfer_id.clone(),
+            };
+            let decoded = wincode_round_trip(&original);
+            assert_eq!(decoded.transfer_id, transfer_id);
+        }
+    }
+
+    /// `FileTransferSendFailedPayload` survives a wincode round trip
+    /// in every error-kind variant. The worker dispatches its abort
+    /// policy off `kind`; a silent re-ordering of the enum would map
+    /// `PacketTooLarge` to `Other` (or vice versa), demoting a
+    /// configuration bug to a warning and skipping the
+    /// fatal-transfer abort.
+    #[test]
+    fn file_transfer_send_failed_round_trips_all_kinds() {
+        for kind in [
+            FileTransferSendErrorKind::PacketTooLarge,
+            FileTransferSendErrorKind::TransportClosed,
+            FileTransferSendErrorKind::Other,
+        ] {
+            let msg = ServiceToWorker::FileTransferSendFailed(FileTransferSendFailedPayload {
+                connection_id: "conn-ft".to_string(),
+                transfer_id: Some("00000000-0000-0000-0000-000000000001".to_string()),
+                chunk_index: Some(42),
+                kind,
+                error: "outbound packet too large".to_string(),
+            });
+            match wincode_round_trip(&msg) {
+                ServiceToWorker::FileTransferSendFailed(p) => {
+                    assert_eq!(p.connection_id, "conn-ft");
+                    assert_eq!(
+                        p.transfer_id.as_deref(),
+                        Some("00000000-0000-0000-0000-000000000001")
+                    );
+                    assert_eq!(p.chunk_index, Some(42));
+                    assert_eq!(p.kind, kind);
+                    assert_eq!(p.error, "outbound packet too large");
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
+    /// Coarse-grained variant: `transfer_id` and `chunk_index` are
+    /// optional so the daemon can still send a failure notification
+    /// when it cannot attribute the failure to a specific transfer
+    /// (e.g. the failing payload was a legacy chunk emitted before the
+    /// worker started populating `transfer_id`). The worker treats
+    /// `None` as "abort everything for this connection".
+    #[test]
+    fn file_transfer_send_failed_round_trips_without_transfer_id() {
+        let msg = ServiceToWorker::FileTransferSendFailed(FileTransferSendFailedPayload {
+            connection_id: "conn-ft".to_string(),
+            transfer_id: None,
+            chunk_index: None,
+            kind: FileTransferSendErrorKind::TransportClosed,
+            error: "channel closed".to_string(),
+        });
+        match wincode_round_trip(&msg) {
+            ServiceToWorker::FileTransferSendFailed(p) => {
+                assert_eq!(p.connection_id, "conn-ft");
+                assert!(p.transfer_id.is_none());
+                assert!(p.chunk_index.is_none());
+                assert_eq!(p.kind, FileTransferSendErrorKind::TransportClosed);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Wincode payloads written by older binaries that pre-date the
+    /// `transfer_id` field MUST still decode — `#[serde(default)]`
+    /// makes the field optional so a worker built before the
+    /// `FileTransferSendFailed` rollout can still hand chunks to a
+    /// newer daemon (and vice versa) without an IPC framing mismatch.
+    #[test]
+    fn file_transfer_payload_accepts_legacy_json_without_transfer_id() {
+        let legacy = serde_json::json!({
+            "connection_id": "ft-1",
+            "data": [1, 2, 3],
+            "is_text": false,
+        });
+        let decoded: FileTransferPayload = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.connection_id, "ft-1");
+        assert_eq!(decoded.data, vec![1, 2, 3]);
+        assert!(!decoded.is_text);
+        assert!(decoded.transfer_id.is_none());
     }
 
     /// `ErrorPayload.connection_id` survives a wincode round-trip in
@@ -1814,6 +2006,13 @@ mod tests {
             ServiceToWorker::ListTerminalRequest(ListTerminalRequestPayload {
                 request_id: "r7".to_string(),
                 connection_id: Some("c".to_string()),
+            }),
+            ServiceToWorker::FileTransferSendFailed(FileTransferSendFailedPayload {
+                connection_id: "c".to_string(),
+                transfer_id: Some("11111111-2222-3333-4444-555555555555".to_string()),
+                chunk_index: Some(0),
+                kind: FileTransferSendErrorKind::PacketTooLarge,
+                error: "outbound packet too large".to_string(),
             }),
         ];
         for case in &cases {

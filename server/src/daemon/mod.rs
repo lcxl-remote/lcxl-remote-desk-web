@@ -141,6 +141,14 @@ pub async fn run_service_daemon_inner(
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(shared_settings_data.clone(), pc_registry.clone());
 
+    // Allow the per-connection file-transfer writer task to push a
+    // `FileTransferSendFailed` back to the worker on a daemon-side
+    // `dc.send` failure. Installed here so the OnceCell sees a real
+    // `WorkerManager` for the lifetime of the daemon; tests that
+    // never reach this entry point keep observing `None` and stick
+    // to the legacy log-and-drop behaviour.
+    pc_registry.set_worker_manager(worker_mgr.clone());
+
     let initial_session = get_current_session_id();
     let initial_desktop = get_initial_desktop_name();
     if let Err(e) = worker_mgr
@@ -255,6 +263,11 @@ pub async fn start_inprocess_daemon(
     let pc_registry = PcRegistry::new();
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
+
+    // See ServiceDaemon entry above: install the WorkerManager handle
+    // so the file-transfer writer task can report `dc.send` failures
+    // back to the worker via FileTransferSendFailed.
+    pc_registry.set_worker_manager(worker_mgr.clone());
 
     let session_id = get_current_session_id();
     let initial_desktop = get_initial_desktop_name();

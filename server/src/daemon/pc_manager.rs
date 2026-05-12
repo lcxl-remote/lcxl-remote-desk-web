@@ -75,9 +75,10 @@ use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encode
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
 use desk_capture_engine::video_encoder::video_encoder_factory::list_video_encoder;
 use desk_ipc_protocol::message::{
-    ClipboardPayload, CursorDataPayload, FileTransferPayload, ForceKeyframePayload, InputPayload,
-    MediaCapabilities, MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload,
-    ServiceToWorker, StartMediaPayload, StopMediaPayload, UpdateMediaSettingsPayload,
+    ClipboardPayload, CursorDataPayload, FileTransferPayload, FileTransferSendErrorKind,
+    FileTransferSendFailedPayload, ForceKeyframePayload, InputPayload, MediaCapabilities,
+    MediaCodec, MediaFrame, MediaFrameKind, OpaqueConnectionPayload, ServiceToWorker,
+    StartMediaPayload, StopMediaPayload, UpdateMediaSettingsPayload,
 };
 use desk_signal_facade::model::signal::InitSignalingData;
 use std::time::Duration;
@@ -418,9 +419,22 @@ pub struct PeerConnectionContext {
 /// to the `DeskSession::rtc_peer_connection_map` the worker held in
 /// Arch III but lives in the daemon process so it survives every
 /// worker swap.
+///
+/// The registry also holds an optional [`WorkerManager`] handle used
+/// by [`spawn_file_transfer_writer_task`] to push
+/// [`ServiceToWorker::FileTransferSendFailed`] back to the worker when
+/// `dc.send` fails. Stored as `OnceCell<WorkerManager>` (set once by
+/// the daemon entry point right after `WorkerManager::new`) rather
+/// than threaded through every [`Self::create_for_request_remote`]
+/// call: `WorkerManager` holds the same registry as a clonable
+/// `PcRegistry`, so passing it by argument would re-introduce the
+/// constructor-time cycle that the runtime-injection design was
+/// chosen to break. Tests that never set the handle keep the legacy
+/// "log + drop" behaviour, matching pre-F1 semantics.
 #[derive(Clone, Default)]
 pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
+    worker_mgr: Arc<tokio::sync::OnceCell<WorkerManager>>,
 }
 
 /// Errors produced by [`PcRegistry`] handlers. Worker-side equivalents
@@ -431,6 +445,30 @@ type RegistryResult<T> = Result<T, DeskError>;
 impl PcRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Install the daemon's [`WorkerManager`] so the file-transfer
+    /// writer task can push [`ServiceToWorker::FileTransferSendFailed`]
+    /// back to the worker on `dc.send` failure. Idempotent — calling
+    /// twice is a programmer bug (worker_manager is meant to be
+    /// initialised once at daemon startup) and is silently ignored
+    /// rather than panicking so a future re-entry from crash recovery
+    /// stays safe.
+    pub fn set_worker_manager(&self, worker_mgr: WorkerManager) {
+        if self.worker_mgr.set(worker_mgr).is_err() {
+            log::debug!(
+                "[pc_manager] PcRegistry::set_worker_manager called more than once; ignoring"
+            );
+        }
+    }
+
+    /// Returns the registered [`WorkerManager`] handle if one was
+    /// installed via [`Self::set_worker_manager`]. Tests that never
+    /// register one observe `None`, which short-circuits the
+    /// reverse-feedback path back to its pre-F1 "log + drop"
+    /// behaviour.
+    pub fn worker_manager(&self) -> Option<WorkerManager> {
+        self.worker_mgr.get().cloned()
     }
 
     pub async fn contains(&self, connection_id: &str) -> bool {
@@ -498,6 +536,7 @@ impl PcRegistry {
             connection_id.to_string(),
             file_transfer_writer_rx,
             Arc::clone(&file_transfer_data_channel),
+            self.worker_manager(),
         );
 
         let ctx = Arc::new(RwLock::new(PeerConnectionContext {
@@ -963,10 +1002,20 @@ fn install_browser_dc_message_forwarder(
                 // heartbeats / manager responses, which is exactly the
                 // HOL-blocking regression fix-2026-05-05 forbids.
                 if route == DcRoute::FileTransfer {
+                    // Browser → daemon file-transfer chunks/control don't
+                    // carry an IPC-visible transfer_id: the routing key is
+                    // either a binary header (first 36 bytes) the worker
+                    // parses, or a JSON envelope it deserializes. The
+                    // daemon stays protocol-agnostic and forwards the
+                    // payload verbatim with `transfer_id: None`. Only the
+                    // reverse direction (worker → daemon) sets the field,
+                    // and only so the writer task can scope a `dc.send`
+                    // failure when reporting `FileTransferSendFailed`.
                     let payload = FileTransferPayload {
                         connection_id: connection_id.clone(),
                         data: bytes,
                         is_text,
+                        transfer_id: None,
                     };
                     if let Err(e) = worker_mgr.send_file_to_worker(payload).await {
                         // Possible causes: worker not yet up (file lane
@@ -1371,6 +1420,17 @@ pub async fn handle_offer(
     log::info!(
         "[pc_manager] Offer from {from_connection_id}: has_video={has_video}, has_audio={has_audio}"
     );
+    // F3 (observe-only): record the remote SDP's advertised
+    // `a=max-message-size` and assert chunk_size + binary-header fits.
+    // webrtc-rs 0.17.1 does not expose the negotiated value on
+    // `RTCSctpTransport::get_capabilities()` (it currently hard-codes
+    // `0`), so we parse the SDP text directly. The check is informational
+    // only — a violation logs at `error!` but does NOT block the offer;
+    // the actual `dc.send` will surface the failure via
+    // F1/F2 (`FileTransferSendErrorKind::PacketTooLarge`) anyway, but
+    // having the warning at SDP time means we catch it before the first
+    // byte of file data hits the channel.
+    log_sdp_max_message_size(from_connection_id, sdp_str);
 
     if has_video && ctx_guard.video_track.is_none() {
         let video_mime_type = match offer.desk_settings.get_video_encoder_type()? {
@@ -1872,6 +1932,17 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
 /// context drops (registry release in `cleanup_pc`), all senders are
 /// gone and `rx.recv()` returns `None`, exiting the task.
 ///
+/// When `worker_mgr` is `Some`, a failed `dc.send` is reported back to
+/// the worker via [`ServiceToWorker::FileTransferSendFailed`] so the
+/// worker dispatcher can abort the matching in-flight transfer and
+/// emit a `TransferError` to the browser. The error is also classified
+/// ([`FileTransferSendErrorKind`]) so the worker (and the daemon log)
+/// can distinguish a configuration bug (`PacketTooLarge`) from normal
+/// teardown (`TransportClosed`). When `worker_mgr` is `None`
+/// (test-only path / pre-F1 callers), the failure is logged and
+/// dropped — matching the legacy semantics so PR-scope-tests don't
+/// need to wire a real `WorkerManager`.
+///
 /// Silent-drop branches inside the task:
 ///
 /// - No file-transfer DC registered — debug (browser hasn't opened it
@@ -1879,13 +1950,11 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
 /// - DC not in `Open` state — debug.
 /// - send_text on non-UTF-8 bytes — warn + drop. Defends against a
 ///   buggy worker that sets `is_text=true` on raw chunk bytes.
-/// - send failed — warn. The worker's transfer protocol carries
-///   per-chunk acks; the browser detects loss and recovers via
-///   `TransferError` retransmission.
 fn spawn_file_transfer_writer_task(
     connection_id: String,
     mut rx: mpsc::Receiver<FileTransferPayload>,
     dc_slot: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
+    worker_mgr: Option<WorkerManager>,
 ) {
     // `tokio::spawn` (not `actix_web::rt::spawn`) is intentional:
     // the task only awaits `mpsc::recv` and `webrtc-rs` futures, both
@@ -1936,6 +2005,7 @@ fn spawn_file_transfer_writer_task(
             let buffered_before = dc.buffered_amount().await as u64;
             let payload_len = payload.data.len() as u64;
             let is_text = payload.is_text;
+            let payload_transfer_id = payload.transfer_id.clone();
             let send_start = std::time::Instant::now();
             let result = if is_text {
                 let s = match std::str::from_utf8(&payload.data) {
@@ -1955,9 +2025,47 @@ fn spawn_file_transfer_writer_task(
             let dc_send_elapsed = send_start.elapsed();
             last_send_done = std::time::Instant::now();
             if let Err(e) = result {
-                log::warn!(
-                    "[pc_manager] failed to send file transfer data for {connection_id}: {e}"
-                );
+                let kind = classify_dc_send_error(&e);
+                match kind {
+                    FileTransferSendErrorKind::PacketTooLarge => {
+                        // Configuration bug: the chosen chunk_size +
+                        // binary-header exceeds the remote SDP's
+                        // a=max-message-size. The whole transfer is
+                        // doomed (every subsequent chunk trips the same
+                        // check) so this is logged at error! and the
+                        // worker is told to abort.
+                        log::error!(
+                            "[pc_manager] {connection_id}: SCTP packet too large \
+                             (chunk_size + header > remote max_message_size): {e}"
+                        );
+                    }
+                    FileTransferSendErrorKind::TransportClosed => {
+                        // Normal teardown / peer disconnect; the
+                        // cleanup_pc path is already on its way.
+                        log::debug!("[pc_manager] {connection_id}: DC closed mid-transfer: {e}");
+                    }
+                    FileTransferSendErrorKind::Other => {
+                        log::warn!(
+                            "[pc_manager] {connection_id}: file transfer dc.send failed: {e}"
+                        );
+                    }
+                }
+                if let Some(mgr) = worker_mgr.as_ref() {
+                    let notify =
+                        ServiceToWorker::FileTransferSendFailed(FileTransferSendFailedPayload {
+                            connection_id: connection_id.clone(),
+                            transfer_id: payload_transfer_id,
+                            chunk_index: None,
+                            kind,
+                            error: e.to_string(),
+                        });
+                    if let Err(send_err) = mgr.send_to_worker(notify).await {
+                        log::debug!(
+                            "[pc_manager] {connection_id}: could not deliver \
+                             FileTransferSendFailed to worker: {send_err}"
+                        );
+                    }
+                }
                 // Still account for the failed send in the window so
                 // the next flush surfaces the failure latency.
             }
@@ -1984,6 +2092,113 @@ fn spawn_file_transfer_writer_task(
             "[pc_manager] file transfer writer task exited for {connection_id} (sender dropped)"
         );
     });
+}
+
+/// Categorise a `webrtc::Error` from `dc.send` / `dc.send_text` into
+/// the variants the worker reacts to. The webrtc-rs error chain is
+/// `webrtc::Error::Sctp(webrtc_sctp::Error::ErrOutboundPacketTooLarge)`
+/// for the "chunk too large" case; rather than reaching into the
+/// nested error type (the `Sctp` arm is private to webrtc-rs and
+/// could be refactored), match on the rendered `Display` substring.
+/// The substring `"OutboundPacketTooLarge"` is stable across
+/// webrtc-rs 0.17.x and uniquely identifies the SCTP wire-level
+/// rejection that the 256 KiB chunk-size regression hit in
+/// 2026-05-11 (see `agent_works/web/2026-05-11_ft-metrics-observability.md`).
+fn classify_dc_send_error(err: &webrtc::Error) -> FileTransferSendErrorKind {
+    let rendered = err.to_string();
+    if rendered.contains("OutboundPacketTooLarge") {
+        FileTransferSendErrorKind::PacketTooLarge
+    } else if rendered.contains("closed")
+        || rendered.contains("Closed")
+        || rendered.contains("StreamClosed")
+        || rendered.contains("ConnectionClosed")
+    {
+        FileTransferSendErrorKind::TransportClosed
+    } else {
+        FileTransferSendErrorKind::Other
+    }
+}
+
+/// Parse `a=max-message-size:N` out of a remote SDP. Returns `None`
+/// when the attribute is absent (some browsers / older versions skip
+/// it, in which case the SCTP RFC 8841 default of 65536 applies — but
+/// we don't synthesise that here; the caller logs the gap).
+///
+/// The attribute can appear on the session level or under the
+/// `m=application` (DataChannel) media section; either case wins. We
+/// match the literal `a=max-message-size:` prefix because there is no
+/// other SDP attribute that shares the prefix, and we deliberately
+/// don't bring in a full SDP parser for one line — keeping the
+/// dependency surface minimal.
+fn parse_sdp_max_message_size(sdp: &str) -> Option<u64> {
+    const PREFIX: &str = "a=max-message-size:";
+    sdp.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed.strip_prefix(PREFIX).and_then(|rest| {
+            rest.split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u64>().ok())
+        })
+    })
+}
+
+/// Log the offer's `a=max-message-size` advertise and assert that our
+/// chosen file-transfer chunk size fits inside it (chunk + 40-byte
+/// binary header).
+///
+/// `info!` on success: useful when correlating production logs
+/// against a chunk-size regression — knowing the actual negotiated
+/// value retroactively explains a `PacketTooLarge` from
+/// [`classify_dc_send_error`].
+///
+/// `error!` on violation: the SCTP send will reject the very first
+/// binary chunk with `ErrOutboundPacketTooLarge`. Surfacing it at
+/// offer time gives operators a chance to roll back the chunk-size
+/// change before the next download starts, instead of finding out
+/// only when the first file fails.
+///
+/// `warn!` when the attribute is absent: per RFC 8841 §6 the default
+/// is 65536 bytes (64 KiB), which is **smaller** than our 240 KiB +
+/// 40 B header. A peer that doesn't advertise the attribute is on
+/// some old WebRTC stack that probably also doesn't lift the default,
+/// so we proactively warn.
+fn log_sdp_max_message_size(connection_id: &str, sdp: &str) {
+    // Constants from the worker dispatcher reach across the
+    // daemon ↔ worker boundary because chunk_size is currently a
+    // compile-time constant on the worker side. A future negotiated
+    // chunk_size (deferred F3 follow-up) would consult this value to
+    // pick the maximum; for now we just check our static choice fits.
+    use crate::model::file_transfer::BINARY_HEADER_SIZE;
+    use crate::worker::file_transfer_dispatcher::FILE_TRANSFER_CHUNK_SIZE_TX;
+    let required = (FILE_TRANSFER_CHUNK_SIZE_TX + BINARY_HEADER_SIZE) as u64;
+    match parse_sdp_max_message_size(sdp) {
+        Some(advertised) => {
+            if advertised < required {
+                log::error!(
+                    "[pc_manager] {connection_id}: remote SDP advertises \
+                     max-message-size={advertised} but our chunk \
+                     (FILE_TRANSFER_CHUNK_SIZE_TX={FILE_TRANSFER_CHUNK_SIZE_TX} + \
+                     BINARY_HEADER_SIZE={BINARY_HEADER_SIZE} = {required} B) won't fit; \
+                     downloads will fail with ErrOutboundPacketTooLarge — \
+                     lower FILE_TRANSFER_CHUNK_SIZE_TX or use a browser that advertises a \
+                     larger ceiling"
+                );
+            } else {
+                log::info!(
+                    "[pc_manager] {connection_id}: remote SDP max-message-size={advertised} \
+                     (chunk+header={required})"
+                );
+            }
+        }
+        None => {
+            log::warn!(
+                "[pc_manager] {connection_id}: remote SDP has no a=max-message-size; \
+                 falling back to RFC 8841 default 65536 which is below our chunk+header \
+                 ({required} B). Downloads to this peer may fail with \
+                 ErrOutboundPacketTooLarge"
+            );
+        }
+    }
 }
 
 /// Centralised teardown for one browser-side PC. Removes the registry
@@ -2275,6 +2490,69 @@ mod tests {
         assert!(!w.is_full());
         assert!(w.flush_line("cid").is_none());
     }
+
+    // ============== F3: SDP max-message-size parser ==============
+
+    /// Chrome's SDP advertises 262144 (256 KiB) on a session-level
+    /// attribute. The parser must surface it as an unsigned value.
+    #[test]
+    fn parse_sdp_max_message_size_session_level() {
+        let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+                   a=max-message-size:262144\r\n\
+                   m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), Some(262144));
+    }
+
+    /// Some browsers put the attribute under the `m=application`
+    /// section instead of the session level. The parser doesn't care
+    /// — first match wins.
+    #[test]
+    fn parse_sdp_max_message_size_media_level() {
+        let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+                   m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                   a=mid:0\r\n\
+                   a=max-message-size:1073741823\r\n";
+        assert_eq!(parse_sdp_max_message_size(sdp), Some(1073741823));
+    }
+
+    /// Absent attribute → None. The caller distinguishes this from a
+    /// parse failure and falls back to the RFC default with a warning.
+    #[test]
+    fn parse_sdp_max_message_size_missing_returns_none() {
+        let sdp = "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n\
+                   m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
+        assert!(parse_sdp_max_message_size(sdp).is_none());
+    }
+
+    /// Garbled value (non-numeric) is treated as missing — we don't
+    /// want to half-parse `a=max-message-size:abc` and pretend we
+    /// negotiated something.
+    #[test]
+    fn parse_sdp_max_message_size_invalid_returns_none() {
+        let sdp = "v=0\r\na=max-message-size:not-a-number\r\n";
+        assert!(parse_sdp_max_message_size(sdp).is_none());
+    }
+
+    /// The configured chunk_size + binary header must fit under
+    /// Chrome's 262144-byte advertise. This is the same invariant the
+    /// worker-side `download_response_advertises_240kib_chunk_size`
+    /// regression test pins, but reasserted at the daemon layer so a
+    /// future change to either constant fails both ends.
+    ///
+    /// Encoded as a `const` assertion so it fires at compile time
+    /// rather than as a runtime test (which clippy correctly flags as
+    /// `assertions_on_constants` — both operands are compile-time
+    /// literals).
+    const _CHUNK_SIZE_FITS_CHROME_MAX_MESSAGE_SIZE: () = {
+        use crate::model::file_transfer::BINARY_HEADER_SIZE;
+        use crate::worker::file_transfer_dispatcher::FILE_TRANSFER_CHUNK_SIZE_TX;
+        const CHROME_MAX_MESSAGE_SIZE: usize = 262144;
+        assert!(
+            FILE_TRANSFER_CHUNK_SIZE_TX + BINARY_HEADER_SIZE <= CHROME_MAX_MESSAGE_SIZE,
+            "wire-level SCTP message must not exceed Chrome's a=max-message-size:262144 \
+             advertise — see 2026-05-11 ErrOutboundPacketTooLarge regression"
+        );
+    };
 
     /// One recorded send populates frames/bytes/dc_send_ns and
     /// updates `buffered_max` / `buffered_sum`. Verifies the
@@ -3907,6 +4185,7 @@ mod tests {
             connection_id: "ghost".to_string(),
             data: b"{\"type\":\"DownloadResponse\"}".to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         write_file_transfer_data(&registry, payload).await;
     }
@@ -3947,6 +4226,7 @@ mod tests {
             connection_id: "conn-no-control".to_string(),
             data: b"{\"type\":\"DownloadResponse\"}".to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         write_file_transfer_data(&registry, payload).await;
     }
@@ -3971,6 +4251,7 @@ mod tests {
             connection_id: "conn-bin-no-dc".to_string(),
             data: vec![0x00, 0x01, 0x02, 0x03],
             is_text: false,
+            transfer_id: None,
         };
         write_file_transfer_data(&registry, payload).await;
     }
@@ -4013,6 +4294,7 @@ mod tests {
                 connection_id: "conn-fast-dispatch".to_string(),
                 data: format!("chunk-{i}").into_bytes(),
                 is_text: true,
+                transfer_id: None,
             };
             write_file_transfer_data(&registry, payload).await;
         }
@@ -4052,6 +4334,7 @@ mod tests {
             connection_id: "conn-removed".to_string(),
             data: b"stale".to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         write_file_transfer_data(&registry, payload).await;
     }
@@ -4068,7 +4351,7 @@ mod tests {
     async fn file_transfer_writer_task_exits_when_sender_drops() {
         let dc_slot: Arc<RwLock<Option<Arc<RTCDataChannel>>>> = Arc::new(RwLock::new(None));
         let (tx, rx) = mpsc::channel::<FileTransferPayload>(2);
-        spawn_file_transfer_writer_task("conn-lifecycle".to_string(), rx, dc_slot);
+        spawn_file_transfer_writer_task("conn-lifecycle".to_string(), rx, dc_slot, None);
         // Push one payload (silently dropped — no DC) then drop the
         // sender. The task drains the queued payload, observes
         // `recv() → None`, and exits.
@@ -4076,6 +4359,7 @@ mod tests {
             connection_id: "conn-lifecycle".to_string(),
             data: b"queued".to_vec(),
             is_text: true,
+            transfer_id: None,
         })
         .await
         .expect("send pre-drop");
@@ -4133,6 +4417,7 @@ mod tests {
             connection_id: "conn-bp".to_string(),
             data: tag.as_bytes().to_vec(),
             is_text: true,
+            transfer_id: None,
         };
         // First two writes fill the queue and return promptly.
         tokio::time::timeout(
