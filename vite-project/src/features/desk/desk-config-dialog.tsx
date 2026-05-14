@@ -84,6 +84,7 @@ export function DeskConfigDialog({
             audio_encoder: null,
             wayland_control_mode: "auto",
             video_fps: undefined,
+            enable_dirty_rect: true,
         },
     })
 
@@ -96,6 +97,7 @@ export function DeskConfigDialog({
                 video_zoom_ratio: initData.desk_settings.video_zoom_ratio ?? 100,
                 video_quality: initData.desk_settings.video_quality ?? 22,
                 wayland_control_mode: initData.desk_settings.wayland_control_mode ?? "auto",
+                enable_dirty_rect: initData.desk_settings.enable_dirty_rect ?? true,
             })
         }
     }, [initData, form])
@@ -613,6 +615,32 @@ export function DeskConfigDialog({
                                                 />
                                             </FormControl>
                                             <FormMessage />
+                                        </FormItem>
+                                    )}
+                                />
+
+                                <FormField
+                                    control={form.control}
+                                    name="enable_dirty_rect"
+                                    render={({ field }) => (
+                                        <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
+                                            <FormControl>
+                                                <Checkbox
+                                                    checked={field.value ?? true}
+                                                    onCheckedChange={field.onChange}
+                                                />
+                                            </FormControl>
+                                            <div className="space-y-1 leading-none">
+                                                <FormLabel>
+                                                    {t('pages.desk.enableDirtyRect', 'Enable Dirty Rect Optimisation')}
+                                                </FormLabel>
+                                                <p className="text-xs text-muted-foreground">
+                                                    {t(
+                                                        'pages.desk.enableDirtyRectDescription',
+                                                        'Only re-encode changed regions of the screen. Turn off if you see transient black bars during animations.'
+                                                    )}
+                                                </p>
+                                            </div>
                                         </FormItem>
                                     )}
                                 />

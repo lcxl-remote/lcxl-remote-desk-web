@@ -710,8 +710,13 @@ impl PcRegistry {
         fps: Option<u32>,
         bitrate_kbps: Option<u32>,
         quality: Option<u32>,
+        enable_dirty_rect: Option<bool>,
     ) {
-        if fps.is_none() && bitrate_kbps.is_none() && quality.is_none() {
+        if fps.is_none()
+            && bitrate_kbps.is_none()
+            && quality.is_none()
+            && enable_dirty_rect.is_none()
+        {
             return;
         }
         let connection_ids: Vec<String> = {
@@ -731,6 +736,7 @@ impl PcRegistry {
                 fps,
                 bitrate_kbps,
                 quality,
+                enable_dirty_rect,
             };
             if let Err(e) = worker_mgr
                 .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
@@ -1525,6 +1531,14 @@ pub async fn handle_offer(
         // DuplicateOutput. The worker falls back to its own settings
         // when this is `None`.
         image_capture: offer.desk_settings.image_capture.clone(),
+        // Thread the Advanced-tab dirty-rect kill-switch from the
+        // browser offer through to the worker on the *first*
+        // StartMedia. Without this the worker's `merged_settings`
+        // would always pick up its base-settings default (`true`),
+        // regardless of what the browser actually negotiated, and the
+        // toggle would only take effect after a subsequent live
+        // `UpdateDeskSettings` round-trip.
+        enable_dirty_rect: Some(offer.desk_settings.enable_dirty_rect),
     };
     // PR 6: stash the payload so a worker swap can re-issue it via
     // `resume_active_media` without forcing the browser through a fresh
@@ -3141,7 +3155,31 @@ mod tests {
 
         // No worker active and all-None payload — must complete cleanly.
         registry
-            .broadcast_media_settings_update(&worker_mgr, None, None, None)
+            .broadcast_media_settings_update(&worker_mgr, None, None, None, None)
+            .await;
+    }
+
+    /// Regression for the dirty-rect kill-switch: a fan-out that
+    /// carries *only* `enable_dirty_rect` (fps / bitrate / quality all
+    /// `None`) must NOT short-circuit. The browser toggling the
+    /// Advanced-tab switch without changing anything else is the
+    /// expected path, and pre-fix `broadcast_media_settings_update`
+    /// would have early-returned on `fps.is_none() && bitrate.is_none()
+    /// && quality.is_none()`, silently dropping the toggle on the
+    /// floor.
+    #[tokio::test]
+    async fn broadcast_media_settings_update_dirty_rect_only_not_short_circuited() {
+        let registry = PcRegistry::new();
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        // Empty registry + dirty-rect-only payload: must complete
+        // cleanly rather than early-return (the all-None guard must
+        // include enable_dirty_rect).
+        registry
+            .broadcast_media_settings_update(&worker_mgr, None, None, None, Some(false))
             .await;
     }
 
@@ -3169,7 +3207,7 @@ mod tests {
         // No cached_start_media → loop body skipped; no worker active
         // either, but the function must still not panic.
         registry
-            .broadcast_media_settings_update(&worker_mgr, Some(60), None, Some(40))
+            .broadcast_media_settings_update(&worker_mgr, Some(60), None, Some(40), Some(false))
             .await;
 
         // The registered PC stays uncached.

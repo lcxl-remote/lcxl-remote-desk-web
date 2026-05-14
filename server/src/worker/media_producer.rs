@@ -546,6 +546,18 @@ fn drain_settings_updates(
             merged_settings.video_quality = q;
             changed = true;
         }
+        if let Some(enable) = payload.enable_dirty_rect
+            && enable != merged_settings.enable_dirty_rect
+        {
+            // Live-apply the browser's Advanced-tab kill-switch. We do
+            // *not* flip the `changed` flag because the encoder
+            // doesn't need to be rebuilt — `merged_settings.
+            // enable_dirty_rect` is read per-frame by the encoder via
+            // `encode(..., enable_dirty_rect)`, so the next frame
+            // picks up the new value without a `create_video_encoder`
+            // round-trip.
+            merged_settings.enable_dirty_rect = enable;
+        }
         if let Some(kbps) = payload.bitrate_kbps
             && kbps > 0
         {
@@ -586,6 +598,14 @@ fn payload_overrides(base: &DeskSettings, payload: &StartMediaPayload) -> DeskSe
     // first — see the IPC field's doc comment for the failure mode.
     if let Some(backend) = payload.image_capture.as_deref() {
         s.image_capture = Some(backend.to_string());
+    }
+    // Per-connection dirty-rect kill-switch — when the daemon sniffed
+    // the value out of the SDP offer's `desk_settings`, honour it
+    // here. `None` means the daemon is older than the field (or the
+    // offer never carried it) and we keep the worker's base setting,
+    // matching the back-compat contract documented on the IPC field.
+    if let Some(enable) = payload.enable_dirty_rect {
+        s.enable_dirty_rect = enable;
     }
     // Cut 4: `video_device` IPC field maps to `\\\\.\\DISPLAY-N` style strings
     // but `DeskSettings.video_device_index` is a numeric index. Without a
@@ -734,8 +754,9 @@ async fn video_pipeline_loop(
     let mut merged_settings = payload_overrides(&base_settings, &payload);
 
     info!(
-        "[MediaProducer:{connection_id}] Starting pipeline: codec={codec:?}, fps={}",
-        merged_settings.video_fps
+        "[MediaProducer:{connection_id}] Starting pipeline: codec={codec:?}, fps={}, \
+         enable_dirty_rect={}",
+        merged_settings.video_fps, merged_settings.enable_dirty_rect
     );
 
     // Subscribe to the shared capture loop for this `(backend,
@@ -834,8 +855,10 @@ async fn video_pipeline_loop(
         if settings_changed {
             info!(
                 "[MediaProducer:{connection_id}] Live settings changed; recreating encoder \
-                 (fps={}, video_quality={})",
-                merged_settings.video_fps, merged_settings.video_quality
+                 (fps={}, video_quality={}, enable_dirty_rect={})",
+                merged_settings.video_fps,
+                merged_settings.video_quality,
+                merged_settings.enable_dirty_rect
             );
             encoder = create_video_encoder(&merged_settings, &display_info)
                 .map_err(|e| format!("{e}"))?;
@@ -971,7 +994,10 @@ async fn video_pipeline_loop(
             continue;
         }
 
-        let nal_info_vec = match encoder.encode(shared_frame.as_ref() as &dyn ImageInfo) {
+        let nal_info_vec = match encoder.encode(
+            shared_frame.as_ref() as &dyn ImageInfo,
+            merged_settings.enable_dirty_rect,
+        ) {
             Ok(v) => v,
             Err(e) => {
                 warn!("[MediaProducer:{connection_id}] encode error: {e}; continuing");
@@ -1469,6 +1495,7 @@ mod tests {
             start_video: true,
             start_audio: true,
             image_capture: None,
+            enable_dirty_rect: None,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.video_encoder.as_deref(), Some("VP9"));
@@ -1504,6 +1531,7 @@ mod tests {
             start_video: true,
             start_audio: true,
             image_capture: Some("GDI".into()),
+            enable_dirty_rect: None,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(
@@ -1535,6 +1563,7 @@ mod tests {
             start_video: true,
             start_audio: true,
             image_capture: None,
+            enable_dirty_rect: None,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.image_capture.as_deref(), Some("DXGI"));
@@ -1558,6 +1587,7 @@ mod tests {
             start_video: true,
             start_audio: true,
             image_capture: None,
+            enable_dirty_rect: None,
         };
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.video_fps, 24);
@@ -1587,6 +1617,7 @@ mod tests {
             start_video: false,
             start_audio: false,
             image_capture: None,
+            enable_dirty_rect: None,
         });
         let state = producer
             .connection_pipeline_state("files")
@@ -1639,6 +1670,7 @@ mod tests {
             fps: Some(30),
             bitrate_kbps: Some(2_000),
             quality: Some(50),
+            enable_dirty_rect: None,
         });
     }
 
@@ -1675,6 +1707,7 @@ mod tests {
             fps: Some(60),
             bitrate_kbps: None,
             quality: Some(40),
+            enable_dirty_rect: None,
         })
         .unwrap();
         let changed = drain_settings_updates(
@@ -1702,6 +1735,7 @@ mod tests {
             fps: Some(60),
             bitrate_kbps: None,
             quality: Some(40),
+            enable_dirty_rect: None,
         })
         .unwrap();
         let changed = drain_settings_updates(
@@ -1712,6 +1746,114 @@ mod tests {
             &mut frame_duration_ns,
         );
         assert!(!changed);
+    }
+
+    /// Regression for the dirty-rect kill-switch wiring: the browser's
+    /// Advanced-tab toggle eventually lands as
+    /// `UpdateMediaSettingsPayload.enable_dirty_rect`; `drain_settings_
+    /// updates` must apply it to `merged_settings.enable_dirty_rect`
+    /// so the next `encoder.encode(..., enable_dirty_rect)` call
+    /// honours it. Pre-fix the field did not exist on the payload at
+    /// all, so the worker's `merged_settings.enable_dirty_rect` was
+    /// frozen at the worker's startup default (`true`) regardless of
+    /// what the browser sent.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_settings_updates_applies_enable_dirty_rect() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+        let mut merged = DeskSettings {
+            enable_dirty_rect: true,
+            ..DeskSettings::default()
+        };
+        let mut frame_interval = merged.get_duration_by_video_fps();
+        let mut frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
+
+        tx.send(UpdateMediaSettingsPayload {
+            connection_id: "c1".into(),
+            fps: None,
+            bitrate_kbps: None,
+            quality: None,
+            enable_dirty_rect: Some(false),
+        })
+        .unwrap();
+        let changed = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut frame_interval,
+            &mut frame_duration_ns,
+        );
+        // Dirty-rect flips do not force an encoder rebuild — the
+        // encoder reads the flag per-frame. `changed` stays `false`.
+        assert!(
+            !changed,
+            "enable_dirty_rect-only change must not force encoder rebuild"
+        );
+        assert!(
+            !merged.enable_dirty_rect,
+            "enable_dirty_rect must be applied to merged_settings"
+        );
+
+        // Re-enabling round-trips just as cleanly.
+        tx.send(UpdateMediaSettingsPayload {
+            connection_id: "c1".into(),
+            fps: None,
+            bitrate_kbps: None,
+            quality: None,
+            enable_dirty_rect: Some(true),
+        })
+        .unwrap();
+        let _ = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut frame_interval,
+            &mut frame_duration_ns,
+        );
+        assert!(merged.enable_dirty_rect);
+    }
+
+    /// `payload_overrides` must honour `StartMediaPayload.
+    /// enable_dirty_rect` so a fresh connection picks up the
+    /// browser's Advanced-tab toggle on the *first* frame rather than
+    /// waiting for a follow-up `UpdateMediaSettings`. Regression
+    /// guard: pre-fix the field did not exist on `StartMediaPayload`,
+    /// so a connection that negotiated `enable_dirty_rect=false`
+    /// would still see the worker's base default (`true`) until the
+    /// next live settings round-trip.
+    #[test]
+    fn payload_overrides_applies_enable_dirty_rect() {
+        let base = DeskSettings {
+            enable_dirty_rect: true,
+            ..DeskSettings::default()
+        };
+        let payload = StartMediaPayload {
+            connection_id: "c-dr".into(),
+            video_codec: MediaCodec::H264,
+            audio_codec: MediaCodec::Opus,
+            video_device: None,
+            audio_device: None,
+            fps: 0,
+            bitrate_kbps: 0,
+            quality: 0,
+            start_video: true,
+            start_audio: true,
+            image_capture: None,
+            enable_dirty_rect: Some(false),
+        };
+        let merged = payload_overrides(&base, &payload);
+        assert!(
+            !merged.enable_dirty_rect,
+            "payload override must replace the worker's base value"
+        );
+
+        // `None` preserves base — back-compat path with older daemons
+        // that do not yet sniff the field.
+        let payload_none = StartMediaPayload {
+            enable_dirty_rect: None,
+            ..payload
+        };
+        let merged_none = payload_overrides(&base, &payload_none);
+        assert!(merged_none.enable_dirty_rect);
     }
 
     /// `drain_settings_updates` ignores `fps = 0` (sentinel for "use
@@ -1734,6 +1876,7 @@ mod tests {
             fps: Some(0),              // sentinel — must NOT replace 30 with 0 fps
             bitrate_kbps: Some(8_000), // currently unwired — must NOT change anything
             quality: None,
+            enable_dirty_rect: None,
         })
         .unwrap();
         let changed = drain_settings_updates(

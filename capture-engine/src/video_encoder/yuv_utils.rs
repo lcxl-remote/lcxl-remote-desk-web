@@ -290,8 +290,17 @@ impl PersistentYuvBuffer {
     /// untouched regions of the freshly-allocated zero buffer leak
     /// into the encoder as Y=U=V=0 and the decoded frame shows a
     /// green wash for everything outside the first dirty rect.
-    pub fn update(&mut self, image_info: &dyn ImageInfo) -> Result<(), CaptureError> {
-        if !self.initialized {
+    ///
+    /// When `enable_dirty_rect` is `false` the partial path is bypassed
+    /// entirely: every call performs a full BGRA→YUV conversion. The
+    /// dirty-rect hint from the backend is ignored. Use this as a
+    /// kill-switch when partial updates surface rendering artefacts.
+    pub fn update(
+        &mut self,
+        image_info: &dyn ImageInfo,
+        enable_dirty_rect: bool,
+    ) -> Result<(), CaptureError> {
+        if !self.initialized || !enable_dirty_rect {
             return self.update_full(image_info);
         }
         match image_info.get_dirty_rects() {
@@ -455,7 +464,7 @@ mod tests {
             }],
         );
         let mut buf = PersistentYuvBuffer::new(64, 64);
-        buf.update(&img).unwrap();
+        buf.update(&img, true).unwrap();
 
         // Sample the Y plane at (50, 50) — well outside the dirty
         // rect (0..8, 0..8). Pre-fix this byte was 0; post-fix it
@@ -481,13 +490,13 @@ mod tests {
         // Seed with a full conversion at fill=0x40.
         let seed = StubBgraImageWithRects::solid(8, 8, 0x40, vec![]);
         let mut buf = PersistentYuvBuffer::new(8, 8);
-        buf.update(&seed).unwrap();
+        buf.update(&seed, true).unwrap();
         let seeded_y0 = buf.y_plane()[0];
 
         // Now hand a different fill (0xC0) but with `Some([])` — the
         // updated path must skip and leave the prior Y plane intact.
         let no_change = StubBgraImageWithRects::solid(8, 8, 0xC0, vec![]);
-        buf.update(&no_change).unwrap();
+        buf.update(&no_change, true).unwrap();
         assert_eq!(
             buf.y_plane()[0],
             seeded_y0,
@@ -503,7 +512,7 @@ mod tests {
         // Seed with fill=0x40 full-frame.
         let seed = StubBgraImageWithRects::solid(16, 16, 0x40, vec![]);
         let mut buf = PersistentYuvBuffer::new(16, 16);
-        buf.update(&seed).unwrap();
+        buf.update(&seed, true).unwrap();
 
         // Partial update with fill=0xFF on a 4x4 top-left rect. The
         // outside-rect Y must remain at the seed's mid-grey value.
@@ -519,7 +528,7 @@ mod tests {
             }],
         );
         let prior_outside = buf.y_plane()[10 * 16 + 10];
-        buf.update(&patch).unwrap();
+        buf.update(&patch, true).unwrap();
         let after_outside = buf.y_plane()[10 * 16 + 10];
         let after_inside = buf.y_plane()[2 * 16 + 2];
         assert_eq!(
@@ -529,6 +538,65 @@ mod tests {
         assert!(
             after_inside > prior_outside,
             "inside-rect Y must reflect the brighter patch (0xFF vs 0x40)"
+        );
+    }
+
+    /// Kill-switch path: when `enable_dirty_rect` is false, an
+    /// initialised buffer must ignore the dirty-rect hint and run a
+    /// full conversion every call — even when the hint is `Some([])`
+    /// (which normally skips). This is the user-facing escape hatch
+    /// from partial-update rendering artefacts.
+    #[test]
+    fn disabled_dirty_rect_forces_full_update_even_when_hint_says_skip() {
+        // Seed with fill=0x40 full-frame so the buffer is initialised.
+        let seed = StubBgraImageWithRects::solid(8, 8, 0x40, vec![]);
+        let mut buf = PersistentYuvBuffer::new(8, 8);
+        buf.update(&seed, true).unwrap();
+        let seeded_y0 = buf.y_plane()[0];
+
+        // Hand a different fill (0xC0) with `Some([])` and switch the
+        // dirty-rect optimisation off. The full-frame path must
+        // overwrite the Y plane with the new fill's luma rather than
+        // honour the "nothing changed" hint.
+        let new_frame = StubBgraImageWithRects::solid(8, 8, 0xC0, vec![]);
+        buf.update(&new_frame, false).unwrap();
+        assert_ne!(
+            buf.y_plane()[0],
+            seeded_y0,
+            "disabling dirty-rect must force a full conversion — Y plane should reflect the new fill"
+        );
+    }
+
+    /// Disabling the dirty-rect optimisation must also ignore a
+    /// non-empty rect hint and rebuild the entire frame, so partial
+    /// updates can never leak stale pixels into untouched regions.
+    #[test]
+    fn disabled_dirty_rect_ignores_partial_rect_hint() {
+        // Seed with fill=0x40 full-frame.
+        let seed = StubBgraImageWithRects::solid(16, 16, 0x40, vec![]);
+        let mut buf = PersistentYuvBuffer::new(16, 16);
+        buf.update(&seed, true).unwrap();
+        let prior_outside = buf.y_plane()[10 * 16 + 10];
+
+        // Partial-rect hint covering only top-left 4x4, but supply a
+        // brighter fill (0xFF) and switch dirty-rect off — the whole
+        // buffer must be overwritten with the new fill.
+        let patch = StubBgraImageWithRects::solid(
+            16,
+            16,
+            0xFF,
+            vec![DirtyRect {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+            }],
+        );
+        buf.update(&patch, false).unwrap();
+        let after_outside = buf.y_plane()[10 * 16 + 10];
+        assert!(
+            after_outside > prior_outside,
+            "outside-rect Y must change when dirty-rect is disabled — full conversion expected"
         );
     }
 }

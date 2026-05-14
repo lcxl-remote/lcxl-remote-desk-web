@@ -556,6 +556,12 @@ export type DeskSettings = {
     */
     enable_d3d_debug?: boolean;
     /**
+     * @description Whether the encoder may honour `ImageInfo::get_dirty_rects` to only re-convert changed regions of the BGRA frame into the persistent YUV buffer. Defaults to `true` (the optimisation is on). Setting it to `false` forces every captured frame through a full BGRA→YUV conversion — useful as a kill-switch when partial updates surface rendering artefacts (e.g. transient black bars on animation-heavy content).
+     * @default true
+     * @type boolean | undefined
+    */
+    enable_dirty_rect?: boolean;
+    /**
      * @default null
     */
     h264_encoder?: (null | H264EncoderSettings);

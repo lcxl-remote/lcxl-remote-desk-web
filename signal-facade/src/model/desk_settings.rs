@@ -253,6 +253,14 @@ pub struct DeskSettings {
     pub display_name: Option<String>,
     /// Wayland control mode: portal/uinput/none
     pub wayland_control_mode: Option<String>,
+    /// Whether the encoder may honour `ImageInfo::get_dirty_rects` to only
+    /// re-convert changed regions of the BGRA frame into the persistent YUV
+    /// buffer. Defaults to `true` (the optimisation is on). Setting it to
+    /// `false` forces every captured frame through a full BGRA→YUV
+    /// conversion — useful as a kill-switch when partial updates surface
+    /// rendering artefacts (e.g. transient black bars on animation-heavy
+    /// content).
+    pub enable_dirty_rect: bool,
 }
 
 impl DeskSettings {
@@ -382,6 +390,7 @@ impl Default for DeskSettings {
             private_screen: PrivateScreenSettings::default(),
             display_name: None,
             wayland_control_mode: None,
+            enable_dirty_rect: true,
         }
     }
 }
@@ -509,6 +518,7 @@ mod wincode_tests {
             },
             display_name: Some("\\\\.\\DISPLAY2".to_string()),
             wayland_control_mode: Some("portal".to_string()),
+            enable_dirty_rect: false,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");

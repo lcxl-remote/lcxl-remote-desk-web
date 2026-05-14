@@ -15,7 +15,15 @@ pub struct NalInfo {
 }
 
 pub trait VideoEncoder {
-    fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError>;
+    /// Encode a freshly-captured frame. `enable_dirty_rect` gates whether
+    /// the implementation may honour `ImageInfo::get_dirty_rects` to skip
+    /// or partially update its internal YUV buffer. Pass `false` to force
+    /// a full BGRA→YUV conversion on every call.
+    fn encode(
+        &mut self,
+        image_info: &dyn ImageInfo,
+        enable_dirty_rect: bool,
+    ) -> Result<Vec<NalInfo>, CaptureError>;
     /// Re-encode using the cached YUV buffer without consuming new frame data.
     /// Used for heartbeat frames when the desktop is static.
     /// Returns an empty vec if no YUV buffer has been populated yet.

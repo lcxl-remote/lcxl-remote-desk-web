@@ -103,14 +103,21 @@ impl Av1Encoder {
 }
 
 impl VideoEncoder for Av1Encoder {
-    fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError> {
+    fn encode(
+        &mut self,
+        image_info: &dyn ImageInfo,
+        enable_dirty_rect: bool,
+    ) -> Result<Vec<NalInfo>, CaptureError> {
         if self.yuv_buffer.is_none() {
             self.yuv_buffer = Some(PersistentYuvBuffer::new(
                 image_info.get_width(),
                 image_info.get_height(),
             ));
         }
-        self.yuv_buffer.as_mut().unwrap().update(image_info)?;
+        self.yuv_buffer
+            .as_mut()
+            .unwrap()
+            .update(image_info, enable_dirty_rect)?;
         Av1Encoder::encode_with_ctx(
             &mut self.ctx,
             Instant::now(),

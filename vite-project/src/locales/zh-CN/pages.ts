@@ -367,6 +367,8 @@ export default {
   'pages.desk.adaptiveResolution': '自适应网页分辨率',
   'pages.desk.adaptiveQuality': '自适应画质',
   'pages.desk.adaptiveQualityDescription': '根据丢包率和 RTT 自动调整画质',
+  'pages.desk.enableDirtyRect': '启用脏矩形优化',
+  'pages.desk.enableDirtyRectDescription': '只重编码屏幕上发生变化的区域。若动画时出现瞬时黑条，可关闭。',
   'pages.desk.remoteResolutionScale': '远程分辨率缩放',
   'pages.desk.audioConfig': '音频配置',
   'pages.desk.captureAudio': '捕获音频',

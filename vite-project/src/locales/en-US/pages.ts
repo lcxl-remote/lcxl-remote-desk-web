@@ -369,6 +369,8 @@ export default {
   'pages.desk.adaptiveResolution': 'Adaptive Web Page Resolution',
   'pages.desk.adaptiveQuality': 'Adaptive Video Quality',
   'pages.desk.adaptiveQualityDescription': 'Auto-tune video quality based on packet loss and RTT',
+  'pages.desk.enableDirtyRect': 'Enable Dirty Rect Optimisation',
+  'pages.desk.enableDirtyRectDescription': 'Only re-encode changed regions of the screen. Turn off if you see transient black bars during animations.',
   'pages.desk.remoteResolutionScale': 'Remote Resolution Scale',
   'pages.desk.audioConfig': 'Audio Configuration',
   'pages.desk.captureAudio': 'Capture Audio',

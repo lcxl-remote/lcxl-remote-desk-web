@@ -406,6 +406,7 @@ async fn handle_update_desk_settings_inbound(
             Some(settings.video_fps),
             None,
             Some(settings.video_quality),
+            Some(settings.enable_dirty_rect),
         )
         .await;
 

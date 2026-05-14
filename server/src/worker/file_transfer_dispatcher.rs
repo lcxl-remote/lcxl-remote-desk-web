@@ -1351,6 +1351,7 @@ mod tests {
             start_video: true,
             start_audio: true,
             image_capture: None,
+            enable_dirty_rect: None,
         }
     }
 

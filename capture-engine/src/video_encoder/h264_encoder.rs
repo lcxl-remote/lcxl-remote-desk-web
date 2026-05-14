@@ -152,14 +152,21 @@ impl H264Encoder {
 }
 
 impl VideoEncoder for H264Encoder {
-    fn encode(&mut self, image_info: &dyn ImageInfo) -> Result<Vec<NalInfo>, CaptureError> {
+    fn encode(
+        &mut self,
+        image_info: &dyn ImageInfo,
+        enable_dirty_rect: bool,
+    ) -> Result<Vec<NalInfo>, CaptureError> {
         if self.yuv_buffer.is_none() {
             self.yuv_buffer = Some(PersistentYuvBuffer::new(
                 image_info.get_width(),
                 image_info.get_height(),
             ));
         }
-        self.yuv_buffer.as_mut().unwrap().update(image_info)?;
+        self.yuv_buffer
+            .as_mut()
+            .unwrap()
+            .update(image_info, enable_dirty_rect)?;
         // Split borrow: self.encoder (mut) and self.yuv_buffer (shared) are different fields.
         H264Encoder::encode_with_encoder(&mut self.encoder, self.yuv_buffer.as_ref().unwrap())
     }

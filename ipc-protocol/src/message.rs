@@ -502,6 +502,17 @@ pub struct StartMediaPayload {
     /// connection cannot pick a different backend than the first.
     #[serde(default)]
     pub image_capture: Option<String>,
+    /// Per-connection override for the BGRA→YUV dirty-rect fast path
+    /// in `PersistentYuvBuffer`. `None` means "use the worker's base
+    /// `DeskSettings.enable_dirty_rect`" (back-compat with older
+    /// daemons). `Some(false)` forces every frame through a full
+    /// conversion — needed for the browser Advanced-tab kill-switch
+    /// to take effect on the *first* StartMedia, before any live
+    /// `UpdateMediaSettings` would be issued. Without this field a
+    /// fresh connection always picks up the worker's default
+    /// (`true`) regardless of the browser's offer-time setting.
+    #[serde(default)]
+    pub enable_dirty_rect: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -519,6 +530,15 @@ pub struct UpdateMediaSettingsPayload {
     pub fps: Option<u32>,
     pub bitrate_kbps: Option<u32>,
     pub quality: Option<u32>,
+    /// Toggle for the BGRA→YUV dirty-rect fast path in
+    /// `PersistentYuvBuffer`. `None` means "leave the current value
+    /// alone" (older daemons that never sniff the field). `Some(false)`
+    /// forces every frame through a full conversion; `Some(true)`
+    /// re-enables partial updates. Threaded through so the browser's
+    /// Advanced-tab kill-switch can be retuned mid-stream without
+    /// tearing down the encoder.
+    #[serde(default)]
+    pub enable_dirty_rect: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
@@ -1006,6 +1026,7 @@ mod tests {
             start_video: true,
             start_audio: true,
             image_capture: None,
+            enable_dirty_rect: Some(false),
         });
         match wincode_round_trip(&msg) {
             ServiceToWorker::StartMedia(p) => {
@@ -1015,6 +1036,11 @@ mod tests {
                 assert_eq!(p.fps, 60);
                 assert!(p.start_video);
                 assert!(p.start_audio);
+                assert_eq!(
+                    p.enable_dirty_rect,
+                    Some(false),
+                    "enable_dirty_rect must survive StartMedia wincode round-trip"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1038,6 +1064,7 @@ mod tests {
             start_video: false,
             start_audio: false,
             image_capture: None,
+            enable_dirty_rect: None,
         });
         match wincode_round_trip(&msg) {
             ServiceToWorker::StartMedia(p) => {
@@ -1074,6 +1101,53 @@ mod tests {
             payload.start_audio,
             "missing start_audio must default to true"
         );
+    }
+
+    /// `UpdateMediaSettings` carries the live-tune knobs the daemon
+    /// sniffs out of an inbound `UpdateDeskSettings` and fans out to
+    /// every active worker. Round-trip pins the field set (especially
+    /// `enable_dirty_rect`) so a future schema bump that drops the
+    /// dirty-rect flag fails this test instead of silently regressing
+    /// the kill-switch back to "frontend toggle ignored".
+    #[test]
+    fn update_media_settings_round_trips_wincode_with_dirty_rect() {
+        let msg = ServiceToWorker::UpdateMediaSettings(UpdateMediaSettingsPayload {
+            connection_id: "conn-dr".to_string(),
+            fps: Some(45),
+            bitrate_kbps: None,
+            quality: Some(22),
+            enable_dirty_rect: Some(false),
+        });
+        match wincode_round_trip(&msg) {
+            ServiceToWorker::UpdateMediaSettings(p) => {
+                assert_eq!(p.connection_id, "conn-dr");
+                assert_eq!(p.fps, Some(45));
+                assert_eq!(p.bitrate_kbps, None);
+                assert_eq!(p.quality, Some(22));
+                assert_eq!(
+                    p.enable_dirty_rect,
+                    Some(false),
+                    "enable_dirty_rect must survive wincode round-trip"
+                );
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// JSON back-compat: a payload from an older daemon that does not
+    /// know about `enable_dirty_rect` must deserialise with the field
+    /// as `None` (meaning: "leave current setting alone") rather than
+    /// erroring or defaulting to `Some(false)`.
+    #[test]
+    fn update_media_settings_json_missing_enable_dirty_rect_is_none() {
+        let json = r#"{
+            "connection_id": "conn-legacy",
+            "fps": 30,
+            "bitrate_kbps": null,
+            "quality": 50
+        }"#;
+        let payload: UpdateMediaSettingsPayload = serde_json::from_str(json).expect("parse");
+        assert_eq!(payload.enable_dirty_rect, None);
     }
 
     #[test]
@@ -1916,6 +1990,7 @@ mod tests {
                 start_video: true,
                 start_audio: true,
                 image_capture: None,
+                enable_dirty_rect: None,
             }),
             ServiceToWorker::StopMedia(StopMediaPayload {
                 connection_id: "c".to_string(),
@@ -1925,6 +2000,7 @@ mod tests {
                 fps: Some(60),
                 bitrate_kbps: Some(6_000),
                 quality: Some(50),
+                enable_dirty_rect: Some(false),
             }),
             ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
                 connection_id: "c".to_string(),
