@@ -765,10 +765,7 @@ mod wincode_tests {
         for (variant, expected_tag) in all_variants_with_tag() {
             let bytes = wincode::config::serialize(&variant, config)
                 .unwrap_or_else(|err| panic!("encode {variant:?}: {err}"));
-            assert!(
-                bytes.len() >= 4,
-                "{variant:?} produced fewer than 4 bytes",
-            );
+            assert!(bytes.len() >= 4, "{variant:?} produced fewer than 4 bytes",);
             let tag = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             assert_eq!(
                 tag, expected_tag,

@@ -5,8 +5,7 @@ use actix_web::web;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaReceiver, framed, inprocess},
     message::{
-        FileTransferPayload, MediaCapabilities, ServiceToWorker, WorkerInitPayload,
-        WorkerToService,
+        FileTransferPayload, MediaCapabilities, ServiceToWorker, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -413,8 +412,7 @@ impl WorkerManager {
         let (media_tx, media_rx) = inprocess::make_media();
         // daemon → worker: daemon emits, worker drains in its file
         // dispatcher loop.
-        let (file_d2w_tx, file_d2w_rx) =
-            inprocess::make_file_inprocess::<FileTransferPayload>();
+        let (file_d2w_tx, file_d2w_rx) = inprocess::make_file_inprocess::<FileTransferPayload>();
         // worker → daemon: worker dispatcher emits, daemon drains
         // straight into `pc_manager::write_file_transfer_data`.
         let (file_w2d_tx, mut file_w2d_rx) =
@@ -569,9 +567,7 @@ impl WorkerManager {
             match guard.as_ref() {
                 Some(s) => Arc::clone(s),
                 None => {
-                    return Err(
-                        "File lane not yet ready (pipe not yet accepted)".to_string()
-                    );
+                    return Err("File lane not yet ready (pipe not yet accepted)".to_string());
                 }
             }
         };
@@ -1135,44 +1131,40 @@ async fn run_pipe_server(
     // the event lane on failure would silently restore the HOL bug
     // fix-2026-05-05 was supposed to prevent. On accept failure we
     // surface a warning and drop into recovery rather than degrading.
-    let file_drain_handle = match tokio::time::timeout(
-        Duration::from_secs(15),
-        file_server.connect(),
-    )
-    .await
-    {
-        Ok(Ok(())) => {
-            info!("Worker connected on file pipe {file_pipe_path}");
-            let (file_reader, file_writer) = tokio::io::split(file_server);
-            let sender = framed::spawn_file_sender::<_, FileTransferPayload>(file_writer);
-            // Publish the sender into the slot so DC forwarders'
-            // `WorkerManager::send_file_to_worker` look-ups resolve.
-            *file_sender_slot.write().await = Some(sender);
-            let receiver = framed::make_event_receiver::<_, FileTransferPayload>(file_reader);
-            // Daemon-side drain task: each worker→daemon payload feeds
-            // straight into `pc_manager::write_file_transfer_data`. A
-            // single serial drain accepts cross-connection HOL as a
-            // documented trade-off; per-connection lanes can be added
-            // later if it becomes a problem.
-            Some(spawn_file_drain_task(receiver, pc_registry.clone()))
-        }
-        Ok(Err(e)) => {
-            warn!(
-                "File pipe connect failed for {file_pipe_path}: {e}; \
+    let file_drain_handle =
+        match tokio::time::timeout(Duration::from_secs(15), file_server.connect()).await {
+            Ok(Ok(())) => {
+                info!("Worker connected on file pipe {file_pipe_path}");
+                let (file_reader, file_writer) = tokio::io::split(file_server);
+                let sender = framed::spawn_file_sender::<_, FileTransferPayload>(file_writer);
+                // Publish the sender into the slot so DC forwarders'
+                // `WorkerManager::send_file_to_worker` look-ups resolve.
+                *file_sender_slot.write().await = Some(sender);
+                let receiver = framed::make_event_receiver::<_, FileTransferPayload>(file_reader);
+                // Daemon-side drain task: each worker→daemon payload feeds
+                // straight into `pc_manager::write_file_transfer_data`. A
+                // single serial drain accepts cross-connection HOL as a
+                // documented trade-off; per-connection lanes can be added
+                // later if it becomes a problem.
+                Some(spawn_file_drain_task(receiver, pc_registry.clone()))
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "File pipe connect failed for {file_pipe_path}: {e}; \
                  dropping into recovery (no file lane = no file transfer)"
-            );
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
-            return Ok(());
-        }
-        Err(_) => {
-            warn!(
-                "Timed out waiting for worker on file pipe {file_pipe_path}; \
+                );
+                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                return Ok(());
+            }
+            Err(_) => {
+                warn!(
+                    "Timed out waiting for worker on file pipe {file_pipe_path}; \
                  dropping into recovery"
-            );
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
-            return Ok(());
-        }
-    };
+                );
+                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                return Ok(());
+            }
+        };
 
     // Keep-PC semantics: browser-facing `SignalingType::DesktopReady` is
     // not emitted on worker (re)spawn. The browser's WebRTC PC stays up
@@ -1383,41 +1375,37 @@ async fn run_pipe_server(
 
     // Wait for the worker to dial back on the file Unix socket. Same
     // policy as Windows: mandatory, recover on failure.
-    let file_drain_handle = match tokio::time::timeout(
-        Duration::from_secs(15),
-        file_listener.accept(),
-    )
-    .await
-    {
-        Ok(Ok((file_stream, _))) => {
-            info!("Worker connected on file socket {file_socket_path}");
-            let (file_reader, file_writer) = tokio::io::split(file_stream);
-            let sender = framed::spawn_file_sender::<_, FileTransferPayload>(file_writer);
-            *file_sender_slot.write().await = Some(sender);
-            let receiver = framed::make_event_receiver::<_, FileTransferPayload>(file_reader);
-            Some(spawn_file_drain_task(receiver, pc_registry.clone()))
-        }
-        Ok(Err(e)) => {
-            warn!(
-                "File socket accept failed for {file_socket_path}: {e}; \
+    let file_drain_handle =
+        match tokio::time::timeout(Duration::from_secs(15), file_listener.accept()).await {
+            Ok(Ok((file_stream, _))) => {
+                info!("Worker connected on file socket {file_socket_path}");
+                let (file_reader, file_writer) = tokio::io::split(file_stream);
+                let sender = framed::spawn_file_sender::<_, FileTransferPayload>(file_writer);
+                *file_sender_slot.write().await = Some(sender);
+                let receiver = framed::make_event_receiver::<_, FileTransferPayload>(file_reader);
+                Some(spawn_file_drain_task(receiver, pc_registry.clone()))
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "File socket accept failed for {file_socket_path}: {e}; \
                  dropping into recovery (no file lane = no file transfer)"
-            );
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
-            let _ = std::fs::remove_file(socket_path);
-            let _ = std::fs::remove_file(&file_socket_path);
-            return Ok(());
-        }
-        Err(_) => {
-            warn!(
-                "Timed out waiting for worker on file socket {file_socket_path}; \
+                );
+                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                let _ = std::fs::remove_file(socket_path);
+                let _ = std::fs::remove_file(&file_socket_path);
+                return Ok(());
+            }
+            Err(_) => {
+                warn!(
+                    "Timed out waiting for worker on file socket {file_socket_path}; \
                  dropping into recovery"
-            );
-            worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
-            let _ = std::fs::remove_file(socket_path);
-            let _ = std::fs::remove_file(&file_socket_path);
-            return Ok(());
-        }
-    };
+                );
+                worker_mgr.handle_crash_recovery(session_id, desktop_name_copy);
+                let _ = std::fs::remove_file(socket_path);
+                let _ = std::fs::remove_file(&file_socket_path);
+                return Ok(());
+            }
+        };
 
     // Keep-PC: see the Windows path above; browser-facing DesktopReady is
     // not emitted on worker spawn.

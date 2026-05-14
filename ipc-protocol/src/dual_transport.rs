@@ -771,10 +771,13 @@ mod tests {
         // resolves quickly once a slot frees.
         rx.recv().await.expect("first drain");
         let started = tokio::time::Instant::now();
-        tokio::time::timeout(Duration::from_millis(100), tx.send(ServiceToWorker::Shutdown))
-            .await
-            .expect("send timed out post-drain")
-            .unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            tx.send(ServiceToWorker::Shutdown),
+        )
+        .await
+        .expect("send timed out post-drain")
+        .unwrap();
         assert!(
             started.elapsed() < Duration::from_millis(100),
             "send took too long after drain: {:?}",
@@ -790,10 +793,13 @@ mod tests {
         let (tx, mut _rx) = inprocess::make_file_inprocess::<ServiceToWorker>();
         // Fill exactly FILE_QUEUE_CAP slots without consuming.
         for _ in 0..FILE_QUEUE_CAP {
-            tokio::time::timeout(Duration::from_millis(50), tx.send(ServiceToWorker::Shutdown))
-                .await
-                .expect("send-within-cap should not block")
-                .unwrap();
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                tx.send(ServiceToWorker::Shutdown),
+            )
+            .await
+            .expect("send-within-cap should not block")
+            .unwrap();
         }
         // (cap + 1)-th must block.
         let blocked = tokio::time::timeout(

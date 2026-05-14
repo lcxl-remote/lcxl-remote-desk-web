@@ -3,7 +3,14 @@ use utoipa::ToSchema;
 
 /// Selected Audio Device Model
 #[derive(
-    Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, wincode::SchemaWrite, wincode::SchemaRead,
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
 )]
 pub struct SelectedAudioDevice {
     /// Audio data flow (render or capture)
@@ -23,7 +30,14 @@ impl Default for SelectedAudioDevice {
 
 /// Audio Data Flow Enum
 #[derive(
-    Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema, wincode::SchemaWrite, wincode::SchemaRead,
+    Debug,
+    Clone,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    ToSchema,
+    wincode::SchemaWrite,
+    wincode::SchemaRead,
 )]
 pub enum AudioDataFlow {
     /// Render audio to speakers or headphones

@@ -67,9 +67,8 @@ pub async fn init_telemetry(
     // default `log_level`) silently drops them before the ConsoleLayer sees
     // them, leaving the console UI with an empty task list. EnvFilter 0.3
     // does not implement Clone, so we rebuild it per layer.
-    let make_env_filter = || {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level))
-    };
+    let make_env_filter =
+        || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     // ServiceDaemon and SessionWorker are launched without an
     // interactive console (SCM / `CreateProcessAsUserW` from the

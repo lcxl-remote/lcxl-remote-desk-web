@@ -47,7 +47,9 @@ pub struct FileListParams {
     pub connection_id: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, wincode::SchemaWrite, wincode::SchemaRead)]
+#[derive(
+    Serialize, Deserialize, ToSchema, Debug, Clone, wincode::SchemaWrite, wincode::SchemaRead,
+)]
 pub struct FileInfo {
     pub name: String,
     pub path: String,
@@ -151,7 +153,9 @@ impl FileInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, ToSchema, Debug, Clone, wincode::SchemaWrite, wincode::SchemaRead)]
+#[derive(
+    Serialize, Deserialize, ToSchema, Debug, Clone, wincode::SchemaWrite, wincode::SchemaRead,
+)]
 pub struct FileListResponse {
     pub file_info_list: Vec<FileInfo>,
     pub total_count: i64,
@@ -225,8 +229,7 @@ mod wincode_tests {
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
-        let back: FileListParams =
-            wincode::config::deserialize(&bytes, config).expect("decode");
+        let back: FileListParams = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.path, original.path);
         assert_eq!(back.page_no, original.page_no);
         assert_eq!(back.page_count, original.page_count);
@@ -307,8 +310,7 @@ mod wincode_tests {
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
-        let back: FileListResponse =
-            wincode::config::deserialize(&bytes, config).expect("decode");
+        let back: FileListResponse = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.total_count, 2);
         assert_eq!(back.file_info_list.len(), 2);
         assert_eq!(back.file_info_list[0].name, "a.txt");
@@ -324,8 +326,7 @@ mod wincode_tests {
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
-        let back: DeleteFileRequest =
-            wincode::config::deserialize(&bytes, config).expect("decode");
+        let back: DeleteFileRequest = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.file_path, original.file_path);
         assert_eq!(back.delete_permanently, original.delete_permanently);
         assert_eq!(back.connection_id, original.connection_id);

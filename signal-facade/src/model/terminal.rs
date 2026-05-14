@@ -115,8 +115,7 @@ mod wincode_tests {
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
-        let back: TerminalInputData =
-            wincode::config::deserialize(&bytes, config).expect("decode");
+        let back: TerminalInputData = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.content, original.content);
     }
 
