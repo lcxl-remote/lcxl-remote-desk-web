@@ -1,6 +1,8 @@
 #[cfg(target_os = "windows")]
 pub mod dxgi_capture;
 #[cfg(target_os = "windows")]
+pub mod dxgi_compose;
+#[cfg(target_os = "windows")]
 pub mod gdi_capture;
 pub mod image_capture_factory;
 #[cfg(target_os = "windows")]

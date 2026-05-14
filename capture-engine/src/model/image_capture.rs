@@ -13,7 +13,7 @@ pub enum ImageType {
 /// A rectangular region of the screen that changed in the current frame.
 /// Coordinates are in pixels, top-left origin.  Width and height are always
 /// aligned to even numbers (required by YUV420 chroma subsampling).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyRect {
     pub x: u32,
     pub y: u32,
