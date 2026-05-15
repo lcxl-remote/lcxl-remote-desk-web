@@ -610,6 +610,13 @@ pub struct ScreenOutput {
     /// cursor-delta state machine.
     pub last_cursor_rect: Option<DirtyRect>,
     pub metadata_buffer: Vec<u8>,
+    /// When `true`, `get_frame` skips the MSDN dirty/move composition
+    /// path and instead `CopyResource`s the entire acquired desktop
+    /// texture into the persistent RT each frame. Toggled by the
+    /// `LCXL_DXGI_FULL_BLIT` environment variable at `ScreenOutput`
+    /// construction time — diagnostic A/B switch only, not exposed
+    /// to the UI.
+    pub full_frame_blit: bool,
 }
 
 impl ScreenOutput {
@@ -723,6 +730,20 @@ impl ScreenOutput {
             dirty_vertex_buffer_capacity_verts: 0,
             last_cursor_rect: None,
             metadata_buffer: vec![],
+            full_frame_blit: {
+                let env_val = std::env::var("LCXL_DXGI_FULL_BLIT").ok();
+                let on = dxgi_compose::decide_full_frame_blit(env_val.as_deref());
+                if on {
+                    log::warn!(
+                        "[DXGI] LCXL_DXGI_FULL_BLIT enabled (raw={:?}) — \
+                         output_index={} will skip dirty/move compose and \
+                         CopyResource the entire acquired texture each frame.",
+                        env_val,
+                        output_index
+                    );
+                }
+                on
+            },
         })
     }
 
@@ -1032,22 +1053,39 @@ impl ScreenOutput {
         let frame_width = self.dup_output_desc.ModeDesc.Width;
         let frame_height = self.dup_output_desc.ModeDesc.Height;
 
-        // --- Read DXGI move + dirty metadata ---
-        let (move_raw, dirty_raw) = if frame_info.TotalMetadataBufferSize > 0 {
-            self.read_frame_metadata(frame_info.TotalMetadataBufferSize)?
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        let moves = dxgi_compose::parse_move_rects(&move_raw);
-        let dirties = dxgi_compose::parse_dirty_rects(&dirty_raw);
-
-        // --- Compose into persistent RT ---
-        // `composition_plan` is always applied in full; fragmentation
-        // only downgrades the dirty *hint* below, never the
-        // composition.
         let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
-        self.copy_move_rects(&moves)?;
-        self.compose_dirty_rects(&dirties, &acquired_desktop_image)?;
+
+        // Diagnostic full-frame fallback: when LCXL_DXGI_FULL_BLIT is
+        // set, replace the entire RT with the acquired texture and
+        // skip metadata parsing + per-rect composition. Validates
+        // whether transient black bars during HTML5 video playback
+        // come from the metadata path or from the acquired texture
+        // contents themselves (hardware overlay / direct flip).
+        let (moves, dirties) = if self.full_frame_blit {
+            unsafe {
+                self.manager
+                    .device_context
+                    .CopyResource(&self.render_target_texture_2d, &acquired_desktop_image);
+            }
+            (Vec::new(), Vec::new())
+        } else {
+            // --- Read DXGI move + dirty metadata ---
+            let (move_raw, dirty_raw) = if frame_info.TotalMetadataBufferSize > 0 {
+                self.read_frame_metadata(frame_info.TotalMetadataBufferSize)?
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            let moves = dxgi_compose::parse_move_rects(&move_raw);
+            let dirties = dxgi_compose::parse_dirty_rects(&dirty_raw);
+
+            // --- Compose into persistent RT ---
+            // `composition_plan` is always applied in full;
+            // fragmentation only downgrades the dirty *hint* below,
+            // never the composition.
+            self.copy_move_rects(&moves)?;
+            self.compose_dirty_rects(&dirties, &acquired_desktop_image)?;
+            (moves, dirties)
+        };
 
         // --- Cursor overlay pipeline ---
         // Stage 1: snapshot the clean composed desktop into
@@ -1094,15 +1132,22 @@ impl ScreenOutput {
         }
 
         // --- Dirty hint for downstream YUV partial-update ---
-        let dirty_rects_opt = dxgi_compose::build_dirty_hint(
-            &moves,
-            &dirties,
-            cursor_before,
-            cursor_after,
-            cursor_after_shape_known,
-            frame_width,
-            frame_height,
-        );
+        // Full-frame-blit mode rewrites the entire RT every frame, so
+        // the actual changed region is the whole screen — forcing
+        // `None` makes downstream encoders do a full BGRA→YUV pass.
+        let dirty_rects_opt = if self.full_frame_blit {
+            None
+        } else {
+            dxgi_compose::build_dirty_hint(
+                &moves,
+                &dirties,
+                cursor_before,
+                cursor_after,
+                cursor_after_shape_known,
+                frame_width,
+                frame_height,
+            )
+        };
 
         // Stage 3: copy the composited frame (RT + cursor) to staging
         // for CPU readback.

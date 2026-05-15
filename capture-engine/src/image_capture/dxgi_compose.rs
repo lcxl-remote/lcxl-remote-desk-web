@@ -341,6 +341,29 @@ pub fn build_dirty_hint(
     Some(hint)
 }
 
+/// Diagnostic kill-switch read from the `LCXL_DXGI_FULL_BLIT`
+/// environment variable. When the result is `true`, the DXGI capture
+/// pipeline skips the MSDN-style per-rect composition (move + dirty
+/// rects) and falls back to a single `CopyResource` of the entire
+/// acquired desktop texture into the persistent render target each
+/// frame. Used to A/B-test whether transient black bars during HTML5
+/// video playback are caused by metadata reporting versus
+/// hardware-overlay / direct-flip artefacts in the acquired texture
+/// itself.
+///
+/// Accepted truthy values (case-insensitive): `1`, `true`, `yes`,
+/// `on`. Anything else — including missing variable, empty string, or
+/// unrecognised value — disables the override.
+pub fn decide_full_frame_blit(env_value: Option<&str>) -> bool {
+    match env_value {
+        Some(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +717,31 @@ mod tests {
         let r = cursor_rect_from_state(100, 200, &info, 1920, 1080);
         // align_and_clamp on (100, 200, 116, 216) — all even → unchanged.
         assert_eq!(r, dirty(100, 200, 16, 16));
+    }
+
+    #[test]
+    fn decide_full_frame_blit_truthy_values() {
+        assert!(decide_full_frame_blit(Some("1")));
+        assert!(decide_full_frame_blit(Some("true")));
+        assert!(decide_full_frame_blit(Some("TRUE")));
+        assert!(decide_full_frame_blit(Some("True")));
+        assert!(decide_full_frame_blit(Some("yes")));
+        assert!(decide_full_frame_blit(Some("YES")));
+        assert!(decide_full_frame_blit(Some("on")));
+        assert!(decide_full_frame_blit(Some(" 1 ")));
+        assert!(decide_full_frame_blit(Some("\ttrue\n")));
+    }
+
+    #[test]
+    fn decide_full_frame_blit_falsy_values() {
+        assert!(!decide_full_frame_blit(None));
+        assert!(!decide_full_frame_blit(Some("")));
+        assert!(!decide_full_frame_blit(Some("0")));
+        assert!(!decide_full_frame_blit(Some("false")));
+        assert!(!decide_full_frame_blit(Some("no")));
+        assert!(!decide_full_frame_blit(Some("off")));
+        assert!(!decide_full_frame_blit(Some("garbage")));
+        // Numeric-looking but unsupported values must not coerce to true.
+        assert!(!decide_full_frame_blit(Some("2")));
     }
 }
