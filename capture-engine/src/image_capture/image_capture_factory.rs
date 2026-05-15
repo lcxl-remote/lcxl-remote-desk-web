@@ -11,6 +11,7 @@ use crate::image_capture::mac_screencapturekit::{
 use crate::image_capture::{
     dxgi_capture::{DxgiImageCapture, DxgiImageOutputEnumerator},
     gdi_capture::{GdiImageCapture, GdiImageOutputEnumerator},
+    wgc_capture::{WgcImageCapture, WgcImageOutputEnumerator},
 };
 #[cfg(target_os = "linux")]
 use crate::image_capture::{
@@ -50,6 +51,8 @@ pub fn create_image_capture(
 ) -> Result<Box<dyn ImageCapture + Send>, CaptureError> {
     let image_capture_type = desk_settings.get_image_capture_type()?;
     let capture: Box<dyn ImageCapture + Send> = match image_capture_type {
+        #[cfg(target_os = "windows")]
+        ImageCaptureType::WGC => Box::new(WgcImageCapture::new(desk_settings)?),
         #[cfg(target_os = "windows")]
         ImageCaptureType::DXGI => Box::new(DxgiImageCapture::new(desk_settings)?),
         #[cfg(target_os = "windows")]
@@ -105,6 +108,8 @@ pub fn list_image_output(
     image_capture_type: ImageCaptureType,
 ) -> Result<Vec<DisplayInfo>, CaptureError> {
     let capture: Box<dyn ImageOutputEnumerator + Send> = match image_capture_type {
+        #[cfg(target_os = "windows")]
+        ImageCaptureType::WGC => Box::new(WgcImageOutputEnumerator::new()?),
         #[cfg(target_os = "windows")]
         ImageCaptureType::DXGI => Box::new(DxgiImageOutputEnumerator::new()),
         #[cfg(target_os = "windows")]

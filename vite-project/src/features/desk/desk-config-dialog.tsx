@@ -102,7 +102,18 @@ export function DeskConfigDialog({
         }
     }, [initData, form])
 
-    const imageCaptureList = initData && initData.video_device_list ? Object.keys(initData.video_device_list) : []
+    // Backend returns `video_device_list` as a JSON-serialized
+    // BTreeMap, which sorts alphabetically (D < G < W). Pin a preferred
+    // order so WGC — the only backend that correctly captures hardware
+    // overlay surfaces like browser-decoded video — appears first.
+    const CAPTURE_PREFERRED_ORDER = ["WGC", "DXGI", "GDI"] as const
+    const rawCaptureKeys = initData && initData.video_device_list ? Object.keys(initData.video_device_list) : []
+    const imageCaptureList = [
+        ...CAPTURE_PREFERRED_ORDER.filter((k) => rawCaptureKeys.includes(k)),
+        ...rawCaptureKeys
+            .filter((k) => !(CAPTURE_PREFERRED_ORDER as readonly string[]).includes(k))
+            .sort(),
+    ]
     const selectedImageCapture = form.watch("image_capture")
     const videoDeviceList = initData && selectedImageCapture && initData.video_device_list
         ? initData.video_device_list[selectedImageCapture]
@@ -209,6 +220,21 @@ export function DeskConfigDialog({
                                         </FormItem>
                                     )}
                                 />
+
+                                {selectedImageCapture === "DXGI" && (
+                                    <Alert>
+                                        <AlertTriangle className="h-4 w-4" />
+                                        <AlertTitle>
+                                            {t("pages.desk.dxgiVideoBlackBarWarning.title", "DXGI capture limitation")}
+                                        </AlertTitle>
+                                        <AlertDescription>
+                                            {t(
+                                                "pages.desk.dxgiVideoBlackBarWarning.body",
+                                                "DXGI captures DWM's framebuffer. Browser-decoded video uses a hardware overlay surface that DXGI cannot read, so brief black bars may flash while playing video. Switch to WGC for correct video capture."
+                                            )}
+                                        </AlertDescription>
+                                    </Alert>
+                                )}
 
                                 {selectedImageCapture && videoDeviceList && videoDeviceList.length > 0 && (
                                     <FormField

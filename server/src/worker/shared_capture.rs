@@ -433,6 +433,26 @@ mod tests {
         );
     }
 
+    /// Windows backends DXGI / GDI / WGC must all hash to distinct
+    /// `CaptureKey`s at the same `video_device_index`. Without this,
+    /// switching between WGC and DXGI on display 0 could hand a stale
+    /// frame from the wrong backend.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn key_derivation_separates_wgc_dxgi_gdi() {
+        let mut s = DeskSettings::default();
+        s.video_device_index = 0;
+        s.image_capture = Some("WGC".into());
+        let k_wgc = key_for_settings(&s).unwrap();
+        s.image_capture = Some("DXGI".into());
+        let k_dxgi = key_for_settings(&s).unwrap();
+        s.image_capture = Some("GDI".into());
+        let k_gdi = key_for_settings(&s).unwrap();
+        assert_ne!(k_wgc, k_dxgi);
+        assert_ne!(k_dxgi, k_gdi);
+        assert_ne!(k_wgc, k_gdi);
+    }
+
     /// Regression: `run_capture_loop` used to call
     /// `capture.get_current_output()` on every tick to refresh
     /// `SharedFrame.display_info` — but no downstream consumer reads

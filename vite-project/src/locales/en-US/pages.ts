@@ -362,6 +362,8 @@ export default {
   'pages.desk.screenCaptureMode': 'Screen Capture Mode',
   'pages.desk.screenCaptureModePlaceholder': 'Please select a screen capture mode',
   'pages.desk.screenCaptureModeRequired': 'Please select a screen capture mode!',
+  'pages.desk.dxgiVideoBlackBarWarning.title': 'DXGI capture limitation',
+  'pages.desk.dxgiVideoBlackBarWarning.body': "DXGI captures DWM's framebuffer. Browser-decoded video uses a hardware overlay surface that DXGI cannot read, so brief black bars may flash while playing video. Switch to WGC for correct video capture.",
   'pages.desk.displayDevice': 'Display Device',
   'pages.desk.displayDevicePlaceholder': 'Please select a display device',
   'pages.desk.displayDeviceRequired': 'Please select a display device!',

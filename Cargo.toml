@@ -195,6 +195,15 @@ windows = { version = "0.61", features = [
     "Win32_System_RemoteDesktop",
     "Win32_System_Environment",
     "Win32_Foundation",
+    # Windows.Graphics.Capture (WGC) backend
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
 ] }
 windows-result = "0.3"
 windows-core = "0.61"

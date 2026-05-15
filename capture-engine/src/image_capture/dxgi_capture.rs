@@ -2060,7 +2060,14 @@ mod tests {
         Ok(())
     }
 
+    /// Hardware + interactive-desktop dependent: needs a live D3D11
+    /// adapter and an attached display. Fails on headless CI / RDP-only
+    /// sessions with `DXGI_ERROR_DEVICE_HUNG` (0x887A0005) once another
+    /// D3D test in the suite has already consumed the device. Run
+    /// manually with `cargo test -- --ignored test_screen` on a
+    /// machine with a GPU + monitor.
     #[test]
+    #[ignore]
     fn test_screen() -> Result<(), CaptureError> {
         initialize();
         let settings = DeskSettings::default();

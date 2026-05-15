@@ -101,6 +101,11 @@ pub trait ImageOutputEnumerator {
 /// Image Capture Type Enum
 #[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy)]
 pub enum ImageCaptureType {
+    /// Capture image via Windows.Graphics.Capture (WGC).
+    /// Declared first so EnumIter visits it before DXGI/GDI; the frontend
+    /// dropdown additionally pins WGC to the top for preferred ordering.
+    #[cfg(target_os = "windows")]
+    WGC,
     /// Capture image from DXGI device
     #[cfg(target_os = "windows")]
     DXGI,

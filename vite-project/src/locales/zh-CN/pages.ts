@@ -360,6 +360,8 @@ export default {
   'pages.desk.screenCaptureMode': '屏幕捕获模式',
   'pages.desk.screenCaptureModePlaceholder': '请选择一个屏幕捕获模式',
   'pages.desk.screenCaptureModeRequired': '请选择一个屏幕捕获模式!',
+  'pages.desk.dxgiVideoBlackBarWarning.title': 'DXGI 模式提示',
+  'pages.desk.dxgiVideoBlackBarWarning.body': 'DXGI 抓取的是 DWM 合成后的帧缓存；浏览器中视频走的是硬件覆盖层（hardware overlay），DXGI 读不到这部分像素，画面会出现闪现型黑条。需要观看视频请切到 WGC 模式。',
   'pages.desk.displayDevice': '显示设备',
   'pages.desk.displayDevicePlaceholder': '请选择一个显示设备',
   'pages.desk.displayDeviceRequired': '请选择一个显示设备!',
