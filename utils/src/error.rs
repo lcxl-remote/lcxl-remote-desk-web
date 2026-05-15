@@ -41,6 +41,13 @@ impl DeskErrorCode {
     pub const PERMISSION_ERROR: DeskErrorCode = DeskErrorCode(4);
     pub const INVALID_PARAMS: DeskErrorCode = DeskErrorCode(5);
     pub const UNKNOWN_SIGNALING_TYPE: DeskErrorCode = DeskErrorCode(6);
+    /// The requested feature/backend is structurally unavailable in the
+    /// current process or desktop context (e.g. Windows.Graphics.Capture
+    /// under the SYSTEM token / Winlogon desktop, where RuntimeBroker is
+    /// not running). Callers may transparently fall back to an
+    /// alternative implementation instead of surfacing this as a hard
+    /// error.
+    pub const FEATURE_UNAVAILABLE: DeskErrorCode = DeskErrorCode(7);
 
     pub const FILE_PATH_NOT_FOUND: DeskErrorCode = DeskErrorCode(11);
     pub const CLIENT_ID_NOT_FOUND: DeskErrorCode = DeskErrorCode(12);

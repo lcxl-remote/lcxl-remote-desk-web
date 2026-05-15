@@ -653,6 +653,12 @@ mod tests {
             let _ = init_logs(LevelFilter::Debug);
         });
     }
+    // Disabled in automated runs: this test needs an interactive GUI
+    // desktop (BitBlt against a real device context). CI / headless
+    // service-mode runs don't have one — same rationale as the DXGI
+    // `test_screen` ignore. Run manually with
+    // `cargo test -p desk-capture-engine --lib gdi_capture::tests::test_capture_image -- --ignored`.
+    #[ignore]
     #[test]
     fn test_capture_image() -> Result<(), CaptureError> {
         initialize();

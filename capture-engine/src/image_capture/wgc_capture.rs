@@ -169,12 +169,17 @@ impl WgcImageOutputEnumerator {
     pub fn new() -> Result<Self, CaptureError> {
         match GraphicsCaptureSession::IsSupported() {
             Ok(true) => Ok(Self),
+            // Structural unavailability: tagged FEATURE_UNAVAILABLE so the
+            // factory can transparently fall back to DXGI for capture
+            // instances, and `list_image_capture` can demote the
+            // enumeration log to WARN (this is the expected path on
+            // Winlogon / SYSTEM-token workers).
             Ok(false) => CaptureError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::FEATURE_UNAVAILABLE,
                 "Windows.Graphics.Capture is not supported on this system",
             ),
             Err(e) => CaptureError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::FEATURE_UNAVAILABLE,
                 &format!("Failed to query GraphicsCaptureSession::IsSupported: {}", e),
             ),
         }
@@ -244,17 +249,26 @@ impl WgcImageCapture {
         // Same `IsSupported()` check the enumerator runs — we hit this
         // path if a user has WGC saved in settings but lands on a
         // machine that no longer supports it.
+        // The IsSupported failure modes here are structural — either
+        // the OS is too old or the WGC broker service is not present
+        // in our session (Winlogon / SYSTEM). Both are tagged
+        // FEATURE_UNAVAILABLE so the factory can fall back to DXGI for
+        // this capture instance without surfacing the error to the
+        // pipeline. Failures later in this function (EnumOutputs,
+        // CreateDirect3D11DeviceFromDXGIDevice, …) keep their original
+        // error code — those indicate real trouble and must not be
+        // silently downgraded.
         match GraphicsCaptureSession::IsSupported() {
             Ok(true) => {}
             Ok(false) => {
                 return CaptureError::custom_error(
-                    DeskErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::FEATURE_UNAVAILABLE,
                     "WGC requires Windows 10 1903+ (GraphicsCaptureSession::IsSupported = false)",
                 );
             }
             Err(e) => {
                 return CaptureError::custom_error(
-                    DeskErrorCode::SYSTEM_ERROR,
+                    DeskErrorCode::FEATURE_UNAVAILABLE,
                     &format!("Failed to query GraphicsCaptureSession::IsSupported: {}", e),
                 );
             }

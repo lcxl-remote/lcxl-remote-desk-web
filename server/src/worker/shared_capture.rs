@@ -188,7 +188,10 @@ impl SharedCaptureRegistry {
         settings: &DeskSettings,
     ) -> Result<SharedCaptureHandle, CaptureError> {
         let key = key_for_settings(settings)?;
-        // Fast path: existing live entry.
+        // Fast path: existing live entry under the originally
+        // requested key. Avoids the cost of building a capture
+        // instance when the user-configured backend is already
+        // running.
         {
             let mut g = self.map.lock().expect("shared capture registry poisoned");
             if let Some(weak) = g.get(&key) {
@@ -203,8 +206,30 @@ impl SharedCaptureRegistry {
         // Slow path: build the capture instance + spawn the loop.
         // The first capture instance is built synchronously so the
         // caller observes `CaptureError` directly (e.g. wrong output
-        // index, missing display device).
+        // index, missing display device). The factory may
+        // transparently fall back to a different backend (e.g.
+        // WGC → DXGI when the WGC RuntimeBroker is unavailable in
+        // SYSTEM/Winlogon contexts), so the effective backend is
+        // queried below and used to key the registry slot.
         let initial_capture = create_image_capture(settings)?;
+        let effective_type = initial_capture.get_capture_type();
+        let effective_key = key_from_capture_type(effective_type, settings.video_device_index);
+
+        // Pre-spawn race re-check on the effective key. Crucial when
+        // a sibling subscriber already runs the effective backend on
+        // this output (e.g. an existing DXGI subscriber when our WGC
+        // request just fell back to DXGI): we must reuse the existing
+        // loop instead of momentarily spawning a second DXGI Desktop
+        // Duplication on the same monitor (DXGI is exclusive per
+        // output and the second instance would fail or churn).
+        {
+            let mut g = self.map.lock().expect("shared capture registry poisoned");
+            if let Some(existing) = decide_registry_reuse(&mut g, &key, &effective_key) {
+                drop(initial_capture);
+                return Ok(SharedCaptureHandle { inner: existing });
+            }
+        }
+
         let display_info = initial_capture.get_current_output()?;
 
         let (sender, _) = broadcast::channel::<Arc<SharedFrame>>(8);
@@ -212,12 +237,12 @@ impl SharedCaptureRegistry {
 
         let sender_for_thread = sender.clone();
         let stop_for_thread = Arc::clone(&stop_flag);
-        let key_for_thread = key.clone();
+        let key_for_thread = effective_key.clone();
         let display_info_for_thread = display_info.clone();
         let join = thread::Builder::new()
             .name(format!(
                 "shared-capture-{}-{}",
-                key.backend, key.output_index
+                effective_key.backend, effective_key.output_index
             ))
             .spawn(move || {
                 run_capture_loop(
@@ -235,23 +260,22 @@ impl SharedCaptureRegistry {
             stop_flag,
             join_handle: StdMutex::new(Some(join)),
             display_info,
-            key: key.clone(),
+            key: effective_key.clone(),
             registry: Arc::downgrade(self),
         });
 
         let mut g = self.map.lock().expect("shared capture registry poisoned");
-        // Re-check in case another thread raced us. If a different
-        // entry got inserted, we lost the race — return the winner
-        // and let our own freshly-built `inner` drop, which cleans
-        // up its capture thread.
-        if let Some(existing_weak) = g.get(&key)
+        // Post-spawn race re-check (safety net against true races
+        // between two concurrent subscribers). Keyed by effective_key,
+        // matching what we'll insert.
+        if let Some(existing_weak) = g.get(&effective_key)
             && let Some(existing_inner) = existing_weak.upgrade()
         {
             return Ok(SharedCaptureHandle {
                 inner: existing_inner,
             });
         }
-        g.insert(key, Arc::downgrade(&inner));
+        g.insert(effective_key, Arc::downgrade(&inner));
         Ok(SharedCaptureHandle { inner })
     }
 
@@ -274,12 +298,53 @@ impl SharedCaptureRegistry {
     }
 }
 
+/// Build a `CaptureKey` from a backend variant and output index.
+/// Kept as a tiny pure function so the rest of the module (and the
+/// tests for `decide_registry_reuse`) can talk about keys without
+/// detouring through a `DeskSettings` round-trip.
+fn key_from_capture_type(t: ImageCaptureType, output_index: u32) -> CaptureKey {
+    CaptureKey {
+        backend: <&'static str>::from(t).to_string(),
+        output_index,
+    }
+}
+
 fn key_for_settings(settings: &DeskSettings) -> Result<CaptureKey, CaptureError> {
     let backend: ImageCaptureType = settings.get_image_capture_type()?;
-    Ok(CaptureKey {
-        backend: <&'static str>::from(backend).to_string(),
-        output_index: settings.video_device_index,
-    })
+    Ok(key_from_capture_type(backend, settings.video_device_index))
+}
+
+/// In-lock decision: should we reuse an existing live entry under
+/// `effective_key`, or proceed to spawn a new capture loop?
+/// Opportunistically prunes stale `Weak` entries at both keys so the
+/// registry does not accumulate dead slots.
+///
+/// Returns `Some(existing_inner)` when a live entry under
+/// `effective_key` is found (caller must drop their fresh capture
+/// instance without spawning), `None` otherwise (caller proceeds to
+/// spawn and insert).
+///
+/// This is split out as a pure function so the WGC → DXGI fallback
+/// race-handling can be unit-tested without depending on a real
+/// capture device.
+fn decide_registry_reuse(
+    map: &mut HashMap<CaptureKey, Weak<SharedInner>>,
+    original_key: &CaptureKey,
+    effective_key: &CaptureKey,
+) -> Option<Arc<SharedInner>> {
+    if let Some(weak) = map.get(effective_key) {
+        if let Some(inner) = weak.upgrade() {
+            return Some(inner);
+        }
+        map.remove(effective_key);
+    }
+    if effective_key != original_key
+        && let Some(weak) = map.get(original_key)
+        && weak.upgrade().is_none()
+    {
+        map.remove(original_key);
+    }
+    None
 }
 
 fn run_capture_loop(
@@ -451,6 +516,140 @@ mod tests {
         assert_ne!(k_wgc, k_dxgi);
         assert_ne!(k_dxgi, k_gdi);
         assert_ne!(k_wgc, k_gdi);
+    }
+
+    /// Construct a barebones `Arc<SharedInner>` for registry tests
+    /// without spawning any threads or touching the capture engine.
+    /// The capture loop never runs against this synthetic instance —
+    /// it only exists to satisfy `Arc::downgrade` so we can drive
+    /// `decide_registry_reuse` against a realistic registry map.
+    #[cfg(target_os = "windows")]
+    fn synthetic_shared_inner(key: CaptureKey) -> Arc<SharedInner> {
+        let (sender, _) = broadcast::channel::<Arc<SharedFrame>>(1);
+        Arc::new(SharedInner {
+            sender,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            join_handle: StdMutex::new(None),
+            display_info: DisplayInfo::default(),
+            key,
+            registry: Weak::new(),
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn key_from_capture_type_pure_function() {
+        let k_dxgi = key_from_capture_type(ImageCaptureType::DXGI, 0);
+        assert_eq!(k_dxgi.backend, "DXGI");
+        assert_eq!(k_dxgi.output_index, 0);
+
+        let k_wgc = key_from_capture_type(ImageCaptureType::WGC, 2);
+        assert_eq!(k_wgc.backend, "WGC");
+        assert_eq!(k_wgc.output_index, 2);
+
+        let k_gdi = key_from_capture_type(ImageCaptureType::GDI, 1);
+        assert_eq!(k_gdi.backend, "GDI");
+        assert_eq!(k_gdi.output_index, 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn key_from_capture_type_distinct_per_backend() {
+        let kw = key_from_capture_type(ImageCaptureType::WGC, 0);
+        let kd = key_from_capture_type(ImageCaptureType::DXGI, 0);
+        let kg = key_from_capture_type(ImageCaptureType::GDI, 0);
+        assert_ne!(kw, kd);
+        assert_ne!(kd, kg);
+        assert_ne!(kw, kg);
+    }
+
+    /// The critical fallback property: when the factory silently
+    /// rewrote WGC → DXGI for the new capture instance and an existing
+    /// DXGI subscriber is already running on the same output,
+    /// `decide_registry_reuse` must return that existing inner so the
+    /// caller can drop its fresh capture without spawning a second
+    /// DXGI Desktop Duplication on the monitor.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn decide_registry_reuse_returns_existing_on_effective_key_hit() {
+        let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
+        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, 0);
+
+        let live = synthetic_shared_inner(dxgi_key.clone());
+        map.insert(dxgi_key.clone(), Arc::downgrade(&live));
+
+        let decision = decide_registry_reuse(&mut map, &wgc_key, &dxgi_key);
+        let got = decision.expect("must reuse existing DXGI entry");
+        assert!(
+            Arc::ptr_eq(&got, &live),
+            "reused inner must be the exact pre-populated Arc"
+        );
+    }
+
+    /// When no live entry exists under the effective key, the function
+    /// returns None so the caller proceeds to spawn.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn decide_registry_reuse_returns_none_when_no_hit() {
+        let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
+        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, 0);
+        assert!(decide_registry_reuse(&mut map, &wgc_key, &dxgi_key).is_none());
+    }
+
+    /// Stale `Weak` entries at both `effective_key` and (if different)
+    /// `original_key` are removed by the same call that probes for
+    /// reuse — keeping the registry from accumulating dead slots even
+    /// in the fallback path.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn decide_registry_reuse_cleans_stale_weak() {
+        let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
+        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, 0);
+
+        // Insert two stale Weaks: one at effective_key, one at original_key.
+        let dropped_dxgi = synthetic_shared_inner(dxgi_key.clone());
+        let stale_dxgi = Arc::downgrade(&dropped_dxgi);
+        drop(dropped_dxgi);
+        map.insert(dxgi_key.clone(), stale_dxgi);
+
+        let dropped_wgc = synthetic_shared_inner(wgc_key.clone());
+        let stale_wgc = Arc::downgrade(&dropped_wgc);
+        drop(dropped_wgc);
+        map.insert(wgc_key.clone(), stale_wgc);
+
+        assert!(
+            decide_registry_reuse(&mut map, &wgc_key, &dxgi_key).is_none(),
+            "stale entries must not be returned as reusable"
+        );
+        assert!(
+            !map.contains_key(&dxgi_key),
+            "stale effective_key slot must be removed"
+        );
+        assert!(
+            !map.contains_key(&wgc_key),
+            "stale original_key slot must be removed when it differs from effective_key"
+        );
+    }
+
+    /// When `effective_key == original_key` (no fallback), the
+    /// function does not over-prune: a stale slot at the shared key is
+    /// removed once, not twice.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn decide_registry_reuse_when_effective_equals_original() {
+        let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
+
+        let dropped = synthetic_shared_inner(dxgi_key.clone());
+        let stale = Arc::downgrade(&dropped);
+        drop(dropped);
+        map.insert(dxgi_key.clone(), stale);
+
+        assert!(decide_registry_reuse(&mut map, &dxgi_key, &dxgi_key).is_none());
+        assert!(!map.contains_key(&dxgi_key));
     }
 
     /// Regression: `run_capture_loop` used to call
