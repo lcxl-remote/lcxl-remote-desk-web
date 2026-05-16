@@ -6,7 +6,7 @@ use desk_signal_facade::model::{
 };
 use desk_utils::error::DeskErrorCode;
 use windows::Win32::{
-    Foundation::{GENERIC_ALL, HMODULE, RECT},
+    Foundation::{GENERIC_ALL, HMODULE, LUID, RECT},
     Graphics::{
         Direct3D::{
             D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_REFERENCE,
@@ -20,26 +20,27 @@ use windows::Win32::{
             D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA, D3D11_BOX,
             D3D11_BUFFER_DESC, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_NEVER,
             D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG,
-            D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_FLOAT32_MAX, D3D11_INPUT_ELEMENT_DESC,
-            D3D11_INPUT_PER_VERTEX_DATA, D3D11_SAMPLER_DESC, D3D11_SDK_VERSION,
-            D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE_ADDRESS_CLAMP,
-            D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11_VIEWPORT,
-            D3D11CreateDevice, ID3D11BlendState, ID3D11Device, ID3D11DeviceContext,
-            ID3D11InputLayout, ID3D11PixelShader, ID3D11RenderTargetView, ID3D11SamplerState,
-            ID3D11Texture2D, ID3D11VertexShader,
+            D3D11_CREATE_DEVICE_FLAG, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_FLOAT32_MAX,
+            D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_SAMPLER_DESC,
+            D3D11_SDK_VERSION, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SUBRESOURCE_DATA,
+            D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+            D3D11_USAGE_STAGING, D3D11_VIEWPORT, D3D11CreateDevice, ID3D11BlendState, ID3D11Device,
+            ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RenderTargetView,
+            ID3D11SamplerState, ID3D11Texture2D, ID3D11VertexShader,
         },
         Dxgi::{
             Common::{
                 DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT,
             },
-            DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL,
-            DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT,
-            DXGI_OUTDUPL_DESC, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT,
-            DXGI_OUTDUPL_POINTER_SHAPE_INFO, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR,
-            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+            CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ERROR_ACCESS_LOST,
+            DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND,
+            DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAP_READ, DXGI_MAPPED_RECT, DXGI_OUTDUPL_DESC,
+            DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_MOVE_RECT, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+            DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
             DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
-            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIDevice, IDXGIOutput1,
-            IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
+            DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice,
+            IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+            IDXGISurface,
         },
         Gdi::{DISPLAY_DEVICE_STATE_FLAGS, DISPLAY_DEVICEW, EnumDisplayDevicesW},
     },
@@ -254,6 +255,262 @@ pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
     }
 }
 
+// ============================================================================
+// Cross-adapter output enumeration (phase 1)
+// ============================================================================
+
+/// One DXGI output joined with the adapter that owns it. The flat
+/// ordering of a `Vec<EnumeratedOutput>` defines the meaning of
+/// `DeskSettings::video_device_index` in the cross-adapter world: the
+/// default hardware adapter is placed first (so existing single-GPU
+/// users see no behavior change), then the remaining adapters follow in
+/// `IDXGIFactory1::EnumAdapters1` order.
+#[derive(Clone)]
+pub(crate) struct EnumeratedOutput {
+    pub adapter_index: u32,
+    pub local_output_index: u32,
+    pub adapter: IDXGIAdapter1,
+    pub desc: DXGI_OUTPUT_DESC,
+    pub adapter_desc: DXGI_ADAPTER_DESC1,
+}
+
+/// Pure range check for a flat output index against the total count.
+/// Extracted so it is unit-testable without DXGI fixtures.
+fn select_index(total: u32, flat: u32) -> Result<u32, CaptureError> {
+    if total == 0 {
+        return CaptureError::custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            &format!(
+                "no DXGI outputs enumerated (total_outputs=0); flat_index={} cannot be resolved",
+                flat
+            ),
+        );
+    }
+    if flat >= total {
+        return CaptureError::custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            &format!("flat_index={} out of range, total_outputs={}", flat, total),
+        );
+    }
+    Ok(flat)
+}
+
+/// Pure ordering: returns the permutation (indices into `adapter_luids`)
+/// that places `default_luid` first when present, and keeps the rest in
+/// their original factory order. If `default_luid` is `None` or its LUID
+/// is not found in `adapter_luids`, the identity permutation is
+/// returned. Extracted so it is unit-testable without DXGI fixtures.
+fn order_adapters_by_default_luid(
+    default_luid: Option<LUID>,
+    adapter_luids: &[LUID],
+) -> Vec<usize> {
+    let identity: Vec<usize> = (0..adapter_luids.len()).collect();
+    let Some(target) = default_luid else {
+        return identity;
+    };
+    let Some(promoted) = adapter_luids
+        .iter()
+        .position(|l| l.LowPart == target.LowPart && l.HighPart == target.HighPart)
+    else {
+        return identity;
+    };
+    let mut order = Vec::with_capacity(adapter_luids.len());
+    order.push(promoted);
+    for (i, _) in adapter_luids.iter().enumerate() {
+        if i != promoted {
+            order.push(i);
+        }
+    }
+    order
+}
+
+/// Capture the LUID of the adapter that `D3D11CreateDevice(None, HARDWARE)`
+/// would pick, so cross-adapter enumeration can promote it to flat
+/// position 0 and preserve `video_device_index` semantics for
+/// single-default-adapter users. Returns `None` (without erroring) if
+/// the probe fails — callers fall back to factory order.
+fn probe_default_adapter_luid() -> Option<LUID> {
+    let driver_types: [D3D_DRIVER_TYPE; 3] = [
+        D3D_DRIVER_TYPE_HARDWARE,
+        D3D_DRIVER_TYPE_WARP,
+        D3D_DRIVER_TYPE_REFERENCE,
+    ];
+    let feature_levels: [D3D_FEATURE_LEVEL; 4] = [
+        D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1,
+        D3D_FEATURE_LEVEL_10_0,
+        D3D_FEATURE_LEVEL_9_1,
+    ];
+    let mut device: Option<ID3D11Device> = None;
+    for driver_type in driver_types {
+        let r = unsafe {
+            D3D11CreateDevice(
+                None,
+                driver_type,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&feature_levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )
+        };
+        if r.is_ok() {
+            break;
+        }
+    }
+    let device = device?;
+    let dxgi_device = device.cast::<IDXGIDevice>().ok()?;
+    let adapter = unsafe { dxgi_device.GetParent::<IDXGIAdapter>().ok()? };
+    let adapter1 = adapter.cast::<IDXGIAdapter1>().ok()?;
+    let desc = unsafe { adapter1.GetDesc1().ok()? };
+    Some(desc.AdapterLuid)
+}
+
+/// Enumerate every output across every DXGI adapter. See
+/// [`EnumeratedOutput`] for the flat ordering contract.
+pub(crate) fn enumerate_all_outputs() -> Result<Vec<EnumeratedOutput>, CaptureError> {
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
+
+    // Phase 1: collect every adapter (preserve factory order).
+    struct AdapterEntry {
+        adapter: IDXGIAdapter1,
+        desc: DXGI_ADAPTER_DESC1,
+        luid: LUID,
+        output_descs: Vec<DXGI_OUTPUT_DESC>,
+    }
+    let mut adapters: Vec<AdapterEntry> = Vec::new();
+    let mut adapter_idx: u32 = 0;
+    loop {
+        let r = unsafe { factory.EnumAdapters1(adapter_idx) };
+        let adapter = match r {
+            Ok(a) => a,
+            Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(e) => return Err(CaptureError::from(e)),
+        };
+        let desc = unsafe { adapter.GetDesc1() }?;
+        let luid = desc.AdapterLuid;
+        let mut output_descs: Vec<DXGI_OUTPUT_DESC> = Vec::new();
+        let mut out_idx: u32 = 0;
+        loop {
+            let r = unsafe { adapter.EnumOutputs(out_idx) };
+            let output = match r {
+                Ok(o) => o,
+                Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(e) => return Err(CaptureError::from(e)),
+            };
+            let output_desc = unsafe { output.GetDesc() }?;
+            output_descs.push(output_desc);
+            out_idx += 1;
+        }
+        adapters.push(AdapterEntry {
+            adapter,
+            desc,
+            luid,
+            output_descs,
+        });
+        adapter_idx += 1;
+    }
+
+    // Phase 2: reorder adapters so the default hardware adapter is
+    // first. This preserves `video_device_index` semantics for users
+    // who only ever saw default-adapter outputs.
+    let default_luid = probe_default_adapter_luid();
+    let luids: Vec<LUID> = adapters.iter().map(|e| e.luid).collect();
+    let order = order_adapters_by_default_luid(default_luid, &luids);
+
+    // Phase 3: flatten according to the new order.
+    let mut flat: Vec<EnumeratedOutput> = Vec::new();
+    for (new_adapter_idx, &orig_idx) in order.iter().enumerate() {
+        let entry = &adapters[orig_idx];
+        for (local_idx, output_desc) in entry.output_descs.iter().enumerate() {
+            flat.push(EnumeratedOutput {
+                adapter_index: new_adapter_idx as u32,
+                local_output_index: local_idx as u32,
+                adapter: entry.adapter.clone(),
+                desc: *output_desc,
+                adapter_desc: entry.desc,
+            });
+        }
+    }
+    log::info!(
+        "enumerate_all_outputs: {} adapter(s), {} output(s) total, default_luid={}",
+        adapters.len(),
+        flat.len(),
+        match default_luid {
+            Some(l) => format!("Some({:?})", (l.LowPart, l.HighPart)),
+            None => "None".to_string(),
+        }
+    );
+    Ok(flat)
+}
+
+/// Resolve a flat `video_device_index` against the enumerated outputs.
+/// On failure, the error message includes the flat index, total output
+/// count, and a brief per-adapter summary to help multi-GPU / IDD
+/// triage. Range-checking is delegated to [`select_index`] for parity
+/// with its unit tests.
+pub(crate) fn select_output(
+    entries: &[EnumeratedOutput],
+    flat_index: u32,
+) -> Result<&EnumeratedOutput, CaptureError> {
+    let total = entries.len() as u32;
+    match select_index(total, flat_index) {
+        Ok(idx) => Ok(&entries[idx as usize]),
+        Err(_) => CaptureError::custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            &format!(
+                "select_output: flat_index={} not addressable, total_outputs={} ({})",
+                flat_index,
+                total,
+                build_adapter_summary(entries)
+            ),
+        ),
+    }
+}
+
+/// Render a `"adapter[i]='Name' K output(s); ..."` string describing
+/// the flat enumeration. Helper for `select_output` error messages.
+fn build_adapter_summary(entries: &[EnumeratedOutput]) -> String {
+    let mut summary = String::new();
+    let mut current_adapter: i64 = -1;
+    let mut current_count: u32 = 0;
+    let mut current_name = String::new();
+    for e in entries {
+        if e.adapter_index as i64 != current_adapter {
+            if current_adapter >= 0 {
+                summary.push_str(&format!(
+                    "adapter[{}]='{}' {} output(s); ",
+                    current_adapter, current_name, current_count
+                ));
+            }
+            current_adapter = e.adapter_index as i64;
+            current_count = 0;
+            current_name = adapter_name_from_desc(&e.adapter_desc);
+        }
+        current_count += 1;
+    }
+    if current_adapter >= 0 {
+        summary.push_str(&format!(
+            "adapter[{}]='{}' {} output(s)",
+            current_adapter, current_name, current_count
+        ));
+    }
+    summary
+}
+
+/// Convert `DXGI_ADAPTER_DESC1::Description` ([u16; 128]) to a String,
+/// stopping at the first NUL.
+pub(crate) fn adapter_name_from_desc(desc: &DXGI_ADAPTER_DESC1) -> String {
+    let null = desc
+        .Description
+        .iter()
+        .position(|&c| c == 0u16)
+        .unwrap_or(desc.Description.len());
+    String::from_utf16_lossy(&desc.Description[..null])
+}
+
 pub struct ScreenRecordManager {
     pub device: ID3D11Device,
     pub device_context: ID3D11DeviceContext,
@@ -445,10 +702,9 @@ impl ScreenRecordManager {
     }
 
     pub fn new(settings: &DeskSettings) -> Result<Arc<Self>, CaptureError> {
-        // get desktop
         Self::set_thread_input_desktop()?;
+        let flags = Self::device_flags(settings);
 
-        // init dxgi factory
         let driver_types: [D3D_DRIVER_TYPE; 3] = [
             D3D_DRIVER_TYPE_HARDWARE,
             D3D_DRIVER_TYPE_WARP,
@@ -460,16 +716,9 @@ impl ScreenRecordManager {
             D3D_FEATURE_LEVEL_10_0,
             D3D_FEATURE_LEVEL_9_1,
         ];
-        let mut flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-        if settings.enable_d3d_debug {
-            log::info!("Enable d3d debug flag");
-            flags |= D3D11_CREATE_DEVICE_DEBUG;
-        }
 
-        let mut device = None;
-        //let mut feature_level = D3D_FEATURE_LEVEL_11_1;
-
-        let mut device_context = None;
+        let mut device: Option<ID3D11Device> = None;
+        let mut device_context: Option<ID3D11DeviceContext> = None;
         let mut result = Ok(());
 
         for driver_type in driver_types {
@@ -480,10 +729,8 @@ impl ScreenRecordManager {
                     HMODULE::default(),
                     flags,
                     Some(&feature_levels),
-                    //None,
                     D3D11_SDK_VERSION,
                     Some(&mut device),
-                    //Some(&mut feature_level),
                     None,
                     Some(&mut device_context),
                 )
@@ -498,7 +745,6 @@ impl ScreenRecordManager {
                 break;
             }
         }
-        // Check if device creation was successful
         result?;
 
         let device = device.unwrap();
@@ -507,9 +753,92 @@ impl ScreenRecordManager {
         let dxgi_device = device.cast::<IDXGIDevice>()?;
         let dxgi_adapter = unsafe { dxgi_device.GetParent::<IDXGIAdapter>() }?;
 
-        // Create the sample state
-        let mut samp_desc = D3D11_SAMPLER_DESC::default();
+        Self::init_d3d_pipeline(device, device_context, dxgi_adapter)
+    }
 
+    /// Build a `ScreenRecordManager` whose D3D11 device is created on a
+    /// specific adapter — required for `IDXGIOutputDuplication`, which
+    /// demands the device and output share an adapter. Used by the
+    /// cross-adapter path in `DxgiImageCapture::new` (see
+    /// [`enumerate_all_outputs`]).
+    pub fn new_with_adapter(
+        settings: &DeskSettings,
+        adapter: &IDXGIAdapter1,
+    ) -> Result<Arc<Self>, CaptureError> {
+        Self::set_thread_input_desktop()?;
+        let flags = Self::device_flags(settings);
+
+        // Cast IDXGIAdapter1 → IDXGIAdapter explicitly so we never rely
+        // on windows-rs Param trait inference at the call site.
+        let adapter_base: IDXGIAdapter = adapter.cast::<IDXGIAdapter>()?;
+
+        let feature_levels: [D3D_FEATURE_LEVEL; 4] = [
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+            D3D_FEATURE_LEVEL_9_1,
+        ];
+
+        let mut device: Option<ID3D11Device> = None;
+        let mut device_context: Option<ID3D11DeviceContext> = None;
+        // MSDN: when pAdapter is non-NULL, DriverType MUST be
+        // D3D_DRIVER_TYPE_UNKNOWN.
+        let create_result = unsafe {
+            D3D11CreateDevice(
+                Some(&adapter_base),
+                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+                HMODULE::default(),
+                flags,
+                Some(&feature_levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut device_context),
+            )
+        };
+        if let Err(err) = create_result {
+            let adapter_desc = unsafe { adapter.GetDesc1() }.ok();
+            let adapter_name = adapter_desc
+                .as_ref()
+                .map(adapter_name_from_desc)
+                .unwrap_or_else(|| "<GetDesc1 failed>".to_string());
+            let (lo, hi) = adapter_desc
+                .as_ref()
+                .map(|d| (d.AdapterLuid.LowPart, d.AdapterLuid.HighPart))
+                .unwrap_or((0, 0));
+            return CaptureError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                &format!(
+                    "D3D11CreateDevice with explicit adapter='{}' (LUID={:#x}:{:#x}) failed: {} ({:?})",
+                    adapter_name,
+                    hi,
+                    lo,
+                    err.message(),
+                    err.code()
+                ),
+            );
+        }
+
+        let device = device.unwrap();
+        let device_context = device_context.unwrap();
+        Self::init_d3d_pipeline(device, device_context, adapter_base)
+    }
+
+    fn device_flags(settings: &DeskSettings) -> D3D11_CREATE_DEVICE_FLAG {
+        let mut flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+        if settings.enable_d3d_debug {
+            log::info!("Enable d3d debug flag");
+            flags |= D3D11_CREATE_DEVICE_DEBUG;
+        }
+        flags
+    }
+
+    fn init_d3d_pipeline(
+        device: ID3D11Device,
+        device_context: ID3D11DeviceContext,
+        dxgi_adapter: IDXGIAdapter,
+    ) -> Result<Arc<Self>, CaptureError> {
+        let mut samp_desc = D3D11_SAMPLER_DESC::default();
         samp_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         samp_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
         samp_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -520,9 +849,8 @@ impl ScreenRecordManager {
         let mut sampler_linear = None;
         unsafe { device.CreateSamplerState(&samp_desc, Some(&mut sampler_linear)) }?;
         let sampler_linear = [sampler_linear];
-        // Create the blend state
-        let mut blend_state_desc = D3D11_BLEND_DESC::default();
 
+        let mut blend_state_desc = D3D11_BLEND_DESC::default();
         blend_state_desc.AlphaToCoverageEnable = false.into();
         blend_state_desc.IndependentBlendEnable = false.into();
         blend_state_desc.RenderTarget[0].BlendEnable = true.into();
@@ -530,8 +858,8 @@ impl ScreenRecordManager {
         blend_state_desc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
         blend_state_desc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
         // big thanks to https://github.com/MirrorX-Desktop/MirrorX/blob/master/mirrorx_core/src/component/desktop/windows/duplicator.rs#L1013C51-L1013C80
-        blend_state_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_INV_DEST_ALPHA; //D3D11_BLEND_ONE 
-        blend_state_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE; //D3D11_BLEND_ZERO
+        blend_state_desc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_INV_DEST_ALPHA;
+        blend_state_desc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
         blend_state_desc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
         blend_state_desc.RenderTarget[0].RenderTargetWriteMask =
             D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8;
@@ -1728,55 +2056,63 @@ impl DxgiImageOutputEnumerator {
 
 impl ImageOutputEnumerator for DxgiImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
-        let settings = DeskSettings::default();
-        let manager = ScreenRecordManager::new(&settings)?;
-        let mut output_list = vec![];
-        let mut output_index = 0;
-        loop {
-            let result = unsafe { manager.dxgi_adapter.EnumOutputs(output_index) };
-            if let Ok(output) = result {
-                let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
-
-                output_list.push(from_dxgi_output_desc(&output_desc));
-            } else if let Err(error) = result {
-                if error.code() != DXGI_ERROR_NOT_FOUND {
-                    log::error!(
-                        "Failed to enumerate outputs, code: {}, message: {}",
-                        error.code(),
-                        error.message()
-                    );
-                    return Err(CaptureError::from(error));
-                }
-                log::warn!(
-                    "Output index not found, finished enumeration. Total outputs found: {}",
-                    output_index
-                );
-                break;
-            }
-            output_index += 1;
-        }
-        Ok(output_list)
+        // Cross-adapter enumeration: see `enumerate_all_outputs`. The
+        // flat order it returns defines `video_device_index` semantics
+        // for callers; default hardware adapter is placed first so
+        // single-GPU users see the same indices as before.
+        let entries = enumerate_all_outputs()?;
+        log::info!(
+            "DxgiImageOutputEnumerator: enumerated {} output(s) across all adapters",
+            entries.len()
+        );
+        Ok(entries
+            .iter()
+            .map(|e| from_dxgi_output_desc(&e.desc))
+            .collect())
     }
 }
 
 pub struct DxgiImageCapture {
     pub manager: Arc<ScreenRecordManager>,
+    /// Flat / external index — equals `settings.video_device_index`.
+    /// Public API and semantics unchanged across the cross-adapter
+    /// refactor; downstream code keeps reading this for diagnostics.
     pub output_index: u32,
+    /// Position of the chosen adapter in the flat ordering returned by
+    /// [`enumerate_all_outputs`]. Used for diagnostics only.
+    adapter_index: u32,
+    /// `EnumOutputs` index *within* the chosen adapter — what
+    /// `manager.dxgi_adapter.EnumOutputs()` and
+    /// `ScreenOutput::new(manager, idx)` actually want. Different from
+    /// `output_index` whenever the user picks an output on a non-default
+    /// adapter.
+    local_output_index: u32,
     pub screen_output: Option<ScreenOutput>,
     last_cursor_fingerprint: Option<DxgiCursorFingerprint>,
 }
 
 impl DxgiImageCapture {
     pub fn new(settings: &DeskSettings) -> Result<Self, CaptureError> {
-        let manager = ScreenRecordManager::new(settings)?;
-        let screen_output = Some(ScreenOutput::new(
-            manager.clone(),
+        let entries = enumerate_all_outputs()?;
+        let chosen = select_output(&entries, settings.video_device_index)?;
+        let chosen_adapter_index = chosen.adapter_index;
+        let chosen_local_index = chosen.local_output_index;
+        let chosen_adapter_name = adapter_name_from_desc(&chosen.adapter_desc);
+        log::info!(
+            "DxgiImageCapture::new: flat_index={} → adapter[{}]='{}' local_output_index={}",
             settings.video_device_index,
-        )?);
+            chosen_adapter_index,
+            chosen_adapter_name,
+            chosen_local_index
+        );
+        let manager = ScreenRecordManager::new_with_adapter(settings, &chosen.adapter)?;
+        let screen_output = Some(ScreenOutput::new(manager.clone(), chosen_local_index)?);
         Ok(DxgiImageCapture {
             manager,
-            screen_output,
             output_index: settings.video_device_index,
+            adapter_index: chosen_adapter_index,
+            local_output_index: chosen_local_index,
+            screen_output,
             last_cursor_fingerprint: None,
         })
     }
@@ -1896,7 +2232,20 @@ impl ImageCapture for DxgiImageCapture {
         let draw_mouse = matches!(request.cursor_mode, CursorCaptureMode::RenderInFrame);
         log::trace!("Start to get screen output frame");
         if self.screen_output.is_none() {
-            self.screen_output = Some(ScreenOutput::new(self.manager.clone(), self.output_index)?);
+            // Use the local (per-adapter) index, not the flat
+            // video_device_index — `manager.dxgi_adapter` is the
+            // adapter we picked in `new()`, so EnumOutputs there only
+            // accepts indices within that adapter.
+            log::debug!(
+                "ScreenOutput rebuild on adapter_index={} local_output_index={} (flat output_index={})",
+                self.adapter_index,
+                self.local_output_index,
+                self.output_index
+            );
+            self.screen_output = Some(ScreenOutput::new(
+                self.manager.clone(),
+                self.local_output_index,
+            )?);
         }
         let screen_output = self.screen_output.as_mut().unwrap();
         let acq_result = match screen_output.get_frame(draw_mouse) {
@@ -1984,7 +2333,13 @@ impl ImageCapture for DxgiImageCapture {
     }
 
     fn get_current_output(&self) -> Result<DisplayInfo, CaptureError> {
-        let output = unsafe { self.manager.dxgi_adapter.EnumOutputs(self.output_index)? };
+        // Local index, not flat — see field docs on
+        // `DxgiImageCapture::local_output_index`.
+        let output = unsafe {
+            self.manager
+                .dxgi_adapter
+                .EnumOutputs(self.local_output_index)?
+        };
         let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
         Ok(from_dxgi_output_desc(&output_desc))
     }
@@ -2014,6 +2369,136 @@ mod tests {
     use super::*;
 
     static INIT: Once = Once::new();
+
+    // -----------------------------------------------------------------
+    // Pure-function tests (cross-adapter enumeration helpers).
+    // No DXGI fixtures needed.
+    // -----------------------------------------------------------------
+
+    fn luid(lo: u32, hi: i32) -> LUID {
+        LUID {
+            LowPart: lo,
+            HighPart: hi,
+        }
+    }
+
+    #[test]
+    fn select_index_returns_value_for_valid_flat() {
+        for flat in 0..4u32 {
+            let got = select_index(4, flat).expect("flat in range");
+            assert_eq!(got, flat);
+        }
+    }
+
+    #[test]
+    fn select_index_returns_error_for_out_of_range() {
+        let err = select_index(4, 4).expect_err("out-of-range should error");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("flat_index=4") && msg.contains("total_outputs=4"),
+            "error message should include both indices, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn select_index_returns_error_for_empty() {
+        let err = select_index(0, 0).expect_err("empty enumeration should error");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("total_outputs=0"),
+            "error message should report zero total, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn order_adapters_default_in_middle_promoted_to_front() {
+        let a = luid(1, 0);
+        let b = luid(2, 0);
+        let c = luid(3, 0);
+        let got = order_adapters_by_default_luid(Some(b), &[a, b, c]);
+        assert_eq!(got, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn order_adapters_default_not_found_keeps_factory_order() {
+        let a = luid(1, 0);
+        let b = luid(2, 0);
+        let c = luid(3, 0);
+        let unknown = luid(99, 0);
+        let got = order_adapters_by_default_luid(Some(unknown), &[a, b, c]);
+        assert_eq!(got, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn order_adapters_default_is_none_keeps_factory_order() {
+        let a = luid(1, 0);
+        let b = luid(2, 0);
+        let c = luid(3, 0);
+        let got = order_adapters_by_default_luid(None, &[a, b, c]);
+        assert_eq!(got, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn order_adapters_single_adapter_is_idempotent() {
+        let a = luid(7, 1);
+        assert_eq!(order_adapters_by_default_luid(Some(a), &[a]), vec![0]);
+        assert_eq!(order_adapters_by_default_luid(None, &[a]), vec![0]);
+    }
+
+    #[test]
+    fn order_adapters_empty_input_returns_empty() {
+        let got = order_adapters_by_default_luid(Some(luid(1, 0)), &[]);
+        assert!(got.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Integration smoke tests for `enumerate_all_outputs` — gated on
+    // Windows + #[ignore] so they only run on a real DXGI host via
+    // `cargo test -- --ignored`.
+    // -----------------------------------------------------------------
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn enumerate_all_outputs_returns_nonempty_on_windows() {
+        initialize();
+        let outputs = enumerate_all_outputs().expect("enumerate_all_outputs");
+        assert!(
+            !outputs.is_empty(),
+            "at least one DXGI output should exist on a Windows host"
+        );
+        for o in &outputs {
+            log::info!(
+                "[enum] adapter_index={} local_output_index={} adapter='{}' display='{}'",
+                o.adapter_index,
+                o.local_output_index,
+                adapter_name_from_desc(&o.adapter_desc),
+                from_dxgi_output_desc(&o.desc).device_name,
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn enumerate_all_outputs_finds_lcxl_idd_when_present() {
+        initialize();
+        let outputs = enumerate_all_outputs().expect("enumerate_all_outputs");
+        let lcxl = outputs.iter().find(|o| {
+            let info = from_dxgi_output_desc(&o.desc);
+            info.display_device_name
+                .as_deref()
+                .map(|s| s.to_ascii_lowercase().contains("lcxl"))
+                .unwrap_or(false)
+        });
+        assert!(
+            lcxl.is_some(),
+            "expected to find an output whose EnumDisplayDevicesW DeviceString contains 'Lcxl'. \
+             Confirm `cargo run -p poc-indirect-display -- create-device` is running before running this test."
+        );
+    }
 
     pub fn initialize() {
         INIT.call_once(|| {

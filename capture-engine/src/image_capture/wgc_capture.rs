@@ -35,9 +35,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, ID3D11Device, ID3D11DeviceContext, ID3D11Resource,
     ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::{
-    DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_NOT_FOUND, DXGI_OUTPUT_DESC, IDXGIDevice,
-};
+use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, DXGI_OUTPUT_DESC, IDXGIDevice};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
     GetObjectW, RGBQUAD, ReleaseDC,
@@ -54,7 +52,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::{Interface, PCWSTR};
 
 use crate::error::CaptureError;
-use crate::image_capture::dxgi_capture::{ScreenRecordManager, from_dxgi_output_desc};
+use crate::image_capture::dxgi_capture::{
+    ScreenRecordManager, enumerate_all_outputs, from_dxgi_output_desc, select_output,
+};
 use crate::image_capture::wgc_compose;
 use crate::model::image_capture::CursorSyncData;
 use crate::model::image_capture::{
@@ -188,36 +188,19 @@ impl WgcImageOutputEnumerator {
 
 impl ImageOutputEnumerator for WgcImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
-        // Reuse the DXGI adapter for monitor enumeration so the
+        // Reuse the cross-adapter DXGI enumeration so the
         // `video_device_index` semantics stay aligned between DXGI/WGC
         // (a user switching backends shouldn't have their selected
         // display reset).
-        let settings = DeskSettings::default();
-        let manager = ScreenRecordManager::new(&settings)?;
-        let mut output_list = vec![];
-        let mut output_index = 0u32;
-        loop {
-            let result = unsafe { manager.dxgi_adapter.EnumOutputs(output_index) };
-            match result {
-                Ok(output) => {
-                    let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
-                    output_list.push(from_dxgi_output_desc(&output_desc));
-                }
-                Err(error) => {
-                    if error.code() != DXGI_ERROR_NOT_FOUND {
-                        log::error!(
-                            "[WGC] EnumOutputs failed, code: {}, message: {}",
-                            error.code(),
-                            error.message()
-                        );
-                        return Err(CaptureError::from(error));
-                    }
-                    break;
-                }
-            }
-            output_index += 1;
-        }
-        Ok(output_list)
+        let entries = enumerate_all_outputs()?;
+        log::info!(
+            "WgcImageOutputEnumerator: enumerated {} output(s) across all adapters",
+            entries.len()
+        );
+        Ok(entries
+            .iter()
+            .map(|e| from_dxgi_output_desc(&e.desc))
+            .collect())
     }
 }
 
@@ -276,8 +259,12 @@ impl WgcImageCapture {
 
         let manager = ScreenRecordManager::new(settings)?;
         let output_index = settings.video_device_index;
-        let output = unsafe { manager.dxgi_adapter.EnumOutputs(output_index) }?;
-        let output_desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }?;
+        // WGC capture binds to HMONITOR (not IDXGIAdapter), so we can
+        // resolve the output across all adapters; the frame pool keeps
+        // running on the default-adapter manager above.
+        let entries = enumerate_all_outputs()?;
+        let chosen = select_output(&entries, output_index)?;
+        let output_desc: DXGI_OUTPUT_DESC = chosen.desc;
         let display_info = from_dxgi_output_desc(&output_desc);
         let hmonitor_raw = output_desc.Monitor.0 as isize;
         let monitor_size = SizeInt32 {
@@ -286,8 +273,9 @@ impl WgcImageCapture {
         };
 
         log::info!(
-            "[WGC] capture instance created: output_index={}, monitor_size={}x{}",
+            "[WGC] capture instance created: output_index={}, adapter_index={}, monitor_size={}x{}",
             output_index,
+            chosen.adapter_index,
             monitor_size.Width,
             monitor_size.Height
         );
