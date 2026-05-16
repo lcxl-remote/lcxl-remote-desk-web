@@ -1,6 +1,8 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import DeskSession from './desk-session';
 import React from 'react';
 
@@ -179,8 +181,44 @@ describe('DeskSession Control Bar', () => {
     
     // Even if we blur or mouse leave, it should stay expanded because the menu sets the state
     fireEvent.mouseLeave(content!);
-    
+
     // We expect it to still be expanded
     expect(content).toHaveClass('expanded');
+  });
+});
+
+describe('DeskSession Video Sizing', () => {
+  it('keeps the video element using object-contain so it letterboxes inside the wrapper', () => {
+    const { container } = render(<DeskSession />);
+
+    const video = container.querySelector('video.videoElement');
+    expect(video).toBeInTheDocument();
+    // h-full + w-full + object-contain is what makes the video letterbox
+    // instead of overflowing the short axis. Guard against accidental
+    // removal — that regression produced a scrollbar in short viewports.
+    expect(video).toHaveClass('h-full');
+    expect(video).toHaveClass('w-full');
+    expect(video).toHaveClass('object-contain');
+  });
+
+  it('positions .videoWrapper absolutely so its size does not depend on a height: 100% chain', () => {
+    const { container } = render(<DeskSession />);
+
+    const wrapper = container.querySelector('.videoWrapper') as HTMLElement | null;
+    expect(wrapper).not.toBeNull();
+
+    // jsdom does not apply imported CSS to document.styleSheets, so read
+    // the file from disk and assert the rule directly. Catches anyone
+    // reverting .videoWrapper back to height: 100%, which is what allowed
+    // the video's intrinsic ratio to overflow the container.
+    // Vitest cwd is the vite-project root.
+    const cssPath = resolve(process.cwd(), 'src/features/desk/desk-session.css');
+    // Strip /* ... */ block comments so they don't trip the assertions.
+    const css = readFileSync(cssPath, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const wrapperBlock = css.match(/\.videoWrapper\s*{([^}]*)}/);
+    expect(wrapperBlock, '.videoWrapper rule must exist in desk-session.css').toBeTruthy();
+    expect(wrapperBlock![1]).toMatch(/position\s*:\s*absolute/);
+    expect(wrapperBlock![1]).toMatch(/inset\s*:\s*0/);
+    expect(wrapperBlock![1]).not.toMatch(/height\s*:\s*100%/);
   });
 });

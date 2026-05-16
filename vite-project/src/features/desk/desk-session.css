@@ -1,7 +1,10 @@
 .videoWrapper {
-    position: relative;
-    width: 100%;
-    height: 100%;
+    /* Bind size directly to the nearest positioned ancestor (the flex-1
+       black stage) so the video never falls back to its intrinsic ratio
+       when the height: 100% chain fails to resolve — that fallback was
+       what produced a scrollbar in short viewports. */
+    position: absolute;
+    inset: 0;
     background: #000;
     overflow: hidden;
 }
