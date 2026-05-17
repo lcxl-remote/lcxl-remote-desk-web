@@ -5,6 +5,7 @@ pub mod input_dispatcher;
 pub mod media_producer;
 pub mod session;
 pub mod shared_capture;
+pub mod virtual_display;
 pub mod whiteboard_dispatcher;
 
 use crate::model::settings::Args;

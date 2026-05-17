@@ -3,9 +3,13 @@ use crate::{
     model::settings::{Args, Settings, SharedSettings, StartupMode},
     service::signaling::{DeskSession, DeskSessionMessage, DeskSessionSender},
     worker::{
-        clipboard_dispatcher::ClipboardDispatcher, desktop_monitor,
-        file_transfer_dispatcher::FileTransferDispatcher, input_dispatcher::InputDispatcher,
-        media_producer::MediaProducer, whiteboard_dispatcher::WhiteboardDispatcher,
+        clipboard_dispatcher::ClipboardDispatcher,
+        desktop_monitor,
+        file_transfer_dispatcher::FileTransferDispatcher,
+        input_dispatcher::InputDispatcher,
+        media_producer::MediaProducer,
+        virtual_display::{VirtualDisplayState, run_set_mode},
+        whiteboard_dispatcher::WhiteboardDispatcher,
     },
 };
 use actix_web::web;
@@ -16,8 +20,8 @@ use desk_ipc_protocol::{
         ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
         ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
         PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
-        SignalingErrorPayload, TerminalClosedPayload, TerminalStartedPayload, WorkerInitPayload,
-        WorkerToService,
+        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
+        WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -30,6 +34,7 @@ use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use desk_signal_facade::model::system_info::SystemInfo;
 use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{TerminalList, TerminalOutputData};
+use desk_virtual_display::VirtualDisplayController;
 use log::{error, info, warn};
 use std::{
     sync::Arc,
@@ -703,6 +708,14 @@ impl WorkerSession {
 
         info!("DeskSession created successfully, entering main loop");
 
+        // Virtual display: platform controller (Windows IDD impl in
+        // phase 2; NotSupported stub everywhere else) + per-worker
+        // state (attached_display + dual StartMedia cache). Owned by
+        // the main loop so all mutations are single-threaded.
+        let virtual_display_controller: Arc<dyn VirtualDisplayController> =
+            Arc::from(desk_virtual_display::controller_provider());
+        let mut vd_state = VirtualDisplayState::new();
+
         // Reader task: drain the inbound `EventReceiver<ServiceToWorker>`
         // and forward into an unbounded mpsc the main loop selects on. A
         // `None` from `recv()` means the transport closed (peer disconnected
@@ -811,25 +824,34 @@ impl WorkerSession {
                                             payload.video_codec,
                                             payload.fps,
                                         );
+                                        // Virtual display: cache the
+                                        // original (preserves the user's
+                                        // preferred physical capture target
+                                        // across attach/detach cycles) and
+                                        // hand the producer the active
+                                        // payload (which may have
+                                        // video_device overridden to the
+                                        // attached virtual display).
+                                        let active = vd_state.record_start(payload);
                                         // Cut 5: spin up per-connection input
                                         // handlers alongside the encoder so
                                         // mouse / keyboard input is ready as
                                         // soon as the browser opens its DCs.
-                                        input_dispatcher.start_connection(&payload);
+                                        input_dispatcher.start_connection(&active);
                                         // PR 4 cut 1: subscribe the connection
                                         // to clipboard sync; the dispatcher
                                         // starts its polling loop on the first
                                         // active connection.
                                         if let Some(d) = clipboard_dispatcher.as_ref() {
-                                            d.start_connection(&payload).await;
+                                            d.start_connection(&active).await;
                                         }
                                         // PR 4 cut 2: subscribe the connection
                                         // to file transfer commands.
-                                        file_transfer_dispatcher.start_connection(&payload).await;
+                                        file_transfer_dispatcher.start_connection(&active).await;
                                         // PR 4 cut 3: subscribe the connection
                                         // to whiteboard draw commands.
-                                        whiteboard_dispatcher.start_connection(&payload).await;
-                                        producer.start_media(payload);
+                                        whiteboard_dispatcher.start_connection(&active).await;
+                                        producer.start_media(active);
                                     } else {
                                         warn!(
                                             "Worker received StartMedia but media producer is \
@@ -838,6 +860,7 @@ impl WorkerSession {
                                     }
                                 }
                                 ServiceToWorker::StopMedia(payload) => {
+                                    vd_state.record_stop(&payload.connection_id);
                                     if let Some(producer) = media_producer.as_ref() {
                                         producer.stop_media(&payload);
                                     }
@@ -1069,41 +1092,53 @@ impl WorkerSession {
                                         .handle_send_failed(payload)
                                         .await;
                                 }
-                                // Virtual display IPC. Commit 6 wires
-                                // these into the controller + capture
-                                // restart pipeline; for now (commit 4)
-                                // they short-circuit so adding the new
-                                // ServiceToWorker variants in the IPC
-                                // crate does not break the worker
-                                // build. The daemon's
-                                // VirtualDisplaySupervisor (commit 5)
-                                // never actually sends these in phase
-                                // 1, since `is_active()` is always
-                                // false on the stub.
+                                // Virtual display: the daemon owns the
+                                // SwDevice handle; the worker owns
+                                // attached_display tracking + the
+                                // controller (driver pipe + CDS). Phase
+                                // 1 ships a NotSupported stub
+                                // controller so these arms exercise
+                                // the data path against an inert
+                                // backend; phase 2 swaps in the real
+                                // Windows IDD implementation.
                                 ServiceToWorker::SetVirtualDisplayMode(payload) => {
-                                    warn!(
-                                        "SetVirtualDisplayMode received but virtual display \
-                                         worker handling is not wired yet \
-                                         (request_id={}, connection_id={}, {}x{}@{})",
-                                        payload.request_id,
-                                        payload.connection_id,
-                                        payload.width,
-                                        payload.height,
-                                        payload.refresh_hz,
-                                    );
+                                    let controller = Arc::clone(&virtual_display_controller);
+                                    let attached = vd_state.attached_display.clone();
+                                    let response = run_set_mode(controller, attached, payload).await;
+                                    if writer_tx.send(response).is_err() {
+                                        warn!(
+                                            "writer task closed; dropping VirtualDisplayMode \
+                                             response"
+                                        );
+                                    }
                                 }
                                 ServiceToWorker::AttachVirtualDisplay(payload) => {
-                                    warn!(
-                                        "AttachVirtualDisplay received but virtual display \
-                                         worker handling is not wired yet (display={})",
+                                    info!(
+                                        "Worker received AttachVirtualDisplay: display={}",
                                         payload.display_name,
                                     );
+                                    let steps =
+                                        vd_state.rebuild_active_for_attach(Some(payload.display_name));
+                                    if let Some(producer) = media_producer.as_ref() {
+                                        for step in steps {
+                                            producer.stop_media(&StopMediaPayload {
+                                                connection_id: step.connection_id.clone(),
+                                            });
+                                            producer.start_media(step.active);
+                                        }
+                                    }
                                 }
                                 ServiceToWorker::DetachVirtualDisplay => {
-                                    warn!(
-                                        "DetachVirtualDisplay received but virtual display \
-                                         worker handling is not wired yet",
-                                    );
+                                    info!("Worker received DetachVirtualDisplay");
+                                    let steps = vd_state.rebuild_active_for_attach(None);
+                                    if let Some(producer) = media_producer.as_ref() {
+                                        for step in steps {
+                                            producer.stop_media(&StopMediaPayload {
+                                                connection_id: step.connection_id.clone(),
+                                            });
+                                            producer.start_media(step.active);
+                                        }
+                                    }
                                 }
                             }
                         }
