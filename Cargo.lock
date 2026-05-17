@@ -2664,6 +2664,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-virtual-display"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

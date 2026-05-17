@@ -1,0 +1,13 @@
+[package]
+name = "desk-virtual-display"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = { workspace = true }
