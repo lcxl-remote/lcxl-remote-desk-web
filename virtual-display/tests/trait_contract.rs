@@ -4,9 +4,10 @@
 
 use desk_virtual_display::{
     VirtualDisplayController, VirtualDisplayError, VirtualDisplayHandle, VirtualDisplayHandleInner,
-    VirtualDisplayLifecycle, VirtualDisplayMode, controller_provider, lifecycle_provider,
-    validate_mode,
+    VirtualDisplayLifecycle, VirtualDisplayMode, lifecycle_provider, validate_mode,
 };
+#[cfg(not(target_os = "windows"))]
+use desk_virtual_display::controller_provider;
 use std::sync::Mutex;
 
 struct MockHandleInner;
@@ -83,14 +84,16 @@ fn mock_controller_rejects_invalid_mode() {
     ));
 }
 
+/// Non-Windows platforms keep the permanent `unsupported` stub forever
+/// — there is no IDD equivalent off Windows. The factory must return a
+/// provider whose `create` / `set_mode` reject every call with
+/// `NotSupported`. The Windows factory exercises real Win32 calls and
+/// is covered by the `#[ignore]` smoke tests in `windows::tests`.
+#[cfg(not(target_os = "windows"))]
 #[test]
-fn platform_factory_returns_not_supported_in_phase_one() {
-    // Phase 1: every platform factory returns an inert provider whose
-    // create() / set_mode() respond with NotSupported. This guarantees
-    // the protocol skeleton is exercised end-to-end without the real
-    // driver pipeline being live.
+fn platform_factory_returns_not_supported_on_unsupported_platforms() {
     let lc = lifecycle_provider();
-    let err = lc.create().expect_err("phase 1 should not create");
+    let err = lc.create().expect_err("unsupported platform should not create");
     assert!(matches!(err, VirtualDisplayError::NotSupported));
 
     let ctrl = controller_provider();
@@ -101,6 +104,32 @@ fn platform_factory_returns_not_supported_in_phase_one() {
     };
     let err = ctrl
         .set_mode("any", mode)
-        .expect_err("phase 1 should not set mode");
+        .expect_err("unsupported platform should not set mode");
     assert!(matches!(err, VirtualDisplayError::NotSupported));
+}
+
+/// On Windows the factory MUST hand back the real production provider
+/// rather than an inert stub. We can't reach the driver from CI, so we
+/// only verify that the lifecycle attempt fails with `DeviceCreate`
+/// (driver missing) — never with `NotSupported`, which would mean we
+/// regressed to the phase-1 stub.
+#[cfg(target_os = "windows")]
+#[test]
+fn platform_factory_returns_real_windows_provider() {
+    let lc = lifecycle_provider();
+    let err = lc
+        .create()
+        .expect_err("CI host has no lcxl IDD driver installed");
+    assert!(
+        !matches!(err, VirtualDisplayError::NotSupported),
+        "Windows factory regressed to the phase-1 NotSupported stub: {err}"
+    );
+    // The only reasonable error on a stock CI host is DeviceCreate
+    // (driver missing / no driver match). Anything else means the
+    // lifecycle started doing more than it should before the driver
+    // becomes available.
+    assert!(
+        matches!(err, VirtualDisplayError::DeviceCreate(_)),
+        "expected DeviceCreate on driverless host, got: {err}"
+    );
 }
