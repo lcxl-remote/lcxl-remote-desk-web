@@ -23,15 +23,18 @@ use windows::core::{Owned, PCWSTR};
 
 use crate::{VirtualDisplayError, VirtualDisplayHandleInner};
 
-/// Hardware ID published by the lcxl indirect display INF. Production
-/// installs MUST advertise this exact string in their INF, or the OS
-/// will not match a driver and `SwDeviceCreate` reports no-match.
-pub const LCXL_IDD_HARDWARE_ID: &str = "LcxlIddSampleDriver";
+/// Hardware ID published by the lcxl production virtual-display INF
+/// (`enterprise/virtual-display-driver/`). Production installs MUST
+/// advertise this exact string in their INF, or the OS will not match
+/// a driver and `SwDeviceCreate` reports no-match. Deliberately
+/// distinct from the PoC HW ID `LcxlIddSampleDriver` so the two INFs
+/// can coexist on a developer test machine without overlapping.
+pub const LCXL_IDD_HARDWARE_ID: &str = "LcxlVirtualDisplay";
 /// Instance ID requested when materialising the device. Stable across
 /// restarts so the PnP manager can find the same node.
-pub const LCXL_IDD_INSTANCE_ID: &str = "LcxlIddSampleDriver";
+pub const LCXL_IDD_INSTANCE_ID: &str = "LcxlVirtualDisplay";
 /// Friendly description shown by the OS in Device Manager.
-pub const LCXL_IDD_DESCRIPTION: &str = "Lcxl Indirect Display";
+pub const LCXL_IDD_DESCRIPTION: &str = "Lcxl Virtual Display";
 
 /// Maximum time we are willing to wait for the OS to confirm the device
 /// has been installed before giving up. Driver installations on a clean
@@ -368,8 +371,12 @@ mod tests {
     fn hardware_id_constants_match_inf_contract() {
         // The production INF (enterprise/virtual-display-driver/) MUST
         // advertise this exact hardware ID, otherwise SwDeviceCreate
-        // reports no driver match.
-        assert_eq!(LCXL_IDD_HARDWARE_ID, "LcxlIddSampleDriver");
-        assert_eq!(LCXL_IDD_INSTANCE_ID, "LcxlIddSampleDriver");
+        // reports no driver match. Kept deliberately different from
+        // the PoC HW ID (`LcxlIddSampleDriver`, see
+        // pocs/poc-indirect-display/driver/IddSampleDriver.inf) so the
+        // two INFs can coexist on a dev box.
+        assert_eq!(LCXL_IDD_HARDWARE_ID, "LcxlVirtualDisplay");
+        assert_eq!(LCXL_IDD_INSTANCE_ID, "LcxlVirtualDisplay");
+        assert_ne!(LCXL_IDD_HARDWARE_ID, "LcxlIddSampleDriver");
     }
 }
