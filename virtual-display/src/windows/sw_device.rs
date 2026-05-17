@@ -1,11 +1,18 @@
 //! PnP software-device lifecycle for the virtual display.
 //!
 //! Materialises the lcxl IDD as a software device via `SwDeviceCreate`,
-//! waits for the OS to confirm creation, walks `EnumDisplayDevicesW` to
-//! resolve the device instance id to a `\\.\DISPLAYn` GDI name, and
-//! holds the handle so `SwDeviceClose` fires on drop. Modelled on the
-//! PoC at `pocs/poc-indirect-display/src/device.rs`, but trimmed to the
+//! waits for the OS to confirm creation, and holds the handle so
+//! `SwDeviceClose` fires on drop. Modelled on the PoC at
+//! `pocs/poc-indirect-display/src/device.rs`, but trimmed to the
 //! signatures the production trait needs.
+//!
+//! GDI display-name resolution (`\\.\DISPLAYn`) does **not** live here
+//! because `EnumDisplayDevicesW` is thread-desktop-bound and returns an
+//! empty enumeration when called from the LocalSystem service desktop
+//! (Session 0). The daemon hands the PnP instance id to a user-session
+//! worker via IPC; the worker then invokes [`find_display_name`] (via
+//! [`crate::resolve_display_name`]) from inside the interactive desktop
+//! where the GDI walk succeeds.
 
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
@@ -150,9 +157,15 @@ unsafe extern "system" fn creation_callback(
     let _ = unsafe { SetEvent(ctx.event) };
 }
 
-/// Create the virtual display software device and resolve its GDI
-/// display name. The returned [`SwDeviceHandle`] keeps the device alive
-/// for as long as it lives.
+/// Create the virtual display software device and return its PnP
+/// instance id (e.g. `SWD\LcxlVirtualDisplay\LcxlVirtualDisplay`). The
+/// returned [`SwDeviceHandle`] keeps the device alive for as long as it
+/// lives.
+///
+/// This function does **not** resolve the GDI `\\.\DISPLAYn` name —
+/// see the module doc-comment for why. Callers wanting the display
+/// name must invoke [`crate::resolve_display_name`] from inside the
+/// interactive user session.
 pub fn create_virtual_display() -> Result<(SwDeviceHandle, String), VirtualDisplayError> {
     create_virtual_display_with_timeout(DEFAULT_CREATE_TIMEOUT)
 }
@@ -262,15 +275,18 @@ pub fn create_virtual_display_with_timeout(
         final_state.device_instance_id
     );
 
-    // Walk EnumDisplayDevicesW to find the matching `\\.\DISPLAYn` name.
-    let display_name = find_display_name(&final_state.device_instance_id)?;
-
+    // GDI display-name resolution is deferred to the user-session
+    // worker (see module doc-comment for the Session 0 isolation
+    // rationale). The daemon hands the instance id over IPC and the
+    // worker calls `find_display_name` from inside the interactive
+    // desktop.
+    let instance_id = final_state.device_instance_id.clone();
     Ok((
         SwDeviceHandle {
             handle: owned,
             instance_id: final_state.device_instance_id,
         },
-        display_name,
+        instance_id,
     ))
 }
 
@@ -278,11 +294,23 @@ pub fn create_virtual_display_with_timeout(
 /// the freshly-created software device's instance id, returning the
 /// associated `DeviceName` (`\\.\DISPLAYn`).
 ///
-/// Matching strategy: PnP `DeviceID` strings look like
-/// `\\?\ROOT#LCXLIDDSAMPLEDRIVER#0000#{...class GUID...}`; we look for
-/// the hardware-id substring case-insensitively. This avoids being
-/// brittle against PnP id casing/format differences across Windows
-/// versions.
+/// **Caller scope**: must run inside the interactive user session.
+/// `EnumDisplayDevicesW` is thread-desktop-bound and returns an empty
+/// enumeration when called from Session 0 (LocalSystem service desktop)
+/// even when the virtual monitor is in fact registered in the PnP tree.
+/// See the module doc-comment for the chain of evidence.
+///
+/// **Matching strategy**: today this function matches on the
+/// [`LCXL_IDD_HARDWARE_ID`] substring rather than the supplied
+/// `instance_id` argument. The argument is only embedded in the error
+/// message on miss. This is safe under the current "at most one lcxl
+/// virtual display per host" assumption (driven by the fixed
+/// [`LCXL_IDD_INSTANCE_ID`] constant). When multi-virtual-display is
+/// added, this match must be tightened to compare against the supplied
+/// `instance_id` instead, otherwise the wrong `\\.\DISPLAYn` could be
+/// returned. The substring-on-HW-id choice also smooths over PnP id
+/// casing/format differences across Windows versions for the single
+/// virtual display case.
 pub fn find_display_name(instance_id: &str) -> Result<String, VirtualDisplayError> {
     let needle = LCXL_IDD_HARDWARE_ID.to_ascii_uppercase();
     let mut last_seen: Vec<String> = Vec::new();

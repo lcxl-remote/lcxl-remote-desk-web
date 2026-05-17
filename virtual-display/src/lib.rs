@@ -30,8 +30,19 @@ pub trait VirtualDisplayHandleInner: Send + Sync {}
 
 /// Owned reference to a live virtual monitor. The handle keeps the OS
 /// resource alive for as long as it lives.
+///
+/// `instance_id` carries the **PnP device instance id** assigned by the
+/// OS during `SwDeviceCreate` (e.g.
+/// `SWD\LcxlVirtualDisplay\LcxlVirtualDisplay`). It is **not** a GDI
+/// display name (`\\.\DISPLAYn`); the LocalSystem daemon cannot resolve
+/// the instance id locally because `EnumDisplayDevicesW` is
+/// thread-desktop-bound and returns an empty enumeration from Session 0.
+/// The daemon therefore forwards the instance id to a user-session
+/// worker via IPC, and the worker calls [`resolve_display_name`] to
+/// turn it into a GDI display name suitable for
+/// `ChangeDisplaySettingsExW`.
 pub struct VirtualDisplayHandle {
-    pub display_name: String,
+    pub instance_id: String,
     #[allow(dead_code)]
     inner: Box<dyn VirtualDisplayHandleInner>,
 }
@@ -39,9 +50,9 @@ pub struct VirtualDisplayHandle {
 impl VirtualDisplayHandle {
     /// Public constructor so platform implementations (including future
     /// out-of-crate impls) can build a handle.
-    pub fn new(display_name: String, inner: Box<dyn VirtualDisplayHandleInner>) -> Self {
+    pub fn new(instance_id: String, inner: Box<dyn VirtualDisplayHandleInner>) -> Self {
         Self {
-            display_name,
+            instance_id,
             inner,
         }
     }
@@ -50,7 +61,7 @@ impl VirtualDisplayHandle {
 impl std::fmt::Debug for VirtualDisplayHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtualDisplayHandle")
-            .field("display_name", &self.display_name)
+            .field("instance_id", &self.instance_id)
             .finish_non_exhaustive()
     }
 }
@@ -251,6 +262,31 @@ pub fn controller_provider() -> Box<dyn VirtualDisplayController> {
     #[cfg(not(target_os = "windows"))]
     {
         Box::new(unsupported::UnsupportedController)
+    }
+}
+
+/// Resolve the OS-level PnP instance id (e.g.
+/// `SWD\LcxlVirtualDisplay\LcxlVirtualDisplay`) returned by
+/// [`VirtualDisplayLifecycle::create`] to a GDI display name
+/// (`\\.\DISPLAYn`) usable by `ChangeDisplaySettingsExW`.
+///
+/// **Caller scope (Windows)**: must run inside the interactive user
+/// session. `EnumDisplayDevicesW` is thread-desktop-bound and returns
+/// an empty set when called from the LocalSystem service desktop
+/// (Session 0), even when the virtual monitor is in fact registered.
+/// The daemon therefore hands the instance id to its user-session
+/// worker via IPC, and the worker calls this function.
+///
+/// Returns [`VirtualDisplayError::NotSupported`] on non-Windows builds.
+pub fn resolve_display_name(instance_id: &str) -> Result<String, VirtualDisplayError> {
+    #[cfg(target_os = "windows")]
+    {
+        windows::sw_device::find_display_name(instance_id)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = instance_id;
+        Err(VirtualDisplayError::NotSupported)
     }
 }
 
@@ -483,6 +519,17 @@ mod tests {
             resp.data.unwrap()["applied_mode"]["width"],
             serde_json::json!(1024)
         );
+    }
+
+    /// Non-Windows builds keep the permanent stub: a daemon (or test
+    /// harness) calling `resolve_display_name` from Linux / macOS must
+    /// observe `NotSupported`, not a silent empty string or a panic.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn resolve_display_name_returns_not_supported_on_non_windows() {
+        let err = resolve_display_name("SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay")
+            .expect_err("non-Windows must reject");
+        assert!(matches!(err, VirtualDisplayError::NotSupported));
     }
 
     #[test]

@@ -2,8 +2,10 @@
 //!
 //! Layout:
 //! - [`sw_device`] owns the PnP software device lifecycle via
-//!   `SwDeviceCreate` / `SwDeviceClose` and maps the resulting device
-//!   instance id to a GDI display name (`\\.\DISPLAYn`).
+//!   `SwDeviceCreate` / `SwDeviceClose` and exposes
+//!   [`sw_device::find_display_name`] for user-session GDI lookup. The
+//!   public entry point used by callers outside this crate is
+//!   [`crate::resolve_display_name`].
 //! - [`pipe_client`] talks to the C++ UMDF driver over the named pipe
 //!   defined by [`crate::PIPE_NAME`] using the length-prefixed JSON
 //!   protocol declared in [`crate::DriverRequest`] / [`DriverResponse`].
@@ -11,9 +13,12 @@
 //!   `ChangeDisplaySettingsExW`.
 //!
 //! `WindowsLifecycle` is held by the LocalSystem daemon and produces a
-//! [`VirtualDisplayHandle`] keyed by the discovered display name.
-//! `WindowsController` lives in the user-session worker and combines a
-//! driver-pipe write with a CDS commit per `set_mode` call.
+//! [`VirtualDisplayHandle`] keyed by the PnP instance id — **not** the
+//! GDI display name, because `EnumDisplayDevicesW` does not see the
+//! virtual monitor from Session 0. The worker-side `WindowsController`
+//! receives the instance id over IPC, resolves it via
+//! [`crate::resolve_display_name`], and combines a driver-pipe write
+//! with a CDS commit per `set_mode` call.
 
 use crate::{
     VirtualDisplayController, VirtualDisplayError, VirtualDisplayHandle, VirtualDisplayLifecycle,
@@ -40,8 +45,8 @@ impl Default for WindowsLifecycle {
 
 impl VirtualDisplayLifecycle for WindowsLifecycle {
     fn create(&self) -> Result<VirtualDisplayHandle, VirtualDisplayError> {
-        let (handle, display_name) = sw_device::create_virtual_display()?;
-        Ok(VirtualDisplayHandle::new(display_name, Box::new(handle)))
+        let (handle, instance_id) = sw_device::create_virtual_display()?;
+        Ok(VirtualDisplayHandle::new(instance_id, Box::new(handle)))
     }
 }
 
@@ -81,18 +86,30 @@ mod tests {
     /// Smoke test that exercises the full daemon-side `create` path.
     /// Ignored by default because it requires the lcxl IDD driver to be
     /// installed on the host. Run manually with:
-    /// `cargo test -p desk-virtual-display --release -- --ignored windows_lifecycle_create_smoke`
+    /// `cargo test -p desk-virtual-display --release -- --ignored create_virtual_display_returns_instance_id_format`
+    ///
+    /// After the Session-0 fix, the daemon-side path stops at
+    /// SwDeviceCreate and surfaces the **PnP instance id** rather than
+    /// a GDI display name. Asserting on the `SWD\…` prefix guards
+    /// against a regression where someone re-introduces an
+    /// EnumDisplayDevicesW call in the daemon path.
     #[test]
     #[ignore = "requires lcxl IDD driver installed and signed (manual E2E only)"]
-    fn windows_lifecycle_create_smoke() {
+    fn create_virtual_display_returns_instance_id_format() {
         let lifecycle = WindowsLifecycle::new();
         let handle = lifecycle
             .create()
             .expect("SwDeviceCreate should succeed when driver is installed");
         assert!(
-            handle.display_name.starts_with(r"\\.\DISPLAY"),
-            "expected GDI display name, got {:?}",
-            handle.display_name
+            handle.instance_id.starts_with("SWD\\"),
+            "expected PnP instance id (e.g. SWD\\LcxlVirtualDisplay\\…), got {:?}",
+            handle.instance_id
+        );
+        assert!(
+            !handle.instance_id.starts_with(r"\\.\DISPLAY"),
+            "daemon path must not resolve GDI display names \
+             (Session 0 cannot see them); got {:?}",
+            handle.instance_id
         );
         // Drop closes SwDevice; nothing else to assert here.
     }

@@ -20,8 +20,12 @@ struct MockLifecycle {
 impl VirtualDisplayLifecycle for MockLifecycle {
     fn create(&self) -> Result<VirtualDisplayHandle, VirtualDisplayError> {
         *self.calls.lock().unwrap() += 1;
+        // After the Session-0 fix the handle carries a PnP instance id,
+        // not a GDI display name. The mock mirrors the real Windows
+        // format so the assertions in `mock_lifecycle_creates_handle`
+        // remain meaningful as documentation of the post-fix contract.
         Ok(VirtualDisplayHandle::new(
-            "MOCK\\DISPLAY1".into(),
+            "SWD\\MOCK\\MOCK".into(),
             Box::new(MockHandleInner),
         ))
     }
@@ -49,7 +53,7 @@ fn mock_lifecycle_creates_handle() {
         calls: Mutex::new(0),
     };
     let handle = lc.create().expect("create");
-    assert_eq!(handle.display_name, "MOCK\\DISPLAY1");
+    assert_eq!(handle.instance_id, "SWD\\MOCK\\MOCK");
     assert_eq!(*lc.calls.lock().unwrap(), 1);
 }
 
