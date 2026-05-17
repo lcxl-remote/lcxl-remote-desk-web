@@ -261,6 +261,15 @@ pub struct DeskSettings {
     /// rendering artefacts (e.g. transient black bars on animation-heavy
     /// content).
     pub enable_dirty_rect: bool,
+    /// Whether the daemon should create a Windows Indirect Display
+    /// virtual monitor on startup. Service-mode only — ignored in
+    /// default / signaling-only / desk-server-only modes. Defaults
+    /// to `false`. In phase 1 of the virtual display integration
+    /// changing this requires editing the TOML and restarting the
+    /// daemon; the UI toggle path is on a separate roadmap (the
+    /// browser-issued `UpdateDeskSettings` only reaches the worker,
+    /// not the daemon's `VirtualDisplaySupervisor`).
+    pub enable_virtual_display: bool,
 }
 
 impl DeskSettings {
@@ -391,6 +400,7 @@ impl Default for DeskSettings {
             display_name: None,
             wayland_control_mode: None,
             enable_dirty_rect: true,
+            enable_virtual_display: false,
         }
     }
 }
@@ -519,6 +529,7 @@ mod wincode_tests {
             display_name: Some("\\\\.\\DISPLAY2".to_string()),
             wayland_control_mode: Some("portal".to_string()),
             enable_dirty_rect: false,
+            enable_virtual_display: true,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -539,5 +550,36 @@ mod wincode_tests {
         let bytes = wincode::config::serialize(&original, config).expect("encode");
         let back: DeskSettings = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back, original);
+    }
+
+    /// Default must keep `enable_virtual_display` off so an old TOML
+    /// missing the field deserialises to a daemon that does not try to
+    /// create a virtual display. Pin this explicitly.
+    #[test]
+    fn desk_settings_enable_virtual_display_default_false() {
+        let s = DeskSettings::default();
+        assert!(!s.enable_virtual_display);
+    }
+
+    /// Old TOML / JSON written before this field existed must still
+    /// deserialise (struct-level `#[serde(default)]` populates the
+    /// missing field with the type default `false`).
+    #[test]
+    fn desk_settings_enable_virtual_display_absent_in_json_uses_default_false() {
+        let raw = r#"{}"#;
+        let s: DeskSettings = serde_json::from_str(raw).expect("decode");
+        assert!(!s.enable_virtual_display);
+    }
+
+    /// True round-trips through JSON intact.
+    #[test]
+    fn desk_settings_enable_virtual_display_json_roundtrip_true() {
+        let s = DeskSettings {
+            enable_virtual_display: true,
+            ..DeskSettings::default()
+        };
+        let json = serde_json::to_string(&s).expect("encode");
+        let back: DeskSettings = serde_json::from_str(&json).expect("decode");
+        assert!(back.enable_virtual_display);
     }
 }

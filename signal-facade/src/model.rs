@@ -11,4 +11,5 @@ pub mod system_info;
 pub mod system_settings;
 pub mod terminal;
 pub mod version;
+pub mod virtual_display;
 pub mod whiteboard;
