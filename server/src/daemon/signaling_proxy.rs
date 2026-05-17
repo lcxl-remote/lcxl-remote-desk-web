@@ -1,5 +1,6 @@
 use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouterContext};
+use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
@@ -23,6 +24,7 @@ pub async fn run_signaling_proxy(
     host_control_hub: Arc<HostControlHub>,
     mut worker_rx: WorkerMessageReceiver,
     pc_registry: PcRegistry,
+    virtual_display: Option<Arc<VirtualDisplaySupervisor>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
 
@@ -40,10 +42,11 @@ pub async fn run_signaling_proxy(
         settings: settings.clone(),
         host_control_hub: host_control_hub.clone(),
         worker_mgr: worker_mgr.clone(),
-        // Commit 5 wires the supervisor in for service-daemon mode.
-        // Until then the router replies with FEATURE_UNAVAILABLE for
-        // every inbound ChangeDisplaySettings.
-        virtual_display: None,
+        // Some(...) only in service-daemon mode; in-process and
+        // desk-server modes leave this None so the router replies
+        // with FEATURE_UNAVAILABLE for every inbound
+        // ChangeDisplaySettings.
+        virtual_display: virtual_display.clone(),
     };
 
     let local_handle = {
@@ -191,6 +194,15 @@ pub async fn run_signaling_proxy(
                 // place. For the very first Capabilities (no PCs yet,
                 // no cached offers) this is a no-op.
                 pc_registry.resume_active_media(&worker_mgr).await;
+                // Virtual display reattach: tell the supervisor a
+                // worker is alive, so a freshly-spawned worker that
+                // arrives mid-session gets AttachVirtualDisplay
+                // without polling. The supervisor decides whether
+                // to actually send (no-op unless Attaching /
+                // Attached).
+                if let Some(supervisor) = virtual_display.as_ref() {
+                    supervisor.on_worker_capabilities().await;
+                }
             }
             // Worker-emitted typed error response. Catches every
             // `service::signaling::DeskSession::send_error` call (terminal

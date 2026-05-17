@@ -529,6 +529,25 @@ impl WorkerManager {
         self.worker_capabilities.lock().unwrap().clone()
     }
 
+    /// Test-only: install an `ipc_tx` so `send_to_worker` has a
+    /// destination without going through `start_worker` /
+    /// `start_inprocess_worker`. Used by routing tests that need to
+    /// observe the IPC the daemon sends without standing up a real
+    /// worker process.
+    #[cfg(test)]
+    pub async fn install_active_for_test(&self, ipc_tx: mpsc::UnboundedSender<ServiceToWorker>) {
+        let mut inner = self.inner.lock().await;
+        inner.active_worker = Some(WorkerHandle {
+            pipe_name: "test".to_string(),
+            ipc_tx,
+            process_handle: None,
+            last_heartbeat_at: Instant::now(),
+            session_id: 0,
+            desktop_name: None,
+            file_sender_tx: Arc::new(RwLock::new(None)),
+        });
+    }
+
     pub async fn send_to_worker(&self, msg: ServiceToWorker) -> Result<(), String> {
         let inner = self.inner.lock().await;
         if let Some(worker) = &inner.active_worker {

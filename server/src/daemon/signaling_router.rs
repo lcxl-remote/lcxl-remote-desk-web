@@ -1481,7 +1481,9 @@ mod tests {
     #[tokio::test]
     async fn route_returns_error_when_toggle_off() {
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new()));
+        ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
+            ctx.worker_mgr.clone(),
+        )));
         // settings.desk.enable_virtual_display defaults to false.
         let model = make_change_display_settings_model(
             "req-2",
@@ -1509,7 +1511,9 @@ mod tests {
     #[tokio::test]
     async fn route_returns_error_when_supervisor_inactive() {
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new()));
+        ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
+            ctx.worker_mgr.clone(),
+        )));
         ctx.settings.write().await.desk.enable_virtual_display = true;
         let model = make_change_display_settings_model(
             "req-3",
@@ -1529,11 +1533,158 @@ mod tests {
         );
     }
 
-    // Routing tests that require an *active* supervisor (the
-    // `Attached` state lands in commit 5) — INVALID_PARAMS payload
-    // path, INVALID_PARAMS validate_mode path, REMOTE_DESK_OFFLINE
-    // worker-send path, and the success-dispatch path — are added
-    // alongside the state machine in commit 5 so they can drive a
-    // genuinely live supervisor instead of asserting on the same
-    // FEATURE_UNAVAILABLE trapdoor.
+    /// Build a router context with an *active* supervisor
+    /// (`Attached` state). Used by the validation / dispatch tests
+    /// below — they need to push past the FEATURE_UNAVAILABLE gates.
+    fn make_ctx_with_active_supervisor() -> (RouterContext, broadcast::Receiver<String>) {
+        let (mut ctx, rx) = make_ctx_with_rx();
+        let supervisor = VirtualDisplaySupervisor::new_attached_for_test(
+            ctx.worker_mgr.clone(),
+            "MOCK\\DISPLAY1",
+        );
+        ctx.virtual_display = Some(Arc::new(supervisor));
+        (ctx, rx)
+    }
+
+    /// Validation arm: width below the minimum dimension. Active
+    /// supervisor lets the request through the gates; validate_mode
+    /// fails inside the handler → INVALID_PARAMS.
+    #[tokio::test]
+    async fn route_returns_error_on_invalid_mode() {
+        let (ctx, mut rx) = make_ctx_with_active_supervisor();
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        let model = make_change_display_settings_model(
+            "req-invalid-mode",
+            ChangeDisplaySettingsPayload {
+                width: 100,
+                height: 100,
+                refresh_hz: 60,
+            },
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+        let resp = read_response(&mut rx);
+        let state = resp.response_state.expect("error response missing state");
+        assert_eq!(state.error_code, DeskErrorCode::INVALID_PARAMS.code());
+        assert!(
+            state
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("invalid mode:"),
+            "expected 'invalid mode:' prefix, got {:?}",
+            state.message
+        );
+    }
+
+    /// Payload parse arm: width sent as a string instead of int.
+    /// Active supervisor lets the request through the gates; serde
+    /// parse fails → INVALID_PARAMS.
+    #[tokio::test]
+    async fn route_returns_error_on_payload_parse_fail() {
+        let (ctx, mut rx) = make_ctx_with_active_supervisor();
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        let model = SignalingModel::new(
+            "req-bad-payload",
+            SignalingType::ChangeDisplaySettings,
+            Some("conn-1".to_string()),
+            None,
+            Some(serde_json::json!({"width": "not an int"})),
+            None,
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+        let resp = read_response(&mut rx);
+        let state = resp.response_state.expect("error response missing state");
+        assert_eq!(state.error_code, DeskErrorCode::INVALID_PARAMS.code());
+        assert!(
+            state
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("bad ChangeDisplaySettings payload"),
+            "expected 'bad ChangeDisplaySettings payload' prefix, got {:?}",
+            state.message
+        );
+    }
+
+    /// Worker-unavailable arm: validate_mode passes; worker_mgr's
+    /// send_to_worker fails because no worker is registered →
+    /// REMOTE_DESK_OFFLINE.
+    #[tokio::test]
+    async fn route_returns_error_when_worker_unavailable() {
+        let (ctx, mut rx) = make_ctx_with_active_supervisor();
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        let model = make_change_display_settings_model(
+            "req-no-worker",
+            ChangeDisplaySettingsPayload {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+            },
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+        let resp = read_response(&mut rx);
+        let state = resp.response_state.expect("error response missing state");
+        assert_eq!(state.error_code, DeskErrorCode::REMOTE_DESK_OFFLINE.code());
+        assert!(
+            state
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("worker unavailable:"),
+            "expected 'worker unavailable:' prefix, got {:?}",
+            state.message
+        );
+    }
+
+    /// Successful dispatch — supervisor active, toggle on, payload
+    /// valid, worker reachable. The router emits no error response
+    /// (the worker's `WorkerToService::VirtualDisplayMode` will fan
+    /// out the real reply, but that path is wired in commit 7). The
+    /// test asserts on the classifier + that no error is emitted to
+    /// outbound_tx.
+    #[tokio::test]
+    async fn route_dispatches_set_virtual_display_mode_with_valid_input() {
+        // Build a router context wired to a live worker so
+        // send_to_worker reports success rather than "No active
+        // worker". We re-implement parts of make_ctx_with_rx to
+        // attach a worker.
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        // Live worker: hook a fake IPC sender into WorkerManager so
+        // send_to_worker has a destination. The minimal version is
+        // to start an in-process worker via a paired transport pair.
+        let (worker_tx, mut worker_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        ctx.worker_mgr.install_active_for_test(worker_tx).await;
+        ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            ctx.worker_mgr.clone(),
+            "MOCK\\DISPLAY1",
+        )));
+        let model = make_change_display_settings_model(
+            "req-success",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            },
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+        // No error response should land on outbound_tx.
+        assert!(
+            rx.try_recv().is_err(),
+            "successful dispatch must not emit an error response on outbound_tx"
+        );
+        // The worker must see the typed IPC.
+        let sent = worker_rx
+            .try_recv()
+            .expect("worker must have received SetVirtualDisplayMode IPC");
+        match sent {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.request_id, "req-success");
+                assert_eq!(p.width, 1920);
+                assert_eq!(p.height, 1080);
+                assert_eq!(p.refresh_hz, 60);
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
+    }
 }

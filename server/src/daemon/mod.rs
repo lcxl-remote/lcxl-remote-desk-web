@@ -168,11 +168,32 @@ pub async fn run_service_daemon_inner(
         })
     };
 
+    // Service-daemon mode only: construct the virtual display
+    // supervisor, hand it to the router (via signaling_proxy) so
+    // inbound ChangeDisplaySettings sees an Active state when the
+    // toggle is on and the provider succeeded. Phase 1 ships the
+    // stub provider, so create() returns NotSupported and the
+    // supervisor stays Disabled — the routing path is exercised
+    // end-to-end, the feature itself is dormant.
+    let virtual_display_supervisor = {
+        let provider = desk_virtual_display::lifecycle_provider();
+        let supervisor = virtual_display::new_arc(provider, worker_mgr.clone());
+        let desired = shared_settings.read().await.desk.enable_virtual_display;
+        if let Err(e) = supervisor.apply(desired).await {
+            warn!(
+                "VirtualDisplaySupervisor.apply({desired}) failed at daemon startup: {e}; \
+                 continuing without virtual display support",
+            );
+        }
+        Some(supervisor)
+    };
+
     let proxy_handle = {
         let settings = shared_settings_data.clone();
         let worker_mgr = worker_mgr.clone();
         let host_control_hub = Arc::clone(&host_control_hub);
         let pc_registry = pc_registry.clone();
+        let virtual_display = virtual_display_supervisor.clone();
         actix_web::rt::spawn(async move {
             if let Err(e) = signaling_proxy::run_signaling_proxy(
                 settings,
@@ -180,6 +201,7 @@ pub async fn run_service_daemon_inner(
                 host_control_hub,
                 worker_rx,
                 pc_registry,
+                virtual_display,
             )
             .await
             {
@@ -207,6 +229,9 @@ pub async fn run_service_daemon_inner(
     }
     info!("ServiceDaemon shutting down…");
 
+    if let Some(supervisor) = virtual_display_supervisor.as_ref() {
+        supervisor.shutdown().await;
+    }
     worker_mgr.shutdown_all().await;
     monitor_handle.abort();
     proxy_handle.abort();
@@ -292,6 +317,8 @@ pub async fn start_inprocess_daemon(
     let proxy_settings = settings.clone();
     let proxy_hub = Arc::clone(&host_control_hub);
     let proxy_registry = pc_registry.clone();
+    // In-process mode never owns a virtual display supervisor — the
+    // router replies with FEATURE_UNAVAILABLE for ChangeDisplaySettings.
     actix_web::rt::spawn(async move {
         if let Err(e) = signaling_proxy::run_signaling_proxy(
             proxy_settings,
@@ -299,6 +326,7 @@ pub async fn start_inprocess_daemon(
             proxy_hub,
             worker_rx,
             proxy_registry,
+            None,
         )
         .await
         {
