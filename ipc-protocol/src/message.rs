@@ -162,6 +162,25 @@ pub enum ServiceToWorker {
     /// it on the file pipe would deadlock when the file lane is what's
     /// already saturated.
     FileTransferSendFailed(FileTransferSendFailedPayload),
+
+    // ---------- Arch IV virtual display (event pipe) ----------
+    /// Daemon → worker: apply a new mode to the virtual monitor. Worker
+    /// pushes the mode through the driver named-pipe and then calls
+    /// `ChangeDisplaySettingsExW` on the attached `\\.\DISPLAYn`. Reply
+    /// travels back via [`WorkerToService::VirtualDisplayMode`].
+    SetVirtualDisplayMode(SetVirtualDisplayModePayload),
+
+    /// Daemon → worker: a virtual display is live; rebuild any active
+    /// capture pipeline so it targets the virtual monitor. Re-sent every
+    /// time the daemon sees a worker [`WorkerToService::Capabilities`]
+    /// while the supervisor is in the `Attached` state, so a freshly
+    /// reattached worker recovers without polling.
+    AttachVirtualDisplay(AttachVirtualDisplayPayload),
+
+    /// Daemon → worker: the virtual display has gone away. Rebuild any
+    /// active capture pipeline against the user's original physical-
+    /// display target.
+    DetachVirtualDisplay,
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -282,6 +301,16 @@ pub enum WorkerToService {
     /// [`TerminalList`] (available shells + the configured default
     /// index).
     ListTerminalResponse(ListTerminalResponsePayload),
+
+    // ---------- Arch IV virtual display (event pipe) ----------
+    /// Worker → daemon reply to
+    /// [`ServiceToWorker::SetVirtualDisplayMode`]. `outcome` carries
+    /// either the mode the driver actually applied (which may have been
+    /// snapped to the nearest supported configuration) or the error
+    /// string from the user-mode controller. The daemon's outbound
+    /// classifier maps this to a `SignalingType::ChangeDisplaySettings`
+    /// response (Applied) or `SignalingModel::error(...)` (Failed).
+    VirtualDisplayMode(VirtualDisplayModeResponsePayload),
 }
 
 // ==================== Payload Types ====================
@@ -922,6 +951,64 @@ pub struct DesktopChangedPayload {
     /// "Screen-saver". The daemon launches the next worker with this name as
     /// the `lpDesktop` argument to `CreateProcessAsUserW`.
     pub name: String,
+}
+
+// ============= Arch IV: virtual display IPC payloads =============
+
+/// Payload for [`ServiceToWorker::SetVirtualDisplayMode`]. The browser
+/// sends a `SignalingType::ChangeDisplaySettings`; the daemon validates
+/// it (`desk_virtual_display::validate_mode`) and forwards it here. The
+/// worker calls `VirtualDisplayController::set_mode` (driver pipe + CDS).
+/// `request_id` correlates with [`WorkerToService::VirtualDisplayMode`].
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct SetVirtualDisplayModePayload {
+    pub request_id: String,
+    pub connection_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: u32,
+}
+
+/// Payload for [`ServiceToWorker::AttachVirtualDisplay`]. The daemon
+/// holds the `SwDevice` handle; it tells the worker which Windows
+/// display device name (`\\.\DISPLAYn`) the virtual monitor is mapped
+/// to so the worker can switch its capture target.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct AttachVirtualDisplayPayload {
+    pub display_name: String,
+}
+
+/// Wire form of `desk_virtual_display::VirtualDisplayMode`. Duplicated
+/// here intentionally so `desk-ipc-protocol` does not need a reverse
+/// dependency onto `desk-virtual-display`.
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq, Hash,
+)]
+pub struct VirtualDisplayModeData {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: u32,
+}
+
+/// Result of a worker-side `set_mode`. The IDD driver is free to snap
+/// the requested mode to the nearest supported configuration, so
+/// `Applied` carries what actually took effect, not what was requested.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+#[serde(tag = "status", content = "data")]
+pub enum VirtualDisplayModeOutcome {
+    Applied(VirtualDisplayModeData),
+    Failed(String),
+}
+
+/// Payload for [`WorkerToService::VirtualDisplayMode`]. Correlates with
+/// the originating [`ServiceToWorker::SetVirtualDisplayMode`] via
+/// `request_id` so the daemon's outbound classifier can wire it back to
+/// the matching browser signaling websocket.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct VirtualDisplayModeResponsePayload {
+    pub request_id: String,
+    pub connection_id: String,
+    pub outcome: VirtualDisplayModeOutcome,
 }
 
 #[cfg(test)]
@@ -2090,6 +2177,17 @@ mod tests {
                 kind: FileTransferSendErrorKind::PacketTooLarge,
                 error: "outbound packet too large".to_string(),
             }),
+            ServiceToWorker::SetVirtualDisplayMode(SetVirtualDisplayModePayload {
+                request_id: "r8".to_string(),
+                connection_id: "c".to_string(),
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            }),
+            ServiceToWorker::AttachVirtualDisplay(AttachVirtualDisplayPayload {
+                display_name: "\\\\.\\DISPLAY3".to_string(),
+            }),
+            ServiceToWorker::DetachVirtualDisplay,
         ];
         for case in &cases {
             let decoded = wincode_round_trip(case);
@@ -2195,6 +2293,15 @@ mod tests {
                     current: 0,
                 },
             }),
+            WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+                request_id: "r".to_string(),
+                connection_id: "c".to_string(),
+                outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                }),
+            }),
         ];
         for case in &cases {
             let decoded = wincode_round_trip(case);
@@ -2276,6 +2383,139 @@ mod tests {
                 }
                 other => panic!("unexpected: {other:?}"),
             }
+        }
+    }
+
+    // ============== Virtual display variants ==============
+
+    #[test]
+    fn set_virtual_display_mode_round_trips_wincode() {
+        let msg = ServiceToWorker::SetVirtualDisplayMode(SetVirtualDisplayModePayload {
+            request_id: "req-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            width: 2560,
+            height: 1440,
+            refresh_hz: 144,
+        });
+        match wincode_round_trip(&msg) {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.request_id, "req-1");
+                assert_eq!(p.connection_id, "conn-1");
+                assert_eq!(p.width, 2560);
+                assert_eq!(p.height, 1440);
+                assert_eq!(p.refresh_hz, 144);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_virtual_display_mode_round_trips_serde_json() {
+        let msg = ServiceToWorker::SetVirtualDisplayMode(SetVirtualDisplayModePayload {
+            request_id: "req-1".to_string(),
+            connection_id: "conn-1".to_string(),
+            width: 1280,
+            height: 720,
+            refresh_hz: 60,
+        });
+        let json = serde_json::to_string(&msg).expect("encode");
+        let back: ServiceToWorker = serde_json::from_str(&json).expect("decode");
+        match back {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.width, 1280);
+                assert_eq!(p.height, 720);
+                assert_eq!(p.refresh_hz, 60);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_virtual_display_round_trips_wincode() {
+        let msg = ServiceToWorker::AttachVirtualDisplay(AttachVirtualDisplayPayload {
+            display_name: "\\\\.\\DISPLAY3".to_string(),
+        });
+        match wincode_round_trip(&msg) {
+            ServiceToWorker::AttachVirtualDisplay(p) => {
+                assert_eq!(p.display_name, "\\\\.\\DISPLAY3");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_virtual_display_round_trips_serde_json() {
+        let msg = ServiceToWorker::AttachVirtualDisplay(AttachVirtualDisplayPayload {
+            display_name: "\\\\.\\DISPLAY3".to_string(),
+        });
+        let json = serde_json::to_string(&msg).expect("encode");
+        let back: ServiceToWorker = serde_json::from_str(&json).expect("decode");
+        match back {
+            ServiceToWorker::AttachVirtualDisplay(p) => {
+                assert_eq!(p.display_name, "\\\\.\\DISPLAY3");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detach_virtual_display_round_trips_wincode() {
+        let msg = ServiceToWorker::DetachVirtualDisplay;
+        let back = wincode_round_trip(&msg);
+        assert!(matches!(back, ServiceToWorker::DetachVirtualDisplay));
+    }
+
+    #[test]
+    fn detach_virtual_display_round_trips_serde_json() {
+        let msg = ServiceToWorker::DetachVirtualDisplay;
+        let json = serde_json::to_string(&msg).expect("encode");
+        let back: ServiceToWorker = serde_json::from_str(&json).expect("decode");
+        assert!(matches!(back, ServiceToWorker::DetachVirtualDisplay));
+    }
+
+    #[test]
+    fn virtual_display_mode_response_applied_round_trips_wincode() {
+        let msg = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+            request_id: "req-9".to_string(),
+            connection_id: "conn-9".to_string(),
+            outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            }),
+        });
+        match wincode_round_trip(&msg) {
+            WorkerToService::VirtualDisplayMode(p) => {
+                assert_eq!(p.request_id, "req-9");
+                assert_eq!(p.connection_id, "conn-9");
+                match p.outcome {
+                    VirtualDisplayModeOutcome::Applied(m) => {
+                        assert_eq!(m.width, 1920);
+                        assert_eq!(m.height, 1080);
+                        assert_eq!(m.refresh_hz, 60);
+                    }
+                    other => panic!("unexpected outcome: {other:?}"),
+                }
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn virtual_display_mode_response_failed_round_trips_wincode() {
+        let msg = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+            request_id: "req-10".to_string(),
+            connection_id: "conn-10".to_string(),
+            outcome: VirtualDisplayModeOutcome::Failed("driver pipe IO failed".to_string()),
+        });
+        match wincode_round_trip(&msg) {
+            WorkerToService::VirtualDisplayMode(p) => match p.outcome {
+                VirtualDisplayModeOutcome::Failed(reason) => {
+                    assert_eq!(reason, "driver pipe IO failed");
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            },
+            other => panic!("unexpected: {other:?}"),
         }
     }
 }
