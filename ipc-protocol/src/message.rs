@@ -311,6 +311,19 @@ pub enum WorkerToService {
     /// classifier maps this to a `SignalingType::ChangeDisplaySettings`
     /// response (Applied) or `SignalingModel::error(...)` (Failed).
     VirtualDisplayMode(VirtualDisplayModeResponsePayload),
+
+    /// Worker → daemon reply to
+    /// [`ServiceToWorker::AttachVirtualDisplay`]. The daemon stops at
+    /// `SwDeviceCreate` (Session 0 cannot enumerate displays) and
+    /// hands the PnP instance id to the worker; the worker resolves
+    /// it to a GDI `\\.\DISPLAYn` inside the user session and reports
+    /// the outcome back here. The daemon's supervisor uses this
+    /// message — and **only** this message — to promote its state
+    /// machine from `Attaching` to `Attached`. There is no
+    /// browser-facing surface for this reply; attach failure is
+    /// reflected to the browser indirectly via `is_active()` →
+    /// `FEATURE_UNAVAILABLE` on subsequent `ChangeDisplaySettings`.
+    VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload),
 }
 
 // ==================== Payload Types ====================
@@ -970,12 +983,17 @@ pub struct SetVirtualDisplayModePayload {
 }
 
 /// Payload for [`ServiceToWorker::AttachVirtualDisplay`]. The daemon
-/// holds the `SwDevice` handle; it tells the worker which Windows
-/// display device name (`\\.\DISPLAYn`) the virtual monitor is mapped
-/// to so the worker can switch its capture target.
+/// holds the `SwDevice` handle and forwards the OS-assigned PnP
+/// instance id (e.g. `SWD\LcxlVirtualDisplay\LcxlVirtualDisplay`) the
+/// IDD monitor was assigned. The worker resolves the instance id to a
+/// GDI `\\.\DISPLAYn` from inside the user session (where
+/// `EnumDisplayDevicesW` actually sees the virtual monitor) and replies
+/// with [`WorkerToService::VirtualDisplayAttachResult`]. The daemon
+/// cannot resolve the display name itself because Session 0 (the
+/// LocalSystem service desktop) does not see any GDI displays.
 #[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
 pub struct AttachVirtualDisplayPayload {
-    pub display_name: String,
+    pub instance_id: String,
 }
 
 /// Wire form of `desk_virtual_display::VirtualDisplayMode`. Duplicated
@@ -1009,6 +1027,37 @@ pub struct VirtualDisplayModeResponsePayload {
     pub request_id: String,
     pub connection_id: String,
     pub outcome: VirtualDisplayModeOutcome,
+}
+
+/// Result of the worker resolving a PnP instance id (forwarded from the
+/// daemon via [`ServiceToWorker::AttachVirtualDisplay`]) into a usable
+/// GDI display name. Modelled as an explicit two-variant enum so the
+/// wincode / serde wire shapes match the rest of `message.rs` rather
+/// than the ad-hoc `Result<T, E>` envelope.
+///
+/// - `Attached(display_name)` — `display_name` is the GDI
+///   `\\.\DISPLAYn` form the worker captured against.
+/// - `Failed(message)` — exhaustive worker-side retries did not turn
+///   up a GDI device matching the instance id (e.g. the driver
+///   crashed, PnP node disappeared, or `EnumDisplayDevicesW` raced
+///   with the IDD monitor arrival window).
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+#[serde(tag = "status", content = "data")]
+pub enum VirtualDisplayAttachOutcome {
+    Attached(String),
+    Failed(String),
+}
+
+/// Payload for [`WorkerToService::VirtualDisplayAttachResult`]. The
+/// `instance_id` field correlates the reply with a specific
+/// `SwDeviceCreate` round so the supervisor can drop stale replies
+/// that arrive after the daemon has re-created the underlying handle
+/// (i.e. after a daemon restart, where the PnP id is identical but the
+/// in-memory supervisor state is fresh).
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct VirtualDisplayAttachResultPayload {
+    pub instance_id: String,
+    pub outcome: VirtualDisplayAttachOutcome,
 }
 
 #[cfg(test)]
@@ -2185,7 +2234,7 @@ mod tests {
                 refresh_hz: 60,
             }),
             ServiceToWorker::AttachVirtualDisplay(AttachVirtualDisplayPayload {
-                display_name: "\\\\.\\DISPLAY3".to_string(),
+                instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
             }),
             ServiceToWorker::DetachVirtualDisplay,
         ];
@@ -2301,6 +2350,10 @@ mod tests {
                     height: 1080,
                     refresh_hz: 60,
                 }),
+            }),
+            WorkerToService::VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload {
+                instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
+                outcome: VirtualDisplayAttachOutcome::Attached("\\\\.\\DISPLAY4".to_string()),
             }),
         ];
         for case in &cases {
@@ -2433,11 +2486,11 @@ mod tests {
     #[test]
     fn attach_virtual_display_round_trips_wincode() {
         let msg = ServiceToWorker::AttachVirtualDisplay(AttachVirtualDisplayPayload {
-            display_name: "\\\\.\\DISPLAY3".to_string(),
+            instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
         });
         match wincode_round_trip(&msg) {
             ServiceToWorker::AttachVirtualDisplay(p) => {
-                assert_eq!(p.display_name, "\\\\.\\DISPLAY3");
+                assert_eq!(p.instance_id, "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay");
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -2446,15 +2499,90 @@ mod tests {
     #[test]
     fn attach_virtual_display_round_trips_serde_json() {
         let msg = ServiceToWorker::AttachVirtualDisplay(AttachVirtualDisplayPayload {
-            display_name: "\\\\.\\DISPLAY3".to_string(),
+            instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
         });
         let json = serde_json::to_string(&msg).expect("encode");
         let back: ServiceToWorker = serde_json::from_str(&json).expect("decode");
         match back {
             ServiceToWorker::AttachVirtualDisplay(p) => {
-                assert_eq!(p.display_name, "\\\\.\\DISPLAY3");
+                assert_eq!(p.instance_id, "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay");
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn virtual_display_attach_outcome_attached_wincode_roundtrip() {
+        let original = WorkerToService::VirtualDisplayAttachResult(
+            VirtualDisplayAttachResultPayload {
+                instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
+                outcome: VirtualDisplayAttachOutcome::Attached("\\\\.\\DISPLAY4".to_string()),
+            },
+        );
+        match wincode_round_trip(&original) {
+            WorkerToService::VirtualDisplayAttachResult(p) => {
+                assert_eq!(p.instance_id, "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay");
+                assert_eq!(
+                    p.outcome,
+                    VirtualDisplayAttachOutcome::Attached("\\\\.\\DISPLAY4".to_string()),
+                );
+            }
+            other => panic!("unexpected variant after wincode round-trip: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn virtual_display_attach_outcome_failed_wincode_roundtrip() {
+        let original = WorkerToService::VirtualDisplayAttachResult(
+            VirtualDisplayAttachResultPayload {
+                instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
+                outcome: VirtualDisplayAttachOutcome::Failed(
+                    "find_display_name: seen=[] after 6 retries".to_string(),
+                ),
+            },
+        );
+        match wincode_round_trip(&original) {
+            WorkerToService::VirtualDisplayAttachResult(p) => {
+                assert_eq!(p.instance_id, "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay");
+                assert!(
+                    matches!(p.outcome, VirtualDisplayAttachOutcome::Failed(ref msg) if msg.contains("seen=[]")),
+                    "expected Failed with diagnostic message, got {:?}",
+                    p.outcome
+                );
+            }
+            other => panic!("unexpected variant after wincode round-trip: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worker_to_service_virtual_display_attach_result_serde_attached_and_failed() {
+        // serde JSON is the on-wire form used by anything that bridges
+        // the wincode IPC frames out to text (e.g. log diagnostics or
+        // future REST-shaped tooling). Cover both Attached + Failed
+        // variants so a future enum tweak (renaming, changing tag
+        // attributes) gets flagged here.
+        for case in [
+            WorkerToService::VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload {
+                instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
+                outcome: VirtualDisplayAttachOutcome::Attached("\\\\.\\DISPLAY4".to_string()),
+            }),
+            WorkerToService::VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload {
+                instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
+                outcome: VirtualDisplayAttachOutcome::Failed("driver pipe IO failed".to_string()),
+            }),
+        ] {
+            let json = serde_json::to_string(&case).expect("encode");
+            let back: WorkerToService = serde_json::from_str(&json).expect("decode");
+            match (case, back) {
+                (
+                    WorkerToService::VirtualDisplayAttachResult(a),
+                    WorkerToService::VirtualDisplayAttachResult(b),
+                ) => {
+                    assert_eq!(a.instance_id, b.instance_id);
+                    assert_eq!(a.outcome, b.outcome);
+                }
+                (a, b) => panic!("round-trip variant drift: {a:?} -> {b:?}"),
+            }
         }
     }
 
