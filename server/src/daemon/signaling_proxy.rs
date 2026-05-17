@@ -6,11 +6,15 @@ use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
 use awc::{Client, Connector};
-use desk_ipc_protocol::message::{ERROR_CODE_MEDIA_TRANSPORT_STUCK, WorkerToService};
+use desk_ipc_protocol::message::{
+    ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
+};
 use desk_signal_facade::model::{
     signal::{RemoteDeskTypeEnum, SignalingModel, SignalingResponseState, SignalingType},
     version::VersionInfo,
+    virtual_display::ChangeDisplaySettingsPayload,
 };
+use desk_utils::error::DeskErrorCode;
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
 use rustls::{ClientConfig, RootCertStore};
@@ -487,17 +491,30 @@ pub async fn run_signaling_proxy(
                     Some(&payload.terminals),
                 );
             }
-            // Commit 7 ferries the response back to the browser as
-            // SignalingType::ChangeDisplaySettings (Applied) or
-            // SignalingModel::error (Failed). Phase 1 supervisors
-            // never emit this payload (Attached is unreachable),
-            // but the arm is kept here to make the enum exhaustive.
+            // Virtual display response: rebuild the matching outbound
+            // ChangeDisplaySettings model and write it onto the
+            // browser's signaling WS. Applied -> success response with
+            // the mode the driver actually applied (may have been
+            // snapped). Failed -> SignalingModel::error with
+            // INVALID_STATE + the controller's error message.
             WorkerToService::VirtualDisplayMode(payload) => {
-                warn!(
-                    "[SignalingProxy] VirtualDisplayMode response routing is not wired yet \
-                     (request_id={}, connection_id={}, outcome={:?})",
-                    payload.request_id, payload.connection_id, payload.outcome,
-                );
+                let connection_id_debug = payload.connection_id.clone();
+                let request_id_debug = payload.request_id.clone();
+                match build_virtual_display_response(payload) {
+                    Ok(model) => match serde_json::to_string(&model) {
+                        Ok(text) => {
+                            let _ = outbound_tx.send(text);
+                        }
+                        Err(e) => warn!(
+                            "[SignalingProxy] Failed to serialise VirtualDisplayMode response \
+                             for {connection_id_debug} (request_id={request_id_debug}): {e}"
+                        ),
+                    },
+                    Err(e) => warn!(
+                        "[SignalingProxy] Failed to build VirtualDisplayMode response model \
+                         for {connection_id_debug} (request_id={request_id_debug}): {e}"
+                    ),
+                }
             }
         }
     }
@@ -508,6 +525,45 @@ pub async fn run_signaling_proxy(
 
     info!("Signaling proxy stopped");
     Ok(())
+}
+
+/// Helper: build the outbound `SignalingModel` for a
+/// `WorkerToService::VirtualDisplayMode` response. Applied →
+/// success response carrying the mode the driver actually applied
+/// (which may have been snapped to a nearby supported configuration);
+/// Failed → `SignalingModel::error(INVALID_STATE, reason)`.
+///
+/// Kept as a free function so the routing logic can be unit-tested
+/// without spinning up a signaling-proxy task. The call site in the
+/// proxy loop only deals with the serialisation + outbound broadcast.
+fn build_virtual_display_response(
+    payload: desk_ipc_protocol::message::VirtualDisplayModeResponsePayload,
+) -> Result<SignalingModel, desk_signal_facade::error::DeskSignalFacadeError> {
+    let connection_id = Some(payload.connection_id);
+    match payload.outcome {
+        VirtualDisplayModeOutcome::Applied(data) => {
+            let response = ChangeDisplaySettingsPayload {
+                width: data.width,
+                height: data.height,
+                refresh_hz: data.refresh_hz,
+            };
+            SignalingModel::success_response(
+                &payload.request_id,
+                SignalingType::ChangeDisplaySettings,
+                None,
+                connection_id,
+                Some(&response),
+            )
+        }
+        VirtualDisplayModeOutcome::Failed(reason) => SignalingModel::error(
+            &payload.request_id,
+            SignalingType::ChangeDisplaySettings,
+            None,
+            connection_id,
+            DeskErrorCode::INVALID_STATE,
+            &reason,
+        ),
+    }
 }
 
 /// Helper for batch 2 of the typed-IPC migration: rebuild the
@@ -837,5 +893,59 @@ mod tests {
         );
         let text = serde_json::to_string(&model).unwrap();
         handle_inbound_signaling_text(text, &router_ctx).await;
+    }
+
+    // ====== Virtual display response routing ======
+
+    use desk_ipc_protocol::message::{VirtualDisplayModeData, VirtualDisplayModeResponsePayload};
+
+    #[test]
+    fn build_virtual_display_response_applied_emits_success_with_mode() {
+        let payload = VirtualDisplayModeResponsePayload {
+            request_id: "req-42".to_string(),
+            connection_id: "conn-7".to_string(),
+            outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            }),
+        };
+        let model = build_virtual_display_response(payload).expect("build success model");
+        assert_eq!(model.request_id, "req-42");
+        assert_eq!(
+            model.signaling_type as i32,
+            SignalingType::ChangeDisplaySettings as i32
+        );
+        assert_eq!(model.to_connection_id.as_deref(), Some("conn-7"));
+        let state = model
+            .response_state
+            .clone()
+            .expect("success response carries state");
+        assert_eq!(state.error_code, 0);
+        // Serialise to JSON to verify the payload survives.
+        let text = serde_json::to_string(&model).unwrap();
+        assert!(
+            text.contains("1920") && text.contains("1080") && text.contains("60"),
+            "expected mode fields in serialised model, got {text}"
+        );
+    }
+
+    #[test]
+    fn build_virtual_display_response_failed_emits_invalid_state_error() {
+        let payload = VirtualDisplayModeResponsePayload {
+            request_id: "req-43".to_string(),
+            connection_id: "conn-8".to_string(),
+            outcome: VirtualDisplayModeOutcome::Failed("driver pipe IO failed".to_string()),
+        };
+        let model = build_virtual_display_response(payload).expect("build error model");
+        assert_eq!(model.request_id, "req-43");
+        assert_eq!(
+            model.signaling_type as i32,
+            SignalingType::ChangeDisplaySettings as i32
+        );
+        assert_eq!(model.to_connection_id.as_deref(), Some("conn-8"));
+        let state = model.response_state.expect("error response carries state");
+        assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
+        assert_eq!(state.message.as_deref(), Some("driver pipe IO failed"));
     }
 }
