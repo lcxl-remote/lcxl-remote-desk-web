@@ -8,7 +8,7 @@ use crate::{
         file_transfer_dispatcher::FileTransferDispatcher,
         input_dispatcher::InputDispatcher,
         media_producer::MediaProducer,
-        virtual_display::{VirtualDisplayState, run_set_mode},
+        virtual_display::{VirtualDisplayState, resolve_attach_with_backoff, run_set_mode},
         whiteboard_dispatcher::WhiteboardDispatcher,
     },
 };
@@ -21,7 +21,8 @@ use desk_ipc_protocol::{
         ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
         PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
         SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
-        WorkerInitPayload, WorkerToService,
+        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
+        WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -1114,18 +1115,59 @@ impl WorkerSession {
                                 }
                                 ServiceToWorker::AttachVirtualDisplay(payload) => {
                                     info!(
-                                        "Worker received AttachVirtualDisplay: display={}",
-                                        payload.display_name,
+                                        "Worker received AttachVirtualDisplay: instance_id={}",
+                                        payload.instance_id,
                                     );
-                                    let steps =
-                                        vd_state.rebuild_active_for_attach(Some(payload.display_name));
-                                    if let Some(producer) = media_producer.as_ref() {
-                                        for step in steps {
-                                            producer.stop_media(&StopMediaPayload {
-                                                connection_id: step.connection_id.clone(),
-                                            });
-                                            producer.start_media(step.active);
+                                    // The daemon (Session 0) cannot resolve
+                                    // the GDI display name; we do it here in
+                                    // the user session via
+                                    // `desk_virtual_display::resolve_display_name`,
+                                    // with bounded backoff retries to cover
+                                    // the IDD bring-up window. The supervisor
+                                    // uses our reply to decide whether to
+                                    // promote its state machine to Attached.
+                                    let instance_id = payload.instance_id;
+                                    let outcome = resolve_attach_with_backoff(
+                                        &instance_id,
+                                        desk_virtual_display::resolve_display_name,
+                                        tokio::time::sleep,
+                                    )
+                                    .await;
+                                    if let VirtualDisplayAttachOutcome::Attached(ref display_name) =
+                                        outcome
+                                    {
+                                        info!(
+                                            "Resolved virtual display instance_id {} -> {}",
+                                            instance_id, display_name,
+                                        );
+                                        let steps = vd_state
+                                            .rebuild_active_for_attach(Some(display_name.clone()));
+                                        if let Some(producer) = media_producer.as_ref() {
+                                            for step in steps {
+                                                producer.stop_media(&StopMediaPayload {
+                                                    connection_id: step.connection_id.clone(),
+                                                });
+                                                producer.start_media(step.active);
+                                            }
                                         }
+                                    } else {
+                                        warn!(
+                                            "Failed to resolve virtual display instance_id {}; \
+                                             not updating attached_display",
+                                            instance_id,
+                                        );
+                                    }
+                                    let result_msg = WorkerToService::VirtualDisplayAttachResult(
+                                        VirtualDisplayAttachResultPayload {
+                                            instance_id,
+                                            outcome,
+                                        },
+                                    );
+                                    if writer_tx.send(result_msg).is_err() {
+                                        warn!(
+                                            "writer task closed; dropping \
+                                             VirtualDisplayAttachResult"
+                                        );
                                     }
                                 }
                                 ServiceToWorker::DetachVirtualDisplay => {

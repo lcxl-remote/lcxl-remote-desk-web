@@ -21,10 +21,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use desk_ipc_protocol::message::{
-    SetVirtualDisplayModePayload, StartMediaPayload, VirtualDisplayModeData,
-    VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload, WorkerToService,
+    SetVirtualDisplayModePayload, StartMediaPayload, VirtualDisplayAttachOutcome,
+    VirtualDisplayModeData, VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload,
+    WorkerToService,
 };
 use desk_virtual_display::{VirtualDisplayController, VirtualDisplayError, VirtualDisplayMode};
 
@@ -113,6 +115,69 @@ impl VirtualDisplayState {
 pub struct RestartStep {
     pub connection_id: String,
     pub active: StartMediaPayload,
+}
+
+/// Exponential-backoff schedule for the attach resolver. Six attempts,
+/// `250 / 500 / 1000 / 2000 / 4000 / 8000` ms between them (~15.75 s
+/// total wall time). Sized to comfortably cover the worst-case IDD
+/// driver bring-up + GDI enumeration race observed on a cold-installed
+/// host; if six rounds still fail the problem is structural (driver
+/// crashed, monitor never enumerated) and further retries would only
+/// hide the failure.
+pub const ATTACH_BACKOFF_SCHEDULE_MS: [u64; 6] = [250, 500, 1000, 2000, 4000, 8000];
+
+/// Resolve a PnP instance id to a GDI `\\.\DISPLAYn` with bounded
+/// exponential-backoff retries. Pure function — no side effects on
+/// worker state — so the caller (worker session loop) wires the result
+/// into `VirtualDisplayState` and the media producer.
+///
+/// The `resolver` and `sleeper` closures are injectable so unit tests
+/// drive arbitrary retry sequences without sleeping real wall time.
+/// Production wires `resolver = desk_virtual_display::resolve_display_name`
+/// and `sleeper = tokio::time::sleep`.
+///
+/// Returns:
+/// - [`VirtualDisplayAttachOutcome::Attached`] with the resolved
+///   display name on the first successful resolver call.
+/// - [`VirtualDisplayAttachOutcome::Failed`] carrying the last
+///   resolver error message if every retry slot was exhausted.
+pub async fn resolve_attach_with_backoff<R, S, Fut>(
+    instance_id: &str,
+    mut resolver: R,
+    mut sleeper: S,
+) -> VirtualDisplayAttachOutcome
+where
+    R: FnMut(&str) -> Result<String, VirtualDisplayError>,
+    S: FnMut(Duration) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let schedule = ATTACH_BACKOFF_SCHEDULE_MS;
+    let mut last_err: String = String::new();
+    for (attempt, &sleep_ms) in schedule.iter().enumerate() {
+        match resolver(instance_id) {
+            Ok(display_name) => return VirtualDisplayAttachOutcome::Attached(display_name),
+            Err(e) => {
+                last_err = e.to_string();
+                let is_last_attempt = attempt + 1 == schedule.len();
+                if is_last_attempt {
+                    // No sleep after the final attempt — exit the loop
+                    // and fall through to the Failed return below.
+                    break;
+                }
+                tracing::debug!(
+                    virtual_display.instance_id = %instance_id,
+                    virtual_display.attempt = attempt + 1,
+                    virtual_display.backoff_ms = sleep_ms,
+                    "resolve_attach_with_backoff: attempt failed: {e}; will retry",
+                );
+                sleeper(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
+    VirtualDisplayAttachOutcome::Failed(format!(
+        "exhausted {} retries resolving instance {instance_id}: {last_err}",
+        schedule.len(),
+    ))
 }
 
 /// Drive `controller.set_mode` on a blocking thread (the Windows
@@ -288,6 +353,128 @@ mod tests {
             *self.applied_mode.lock().unwrap() = Some(mode);
             (self.result)(mode)
         }
+    }
+
+    /// `tokio::time::sleep` is awkward to mock at the type level. The
+    /// existing tests wrap the injected sleeper around a counter and
+    /// assert on the recorded `Duration`s instead, so we never spend
+    /// real wall time waiting for the 250 / 500 / ... backoff schedule.
+    fn make_recording_sleeper() -> (
+        std::sync::Arc<Mutex<Vec<Duration>>>,
+        impl FnMut(Duration) -> std::future::Ready<()>,
+    ) {
+        let log: std::sync::Arc<Mutex<Vec<Duration>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log_clone = std::sync::Arc::clone(&log);
+        let sleeper = move |d: Duration| {
+            log_clone.lock().unwrap().push(d);
+            std::future::ready(())
+        };
+        (log, sleeper)
+    }
+
+    #[tokio::test]
+    async fn resolve_attach_with_backoff_returns_attached_on_first_success() {
+        let calls = std::sync::Arc::new(Mutex::new(0u32));
+        let calls_clone = std::sync::Arc::clone(&calls);
+        let resolver = move |_: &str| {
+            *calls_clone.lock().unwrap() += 1;
+            Ok(r"\\.\DISPLAY4".to_string())
+        };
+        let (sleep_log, sleeper) = make_recording_sleeper();
+        let outcome = resolve_attach_with_backoff(
+            "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay",
+            resolver,
+            sleeper,
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            VirtualDisplayAttachOutcome::Attached(ref n) if n == r"\\.\DISPLAY4"
+        ));
+        assert_eq!(*calls.lock().unwrap(), 1, "first success must short-circuit");
+        assert!(
+            sleep_log.lock().unwrap().is_empty(),
+            "no backoff sleep needed on first success",
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_attach_with_backoff_retries_until_success() {
+        // First two attempts fail, third succeeds.
+        let calls = std::sync::Arc::new(Mutex::new(0u32));
+        let calls_clone = std::sync::Arc::clone(&calls);
+        let resolver = move |_: &str| -> Result<String, VirtualDisplayError> {
+            let mut n = calls_clone.lock().unwrap();
+            *n += 1;
+            if *n < 3 {
+                Err(VirtualDisplayError::DeviceCreate(format!(
+                    "transient #{}",
+                    *n
+                )))
+            } else {
+                Ok(r"\\.\DISPLAY4".to_string())
+            }
+        };
+        let (sleep_log, sleeper) = make_recording_sleeper();
+        let outcome = resolve_attach_with_backoff(
+            "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay",
+            resolver,
+            sleeper,
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            VirtualDisplayAttachOutcome::Attached(ref n) if n == r"\\.\DISPLAY4"
+        ));
+        assert_eq!(*calls.lock().unwrap(), 3, "must retry until success");
+        // Two sleeps between the three attempts: 250, 500.
+        let log = sleep_log.lock().unwrap();
+        assert_eq!(*log, vec![Duration::from_millis(250), Duration::from_millis(500)]);
+    }
+
+    #[tokio::test]
+    async fn resolve_attach_with_backoff_returns_failed_after_max_retries() {
+        let calls = std::sync::Arc::new(Mutex::new(0u32));
+        let calls_clone = std::sync::Arc::clone(&calls);
+        let resolver = move |_: &str| -> Result<String, VirtualDisplayError> {
+            *calls_clone.lock().unwrap() += 1;
+            Err(VirtualDisplayError::DeviceCreate("permanent".to_string()))
+        };
+        let (sleep_log, sleeper) = make_recording_sleeper();
+        let outcome = resolve_attach_with_backoff(
+            "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay",
+            resolver,
+            sleeper,
+        )
+        .await;
+        match outcome {
+            VirtualDisplayAttachOutcome::Failed(msg) => {
+                assert!(
+                    msg.contains("exhausted 6 retries"),
+                    "expected exhaustion summary, got {msg}",
+                );
+                assert!(msg.contains("permanent"), "expected last error in message, got {msg}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ATTACH_BACKOFF_SCHEDULE_MS.len() as u32,
+            "every retry slot must be consumed",
+        );
+        // 5 sleeps between 6 attempts; the trailing 8000 ms slot is
+        // skipped because it would just delay returning Failed.
+        let log = sleep_log.lock().unwrap();
+        assert_eq!(
+            *log,
+            vec![
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+                Duration::from_millis(1_000),
+                Duration::from_millis(2_000),
+                Duration::from_millis(4_000),
+            ],
+        );
     }
 
     #[tokio::test]

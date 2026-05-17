@@ -491,6 +491,16 @@ pub async fn run_signaling_proxy(
                     Some(&payload.terminals),
                 );
             }
+            // Virtual display attach result: drive the supervisor's
+            // state machine via the worker's confirmation that it
+            // resolved (or failed to resolve) the PnP instance id we
+            // forwarded. Not a browser-facing message — the supervisor
+            // is the only consumer; the browser learns about success /
+            // failure indirectly through is_active() gating on the
+            // next ChangeDisplaySettings request.
+            WorkerToService::VirtualDisplayAttachResult(payload) => {
+                dispatch_attach_result(payload, virtual_display.as_ref()).await;
+            }
             // Virtual display response: rebuild the matching outbound
             // ChangeDisplaySettings model and write it onto the
             // browser's signaling WS. Applied -> success response with
@@ -525,6 +535,31 @@ pub async fn run_signaling_proxy(
 
     info!("Signaling proxy stopped");
     Ok(())
+}
+
+/// Dispatch a [`WorkerToService::VirtualDisplayAttachResult`] to the
+/// supervisor if it exists; in non-service-daemon modes
+/// (`virtual_display = None`) production routes never produce this
+/// variant, so a stray reply is either a test fixture or a logic bug —
+/// drop it with a warning rather than panic. Extracted from the proxy
+/// match arm to keep the routing logic unit-testable without spinning
+/// up the full proxy task / outbound channel infrastructure.
+async fn dispatch_attach_result(
+    payload: desk_ipc_protocol::message::VirtualDisplayAttachResultPayload,
+    virtual_display: Option<&std::sync::Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+) {
+    match virtual_display {
+        Some(supervisor) => {
+            supervisor.on_worker_attach_result(payload).await;
+        }
+        None => {
+            warn!(
+                "[SignalingProxy] VirtualDisplayAttachResult arrived while supervisor \
+                 disabled (non-service-daemon mode?); dropping instance_id={}",
+                payload.instance_id,
+            );
+        }
+    }
 }
 
 /// Helper: build the outbound `SignalingModel` for a
@@ -947,5 +982,23 @@ mod tests {
         let state = model.response_state.expect("error response carries state");
         assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
         assert_eq!(state.message.as_deref(), Some("driver pipe IO failed"));
+    }
+
+    /// Non-service-daemon startup paths leave `RouterContext.virtual_display`
+    /// at `None`. If a stale or test-induced `VirtualDisplayAttachResult`
+    /// arrives, the dispatch helper must drop it without panicking.
+    /// Regression guard for the original v2 plan, which did not specify
+    /// behaviour for this branch.
+    #[tokio::test]
+    async fn dispatch_attach_result_drops_message_when_supervisor_disabled() {
+        use desk_ipc_protocol::message::{
+            VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload,
+        };
+        let payload = VirtualDisplayAttachResultPayload {
+            instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
+            outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY4".to_string()),
+        };
+        // No panic, no error — just a warn-and-drop side effect.
+        dispatch_attach_result(payload, None).await;
     }
 }
