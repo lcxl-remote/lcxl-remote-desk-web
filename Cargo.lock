@@ -4765,6 +4765,7 @@ dependencies = [
  "desk-signal-facade",
  "desk-turn",
  "desk-utils",
+ "desk-virtual-display",
  "encoding_rs",
  "evdev",
  "futures",

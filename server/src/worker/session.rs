@@ -1069,6 +1069,42 @@ impl WorkerSession {
                                         .handle_send_failed(payload)
                                         .await;
                                 }
+                                // Virtual display IPC. Commit 6 wires
+                                // these into the controller + capture
+                                // restart pipeline; for now (commit 4)
+                                // they short-circuit so adding the new
+                                // ServiceToWorker variants in the IPC
+                                // crate does not break the worker
+                                // build. The daemon's
+                                // VirtualDisplaySupervisor (commit 5)
+                                // never actually sends these in phase
+                                // 1, since `is_active()` is always
+                                // false on the stub.
+                                ServiceToWorker::SetVirtualDisplayMode(payload) => {
+                                    warn!(
+                                        "SetVirtualDisplayMode received but virtual display \
+                                         worker handling is not wired yet \
+                                         (request_id={}, connection_id={}, {}x{}@{})",
+                                        payload.request_id,
+                                        payload.connection_id,
+                                        payload.width,
+                                        payload.height,
+                                        payload.refresh_hz,
+                                    );
+                                }
+                                ServiceToWorker::AttachVirtualDisplay(payload) => {
+                                    warn!(
+                                        "AttachVirtualDisplay received but virtual display \
+                                         worker handling is not wired yet (display={})",
+                                        payload.display_name,
+                                    );
+                                }
+                                ServiceToWorker::DetachVirtualDisplay => {
+                                    warn!(
+                                        "DetachVirtualDisplay received but virtual display \
+                                         worker handling is not wired yet",
+                                    );
+                                }
                             }
                         }
                         Some(None) => {

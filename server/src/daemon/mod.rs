@@ -6,6 +6,7 @@ pub mod session_monitor;
 pub mod signaling_proxy;
 pub mod signaling_router;
 pub mod tauri_ipc;
+pub mod virtual_display;
 pub mod windows_service;
 pub mod worker_manager;
 

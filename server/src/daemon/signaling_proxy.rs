@@ -40,6 +40,10 @@ pub async fn run_signaling_proxy(
         settings: settings.clone(),
         host_control_hub: host_control_hub.clone(),
         worker_mgr: worker_mgr.clone(),
+        // Commit 5 wires the supervisor in for service-daemon mode.
+        // Until then the router replies with FEATURE_UNAVAILABLE for
+        // every inbound ChangeDisplaySettings.
+        virtual_display: None,
     };
 
     let local_handle = {
@@ -471,6 +475,18 @@ pub async fn run_signaling_proxy(
                     Some(&payload.terminals),
                 );
             }
+            // Commit 7 ferries the response back to the browser as
+            // SignalingType::ChangeDisplaySettings (Applied) or
+            // SignalingModel::error (Failed). Phase 1 supervisors
+            // never emit this payload (Attached is unreachable),
+            // but the arm is kept here to make the enum exhaustive.
+            WorkerToService::VirtualDisplayMode(payload) => {
+                warn!(
+                    "[SignalingProxy] VirtualDisplayMode response routing is not wired yet \
+                     (request_id={}, connection_id={}, outcome={:?})",
+                    payload.request_id, payload.connection_id, payload.outcome,
+                );
+            }
         }
     }
 
@@ -737,6 +753,7 @@ mod tests {
             settings,
             host_control_hub: Arc::new(HostControlHub::new_local()),
             worker_mgr,
+            virtual_display: None,
         };
         (ctx, outbound_tx)
     }

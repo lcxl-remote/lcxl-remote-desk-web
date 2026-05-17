@@ -29,7 +29,8 @@ use desk_ipc_protocol::message::{
     CloseTerminalPayload, EnablePrivateScreenPayload, ListTerminalRequestPayload,
     ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload, ManagerRequestRefPayload,
     ManagerUpdateSettingsRequestPayload, ResizeTerminalPayload, SendDataToTerminalPayload,
-    ServiceToWorker, StartTerminalRequestPayload, UpdateDeskSettingsPayload,
+    ServiceToWorker, SetVirtualDisplayModePayload, StartTerminalRequestPayload,
+    UpdateDeskSettingsPayload,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
@@ -39,9 +40,13 @@ use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{
     StartTerminalSession, TerminalInputData, TerminalResizeData,
 };
+use desk_signal_facade::model::virtual_display::ChangeDisplaySettingsPayload;
+use desk_utils::error::DeskErrorCode;
+use desk_virtual_display::{VirtualDisplayMode, validate_mode};
 use tokio::sync::broadcast;
 
 use crate::daemon::pc_manager::{self, PcRegistry};
+use crate::daemon::virtual_display::VirtualDisplaySupervisor;
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
@@ -86,12 +91,9 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // are dead enums no client/worker handles. An inbound copy
         // is a protocol error from the browser; daemon swallows it
         // here rather than bridging — the worker would either fall
-        // through to `UNKNOWN_SIGNALING_TYPE` (ChangeDisplaySettings:
-        // never wired up) or have no handler at all.
+        // through to `UNKNOWN_SIGNALING_TYPE` or have no handler at
+        // all.
         //
-        // - `ChangeDisplaySettings`: the front-end never emits it
-        //   and the worker's `DeskSession::handle_message` has no
-        //   arm; effectively a dead enum variant.
         // - `PrivateScreenStateChanged`: worker → browser only;
         //   emitted by `WorkerToService::PrivateScreenStateChanged`
         //   typed IPC since this batch.
@@ -103,9 +105,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   path bypasses the router entirely.
         // - `ManagerSystemStatue` (batch 2): a dead-enum variant —
         //   the worker's `handle_message` has no arm and the
-        //   front-end never emits it. Swallow the same way batch 0
-        //   handled AcceptControl / DenyControl and batch 1 handled
-        //   ChangeDisplaySettings.
+        //   front-end never emits it.
         // - `ReplyFromTerminal` / `TerminalStarted` / `TerminalClosed`
         //   (batch 3): worker → browser only. Worker emits them via
         //   typed `WorkerToService::ReplyFromTerminal` /
@@ -115,8 +115,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   bridging to the worker (which has no `handle_message`
         //   arm for these and would only return
         //   `UNKNOWN_SIGNALING_TYPE`).
-        SignalingType::ChangeDisplaySettings
-        | SignalingType::PrivateScreenStateChanged
+        SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
         | SignalingType::ManagerSystemStatue
         | SignalingType::ReplyFromTerminal
@@ -142,6 +141,13 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // helpers (batches 1–3 of the typed-IPC migration covered
         // them all; the legacy `SignalingMessage` bridge no longer
         // exists).
+        //
+        // `ChangeDisplaySettings` joins this list with the virtual
+        // display integration: the daemon validates the request,
+        // surfaces feature / state / param errors back to the
+        // browser as `SignalingModel::error`, and only forwards a
+        // typed `SetVirtualDisplayMode` IPC when the supervisor is
+        // active in service mode.
         SignalingType::EnablePrivateScreen
         | SignalingType::UpdateDeskSettings
         | SignalingType::ManagerSystemInfo
@@ -153,7 +159,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::CloseTerminal
         | SignalingType::ListTerminal
         | SignalingType::ManagerQuerySettings
-        | SignalingType::ManagerUpdateSettings => RouteOwnership::Worker,
+        | SignalingType::ManagerUpdateSettings
+        | SignalingType::ChangeDisplaySettings => RouteOwnership::Worker,
 
         // ---- Error / Unknown ----
         // After batch 4 these are daemon-owned. `Error` is something
@@ -215,6 +222,11 @@ pub struct RouterContext {
     /// completes (so the worker knows to spin up the per-connection
     /// encoder).
     pub worker_mgr: WorkerManager,
+    /// `Some(...)` only in service-daemon mode. Default / signaling
+    /// / desk-server-only modes leave this `None`, so the
+    /// `ChangeDisplaySettings` route always replies with
+    /// `FEATURE_UNAVAILABLE` outside service mode.
+    pub virtual_display: Option<Arc<VirtualDisplaySupervisor>>,
 }
 
 /// Route a signaling message.
@@ -288,7 +300,6 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::Init
         | SignalingType::AcceptControl
         | SignalingType::DenyControl
-        | SignalingType::ChangeDisplaySettings
         | SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
         | SignalingType::ManagerSystemStatue
@@ -328,7 +339,153 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::ResizeTerminal => handle_resize_terminal_inbound(ctx, model).await,
         SignalingType::CloseTerminal => handle_close_terminal_inbound(ctx, model).await,
         SignalingType::ListTerminal => handle_list_terminal_inbound(ctx, model).await,
+        // Virtual display integration: browser → daemon ChangeDisplaySettings.
+        // Daemon validates input, surfaces error responses for the
+        // un-routable cases (FEATURE_UNAVAILABLE / INVALID_PARAMS /
+        // REMOTE_DESK_OFFLINE / INVALID_STATE), and forwards a typed
+        // SetVirtualDisplayMode IPC only when the supervisor is active.
+        SignalingType::ChangeDisplaySettings => {
+            handle_change_display_settings_inbound(ctx, model).await
+        }
     }
+}
+
+/// Emit an error response back to the browser via `outbound_tx`. The
+/// browser's pending request matches on `request_id` + `signaling_type`.
+/// Build / serialise failures are non-fatal — log and drop.
+fn emit_error_response(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    code: DeskErrorCode,
+    message: &str,
+) {
+    match SignalingModel::error(
+        &model.request_id,
+        model.signaling_type,
+        None,
+        model.from_connection_id.clone(),
+        code,
+        message,
+    ) {
+        Ok(error_model) => match serde_json::to_string(&error_model) {
+            Ok(text) => {
+                let _ = ctx.outbound_tx.send(text);
+            }
+            Err(e) => log::warn!(
+                "[router] failed to serialise {:?} error response: {e} (request_id={})",
+                model.signaling_type,
+                model.request_id,
+            ),
+        },
+        Err(e) => log::warn!(
+            "[router] failed to build {:?} error response: {e} (request_id={})",
+            model.signaling_type,
+            model.request_id,
+        ),
+    }
+}
+
+/// Virtual display: validate + forward a browser-issued
+/// `ChangeDisplaySettings`. Inbound model carries
+/// `ChangeDisplaySettingsPayload`; daemon checks (in order):
+///
+/// 1. Service-mode only — `ctx.virtual_display.is_none()` ⇒
+///    `FEATURE_UNAVAILABLE` ("only supported in service mode").
+/// 2. Toggle on — `settings.desk.enable_virtual_display == false` ⇒
+///    `FEATURE_UNAVAILABLE` ("not enabled").
+/// 3. Supervisor live — `is_active() == false` ⇒
+///    `FEATURE_UNAVAILABLE` ("unavailable").
+/// 4. Payload parses — `INVALID_PARAMS`.
+/// 5. Mode within bounds — `validate_mode` ⇒ `INVALID_PARAMS`.
+/// 6. Worker reachable — `send_to_worker` ⇒ `REMOTE_DESK_OFFLINE`.
+///
+/// On success the typed `SetVirtualDisplayMode` IPC carries
+/// `request_id` + `connection_id` so the worker's reply (via
+/// `WorkerToService::VirtualDisplayMode`) can be ferried back to the
+/// matching browser PC. `route` itself always returns `Ok(())` — the
+/// browser-visible failure is the error response we already emitted.
+async fn handle_change_display_settings_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let supervisor = match ctx.virtual_display.as_ref() {
+        Some(s) => s,
+        None => {
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::FEATURE_UNAVAILABLE,
+                "virtual display only supported in service mode",
+            );
+            return Ok(());
+        }
+    };
+    let toggle_on = ctx.settings.read().await.desk.enable_virtual_display;
+    if !toggle_on {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "virtual display not enabled",
+        );
+        return Ok(());
+    }
+    if !supervisor.is_active().await {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "virtual display unavailable",
+        );
+        return Ok(());
+    }
+    let payload = match model.get_data::<ChangeDisplaySettingsPayload>() {
+        Ok(p) => p,
+        Err(e) => {
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("bad ChangeDisplaySettings payload: {e}"),
+            );
+            return Ok(());
+        }
+    };
+    let mode = VirtualDisplayMode {
+        width: payload.width,
+        height: payload.height,
+        refresh_hz: payload.refresh_hz,
+    };
+    if let Err(e) = validate_mode(mode) {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_PARAMS,
+            &format!("invalid mode: {e}"),
+        );
+        return Ok(());
+    }
+    let connection_id = model.from_connection_id.clone().unwrap_or_default();
+    let ipc_payload = SetVirtualDisplayModePayload {
+        request_id: model.request_id.clone(),
+        connection_id,
+        width: payload.width,
+        height: payload.height,
+        refresh_hz: payload.refresh_hz,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::SetVirtualDisplayMode(ipc_payload))
+        .await
+    {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::REMOTE_DESK_OFFLINE,
+            &format!("worker unavailable: {e}"),
+        );
+    }
+    Ok(())
 }
 
 /// Batch 1: parse the inbound `EnablePrivateScreen` payload and ship
@@ -776,7 +933,6 @@ mod tests {
             SignalingType::RequireControl,
             SignalingType::AcceptControl,
             SignalingType::DenyControl,
-            SignalingType::ChangeDisplaySettings,
             SignalingType::PrivateScreenStateChanged,
             SignalingType::AudioPlaybackError,
             SignalingType::ManagerSystemStatue,
@@ -822,6 +978,7 @@ mod tests {
             SignalingType::ListTerminal,
             SignalingType::ManagerQuerySettings,
             SignalingType::ManagerUpdateSettings,
+            SignalingType::ChangeDisplaySettings,
         ] {
             assert_eq!(
                 classify(t),
@@ -845,7 +1002,41 @@ mod tests {
             settings,
             host_control_hub: Arc::new(HostControlHub::new_local()),
             worker_mgr,
+            virtual_display: None,
         }
+    }
+
+    /// Variant of `make_ctx` that hands the caller a fresh
+    /// `outbound_rx` so the test can assert on the error response
+    /// the router emits via `outbound_tx`.
+    fn make_ctx_with_rx() -> (RouterContext, broadcast::Receiver<String>) {
+        let mut ctx = make_ctx();
+        let rx = ctx.outbound_tx.subscribe();
+        // Drain any pre-existing receiver before the test starts so
+        // we never see stale messages from earlier construction.
+        let (new_tx, new_rx) = broadcast::channel::<String>(16);
+        ctx.outbound_tx = new_tx;
+        let _ = rx; // shadow the original
+        (ctx, new_rx)
+    }
+
+    fn read_response(rx: &mut broadcast::Receiver<String>) -> SignalingModel {
+        let text = rx.try_recv().expect("expected outbound error response");
+        serde_json::from_str::<SignalingModel>(&text).expect("response not valid JSON")
+    }
+
+    fn make_change_display_settings_model(
+        request_id: &str,
+        payload: ChangeDisplaySettingsPayload,
+    ) -> SignalingModel {
+        SignalingModel::new(
+            request_id,
+            SignalingType::ChangeDisplaySettings,
+            Some("conn-1".to_string()),
+            None,
+            Some(serde_json::to_value(payload).unwrap()),
+            None,
+        )
     }
 
     /// Daemon-emitted or dead inbound variants are swallowed — they
@@ -866,7 +1057,6 @@ mod tests {
             SignalingType::Init,
             SignalingType::AcceptControl,
             SignalingType::DenyControl,
-            SignalingType::ChangeDisplaySettings,
             SignalingType::PrivateScreenStateChanged,
             SignalingType::AudioPlaybackError,
             SignalingType::ManagerSystemStatue,
@@ -1244,4 +1434,106 @@ mod tests {
         );
         assert!(route(&model, &ctx).await.is_ok());
     }
+
+    // ============= Virtual display routing =============
+
+    /// ChangeDisplaySettings(205) must now classify as worker-owned;
+    /// it used to be in the daemon-swallow batch as a dead enum.
+    #[test]
+    fn classify_change_display_settings_is_worker_owned() {
+        assert_eq!(
+            classify(SignalingType::ChangeDisplaySettings),
+            RouteOwnership::Worker,
+        );
+    }
+
+    /// Non-service-daemon modes leave `RouterContext::virtual_display`
+    /// at `None`; the router replies with `FEATURE_UNAVAILABLE` and
+    /// the "only supported in service mode" message.
+    #[tokio::test]
+    async fn route_returns_error_when_supervisor_is_none() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        let model = make_change_display_settings_model(
+            "req-1",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+            },
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+        let resp = read_response(&mut rx);
+        let state = resp.response_state.expect("error response missing state");
+        assert_eq!(state.error_code, DeskErrorCode::FEATURE_UNAVAILABLE.code());
+        assert_eq!(
+            state.message.as_deref(),
+            Some("virtual display only supported in service mode")
+        );
+        assert_eq!(
+            resp.signaling_type as i32,
+            SignalingType::ChangeDisplaySettings as i32,
+        );
+        assert_eq!(resp.request_id, "req-1");
+    }
+
+    /// Service-daemon mode with the toggle off ⇒
+    /// `FEATURE_UNAVAILABLE` + "not enabled".
+    #[tokio::test]
+    async fn route_returns_error_when_toggle_off() {
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new()));
+        // settings.desk.enable_virtual_display defaults to false.
+        let model = make_change_display_settings_model(
+            "req-2",
+            ChangeDisplaySettingsPayload {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+            },
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+        let resp = read_response(&mut rx);
+        let state = resp.response_state.expect("error response missing state");
+        assert_eq!(state.error_code, DeskErrorCode::FEATURE_UNAVAILABLE.code());
+        assert_eq!(
+            state.message.as_deref(),
+            Some("virtual display not enabled")
+        );
+    }
+
+    /// Toggle on but supervisor never reached the `Attached` state
+    /// (e.g. `lifecycle.create()` returned NotSupported on the stub
+    /// provider). Router must reply with `FEATURE_UNAVAILABLE` +
+    /// "unavailable" rather than letting the IPC fly into a dead
+    /// pipeline.
+    #[tokio::test]
+    async fn route_returns_error_when_supervisor_inactive() {
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new()));
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        let model = make_change_display_settings_model(
+            "req-3",
+            ChangeDisplaySettingsPayload {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+            },
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+        let resp = read_response(&mut rx);
+        let state = resp.response_state.expect("error response missing state");
+        assert_eq!(state.error_code, DeskErrorCode::FEATURE_UNAVAILABLE.code());
+        assert_eq!(
+            state.message.as_deref(),
+            Some("virtual display unavailable")
+        );
+    }
+
+    // Routing tests that require an *active* supervisor (the
+    // `Attached` state lands in commit 5) — INVALID_PARAMS payload
+    // path, INVALID_PARAMS validate_mode path, REMOTE_DESK_OFFLINE
+    // worker-send path, and the success-dispatch path — are added
+    // alongside the state machine in commit 5 so they can drive a
+    // genuinely live supervisor instead of asserting on the same
+    // FEATURE_UNAVAILABLE trapdoor.
 }
