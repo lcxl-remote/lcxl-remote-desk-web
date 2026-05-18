@@ -35,7 +35,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, ID3D11Device, ID3D11DeviceContext, ID3D11Resource,
     ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, DXGI_OUTPUT_DESC, IDXGIDevice};
+use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_DEVICE_REMOVED, IDXGIDevice};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC, GetDIBits,
     GetObjectW, RGBQUAD, ReleaseDC,
@@ -52,14 +52,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::{Interface, PCWSTR};
 
 use crate::error::CaptureError;
-use crate::image_capture::dxgi_capture::{
-    ScreenRecordManager, enumerate_all_outputs, from_dxgi_output_desc, select_output,
+use crate::image_capture::dxgi_capture::ScreenRecordManager;
+use crate::image_capture::monitors::{
+    enum_display_infos, find_monitor_by_device_name, select_display_info_by_name,
 };
-// `from_dxgi_output_desc` is now only used by the legacy WGC capture
-// instance constructor (kept in place until commit 3 swaps it for the
-// device-name lookup); the enumerator side has moved to the GDI-layer
-// `monitors::enum_display_infos` so IDD virtual displays are no longer
-// filtered out by the DXGI EnumOutputs path.
 use crate::image_capture::wgc_compose;
 use crate::model::image_capture::CursorSyncData;
 use crate::model::image_capture::{
@@ -203,7 +199,7 @@ impl ImageOutputEnumerator for WgcImageOutputEnumerator {
         // place. PoC spike B (see
         // `agent_works/workspace/2026-05-18_virtual-display-bug2-spike.md`)
         // proves the round-trip end-to-end.
-        let infos = crate::image_capture::monitors::enum_display_infos()?;
+        let infos = enum_display_infos()?;
         log::info!(
             "WgcImageOutputEnumerator: enumerated {} monitor(s) via EnumDisplayMonitors",
             infos.len()
@@ -214,10 +210,6 @@ impl ImageOutputEnumerator for WgcImageOutputEnumerator {
 
 pub struct WgcImageCapture {
     manager: Arc<ScreenRecordManager>,
-    /// Stored for diagnostics / future re-enumeration; not actively
-    /// read by the steady-state capture loop (display_info is the
-    /// cached source of truth).
-    _output_index: u32,
     display_info: DisplayInfo,
     /// HMONITOR is `*mut c_void` under the hood, which Rust marks as
     /// `!Send`. Store the opaque value as `isize` so the value itself
@@ -265,32 +257,43 @@ impl WgcImageCapture {
             }
         }
 
+        // Resolve the target monitor through the GDI EnumDisplayMonitors
+        // path so IDD virtual displays — invisible to DXGI — are
+        // selectable. Selection happens before D3D11 device creation
+        // so an empty / unknown device_name surfaces INVALID_PARAMS
+        // without the cost (and the headless-CI failure mode) of
+        // building a D3D11 device.
+        let infos = enum_display_infos()?;
+        let display_info =
+            select_display_info_by_name(&infos, &settings.video_device_name)?;
+        let monitor_entry = find_monitor_by_device_name(&display_info.device_name)?
+            .ok_or_else(|| {
+                CaptureError::new_custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    &format!(
+                        "device_name {:?} disappeared between enum_display_infos \
+                         and find_monitor_by_device_name (race with display \
+                         hot-plug?)",
+                        display_info.device_name
+                    ),
+                )
+            })?;
         let manager = ScreenRecordManager::new(settings)?;
-        let output_index = settings.video_device_index;
-        // WGC capture binds to HMONITOR (not IDXGIAdapter), so we can
-        // resolve the output across all adapters; the frame pool keeps
-        // running on the default-adapter manager above.
-        let entries = enumerate_all_outputs()?;
-        let chosen = select_output(&entries, output_index)?;
-        let output_desc: DXGI_OUTPUT_DESC = chosen.desc;
-        let display_info = from_dxgi_output_desc(&output_desc);
-        let hmonitor_raw = output_desc.Monitor.0 as isize;
+        let hmonitor_raw = monitor_entry.hmonitor_raw;
         let monitor_size = SizeInt32 {
-            Width: output_desc.DesktopCoordinates.right - output_desc.DesktopCoordinates.left,
-            Height: output_desc.DesktopCoordinates.bottom - output_desc.DesktopCoordinates.top,
+            Width: display_info.desktop_coordinates.width(),
+            Height: display_info.desktop_coordinates.height(),
         };
 
         log::info!(
-            "[WGC] capture instance created: output_index={}, adapter_index={}, monitor_size={}x{}",
-            output_index,
-            chosen.adapter_index,
+            "[WGC] capture instance created: device_name={:?} monitor_size={}x{}",
+            display_info.device_name,
             monitor_size.Width,
             monitor_size.Height
         );
 
         Ok(WgcImageCapture {
             manager,
-            _output_index: output_index,
             display_info,
             hmonitor_raw,
             monitor_size,
@@ -944,9 +947,16 @@ mod tests {
     #[test]
     #[ignore]
     fn captures_a_frame_locally() {
+        // Smoke needs a real device_name to bind the capture session.
+        // The first entry from EnumDisplayMonitors is always present
+        // on a desktop session.
+        let infos = enum_display_infos().expect("enum_display_infos");
+        let primary = infos
+            .first()
+            .expect("at least one display required for the smoke test");
         let settings = DeskSettings {
             image_capture: Some("WGC".into()),
-            video_device_index: 0,
+            video_device_name: primary.device_name.clone(),
             ..Default::default()
         };
         let mut capture = WgcImageCapture::new(&settings).expect("WgcImageCapture::new");

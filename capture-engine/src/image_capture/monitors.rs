@@ -28,7 +28,6 @@
 //! [`find_monitor_by_device_name`].
 
 use core::mem::size_of;
-use std::ffi::c_void;
 
 use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
 use desk_utils::error::DeskErrorCode;
@@ -135,6 +134,45 @@ pub fn find_monitor_by_device_name(
     Ok(entries.into_iter().find(|e| e.device_name == device_name))
 }
 
+/// Pure device-name selection over a [`DisplayInfo`] slice. Shared by
+/// every capture backend that selects a target by GDI device name.
+/// Empty `requested` is a hard error: the fresh-install "no display
+/// selected" state must never silently fall back to a default, so the
+/// failure surfaces all the way to the worker / signaling layer. The
+/// not-found branch carries the list of enumerated names for triage.
+pub fn select_display_info_by_name(
+    infos: &[DisplayInfo],
+    requested: &str,
+) -> Result<DisplayInfo, CaptureError> {
+    if requested.is_empty() {
+        return CaptureError::custom_error(
+            DeskErrorCode::INVALID_PARAMS,
+            "video_device_name is empty: no display has been selected. \
+             Open the desktop dialog in the browser and pick a display \
+             before starting media.",
+        );
+    }
+    if let Some(found) = infos.iter().find(|i| i.device_name == requested) {
+        return Ok(found.clone());
+    }
+    let summary = if infos.is_empty() {
+        "(none)".to_string()
+    } else {
+        infos
+            .iter()
+            .map(|i| format!("{:?}", i.device_name))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    CaptureError::custom_error(
+        DeskErrorCode::INVALID_PARAMS,
+        &format!(
+            "device_name {:?} not enumerated by capture backend; enumerated: [{}]",
+            requested, summary
+        ),
+    )
+}
+
 /// Look up `EnumDisplayDevicesW(device_name, 0)` to get the friendly
 /// `DeviceString` (e.g. `"Generic PnP Monitor"`). Returns `None` when
 /// the device cannot be resolved — the field is purely informational
@@ -178,10 +216,18 @@ fn lookup_display_device_name(device_name: &str) -> Option<String> {
 /// are best-effort — failure to fill them never aborts enumeration,
 /// since the WGC capture path only needs `device_name` to bind a
 /// monitor via `CreateForMonitor`.
+///
+/// Entries whose device_name does not follow the standard `\\.\DISPLAY`
+/// prefix are filtered out: Windows occasionally surfaces phantom
+/// devices (e.g. `"WinDisc"`, reported after hot-disconnecting an
+/// external monitor on a still-running session) that are not
+/// addressable through any capture API. They would only clutter the
+/// dropdown and produce confusing errors at selection time.
 pub fn enum_display_infos() -> Result<Vec<DisplayInfo>, CaptureError> {
     let entries = enum_monitors()?;
     let infos = entries
         .into_iter()
+        .filter(|m| m.device_name.starts_with(r"\\.\DISPLAY"))
         .map(|m| {
             let display_device_name = lookup_display_device_name(&m.device_name);
             let resolutions = enum_display_resolutions(&m.device_name).unwrap_or_default();
@@ -206,13 +252,6 @@ pub fn enum_display_infos() -> Result<Vec<DisplayInfo>, CaptureError> {
         .collect();
     Ok(infos)
 }
-
-// Silence the unused-import warning on non-test builds while the
-// pointer round-trip is exercised only from the test module.
-#[cfg(test)]
-const _: () = {
-    let _ = size_of::<*mut c_void>();
-};
 
 #[cfg(test)]
 mod tests {
@@ -247,5 +286,56 @@ mod tests {
         };
         assert_eq!(r.width(), 1280);
         assert_eq!(r.height(), 800);
+    }
+
+    fn make_info(name: &str) -> DisplayInfo {
+        DisplayInfo {
+            device_name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn select_display_info_by_name_finds_matching_display() {
+        let infos = vec![make_info(r"\\.\DISPLAY1"), make_info(r"\\.\DISPLAY7")];
+        let chosen = select_display_info_by_name(&infos, r"\\.\DISPLAY7").expect("match");
+        assert_eq!(chosen.device_name, r"\\.\DISPLAY7");
+    }
+
+    /// Empty `video_device_name` represents the legal-but-unselected
+    /// state on fresh installs. The capture-engine must never silently
+    /// fall back to the primary monitor on this path — instead, every
+    /// backend's `new` surfaces INVALID_PARAMS so the frontend can
+    /// prompt the user. The dialog already gates submit on a non-empty
+    /// name, so this is purely a defensive guarantee on the lower
+    /// layer.
+    #[test]
+    fn select_display_info_by_name_returns_invalid_params_when_empty_string() {
+        let infos = vec![make_info(r"\\.\DISPLAY1")];
+        let err = select_display_info_by_name(&infos, "").expect_err("empty must error");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("video_device_name is empty"),
+            "error must mention the empty selection: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn select_display_info_by_name_returns_invalid_params_when_no_match() {
+        let infos = vec![make_info(r"\\.\DISPLAY1"), make_info(r"\\.\DISPLAY7")];
+        let err = select_display_info_by_name(&infos, r"\\.\DISPLAY99")
+            .expect_err("no match must error");
+        let msg = format!("{}", err);
+        // The Debug formatter double-escapes backslashes inside the
+        // message, so the assertion targets the human-recognisable
+        // suffix that is stable across Display / Debug rendering.
+        assert!(
+            msg.contains("DISPLAY99")
+                && msg.contains("DISPLAY1")
+                && msg.contains("DISPLAY7"),
+            "error must list the requested name and the enumerated list: {}",
+            msg
+        );
     }
 }

@@ -103,6 +103,31 @@ impl GdiImageOutputEnumerator {
         GdiImageOutputEnumerator {}
     }
 
+    /// Walk `EnumDisplayDevicesW` until the entry whose GDI
+    /// `\\.\DISPLAYn` device_name matches `requested`. Returns
+    /// `Ok(None)` when the enumeration is exhausted without a match;
+    /// callers translate that into INVALID_PARAMS with the list of
+    /// available names (see [`select_display_info_by_name`]
+    /// in the `monitors` module — GDI cannot reuse it as-is because
+    /// it walks devices lazily here to avoid the per-display
+    /// `EnumDisplaySettingsW` cost when we only need one entry).
+    pub fn get_output_by_name(
+        requested: &str,
+    ) -> Result<Option<DisplayInfo>, CaptureError> {
+        let mut idevnum = 0u32;
+        loop {
+            let entry = Self::get_output(idevnum)?;
+            let info = match entry {
+                Some(info) => info,
+                None => return Ok(None),
+            };
+            if info.device_name == requested {
+                return Ok(Some(info));
+            }
+            idevnum += 1;
+        }
+    }
+
     pub fn get_output(idevnum: u32) -> Result<Option<DisplayInfo>, CaptureError> {
         let mut display_device = DISPLAY_DEVICEW {
             cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
@@ -188,7 +213,10 @@ impl ImageOutputEnumerator for GdiImageOutputEnumerator {
 }
 
 pub struct GdiImageCapture {
-    pub idevnum: u32,
+    /// GDI device name (`\\.\DISPLAYn`) of the chosen monitor. Used
+    /// for diagnostics and so the shared-capture registry can key on
+    /// the realised device (not just whatever was in DeskSettings).
+    pub device_name: String,
     pub display_info: DisplayInfo,
     last_cursor_fingerprint: Option<GdiCursorFingerprint>,
 }
@@ -217,20 +245,40 @@ impl GdiImageCapture {
                 }
             }
         }
-        let display_info_opt = GdiImageOutputEnumerator::get_output(settings.video_device_index)?;
-        let display_info = if let Some(display_info) = display_info_opt {
-            display_info
-        } else {
+        let requested = &settings.video_device_name;
+        if requested.is_empty() {
             return CaptureError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                &format!(
-                    "Cannot get current output by index {}",
-                    settings.video_device_index
-                ),
+                DeskErrorCode::INVALID_PARAMS,
+                "video_device_name is empty: no display has been selected. \
+                 Open the desktop dialog in the browser and pick a display \
+                 before starting media.",
             );
+        }
+        let display_info = match GdiImageOutputEnumerator::get_output_by_name(requested)? {
+            Some(info) => info,
+            None => {
+                let available = GdiImageOutputEnumerator::new()
+                    .get_output_list()
+                    .ok()
+                    .map(|list| {
+                        list.iter()
+                            .map(|i| format!("{:?}", i.device_name))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_else(|| "(re-enum failed)".to_string());
+                return CaptureError::custom_error(
+                    DeskErrorCode::INVALID_PARAMS,
+                    &format!(
+                        "device_name {:?} not enumerated by GDI; enumerated: [{}]",
+                        requested, available
+                    ),
+                );
+            }
         };
+        let device_name = display_info.device_name.clone();
         Ok(GdiImageCapture {
-            idevnum: settings.video_device_index,
+            device_name,
             display_info,
             last_cursor_fingerprint: None,
         })
@@ -663,8 +711,9 @@ mod tests {
     fn test_capture_image() -> Result<(), CaptureError> {
         initialize();
         let display_info = GdiImageOutputEnumerator::get_output(0)?.unwrap();
+        let device_name = display_info.device_name.clone();
         let mut image_capture = GdiImageCapture {
-            idevnum: 0,
+            device_name,
             display_info,
             last_cursor_fingerprint: None,
         };

@@ -16,6 +16,8 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 
+use desk_utils::error::DeskErrorCode;
+
 use crate::{
     error::CaptureError,
     model::image_capture::{
@@ -23,6 +25,21 @@ use crate::{
         ImageOutputEnumerator, ImageType,
     },
 };
+
+/// Each X11 display is exposed under the synthetic name
+/// `X11 Display {index}` so capture targets can be addressed by
+/// device_name like the Windows backends. RandR-output naming is a
+/// candidate v5 improvement; the index-based form keeps the wire
+/// contract uniform and lets `DeskSettings.video_device_name` carry a
+/// real value on Linux without any UI changes.
+fn x11_device_name(index: usize) -> String {
+    format!("X11 Display {}", index)
+}
+
+fn parse_x11_device_name(name: &str) -> Option<usize> {
+    name.strip_prefix("X11 Display ")
+        .and_then(|s| s.parse::<usize>().ok())
+}
 
 const PLANE_MASK: u32 = !1;
 
@@ -90,11 +107,11 @@ impl ImageOutputEnumerator for X11ImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         let mut display_list = vec![];
         let (connection, screen) = x11rb::connect(None)?;
-        let (primary_display_index, displays) = get_displays(&connection, screen)?;
-        for d in &displays {
+        let (_primary_display_index, displays) = get_displays(&connection, screen)?;
+        for (idx, d) in displays.iter().enumerate() {
             log::info!("{:?}", d);
             display_list.push(DisplayInfo {
-                device_name: "X11 Display".to_string(),
+                device_name: x11_device_name(idx),
                 display_device_name: None,
                 desktop_coordinates: DisplayRect {
                     left: d.left as i32,
@@ -132,10 +149,11 @@ impl ImageCapture for X11ImageCapture {
     }
 
     fn get_current_output(&self) -> Result<DisplayInfo, CaptureError> {
+        let index = self.index;
         self.displays
             .get(self.index)
             .map(|d| DisplayInfo {
-                device_name: "X11 Display".to_string(),
+                device_name: x11_device_name(index),
                 display_device_name: None,
                 desktop_coordinates: DisplayRect {
                     left: d.left as i32,
@@ -221,8 +239,40 @@ impl X11ImageCapture {
         };
 
         let (primary_display_index, displays) = get_displays(&connection, screen)?;
+
+        // Map `video_device_name` ("X11 Display N") back to its
+        // positional index against the same `displays` vector the
+        // enumerator returned. Empty / unknown / unparseable names are
+        // hard errors so the worker surfaces a structured failure to
+        // the frontend — there is no silent fallback to "first
+        // display" (mirrors the WGC/DXGI/GDI policy).
+        let requested = &settings.video_device_name;
+        if requested.is_empty() {
+            return CaptureError::custom_error(
+                DeskErrorCode::INVALID_PARAMS,
+                "video_device_name is empty: no X11 display has been selected. \
+                 Open the desktop dialog in the browser and pick a display \
+                 before starting media.",
+            );
+        }
+        let index = match parse_x11_device_name(requested) {
+            Some(idx) if idx < displays.len() => idx,
+            _ => {
+                let available = (0..displays.len())
+                    .map(|i| format!("{:?}", x11_device_name(i)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return CaptureError::custom_error(
+                    DeskErrorCode::INVALID_PARAMS,
+                    &format!(
+                        "device_name {:?} not enumerated by X11; enumerated: [{}]",
+                        requested, available
+                    ),
+                );
+            }
+        };
         Ok(X11ImageCapture {
-            index: settings.video_device_index as usize,
+            index,
             screen,
             displays,
             primary_display_index,

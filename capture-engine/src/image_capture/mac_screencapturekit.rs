@@ -115,23 +115,44 @@ impl StreamErrorHandler for ErrorHandler {
 }
 
 impl MacScreencaptureKitImageCapture {
-    pub fn new(_settings: &DeskSettings) -> Result<Self, CaptureError> {
+    pub fn new(settings: &DeskSettings) -> Result<Self, CaptureError> {
         let content = SCShareableContent::try_current().map_err(|e| {
             CaptureError::new_custom_error(DeskErrorCode::PERMISSION_ERROR, e.as_str())
         })?;
         let displays = content.displays;
 
-        // Default to main display or first display
-        let display = displays.first().ok_or(CaptureError::new_custom_error(
-            DeskErrorCode::SYSTEM_ERROR,
-            "No displays found",
-        ))?;
+        let requested = &settings.video_device_name;
+        if requested.is_empty() {
+            return CaptureError::custom_error(
+                DeskErrorCode::INVALID_PARAMS,
+                "video_device_name is empty: no display has been selected. \
+                 Open the desktop dialog in the browser and pick a display \
+                 before starting media.",
+            );
+        }
+        let display = displays
+            .iter()
+            .find(|d| d.display_id.to_string() == *requested)
+            .ok_or_else(|| {
+                let available = displays
+                    .iter()
+                    .map(|d| format!("{:?}", d.display_id.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                CaptureError::new_custom_error(
+                    DeskErrorCode::INVALID_PARAMS,
+                    &format!(
+                        "device_name {:?} not enumerated by ScreenCaptureKit; enumerated: [{}]",
+                        requested, available
+                    ),
+                )
+            })?;
 
         let width = display.width as u32;
         let height = display.height as u32;
 
         let display_info = DisplayInfo {
-            device_name: display.display_id.to_string(), // Or \\.\DISPLAY1 style if needed
+            device_name: display.display_id.to_string(),
             display_device_name: Some(format!("Display {}", display.display_id)),
             desktop_coordinates: DisplayRect {
                 left: 0,

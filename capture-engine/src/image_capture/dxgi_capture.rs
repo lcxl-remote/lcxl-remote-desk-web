@@ -260,11 +260,12 @@ pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
 // ============================================================================
 
 /// One DXGI output joined with the adapter that owns it. The flat
-/// ordering of a `Vec<EnumeratedOutput>` defines the meaning of
-/// `DeskSettings::video_device_index` in the cross-adapter world: the
-/// default hardware adapter is placed first (so existing single-GPU
-/// users see no behavior change), then the remaining adapters follow in
-/// `IDXGIFactory1::EnumAdapters1` order.
+/// ordering of a `Vec<EnumeratedOutput>` is the order presented to the
+/// frontend dropdown: the default hardware adapter is placed first
+/// (so existing single-GPU users see no behavior change), then the
+/// remaining adapters follow in `IDXGIFactory1::EnumAdapters1` order.
+/// Selection is by `DeskSettings::video_device_name` against the GDI
+/// device name embedded in each entry's `DXGI_OUTPUT_DESC.DeviceName`.
 #[derive(Clone)]
 pub(crate) struct EnumeratedOutput {
     pub adapter_index: u32,
@@ -274,25 +275,61 @@ pub(crate) struct EnumeratedOutput {
     pub adapter_desc: DXGI_ADAPTER_DESC1,
 }
 
-/// Pure range check for a flat output index against the total count.
-/// Extracted so it is unit-testable without DXGI fixtures.
-fn select_index(total: u32, flat: u32) -> Result<u32, CaptureError> {
-    if total == 0 {
+/// Extract the GDI device name (`\\.\DISPLAYn`) from a DXGI output
+/// descriptor. The 32-wchar field is null-terminated.
+pub(crate) fn output_device_name(desc: &DXGI_OUTPUT_DESC) -> String {
+    let nul = desc
+        .DeviceName
+        .iter()
+        .position(|&c| c == 0u16)
+        .unwrap_or(desc.DeviceName.len());
+    String::from_utf16_lossy(&desc.DeviceName[..nul])
+}
+
+/// Pure device-name selection: given a flat slice of GDI device names
+/// in flat-enumeration order, return the position whose entry exactly
+/// matches `requested`. Pure (no DXGI fixtures) so the
+/// not-found / empty-string / IDD-hint branches are exhaustively
+/// testable. The IDD hint is generated on every not-found error because
+/// missing IDD enumeration is the most common reason a user-selected
+/// display fails to resolve through DXGI; we cannot prove the missing
+/// entry is in fact an IDD, so the message is worded as "is the
+/// likely cause if you selected a virtual display."
+pub(crate) fn find_device_name_index(
+    names: &[String],
+    requested: &str,
+) -> Result<usize, CaptureError> {
+    if requested.is_empty() {
         return CaptureError::custom_error(
             DeskErrorCode::INVALID_PARAMS,
-            &format!(
-                "no DXGI outputs enumerated (total_outputs=0); flat_index={} cannot be resolved",
-                flat
-            ),
+            "video_device_name is empty: no display has been selected. \
+             Open the desktop dialog in the browser and pick a display \
+             before starting media.",
         );
     }
-    if flat >= total {
-        return CaptureError::custom_error(
-            DeskErrorCode::INVALID_PARAMS,
-            &format!("flat_index={} out of range, total_outputs={}", flat, total),
-        );
+    if let Some(idx) = names.iter().position(|n| n == requested) {
+        return Ok(idx);
     }
-    Ok(flat)
+    let summary = if names.is_empty() {
+        "(none)".to_string()
+    } else {
+        names
+            .iter()
+            .map(|n| format!("{:?}", n))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    CaptureError::custom_error(
+        DeskErrorCode::INVALID_PARAMS,
+        &format!(
+            "device_name {:?} not enumerated by DXGI; enumerated: [{}]. \
+             IDD virtual displays are not exposed through DXGI \
+             (EnumAdapters does not allocate a dedicated IDXGIAdapter \
+             for IDD devices); switch the capture backend to WGC if \
+             this is a virtual display.",
+            requested, summary
+        ),
+    )
 }
 
 /// Pure ordering: returns the permutation (indices into `adapter_luids`)
@@ -326,9 +363,9 @@ fn order_adapters_by_default_luid(
 
 /// Capture the LUID of the adapter that `D3D11CreateDevice(None, HARDWARE)`
 /// would pick, so cross-adapter enumeration can promote it to flat
-/// position 0 and preserve `video_device_index` semantics for
-/// single-default-adapter users. Returns `None` (without erroring) if
-/// the probe fails — callers fall back to factory order.
+/// position 0 and keep single-default-adapter users seeing the same
+/// dropdown order. Returns `None` (without erroring) if the probe
+/// fails — callers fall back to factory order.
 fn probe_default_adapter_luid() -> Option<LUID> {
     let driver_types: [D3D_DRIVER_TYPE; 3] = [
         D3D_DRIVER_TYPE_HARDWARE,
@@ -414,8 +451,8 @@ pub(crate) fn enumerate_all_outputs() -> Result<Vec<EnumeratedOutput>, CaptureEr
     }
 
     // Phase 2: reorder adapters so the default hardware adapter is
-    // first. This preserves `video_device_index` semantics for users
-    // who only ever saw default-adapter outputs.
+    // first. Preserves dropdown ordering for users who only ever saw
+    // default-adapter outputs.
     let default_luid = probe_default_adapter_luid();
     let luids: Vec<LUID> = adapters.iter().map(|e| e.luid).collect();
     let order = order_adapters_by_default_luid(default_luid, &luids);
@@ -446,27 +483,26 @@ pub(crate) fn enumerate_all_outputs() -> Result<Vec<EnumeratedOutput>, CaptureEr
     Ok(flat)
 }
 
-/// Resolve a flat `video_device_index` against the enumerated outputs.
-/// On failure, the error message includes the flat index, total output
-/// count, and a brief per-adapter summary to help multi-GPU / IDD
-/// triage. Range-checking is delegated to [`select_index`] for parity
-/// with its unit tests.
-pub(crate) fn select_output(
-    entries: &[EnumeratedOutput],
-    flat_index: u32,
-) -> Result<&EnumeratedOutput, CaptureError> {
-    let total = entries.len() as u32;
-    match select_index(total, flat_index) {
-        Ok(idx) => Ok(&entries[idx as usize]),
-        Err(_) => CaptureError::custom_error(
-            DeskErrorCode::INVALID_PARAMS,
-            &format!(
-                "select_output: flat_index={} not addressable, total_outputs={} ({})",
-                flat_index,
-                total,
-                build_adapter_summary(entries)
-            ),
-        ),
+/// Resolve a GDI device name against the flat enumeration. On
+/// failure, the error message includes the requested name, every
+/// enumerated device_name, a per-adapter summary (for multi-GPU
+/// triage), and the IDD-not-on-DXGI hint generated by
+/// [`find_device_name_index`].
+pub(crate) fn select_output_by_name<'a>(
+    entries: &'a [EnumeratedOutput],
+    device_name: &str,
+) -> Result<&'a EnumeratedOutput, CaptureError> {
+    let names: Vec<String> = entries.iter().map(|e| output_device_name(&e.desc)).collect();
+    match find_device_name_index(&names, device_name) {
+        Ok(idx) => Ok(&entries[idx]),
+        Err(e) => {
+            // Re-wrap to append the per-adapter summary, which the pure
+            // helper cannot compute (it does not see EnumeratedOutput).
+            CaptureError::custom_error(
+                DeskErrorCode::INVALID_PARAMS,
+                &format!("{} adapter_summary: ({})", e, build_adapter_summary(entries)),
+            )
+        }
     }
 }
 
@@ -2057,8 +2093,8 @@ impl DxgiImageOutputEnumerator {
 impl ImageOutputEnumerator for DxgiImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         // Cross-adapter enumeration: see `enumerate_all_outputs`. The
-        // flat order it returns defines `video_device_index` semantics
-        // for callers; default hardware adapter is placed first so
+        // flat order is the dropdown order: default hardware adapter
+        // is placed first so
         // single-GPU users see the same indices as before.
         let entries = enumerate_all_outputs()?;
         log::info!(
@@ -2074,18 +2110,18 @@ impl ImageOutputEnumerator for DxgiImageOutputEnumerator {
 
 pub struct DxgiImageCapture {
     pub manager: Arc<ScreenRecordManager>,
-    /// Flat / external index — equals `settings.video_device_index`.
-    /// Public API and semantics unchanged across the cross-adapter
-    /// refactor; downstream code keeps reading this for diagnostics.
-    pub output_index: u32,
+    /// GDI device name (`\\.\DISPLAYn`) of the chosen output. The
+    /// equivalent of the legacy `output_index` for diagnostics and for
+    /// the shared-capture registry's `effective_key` (see
+    /// `shared_capture::get_or_initialize`).
+    pub device_name: String,
     /// Position of the chosen adapter in the flat ordering returned by
     /// [`enumerate_all_outputs`]. Used for diagnostics only.
     adapter_index: u32,
     /// `EnumOutputs` index *within* the chosen adapter — what
     /// `manager.dxgi_adapter.EnumOutputs()` and
-    /// `ScreenOutput::new(manager, idx)` actually want. Different from
-    /// `output_index` whenever the user picks an output on a non-default
-    /// adapter.
+    /// `ScreenOutput::new(manager, idx)` actually want. Recomputed at
+    /// `new` time from the chosen `EnumeratedOutput`.
     local_output_index: u32,
     pub screen_output: Option<ScreenOutput>,
     last_cursor_fingerprint: Option<DxgiCursorFingerprint>,
@@ -2094,13 +2130,14 @@ pub struct DxgiImageCapture {
 impl DxgiImageCapture {
     pub fn new(settings: &DeskSettings) -> Result<Self, CaptureError> {
         let entries = enumerate_all_outputs()?;
-        let chosen = select_output(&entries, settings.video_device_index)?;
+        let chosen = select_output_by_name(&entries, &settings.video_device_name)?;
         let chosen_adapter_index = chosen.adapter_index;
         let chosen_local_index = chosen.local_output_index;
         let chosen_adapter_name = adapter_name_from_desc(&chosen.adapter_desc);
+        let chosen_device_name = output_device_name(&chosen.desc);
         log::info!(
-            "DxgiImageCapture::new: flat_index={} → adapter[{}]='{}' local_output_index={}",
-            settings.video_device_index,
+            "DxgiImageCapture::new: device_name={:?} → adapter[{}]='{}' local_output_index={}",
+            chosen_device_name,
             chosen_adapter_index,
             chosen_adapter_name,
             chosen_local_index
@@ -2109,7 +2146,7 @@ impl DxgiImageCapture {
         let screen_output = Some(ScreenOutput::new(manager.clone(), chosen_local_index)?);
         Ok(DxgiImageCapture {
             manager,
-            output_index: settings.video_device_index,
+            device_name: chosen_device_name,
             adapter_index: chosen_adapter_index,
             local_output_index: chosen_local_index,
             screen_output,
@@ -2233,14 +2270,14 @@ impl ImageCapture for DxgiImageCapture {
         log::trace!("Start to get screen output frame");
         if self.screen_output.is_none() {
             // Use the local (per-adapter) index, not the flat
-            // video_device_index — `manager.dxgi_adapter` is the
-            // adapter we picked in `new()`, so EnumOutputs there only
-            // accepts indices within that adapter.
+            // position — `manager.dxgi_adapter` is the adapter we
+            // picked in `new()`, so EnumOutputs there only accepts
+            // indices within that adapter.
             log::debug!(
-                "ScreenOutput rebuild on adapter_index={} local_output_index={} (flat output_index={})",
+                "ScreenOutput rebuild on adapter_index={} local_output_index={} device_name={:?}",
                 self.adapter_index,
                 self.local_output_index,
-                self.output_index
+                self.device_name
             );
             self.screen_output = Some(ScreenOutput::new(
                 self.manager.clone(),
@@ -2382,32 +2419,78 @@ mod tests {
         }
     }
 
-    #[test]
-    fn select_index_returns_value_for_valid_flat() {
-        for flat in 0..4u32 {
-            let got = select_index(4, flat).expect("flat in range");
-            assert_eq!(got, flat);
-        }
+    fn make_names(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn select_index_returns_error_for_out_of_range() {
-        let err = select_index(4, 4).expect_err("out-of-range should error");
+    fn find_device_name_index_finds_match() {
+        let names = make_names(&[r"\\.\DISPLAY1", r"\\.\DISPLAY7"]);
+        assert_eq!(
+            find_device_name_index(&names, r"\\.\DISPLAY7").expect("match"),
+            1
+        );
+        assert_eq!(
+            find_device_name_index(&names, r"\\.\DISPLAY1").expect("match"),
+            0
+        );
+    }
+
+    /// Empty `video_device_name` is a legal-but-unselected state on
+    /// fresh installs — the daemon must not silently fall back to
+    /// "device index 0" on this path. Hard error so the caller (the
+    /// capture-engine factory, ultimately) surfaces a structured
+    /// failure to the worker / pipeline. The frontend keeps users from
+    /// hitting this in practice by gating submit on a non-empty name.
+    #[test]
+    fn find_device_name_index_returns_invalid_params_when_empty_string() {
+        let names = make_names(&[r"\\.\DISPLAY1"]);
+        let err = find_device_name_index(&names, "").expect_err("empty string must error");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("flat_index=4") && msg.contains("total_outputs=4"),
-            "error message should include both indices, got: {}",
+            msg.contains("video_device_name is empty"),
+            "error message must call out the empty selection: {}",
             msg
         );
     }
 
     #[test]
-    fn select_index_returns_error_for_empty() {
-        let err = select_index(0, 0).expect_err("empty enumeration should error");
+    fn find_device_name_index_returns_invalid_params_when_no_match() {
+        let names = make_names(&[r"\\.\DISPLAY1", r"\\.\DISPLAY7"]);
+        let err = find_device_name_index(&names, r"\\.\DISPLAY99")
+            .expect_err("unknown name must error");
+        let msg = format!("{}", err);
+        // The Debug formatter double-escapes backslashes, so the
+        // assertion targets the human-recognisable suffix that is
+        // stable across Display/Debug rendering.
+        assert!(
+            msg.contains("DISPLAY99")
+                && msg.contains("DISPLAY1")
+                && msg.contains("DISPLAY7"),
+            "error message must include the requested name and the enumerated list: {}",
+            msg
+        );
+    }
+
+    /// Failing to find a display through the DXGI enumeration is
+    /// indistinguishable from "this is an IDD that DXGI cannot see",
+    /// so the error message must always carry the WGC-fallback hint.
+    /// The frontend uses this string verbatim from the worker log only
+    /// for diagnostics — actual fallback is the user's job once they
+    /// see the suggestion.
+    #[test]
+    fn dxgi_select_by_name_rejects_idd_with_helpful_message() {
+        let names = make_names(&[r"\\.\DISPLAY1"]);
+        let err = find_device_name_index(&names, r"\\.\DISPLAY99").expect_err("not found");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("total_outputs=0"),
-            "error message should report zero total, got: {}",
+            msg.contains("IDD virtual displays are not exposed through DXGI"),
+            "error message must contain the IDD/WGC hint: {}",
+            msg
+        );
+        assert!(
+            msg.contains("WGC"),
+            "error message must mention WGC as the alternative backend: {}",
             msg
         );
     }
@@ -2644,8 +2727,8 @@ mod tests {
                 output_list
             );
             drop(enumerator);
-            for index in 0..output_list.len() {
-                settings.video_device_index = index as u32;
+            for output in &output_list {
+                settings.video_device_name = output.device_name.clone();
                 let capture_result = DxgiImageCapture::new(&settings);
                 if let Err(e) = capture_result {
                     log::error!("Failed to get screen output {}: {}", desktop_name, e);
@@ -2661,7 +2744,15 @@ mod tests {
                     .unwrap();
 
                 let tmp_dir = PathBuf::from("sample");
-                let name = tmp_dir.join(format!("screenshot_{}_{}.bmp", desktop_name, index));
+                let sanitized_name: String = output
+                    .device_name
+                    .chars()
+                    .map(|c| if c == '\\' || c == '.' { '_' } else { c })
+                    .collect();
+                let name = tmp_dir.join(format!(
+                    "screenshot_{}_{}.bmp",
+                    desktop_name, sanitized_name
+                ));
 
                 save_screenshot_to_file(&mut capture, name.as_path()).unwrap();
             }
