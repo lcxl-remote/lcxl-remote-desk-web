@@ -212,8 +212,16 @@ pub struct PrivateScreenSettings {
 pub struct DeskSettings {
     /// Enable D3D debug mode
     pub enable_d3d_debug: bool,
-    /// Video device index
-    pub video_device_index: u32,
+    /// GDI device name of the capture target (`\\.\DISPLAYn`).
+    /// Empty string means "no display selected yet" — the browser
+    /// must surface a chooser before starting media. Selection by
+    /// name (instead of by enumeration index) is required so that
+    /// IDD virtual displays — which are visible to GDI but invisible
+    /// to `IDXGIAdapter::EnumOutputs` — can be addressed unambiguously,
+    /// and so that the selected target survives display hot-plug
+    /// reordering. See the v4 virtual-display capture-selection plan
+    /// for full context.
+    pub video_device_name: String,
     /// Video encode quality, 0-63, lower is better. Default is 22.
     pub video_quality: u32,
     /// Enable adaptive web page resolution
@@ -379,7 +387,7 @@ impl Default for DeskSettings {
     fn default() -> Self {
         Self {
             enable_d3d_debug: false,
-            video_device_index: 0,
+            video_device_name: String::new(),
             video_quality: 22,
             adaptive_web_page_resolution: false,
             video_zoom_ratio: 100,
@@ -477,7 +485,7 @@ mod wincode_tests {
     fn desk_settings_round_trips_wincode_with_nested_options_populated() {
         let original = DeskSettings {
             enable_d3d_debug: true,
-            video_device_index: 1,
+            video_device_name: r"\\.\DISPLAY2".to_string(),
             video_quality: 33,
             adaptive_web_page_resolution: true,
             video_zoom_ratio: 75,
@@ -581,5 +589,31 @@ mod wincode_tests {
         let json = serde_json::to_string(&s).expect("encode");
         let back: DeskSettings = serde_json::from_str(&json).expect("decode");
         assert!(back.enable_virtual_display);
+    }
+
+    /// `video_device_name = ""` means "no display selected yet" and is
+    /// the legal default for a fresh install. The browser must surface
+    /// a chooser before media starts; the daemon, when relaying
+    /// `StartMediaPayload`, must map this empty string to `None` so
+    /// the worker treats it as "use whatever the OS hands me" rather
+    /// than as a literal display name.
+    #[test]
+    fn desk_settings_video_device_name_default_is_empty_string() {
+        let s = DeskSettings::default();
+        assert_eq!(s.video_device_name, "");
+    }
+
+    /// Old TOML / JSON written before the v4 rename carries a numeric
+    /// `video_device_index` field. Struct-level `#[serde(default)]` lets
+    /// serde drop the unknown field silently and populate the renamed
+    /// `video_device_name` with its empty-string default. This keeps
+    /// users on existing on-disk config from hard-failing the daemon
+    /// boot — they will be prompted to pick a display in the browser
+    /// on their next session.
+    #[test]
+    fn desk_settings_serde_ignores_unknown_video_device_index() {
+        let raw = r#"{"video_device_index": 7}"#;
+        let s: DeskSettings = serde_json::from_str(raw).expect("decode");
+        assert_eq!(s.video_device_name, "");
     }
 }
