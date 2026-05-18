@@ -6,6 +6,8 @@ pub mod dxgi_compose;
 pub mod gdi_capture;
 pub mod image_capture_factory;
 #[cfg(target_os = "windows")]
+pub mod monitors;
+#[cfg(target_os = "windows")]
 pub mod wgc_capture;
 #[cfg(target_os = "windows")]
 pub mod wgc_compose;

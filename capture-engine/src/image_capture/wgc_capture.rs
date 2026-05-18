@@ -55,6 +55,11 @@ use crate::error::CaptureError;
 use crate::image_capture::dxgi_capture::{
     ScreenRecordManager, enumerate_all_outputs, from_dxgi_output_desc, select_output,
 };
+// `from_dxgi_output_desc` is now only used by the legacy WGC capture
+// instance constructor (kept in place until commit 3 swaps it for the
+// device-name lookup); the enumerator side has moved to the GDI-layer
+// `monitors::enum_display_infos` so IDD virtual displays are no longer
+// filtered out by the DXGI EnumOutputs path.
 use crate::image_capture::wgc_compose;
 use crate::model::image_capture::CursorSyncData;
 use crate::model::image_capture::{
@@ -188,19 +193,22 @@ impl WgcImageOutputEnumerator {
 
 impl ImageOutputEnumerator for WgcImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
-        // Reuse the cross-adapter DXGI enumeration so the
-        // `video_device_index` semantics stay aligned between DXGI/WGC
-        // (a user switching backends shouldn't have their selected
-        // display reset).
-        let entries = enumerate_all_outputs()?;
+        // GDI EnumDisplayMonitors, not DXGI EnumAdapters/EnumOutputs.
+        // The OS does not allocate a dedicated IDXGIAdapter for an
+        // Indirect Display Driver (IDD) virtual monitor, so the DXGI
+        // enumeration silently omits it. WGC binds capture via
+        // `IGraphicsCaptureItemInterop::CreateForMonitor(HMONITOR)`
+        // where HMONITOR is a GDI-layer handle, so IDDs are fully
+        // capturable as long as we discover them via GDI in the first
+        // place. PoC spike B (see
+        // `agent_works/workspace/2026-05-18_virtual-display-bug2-spike.md`)
+        // proves the round-trip end-to-end.
+        let infos = crate::image_capture::monitors::enum_display_infos()?;
         log::info!(
-            "WgcImageOutputEnumerator: enumerated {} output(s) across all adapters",
-            entries.len()
+            "WgcImageOutputEnumerator: enumerated {} monitor(s) via EnumDisplayMonitors",
+            infos.len()
         );
-        Ok(entries
-            .iter()
-            .map(|e| from_dxgi_output_desc(&e.desc))
-            .collect())
+        Ok(infos)
     }
 }
 
@@ -871,6 +879,64 @@ mod tests {
         if let Ok(true) = GraphicsCaptureSession::IsSupported() {
             assert!(WgcImageOutputEnumerator::new().is_ok());
         }
+    }
+
+    /// Every GDI device name returned by the new EnumDisplayMonitors-
+    /// backed enumerator must follow the documented `\\.\DISPLAYn`
+    /// shape. The WGC capture-instance constructor will look up
+    /// HMONITORs by exact-string match on this field, so a stray
+    /// transformation (e.g. trimming the leading `\\?\`) would silently
+    /// orphan every selection. Headless CI may legitimately return an
+    /// empty list; the assertion only kicks in when at least one
+    /// monitor is present.
+    #[test]
+    fn wgc_image_output_enumerator_returns_device_names_with_backslash_prefix() {
+        // Skip on hosts where WGC itself is unsupported — the
+        // enumerator runs through the GDI path regardless, but we
+        // gate on the same precondition the production factory uses
+        // to avoid spurious failures on non-WGC CI runners.
+        if !matches!(GraphicsCaptureSession::IsSupported(), Ok(true)) {
+            return;
+        }
+        let enumerator = WgcImageOutputEnumerator::new().expect("enumerator");
+        let infos = enumerator.get_output_list().expect("get_output_list");
+        for info in &infos {
+            assert!(
+                info.device_name.starts_with(r"\\.\"),
+                "WGC enumerator yielded device_name without GDI prefix: {:?}",
+                info.device_name
+            );
+        }
+    }
+
+    /// Hardware smoke: when an `lcxl` IDD virtual monitor is attached,
+    /// the new GDI-backed enumerator must list it. The legacy DXGI
+    /// path silently omitted IDDs (root cause of v4); this guards the
+    /// fix from regressing. Ignored by default because it requires the
+    /// production virtual-display driver to be loaded and bound — we
+    /// run it manually via `cargo test -p desk-capture-engine -- \
+    /// --ignored wgc_image_output_enumerator_includes_idd_when_attached`
+    /// against a daemon-driven workstation.
+    #[test]
+    #[ignore]
+    fn wgc_image_output_enumerator_includes_idd_when_attached() {
+        let enumerator = WgcImageOutputEnumerator::new().expect("enumerator");
+        let infos = enumerator.get_output_list().expect("get_output_list");
+        let has_idd = infos.iter().any(|info| {
+            info.display_device_name
+                .as_deref()
+                .map(|n| n.to_ascii_lowercase().contains("lcxl"))
+                .unwrap_or(false)
+        });
+        assert!(
+            has_idd,
+            "expected at least one DisplayInfo whose display_device_name contains \
+             'Lcxl' (the IDD virtual display); enumerated: {:?}",
+            infos
+                .iter()
+                .map(|i| (i.device_name.clone(), i.display_device_name.clone()))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// Hardware-touching integration smoke test. Ignored in CI (no GPU)
