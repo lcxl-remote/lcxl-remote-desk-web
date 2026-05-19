@@ -181,6 +181,21 @@ pub enum ServiceToWorker {
     /// active capture pipeline against the user's original physical-
     /// display target.
     DetachVirtualDisplay,
+
+    /// Daemon → worker: re-publish the worker's [`MediaCapabilities`]
+    /// so the daemon's cached snapshot (and any frontend that fetches
+    /// it via the next `InitSignalingData`) reflects the worker's
+    /// latest enumeration. Sent by the daemon's
+    /// `VirtualDisplaySupervisor` when an IDD virtual monitor finishes
+    /// attaching (or finishes detaching) — these transitions change
+    /// what `monitors::enum_display_infos` returns on the worker side,
+    /// but the worker only emits `WorkerToService::Capabilities`
+    /// proactively at startup, so without this push the daemon's
+    /// cached capabilities would never see the IDD. Worker replies by
+    /// emitting a fresh `WorkerToService::Capabilities` via its event
+    /// writer. Unit variant — the worker re-reads `desktop_name` /
+    /// `has_tauri` from its cached `WorkerInitPayload`.
+    RefreshCapabilities,
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -2237,6 +2252,7 @@ mod tests {
                 instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
             }),
             ServiceToWorker::DetachVirtualDisplay,
+            ServiceToWorker::RefreshCapabilities,
         ];
         for case in &cases {
             let decoded = wincode_round_trip(case);
@@ -2599,6 +2615,25 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("encode");
         let back: ServiceToWorker = serde_json::from_str(&json).expect("decode");
         assert!(matches!(back, ServiceToWorker::DetachVirtualDisplay));
+    }
+
+    /// New in v4: daemon → worker `RefreshCapabilities` is a unit
+    /// variant. Both encodings must round-trip cleanly so future
+    /// daemon / worker version drift cannot silently corrupt the
+    /// virtual-display capabilities refresh path.
+    #[test]
+    fn refresh_capabilities_round_trips_wincode() {
+        let msg = ServiceToWorker::RefreshCapabilities;
+        let back = wincode_round_trip(&msg);
+        assert!(matches!(back, ServiceToWorker::RefreshCapabilities));
+    }
+
+    #[test]
+    fn refresh_capabilities_round_trips_serde_json() {
+        let msg = ServiceToWorker::RefreshCapabilities;
+        let json = serde_json::to_string(&msg).expect("encode");
+        let back: ServiceToWorker = serde_json::from_str(&json).expect("decode");
+        assert!(matches!(back, ServiceToWorker::RefreshCapabilities));
     }
 
     #[test]

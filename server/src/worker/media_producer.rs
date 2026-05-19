@@ -607,13 +607,19 @@ fn payload_overrides(base: &DeskSettings, payload: &StartMediaPayload) -> DeskSe
     if let Some(enable) = payload.enable_dirty_rect {
         s.enable_dirty_rect = enable;
     }
-    // Cut 4: `video_device` IPC field maps to `\\\\.\\DISPLAY-N` style strings
-    // but `DeskSettings.video_device_index` is a numeric index. Without a
-    // device → index lookup table the safest behaviour is to ignore the IPC
-    // hint and let the worker keep its configured index. A follow-up cut
-    // wires capture-engine `list_image_capture` enumeration into a daemon
-    // → worker resolution layer.
-    let _ = &payload.video_device;
+    // v4 capture-selection fix: the IPC field carries the exact
+    // `\\.\DISPLAYn` string the browser selected from the dropdown
+    // (sourced via daemon → `StartMediaPayload.video_device`).
+    // Overriding the worker's base setting here lets a second browser
+    // pick a different monitor than the first without colliding on
+    // shared capture state. `None` (legacy daemons or callers that
+    // really want the worker default) leaves `s.video_device_name`
+    // untouched — the capture-engine surfaces INVALID_PARAMS at
+    // `new()` time if it is still empty, which the daemon prevents
+    // by gating on the browser dialog's form validation.
+    if let Some(name) = payload.video_device.as_deref() {
+        s.video_device_name = name.to_string();
+    }
     s
 }
 
@@ -1487,7 +1493,7 @@ mod tests {
             connection_id: "c1".into(),
             video_codec: MediaCodec::Vp9,
             audio_codec: MediaCodec::Opus,
-            video_device: Some("display-1".into()),
+            video_device: Some(r"\\.\DISPLAY7".to_string()),
             audio_device: None,
             fps: 60,
             bitrate_kbps: 0,
@@ -1500,10 +1506,41 @@ mod tests {
         let merged = payload_overrides(&base, &payload);
         assert_eq!(merged.video_encoder.as_deref(), Some("VP9"));
         assert_eq!(merged.video_fps, 60);
-        // Cut 4: `video_device` IPC field is intentionally ignored until
-        // the daemon wires a name→index lookup. Pin so the next change to
-        // payload_overrides doesn't silently start interpreting it.
-        assert_eq!(merged.video_device_index, base.video_device_index);
+        // v4 capture-selection fix: payload_overrides must propagate
+        // the per-connection device_name so each browser binds capture
+        // to the monitor it picked in the dropdown. Pin the wire
+        // contract here — a regression that drops the field would
+        // silently revert the worker to its base-settings target.
+        assert_eq!(merged.video_device_name, r"\\.\DISPLAY7");
+    }
+
+    /// `video_device = None` (legacy daemon, or daemon that mapped
+    /// empty `video_device_name` to None) leaves the worker's base
+    /// `video_device_name` untouched. The capture-engine still hard-
+    /// errors if the base value is empty — that is the documented
+    /// "no display selected" path for a fresh install.
+    #[test]
+    fn payload_overrides_preserves_base_video_device_name_when_payload_is_none() {
+        let base = DeskSettings {
+            video_device_name: r"\\.\DISPLAY1".to_string(),
+            ..DeskSettings::default()
+        };
+        let payload = StartMediaPayload {
+            connection_id: "c1".into(),
+            video_codec: MediaCodec::Vp9,
+            audio_codec: MediaCodec::Opus,
+            video_device: None,
+            audio_device: None,
+            fps: 60,
+            bitrate_kbps: 0,
+            quality: 0,
+            start_video: true,
+            start_audio: true,
+            image_capture: None,
+            enable_dirty_rect: None,
+        };
+        let merged = payload_overrides(&base, &payload);
+        assert_eq!(merged.video_device_name, r"\\.\DISPLAY1");
     }
 
     /// Per-connection `image_capture` choice from the daemon overrides

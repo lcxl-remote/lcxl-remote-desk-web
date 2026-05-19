@@ -1384,6 +1384,21 @@ fn media_codec_to_str(c: &MediaCodec) -> Option<String> {
 
 /// Map the offer's `desk_settings.video_encoder` string to the IPC
 /// `MediaCodec`. Used by `handle_offer` to compose `StartMediaPayload`.
+/// Map the browser-supplied `DeskSettings.video_device_name` to the
+/// `StartMediaPayload.video_device` Option carried over IPC. Empty
+/// string means "no display selected yet" — the daemon passes `None`
+/// so the worker's `payload_overrides` leaves its base
+/// `video_device_name` untouched (which the capture-engine then
+/// hard-errors on; never falls back to a default monitor). Any
+/// non-empty value is propagated verbatim.
+pub(crate) fn video_device_for_payload(video_device_name: &str) -> Option<String> {
+    if video_device_name.is_empty() {
+        None
+    } else {
+        Some(video_device_name.to_string())
+    }
+}
+
 fn video_encoder_to_media_codec(t: VideoEncoderType) -> MediaCodec {
     match t {
         VideoEncoderType::H264 | VideoEncoderType::X264 => MediaCodec::H264,
@@ -1509,11 +1524,16 @@ pub async fn handle_offer(
     // Audio codec defaults to OPUS — PR 3 picks the worker's chosen
     // codec for real once the audio path lands.
     let video_codec = video_encoder_to_media_codec(offer.desk_settings.get_video_encoder_type()?);
+    // v4 capture-selection fix: thread the browser-chosen GDI device
+    // name through to the worker so capture binds to the right
+    // monitor. See [`video_device_for_payload`] for the empty-string
+    // semantics (legal-but-unselected fresh install case).
+    let video_device = video_device_for_payload(&offer.desk_settings.video_device_name);
     let start_media_payload = StartMediaPayload {
         connection_id: from_connection_id.to_string(),
         video_codec,
         audio_codec: MediaCodec::Opus,
-        video_device: None,
+        video_device,
         audio_device: None,
         fps: offer.desk_settings.video_fps,
         bitrate_kbps: 0,
@@ -2503,6 +2523,31 @@ mod tests {
         assert_eq!(w.frames, 0);
         assert!(!w.is_full());
         assert!(w.flush_line("cid").is_none());
+    }
+
+    // ============== v4: StartMediaPayload video_device routing ==============
+
+    /// Fresh-install state: the browser has not yet picked a display,
+    /// so `video_device_name` is empty. The daemon must translate that
+    /// to `None` on the IPC payload — the worker's `payload_overrides`
+    /// then leaves the base setting untouched and the capture-engine
+    /// hard-errors at `new()` time. This is the documented "no
+    /// silent fallback to primary monitor" contract.
+    #[test]
+    fn start_media_payload_video_device_is_none_when_settings_empty() {
+        assert_eq!(video_device_for_payload(""), None);
+    }
+
+    /// Selected display: the browser submitted a non-empty
+    /// `\\.\DISPLAYn`. The daemon passes it through verbatim so the
+    /// worker can rebind capture (e.g. when a second browser picks a
+    /// different monitor than the first).
+    #[test]
+    fn start_media_payload_video_device_is_some_when_settings_set() {
+        assert_eq!(
+            video_device_for_payload(r"\\.\DISPLAY7"),
+            Some(r"\\.\DISPLAY7".to_string())
+        );
     }
 
     // ============== F3: SDP max-message-size parser ==============

@@ -1182,6 +1182,35 @@ impl WorkerSession {
                                         }
                                     }
                                 }
+                                ServiceToWorker::RefreshCapabilities => {
+                                    // Daemon (typically the
+                                    // `VirtualDisplaySupervisor` on the
+                                    // Attaching -> Attached or
+                                    // Attached -> Disabled edge) asked
+                                    // us to re-enumerate displays and
+                                    // re-publish capabilities. We
+                                    // re-use the `desktop_name` /
+                                    // `host_upstream_url` context from
+                                    // the cached `init_payload` so the
+                                    // daemon's snapshot stays
+                                    // consistent with the initial
+                                    // Capabilities the worker sent at
+                                    // startup.
+                                    info!("Worker received RefreshCapabilities");
+                                    let capabilities = MediaProducer::build_capabilities(
+                                        init_payload.desktop_name.as_deref(),
+                                        init_payload.host_upstream_url.is_some(),
+                                    );
+                                    if writer_tx
+                                        .send(WorkerToService::Capabilities(capabilities))
+                                        .is_err()
+                                    {
+                                        warn!(
+                                            "writer task closed; dropping refreshed \
+                                             Capabilities"
+                                        );
+                                    }
+                                }
                             }
                         }
                         Some(None) => {

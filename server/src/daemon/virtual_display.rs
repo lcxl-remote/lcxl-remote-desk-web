@@ -272,6 +272,11 @@ impl VirtualDisplaySupervisor {
         match payload.outcome {
             VirtualDisplayAttachOutcome::Attached(display_name) => {
                 let prev = std::mem::replace(&mut *state, SupervisorState::Disabled);
+                // Edge-trigger: only the Attaching → Attached promotion
+                // fires RefreshCapabilities. A second attach-result on
+                // an already-Attached supervisor is an idempotent no-op
+                // (worker restart path), so it must not re-publish.
+                let promoted_now = matches!(prev, SupervisorState::Attaching { .. });
                 *state = match prev {
                     SupervisorState::Attaching { instance_id, handle } => {
                         info!(
@@ -295,6 +300,30 @@ impl VirtualDisplaySupervisor {
                     // we cannot be in Disabled/Detaching here.
                     other => other,
                 };
+                drop(state);
+                if promoted_now {
+                    // The IDD HMONITOR is now visible to
+                    // `monitors::enum_display_infos`; ask the worker to
+                    // re-publish Capabilities so the daemon's cache (and
+                    // the next browser's `InitSignalingData`) reflects
+                    // it. Re-emitting Capabilities will also trigger
+                    // `on_worker_capabilities`, which re-sends a fresh
+                    // AttachVirtualDisplay; the resulting second attach
+                    // result lands on an already-Attached supervisor
+                    // and is no-op, so the loop terminates after one
+                    // extra attach.
+                    if let Err(e) = self
+                        .worker_mgr
+                        .send_to_worker(ServiceToWorker::RefreshCapabilities)
+                        .await
+                    {
+                        warn!(
+                            "[virtual-display] failed to send RefreshCapabilities on attach \
+                             promotion: {e}; daemon's capabilities cache may stay stale \
+                             until the next worker restart",
+                        );
+                    }
+                }
             }
             VirtualDisplayAttachOutcome::Failed(message) => {
                 warn!(
@@ -310,6 +339,10 @@ impl VirtualDisplaySupervisor {
 
     /// Shutdown path — drop the handle if any. Best-effort
     /// `DetachVirtualDisplay` to the worker; failures are logged.
+    /// After the detach is acknowledged we ask the worker to
+    /// re-publish [`MediaCapabilities`] so the daemon's cache and any
+    /// subsequent browser session no longer offers the IDD as a
+    /// selectable display.
     pub async fn shutdown(&self) {
         let send_detach = {
             let state = self.state.read().await;
@@ -318,13 +351,24 @@ impl VirtualDisplaySupervisor {
                 SupervisorState::Attaching { .. } | SupervisorState::Attached { .. }
             )
         };
-        if send_detach
-            && let Err(e) = self
+        if send_detach {
+            if let Err(e) = self
                 .worker_mgr
                 .send_to_worker(ServiceToWorker::DetachVirtualDisplay)
                 .await
-        {
-            warn!("[virtual-display] shutdown DetachVirtualDisplay send failed: {e}");
+            {
+                warn!("[virtual-display] shutdown DetachVirtualDisplay send failed: {e}");
+            }
+            if let Err(e) = self
+                .worker_mgr
+                .send_to_worker(ServiceToWorker::RefreshCapabilities)
+                .await
+            {
+                warn!(
+                    "[virtual-display] shutdown RefreshCapabilities send failed: {e}; \
+                     dropdown may still list the IDD until the next worker restart",
+                );
+            }
         }
         let mut state = self.state.write().await;
         *state = SupervisorState::Disabled;
@@ -707,6 +751,130 @@ mod tests {
         supervisor.apply(true).await.expect("apply(true)");
         supervisor.shutdown().await;
         assert!(!supervisor.is_active().await);
+    }
+
+    /// Drain all currently buffered messages out of the in-process IPC
+    /// `ipc_rx` without ever awaiting — the supervisor sends to an
+    /// unbounded channel so all enqueued messages are observable
+    /// immediately after the call that produced them.
+    fn drain_ipc(
+        ipc_rx: &mut tokio::sync::mpsc::UnboundedReceiver<
+            desk_ipc_protocol::message::ServiceToWorker,
+        >,
+    ) -> Vec<desk_ipc_protocol::message::ServiceToWorker> {
+        let mut out = Vec::new();
+        while let Ok(msg) = ipc_rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    }
+
+    /// v4 RefreshCapabilities path: the `Attaching → Attached`
+    /// promotion must enqueue exactly one `RefreshCapabilities` on the
+    /// daemon's worker channel so the worker re-publishes its display
+    /// enumeration (which now includes the freshly attached IDD).
+    #[tokio::test]
+    async fn supervisor_on_attach_result_attached_emits_refresh_capabilities_to_worker() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+
+        supervisor.apply(true).await.expect("apply(true)");
+        let _ = drain_ipc(&mut ipc_rx);
+
+        let payload = VirtualDisplayAttachResultPayload {
+            instance_id: MOCK_INSTANCE_ID.to_string(),
+            outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY4".to_string()),
+        };
+        supervisor.on_worker_attach_result(payload).await;
+        let sent = drain_ipc(&mut ipc_rx);
+        let refresh_count = sent
+            .iter()
+            .filter(|m| matches!(m, ServiceToWorker::RefreshCapabilities))
+            .count();
+        assert_eq!(
+            refresh_count, 1,
+            "Attaching -> Attached promotion must emit exactly one \
+             RefreshCapabilities, observed: {sent:?}"
+        );
+    }
+
+    /// Edge-trigger discipline: a second `Attached(_)` reply for an
+    /// already-Attached supervisor must not re-emit
+    /// `RefreshCapabilities`. Without this guard the worker would be
+    /// asked to re-publish capabilities every time the daemon
+    /// re-issued an AttachVirtualDisplay (which happens on each
+    /// `WorkerToService::Capabilities`), turning a one-shot refresh
+    /// into a per-Capabilities ping-pong.
+    #[tokio::test]
+    async fn supervisor_on_attach_result_attached_does_not_emit_refresh_when_already_attached() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+        supervisor.apply(true).await.expect("apply(true)");
+
+        let payload = VirtualDisplayAttachResultPayload {
+            instance_id: MOCK_INSTANCE_ID.to_string(),
+            outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY4".to_string()),
+        };
+        // First Attached: edge fires.
+        supervisor.on_worker_attach_result(payload.clone()).await;
+        let _ = drain_ipc(&mut ipc_rx);
+
+        // Second Attached on already-Attached supervisor: no edge.
+        supervisor.on_worker_attach_result(payload).await;
+        let sent = drain_ipc(&mut ipc_rx);
+        let refresh_count = sent
+            .iter()
+            .filter(|m| matches!(m, ServiceToWorker::RefreshCapabilities))
+            .count();
+        assert_eq!(
+            refresh_count, 0,
+            "second Attached on an already-Attached supervisor must not \
+             re-emit RefreshCapabilities; observed: {sent:?}"
+        );
+    }
+
+    /// Detach path is symmetric: when the supervisor's `shutdown`
+    /// transitions away from `Attaching` / `Attached`, the worker
+    /// must be told to re-publish capabilities so any browser that
+    /// reconnects no longer sees the IDD in the dropdown.
+    #[tokio::test]
+    async fn supervisor_detach_emits_refresh_capabilities_to_worker() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+        supervisor.apply(true).await.expect("apply(true)");
+        let _ = drain_ipc(&mut ipc_rx);
+
+        supervisor.shutdown().await;
+        let sent = drain_ipc(&mut ipc_rx);
+        let refresh_count = sent
+            .iter()
+            .filter(|m| matches!(m, ServiceToWorker::RefreshCapabilities))
+            .count();
+        let detach_count = sent
+            .iter()
+            .filter(|m| matches!(m, ServiceToWorker::DetachVirtualDisplay))
+            .count();
+        assert_eq!(
+            detach_count, 1,
+            "shutdown must emit one DetachVirtualDisplay; observed: {sent:?}"
+        );
+        assert_eq!(
+            refresh_count, 1,
+            "shutdown must emit one RefreshCapabilities after the detach; \
+             observed: {sent:?}"
+        );
     }
 
     /// Backwards-compat: the commit-4 test for the

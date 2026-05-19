@@ -1,7 +1,7 @@
-//! Shared image-capture broadcaster for the worker side of Arch IV.
+﻿//! Shared image-capture broadcaster for the worker side of Arch IV.
 //!
 //! Two browsers connecting to the same desktop both want a frame
-//! stream from `(backend, output_index)` — but the OS-level capture
+//! stream from `(backend, output_index)` 鈥?but the OS-level capture
 //! sources (DXGI Output Duplication in particular) treat
 //! `IDXGIOutputDuplication::DuplicateOutput` as exclusive: the second
 //! call against the same output in the same process returns
@@ -16,13 +16,13 @@
 //! thread that pumps `Arc<SharedFrame>`s into a `tokio::sync::broadcast`
 //! channel; subsequent handles for the same key reuse the existing
 //! channel. The capture thread stops automatically when the last
-//! handle drops (`Arc<SharedInner>` count → 0 → `Drop` sets the stop
+//! handle drops (`Arc<SharedInner>` count 鈫?0 鈫?`Drop` sets the stop
 //! flag and removes the registry entry).
 //!
 //! Concurrency contract:
 //! - One capture loop per `CaptureKey`. Different connections that
 //!   pick *different* backends or *different* output indices each get
-//!   their own loop — e.g. one DXGI on display 0 + one GDI on display
+//!   their own loop 鈥?e.g. one DXGI on display 0 + one GDI on display
 //!   0 coexist on two threads, two DXGI on display 0 share one
 //!   thread.
 //! - Frames are `Arc<SharedFrame>` so the broadcast channel only
@@ -33,13 +33,13 @@
 //! - Cursor mode is hard-pinned to `SyncNative` here. Per-encoder
 //!   `show_mouse` is honoured downstream (in the per-connection
 //!   pipeline) by deciding whether to forward the cursor metadata
-//!   over the connection's `cursor_sync_event` DataChannel — the
+//!   over the connection's `cursor_sync_event` DataChannel 鈥?the
 //!   shared frame never has the cursor baked in. Both DXGI and GDI
 //!   advertise `supports_cursor_sync = true` today so this is
 //!   universal on Windows; the abstraction is platform-agnostic
 //!   regardless.
 //! - Backpressure: `broadcast::Sender::send` returns `Err(SendError)`
-//!   only when there are zero subscribers, which is fine — there is
+//!   only when there are zero subscribers, which is fine 鈥?there is
 //!   always at least one handle alive (otherwise the capture loop
 //!   would have stopped). Slow subscribers see `Lagged` errors when
 //!   they try to receive; we treat that the same as a dropped P-frame
@@ -66,10 +66,14 @@ use tracing::{debug, info};
 
 /// Identifies one capture instance. Connections sharing the same key
 /// reuse the same capture loop; distinct keys get separate loops.
+/// `device_name` is the GDI device name (`\\.\DISPLAYn`) of the chosen
+/// monitor; selection by name was introduced together with IDD virtual
+/// display support, since IDD monitors are addressable via GDI but
+/// invisible to DXGI enumeration.
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub struct CaptureKey {
     pub backend: String,
-    pub output_index: u32,
+    pub device_name: String,
 }
 
 /// One captured frame, shaped for `Arc` sharing across encoder
@@ -124,7 +128,7 @@ struct SharedInner {
 
 impl Drop for SharedInner {
     fn drop(&mut self) {
-        // Last handle went away — tell the capture thread to exit and
+        // Last handle went away 鈥?tell the capture thread to exit and
         // clean up the registry slot. Stop-flag is observed at the
         // top of the capture loop, so the thread exits within one
         // tick (~16ms at the typical 60 Hz refresh rate).
@@ -149,7 +153,7 @@ pub struct SharedCaptureHandle {
 
 impl SharedCaptureHandle {
     /// Subscribe to the broadcast stream. Each call returns a fresh
-    /// `Receiver` — the underlying ring buffer is shared across all
+    /// `Receiver` 鈥?the underlying ring buffer is shared across all
     /// receivers, so a slow consumer falling behind only manifests on
     /// that consumer (as `RecvError::Lagged`), not on its peers.
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<SharedFrame>> {
@@ -181,7 +185,7 @@ impl SharedCaptureRegistry {
     /// Subscribe to the capture stream for the given settings. Reuses
     /// an existing capture loop if one is alive for the same key,
     /// otherwise creates one. The resulting `SharedCaptureHandle`
-    /// keeps the loop alive — drop it (e.g. when the connection ends)
+    /// keeps the loop alive 鈥?drop it (e.g. when the connection ends)
     /// and the loop stops once no other handle remains.
     pub fn subscribe(
         self: &Arc<Self>,
@@ -198,7 +202,7 @@ impl SharedCaptureRegistry {
                 if let Some(inner) = weak.upgrade() {
                     return Ok(SharedCaptureHandle { inner });
                 }
-                // Stale Weak — last handle just dropped. Remove and
+                // Stale Weak 鈥?last handle just dropped. Remove and
                 // fall through to construct fresh.
                 g.remove(&key);
             }
@@ -208,12 +212,17 @@ impl SharedCaptureRegistry {
         // caller observes `CaptureError` directly (e.g. wrong output
         // index, missing display device). The factory may
         // transparently fall back to a different backend (e.g.
-        // WGC → DXGI when the WGC RuntimeBroker is unavailable in
+        // WGC 鈫?DXGI when the WGC RuntimeBroker is unavailable in
         // SYSTEM/Winlogon contexts), so the effective backend is
         // queried below and used to key the registry slot.
         let initial_capture = create_image_capture(settings)?;
         let effective_type = initial_capture.get_capture_type();
-        let effective_key = key_from_capture_type(effective_type, settings.video_device_index);
+        // Key by the device_name the capture instance actually realised
+        // 鈥?not by whatever was on `settings.video_device_name` 鈥?so
+        // any backend that re-resolved the request (today none do, but
+        // the contract should hold) cannot orphan the registry slot.
+        let display_info = initial_capture.get_current_output()?;
+        let effective_key = key_from_capture_type(effective_type, &display_info.device_name);
 
         // Pre-spawn race re-check on the effective key. Crucial when
         // a sibling subscriber already runs the effective backend on
@@ -230,8 +239,6 @@ impl SharedCaptureRegistry {
             }
         }
 
-        let display_info = initial_capture.get_current_output()?;
-
         let (sender, _) = broadcast::channel::<Arc<SharedFrame>>(8);
         let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -242,7 +249,7 @@ impl SharedCaptureRegistry {
         let join = thread::Builder::new()
             .name(format!(
                 "shared-capture-{}-{}",
-                effective_key.backend, effective_key.output_index
+                effective_key.backend, effective_key.device_name
             ))
             .spawn(move || {
                 run_capture_loop(
@@ -281,8 +288,7 @@ impl SharedCaptureRegistry {
 
     fn remove_stale_entry(&self, key: &CaptureKey) {
         let mut g = self.map.lock().expect("shared capture registry poisoned");
-        // Only remove if the slot's Weak has actually expired —
-        // otherwise we would knock out a brand-new entry inserted
+        // Only remove if the slot's Weak has actually expired 鈥?        // otherwise we would knock out a brand-new entry inserted
         // mid-Drop by a racing subscribe path.
         if let Some(weak) = g.get(key)
             && weak.upgrade().is_none()
@@ -298,20 +304,20 @@ impl SharedCaptureRegistry {
     }
 }
 
-/// Build a `CaptureKey` from a backend variant and output index.
+/// Build a `CaptureKey` from a backend variant and GDI device name.
 /// Kept as a tiny pure function so the rest of the module (and the
 /// tests for `decide_registry_reuse`) can talk about keys without
 /// detouring through a `DeskSettings` round-trip.
-fn key_from_capture_type(t: ImageCaptureType, output_index: u32) -> CaptureKey {
+fn key_from_capture_type(t: ImageCaptureType, device_name: &str) -> CaptureKey {
     CaptureKey {
         backend: <&'static str>::from(t).to_string(),
-        output_index,
+        device_name: device_name.to_string(),
     }
 }
 
 fn key_for_settings(settings: &DeskSettings) -> Result<CaptureKey, CaptureError> {
     let backend: ImageCaptureType = settings.get_image_capture_type()?;
-    Ok(key_from_capture_type(backend, settings.video_device_index))
+    Ok(key_from_capture_type(backend, &settings.video_device_name))
 }
 
 /// In-lock decision: should we reuse an existing live entry under
@@ -324,7 +330,7 @@ fn key_for_settings(settings: &DeskSettings) -> Result<CaptureKey, CaptureError>
 /// instance without spawning), `None` otherwise (caller proceeds to
 /// spawn and insert).
 ///
-/// This is split out as a pure function so the WGC → DXGI fallback
+/// This is split out as a pure function so the WGC 鈫?DXGI fallback
 /// race-handling can be unit-tested without depending on a real
 /// capture device.
 fn decide_registry_reuse(
@@ -356,7 +362,7 @@ fn run_capture_loop(
 ) {
     info!(
         "[SharedCapture:{}/{}] capture loop starting",
-        key.backend, key.output_index
+        key.backend, key.device_name
     );
     // Cursor mode is fixed: the shared frame must not have the cursor
     // baked in because different subscribers may have different
@@ -371,8 +377,7 @@ fn run_capture_loop(
     // `capture.get_current_output()` on every tick "in case the user
     // resized the source display", but:
     //
-    //   1. No downstream consumer reads `SharedFrame.display_info` —
-    //      `media_producer` already snapshots `display_info` once at
+    //   1. No downstream consumer reads `SharedFrame.display_info` 鈥?    //      `media_producer` already snapshots `display_info` once at
     //      pipeline start via `SharedCaptureHandle::display_info()`.
     //   2. On Windows, `get_current_output` calls `EnumOutputs` +
     //      `EnumDisplayDevicesW` + `EnumDisplaySettingsW` per call,
@@ -383,7 +388,7 @@ fn run_capture_loop(
     //
     // Per-frame `width`/`height`/`stride` continue to come from
     // `result.image`, so a runtime resolution change is still
-    // reflected in the frame payload — only the unused
+    // reflected in the frame payload 鈥?only the unused
     // `display_info` re-query is removed.
     while !stop_flag.load(Ordering::Acquire) {
         let result = match capture.capture(request) {
@@ -391,7 +396,7 @@ fn run_capture_loop(
             Err(e) => {
                 debug!(
                     "[SharedCapture:{}/{}] capture error: {e}; backing off 16ms",
-                    key.backend, key.output_index
+                    key.backend, key.device_name
                 );
                 thread::sleep(Duration::from_millis(16));
                 continue;
@@ -401,7 +406,7 @@ fn run_capture_loop(
         // The OS-level capture buffer pointed to by `result.image`
         // becomes invalid on the next `capture()` call, so we copy
         // the BGRA payload into an `Arc`-able `Bytes`. This is the
-        // single fan-out cost — every subscriber refcount-bumps
+        // single fan-out cost 鈥?every subscriber refcount-bumps
         // afterwards.
         let stride = result.image.get_stride();
         let width = result.image.get_width();
@@ -421,7 +426,7 @@ fn run_capture_loop(
             display_info: initial_display_info.clone(),
         });
 
-        // No subscribers right now is OK — the capture loop only
+        // No subscribers right now is OK 鈥?the capture loop only
         // exits on stop_flag. (stop_flag is set when every handle
         // is dropped, so "no subscribers + flag still false" is a
         // brief transient between subscribe calls.)
@@ -429,7 +434,7 @@ fn run_capture_loop(
     }
     info!(
         "[SharedCapture:{}/{}] capture loop exited",
-        key.backend, key.output_index
+        key.backend, key.device_name
     );
 }
 
@@ -457,11 +462,11 @@ mod tests {
         // OS having a real capture device available.
         let key = CaptureKey {
             backend: "DXGI".into(),
-            output_index: 0u32,
+            device_name: r"\\.\DISPLAY1".into(),
         };
         {
             let mut g = reg.map.lock().unwrap();
-            // Stand-in for a dropped inner — Weak::new() never
+            // Stand-in for a dropped inner 鈥?Weak::new() never
             // upgrades.
             g.insert(key.clone(), Weak::<SharedInner>::new());
         }
@@ -474,39 +479,39 @@ mod tests {
         );
     }
 
-    /// Key derivation must include both backend and output index so
-    /// "DXGI display 0" and "GDI display 0" produce distinct keys
+    /// Key derivation must include both backend and device_name so
+    /// "DXGI display 1" and "GDI display 1" produce distinct keys
     /// (otherwise they would collide and the second subscriber would
     /// be handed the wrong backend's frames).
     #[test]
-    fn key_derivation_separates_backend_and_output() {
+    fn key_derivation_separates_backend_and_device_name() {
         let mut s = DeskSettings::default();
         s.image_capture = Some("DXGI".into());
-        s.video_device_index = 0;
-        let k_dxgi_0 = key_for_settings(&s).unwrap();
+        s.video_device_name = r"\\.\DISPLAY1".into();
+        let k_dxgi_1 = key_for_settings(&s).unwrap();
 
         s.image_capture = Some("GDI".into());
-        let k_gdi_0 = key_for_settings(&s).unwrap();
-        assert_ne!(k_dxgi_0, k_gdi_0, "different backends must hash separately");
+        let k_gdi_1 = key_for_settings(&s).unwrap();
+        assert_ne!(k_dxgi_1, k_gdi_1, "different backends must hash separately");
 
         s.image_capture = Some("DXGI".into());
-        s.video_device_index = 1;
-        let k_dxgi_1 = key_for_settings(&s).unwrap();
+        s.video_device_name = r"\\.\DISPLAY7".into();
+        let k_dxgi_7 = key_for_settings(&s).unwrap();
         assert_ne!(
-            k_dxgi_0, k_dxgi_1,
-            "different output indices must hash separately"
+            k_dxgi_1, k_dxgi_7,
+            "different device_names must hash separately"
         );
     }
 
     /// Windows backends DXGI / GDI / WGC must all hash to distinct
-    /// `CaptureKey`s at the same `video_device_index`. Without this,
-    /// switching between WGC and DXGI on display 0 could hand a stale
-    /// frame from the wrong backend.
+    /// `CaptureKey`s at the same `video_device_name`. Without this,
+    /// switching between WGC and DXGI on the same display could hand
+    /// a stale frame from the wrong backend.
     #[cfg(target_os = "windows")]
     #[test]
     fn key_derivation_separates_wgc_dxgi_gdi() {
         let mut s = DeskSettings::default();
-        s.video_device_index = 0;
+        s.video_device_name = r"\\.\DISPLAY1".into();
         s.image_capture = Some("WGC".into());
         let k_wgc = key_for_settings(&s).unwrap();
         s.image_capture = Some("DXGI".into());
@@ -520,8 +525,7 @@ mod tests {
 
     /// Construct a barebones `Arc<SharedInner>` for registry tests
     /// without spawning any threads or touching the capture engine.
-    /// The capture loop never runs against this synthetic instance —
-    /// it only exists to satisfy `Arc::downgrade` so we can drive
+    /// The capture loop never runs against this synthetic instance 鈥?    /// it only exists to satisfy `Arc::downgrade` so we can drive
     /// `decide_registry_reuse` against a realistic registry map.
     #[cfg(target_os = "windows")]
     fn synthetic_shared_inner(key: CaptureKey) -> Arc<SharedInner> {
@@ -539,32 +543,53 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn key_from_capture_type_pure_function() {
-        let k_dxgi = key_from_capture_type(ImageCaptureType::DXGI, 0);
+        let k_dxgi = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
         assert_eq!(k_dxgi.backend, "DXGI");
-        assert_eq!(k_dxgi.output_index, 0);
+        assert_eq!(k_dxgi.device_name, r"\\.\DISPLAY1");
 
-        let k_wgc = key_from_capture_type(ImageCaptureType::WGC, 2);
+        let k_wgc = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY7");
         assert_eq!(k_wgc.backend, "WGC");
-        assert_eq!(k_wgc.output_index, 2);
+        assert_eq!(k_wgc.device_name, r"\\.\DISPLAY7");
 
-        let k_gdi = key_from_capture_type(ImageCaptureType::GDI, 1);
+        let k_gdi = key_from_capture_type(ImageCaptureType::GDI, r"\\.\DISPLAY2");
         assert_eq!(k_gdi.backend, "GDI");
-        assert_eq!(k_gdi.output_index, 1);
+        assert_eq!(k_gdi.device_name, r"\\.\DISPLAY2");
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn key_from_capture_type_distinct_per_backend() {
-        let kw = key_from_capture_type(ImageCaptureType::WGC, 0);
-        let kd = key_from_capture_type(ImageCaptureType::DXGI, 0);
-        let kg = key_from_capture_type(ImageCaptureType::GDI, 0);
+        let kw = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY1");
+        let kd = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
+        let kg = key_from_capture_type(ImageCaptureType::GDI, r"\\.\DISPLAY1");
         assert_ne!(kw, kd);
         assert_ne!(kd, kg);
         assert_ne!(kw, kg);
     }
 
+    /// Codex review #4: the registry must key on the device_name the
+    /// capture instance actually realised (`get_current_output().
+    /// device_name`), not on whatever was in `settings.video_device_name`.
+    /// Today no backend re-resolves 鈥?`select_display_info_by_name`
+    /// hard-errors on a miss 鈥?but if one ever introduces a fallback
+    /// path the cache could otherwise key two distinct loops as the
+    /// same slot. Pin the contract explicitly.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn effective_key_uses_initial_capture_device_name_not_settings() {
+        let k_settings = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
+        let k_realised = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY7");
+        // The realised key is what the registry must store / look up
+        // against, derived from `initial_capture.get_current_output()`.
+        // The settings key would only get reused on a coincidence 鈥?        // the test pins that the two are not silently aliased.
+        assert_ne!(
+            k_settings, k_realised,
+            "settings-derived key and capture-realised key must hash apart"
+        );
+    }
+
     /// The critical fallback property: when the factory silently
-    /// rewrote WGC → DXGI for the new capture instance and an existing
+    /// rewrote WGC 鈫?DXGI for the new capture instance and an existing
     /// DXGI subscriber is already running on the same output,
     /// `decide_registry_reuse` must return that existing inner so the
     /// caller can drop its fresh capture without spawning a second
@@ -573,8 +598,8 @@ mod tests {
     #[test]
     fn decide_registry_reuse_returns_existing_on_effective_key_hit() {
         let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
-        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
-        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, 0);
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
+        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY1");
 
         let live = synthetic_shared_inner(dxgi_key.clone());
         map.insert(dxgi_key.clone(), Arc::downgrade(&live));
@@ -593,21 +618,21 @@ mod tests {
     #[test]
     fn decide_registry_reuse_returns_none_when_no_hit() {
         let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
-        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
-        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, 0);
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
+        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY1");
         assert!(decide_registry_reuse(&mut map, &wgc_key, &dxgi_key).is_none());
     }
 
     /// Stale `Weak` entries at both `effective_key` and (if different)
     /// `original_key` are removed by the same call that probes for
-    /// reuse — keeping the registry from accumulating dead slots even
+    /// reuse 鈥?keeping the registry from accumulating dead slots even
     /// in the fallback path.
     #[cfg(target_os = "windows")]
     #[test]
     fn decide_registry_reuse_cleans_stale_weak() {
         let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
-        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
-        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, 0);
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
+        let wgc_key = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY1");
 
         // Insert two stale Weaks: one at effective_key, one at original_key.
         let dropped_dxgi = synthetic_shared_inner(dxgi_key.clone());
@@ -641,7 +666,7 @@ mod tests {
     #[test]
     fn decide_registry_reuse_when_effective_equals_original() {
         let mut map: HashMap<CaptureKey, Weak<SharedInner>> = HashMap::new();
-        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, 0);
+        let dxgi_key = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
 
         let dropped = synthetic_shared_inner(dxgi_key.clone());
         let stale = Arc::downgrade(&dropped);
@@ -654,7 +679,7 @@ mod tests {
 
     /// Regression: `run_capture_loop` used to call
     /// `capture.get_current_output()` on every tick to refresh
-    /// `SharedFrame.display_info` — but no downstream consumer reads
+    /// `SharedFrame.display_info` 鈥?but no downstream consumer reads
     /// that field, while on Windows DXGI each call enumerates display
     /// devices + display modes, each emitting INFO logs from
     /// `desk-capture-engine`. At the OS refresh rate this floods the
@@ -732,7 +757,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let key = CaptureKey {
             backend: "TEST".into(),
-            output_index: 0,
+            device_name: r"\\.\DISPLAY1".into(),
         };
         let initial = DisplayInfo {
             device_name: "test-display".into(),
@@ -757,7 +782,7 @@ mod tests {
             assert_eq!(
                 frame.display_info.device_name, "test-display",
                 "frame #{i} display_info must come from the loop's initial \
-                 snapshot — re-querying per frame is what we removed"
+                 snapshot 鈥?re-querying per frame is what we removed"
             );
         }
 
@@ -775,7 +800,7 @@ mod tests {
         assert_eq!(
             gco, 0,
             "regression: run_capture_loop must NOT invoke get_current_output \
-             per frame — each call enumerates display devices on Windows \
+             per frame 鈥?each call enumerates display devices on Windows \
              DXGI and floods the log at the OS refresh rate (got {gco} \
              calls in 5 frames)"
         );
