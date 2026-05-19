@@ -25,14 +25,23 @@
 //!
 //! ## Display dimensions
 //!
-//! The `MouseEventHandler` needs the screen width / height so it can
-//! map the browser's normalised cursor coordinates onto SendInput's
-//! pixel grid. Cut 5 queries the primary display via
-//! `desk_capture_engine::list_image_capture()` once at handler
-//! construction. Display reconfiguration during a session (resolution
-//! change, monitor add) is handled by killing the connection — the
-//! browser re-establishes and we re-query. Live resolution change
-//! mid-session is out of scope for cut 5.
+//! The `MouseEventHandler` needs the captured monitor's *rectangle*
+//! (left / top / width / height in virtual desktop space) so it can map
+//! the browser's normalised cursor coordinates onto SendInput's pixel
+//! grid AND translate by the monitor's offset. Off-origin monitors —
+//! a second physical screen or an IDD virtual display attached to the
+//! right of the primary — have a non-zero `left`; without it the
+//! cursor always lands on the primary.
+//!
+//! The geometry is derived from `payload.video_device`: that is the
+//! GDI device name the browser picked, so the rect that matches it is
+//! the surface the user actually sees. When no device is selected
+//! (legal during the fresh-install pre-pick state) we fall back to the
+//! first attached display from `desk_capture_engine::list_image_capture()`.
+//! Display reconfiguration during a session (resolution change, monitor
+//! add) is handled by killing the connection — the browser
+//! re-establishes and we re-query. Live resolution change mid-session
+//! is out of scope.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -95,9 +104,10 @@ impl InputDispatcher {
     /// gracefully so a transient capture-engine glitch does not crash
     /// the worker.
     pub fn start_connection(&self, payload: &StartMediaPayload) {
-        let (width, height) = primary_display_size();
+        let (left, top, width, height) =
+            display_geometry_for_device(payload.video_device.as_deref());
         let wayland_mode = self.desk_settings.wayland_control_mode.as_deref();
-        let mouse = match create_mouse_event_handler(width, height, wayland_mode) {
+        let mouse = match create_mouse_event_handler(left, top, width, height, wayland_mode) {
             Ok(h) => h,
             Err(e) => {
                 error!(
@@ -135,8 +145,14 @@ impl InputDispatcher {
             );
         }
         info!(
-            "[InputDispatcher] {}: input handlers ready (display={}x{}, wayland_mode={:?})",
-            payload.connection_id, width, height, wayland_mode
+            "[InputDispatcher] {}: input handlers ready (rect=({},{},{}x{}), device={:?}, wayland_mode={:?})",
+            payload.connection_id,
+            left,
+            top,
+            width,
+            height,
+            payload.video_device.as_deref(),
+            wayland_mode
         );
     }
 
@@ -266,29 +282,82 @@ fn decode_keyboard(data: &[u8]) -> Option<KeyboardEventData> {
     }
 }
 
-/// Query the primary display's pixel dimensions. Falls back to a
-/// sensible 1920x1080 default when the capture-engine reports nothing
-/// (e.g. headless test rig) so handler construction still succeeds —
-/// the cursor mapping will be wrong on a non-1080p display but the
-/// process stays alive.
-fn primary_display_size() -> (i32, i32) {
+/// Resolve the captured monitor's full virtual-desktop rectangle
+/// (left, top, width, height) for the device the browser picked.
+///
+/// - When `requested_device_name` is `Some` and matches a `DisplayInfo`
+///   surfaced by `list_image_capture()`, return that monitor's rect.
+///   This is the path that fixes the off-origin cursor bug for IDD /
+///   secondary monitors.
+/// - When `requested_device_name` is `Some` but does not match (display
+///   was hot-unplugged between StartMedia and the dispatcher firing,
+///   stale TOML config, …), fall back to the primary so handler
+///   construction still succeeds; the cursor will land on the primary
+///   instead of the missing surface but the process stays alive.
+/// - When `requested_device_name` is `None`, fall back to the primary.
+///   The browser dialog already gates submit on a non-empty device
+///   name, so this branch is mostly defensive.
+///
+/// Falls back to a sensible 1920x1080 default when the capture-engine
+/// reports nothing (e.g. headless test rig) so handler construction
+/// still succeeds.
+fn display_geometry_for_device(
+    requested_device_name: Option<&str>,
+) -> (i32, i32, i32, i32) {
+    let mut all_displays = Vec::new();
     for (_backend, displays) in list_image_capture() {
         for display in displays {
-            if !display.attached_to_desktop {
-                continue;
+            if display.attached_to_desktop {
+                all_displays.push(display);
             }
-            let w = display.desktop_coordinates.width();
-            let h = display.desktop_coordinates.height();
-            if w > 0 && h > 0 {
-                return (w, h);
-            }
+        }
+    }
+    geometry_for_device_in(&all_displays, requested_device_name)
+}
+
+/// Pure helper extracted from `display_geometry_for_device` so it can
+/// be unit-tested without a real display attached. Takes the already-
+/// filtered `attached_to_desktop` list and applies the lookup
+/// precedence. Identical fallback to 1920x1080 when no candidate has
+/// non-zero dimensions.
+fn geometry_for_device_in(
+    candidates: &[desk_signal_facade::model::image_capture::DisplayInfo],
+    requested_device_name: Option<&str>,
+) -> (i32, i32, i32, i32) {
+    let pick_rect =
+        |d: &desk_signal_facade::model::image_capture::DisplayInfo| -> (i32, i32, i32, i32) {
+            let r = &d.desktop_coordinates;
+            (r.left, r.top, r.width(), r.height())
+        };
+    if let Some(name) = requested_device_name
+        && !name.is_empty()
+        && let Some(matched) = candidates.iter().find(|d| d.device_name == name)
+    {
+        let g = pick_rect(matched);
+        if g.2 > 0 && g.3 > 0 {
+            return g;
+        }
+    }
+    if let Some(name) = requested_device_name
+        && !name.is_empty()
+    {
+        warn!(
+            "[InputDispatcher] requested device_name {:?} not enumerated; \
+             falling back to primary display",
+            name
+        );
+    }
+    for display in candidates {
+        let g = pick_rect(display);
+        if g.2 > 0 && g.3 > 0 {
+            return g;
         }
     }
     warn!(
         "[InputDispatcher] no attached display found via capture-engine; \
-         falling back to 1920x1080 default"
+         falling back to (0,0,1920,1080) default"
     );
-    (1920, 1080)
+    (0, 0, 1920, 1080)
 }
 
 #[cfg(test)]
@@ -391,5 +460,89 @@ mod tests {
             connection_id: "conn-a".into(),
             data: br#"{"key":"a","event_type":"key_down"}"#.to_vec(),
         });
+    }
+
+    fn display(
+        name: &str,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    ) -> desk_signal_facade::model::image_capture::DisplayInfo {
+        use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+        DisplayInfo {
+            device_name: name.to_string(),
+            display_device_name: None,
+            attached_to_desktop: true,
+            rotation: 0,
+            resolutions: Vec::new(),
+            desktop_coordinates: DisplayRect {
+                left,
+                top,
+                right,
+                bottom,
+            },
+        }
+    }
+
+    /// Requested device matches an entry: return that monitor's rect.
+    /// This is the path that fixes the off-origin cursor bug — without
+    /// it the worker would use the primary's rect even when the browser
+    /// picked an IDD or secondary monitor.
+    #[test]
+    fn geometry_for_device_returns_selected_monitor_rect() {
+        let primary = display(r"\\.\DISPLAY1", 0, 0, 1280, 800);
+        let idd = display(r"\\.\DISPLAY8", 1280, 0, 2780, 900);
+        let pick = geometry_for_device_in(&[primary, idd], Some(r"\\.\DISPLAY8"));
+        // 1500x900 panel at offset (1280, 0). Crucially `left` is 1280,
+        // not 0 — that's the whole point of this commit.
+        assert_eq!(pick, (1280, 0, 1500, 900));
+    }
+
+    /// Off-origin secondary monitor: `left`/`top` are propagated, not
+    /// stripped to zero.
+    #[test]
+    fn geometry_for_device_preserves_left_top_offset() {
+        let primary = display(r"\\.\DISPLAY1", 0, 0, 1920, 1080);
+        let stacked = display(r"\\.\DISPLAY2", 0, 1080, 1920, 2160);
+        let pick = geometry_for_device_in(&[primary, stacked], Some(r"\\.\DISPLAY2"));
+        assert_eq!(pick, (0, 1080, 1920, 1080));
+    }
+
+    /// Requested device not in the enumerated list (hot-unplug between
+    /// capabilities query and StartMedia, or stale TOML): fall back to
+    /// the first attached display so the handler still constructs.
+    #[test]
+    fn geometry_for_device_falls_back_to_primary_when_device_missing() {
+        let primary = display(r"\\.\DISPLAY1", 0, 0, 1280, 800);
+        let other = display(r"\\.\DISPLAY8", 1280, 0, 2780, 900);
+        let pick = geometry_for_device_in(&[primary, other], Some(r"\\.\DISPLAY99"));
+        assert_eq!(pick, (0, 0, 1280, 800));
+    }
+
+    /// `None` (no device picked in the payload) → first attached.
+    #[test]
+    fn geometry_for_device_uses_first_when_no_device_requested() {
+        let primary = display(r"\\.\DISPLAY1", 0, 0, 1280, 800);
+        let pick = geometry_for_device_in(&[primary], None);
+        assert_eq!(pick, (0, 0, 1280, 800));
+    }
+
+    /// Empty string in the payload behaves like `None` (the browser
+    /// uses an empty string for the "no display picked yet" state).
+    #[test]
+    fn geometry_for_device_treats_empty_string_as_unselected() {
+        let primary = display(r"\\.\DISPLAY1", 0, 0, 1280, 800);
+        let pick = geometry_for_device_in(&[primary], Some(""));
+        assert_eq!(pick, (0, 0, 1280, 800));
+    }
+
+    /// Headless environment with no displays: hard-coded 1920x1080 at
+    /// the origin so handler construction does not fail. Matches the
+    /// previous behaviour of `primary_display_size()`.
+    #[test]
+    fn geometry_for_device_returns_default_when_list_empty() {
+        let pick = geometry_for_device_in(&[], None);
+        assert_eq!(pick, (0, 0, 1920, 1080));
     }
 }

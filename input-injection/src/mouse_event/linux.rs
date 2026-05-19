@@ -15,7 +15,21 @@ pub struct UinputMouseEventHandler {
 }
 
 impl UinputMouseEventHandler {
-    pub fn new(_width: i32, _height: i32) -> Result<Self, InputError> {
+    /// `left` / `top` / `width` / `height` are accepted for signature
+    /// uniformity with the Windows and macOS backends, but uinput's
+    /// absolute axis range is a fixed `0..32767` that the X / Wayland
+    /// compositor maps to its own screen / output. Applying a
+    /// virtual-desktop offset here would push the cursor outside the
+    /// reachable range, so the parameters are intentionally ignored.
+    /// Multi-monitor cursor targeting on uinput would require either a
+    /// separate virtual device per output or relative-mode emulation,
+    /// neither of which is in scope today.
+    pub fn new(
+        _left: i32,
+        _top: i32,
+        _width: i32,
+        _height: i32,
+    ) -> Result<Self, InputError> {
         // https://www.kernel.org/doc/html/v4.12/input/uinput.html
         let mut keys = AttributeSet::<KeyCode>::new();
         keys.insert(evdev::KeyCode::BTN_LEFT);

@@ -11,19 +11,33 @@ use crate::mouse_event::wayland_portal;
 #[cfg(target_os = "macos")]
 use crate::mouse_event::mac;
 
+/// Construct a platform mouse event handler bound to the captured
+/// monitor's rectangle in virtual desktop space.
+///
+/// `left` / `top` is the top-left corner of the captured monitor's
+/// rectangle (taken from `DisplayInfo::desktop_coordinates`). The
+/// Windows and macOS backends use it to translate the browser's
+/// normalised `(x, y)` into absolute global cursor coordinates so the
+/// cursor lands on the captured monitor rather than the primary. The
+/// Wayland portal and Linux uinput backends do not — see the per-file
+/// docs on why.
 pub fn create_mouse_event_handler(
+    left: i32,
+    top: i32,
     width: i32,
     height: i32,
     wayland_control_mode: Option<&str>,
 ) -> Result<Box<dyn MouseEventHandler + Send + Sync>, InputError> {
     #[cfg(target_os = "windows")]
     {
+        let _ = wayland_control_mode;
         Ok(Box::new(windows::WindowsMouseEventHandler::new(
-            width, height,
+            left, top, width, height,
         )))
     }
     #[cfg(target_os = "linux")]
     {
+        use crate::model::data_channel::MouseEventData;
         struct NoopMouseEventHandler;
         impl MouseEventHandler for NoopMouseEventHandler {
             fn handle_mouse_move(&mut self, _event: &MouseEventData) -> Result<(), InputError> {
@@ -42,8 +56,10 @@ pub fn create_mouse_event_handler(
 
         let mode = wayland_control_mode.unwrap_or("auto");
         log::info!(
-            "Mouse handler: selecting linux backend, mode={}, width={}, height={}, WAYLAND_DISPLAY={}",
+            "Mouse handler: selecting linux backend, mode={}, rect=({},{},{}x{}), WAYLAND_DISPLAY={}",
             mode,
+            left,
+            top,
             width,
             height,
             std::env::var("WAYLAND_DISPLAY").is_ok()
@@ -56,20 +72,24 @@ pub fn create_mouse_event_handler(
             "uinput" => {
                 log::info!("Mouse handler: using forced uinput backend");
                 return Ok(Box::new(linux::UinputMouseEventHandler::new(
-                    width, height,
+                    left, top, width, height,
                 )?));
             }
             "portal" => {
                 log::info!("Mouse handler: using forced wayland portal backend");
                 return Ok(Box::new(
-                    wayland_portal::WaylandPortalMouseEventHandler::new(width, height)?,
+                    wayland_portal::WaylandPortalMouseEventHandler::new(
+                        left, top, width, height,
+                    )?,
                 ));
             }
             _ => {}
         }
 
         if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            match wayland_portal::WaylandPortalMouseEventHandler::new(width, height) {
+            match wayland_portal::WaylandPortalMouseEventHandler::new(
+                left, top, width, height,
+            ) {
                 Ok(handler) => {
                     log::info!("Mouse handler: auto selected wayland portal backend");
                     return Ok(Box::new(handler));
@@ -81,11 +101,14 @@ pub fn create_mouse_event_handler(
         }
         log::info!("Mouse handler: fallback to uinput backend");
         Ok(Box::new(linux::UinputMouseEventHandler::new(
-            width, height,
+            left, top, width, height,
         )?))
     }
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(mac::MacMouseEventHandler::new(width, height)?))
+        let _ = wayland_control_mode;
+        Ok(Box::new(mac::MacMouseEventHandler::new(
+            left, top, width, height,
+        )?))
     }
 }

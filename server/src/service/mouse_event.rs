@@ -12,16 +12,24 @@ pub async fn handle_mouse_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
 ) -> Result<(), DeskError> {
-    let (width, height) = {
+    // The captured monitor may sit at a non-zero (left, top) in virtual
+    // desktop space (any secondary monitor or IDD virtual display
+    // attached to the right or below the primary). `SetCursorPos` /
+    // `CGEvent::post` both speak that global coordinate space, so the
+    // mouse handler needs the full rectangle — not just width/height —
+    // to land the cursor on the correct surface.
+    let (left, top, width, height) = {
         let state = signaling_state.read().await;
-        let desktop_coordinates = state.display_info.desktop_coordinates;
-        (desktop_coordinates.width(), desktop_coordinates.height())
+        let r = state.display_info.desktop_coordinates;
+        (r.left, r.top, r.width(), r.height())
     };
     let wayland_control_mode = {
         let state = signaling_state.read().await;
         state.wayland_control_mode.clone()
     };
     let handler = Arc::new(Mutex::new(create_mouse_event_handler(
+        left,
+        top,
         width,
         height,
         wayland_control_mode.as_deref(),
