@@ -23,10 +23,13 @@ use windows::Win32::Devices::Enumeration::Pnp::{
     HSWDEVICE, SW_DEVICE_CREATE_INFO, SWDeviceCapabilitiesDriverRequired,
     SWDeviceCapabilitiesRemovable, SWDeviceCapabilitiesSilentInstall, SwDeviceCreate,
 };
-use windows::Win32::Foundation::{CloseHandle, HANDLE as WHANDLE, WAIT_OBJECT_0};
-use windows::Win32::Graphics::Gdi::{DISPLAY_DEVICEW, EnumDisplayDevicesW};
+use windows::Win32::Foundation::{CloseHandle, HANDLE as WHANDLE, LPARAM, RECT, WAIT_OBJECT_0};
+use windows::Win32::Graphics::Gdi::{
+    DISPLAY_DEVICEW, EnumDisplayDevicesW, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
+    MONITORINFOEXW,
+};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
-use windows::core::{Owned, PCWSTR};
+use windows::core::{BOOL, Owned, PCWSTR};
 
 use crate::{VirtualDisplayError, VirtualDisplayHandleInner};
 
@@ -314,6 +317,7 @@ pub fn create_virtual_display_with_timeout(
 pub fn find_display_name(instance_id: &str) -> Result<String, VirtualDisplayError> {
     let needle = LCXL_IDD_HARDWARE_ID.to_ascii_uppercase();
     let mut last_seen: Vec<String> = Vec::new();
+    let mut candidate: Option<String> = None;
     for idevnum in 0u32..MAX_DISPLAY_ENUM_INDEX {
         let mut dev = DISPLAY_DEVICEW {
             cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
@@ -329,13 +333,108 @@ pub fn find_display_name(instance_id: &str) -> Result<String, VirtualDisplayErro
         let device_name = wide_array_to_string(&dev.DeviceName);
         last_seen.push(format!("{device_name}={device_id}"));
         if device_id.to_ascii_uppercase().contains(&needle) {
-            return Ok(device_name);
+            candidate = Some(device_name);
+            break;
         }
     }
-    Err(VirtualDisplayError::DeviceCreate(format!(
-        "no GDI display matches lcxl IDD instance {instance_id}; seen=[{}]",
-        last_seen.join(", ")
-    )))
+    let candidate = candidate.ok_or_else(|| {
+        VirtualDisplayError::DeviceCreate(format!(
+            "no GDI display matches lcxl IDD instance {instance_id}; seen=[{}]",
+            last_seen.join(", ")
+        ))
+    })?;
+    // `EnumDisplayDevicesW` reports the PnP-registered adapter as soon
+    // as `SwDeviceCreate` finishes, but Windows still needs to wire the
+    // monitor into the desktop topology after the driver's
+    // `IddCxMonitorArrival` returns. There is a real window — observed
+    // in practice up to a couple of hundred milliseconds, longer on
+    // busy / freshly-installed systems — during which a positive hit
+    // here does not yet correspond to a monitor that
+    // `EnumDisplayMonitors` will return. Surfacing the candidate at
+    // that stage causes the daemon to promote `Attaching -> Attached`
+    // prematurely; the worker's follow-up `RefreshCapabilities`
+    // enumerates via `EnumDisplayMonitors` and only sees the physical
+    // panels.
+    //
+    // Gate the success path on the candidate appearing in
+    // `EnumDisplayMonitors`. The caller is
+    // `resolve_attach_with_backoff`, which already retries on Err with
+    // an exponential schedule that comfortably covers the bring-up
+    // window, so returning a retry-able error here pushes Attached
+    // promotion to the point where the monitor is *actually* on the
+    // desktop.
+    let attached = enum_attached_display_names()?;
+    if attached.iter().any(|n| n == &candidate) {
+        Ok(candidate)
+    } else {
+        Err(VirtualDisplayError::DeviceCreate(format!(
+            "lcxl IDD instance {instance_id} resolves to {candidate} but the \
+             monitor is not yet attached to the desktop (EnumDisplayMonitors \
+             returned [{}]); retry pending IDD bring-up",
+            attached.join(", ")
+        )))
+    }
+}
+
+/// Enumerate every monitor `EnumDisplayMonitors` currently reports as
+/// attached to the desktop, returning each one's GDI `\\.\DISPLAYn`
+/// name. Distinct from `EnumDisplayDevicesW`: the latter sees every
+/// PnP-registered adapter (including ones whose monitor is not yet
+/// wired into the desktop topology), the former only yields monitors
+/// the OS has finished bringing up. Used by [`find_display_name`] to
+/// confirm a candidate display name is actually live before signalling
+/// Attached to the daemon.
+pub(crate) fn enum_attached_display_names() -> Result<Vec<String>, VirtualDisplayError> {
+    let mut list: Vec<String> = Vec::new();
+    let list_ptr: *mut Vec<String> = &mut list;
+
+    unsafe extern "system" fn callback(
+        hmonitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        // SAFETY: `lparam` carries the `&mut Vec<String>` we passed in.
+        // `EnumDisplayMonitors` invokes the callback synchronously, so
+        // the borrow stays live for the entire enumeration.
+        let list = unsafe { &mut *(lparam.0 as *mut Vec<String>) };
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        let ok =
+            unsafe { GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _ as *mut _) };
+        if ok.as_bool() {
+            let nul_pos = info
+                .szDevice
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(info.szDevice.len());
+            list.push(String::from_utf16_lossy(&info.szDevice[..nul_pos]));
+        }
+        BOOL(1)
+    }
+
+    let ok = unsafe {
+        EnumDisplayMonitors(None, None, Some(callback), LPARAM(list_ptr as isize))
+    };
+    if !ok.as_bool() {
+        return Err(VirtualDisplayError::DeviceCreate(
+            "EnumDisplayMonitors returned FALSE".to_string(),
+        ));
+    }
+    Ok(list)
+}
+
+/// Pure decision helper: given a candidate `device_name` resolved from
+/// the PnP adapter list and the names `EnumDisplayMonitors` currently
+/// reports as attached, decide whether the candidate is ready to be
+/// returned as the resolved display.
+///
+/// Separated out so the gate logic can be unit-tested without driving
+/// real Win32 enumeration — the live FFI calls in `find_display_name`
+/// fold their results into this function and only the FFI thin layer
+/// is left untested.
+pub(crate) fn pick_attached_match(candidate: &str, attached: &[String]) -> bool {
+    attached.iter().any(|n| n == candidate)
 }
 
 #[cfg(test)]
@@ -406,5 +505,52 @@ mod tests {
         assert_eq!(LCXL_IDD_HARDWARE_ID, "LcxlVirtualDisplay");
         assert_eq!(LCXL_IDD_INSTANCE_ID, "LcxlVirtualDisplay");
         assert_ne!(LCXL_IDD_HARDWARE_ID, "LcxlIddSampleDriver");
+    }
+
+    /// Happy path: candidate appears in the attached list — Attached
+    /// promotion is allowed.
+    #[test]
+    fn pick_attached_match_accepts_candidate_present_in_attached_list() {
+        let attached = vec![
+            r"\\.\DISPLAY1".to_string(),
+            r"\\.\DISPLAY13".to_string(),
+        ];
+        assert!(pick_attached_match(r"\\.\DISPLAY13", &attached));
+    }
+
+    /// Race window: PnP enumeration found the adapter but
+    /// `EnumDisplayMonitors` has not seen the monitor wired into the
+    /// desktop yet. The gate must reject so the caller retries.
+    #[test]
+    fn pick_attached_match_rejects_candidate_not_yet_in_attached_list() {
+        let attached = vec![r"\\.\DISPLAY1".to_string()];
+        assert!(!pick_attached_match(r"\\.\DISPLAY13", &attached));
+    }
+
+    /// Defensive: empty attached list (headless / no monitors active)
+    /// always rejects regardless of candidate value.
+    #[test]
+    fn pick_attached_match_rejects_when_no_monitors_attached() {
+        assert!(!pick_attached_match(r"\\.\DISPLAY13", &[]));
+    }
+
+    /// Case sensitivity: GDI device names are always `\\.\DISPLAYn`
+    /// uppercase — the comparison is exact (no normalisation), so a
+    /// hypothetical casing mismatch must fail closed rather than
+    /// silently allowing a different-case match.
+    #[test]
+    fn pick_attached_match_is_case_sensitive() {
+        let attached = vec![r"\\.\display13".to_string()];
+        assert!(!pick_attached_match(r"\\.\DISPLAY13", &attached));
+    }
+
+    /// `enum_attached_display_names` is a Win32 thin wrapper — it must
+    /// not panic on a headless / CI rig where `EnumDisplayMonitors` may
+    /// legitimately return zero entries. (The structural smoke that
+    /// confirms it actually picks up an IDD lives in the
+    /// `poc-indirect-display enum-monitors` CLI subcommand.)
+    #[test]
+    fn enum_attached_display_names_does_not_panic_on_headless_runs() {
+        let _ = enum_attached_display_names();
     }
 }
