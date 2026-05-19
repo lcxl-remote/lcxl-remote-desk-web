@@ -38,6 +38,27 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertTriangle } from "lucide-react"
 import type { InitSignalingData, DeskSettings, DisplayInfo } from "@/services/types"
 
+/**
+ * Compose the human-readable label shown for a `DisplayInfo` in the
+ * display-picker dropdown.
+ *
+ * The size suffix has to be computed as `right - left` and
+ * `bottom - top`: `desktop_coordinates` is a rectangle in virtual
+ * desktop space, not a `(width, height)` pair. Off-origin monitors
+ * (an IDD attached to the right of the primary, or any second
+ * monitor) have `left > 0`, so reading `right` / `bottom` directly
+ * adds the offset into the displayed resolution. Exported so the
+ * unit test can guard against this regression without touching the
+ * Radix Select internals.
+ */
+export function formatDisplayLabel(device: DisplayInfo): string {
+    const name = device.display_device_name ?? device.device_name
+    const r = device.desktop_coordinates
+    const width = r.right - r.left
+    const height = r.bottom - r.top
+    return `${name} (${width}x${height})`
+}
+
 interface DeskConfigDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
@@ -360,7 +381,7 @@ export function DeskConfigDialog({
                                                                     key={device.device_name}
                                                                     value={device.device_name ?? ""}
                                                                 >
-                                                                    {`${device.display_device_name ?? device.device_name} (${device.desktop_coordinates.right}x${device.desktop_coordinates.bottom})`}
+                                                                    {formatDisplayLabel(device)}
                                                                 </SelectItem>
                                                             ))}
                                                         </SelectContent>
