@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { useForm } from "react-hook-form"
 import { useTranslation } from "react-i18next"
 import {
@@ -36,7 +36,7 @@ import { Slider } from "@/components/ui/slider"
 import { Input } from "@/components/ui/input"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertTriangle } from "lucide-react"
-import type { InitSignalingData, DeskSettings } from "@/services/types"
+import type { InitSignalingData, DeskSettings, DisplayInfo } from "@/services/types"
 
 interface DeskConfigDialogProps {
     open: boolean
@@ -74,7 +74,7 @@ export function DeskConfigDialog({
     const form = useForm<FormSettings>({
         defaultValues: {
             image_capture: "",
-            video_device_index: 0,
+            video_device_name: "",
             show_mouse: true,
             adaptive_web_page_resolution: true,
             video_zoom_ratio: 100,
@@ -88,18 +88,69 @@ export function DeskConfigDialog({
         },
     })
 
-    useEffect(() => {
-        if (initData?.desk_settings) {
-            form.reset({
-                ...initData.desk_settings,
-                show_mouse: initData.desk_settings.show_mouse ?? true,
-                adaptive_web_page_resolution: initData.desk_settings.adaptive_web_page_resolution ?? true,
-                video_zoom_ratio: initData.desk_settings.video_zoom_ratio ?? 100,
-                video_quality: initData.desk_settings.video_quality ?? 22,
-                wayland_control_mode: initData.desk_settings.wayland_control_mode ?? "auto",
-                enable_dirty_rect: initData.desk_settings.enable_dirty_rect ?? true,
-            })
+    /**
+     * Set to the previously-saved `video_device_name` when the user
+     * opens the dialog with a configuration that points at a display
+     * that no longer exists (display unplugged between sessions, or
+     * the IDD virtual monitor was detached). Surfaces as a warning
+     * banner above the dropdown; cleared once the user picks a
+     * different display.
+     */
+    const [staleSavedDeviceName, setStaleSavedDeviceName] = useState<string | null>(null)
+
+    /**
+     * Pick a default `device_name` from a backend's
+     * `video_device_list`. Prefers the primary monitor when the
+     * backend surfaces one (DisplayInfo whose `desktop_coordinates`
+     * include the origin point 0,0 — the standard GDI primary-monitor
+     * convention), otherwise falls back to the first entry. Returns
+     * the empty string when the list is empty so the form gates submit
+     * (an empty list is the headless / capture-unsupported state).
+     */
+    const pickDefaultDeviceName = (list: ReadonlyArray<DisplayInfo>): string => {
+        if (list.length === 0) {
+            return ""
         }
+        const primary = list.find((d) => {
+            const r = d.desktop_coordinates
+            return r && r.left === 0 && r.top === 0
+        })
+        return (primary ?? list[0]).device_name ?? ""
+    }
+
+    useEffect(() => {
+        if (!initData?.desk_settings) {
+            return
+        }
+        const saved = initData.desk_settings
+        const backend = saved.image_capture ?? ""
+        const candidates: ReadonlyArray<DisplayInfo> = (backend &&
+            initData.video_device_list &&
+            initData.video_device_list[backend]) || []
+        const savedName = saved.video_device_name ?? ""
+        let resolvedName = savedName
+        let stale: string | null = null
+        if (savedName === "") {
+            resolvedName = pickDefaultDeviceName(candidates)
+        } else if (!candidates.some((d) => d.device_name === savedName)) {
+            // Saved display is gone (hot-plug / IDD detached / config
+            // edited by hand). Prefill the primary so the user can hit
+            // Connect without re-picking, but surface a warning so they
+            // know we didn't honour their persisted choice.
+            stale = savedName
+            resolvedName = pickDefaultDeviceName(candidates)
+        }
+        setStaleSavedDeviceName(stale)
+        form.reset({
+            ...saved,
+            video_device_name: resolvedName,
+            show_mouse: saved.show_mouse ?? true,
+            adaptive_web_page_resolution: saved.adaptive_web_page_resolution ?? true,
+            video_zoom_ratio: saved.video_zoom_ratio ?? 100,
+            video_quality: saved.video_quality ?? 22,
+            wayland_control_mode: saved.wayland_control_mode ?? "auto",
+            enable_dirty_rect: saved.enable_dirty_rect ?? true,
+        })
     }, [initData, form])
 
     // Backend returns `video_device_list` as a JSON-serialized
@@ -131,7 +182,7 @@ export function DeskConfigDialog({
         // Ensure numbers are properly typed
         const submitData: DeskSettings = {
             ...values,
-            video_device_index: Number(values.video_device_index),
+            video_device_name: values.video_device_name ?? "",
             video_zoom_ratio: Number(values.video_zoom_ratio),
             video_quality: Number(values.video_quality),
             wayland_control_mode: values.wayland_control_mode ?? "auto",
@@ -197,7 +248,20 @@ export function DeskConfigDialog({
                                                 key={`image-capture-${currentValue || "empty"}`}
                                                 onValueChange={(value: string) => {
                                                     field.onChange(value)
-                                                    form.setValue("video_device_index", 0) // Reset device index when capture mode changes
+                                                    // Reset device selection to the new
+                                                    // backend's primary monitor: the saved
+                                                    // device_name is only meaningful for the
+                                                    // backend that enumerated it (DXGI never
+                                                    // sees IDD, etc.). The user can re-pick
+                                                    // from the dropdown below.
+                                                    const next = initData?.video_device_list
+                                                        ? initData.video_device_list[value] ?? []
+                                                        : []
+                                                    form.setValue(
+                                                        "video_device_name",
+                                                        pickDefaultDeviceName(next),
+                                                    )
+                                                    setStaleSavedDeviceName(null)
                                                 }}
                                                 defaultValue={currentValue}
                                             >
@@ -237,39 +301,77 @@ export function DeskConfigDialog({
                                 )}
 
                                 {selectedImageCapture && videoDeviceList && videoDeviceList.length > 0 && (
-                                    <FormField
-                                        control={form.control}
-                                        name="video_device_index"
-                                        render={({ field }) => (
-                                            <FormItem>
-                                                <FormLabel>{t('pages.desk.displayDevice', 'Display Device')}</FormLabel>
-                                                {(() => {
-                                                    const currentValue = field.value !== undefined ? String(field.value) : "0"
-                                                    return (
-                                                <Select
-                                                    onValueChange={field.onChange}
-                                                    key={`video-device-${currentValue}`}
-                                                    defaultValue={currentValue}
-                                                >
-                                                    <FormControl>
-                                                        <SelectTrigger>
-                                                            <SelectValue placeholder={t('pages.desk.displayDevicePlaceholder', 'Select Device')} />
-                                                        </SelectTrigger>
-                                                    </FormControl>
-                                                    <SelectContent>
-                                                        {videoDeviceList.map((device, index) => (
-                                                            <SelectItem key={index} value={String(index)}>
-                                                                {`${device.display_device_name} (${device.desktop_coordinates.right}x${device.desktop_coordinates.bottom})`}
-                                                            </SelectItem>
-                                                        ))}
-                                                    </SelectContent>
-                                                </Select>
-                                                    )
-                                                })()}
-                                                <FormMessage />
-                                            </FormItem>
+                                    <>
+                                        {staleSavedDeviceName && (
+                                            <Alert>
+                                                <AlertTriangle className="h-4 w-4" />
+                                                <AlertTitle>
+                                                    {t(
+                                                        "pages.desk.displayDeviceStaleWarning.title",
+                                                        "Previously selected display is unavailable",
+                                                    )}
+                                                </AlertTitle>
+                                                <AlertDescription>
+                                                    {t(
+                                                        "pages.desk.displayDeviceStaleWarning.body",
+                                                        "The display {{name}} you picked last time is no longer enumerated. We prefilled the primary monitor; pick a different one if needed.",
+                                                        { name: staleSavedDeviceName },
+                                                    )}
+                                                </AlertDescription>
+                                            </Alert>
                                         )}
-                                    />
+                                        <FormField
+                                            control={form.control}
+                                            name="video_device_name"
+                                            rules={{
+                                                required: t(
+                                                    "pages.desk.displayDeviceRequired",
+                                                    "Please pick a display before connecting.",
+                                                ),
+                                                validate: (value: string | undefined) =>
+                                                    (value !== undefined && value !== "") ||
+                                                    t(
+                                                        "pages.desk.displayDeviceRequired",
+                                                        "Please pick a display before connecting.",
+                                                    ),
+                                            }}
+                                            render={({ field }) => (
+                                                <FormItem>
+                                                    <FormLabel>{t('pages.desk.displayDevice', 'Display Device')}</FormLabel>
+                                                    {(() => {
+                                                        const currentValue = field.value ?? ""
+                                                        return (
+                                                    <Select
+                                                        onValueChange={(value: string) => {
+                                                            field.onChange(value)
+                                                            setStaleSavedDeviceName(null)
+                                                        }}
+                                                        key={`video-device-${currentValue || "empty"}`}
+                                                        defaultValue={currentValue}
+                                                    >
+                                                        <FormControl>
+                                                            <SelectTrigger>
+                                                                <SelectValue placeholder={t('pages.desk.displayDevicePlaceholder', 'Select Device')} />
+                                                            </SelectTrigger>
+                                                        </FormControl>
+                                                        <SelectContent>
+                                                            {videoDeviceList.map((device) => (
+                                                                <SelectItem
+                                                                    key={device.device_name}
+                                                                    value={device.device_name ?? ""}
+                                                                >
+                                                                    {`${device.display_device_name ?? device.device_name} (${device.desktop_coordinates.right}x${device.desktop_coordinates.bottom})`}
+                                                                </SelectItem>
+                                                            ))}
+                                                        </SelectContent>
+                                                    </Select>
+                                                        )
+                                                    })()}
+                                                    <FormMessage />
+                                                </FormItem>
+                                            )}
+                                        />
+                                    </>
                                 )}
 
                                 <FormField

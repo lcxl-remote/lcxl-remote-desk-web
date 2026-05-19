@@ -186,7 +186,7 @@ npm run build
 - `video_fps`: 视频帧率 (默认 60)。降低此值可减少 CPU 和带宽占用。
 - `video_encoder`: 视频编码器。建议根据硬件支持选择 `VP8` 或 `VP9`。
 - `audio_encoder`: 音频编码器。目前主要支持 `OPUS`。
-- `video_device_index`: 指定要捕获的显示器索引（多显示器环境）。
+- `video_device_name`: 指定要捕获的显示器的 GDI 设备名（`\\.\DISPLAYn`）；为空串时由浏览器在首次连接时弹框选择。
 - `show_mouse`: 是否在远程画面中捕捉并显示移动的鼠标指针。
 
 ### 开发模式推荐配置

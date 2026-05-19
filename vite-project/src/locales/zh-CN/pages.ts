@@ -365,6 +365,8 @@ export default {
   'pages.desk.displayDevice': '显示设备',
   'pages.desk.displayDevicePlaceholder': '请选择一个显示设备',
   'pages.desk.displayDeviceRequired': '请选择一个显示设备!',
+  'pages.desk.displayDeviceStaleWarning.title': '上次选择的显示设备已不可用',
+  'pages.desk.displayDeviceStaleWarning.body': '上次选择的显示设备 {{name}} 已经不存在（可能被拔出，或虚拟屏已分离）。已为您预选主显示器，如果需要请重新选择。',
   'pages.desk.showRemoteMouse': '显示远程鼠标',
   'pages.desk.adaptiveResolution': '自适应网页分辨率',
   'pages.desk.adaptiveQuality': '自适应画质',

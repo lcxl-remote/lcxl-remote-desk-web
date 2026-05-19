@@ -115,7 +115,7 @@ npm run dev
 - `video_fps`: Video frame rate (default 60). Lowering this value reduces CPU and bandwidth usage.
 - `video_encoder`: Video encoder. `VP8` or `VP9` are recommended.
 - `audio_encoder`: Audio encoder. `OPUS` is primarily supported.
-- `video_device_index`: Index of the monitor to capture (multi-monitor environments).
+- `video_device_name`: GDI device name of the monitor to capture (`\\.\DISPLAYn`); empty string means "ask the browser to pick on first connection".
 - `show_mouse`: Whether to capture and display the mouse cursor.
 
 ### Recommended Development Config

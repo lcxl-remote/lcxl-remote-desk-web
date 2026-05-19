@@ -367,6 +367,8 @@ export default {
   'pages.desk.displayDevice': 'Display Device',
   'pages.desk.displayDevicePlaceholder': 'Please select a display device',
   'pages.desk.displayDeviceRequired': 'Please select a display device!',
+  'pages.desk.displayDeviceStaleWarning.title': 'Previously selected display is unavailable',
+  'pages.desk.displayDeviceStaleWarning.body': 'The display {{name}} you picked last time is no longer enumerated (it may have been unplugged or the virtual monitor detached). We prefilled the primary monitor; pick a different one if needed.',
   'pages.desk.showRemoteMouse': 'Show Remote Mouse',
   'pages.desk.adaptiveResolution': 'Adaptive Web Page Resolution',
   'pages.desk.adaptiveQuality': 'Adaptive Video Quality',

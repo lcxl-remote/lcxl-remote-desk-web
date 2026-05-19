@@ -585,12 +585,19 @@ export type DeskSettings = {
     */
     show_mouse?: boolean;
     /**
-     * @description Video device index
-     * @minLength 0
-     * @default 0
-     * @type integer | undefined, int32
+     * @description GDI device name of the capture target (`\\.\DISPLAYn`).
+Empty string means "no display selected yet" — the browser
+must surface a chooser before starting media. Selection by
+name (instead of by enumeration index) is required so that
+IDD virtual displays — which are visible to GDI but invisible
+to `IDXGIAdapter::EnumOutputs` — can be addressed unambiguously,
+and so that the selected target survives display hot-plug
+reordering. See the v4 virtual-display capture-selection plan
+for full context.
+     * @default ""
+     * @type string | undefined
     */
-    video_device_index?: number;
+    video_device_name?: string;
     /**
      * @description Video encoder name, None for auto detection
      * @type string,null
