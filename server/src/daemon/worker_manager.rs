@@ -10,10 +10,10 @@ use desk_ipc_protocol::{
     transport::{read_message, write_message},
 };
 use log::{debug, error, info, warn};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, watch};
 
 /// Default heartbeat-watchdog grace period when settings don't override
 /// it. Worker heartbeats every 5s, so 30s ≈ 6 missed beats — wide
@@ -43,6 +43,18 @@ pub struct WorkerManager {
     /// of its Init handshake. Read by `pc_manager::handle_request_remote`
     /// to populate the daemon's `Init` reply with codec / device data.
     worker_capabilities: Arc<StdMutex<Option<MediaCapabilities>>>,
+    /// Monotonic counter bumped every time [`Self::set_worker_capabilities`]
+    /// installs a fresh snapshot. Paired with [`Self::capabilities_version_tx`]
+    /// so async callers can wait until the cache reflects a known-newer
+    /// snapshot (e.g. `VirtualDisplaySupervisor::ensure_attached` waits
+    /// for the post-attach `RefreshCapabilities` round-trip to update
+    /// the cache before letting `RequestRemote` assemble the Init reply).
+    capabilities_version: Arc<AtomicU64>,
+    /// Watch channel mirroring [`Self::capabilities_version`] so awaiters
+    /// can use `recv.changed().await` instead of polling. The sender side
+    /// is wrapped in `Arc` because `WorkerManager` is `Clone` and
+    /// `watch::Sender` is not.
+    capabilities_version_tx: Arc<watch::Sender<u64>>,
     /// `true` once [`Self::start_inprocess_worker`] has been called.
     /// Portable / Default mode runs the worker as an `actix_web::rt::spawn`
     /// task in the same process, so the daemon must NOT fall back to
@@ -185,6 +197,7 @@ impl WorkerManager {
         pc_registry: PcRegistry,
     ) -> (Self, WorkerMessageReceiver) {
         let (tx, rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (cap_version_tx, _cap_version_rx) = watch::channel::<u64>(0);
         let mgr = WorkerManager {
             settings,
             inner: Arc::new(Mutex::new(WorkerManagerInner {
@@ -193,6 +206,8 @@ impl WorkerManager {
             worker_msg_tx: Arc::new(tx),
             pc_registry,
             worker_capabilities: Arc::new(StdMutex::new(None)),
+            capabilities_version: Arc::new(AtomicU64::new(0)),
+            capabilities_version_tx: Arc::new(cap_version_tx),
             is_inprocess: Arc::new(AtomicBool::new(false)),
         };
         (mgr, rx)
@@ -516,8 +531,16 @@ impl WorkerManager {
     /// from `signaling_proxy` whenever the worker emits
     /// `WorkerToService::Capabilities`. Subsequent `RequestRemote`
     /// handling uses the snapshot to populate the Init reply.
+    ///
+    /// Bumps [`Self::capabilities_version`] and notifies the watch
+    /// channel so awaiters (e.g. `VirtualDisplaySupervisor::ensure_attached`)
+    /// see the freshly installed cache. The cache write happens-before
+    /// the version bump, so any reader observing the new version is
+    /// guaranteed to read the new snapshot.
     pub fn set_worker_capabilities(&self, caps: MediaCapabilities) {
         *self.worker_capabilities.lock().unwrap() = Some(caps);
+        let new_version = self.capabilities_version.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = self.capabilities_version_tx.send_replace(new_version);
     }
 
     /// Take a snapshot of the latest reported worker capabilities.
@@ -527,6 +550,44 @@ impl WorkerManager {
     /// connection.
     pub fn worker_capabilities(&self) -> Option<MediaCapabilities> {
         self.worker_capabilities.lock().unwrap().clone()
+    }
+
+    /// Snapshot of the monotonic counter bumped by every
+    /// [`Self::set_worker_capabilities`] call. Starts at 0 before any
+    /// capabilities have been installed.
+    pub fn capabilities_version(&self) -> u64 {
+        self.capabilities_version.load(Ordering::SeqCst)
+    }
+
+    /// Receiver for the capabilities-version watch channel. Each
+    /// `set_worker_capabilities` call triggers a `recv.changed()`
+    /// wake-up. Use `borrow_and_update()` to read the latest version
+    /// without missing further updates.
+    pub fn subscribe_capabilities_version(&self) -> watch::Receiver<u64> {
+        self.capabilities_version_tx.subscribe()
+    }
+
+    /// Returns `true` when the latest cached `MediaCapabilities` has a
+    /// `DisplayInfo.device_name` equal to `display_name` in any of its
+    /// per-backend buckets. Used by
+    /// `VirtualDisplaySupervisor::ensure_attached` to confirm that the
+    /// post-attach capabilities round-trip has actually surfaced the
+    /// newly attached IDD before signalling completion. Note that
+    /// `video_device_list` is a `BTreeMap<backend_name, Vec<DisplayInfo>>`
+    /// — the map key is the backend ("dxgi" / "wgc" / ...), not the
+    /// display name itself.
+    pub fn capabilities_contains_display(&self, display_name: &str) -> bool {
+        self.worker_capabilities
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|c| {
+                c.video_device_list
+                    .values()
+                    .flatten()
+                    .any(|d| d.device_name == display_name)
+            })
+            .unwrap_or(false)
     }
 
     /// Test-only: install an `ipc_tx` so `send_to_worker` has a
@@ -1741,6 +1802,133 @@ mod tests {
         assert_eq!(got.audio_codecs, caps.audio_codecs);
         assert_eq!(got.desktop_name, "Default");
         assert!(got.has_tauri);
+    }
+
+    /// `set_worker_capabilities` must bump `capabilities_version` and
+    /// notify the watch channel so awaiters can react. Backbone of the
+    /// `VirtualDisplaySupervisor::ensure_attached` post-attach cache
+    /// sync wait.
+    #[tokio::test]
+    async fn set_worker_capabilities_increments_version_and_notifies_watchers() {
+        use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+        let (mgr, _rx) = test_manager();
+        assert_eq!(mgr.capabilities_version(), 0, "starts at 0");
+        let mut watcher = mgr.subscribe_capabilities_version();
+        assert_eq!(*watcher.borrow_and_update(), 0);
+
+        let mut video_device_list: std::collections::BTreeMap<String, Vec<DisplayInfo>> =
+            std::collections::BTreeMap::new();
+        video_device_list.insert(
+            "wgc".to_string(),
+            vec![DisplayInfo {
+                device_name: "\\\\.\\DISPLAY1".to_string(),
+                display_device_name: None,
+                desktop_coordinates: DisplayRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                resolutions: vec![],
+                attached_to_desktop: true,
+                rotation: 0,
+            }],
+        );
+        let caps = MediaCapabilities {
+            video_codecs: vec![],
+            audio_codecs: vec![],
+            video_encoders: vec![],
+            audio_encoders: vec![],
+            video_device_list,
+            audio_device_list: std::collections::BTreeMap::new(),
+            has_tauri: false,
+            is_admin: false,
+            desktop_name: "Default".to_string(),
+        };
+        mgr.set_worker_capabilities(caps);
+        watcher
+            .changed()
+            .await
+            .expect("watch channel must notify on first set");
+        assert_eq!(mgr.capabilities_version(), 1);
+        assert_eq!(*watcher.borrow_and_update(), 1);
+
+        // Successive sets continue to bump monotonically.
+        let caps2 = MediaCapabilities {
+            video_codecs: vec![],
+            audio_codecs: vec![],
+            video_encoders: vec![],
+            audio_encoders: vec![],
+            video_device_list: std::collections::BTreeMap::new(),
+            audio_device_list: std::collections::BTreeMap::new(),
+            has_tauri: false,
+            is_admin: false,
+            desktop_name: "Default".to_string(),
+        };
+        mgr.set_worker_capabilities(caps2);
+        watcher.changed().await.expect("watch notifies on second set");
+        assert_eq!(mgr.capabilities_version(), 2);
+    }
+
+    /// `capabilities_contains_display` semantics: only true when the
+    /// cache is set AND at least one `DisplayInfo.device_name` across
+    /// all backend buckets equals the requested display name. Note the
+    /// outer map keys are backend names ("wgc"), not display names.
+    #[tokio::test]
+    async fn capabilities_contains_display_handles_unset_and_per_backend_buckets() {
+        use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+        let (mgr, _rx) = test_manager();
+        assert!(
+            !mgr.capabilities_contains_display("\\\\.\\DISPLAY1"),
+            "no cache -> false"
+        );
+
+        let mut video_device_list: std::collections::BTreeMap<String, Vec<DisplayInfo>> =
+            std::collections::BTreeMap::new();
+        let display_info = |name: &str| DisplayInfo {
+            device_name: name.to_string(),
+            display_device_name: None,
+            desktop_coordinates: DisplayRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            resolutions: vec![],
+            attached_to_desktop: true,
+            rotation: 0,
+        };
+        video_device_list.insert("wgc".to_string(), vec![display_info("\\\\.\\DISPLAY1")]);
+        video_device_list.insert("dxgi".to_string(), vec![display_info("\\\\.\\DISPLAY2")]);
+        let caps = MediaCapabilities {
+            video_codecs: vec![],
+            audio_codecs: vec![],
+            video_encoders: vec![],
+            audio_encoders: vec![],
+            video_device_list,
+            audio_device_list: std::collections::BTreeMap::new(),
+            has_tauri: false,
+            is_admin: false,
+            desktop_name: "Default".to_string(),
+        };
+        mgr.set_worker_capabilities(caps);
+
+        assert!(
+            mgr.capabilities_contains_display("\\\\.\\DISPLAY1"),
+            "wgc bucket matches"
+        );
+        assert!(
+            mgr.capabilities_contains_display("\\\\.\\DISPLAY2"),
+            "dxgi bucket matches"
+        );
+        assert!(
+            !mgr.capabilities_contains_display("\\\\.\\DISPLAY9"),
+            "absent display -> false"
+        );
+        assert!(
+            !mgr.capabilities_contains_display("wgc"),
+            "backend name is the map key, not a display name; must not match",
+        );
     }
 
     /// Boundary: strictly greater than. Setting timeout exactly equal

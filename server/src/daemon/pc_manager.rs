@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use desk_signal_facade::model::signal::{
     LcxlRTCIceServer, OfferModel, RequestRemoteModel, SignalingModel, SignalingState,
@@ -435,12 +435,35 @@ pub struct PeerConnectionContext {
 pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
     worker_mgr: Arc<tokio::sync::OnceCell<WorkerManager>>,
+    /// Counts in-flight `RequestRemote` handlers that have not yet
+    /// registered a [`PeerConnectionContext`]. Used by
+    /// [`crate::daemon::pc_manager::cleanup_pc`] to suppress N→0
+    /// virtual-display detach while a new browser is mid-`ensure_attached`
+    /// but hasn't called [`Self::create_for_request_remote`] yet. The
+    /// counter is bumped via [`Self::enter_pending`] which returns a
+    /// RAII guard that decrements on drop (panics / early returns are
+    /// covered).
+    pending_requests: Arc<AtomicUsize>,
 }
 
 /// Errors produced by [`PcRegistry`] handlers. Worker-side equivalents
 /// in `service::signaling` use the broader `DeskError`; the registry
 /// re-uses it so callers don't have to bridge two error types.
 type RegistryResult<T> = Result<T, DeskError>;
+
+/// RAII guard returned by [`PcRegistry::enter_pending`]. While held
+/// the registry's `pending_requests` counter stays incremented;
+/// `Drop` decrements it. Guarantees the counter survives panics and
+/// early returns inside the `RequestRemote` handler.
+pub struct PendingRequestGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl PcRegistry {
     pub fn new() -> Self {
@@ -485,6 +508,30 @@ impl PcRegistry {
 
     pub async fn len(&self) -> usize {
         self.inner.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.inner.read().await.is_empty()
+    }
+
+    /// Mark the start of a new `RequestRemote` handler that has not yet
+    /// inserted into the registry. The returned [`PendingRequestGuard`]
+    /// decrements the counter on `Drop`, so RAII covers normal returns,
+    /// `?` early-exits, and panics. The counter is read by
+    /// [`cleanup_pc`] to gate N→0 virtual-display detach — while at
+    /// least one pending request is in flight the supervisor stays
+    /// attached even if the live PC count momentarily hits zero.
+    pub fn enter_pending(&self) -> PendingRequestGuard {
+        self.pending_requests.fetch_add(1, Ordering::SeqCst);
+        PendingRequestGuard {
+            counter: Arc::clone(&self.pending_requests),
+        }
+    }
+
+    /// Snapshot of in-flight `RequestRemote` handlers (those holding a
+    /// live [`PendingRequestGuard`]).
+    pub fn pending_requests(&self) -> usize {
+        self.pending_requests.load(Ordering::SeqCst)
     }
 
     /// Build a new `PeerConnectionContext` for the given browser
@@ -1226,6 +1273,12 @@ fn register_local_ice_candidate_forwarder(
 /// rehydrated across worker swaps) and minus the device-list
 /// enumeration (replaced in cut 4 by the worker's `Capabilities`
 /// message).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Daemon-side RequestRemote handler aggregates state from the \
+              entire RouterContext; bundling into a struct would force a \
+              tighter Arc/RwLock surface than the call sites need."
+)]
 pub async fn handle_request_remote(
     registry: &PcRegistry,
     outbound: &OutboundSink,
@@ -1234,6 +1287,7 @@ pub async fn handle_request_remote(
     has_tauri: bool,
     capabilities: Option<&MediaCapabilities>,
     worker_mgr: Option<&WorkerManager>,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
@@ -1283,6 +1337,7 @@ pub async fn handle_request_remote(
             Arc::clone(&ctx_guard.pc),
             registry.clone(),
             mgr.clone(),
+            virtual_display.cloned(),
             from_connection_id.to_string(),
         );
     }
@@ -2252,10 +2307,12 @@ fn log_sdp_max_message_size(connection_id: &str, sdp: &str) {
 async fn cleanup_pc(
     registry: &PcRegistry,
     worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     connection_id: &str,
     reason: &str,
 ) {
-    if let Some(ctx) = registry.remove(connection_id).await {
+    let removed = registry.remove(connection_id).await;
+    if let Some(ctx) = &removed {
         let ctx = ctx.read().await;
         if let Err(e) = ctx.pc.close().await {
             log::warn!("[pc_manager] PC close failed for {connection_id}: {e}");
@@ -2274,6 +2331,34 @@ async fn cleanup_pc(
         .await
     {
         log::debug!("[pc_manager] StopMedia for {connection_id} could not reach worker: {e}");
+    }
+
+    // N -> 0 virtual display detach. Three gates, all required:
+    //   (1) `removed.is_some()` — only the call that actually pulled
+    //       a live PC out triggers detach. Stale `ConnectionRemoved`
+    //       fan-outs that arrive after the PC was already cleaned up
+    //       (or never existed) MUST NOT trigger a detach, since a
+    //       new `RequestRemote` may be mid-`ensure_attached` with no
+    //       PC registered yet.
+    //   (2) `registry.len() == 0` — no other live browser session
+    //       still using the IDD.
+    //   (3) `registry.pending_requests() == 0` — no other browser
+    //       currently inside the `RequestRemote` handler holding a
+    //       `PendingRequestGuard`. Without this gate, a fast browser
+    //       open/close racing with a slow new connection's
+    //       `ensure_attached` would tear down the IDD while the
+    //       new connection is still bringing it up.
+    if let Some(supervisor) = virtual_display
+        && removed.is_some()
+        && registry.len().await == 0
+        && registry.pending_requests() == 0
+    {
+        log::info!(
+            "[pc_manager] last PC removed, no pending requests; detaching virtual display"
+        );
+        if let Err(e) = supervisor.apply(false).await {
+            log::warn!("[pc_manager] N->0 virtual display detach failed: {e}");
+        }
     }
 }
 
@@ -2297,11 +2382,13 @@ fn register_peer_connection_state_cleanup(
     pc: Arc<RTCPeerConnection>,
     registry: PcRegistry,
     worker_mgr: WorkerManager,
+    virtual_display: Option<Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     connection_id: String,
 ) {
     pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
         let registry = registry.clone();
         let worker_mgr = worker_mgr.clone();
+        let virtual_display = virtual_display.clone();
         let connection_id = connection_id.clone();
         Box::pin(async move {
             match state {
@@ -2310,7 +2397,14 @@ fn register_peer_connection_state_cleanup(
                         "[pc_manager] PC for {connection_id} reached terminal state {state:?}; \
                          tearing down daemon-side context + StopMedia to worker"
                     );
-                    cleanup_pc(&registry, &worker_mgr, &connection_id, "pc_state_terminal").await;
+                    cleanup_pc(
+                        &registry,
+                        &worker_mgr,
+                        virtual_display.as_ref(),
+                        &connection_id,
+                        "pc_state_terminal",
+                    )
+                    .await;
                 }
                 _ => {}
             }
@@ -2328,10 +2422,18 @@ fn register_peer_connection_state_cleanup(
 pub async fn handle_close_control(
     registry: &PcRegistry,
     worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
-    cleanup_pc(registry, worker_mgr, from_connection_id, "close_control").await;
+    cleanup_pc(
+        registry,
+        worker_mgr,
+        virtual_display,
+        from_connection_id,
+        "close_control",
+    )
+    .await;
     Ok(())
 }
 
@@ -2352,12 +2454,14 @@ pub async fn handle_close_control(
 pub async fn handle_connection_removed(
     registry: &PcRegistry,
     worker_mgr: &WorkerManager,
+    virtual_display: Option<&Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
     model: &SignalingModel,
 ) -> Result<(), DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     cleanup_pc(
         registry,
         worker_mgr,
+        virtual_display,
         from_connection_id,
         "peer_signaling_closed",
     )
@@ -2988,6 +3092,29 @@ mod tests {
         assert_eq!(registry.len().await, 1);
     }
 
+    /// `PendingRequestGuard` is the RAII vehicle used by the router's
+    /// `RequestRemote` branch to suppress N→0 virtual-display detach
+    /// while a new browser is mid-`ensure_attached`. Verify the
+    /// counter is properly bumped on construction and decremented on
+    /// `Drop` (including across nesting and early exits).
+    #[test]
+    fn pending_request_guard_increments_and_decrements_counter() {
+        let registry = PcRegistry::new();
+        assert_eq!(registry.pending_requests(), 0, "starts at 0");
+
+        let g1 = registry.enter_pending();
+        assert_eq!(registry.pending_requests(), 1);
+
+        {
+            let _g2 = registry.enter_pending();
+            assert_eq!(registry.pending_requests(), 2, "nested guard stacks");
+        }
+        assert_eq!(registry.pending_requests(), 1, "nested guard dropped");
+
+        drop(g1);
+        assert_eq!(registry.pending_requests(), 0, "outer guard dropped");
+    }
+
     /// Frames addressed to a connection that is not in the registry
     /// (race against `CloseControl` / browser drop) must be silently
     /// dropped — never panic. The daemon's media-receiver loop runs
@@ -3394,6 +3521,7 @@ mod tests {
             false,
             Some(&caps),
             None,
+            None,
             &model,
         )
         .await
@@ -3448,6 +3576,7 @@ mod tests {
             &s,
             "user-x",
             false,
+            None,
             None,
             None,
             &model,
@@ -3514,6 +3643,7 @@ mod tests {
             "user-x",
             false,
             Some(&caps),
+            None,
             None,
             &model,
         )
@@ -3643,6 +3773,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             &model,
         )
         .await
@@ -3723,6 +3854,7 @@ mod tests {
             Arc::clone(&pc),
             registry.clone(),
             worker_mgr,
+            None,
             "conn-cleanup".to_string(),
         );
 
@@ -3762,7 +3894,7 @@ mod tests {
         let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
 
         // No PC registered at all. Must not panic.
-        cleanup_pc(&registry, &worker_mgr, "ghost-connection", "test").await;
+        cleanup_pc(&registry, &worker_mgr, None, "ghost-connection", "test").await;
         assert_eq!(registry.len().await, 0);
     }
 
@@ -3786,7 +3918,7 @@ mod tests {
         let settings = actix_web::web::Data::new(shared);
         let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
 
-        cleanup_pc(&registry, &worker_mgr, "conn-x", "test").await;
+        cleanup_pc(&registry, &worker_mgr, None, "conn-x", "test").await;
 
         assert!(!registry.contains("conn-x").await);
     }
@@ -3821,7 +3953,7 @@ mod tests {
             None,
         );
 
-        handle_connection_removed(&registry, &worker_mgr, &model)
+        handle_connection_removed(&registry, &worker_mgr, None, &model)
             .await
             .expect("handler must not error on a known connection");
 
@@ -3853,10 +3985,209 @@ mod tests {
             None,
         );
 
-        handle_connection_removed(&registry, &worker_mgr, &model)
+        handle_connection_removed(&registry, &worker_mgr, None, &model)
             .await
             .expect("handler must accept unknown ids without erroring");
         assert_eq!(registry.len().await, 0);
+    }
+
+    /// v5 lazy lifecycle: with the last PC removed and no pending
+    /// requests, `cleanup_pc` must `apply(false)` on the supervisor so
+    /// the IDD detaches and the dropdown clears on the next dialog.
+    #[tokio::test]
+    async fn cleanup_pc_detaches_supervisor_when_last_pc_removed_and_no_pending() {
+        use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-only", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            worker_mgr.clone(),
+            "SWD\\TEST\\TEST",
+        ));
+        assert_eq!(supervisor.state_label().await, "Attached");
+
+        cleanup_pc(
+            &registry,
+            &worker_mgr,
+            Some(&supervisor),
+            "conn-only",
+            "test-n-to-zero",
+        )
+        .await;
+
+        assert!(!registry.contains("conn-only").await);
+        assert_eq!(
+            supervisor.state_label().await,
+            "Disabled",
+            "N->0 cleanup must detach the supervisor",
+        );
+    }
+
+    /// As long as other PCs are still live, the supervisor must stay
+    /// attached so the remaining session can keep using the IDD.
+    #[tokio::test]
+    async fn cleanup_pc_keeps_supervisor_when_other_pcs_remain() {
+        use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        for id in ["conn-a", "conn-b"] {
+            registry
+                .create_for_request_remote(id, &request_remote, &s)
+                .await
+                .expect("create");
+        }
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            worker_mgr.clone(),
+            "SWD\\TEST\\TEST",
+        ));
+
+        cleanup_pc(
+            &registry,
+            &worker_mgr,
+            Some(&supervisor),
+            "conn-a",
+            "test-keep",
+        )
+        .await;
+
+        assert!(registry.contains("conn-b").await);
+        assert_eq!(
+            supervisor.state_label().await,
+            "Attached",
+            "supervisor must remain Attached while another PC is live",
+        );
+    }
+
+    /// Codex round 4 #10: a held `PendingRequestGuard` represents a new
+    /// `RequestRemote` mid-`ensure_attached` that hasn't registered a
+    /// PC yet. Cleanup of an old PC during this window must NOT detach
+    /// the IDD — the new connection is about to use it.
+    #[tokio::test]
+    async fn cleanup_pc_keeps_supervisor_when_pending_request_active() {
+        use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-old", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            worker_mgr.clone(),
+            "SWD\\TEST\\TEST",
+        ));
+
+        // Simulate a new RequestRemote in the ensure_attached window:
+        // PC not yet created, but a pending guard is live.
+        let _pending = registry.enter_pending();
+
+        cleanup_pc(
+            &registry,
+            &worker_mgr,
+            Some(&supervisor),
+            "conn-old",
+            "test-pending-race",
+        )
+        .await;
+
+        assert!(!registry.contains("conn-old").await);
+        assert_eq!(
+            supervisor.state_label().await,
+            "Attached",
+            "pending request guard must suppress N->0 detach",
+        );
+    }
+
+    /// Codex round 3 #3 + cleanup_pc N→0 gate: a `cleanup_pc` call for
+    /// a connection id that was never registered (stale
+    /// `ConnectionRemoved` after the PC was already torn down) must
+    /// NOT trigger N→0 detach, even though `registry.len()` may
+    /// happen to be 0. The gate is `removed.is_some()`.
+    #[tokio::test]
+    async fn cleanup_pc_unknown_connection_does_not_detach_supervisor() {
+        use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-live", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            worker_mgr.clone(),
+            "SWD\\TEST\\TEST",
+        ));
+
+        cleanup_pc(
+            &registry,
+            &worker_mgr,
+            Some(&supervisor),
+            "conn-ghost",
+            "stale-ConnectionRemoved",
+        )
+        .await;
+
+        assert!(
+            registry.contains("conn-live").await,
+            "unknown-id cleanup must not touch other PCs",
+        );
+        assert_eq!(
+            supervisor.state_label().await,
+            "Attached",
+            "stale ConnectionRemoved must not trigger detach",
+        );
+    }
+
+    /// `virtual_display: None` (non-ServiceDaemon mode) must still let
+    /// cleanup_pc clear the registry without panicking.
+    #[tokio::test]
+    async fn cleanup_pc_skips_supervisor_when_none() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-x", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+
+        cleanup_pc(&registry, &worker_mgr, None, "conn-x", "no-supervisor").await;
+
+        assert!(!registry.contains("conn-x").await);
     }
 
     /// Codec round-trip: every IPC `MediaCodec` must map to a

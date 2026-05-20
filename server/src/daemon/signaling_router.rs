@@ -23,6 +23,7 @@
 //! through a dedicated typed IPC variant.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use actix_web::web;
 use desk_ipc_protocol::message::{
@@ -46,8 +47,18 @@ use desk_virtual_display::{VirtualDisplayMode, validate_mode};
 use tokio::sync::broadcast;
 
 use crate::daemon::pc_manager::{self, PcRegistry};
-use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+use crate::daemon::virtual_display::{EnsureAttachedOutcome, VirtualDisplaySupervisor};
 use crate::daemon::worker_manager::WorkerManager;
+
+/// Bound on how long the `RequestRemote` branch waits for the IDD to
+/// finish bring-up before falling through to a capabilities-without-IDD
+/// Init reply. `resolve_attach_with_backoff` schedules retries at
+/// `[250, 500, 1000, 2000, 4000, 8000]` ms; with the driver already
+/// loaded the first one or two attempts usually succeed (< 1 s) and
+/// the post-attach `RefreshCapabilities` round-trip lands within
+/// another second. 5 s covers the typical cold-bring-up while still
+/// bounding browser-perceived dialog latency if the driver hangs.
+const VIRTUAL_DISPLAY_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
 use crate::model::settings::SharedSettings;
@@ -243,11 +254,47 @@ pub struct RouterContext {
 pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), RouterError> {
     match model.signaling_type {
         SignalingType::RequestRemote => {
+            // v5 lazy lifecycle: hold a pending guard for the lifetime
+            // of this handler so cleanup_pc on a concurrently-closing
+            // old PC cannot N→0 detach the IDD out from under us.
+            let pending_guard = ctx.pc_registry.enter_pending();
+
             let s = ctx.settings.read().await.clone();
+            // Block on virtual display attach BEFORE assembling the
+            // Init reply so the daemon's capabilities cache reflects
+            // the IDD and the dropdown shows it on the first dialog
+            // open. Timeout falls through to a capabilities-without-IDD
+            // reply; the next dialog open recovers via v4's
+            // RefreshCapabilities round-trip if attach eventually
+            // completes in the background.
+            if let Some(supervisor) = ctx.virtual_display.as_ref()
+                && s.desk.enable_virtual_display
+            {
+                match supervisor
+                    .ensure_attached(VIRTUAL_DISPLAY_ATTACH_TIMEOUT)
+                    .await
+                {
+                    EnsureAttachedOutcome::Attached => {}
+                    EnsureAttachedOutcome::TimedOut => {
+                        log::warn!(
+                            "[router] virtual display attach did not complete within \
+                             {VIRTUAL_DISPLAY_ATTACH_TIMEOUT:?}; Init reply will omit \
+                             IDD this round"
+                        );
+                    }
+                    EnsureAttachedOutcome::Unavailable(e) => {
+                        log::warn!(
+                            "[router] virtual display provider unavailable: {e}; \
+                             continuing without IDD"
+                        );
+                    }
+                }
+            }
+
             let user_name = "worker_node".to_string();
             let has_tauri = ctx.host_control_hub.has_tauri_ui();
             let capabilities = ctx.worker_mgr.worker_capabilities();
-            pc_manager::handle_request_remote(
+            let result = pc_manager::handle_request_remote(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
                 &s,
@@ -255,9 +302,35 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 has_tauri,
                 capabilities.as_ref(),
                 Some(&ctx.worker_mgr),
+                ctx.virtual_display.as_ref(),
                 model,
             )
-            .await?;
+            .await;
+
+            // Release the guard before the post-handler cleanup check so
+            // pending_requests reflects the actual outstanding work.
+            drop(pending_guard);
+
+            // Round 3 #12 / codex post-ensure cleanup: if handle_request_remote
+            // failed to register a PC (parse error, registry collision,
+            // build_peer_connection failure, ...) the supervisor would
+            // remain Attached with no PC ever holding it, and no cleanup
+            // path would later trigger detach. Re-check N→0 conditions
+            // here and detach if appropriate.
+            if let Some(supervisor) = ctx.virtual_display.as_ref()
+                && ctx.pc_registry.len().await == 0
+                && ctx.pc_registry.pending_requests() == 0
+            {
+                log::info!(
+                    "[router] post-RequestRemote cleanup: registry empty and no pending; \
+                     detaching virtual display"
+                );
+                if let Err(e) = supervisor.apply(false).await {
+                    log::warn!("[router] post-RequestRemote cleanup detach failed: {e}");
+                }
+            }
+
+            result?;
             Ok(())
         }
         SignalingType::Offer => {
@@ -270,11 +343,23 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             Ok(())
         }
         SignalingType::CloseControl => {
-            pc_manager::handle_close_control(&ctx.pc_registry, &ctx.worker_mgr, model).await?;
+            pc_manager::handle_close_control(
+                &ctx.pc_registry,
+                &ctx.worker_mgr,
+                ctx.virtual_display.as_ref(),
+                model,
+            )
+            .await?;
             Ok(())
         }
         SignalingType::ConnectionRemoved => {
-            pc_manager::handle_connection_removed(&ctx.pc_registry, &ctx.worker_mgr, model).await?;
+            pc_manager::handle_connection_removed(
+                &ctx.pc_registry,
+                &ctx.worker_mgr,
+                ctx.virtual_display.as_ref(),
+                model,
+            )
+            .await?;
             Ok(())
         }
         SignalingType::RequireControl => {
@@ -1686,5 +1771,108 @@ mod tests {
             }
             other => panic!("unexpected IPC: {other:?}"),
         }
+    }
+
+    // ===== v5 lazy lifecycle: router RequestRemote ensure_attached =====
+
+    fn make_request_remote_model(connection_id: &str) -> SignalingModel {
+        use desk_signal_facade::model::signal::RequestRemoteModel;
+        SignalingModel::new(
+            "req-vd-lazy",
+            SignalingType::RequestRemote,
+            Some(connection_id.to_string()),
+            None,
+            Some(serde_json::to_value(RequestRemoteModel { ice_servers: vec![] }).unwrap()),
+            None,
+        )
+    }
+
+    /// `enable_virtual_display = false`: ensure_attached must NOT be
+    /// called. We can't easily mock the supervisor through a trait
+    /// here, but we can install a `new_attached_for_test` supervisor
+    /// and verify that the route succeeds without changing state —
+    /// the ensure_attached fast-path would also produce Attached, but
+    /// the wider correctness signal is "no panic, route succeeds, no
+    /// virtual display IPCs emitted".
+    #[tokio::test]
+    async fn request_remote_skips_ensure_when_feature_disabled() {
+        let (mut ctx, _rx) = make_ctx_with_rx();
+        // Feature disabled by default in Settings::default(), but pin it.
+        ctx.settings.write().await.desk.enable_virtual_display = false;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            ctx.worker_mgr.clone(),
+            "MOCK\\DISPLAY1",
+        ));
+        ctx.virtual_display = Some(supervisor.clone());
+        let label_before = supervisor.state_label().await;
+
+        let model = make_request_remote_model("conn-disabled");
+        route(&model, &ctx)
+            .await
+            .expect("route must succeed even when ensure is skipped");
+        assert!(ctx.pc_registry.contains("conn-disabled").await);
+        assert_eq!(
+            supervisor.state_label().await,
+            label_before,
+            "ensure_attached must not have been invoked when feature disabled",
+        );
+    }
+
+    /// Non-ServiceDaemon mode (virtual_display = None): ensure_attached
+    /// is skipped entirely. Route must not panic.
+    #[tokio::test]
+    async fn request_remote_skips_ensure_when_no_supervisor() {
+        let (mut ctx, _rx) = make_ctx_with_rx();
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.virtual_display = None;
+
+        let model = make_request_remote_model("conn-no-supervisor");
+        route(&model, &ctx)
+            .await
+            .expect("route must succeed without supervisor");
+        assert!(ctx.pc_registry.contains("conn-no-supervisor").await);
+    }
+
+    /// Feature enabled + supervisor already Attached: ensure_attached
+    /// fast-path returns Attached immediately, route succeeds, the PC
+    /// is registered, and the supervisor remains Attached.
+    #[tokio::test]
+    async fn request_remote_invokes_ensure_when_enabled_and_supervisor_attached() {
+        let (mut ctx, _rx) = make_ctx_with_rx();
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            ctx.worker_mgr.clone(),
+            "MOCK\\DISPLAY1",
+        ));
+        ctx.virtual_display = Some(supervisor.clone());
+
+        let model = make_request_remote_model("conn-enabled");
+        route(&model, &ctx).await.expect("route must succeed");
+        assert!(ctx.pc_registry.contains("conn-enabled").await);
+        assert_eq!(
+            supervisor.state_label().await,
+            "Attached",
+            "supervisor must remain Attached after fast-path ensure",
+        );
+    }
+
+    /// Provider returns NotSupported: ensure_attached resolves as
+    /// Unavailable instantly and the route falls through to the
+    /// capabilities-without-IDD Init reply. PC must still be
+    /// registered.
+    #[tokio::test]
+    async fn request_remote_continues_when_provider_not_supported() {
+        let (mut ctx, _rx) = make_ctx_with_rx();
+        ctx.settings.write().await.desk.enable_virtual_display = true;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
+            ctx.worker_mgr.clone(),
+        ));
+        ctx.virtual_display = Some(supervisor);
+
+        let model = make_request_remote_model("conn-unavailable");
+        route(&model, &ctx)
+            .await
+            .expect("route must continue even when provider is unavailable");
+        assert!(ctx.pc_registry.contains("conn-unavailable").await);
     }
 }

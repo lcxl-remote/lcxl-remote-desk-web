@@ -37,13 +37,15 @@
 //! `WorkerToService::VirtualDisplayAttachResult`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use desk_ipc_protocol::message::{
     AttachVirtualDisplayPayload, ServiceToWorker, VirtualDisplayAttachOutcome,
     VirtualDisplayAttachResultPayload,
 };
 use desk_virtual_display::{VirtualDisplayError, VirtualDisplayHandle, VirtualDisplayLifecycle};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock, watch};
+use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::daemon::worker_manager::WorkerManager;
@@ -62,6 +64,14 @@ use desk_utils::error::DeskErrorCode;
 /// [`desk_virtual_display::resolve_display_name`] — the daemon cannot
 /// do that itself because `EnumDisplayDevicesW` does not see the
 /// virtual monitor from Session 0.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The supervisor only ever holds one SupervisorState at a time, \
+              so the per-instance overhead is bounded by max(variant size). \
+              Boxing the Attaching/Attached variants would force an extra \
+              allocation on every state transition without any concurrency \
+              or copy-cost benefit."
+)]
 enum SupervisorState {
     Disabled,
     Attaching {
@@ -71,6 +81,12 @@ enum SupervisorState {
     },
     Attached {
         instance_id: String,
+        /// GDI display name (`\\.\DISPLAYn`) reported by the worker via
+        /// `VirtualDisplayAttachOutcome::Attached`. Used by
+        /// [`VirtualDisplaySupervisor::ensure_attached`] to verify the
+        /// post-attach capabilities cache actually surfaces this
+        /// monitor before letting `RequestRemote` proceed.
+        display_name: String,
         // `handle` keeps the OS resource alive — dropped only on
         // `apply(false)` / `shutdown`. The struct is held for its
         // Drop, never read.
@@ -78,6 +94,25 @@ enum SupervisorState {
         handle: VirtualDisplayHandle,
     },
     Detaching,
+}
+
+/// Outcome of [`VirtualDisplaySupervisor::ensure_attached`].
+#[derive(Debug)]
+pub enum EnsureAttachedOutcome {
+    /// State is `Attached`, the post-promotion capabilities-version
+    /// target has been reached, and the cached `MediaCapabilities`
+    /// contains the attached display name. `RequestRemote` can safely
+    /// assemble the Init reply expecting the IDD to appear in the
+    /// dropdown.
+    Attached,
+    /// Bring-up did not complete within the timeout. The supervisor is
+    /// left in whatever transitional state it reached (typically
+    /// `Attaching`); a follow-up call will resume from there. Init
+    /// reply this round should fall through without the IDD.
+    TimedOut,
+    /// Provider returned `NotSupported` or an OS error from
+    /// `SwDeviceCreate`. Supervisor is `Disabled`.
+    Unavailable(DeskError),
 }
 
 /// Service-daemon-only owner of the virtual display handle. The
@@ -92,6 +127,27 @@ pub struct VirtualDisplaySupervisor {
     state: RwLock<SupervisorState>,
     provider: Box<dyn VirtualDisplayLifecycle>,
     worker_mgr: WorkerManager,
+    /// Set when the `Attaching → Attached` promotion happens to the
+    /// post-promotion `worker_mgr.capabilities_version()` target value
+    /// (`snapshot + 1`). [`Self::ensure_attached`] uses this watch to
+    /// wait until **both** the cap version has reached the target
+    /// **and** the cached `MediaCapabilities` contains the attached
+    /// `display_name` — the strict three-way confirmation that the
+    /// daemon's view of the world has caught up with the worker's.
+    ///
+    /// Cleared (`send_replace(None)`) on detach so the next attach
+    /// cycle starts from a clean slate.
+    attached_capabilities_target: watch::Sender<Option<u64>>,
+    /// Serialises the entire `apply(true)` / `apply(false)` /
+    /// `shutdown()` flow including the IPC awaits that happen while
+    /// the state lock is **not** held. Without this lock a concurrent
+    /// `apply(true)` running between an in-flight `apply(false)`'s
+    /// `*state = Detaching` and its trailing `DetachVirtualDisplay`
+    /// IPC send could end up with the worker receiving Attach followed
+    /// by the old Detach — tearing down the freshly attached monitor.
+    /// `state` (the `RwLock`) still owns field-level synchronisation;
+    /// `lifecycle_lock` provides whole-operation atomicity.
+    lifecycle_lock: Mutex<()>,
 }
 
 impl VirtualDisplaySupervisor {
@@ -100,10 +156,13 @@ impl VirtualDisplaySupervisor {
     /// phase 2) and a clone of the daemon's `WorkerManager` for IPC.
     /// Starts in `Disabled`.
     pub fn new(provider: Box<dyn VirtualDisplayLifecycle>, worker_mgr: WorkerManager) -> Self {
+        let (target_tx, _target_rx) = watch::channel::<Option<u64>>(None);
         Self {
             state: RwLock::new(SupervisorState::Disabled),
             provider,
             worker_mgr,
+            attached_capabilities_target: target_tx,
+            lifecycle_lock: Mutex::new(()),
         }
     }
 
@@ -127,6 +186,10 @@ impl VirtualDisplaySupervisor {
     /// service is still usable, just without virtual display
     /// support.
     pub async fn apply(&self, desired: bool) -> Result<(), DeskError> {
+        // Hold the lifecycle lock for the whole operation so concurrent
+        // apply / shutdown calls cannot interleave their IPC sends. See
+        // the `lifecycle_lock` field doc.
+        let _lifecycle = self.lifecycle_lock.lock().await;
         let mut state = self.state.write().await;
         match (&*state, desired) {
             // Already in the desired direction — no-op.
@@ -142,9 +205,17 @@ impl VirtualDisplaySupervisor {
                             "VirtualDisplaySupervisor created handle, moving to Attaching",
                         );
                         *state = SupervisorState::Attaching {
-                            instance_id,
+                            instance_id: instance_id.clone(),
                             handle,
                         };
+                        drop(state); // Don't hold the write lock across the IPC await.
+                        // Proactively kick the worker so attach does not
+                        // depend on a future `WorkerToService::Capabilities`
+                        // arriving. Under lazy bring-up the worker has
+                        // typically already emitted its initial
+                        // Capabilities; without this send the supervisor
+                        // would sit in Attaching forever.
+                        self.send_attach_to_worker(&instance_id).await;
                         Ok(())
                     }
                     Err(VirtualDisplayError::NotSupported) => {
@@ -172,20 +243,59 @@ impl VirtualDisplaySupervisor {
             (SupervisorState::Attaching { .. } | SupervisorState::Attached { .. }, false) => {
                 // Drop the handle first (Drop closes SwDevice), then
                 // tell the worker so it doesn't keep trying to capture
-                // a monitor that is going away.
+                // a monitor that is going away. `lifecycle_lock` is
+                // held across all sends below, so any concurrent
+                // `apply(true)` is forced to wait — guaranteeing the
+                // worker observes Detach + RefreshCapabilities of this
+                // round strictly before any next-round Attach.
                 *state = SupervisorState::Detaching;
                 drop(state); // Don't hold the write lock across the IPC await.
-                let send_result = self
+                if let Err(e) = self
                     .worker_mgr
                     .send_to_worker(ServiceToWorker::DetachVirtualDisplay)
-                    .await;
-                if let Err(e) = send_result {
+                    .await
+                {
                     warn!("failed to send DetachVirtualDisplay to worker: {e}");
                 }
+                // Mirror shutdown(): a detach must also flush the
+                // capabilities cache so the next dialog drops the IDD
+                // from the dropdown.
+                if let Err(e) = self
+                    .worker_mgr
+                    .send_to_worker(ServiceToWorker::RefreshCapabilities)
+                    .await
+                {
+                    warn!(
+                        "[virtual-display] detach RefreshCapabilities send failed: {e}; \
+                         dropdown may still list the IDD until the next worker restart",
+                    );
+                }
+                let _ = self.attached_capabilities_target.send_replace(None);
                 let mut state = self.state.write().await;
                 *state = SupervisorState::Disabled;
                 Ok(())
             }
+        }
+    }
+
+    /// IPC helper shared by `apply(true)` (initial kick) and
+    /// `on_worker_capabilities` (worker-restart recovery). Errors are
+    /// logged but not propagated: a missing worker channel is a
+    /// transient condition that the caller's outer retry loop will
+    /// recover from.
+    async fn send_attach_to_worker(&self, instance_id: &str) {
+        let payload = AttachVirtualDisplayPayload {
+            instance_id: instance_id.to_string(),
+        };
+        if let Err(e) = self
+            .worker_mgr
+            .send_to_worker(ServiceToWorker::AttachVirtualDisplay(payload))
+            .await
+        {
+            warn!(
+                "[virtual-display] AttachVirtualDisplay send to worker failed for \
+                 {instance_id}: {e}; will retry on next opportunity",
+            );
         }
     }
 
@@ -212,19 +322,7 @@ impl VirtualDisplaySupervisor {
                 _ => return,
             }
         };
-        let payload = AttachVirtualDisplayPayload {
-            instance_id: instance_id.clone(),
-        };
-        if let Err(e) = self
-            .worker_mgr
-            .send_to_worker(ServiceToWorker::AttachVirtualDisplay(payload))
-            .await
-        {
-            warn!(
-                "[virtual-display] failed to send AttachVirtualDisplay to worker on \
-                 Capabilities for {instance_id}: {e}; staying in current state",
-            );
-        }
+        self.send_attach_to_worker(&instance_id).await;
         // Intentionally no state promotion here — see method doc.
     }
 
@@ -277,6 +375,13 @@ impl VirtualDisplaySupervisor {
                 // an already-Attached supervisor is an idempotent no-op
                 // (worker restart path), so it must not re-publish.
                 let promoted_now = matches!(prev, SupervisorState::Attaching { .. });
+                // Snapshot the current capabilities version BEFORE we
+                // emit RefreshCapabilities. The worker's response will
+                // bump the version to at least `snapshot + 1`;
+                // `ensure_attached` waits for the version to reach
+                // that target (and for the cache to actually contain
+                // `display_name`) before signalling completion.
+                let cap_snapshot = self.worker_mgr.capabilities_version();
                 *state = match prev {
                     SupervisorState::Attaching { instance_id, handle } => {
                         info!(
@@ -285,16 +390,28 @@ impl VirtualDisplaySupervisor {
                             "VirtualDisplaySupervisor promoted Attaching -> Attached \
                              (via attach-result)",
                         );
-                        SupervisorState::Attached { instance_id, handle }
+                        SupervisorState::Attached {
+                            instance_id,
+                            display_name: display_name.clone(),
+                            handle,
+                        }
                     }
-                    SupervisorState::Attached { instance_id, handle } => {
+                    SupervisorState::Attached {
+                        instance_id,
+                        display_name: existing_name,
+                        handle,
+                    } => {
                         debug!(
                             virtual_display.instance_id = %instance_id,
                             virtual_display.display_name = %display_name,
                             "VirtualDisplayAttachResult Attached received while already \
                              Attached; idempotent no-op",
                         );
-                        SupervisorState::Attached { instance_id, handle }
+                        SupervisorState::Attached {
+                            instance_id,
+                            display_name: existing_name,
+                            handle,
+                        }
                     }
                     // We pulled current_id above only on Attaching/Attached, so
                     // we cannot be in Disabled/Detaching here.
@@ -302,6 +419,16 @@ impl VirtualDisplaySupervisor {
                 };
                 drop(state);
                 if promoted_now {
+                    // Publish the target BEFORE sending RefreshCapabilities.
+                    // ensure_attached subscribes to this watch and must see
+                    // a `Some(target)` value before the cap-version bump
+                    // that satisfies it can complete; reversing the order
+                    // would let an awaiter observe the cap bump without
+                    // ever seeing the target and miss the completion edge.
+                    let target = cap_snapshot + 1;
+                    let _ = self
+                        .attached_capabilities_target
+                        .send_replace(Some(target));
                     // The IDD HMONITOR is now visible to
                     // `monitors::enum_display_infos`; ask the worker to
                     // re-publish Capabilities so the daemon's cache (and
@@ -344,6 +471,10 @@ impl VirtualDisplaySupervisor {
     /// subsequent browser session no longer offers the IDD as a
     /// selectable display.
     pub async fn shutdown(&self) {
+        // Serialise with apply() so a concurrent apply(true) cannot
+        // wedge an Attach send between our Detach and the final state
+        // transition to Disabled.
+        let _lifecycle = self.lifecycle_lock.lock().await;
         let send_detach = {
             let state = self.state.read().await;
             matches!(
@@ -370,8 +501,120 @@ impl VirtualDisplaySupervisor {
                 );
             }
         }
+        let _ = self.attached_capabilities_target.send_replace(None);
         let mut state = self.state.write().await;
         *state = SupervisorState::Disabled;
+    }
+
+    /// Lazy bring-up entry point used by the router's `RequestRemote`
+    /// branch. Returns when the supervisor is `Attached` **and** the
+    /// daemon's `worker_capabilities` cache has been refreshed
+    /// post-attach (cap version reached the promotion target **and**
+    /// the cache lists the attached `display_name`) — so the caller
+    /// can safely assemble an `InitSignalingData` whose
+    /// `video_device_list` is known to include the IDD.
+    ///
+    /// On timeout the supervisor is left in its current state (typically
+    /// `Attaching`); the next call resumes from there. The caller is
+    /// expected to fall through to a capabilities-without-IDD Init reply
+    /// rather than fail the `RequestRemote`. A background
+    /// `RefreshCapabilities` may still complete after we return
+    /// `TimedOut`, and the next dialog open will see the IDD.
+    pub async fn ensure_attached(&self, timeout: Duration) -> EnsureAttachedOutcome {
+        let deadline = Instant::now() + timeout;
+        // Subscribe BEFORE the state inspection so a concurrent
+        // promotion / cap bump that lands between the fast-path read
+        // and the wait below cannot escape both signals.
+        let mut target_rx = self.attached_capabilities_target.subscribe();
+        let mut cap_rx = self.worker_mgr.subscribe_capabilities_version();
+
+        if self.is_attach_cache_synced().await {
+            return EnsureAttachedOutcome::Attached;
+        }
+
+        // Decide whether to kick. Holding only a read lock here keeps
+        // the critical section short; the actual bring-up paths each
+        // acquire the write lock + lifecycle lock independently.
+        enum Kick {
+            ResendAttach(String),
+            BringUp,
+            Wait,
+        }
+        let kick = {
+            let state = self.state.read().await;
+            match &*state {
+                SupervisorState::Attaching { instance_id, .. } => {
+                    Kick::ResendAttach(instance_id.clone())
+                }
+                SupervisorState::Attached { .. } => Kick::Wait,
+                SupervisorState::Disabled | SupervisorState::Detaching => Kick::BringUp,
+            }
+        };
+        match kick {
+            Kick::ResendAttach(id) => {
+                // Re-send the AttachVirtualDisplay IPC. The first send
+                // (from apply(true)) may have raced a not-yet-installed
+                // worker channel; retransmitting now is safe — the
+                // worker's attach-result handling is idempotent.
+                self.send_attach_to_worker(&id).await;
+            }
+            Kick::BringUp => {
+                if let Err(e) = self.apply(true).await {
+                    return EnsureAttachedOutcome::Unavailable(e);
+                }
+            }
+            Kick::Wait => { /* already Attached; just wait for cache sync */ }
+        }
+
+        loop {
+            if self.is_attach_cache_synced().await {
+                return EnsureAttachedOutcome::Attached;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return EnsureAttachedOutcome::TimedOut;
+            }
+            tokio::select! {
+                res = tokio::time::timeout(remaining, target_rx.changed()) => {
+                    if res.is_err() {
+                        return EnsureAttachedOutcome::TimedOut;
+                    }
+                }
+                res = tokio::time::timeout(remaining, cap_rx.changed()) => {
+                    if res.is_err() {
+                        return EnsureAttachedOutcome::TimedOut;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Three-way completion check used by `ensure_attached`:
+    /// 1. The `Attaching → Attached` promotion has happened (target is
+    ///    `Some(_)`).
+    /// 2. The daemon's `capabilities_version` has reached the target
+    ///    set at promotion time (i.e. the worker has emitted at least
+    ///    one `Capabilities` after we sent RefreshCapabilities).
+    /// 3. The cached capabilities actually list the attached
+    ///    `display_name` — guarding against unrelated capability bumps
+    ///    that happened to satisfy `cap_version >= target` without
+    ///    surfacing the IDD.
+    async fn is_attach_cache_synced(&self) -> bool {
+        let target = *self.attached_capabilities_target.borrow();
+        let Some(t) = target else {
+            return false;
+        };
+        if self.worker_mgr.capabilities_version() < t {
+            return false;
+        }
+        let display_name = match &*self.state.read().await {
+            SupervisorState::Attached { display_name, .. } => Some(display_name.clone()),
+            _ => None,
+        };
+        let Some(name) = display_name else {
+            return false;
+        };
+        self.worker_mgr.capabilities_contains_display(&name)
     }
 }
 
@@ -420,8 +663,18 @@ impl VirtualDisplaySupervisor {
     /// proceeds past the FEATURE_UNAVAILABLE gates into validation /
     /// dispatch. Useful for testing the INVALID_PARAMS /
     /// REMOTE_DESK_OFFLINE / success-dispatch routes.
+    ///
+    /// Installs a one-bucket `MediaCapabilities` containing
+    /// `display_name` so [`Self::ensure_attached`] fast-path passes
+    /// without any external setup, and primes
+    /// `attached_capabilities_target` to the current cap version. Both
+    /// pieces are required for `ensure_attached` to recognise the
+    /// supervisor as fully attached.
     pub fn new_attached_for_test(worker_mgr: WorkerManager, instance_id: &str) -> Self {
+        use desk_ipc_protocol::message::MediaCapabilities;
+        use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
         use desk_virtual_display::VirtualDisplayHandleInner;
+        use std::collections::BTreeMap;
         struct MockHandleInner;
         impl VirtualDisplayHandleInner for MockHandleInner {}
         struct UnreachableProvider;
@@ -430,14 +683,51 @@ impl VirtualDisplaySupervisor {
                 panic!("provider must not be invoked on a pre-attached test supervisor")
             }
         }
+        let display_name = r"\\.\TESTDISPLAY".to_string();
         let handle = VirtualDisplayHandle::new(instance_id.to_string(), Box::new(MockHandleInner));
+        // Install capabilities that include the display so
+        // ensure_attached's `capabilities_contains_display` check
+        // passes. This also bumps capabilities_version to >= 1.
+        let mut video_device_list: BTreeMap<String, Vec<DisplayInfo>> = BTreeMap::new();
+        video_device_list.insert(
+            "test".to_string(),
+            vec![DisplayInfo {
+                device_name: display_name.clone(),
+                display_device_name: None,
+                desktop_coordinates: DisplayRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                resolutions: vec![],
+                attached_to_desktop: true,
+                rotation: 0,
+            }],
+        );
+        worker_mgr.set_worker_capabilities(MediaCapabilities {
+            video_codecs: vec![],
+            audio_codecs: vec![],
+            video_encoders: vec![],
+            audio_encoders: vec![],
+            video_device_list,
+            audio_device_list: BTreeMap::new(),
+            has_tauri: false,
+            is_admin: false,
+            desktop_name: "Default".to_string(),
+        });
+        let cap_version = worker_mgr.capabilities_version();
+        let (target_tx, _target_rx) = watch::channel(Some(cap_version));
         Self {
             state: RwLock::new(SupervisorState::Attached {
                 instance_id: instance_id.to_string(),
+                display_name,
                 handle,
             }),
             provider: Box::new(UnreachableProvider),
             worker_mgr,
+            attached_capabilities_target: target_tx,
+            lifecycle_lock: Mutex::new(()),
         }
     }
 }
@@ -886,5 +1176,474 @@ mod tests {
         let (worker_mgr, _rx) = make_worker_mgr();
         let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
         assert!(!supervisor.is_active().await);
+    }
+
+    // ===== v5 lazy lifecycle: ensure_attached + lifecycle_lock =====
+
+    /// Build a `MediaCapabilities` whose `video_device_list` contains
+    /// exactly one display under the `"wgc"` bucket. Used by tests that
+    /// want to simulate the worker's post-attach `Capabilities` refresh.
+    fn caps_with_display(display_name: &str) -> desk_ipc_protocol::message::MediaCapabilities {
+        use desk_ipc_protocol::message::MediaCapabilities;
+        use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+        let mut video_device_list: std::collections::BTreeMap<String, Vec<DisplayInfo>> =
+            std::collections::BTreeMap::new();
+        video_device_list.insert(
+            "wgc".to_string(),
+            vec![DisplayInfo {
+                device_name: display_name.to_string(),
+                display_device_name: None,
+                desktop_coordinates: DisplayRect {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                resolutions: vec![],
+                attached_to_desktop: true,
+                rotation: 0,
+            }],
+        );
+        MediaCapabilities {
+            video_codecs: vec![],
+            audio_codecs: vec![],
+            video_encoders: vec![],
+            audio_encoders: vec![],
+            video_device_list,
+            audio_device_list: std::collections::BTreeMap::new(),
+            has_tauri: false,
+            is_admin: false,
+            desktop_name: "Default".to_string(),
+        }
+    }
+
+    /// `apply(true)` is the lazy bring-up entry point — it must
+    /// proactively enqueue an `AttachVirtualDisplay` IPC instead of
+    /// waiting for a future `Capabilities` re-emission, otherwise
+    /// `ensure_attached` would sit in Attaching forever in the
+    /// post-initial-Capabilities steady state.
+    #[tokio::test]
+    async fn apply_true_sends_attach_virtual_display_to_worker() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+
+        supervisor.apply(true).await.expect("apply(true)");
+        let sent = drain_ipc(&mut ipc_rx);
+        let attach_count = sent
+            .iter()
+            .filter(|m| matches!(m, ServiceToWorker::AttachVirtualDisplay(_)))
+            .count();
+        assert_eq!(
+            attach_count, 1,
+            "apply(true) must emit exactly one AttachVirtualDisplay; observed: {sent:?}",
+        );
+    }
+
+    /// `apply(false)` from `Attached` must clear the
+    /// `attached_capabilities_target` watch so a stale post-detach
+    /// `ensure_attached` call cannot fast-path through on the previous
+    /// target.
+    #[tokio::test]
+    async fn apply_false_sends_detach_refresh_and_clears_target() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+
+        supervisor.apply(true).await.expect("apply(true)");
+        supervisor
+            .on_worker_attach_result(VirtualDisplayAttachResultPayload {
+                instance_id: MOCK_INSTANCE_ID.to_string(),
+                outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY4".to_string()),
+            })
+            .await;
+        assert!(
+            supervisor.attached_capabilities_target.borrow().is_some(),
+            "promotion sets target",
+        );
+        let _ = drain_ipc(&mut ipc_rx);
+
+        supervisor.apply(false).await.expect("apply(false)");
+        let sent = drain_ipc(&mut ipc_rx);
+        assert_eq!(
+            sent.iter()
+                .filter(|m| matches!(m, ServiceToWorker::DetachVirtualDisplay))
+                .count(),
+            1,
+            "apply(false) emits DetachVirtualDisplay; observed: {sent:?}",
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|m| matches!(m, ServiceToWorker::RefreshCapabilities))
+                .count(),
+            1,
+            "apply(false) emits RefreshCapabilities; observed: {sent:?}",
+        );
+        assert!(
+            supervisor.attached_capabilities_target.borrow().is_none(),
+            "apply(false) clears target",
+        );
+        assert_eq!(supervisor.state_label().await, "Disabled");
+    }
+
+    /// The `Attaching → Attached` promotion records both the
+    /// `display_name` (for the cache-contains check) and the
+    /// post-promotion `capabilities_version` target (snapshot + 1).
+    #[tokio::test]
+    async fn promotion_stores_display_name_and_sets_target_snapshot_plus_one() {
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        // Seed cap_version to 1 via a no-op Capabilities install so the
+        // snapshot is non-zero (matches the typical bring-up flow where
+        // the worker has already emitted at least one Capabilities).
+        worker_mgr.set_worker_capabilities(caps_with_display(r"\\.\OTHER"));
+        assert_eq!(worker_mgr.capabilities_version(), 1);
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+        supervisor.apply(true).await.expect("apply(true)");
+
+        supervisor
+            .on_worker_attach_result(VirtualDisplayAttachResultPayload {
+                instance_id: MOCK_INSTANCE_ID.to_string(),
+                outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY4".to_string()),
+            })
+            .await;
+
+        // display_name lands in state.
+        let stored = match &*supervisor.state.read().await {
+            SupervisorState::Attached { display_name, .. } => Some(display_name.clone()),
+            _ => None,
+        };
+        assert_eq!(stored.as_deref(), Some(r"\\.\DISPLAY4"));
+        // target == snapshot + 1 == 2.
+        assert_eq!(*supervisor.attached_capabilities_target.borrow(), Some(2));
+    }
+
+    /// Fast-path: `ensure_attached` returns `Attached` without doing
+    /// anything when the supervisor is fully attached AND the cache
+    /// already includes the attached display.
+    #[tokio::test]
+    async fn ensure_attached_fast_path_when_target_and_cache_match() {
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        // `new_attached_for_test` seeds capabilities + target itself.
+        let supervisor =
+            VirtualDisplaySupervisor::new_attached_for_test(worker_mgr, "SWD\\TEST\\TEST");
+
+        let outcome = supervisor
+            .ensure_attached(std::time::Duration::from_millis(100))
+            .await;
+        assert!(matches!(outcome, EnsureAttachedOutcome::Attached));
+    }
+
+    /// Codex round 3 #13: even if target is satisfied by cap_version,
+    /// the cache must actually contain the attached display name for
+    /// the ensure_attached completion to fire.
+    #[tokio::test]
+    async fn ensure_attached_waits_when_target_satisfied_but_cache_missing_display() {
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
+            desk_ipc_protocol::message::ServiceToWorker,
+        >();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
+        supervisor.apply(true).await.expect("apply(true)");
+
+        // Promote with display "\\.\DISPLAY4".
+        supervisor
+            .on_worker_attach_result(VirtualDisplayAttachResultPayload {
+                instance_id: MOCK_INSTANCE_ID.to_string(),
+                outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY4".to_string()),
+            })
+            .await;
+        // Background: bump cap_version with capabilities that DO NOT
+        // include the attached display. ensure_attached must NOT
+        // complete until the cache actually lists the IDD.
+        let worker_mgr_bg = worker_mgr.clone();
+        let bumper = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            // Wrong display name — should not satisfy the check.
+            worker_mgr_bg.set_worker_capabilities(caps_with_display(r"\\.\OTHER"));
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            // Now publish capabilities that include the attached IDD.
+            worker_mgr_bg.set_worker_capabilities(caps_with_display(r"\\.\DISPLAY4"));
+        });
+
+        let outcome = supervisor
+            .ensure_attached(std::time::Duration::from_secs(2))
+            .await;
+        bumper.await.unwrap();
+        assert!(
+            matches!(outcome, EnsureAttachedOutcome::Attached),
+            "ensure_attached completed only after cache surfaced the IDD: {outcome:?}",
+        );
+    }
+
+    /// An unrelated `Capabilities` bump (e.g. worker restart) must not
+    /// satisfy `ensure_attached` — without the strict cache-contains
+    /// check, the daemon could report Attached while the dropdown
+    /// still lacks the IDD.
+    #[tokio::test]
+    async fn ensure_attached_ignores_unrelated_capabilities_bump_before_attached() {
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
+            desk_ipc_protocol::message::ServiceToWorker,
+        >();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
+
+        // Background: bump cap_version but never deliver attach_result.
+        let worker_mgr_bg = worker_mgr.clone();
+        let bumper = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            worker_mgr_bg.set_worker_capabilities(caps_with_display(r"\\.\OTHER"));
+        });
+        let outcome = supervisor
+            .ensure_attached(std::time::Duration::from_millis(200))
+            .await;
+        bumper.await.unwrap();
+        assert!(
+            matches!(outcome, EnsureAttachedOutcome::TimedOut),
+            "cap bump without attach_result must not complete; observed: {outcome:?}",
+        );
+    }
+
+    /// Lazy bring-up from `Disabled`: ensure_attached kicks `apply(true)`
+    /// internally; a background task simulates the worker's
+    /// `attach_result` + `Capabilities` round-trip; ensure_attached
+    /// returns `Attached`.
+    #[tokio::test]
+    async fn ensure_attached_brings_up_from_disabled() {
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
+            desk_ipc_protocol::message::ServiceToWorker,
+        >();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
+
+        let supervisor_bg = supervisor.clone();
+        let worker_mgr_bg = worker_mgr.clone();
+        let bumper = tokio::spawn(async move {
+            // Wait for ensure_attached to issue apply(true).
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            supervisor_bg
+                .on_worker_attach_result(VirtualDisplayAttachResultPayload {
+                    instance_id: MOCK_INSTANCE_ID.to_string(),
+                    outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY7".to_string()),
+                })
+                .await;
+            // Worker's RefreshCapabilities response includes the IDD.
+            worker_mgr_bg.set_worker_capabilities(caps_with_display(r"\\.\DISPLAY7"));
+        });
+
+        let outcome = supervisor
+            .ensure_attached(std::time::Duration::from_secs(2))
+            .await;
+        bumper.await.unwrap();
+        assert!(matches!(outcome, EnsureAttachedOutcome::Attached));
+        assert_eq!(supervisor.state_label().await, "Attached");
+    }
+
+    /// Timeout path: no `attach_result` ever lands. State stays in
+    /// `Attaching` so the next ensure call resumes from there.
+    #[tokio::test]
+    async fn ensure_attached_times_out_when_attach_never_completes() {
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
+            desk_ipc_protocol::message::ServiceToWorker,
+        >();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+
+        let outcome = supervisor
+            .ensure_attached(std::time::Duration::from_millis(100))
+            .await;
+        assert!(matches!(outcome, EnsureAttachedOutcome::TimedOut));
+        assert_eq!(
+            supervisor.state_label().await,
+            "Attaching",
+            "state must remain Attaching after timeout so the next ensure resumes",
+        );
+    }
+
+    /// Codex round 2 #9 / round 3 #9: when a previous ensure_attached
+    /// timed out with the supervisor stuck in Attaching (e.g. the first
+    /// Attach IPC was lost before the worker channel was installed), a
+    /// subsequent ensure_attached must re-send the AttachVirtualDisplay
+    /// IPC so the worker eventually gets the request.
+    #[tokio::test]
+    async fn ensure_attached_resends_attach_when_still_attaching() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+
+        supervisor.apply(true).await.expect("apply(true)");
+        let initial = drain_ipc(&mut ipc_rx);
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|m| matches!(m, ServiceToWorker::AttachVirtualDisplay(_)))
+                .count(),
+            1,
+            "first attach send observed",
+        );
+
+        // Second ensure call: state is still Attaching (no attach_result
+        // arrived). The ensure_attached fast-path miss should trigger a
+        // re-send before the wait loop.
+        let _ = supervisor
+            .ensure_attached(std::time::Duration::from_millis(50))
+            .await;
+        let resent = drain_ipc(&mut ipc_rx);
+        assert!(
+            resent
+                .iter()
+                .any(|m| matches!(m, ServiceToWorker::AttachVirtualDisplay(_))),
+            "subsequent ensure must re-send AttachVirtualDisplay when state is Attaching; \
+             observed: {resent:?}",
+        );
+    }
+
+    /// `Unavailable`: provider returns `NotSupported` (phase 1 / stub
+    /// platforms). ensure_attached must surface the error promptly.
+    #[tokio::test]
+    async fn ensure_attached_returns_unavailable_when_provider_not_supported() {
+        let provider: Box<dyn VirtualDisplayLifecycle> =
+            Box::new(MockLifecycle::returns_not_supported());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
+
+        let outcome = supervisor
+            .ensure_attached(std::time::Duration::from_millis(100))
+            .await;
+        match outcome {
+            EnsureAttachedOutcome::Unavailable(_) => {}
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    /// Codex round 4 #15: lifecycle_lock must serialise the entire
+    /// apply flow including IPC sends so concurrent calls cannot
+    /// interleave. Specifically: an apply(false) running between an
+    /// in-flight apply(true)'s state set and IPC send would let the
+    /// worker observe Detach BEFORE the previous Attach completes its
+    /// own IPC. The test launches one apply(true), waits for it to
+    /// finish, then races apply(false) + apply(true) concurrently and
+    /// asserts the IPC sequence is consistent with serialised
+    /// execution (no Attach interleaved before a Detach of the same
+    /// generation).
+    #[tokio::test]
+    async fn apply_serializes_concurrent_calls_via_lifecycle_lock() {
+        use desk_ipc_protocol::message::ServiceToWorker;
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr));
+
+        supervisor.apply(true).await.expect("first apply(true)");
+        let _ = drain_ipc(&mut ipc_rx);
+
+        // Concurrent apply(false) followed by apply(true). lifecycle_lock
+        // must force them to serialise; the IPC stream observed afterwards
+        // must contain Detach before any second Attach.
+        let s1 = supervisor.clone();
+        let s2 = supervisor.clone();
+        let t1 = tokio::spawn(async move { s1.apply(false).await });
+        // Small skew so apply(false) wins the lock first deterministically.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let t2 = tokio::spawn(async move { s2.apply(true).await });
+        let _ = t1.await.unwrap();
+        let _ = t2.await.unwrap();
+
+        let sent = drain_ipc(&mut ipc_rx);
+        // Locate the Detach. It must precede any AttachVirtualDisplay that
+        // appears after it (the second apply(true)).
+        let detach_idx = sent
+            .iter()
+            .position(|m| matches!(m, ServiceToWorker::DetachVirtualDisplay))
+            .expect("detach must be present in the IPC stream");
+        let second_attach_idx = sent
+            .iter()
+            .enumerate()
+            .skip(detach_idx + 1)
+            .find_map(|(i, m)| {
+                if matches!(m, ServiceToWorker::AttachVirtualDisplay(_)) {
+                    Some(i)
+                } else {
+                    None
+                }
+            });
+        assert!(
+            second_attach_idx.is_some(),
+            "second apply(true) must enqueue Attach after Detach; observed: {sent:?}",
+        );
+    }
+
+    /// Two concurrent `ensure_attached` calls must share a single
+    /// underlying bring-up: provider.create() must run exactly once,
+    /// and both calls must observe `Attached`.
+    #[tokio::test]
+    async fn ensure_attached_concurrent_calls_share_single_apply() {
+        let lifecycle = Arc::new(MockLifecycle::returns_handle());
+        let lifecycle_for_provider = Arc::clone(&lifecycle);
+        struct ArcProvider(Arc<MockLifecycle>);
+        impl VirtualDisplayLifecycle for ArcProvider {
+            fn create(&self) -> Result<VirtualDisplayHandle, VirtualDisplayError> {
+                self.0.create()
+            }
+        }
+        let provider: Box<dyn VirtualDisplayLifecycle> =
+            Box::new(ArcProvider(lifecycle_for_provider));
+        let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
+        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
+            desk_ipc_protocol::message::ServiceToWorker,
+        >();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
+
+        let supervisor_bg = supervisor.clone();
+        let worker_mgr_bg = worker_mgr.clone();
+        let driver = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            supervisor_bg
+                .on_worker_attach_result(VirtualDisplayAttachResultPayload {
+                    instance_id: MOCK_INSTANCE_ID.to_string(),
+                    outcome: VirtualDisplayAttachOutcome::Attached(r"\\.\DISPLAY8".to_string()),
+                })
+                .await;
+            worker_mgr_bg.set_worker_capabilities(caps_with_display(r"\\.\DISPLAY8"));
+        });
+
+        let s1 = supervisor.clone();
+        let s2 = supervisor.clone();
+        let h1 = tokio::spawn(async move {
+            s1.ensure_attached(std::time::Duration::from_secs(2)).await
+        });
+        let h2 = tokio::spawn(async move {
+            s2.ensure_attached(std::time::Duration::from_secs(2)).await
+        });
+        let r1 = h1.await.unwrap();
+        let r2 = h2.await.unwrap();
+        driver.await.unwrap();
+
+        assert!(matches!(r1, EnsureAttachedOutcome::Attached), "first: {r1:?}");
+        assert!(matches!(r2, EnsureAttachedOutcome::Attached), "second: {r2:?}");
+        assert_eq!(
+            lifecycle.create_calls.load(Ordering::SeqCst),
+            1,
+            "provider.create must be called at most once",
+        );
     }
 }

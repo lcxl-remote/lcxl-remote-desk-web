@@ -169,22 +169,17 @@ pub async fn run_service_daemon_inner(
     };
 
     // Service-daemon mode only: construct the virtual display
-    // supervisor, hand it to the router (via signaling_proxy) so
-    // inbound ChangeDisplaySettings sees an Active state when the
-    // toggle is on and the provider succeeded. Phase 1 ships the
-    // stub provider, so create() returns NotSupported and the
-    // supervisor stays Disabled — the routing path is exercised
-    // end-to-end, the feature itself is dormant.
+    // supervisor and hand it to the router (via signaling_proxy). v5
+    // lazy lifecycle: attach is NOT performed at daemon startup any
+    // more. The router calls `ensure_attached` on the first
+    // `RequestRemote` whose desk settings enable the virtual display,
+    // and `cleanup_pc` calls `apply(false)` when the last PC drops.
+    // This keeps the IDD invisible to the local user while there is
+    // no remote session — so a window dragged onto an extended
+    // monitor is impossible when nobody is connected.
     let virtual_display_supervisor = {
         let provider = desk_virtual_display::lifecycle_provider();
         let supervisor = virtual_display::new_arc(provider, worker_mgr.clone());
-        let desired = shared_settings.read().await.desk.enable_virtual_display;
-        if let Err(e) = supervisor.apply(desired).await {
-            warn!(
-                "VirtualDisplaySupervisor.apply({desired}) failed at daemon startup: {e}; \
-                 continuing without virtual display support",
-            );
-        }
         Some(supervisor)
     };
 
