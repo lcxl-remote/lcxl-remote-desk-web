@@ -12,29 +12,24 @@ use windows::Win32::{
 
 use crate::{
     error::InputError,
-    model::data_channel::{MouseEventData, MouseEventHandler},
+    model::{
+        data_channel::{MouseEventData, MouseEventHandler},
+        geometry::SharedMonitorGeometry,
+    },
 };
 
 pub struct WindowsMouseEventHandler {
-    /// Virtual-desktop-space left edge of the captured monitor.
-    /// Required because `SetCursorPos` uses the virtual desktop
-    /// coordinate system whose origin is the primary monitor's top-left
-    /// — non-primary monitors live at a non-zero offset.
-    pub left: i32,
-    /// Virtual-desktop-space top edge of the captured monitor.
-    pub top: i32,
-    pub width: i32,
-    pub height: i32,
+    /// Shared, hot-updatable virtual-desktop rect of the captured
+    /// monitor. The worker mutates it on display reconfiguration
+    /// (`WM_DISPLAYCHANGE`, IDD `SetMode`, virtual display Attach /
+    /// Detach) so the cursor lands correctly without the connection
+    /// being torn down.
+    geometry: SharedMonitorGeometry,
 }
 
 impl WindowsMouseEventHandler {
-    pub fn new(left: i32, top: i32, width: i32, height: i32) -> Self {
-        Self {
-            left,
-            top,
-            width,
-            height,
-        }
+    pub fn new(geometry: SharedMonitorGeometry) -> Self {
+        Self { geometry }
     }
 }
 
@@ -51,8 +46,14 @@ fn compute_absolute(left: i32, top: i32, width: i32, height: i32, x: f64, y: f64
 
 impl MouseEventHandler for WindowsMouseEventHandler {
     fn handle_mouse_move(&mut self, event: &MouseEventData) -> Result<(), InputError> {
-        let (x, y) =
-            compute_absolute(self.left, self.top, self.width, self.height, event.x, event.y);
+        // Snapshot the geometry into locals before releasing the read
+        // lock so the unsafe `SetCursorPos` call below never runs while
+        // the lock is held — keeps the lock-hold window microscopic.
+        let (left, top, width, height) = {
+            let g = self.geometry.read().expect("monitor geometry poisoned");
+            (g.left, g.top, g.width, g.height)
+        };
+        let (x, y) = compute_absolute(left, top, width, height, event.x, event.y);
         let result = unsafe { SetCursorPos(x, y) };
         if let Err(error) = result {
             log::error!(
@@ -160,6 +161,7 @@ impl MouseEventHandler for WindowsMouseEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::geometry::{MonitorGeometry, shared};
 
     /// Primary monitor at the origin: the offset is zero, so the result
     /// is just `(x * width, y * height)`. Sanity check.
@@ -208,9 +210,37 @@ mod tests {
         // Note (1.0, 1.0) maps to (left+width, top+height) i.e. the
         // *exclusive* far edge — one past the last addressable pixel.
         // SetCursorPos clamps internally, so this is acceptable.
-        assert_eq!(
-            compute_absolute(1280, 0, 1500, 900, 1.0, 1.0),
-            (2780, 900)
-        );
+        assert_eq!(compute_absolute(1280, 0, 1500, 900, 1.0, 1.0), (2780, 900));
+    }
+
+    /// Hot-update path: the handler must observe writes made through a
+    /// cloned `SharedMonitorGeometry` handle. This is the contract the
+    /// `InputDispatcher::refresh_geometry` / `retarget_connection`
+    /// callers rely on — they hold their own clone of the same Arc and
+    /// mutate it after a display reconfig.
+    #[test]
+    fn compute_absolute_reflects_geometry_update() {
+        let geometry = shared(MonitorGeometry::new(0, 0, 1280, 800));
+        let writer = std::sync::Arc::clone(&geometry);
+
+        // Pre-update: read through the handler's clone matches the
+        // initial rect.
+        let (l, t, w, h) = {
+            let g = geometry.read().unwrap();
+            (g.left, g.top, g.width, g.height)
+        };
+        assert_eq!(compute_absolute(l, t, w, h, 0.5, 0.5), (640, 400));
+
+        // Worker-side write through the cloned handle.
+        *writer.write().unwrap() = MonitorGeometry::new(1280, 0, 1500, 900);
+
+        // Post-update: the handler's clone sees the new rect on the
+        // next read — exactly what `handle_mouse_move` does on each
+        // event.
+        let (l, t, w, h) = {
+            let g = geometry.read().unwrap();
+            (g.left, g.top, g.width, g.height)
+        };
+        assert_eq!(compute_absolute(l, t, w, h, 0.5, 0.5), (1280 + 750, 450));
     }
 }

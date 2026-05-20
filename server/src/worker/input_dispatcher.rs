@@ -51,9 +51,13 @@ use desk_input_injection::keyboard_event::keyboard_event_factory::create_keyboar
 use desk_input_injection::model::data_channel::{
     KeyboardEventData, KeyboardEventHandler, MouseEventData, MouseEventHandler,
 };
+use desk_input_injection::model::geometry::{
+    MonitorGeometry, SharedMonitorGeometry, shared as shared_geometry,
+};
 use desk_input_injection::mouse_event::mouse_event_factory::create_mouse_event_handler;
 use desk_ipc_protocol::message::{InputPayload, StartMediaPayload, StopMediaPayload};
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::image_capture::DisplayInfo;
 use log::{debug, error, info, warn};
 
 /// Per-connection injection state. Mirrors the per-DC `Arc<Mutex<...>>`
@@ -68,6 +72,17 @@ struct ConnectionInputState {
     /// behaviour (browser sends `sequence_number` to deduplicate
     /// retransmits / late deliveries).
     last_mouse_seq: u64,
+    /// Hot-updatable captured-monitor rect. The clone held here is the
+    /// **same** `Arc<RwLock<...>>` the platform mouse handler holds —
+    /// writing to it through this struct is immediately visible to the
+    /// next mouse event. Mutated by `refresh_geometry` /
+    /// `retarget_connection`.
+    geometry: SharedMonitorGeometry,
+    /// `\\.\DISPLAYn` device name the connection currently captures.
+    /// Required to scope `refresh_geometry(Some(device_name))` to the
+    /// right connections after IDD `SetMode`, and re-written by
+    /// `retarget_connection` after virtual display Attach / Detach.
+    video_device: Option<String>,
 }
 
 /// Worker-side input dispatcher. Cheap to clone (`Arc` inside) so the
@@ -106,8 +121,9 @@ impl InputDispatcher {
     pub fn start_connection(&self, payload: &StartMediaPayload) {
         let (left, top, width, height) =
             display_geometry_for_device(payload.video_device.as_deref());
+        let geometry = shared_geometry(MonitorGeometry::new(left, top, width, height));
         let wayland_mode = self.desk_settings.wayland_control_mode.as_deref();
-        let mouse = match create_mouse_event_handler(left, top, width, height, wayland_mode) {
+        let mouse = match create_mouse_event_handler(geometry.clone(), wayland_mode) {
             Ok(h) => h,
             Err(e) => {
                 error!(
@@ -136,6 +152,8 @@ impl InputDispatcher {
                 mouse,
                 keyboard,
                 last_mouse_seq: 0,
+                geometry,
+                video_device: payload.video_device.clone(),
             },
         );
         if prev.is_some() {
@@ -154,6 +172,37 @@ impl InputDispatcher {
             payload.video_device.as_deref(),
             wayland_mode
         );
+    }
+
+    /// Refresh the shared geometry of one or more connections in
+    /// response to a display reconfiguration. Re-queries the GDI
+    /// display list once and writes new rects atomically into the
+    /// matching connections' `SharedMonitorGeometry` — handlers pick
+    /// up the new value on the next mouse event without being
+    /// rebuilt.
+    ///
+    /// - `device_name = Some(name)`: only refresh connections whose
+    ///   `video_device == Some(name)`. Used after IDD `SetMode` apply
+    ///   when the worker knows exactly which display changed.
+    /// - `device_name = None`: refresh every connection. Used for
+    ///   `WM_DISPLAYCHANGE` (the OS broadcast doesn't tell us which
+    ///   display moved, so we refresh all).
+    pub fn refresh_geometry(&self, device_name: Option<&str>) {
+        let displays = enumerate_attached_displays();
+        let map = self.inner.lock().expect("input dispatcher lock poisoned");
+        refresh_geometry_in(&map, &displays, device_name);
+    }
+
+    /// Retarget one connection to a new video device — used after a
+    /// virtual display Attach/Detach swaps the capture target. Updates
+    /// both `video_device` and `geometry` in place; preserves
+    /// `last_mouse_seq` and the underlying mouse/keyboard handlers
+    /// (they hold the same `SharedMonitorGeometry` Arc, so the
+    /// in-place write is automatically visible).
+    pub fn retarget_connection(&self, payload: &StartMediaPayload) {
+        let displays = enumerate_attached_displays();
+        let mut map = self.inner.lock().expect("input dispatcher lock poisoned");
+        retarget_connection_in(&mut map, &displays, payload);
     }
 
     /// Drop per-connection input handlers. Called from
@@ -301,18 +350,71 @@ fn decode_keyboard(data: &[u8]) -> Option<KeyboardEventData> {
 /// Falls back to a sensible 1920x1080 default when the capture-engine
 /// reports nothing (e.g. headless test rig) so handler construction
 /// still succeeds.
-fn display_geometry_for_device(
-    requested_device_name: Option<&str>,
-) -> (i32, i32, i32, i32) {
-    let mut all_displays = Vec::new();
+fn display_geometry_for_device(requested_device_name: Option<&str>) -> (i32, i32, i32, i32) {
+    let all_displays = enumerate_attached_displays();
+    geometry_for_device_in(&all_displays, requested_device_name)
+}
+
+/// Shared "give me the attached displays" helper. Used by every path
+/// that builds or refreshes per-connection geometry. Kept as a private
+/// function so future displacement of the capture-engine source-of-
+/// truth is a single-file change.
+fn enumerate_attached_displays() -> Vec<DisplayInfo> {
+    let mut out = Vec::new();
     for (_backend, displays) in list_image_capture() {
         for display in displays {
             if display.attached_to_desktop {
-                all_displays.push(display);
+                out.push(display);
             }
         }
     }
-    geometry_for_device_in(&all_displays, requested_device_name)
+    out
+}
+
+/// Pure refresh: walk the connection map and rewrite the geometry of
+/// every connection whose `video_device` matches `device_name`
+/// (`None` = match all). Tested with a hand-built `HashMap` so we
+/// don't need real connections.
+fn refresh_geometry_in(
+    map: &HashMap<String, ConnectionInputState>,
+    displays: &[DisplayInfo],
+    device_name: Option<&str>,
+) {
+    for state in map.values() {
+        let is_match = device_name.is_none_or(|want| state.video_device.as_deref() == Some(want));
+        if !is_match {
+            continue;
+        }
+        let g = geometry_for_device_in(displays, state.video_device.as_deref());
+        let mut w = state.geometry.write().expect("monitor geometry poisoned");
+        *w = MonitorGeometry::new(g.0, g.1, g.2, g.3);
+    }
+}
+
+/// Pure retarget: look up `payload.connection_id`, rewrite both
+/// `video_device` and `geometry` to match the new capture target.
+/// Unknown ids are a warn + no-op so the IPC loop stays alive even if
+/// a daemon-side bug ships a stale id.
+fn retarget_connection_in(
+    map: &mut HashMap<String, ConnectionInputState>,
+    displays: &[DisplayInfo],
+    payload: &StartMediaPayload,
+) {
+    let Some(state) = map.get_mut(&payload.connection_id) else {
+        warn!(
+            "[InputDispatcher] {}: retarget for unknown connection — dropping",
+            payload.connection_id
+        );
+        return;
+    };
+    state.video_device = payload.video_device.clone();
+    let g = geometry_for_device_in(displays, payload.video_device.as_deref());
+    let mut w = state.geometry.write().expect("monitor geometry poisoned");
+    *w = MonitorGeometry::new(g.0, g.1, g.2, g.3);
+    info!(
+        "[InputDispatcher] {}: retargeted to device={:?}, rect=({},{},{}x{})",
+        payload.connection_id, payload.video_device, g.0, g.1, g.2, g.3
+    );
 }
 
 /// Pure helper extracted from `display_geometry_for_device` so it can
@@ -544,5 +646,206 @@ mod tests {
     fn geometry_for_device_returns_default_when_list_empty() {
         let pick = geometry_for_device_in(&[], None);
         assert_eq!(pick, (0, 0, 1920, 1080));
+    }
+
+    // === Hot-reload geometry tests ===
+    //
+    // The factory-driven `start_connection` path can't run on a
+    // headless CI box (it touches platform mouse / keyboard
+    // handlers — uinput on Linux, real Win32 calls on Windows). To
+    // exercise the refresh / retarget logic without depending on the
+    // factory, we hand-build `ConnectionInputState` entries with no-op
+    // handlers and drive `refresh_geometry_in` / `retarget_connection_in`
+    // directly. This is the same pure-function pattern used by
+    // `geometry_for_device_in` above.
+
+    use desk_input_injection::error::InputError;
+    use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventData};
+    use desk_input_injection::model::geometry::{MonitorGeometry, shared as shared_geometry};
+
+    struct NoopMouse;
+    impl MouseEventHandler for NoopMouse {
+        fn handle_mouse_move(&mut self, _: &MouseEventData) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn handle_mouse_down(&mut self, _: &MouseEventData) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn handle_mouse_up(&mut self, _: &MouseEventData) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn handle_mouse_wheel(&mut self, _: &MouseEventData) -> Result<(), InputError> {
+            Ok(())
+        }
+    }
+    struct NoopKeyboard;
+    impl KeyboardEventHandler for NoopKeyboard {
+        fn handle_key_down(&mut self, _: &KeyboardEventData) -> Result<(), InputError> {
+            Ok(())
+        }
+        fn handle_key_up(&mut self, _: &KeyboardEventData) -> Result<(), InputError> {
+            Ok(())
+        }
+    }
+
+    fn fake_state(
+        video_device: Option<&str>,
+        geometry: SharedMonitorGeometry,
+    ) -> ConnectionInputState {
+        ConnectionInputState {
+            mouse: Box::new(NoopMouse),
+            keyboard: Box::new(NoopKeyboard),
+            last_mouse_seq: 0,
+            geometry,
+            video_device: video_device.map(|s| s.to_string()),
+        }
+    }
+
+    /// `refresh_geometry_in(Some(device))` writes only into the
+    /// connections whose `video_device` matches. Sibling connections
+    /// keep their old rect. This is the IDD `SetMode` apply path.
+    #[test]
+    fn refresh_geometry_in_updates_matching_connection() {
+        let primary = display(r"\\.\DISPLAY1", 0, 0, 1280, 800);
+        let idd = display(r"\\.\DISPLAY8", 1280, 0, 2780, 900);
+        let displays = vec![primary, idd];
+
+        let g_phys = shared_geometry(MonitorGeometry::new(0, 0, 1280, 800));
+        let g_idd = shared_geometry(MonitorGeometry::new(1280, 0, 1500, 900));
+        let mut map = HashMap::new();
+        map.insert(
+            "conn-phys".to_string(),
+            fake_state(Some(r"\\.\DISPLAY1"), g_phys.clone()),
+        );
+        map.insert(
+            "conn-idd".to_string(),
+            fake_state(Some(r"\\.\DISPLAY8"), g_idd.clone()),
+        );
+
+        // Pretend the IDD resolution changed: rewrite DISPLAY8 in
+        // the enumeration to the new rect, then refresh.
+        let displays_after = vec![
+            display(r"\\.\DISPLAY1", 0, 0, 1280, 800),
+            display(r"\\.\DISPLAY8", 1280, 0, 3840, 2160),
+        ];
+        refresh_geometry_in(&map, &displays_after, Some(r"\\.\DISPLAY8"));
+
+        assert_eq!(
+            *g_idd.read().unwrap(),
+            MonitorGeometry::new(1280, 0, 2560, 2160),
+            "IDD geometry must reflect the new rect",
+        );
+        assert_eq!(
+            *g_phys.read().unwrap(),
+            MonitorGeometry::new(0, 0, 1280, 800),
+            "DISPLAY1 must be untouched — the filter scoped to DISPLAY8",
+        );
+        // Suppress unused-variable warning on `displays`.
+        let _ = displays;
+    }
+
+    /// `refresh_geometry_in(Some(device))` with a device that no
+    /// connection holds is a no-op — every connection keeps its rect.
+    #[test]
+    fn refresh_geometry_in_unknown_device_is_noop() {
+        let displays = vec![display(r"\\.\DISPLAY1", 0, 0, 1280, 800)];
+        let g = shared_geometry(MonitorGeometry::new(0, 0, 1280, 800));
+        let mut map = HashMap::new();
+        map.insert(
+            "conn-x".to_string(),
+            fake_state(Some(r"\\.\DISPLAY1"), g.clone()),
+        );
+
+        refresh_geometry_in(&map, &displays, Some(r"\\.\GHOST"));
+        assert_eq!(*g.read().unwrap(), MonitorGeometry::new(0, 0, 1280, 800));
+    }
+
+    /// `refresh_geometry_in(None)` re-applies all geometries — the
+    /// `WM_DISPLAYCHANGE` broadcast path. Both connections pick up
+    /// new rects.
+    #[test]
+    fn refresh_geometry_in_none_updates_all_connections() {
+        let displays = vec![
+            display(r"\\.\DISPLAY1", 0, 0, 2560, 1440),
+            display(r"\\.\DISPLAY2", 2560, 0, 5120, 1440),
+        ];
+        let g1 = shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080));
+        let g2 = shared_geometry(MonitorGeometry::new(1920, 0, 3440, 1080));
+        let mut map = HashMap::new();
+        map.insert(
+            "c1".to_string(),
+            fake_state(Some(r"\\.\DISPLAY1"), g1.clone()),
+        );
+        map.insert(
+            "c2".to_string(),
+            fake_state(Some(r"\\.\DISPLAY2"), g2.clone()),
+        );
+
+        refresh_geometry_in(&map, &displays, None);
+        assert_eq!(*g1.read().unwrap(), MonitorGeometry::new(0, 0, 2560, 1440));
+        assert_eq!(
+            *g2.read().unwrap(),
+            MonitorGeometry::new(2560, 0, 2560, 1440)
+        );
+    }
+
+    /// `retarget_connection_in` flips both `video_device` and
+    /// `geometry`. The connection's mouse handler (which holds a
+    /// clone of the same Arc) sees the new rect on the next event.
+    /// `last_mouse_seq` is preserved.
+    #[test]
+    fn retarget_connection_updates_video_device_and_geometry() {
+        let displays = vec![
+            display(r"\\.\DISPLAY1", 0, 0, 1280, 800),
+            display(r"\\.\DISPLAY9", 1280, 0, 2780, 1700),
+        ];
+        let g = shared_geometry(MonitorGeometry::new(0, 0, 1280, 800));
+        let mut state = fake_state(Some(r"\\.\DISPLAY1"), g.clone());
+        state.last_mouse_seq = 42;
+        let mut map = HashMap::new();
+        map.insert("conn-z".to_string(), state);
+
+        let new_payload = StartMediaPayload {
+            connection_id: "conn-z".to_string(),
+            video_device: Some(r"\\.\DISPLAY9".to_string()),
+            ..start_payload("conn-z")
+        };
+        retarget_connection_in(&mut map, &displays, &new_payload);
+
+        let updated = map.get("conn-z").unwrap();
+        assert_eq!(updated.video_device.as_deref(), Some(r"\\.\DISPLAY9"));
+        assert_eq!(updated.last_mouse_seq, 42, "seq must survive retarget");
+        assert_eq!(
+            *g.read().unwrap(),
+            MonitorGeometry::new(1280, 0, 1500, 1700),
+        );
+    }
+
+    /// `retarget_connection_in` on an unknown id is a warn + no-op;
+    /// it must not panic or modify any other connection. Critical for
+    /// IPC-loop liveness if the daemon ever ships a stale id.
+    #[test]
+    fn retarget_connection_unknown_id_is_noop() {
+        let displays = vec![display(r"\\.\DISPLAY1", 0, 0, 1280, 800)];
+        let g = shared_geometry(MonitorGeometry::new(0, 0, 1280, 800));
+        let mut map = HashMap::new();
+        map.insert(
+            "live".to_string(),
+            fake_state(Some(r"\\.\DISPLAY1"), g.clone()),
+        );
+
+        let new_payload = StartMediaPayload {
+            connection_id: "ghost".to_string(),
+            video_device: Some(r"\\.\DISPLAY9".to_string()),
+            ..start_payload("ghost")
+        };
+        retarget_connection_in(&mut map, &displays, &new_payload);
+
+        // Live connection untouched.
+        assert_eq!(
+            map.get("live").unwrap().video_device.as_deref(),
+            Some(r"\\.\DISPLAY1")
+        );
+        assert_eq!(*g.read().unwrap(), MonitorGeometry::new(0, 0, 1280, 800));
     }
 }

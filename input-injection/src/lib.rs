@@ -13,6 +13,7 @@
 pub mod error;
 pub mod model;
 
+pub mod display_watcher;
 pub mod host_control;
 pub mod keyboard_event;
 pub mod mouse_event;

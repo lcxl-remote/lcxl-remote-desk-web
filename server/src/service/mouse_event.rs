@@ -6,32 +6,33 @@ use webrtc::data_channel::RTCDataChannel;
 
 use crate::error::DeskError;
 use desk_input_injection::model::data_channel::MouseEventData;
+use desk_input_injection::model::geometry::{MonitorGeometry, shared as shared_geometry};
 use desk_input_injection::mouse_event::mouse_event_factory::create_mouse_event_handler;
 
+// NOTE: This function is currently dead code (Arch III). The
+// `service/data_channel.rs::handle_data_channel_event` caller is never
+// installed — every startup mode now routes data channels through
+// `daemon/pc_manager.rs::on_data_channel`, which forwards mouse
+// events to the worker via `ServiceToWorker::MouseInput` IPC. The
+// real handler lives in `worker/input_dispatcher.rs`. This file is
+// preserved only so a future cleanup PR can remove the entire
+// `service/{data_channel,mouse_event,keyboard_event,clipboard_event,
+// file_transfer,whiteboard_event}.rs` group in one go.
 pub async fn handle_mouse_event(
     signaling_state: Arc<RwLock<SignalingState>>,
     data_channel: Arc<RTCDataChannel>,
 ) -> Result<(), DeskError> {
-    // The captured monitor may sit at a non-zero (left, top) in virtual
-    // desktop space (any secondary monitor or IDD virtual display
-    // attached to the right or below the primary). `SetCursorPos` /
-    // `CGEvent::post` both speak that global coordinate space, so the
-    // mouse handler needs the full rectangle — not just width/height —
-    // to land the cursor on the correct surface.
-    let (left, top, width, height) = {
+    let geometry = {
         let state = signaling_state.read().await;
         let r = state.display_info.desktop_coordinates;
-        (r.left, r.top, r.width(), r.height())
+        shared_geometry(MonitorGeometry::new(r.left, r.top, r.width(), r.height()))
     };
     let wayland_control_mode = {
         let state = signaling_state.read().await;
         state.wayland_control_mode.clone()
     };
     let handler = Arc::new(Mutex::new(create_mouse_event_handler(
-        left,
-        top,
-        width,
-        height,
+        geometry,
         wayland_control_mode.as_deref(),
     )?));
     let last_sequence_num = Arc::new(Mutex::new(0u64));

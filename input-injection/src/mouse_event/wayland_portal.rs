@@ -2,44 +2,58 @@ use std::sync::Arc;
 
 use crate::{
     error::InputError,
-    model::data_channel::{MouseEventData, MouseEventHandler},
+    model::{
+        data_channel::{MouseEventData, MouseEventHandler},
+        geometry::SharedMonitorGeometry,
+    },
     service::wayland_remote_desktop::WaylandRemoteDesktop,
 };
 
 pub struct WaylandPortalMouseEventHandler {
     portal: Arc<WaylandRemoteDesktop>,
-    width: i32,
-    height: i32,
+    /// Shared, hot-updatable monitor rect. Only `width` / `height` are
+    /// consumed — the xdg-desktop-portal `NotifyPointerMotionAbsolute`
+    /// call takes a `stream_id` that already pins the output and
+    /// expresses `(x, y)` inside that stream's space, so applying
+    /// `left` / `top` would double-shift the cursor.
+    geometry: SharedMonitorGeometry,
 }
 
 impl WaylandPortalMouseEventHandler {
-    /// `left` / `top` are accepted for signature uniformity with the
-    /// Windows and macOS backends, but the xdg-desktop-portal
-    /// `RemoteDesktop.NotifyPointerMotionAbsolute` call takes a
-    /// `stream_id` that already pins the output, with `(x, y)` expressed
-    /// inside that stream's space. Applying a virtual-desktop offset
-    /// would double-shift the cursor, so the parameters are
-    /// intentionally ignored.
-    pub fn new(_left: i32, _top: i32, width: i32, height: i32) -> Result<Self, InputError> {
-        log::info!(
-            "Wayland portal mouse handler: creating, width={}, height={}",
-            width,
-            height
-        );
+    /// `left` / `top` inside `geometry` are intentionally unused; see
+    /// the field doc.
+    pub fn new(geometry: SharedMonitorGeometry) -> Result<Self, InputError> {
+        {
+            let g = geometry.read().expect("monitor geometry poisoned");
+            log::info!(
+                "Wayland portal mouse handler: creating, width={}, height={}",
+                g.width,
+                g.height
+            );
+        }
         let portal = WaylandRemoteDesktop::shared()?;
         log::info!("Wayland portal mouse handler: ready");
-        Ok(Self {
-            portal,
-            width,
-            height,
-        })
+        Ok(Self { portal, geometry })
     }
 
     fn to_absolute(&self, x: f64, y: f64) -> (f64, f64) {
-        let abs_x = (x * self.width as f64).clamp(0.0, self.width as f64);
-        let abs_y = (y * self.height as f64).clamp(0.0, self.height as f64);
-        (abs_x, abs_y)
+        // Snapshot first so the D-Bus call below never runs with the
+        // lock held.
+        let (width, height) = {
+            let g = self.geometry.read().expect("monitor geometry poisoned");
+            (g.width, g.height)
+        };
+        to_absolute_in(width, height, x, y)
     }
+}
+
+/// Pure helper: clamp `(x, y) ∈ [0, 1]` into the stream's pixel space.
+/// Does **not** apply `left` / `top` — the portal stream pins the
+/// output. Extracted so unit tests don't need a live D-Bus session.
+fn to_absolute_in(width: i32, height: i32, x: f64, y: f64) -> (f64, f64) {
+    let abs_x = (x * width as f64).clamp(0.0, width as f64);
+    let abs_y = (y * height as f64).clamp(0.0, height as f64);
+    (abs_x, abs_y)
 }
 
 impl MouseEventHandler for WaylandPortalMouseEventHandler {
@@ -77,40 +91,49 @@ impl MouseEventHandler for WaylandPortalMouseEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::geometry::{MonitorGeometry, shared};
 
     /// Smoke-test the per-stream coordinate mapping: even on a
     /// non-primary stream the `(x, y)` reported to the portal is
-    /// expressed inside the stream's own `(width, height)`, so we deliberately
-    /// do NOT add the `left` / `top` offset that Windows / macOS need.
-    /// This test guards against someone "fixing" the wayland backend by
-    /// mirroring the Windows offset, which would double-shift the cursor.
+    /// expressed inside the stream's own `(width, height)`, so we
+    /// deliberately do NOT add the `left` / `top` offset that Windows /
+    /// macOS need. Guards against someone "fixing" the wayland backend
+    /// by mirroring the Windows offset, which would double-shift the
+    /// cursor.
     #[test]
     fn to_absolute_does_not_apply_virtual_desktop_offset() {
-        // The handler must clamp coords to its own (width, height) and
-        // emit them as-is — the portal stream is the output binding.
-        let handler = WaylandPortalMouseEventHandlerForTest {
-            width: 1500,
-            height: 900,
-        };
-        assert_eq!(handler.to_absolute(0.5, 0.5), (750.0, 450.0));
+        assert_eq!(to_absolute_in(1500, 900, 0.5, 0.5), (750.0, 450.0));
         // Clamps over-the-edge inputs.
-        assert_eq!(handler.to_absolute(2.0, -0.5), (1500.0, 0.0));
+        assert_eq!(to_absolute_in(1500, 900, 2.0, -0.5), (1500.0, 0.0));
     }
 
-    /// Shadow struct exposing the pure arithmetic from
-    /// `WaylandPortalMouseEventHandler::to_absolute`. The real handler
-    /// holds a portal `Arc<WaylandRemoteDesktop>` which requires a live
-    /// D-Bus session to construct on Wayland — CI does not have one,
-    /// so we reproduce the arithmetic here. Keep the bodies in sync.
-    struct WaylandPortalMouseEventHandlerForTest {
-        width: i32,
-        height: i32,
-    }
-    impl WaylandPortalMouseEventHandlerForTest {
-        fn to_absolute(&self, x: f64, y: f64) -> (f64, f64) {
-            let abs_x = (x * self.width as f64).clamp(0.0, self.width as f64);
-            let abs_y = (y * self.height as f64).clamp(0.0, self.height as f64);
-            (abs_x, abs_y)
-        }
+    /// Hot-update path: even though the handler can't be instantiated
+    /// without a live portal session, the arithmetic it executes reads
+    /// the shared geometry on every call, so a worker-side mutation
+    /// flows through. Also re-asserts that `left` / `top` from the
+    /// updated geometry are still ignored (the portal stream pins the
+    /// output).
+    #[test]
+    fn to_absolute_reflects_geometry_update_and_ignores_offset() {
+        let geometry = shared(MonitorGeometry::new(0, 0, 1280, 800));
+        let writer = std::sync::Arc::clone(&geometry);
+
+        let (w, h) = {
+            let g = geometry.read().unwrap();
+            (g.width, g.height)
+        };
+        assert_eq!(to_absolute_in(w, h, 0.5, 0.5), (640.0, 400.0));
+
+        // Worker-side write — note we also stuff a non-zero left/top to
+        // verify they are still ignored after a hot update.
+        *writer.write().unwrap() = MonitorGeometry::new(9999, 9999, 1500, 900);
+
+        let (w, h) = {
+            let g = geometry.read().unwrap();
+            (g.width, g.height)
+        };
+        // 1500x900 → centre is (750, 450). The 9999 offsets do not
+        // leak through, exactly as documented on the field.
+        assert_eq!(to_absolute_in(w, h, 0.5, 0.5), (750.0, 450.0));
     }
 }

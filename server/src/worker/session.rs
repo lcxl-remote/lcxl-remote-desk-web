@@ -13,6 +13,7 @@ use crate::{
     },
 };
 use actix_web::web;
+use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
@@ -340,6 +341,26 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
         }
         _ => None,
     }
+}
+
+/// Returns `true` iff the worker should refresh the input dispatcher's
+/// per-connection geometry after sending this `WorkerToService` response
+/// to the daemon. Specifically: when the response is a
+/// `VirtualDisplayMode` reply carrying `VirtualDisplayModeOutcome::Applied`
+/// — i.e. the IDD driver actually committed a new mode. `Failed` /
+/// non-VirtualDisplayMode variants return `false`.
+///
+/// Pulled out of the main IPC loop so it can be unit-tested without
+/// running the full session.
+fn should_refresh_after_set_mode(response: &WorkerToService) -> bool {
+    matches!(
+        response,
+        WorkerToService::VirtualDisplayMode(p)
+            if matches!(
+                p.outcome,
+                desk_ipc_protocol::message::VirtualDisplayModeOutcome::Applied(_)
+            )
+    )
 }
 
 /// Worker-side session. Stateless wrapper — all mutable state lives in the
@@ -795,6 +816,28 @@ impl WorkerSession {
             desktop_monitor::spawn(init_payload.desktop_name.clone(), desktop_change_tx);
         }
 
+        // Display-change watcher: hidden top-level window listening for
+        // `WM_DISPLAYCHANGE` so we can refresh the per-connection mouse
+        // geometry without tearing down the connection. Spawn failure
+        // is non-fatal — the worker falls back to refreshing only on
+        // explicit IPC triggers (SetVirtualDisplayMode / Attach /
+        // Detach). See `display_watcher` module doc.
+        let (display_watcher_handle, mut display_change_rx) = match display_watcher::spawn() {
+            Ok((w, rx)) => (Some(w), rx),
+            Err(e) => {
+                warn!(
+                    "Display change watcher init failed: {e}. Mouse geometry will only \
+                     refresh on explicit triggers (IDD SetMode / Attach / Detach); \
+                     user-initiated physical-display resolution changes mid-session will \
+                     leave the cursor offset until reconnect."
+                );
+                // Permanently-silent receiver so the `tokio::select!`
+                // arm below safely stays parked.
+                let (_dummy_tx, dummy_rx) = mpsc::unbounded_channel();
+                (None, dummy_rx)
+            }
+        };
+
         loop {
             tokio::select! {
                 msg_result = service_msg_rx.recv() => {
@@ -1105,12 +1148,30 @@ impl WorkerSession {
                                 ServiceToWorker::SetVirtualDisplayMode(payload) => {
                                     let controller = Arc::clone(&virtual_display_controller);
                                     let attached = vd_state.attached_display.clone();
-                                    let response = run_set_mode(controller, attached, payload).await;
+                                    let response = run_set_mode(controller, attached.clone(), payload).await;
+                                    // Inspect the outcome *before* moving
+                                    // `response` into `writer_tx.send` so we
+                                    // can decide whether to refresh input
+                                    // geometry after the reply has been
+                                    // queued. Refresh after send keeps the
+                                    // browser-facing ACK on the critical
+                                    // path and the (best-effort, infallible)
+                                    // refresh off it.
+                                    let should_refresh = should_refresh_after_set_mode(&response);
                                     if writer_tx.send(response).is_err() {
                                         warn!(
                                             "writer task closed; dropping VirtualDisplayMode \
                                              response"
                                         );
+                                    }
+                                    if should_refresh {
+                                        // The connections matching the
+                                        // attached display were already
+                                        // retargeted onto it by the Attach
+                                        // path; refresh_geometry rewrites
+                                        // their stale rect to the
+                                        // freshly-applied resolution.
+                                        input_dispatcher.refresh_geometry(attached.as_deref());
                                     }
                                 }
                                 ServiceToWorker::AttachVirtualDisplay(payload) => {
@@ -1142,13 +1203,24 @@ impl WorkerSession {
                                         );
                                         let steps = vd_state
                                             .rebuild_active_for_attach(Some(display_name.clone()));
-                                        if let Some(producer) = media_producer.as_ref() {
-                                            for step in steps {
+                                        for step in steps {
+                                            if let Some(producer) = media_producer.as_ref() {
                                                 producer.stop_media(&StopMediaPayload {
                                                     connection_id: step.connection_id.clone(),
                                                 });
-                                                producer.start_media(step.active);
+                                                producer.start_media(step.active.clone());
                                             }
+                                            // Mirror the producer Stop+Start
+                                            // on the input side: retarget
+                                            // updates `video_device` and
+                                            // rewrites the SharedMonitorGeometry
+                                            // so the very next mouse event
+                                            // lands on the new capture
+                                            // surface. Without this the
+                                            // virtual display would render
+                                            // but mouse would still target
+                                            // the previous physical screen.
+                                            input_dispatcher.retarget_connection(&step.active);
                                         }
                                     } else {
                                         warn!(
@@ -1173,13 +1245,19 @@ impl WorkerSession {
                                 ServiceToWorker::DetachVirtualDisplay => {
                                     info!("Worker received DetachVirtualDisplay");
                                     let steps = vd_state.rebuild_active_for_attach(None);
-                                    if let Some(producer) = media_producer.as_ref() {
-                                        for step in steps {
+                                    for step in steps {
+                                        if let Some(producer) = media_producer.as_ref() {
                                             producer.stop_media(&StopMediaPayload {
                                                 connection_id: step.connection_id.clone(),
                                             });
-                                            producer.start_media(step.active);
+                                            producer.start_media(step.active.clone());
                                         }
+                                        // Detach restores the original
+                                        // physical capture target; retarget
+                                        // walks the input state back so
+                                        // the cursor lands on the
+                                        // physical display again.
+                                        input_dispatcher.retarget_connection(&step.active);
                                     }
                                 }
                                 ServiceToWorker::RefreshCapabilities => {
@@ -1277,6 +1355,20 @@ impl WorkerSession {
                     // For Winlogon (UAC) the daemon currently keeps us
                     // alive — see signaling_proxy::run_signaling_proxy.
                 }
+
+                // OS-driven display reconfiguration (resolution change,
+                // monitor add/remove, primary swap). The broadcast does
+                // not tell us *which* display changed, so refresh every
+                // active connection's geometry — the read-side cost is
+                // a single RwLock write per connection.
+                Some(evt) = display_change_rx.recv() => {
+                    info!(
+                        "WM_DISPLAYCHANGE received (seq={}); refreshing input geometry for all \
+                         connections",
+                        evt.seq
+                    );
+                    input_dispatcher.refresh_geometry(None);
+                }
             }
         }
 
@@ -1288,6 +1380,12 @@ impl WorkerSession {
         // own writer_tx so the event-pipe writer task observes "all
         // senders gone" and exits cleanly.
         heartbeat_task.abort();
+        // Drop the display watcher early so its message-pump thread
+        // unblocks before the rest of the shutdown chain runs. The
+        // Drop impl posts `WM_CLOSE` and joins the thread; absent a
+        // working watcher (Err path during init) this is a cheap
+        // no-op.
+        drop(display_watcher_handle);
         if let Some(producer) = media_producer.as_ref() {
             producer.shutdown();
         }
@@ -1996,5 +2094,49 @@ mod tests {
             .await
             .expect("forwarder task must exit after transport closes")
             .expect("task panicked");
+    }
+
+    /// `SetVirtualDisplayMode` Applied → the worker should refresh
+    /// per-connection input geometry on the attached display.
+    /// This predicate gates that branch, so unit-test it directly.
+    #[test]
+    fn should_refresh_after_set_mode_returns_true_on_applied() {
+        use desk_ipc_protocol::message::{
+            VirtualDisplayModeData, VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload,
+        };
+        let response = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+            request_id: "r".into(),
+            connection_id: "c".into(),
+            outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
+                width: 2560,
+                height: 1440,
+                refresh_hz: 60,
+            }),
+        });
+        assert!(should_refresh_after_set_mode(&response));
+    }
+
+    /// `SetVirtualDisplayMode` Failed → no geometry refresh; the IDD
+    /// mode did not actually change, so the existing rect is still
+    /// authoritative.
+    #[test]
+    fn should_refresh_after_set_mode_returns_false_on_failed() {
+        use desk_ipc_protocol::message::{
+            VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload,
+        };
+        let response = WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+            request_id: "r".into(),
+            connection_id: "c".into(),
+            outcome: VirtualDisplayModeOutcome::Failed("invalid mode".into()),
+        });
+        assert!(!should_refresh_after_set_mode(&response));
+    }
+
+    /// Non-VirtualDisplayMode responses must never trigger a refresh.
+    /// Guards against a typo that would catch the wrong variant via the
+    /// `matches!` macro.
+    #[test]
+    fn should_refresh_after_set_mode_returns_false_on_other_variants() {
+        assert!(!should_refresh_after_set_mode(&WorkerToService::Ready));
     }
 }

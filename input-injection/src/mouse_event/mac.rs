@@ -1,6 +1,9 @@
 use crate::{
     error::InputError,
-    model::data_channel::{MouseEventData, MouseEventHandler},
+    model::{
+        data_channel::{MouseEventData, MouseEventHandler},
+        geometry::SharedMonitorGeometry,
+    },
 };
 use core_graphics::event::{
     CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
@@ -10,29 +13,27 @@ use core_graphics::geometry::CGPoint;
 use desk_utils::error::DeskErrorCode;
 
 pub struct MacMouseEventHandler {
-    /// Global display-space left edge of the captured display.
+    /// Shared, hot-updatable display rect for the captured monitor.
     /// `CGEvent::post(CGEventTapLocation::HID)` reads `CGPoint`s in the
     /// global multi-display coordinate space, so non-primary displays
-    /// require this offset to land the cursor on the right panel.
-    left: i32,
-    /// Global display-space top edge of the captured display.
-    top: i32,
-    width: i32,
-    height: i32,
+    /// require a non-zero offset to land the cursor on the right panel.
+    /// The worker mutates this on display reconfiguration.
+    geometry: SharedMonitorGeometry,
 }
 
 impl MacMouseEventHandler {
-    pub fn new(left: i32, top: i32, width: i32, height: i32) -> Result<Self, InputError> {
-        Ok(Self {
-            left,
-            top,
-            width,
-            height,
-        })
+    pub fn new(geometry: SharedMonitorGeometry) -> Result<Self, InputError> {
+        Ok(Self { geometry })
     }
 
     fn get_point(&self, x: f64, y: f64) -> CGPoint {
-        let (px, py) = compute_absolute_f64(self.left, self.top, self.width, self.height, x, y);
+        // Snapshot the geometry into locals so the unsafe Core Graphics
+        // calls below never run with the lock held.
+        let (left, top, width, height) = {
+            let g = self.geometry.read().expect("monitor geometry poisoned");
+            (g.left, g.top, g.width, g.height)
+        };
+        let (px, py) = compute_absolute_f64(left, top, width, height, x, y);
         CGPoint { x: px, y: py }
     }
 
@@ -184,5 +185,33 @@ mod tests {
     fn compute_absolute_f64_negative_offset_is_preserved() {
         let (x, y) = compute_absolute_f64(0, -1080, 1920, 1080, 0.25, 0.75);
         assert_eq!((x, y), (480.0, -1080.0 + 810.0));
+    }
+
+    /// Hot-update path: the handler reads the shared geometry on every
+    /// `get_point` call, so a worker-side mutation through a cloned
+    /// handle is visible on the next mouse event. Mirrors the Windows
+    /// `compute_absolute_reflects_geometry_update` contract.
+    #[test]
+    fn compute_absolute_f64_reflects_geometry_update() {
+        use crate::model::geometry::{MonitorGeometry, shared};
+        let geometry = shared(MonitorGeometry::new(0, 0, 1280, 800));
+        let writer = std::sync::Arc::clone(&geometry);
+
+        let (l, t, w, h) = {
+            let g = geometry.read().unwrap();
+            (g.left, g.top, g.width, g.height)
+        };
+        assert_eq!(compute_absolute_f64(l, t, w, h, 0.5, 0.5), (640.0, 400.0));
+
+        *writer.write().unwrap() = MonitorGeometry::new(1280, 0, 1500, 900);
+
+        let (l, t, w, h) = {
+            let g = geometry.read().unwrap();
+            (g.left, g.top, g.width, g.height)
+        };
+        assert_eq!(
+            compute_absolute_f64(l, t, w, h, 0.5, 0.5),
+            (1280.0 + 750.0, 450.0)
+        );
     }
 }
