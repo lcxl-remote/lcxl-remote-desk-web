@@ -93,6 +93,7 @@ use desk_ipc_protocol::message::{
     WorkerToService,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
+use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
 use log::{debug, error, info, warn};
 use tokio::sync::{broadcast, mpsc};
 
@@ -623,6 +624,43 @@ fn payload_overrides(base: &DeskSettings, payload: &StartMediaPayload) -> DeskSe
     s
 }
 
+/// `Some(new)` if the encoder must be torn down and rebuilt because
+/// the frame dimensions diverge from what the encoder was constructed
+/// with. `None` if dimensions match or the frame is the no-content
+/// sentinel (width=0 or height=0).
+///
+/// The (0,0) short-circuit covers `EmptyImageInfo` placeholders
+/// emitted by WGC's `WAIT_TIMEOUT` branch, WGC's frame-pool-resize
+/// branch, and DXGI's `NoContentChange` branch — every backend
+/// surfaces width=0,height=0 for "no real frame this tick", and
+/// re-creating the encoder against 0x0 would either error or feed an
+/// invalid configuration to libvpx / x264.
+fn should_recreate_for_resolution(init: (u32, u32), frame: (u32, u32)) -> Option<(u32, u32)> {
+    if frame.0 == 0 || frame.1 == 0 {
+        return None;
+    }
+    if init != frame { Some(frame) } else { None }
+}
+
+/// Build a synthetic `DisplayInfo` carrying `(width, height)` but
+/// preserving every other field from `base` (device_name, resolutions,
+/// rotation, attached_to_desktop, display_device_name). Used to feed
+/// `create_video_encoder` the *current* encoder size; the encoder only
+/// consumes `desktop_coordinates.width()/height()`, so left/top stay
+/// as in `base` and right/bottom are derived.
+fn display_info_for_size(base: &DisplayInfo, size: (u32, u32)) -> DisplayInfo {
+    let mut di = base.clone();
+    let left = di.desktop_coordinates.left;
+    let top = di.desktop_coordinates.top;
+    di.desktop_coordinates = DisplayRect {
+        left,
+        top,
+        right: left + size.0 as i32,
+        bottom: top + size.1 as i32,
+    };
+    di
+}
+
 /// Inverse of [`codec_from_str`] for the video subset.
 fn video_codec_name(c: MediaCodec) -> Option<&'static str> {
     match c {
@@ -777,8 +815,21 @@ async fn video_pipeline_loop(
     let mut frame_rx = capture_handle.subscribe();
     let display_info = capture_handle.display_info().clone();
 
-    let mut encoder: Box<dyn VideoEncoder> =
-        create_video_encoder(&merged_settings, &display_info).map_err(|e| format!("{e}"))?;
+    // `encoder_init_size` is the *only* authoritative source of the
+    // encoder's current width/height. Every `create_video_encoder`
+    // call below feeds through `display_info_for_size(&display_info,
+    // encoder_init_size)` so settings_changed / keyframe_requested
+    // rebuilds never accidentally drop back to the (stale) subscribe-
+    // time resolution after a mid-session display mode change.
+    let mut encoder_init_size: (u32, u32) = (
+        display_info.desktop_coordinates.width() as u32,
+        display_info.desktop_coordinates.height() as u32,
+    );
+    let mut encoder: Box<dyn VideoEncoder> = create_video_encoder(
+        &merged_settings,
+        &display_info_for_size(&display_info, encoder_init_size),
+    )
+    .map_err(|e| format!("{e}"))?;
     let mut next_pass_is_idr = true; // first frame is always I (encoder emits SPS/PPS+IDR)
     let mut seq: u64 = 0;
     let mut frame_interval = merged_settings.get_duration_by_video_fps();
@@ -866,8 +917,11 @@ async fn video_pipeline_loop(
                 merged_settings.video_quality,
                 merged_settings.enable_dirty_rect
             );
-            encoder = create_video_encoder(&merged_settings, &display_info)
-                .map_err(|e| format!("{e}"))?;
+            encoder = create_video_encoder(
+                &merged_settings,
+                &display_info_for_size(&display_info, encoder_init_size),
+            )
+            .map_err(|e| format!("{e}"))?;
             next_pass_is_idr = true;
             rebuild_pending = true;
             // Reset throttle so the new encoder's first IDR is
@@ -883,8 +937,11 @@ async fn video_pipeline_loop(
                 "[MediaProducer:{connection_id}] Keyframe requested; recreating encoder so the \
                  next encode pass emits an IDR"
             );
-            encoder = create_video_encoder(&merged_settings, &display_info)
-                .map_err(|e| format!("{e}"))?;
+            encoder = create_video_encoder(
+                &merged_settings,
+                &display_info_for_size(&display_info, encoder_init_size),
+            )
+            .map_err(|e| format!("{e}"))?;
             next_pass_is_idr = true;
             rebuild_pending = true;
             last_emit_for_throttle = std::time::Instant::now()
@@ -990,6 +1047,36 @@ async fn video_pipeline_loop(
             last_send_time = now;
             last_emit_wall = Some(now);
             continue;
+        }
+
+        // Resolution change detection: only consult on real content
+        // frames (we already passed the heartbeat / no-content guard
+        // above). `should_recreate_for_resolution` additionally
+        // short-circuits (0,0) defensively in case any backend leaks
+        // an EmptyImageInfo placeholder past the content_changed flag.
+        if let Some((new_w, new_h)) = should_recreate_for_resolution(
+            encoder_init_size,
+            (shared_frame.width, shared_frame.height),
+        ) {
+            info!(
+                "[MediaProducer:{connection_id}] Frame resolution changed {:?} -> {:?}; \
+                 recreating encoder",
+                encoder_init_size,
+                (new_w, new_h)
+            );
+            // Update encoder_init_size FIRST so the synthetic
+            // DisplayInfo built below carries the new dimensions.
+            encoder_init_size = (new_w, new_h);
+            encoder = create_video_encoder(
+                &merged_settings,
+                &display_info_for_size(&display_info, encoder_init_size),
+            )
+            .map_err(|e| format!("{e}"))?;
+            next_pass_is_idr = true;
+            rebuild_pending = true;
+            last_emit_for_throttle = std::time::Instant::now()
+                .checked_sub(frame_interval)
+                .unwrap_or_else(std::time::Instant::now);
         }
 
         // fps throttle: skip the frame entirely if our last emit was
@@ -2264,5 +2351,157 @@ mod tests {
         assert_eq!(decoded.shape_id, 99);
         assert!(decoded.visible);
         assert_eq!(decoded.screen_width, 1920);
+    }
+
+    // ---- should_recreate_for_resolution ----
+
+    /// Steady-state: dimensions match → no rebuild signal.
+    #[test]
+    fn should_recreate_for_resolution_returns_none_when_equal() {
+        assert!(should_recreate_for_resolution((1920, 1080), (1920, 1080)).is_none());
+    }
+
+    /// Width changed → rebuild with the new dimensions.
+    #[test]
+    fn should_recreate_for_resolution_returns_some_on_width_change() {
+        assert_eq!(
+            should_recreate_for_resolution((1920, 1080), (1024, 1080)),
+            Some((1024, 1080))
+        );
+    }
+
+    /// Height changed → rebuild with the new dimensions.
+    #[test]
+    fn should_recreate_for_resolution_returns_some_on_height_change() {
+        assert_eq!(
+            should_recreate_for_resolution((1920, 1080), (1920, 720)),
+            Some((1920, 720))
+        );
+    }
+
+    /// Both width and height changed (typical screen mode change).
+    #[test]
+    fn should_recreate_for_resolution_returns_some_on_both_change() {
+        assert_eq!(
+            should_recreate_for_resolution((1920, 1080), (1024, 768)),
+            Some((1024, 768))
+        );
+    }
+
+    /// (0, h) sentinel: WGC WAIT_TIMEOUT / DXGI NoContentChange emit
+    /// EmptyImageInfo with width=0; never rebuild against zero —
+    /// libvpx / x264 refuse the config and the producer would crash.
+    #[test]
+    fn should_recreate_for_resolution_returns_none_when_frame_width_zero() {
+        assert!(should_recreate_for_resolution((1920, 1080), (0, 1080)).is_none());
+    }
+
+    /// (w, 0) sentinel: symmetric to the width=0 case.
+    #[test]
+    fn should_recreate_for_resolution_returns_none_when_frame_height_zero() {
+        assert!(should_recreate_for_resolution((1920, 1080), (1920, 0)).is_none());
+    }
+
+    /// (0, 0) sentinel: covers the WGC frame-pool-resize handoff
+    /// frame too, where staging_size has been replaced but the
+    /// outgoing CaptureResult is still EmptyImageInfo.
+    #[test]
+    fn should_recreate_for_resolution_returns_none_when_frame_both_zero() {
+        assert!(should_recreate_for_resolution((1920, 1080), (0, 0)).is_none());
+    }
+
+    /// Initialised at zero (worker should never get here, but be
+    /// symmetric for defence in depth): a zero frame still short-
+    /// circuits before the inequality check.
+    #[test]
+    fn should_recreate_for_resolution_returns_none_when_init_zero_and_frame_zero() {
+        assert!(should_recreate_for_resolution((0, 0), (0, 0)).is_none());
+    }
+
+    // ---- display_info_for_size ----
+
+    fn make_base_display_info() -> DisplayInfo {
+        DisplayInfo {
+            device_name: r"\\.\DISPLAY1".to_string(),
+            display_device_name: Some("Generic PnP Monitor".to_string()),
+            desktop_coordinates: DisplayRect {
+                left: 100,
+                top: 50,
+                right: 2020,
+                bottom: 1130,
+            },
+            resolutions: vec![
+                desk_signal_facade::model::image_capture::Resolution::new(1920, 1080),
+                desk_signal_facade::model::image_capture::Resolution::new(2560, 1440),
+            ],
+            attached_to_desktop: true,
+            rotation: 90,
+        }
+    }
+
+    /// Only `desktop_coordinates` is rewritten; every other field of
+    /// the synthetic `DisplayInfo` must carry through unchanged so
+    /// downstream encoders that consult e.g. resolutions list see
+    /// the real device's capabilities.
+    #[test]
+    fn display_info_for_size_preserves_device_name_and_resolutions() {
+        let base = make_base_display_info();
+        let di = display_info_for_size(&base, (1024, 768));
+        assert_eq!(di.device_name, base.device_name);
+        assert_eq!(di.display_device_name, base.display_device_name);
+        assert_eq!(di.resolutions, base.resolutions);
+        assert_eq!(di.attached_to_desktop, base.attached_to_desktop);
+        assert_eq!(di.rotation, base.rotation);
+    }
+
+    /// `right`/`bottom` are derived from `left + width`/`top + height`,
+    /// preserving `left`/`top` as-is from `base`.
+    #[test]
+    fn display_info_for_size_sets_right_bottom_from_left_top_plus_size() {
+        let base = make_base_display_info();
+        let di = display_info_for_size(&base, (1920, 1080));
+        assert_eq!(di.desktop_coordinates.left, 100);
+        assert_eq!(di.desktop_coordinates.top, 50);
+        assert_eq!(di.desktop_coordinates.right, 100 + 1920);
+        assert_eq!(di.desktop_coordinates.bottom, 50 + 1080);
+    }
+
+    /// Secondary monitor placed to the left of the primary in Windows
+    /// Display Settings yields a negative `left`. The derived
+    /// `right` must accept the negative offset and still equal
+    /// `left + width`.
+    #[test]
+    fn display_info_for_size_handles_negative_left_top() {
+        let mut base = make_base_display_info();
+        base.desktop_coordinates = DisplayRect {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        let di = display_info_for_size(&base, (1920, 1080));
+        assert_eq!(di.desktop_coordinates.left, -1920);
+        assert_eq!(di.desktop_coordinates.right, 0);
+        assert_eq!(di.desktop_coordinates.bottom, 1080);
+    }
+
+    /// Verifies the core codex r1 #2 invariant: a settings-changed
+    /// rebuild that fires *after* a resolution change still picks up
+    /// the new size, because every `create_video_encoder` flows
+    /// through `display_info_for_size(&base, encoder_init_size)`.
+    /// We simulate the worker's "encoder_init_size = (1024, 768)
+    /// after a mid-session change" state and assert that the
+    /// rebuild's DisplayInfo carries 1024x768, not the subscribe-
+    /// time 1920x1080.
+    #[test]
+    fn settings_rebuild_uses_current_encoder_size() {
+        let base_display_info = make_base_display_info(); // 1920x1080
+        let encoder_init_size: (u32, u32) = (1024, 768); // post-resize state
+        let rebuild_di = display_info_for_size(&base_display_info, encoder_init_size);
+        assert_eq!(rebuild_di.desktop_coordinates.width() as u32, 1024);
+        assert_eq!(rebuild_di.desktop_coordinates.height() as u32, 768);
+        // Sanity: device_name preserved so the encoder still keys on
+        // the real device.
+        assert_eq!(rebuild_di.device_name, base_display_info.device_name);
     }
 }
