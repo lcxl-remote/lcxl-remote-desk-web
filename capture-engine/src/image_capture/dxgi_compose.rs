@@ -341,20 +341,19 @@ pub fn build_dirty_hint(
     Some(hint)
 }
 
-/// Diagnostic kill-switch read from the `LCXL_DXGI_FULL_BLIT`
-/// environment variable. When the result is `true`, the DXGI capture
-/// pipeline skips the MSDN-style per-rect composition (move + dirty
-/// rects) and falls back to a single `CopyResource` of the entire
-/// acquired desktop texture into the persistent render target each
-/// frame. Used to A/B-test whether transient black bars during HTML5
-/// video playback are caused by metadata reporting versus
-/// hardware-overlay / direct-flip artefacts in the acquired texture
-/// itself.
+/// Parse a truthy / falsey string from an environment variable
+/// without touching the global env (call sites pass
+/// `std::env::var(...).ok().as_deref()`). Truthy values
+/// (case-insensitive): `1`, `true`, `yes`, `on`. Anything else —
+/// including the variable being unset — returns `false`.
 ///
-/// Accepted truthy values (case-insensitive): `1`, `true`, `yes`,
-/// `on`. Anything else — including missing variable, empty string, or
-/// unrecognised value — disables the override.
-pub fn decide_full_frame_blit(env_value: Option<&str>) -> bool {
+/// Originally named `decide_full_frame_blit` and gated DXGI's
+/// `LCXL_DXGI_FULL_BLIT` diagnostic switch. The capture-resolution
+/// fix made full_frame_blit the default; the parser now backs the
+/// inverse opt-out `LCXL_DXGI_DIRTY_COMPOSE` (and is intentionally
+/// renamed to neutral wording so future callers can reuse it
+/// without reading the doc as a recommendation).
+pub fn parse_env_flag(env_value: Option<&str>) -> bool {
     match env_value {
         Some(v) => matches!(
             v.trim().to_ascii_lowercase().as_str(),
@@ -720,28 +719,28 @@ mod tests {
     }
 
     #[test]
-    fn decide_full_frame_blit_truthy_values() {
-        assert!(decide_full_frame_blit(Some("1")));
-        assert!(decide_full_frame_blit(Some("true")));
-        assert!(decide_full_frame_blit(Some("TRUE")));
-        assert!(decide_full_frame_blit(Some("True")));
-        assert!(decide_full_frame_blit(Some("yes")));
-        assert!(decide_full_frame_blit(Some("YES")));
-        assert!(decide_full_frame_blit(Some("on")));
-        assert!(decide_full_frame_blit(Some(" 1 ")));
-        assert!(decide_full_frame_blit(Some("\ttrue\n")));
+    fn parse_env_flag_truthy_values() {
+        assert!(parse_env_flag(Some("1")));
+        assert!(parse_env_flag(Some("true")));
+        assert!(parse_env_flag(Some("TRUE")));
+        assert!(parse_env_flag(Some("True")));
+        assert!(parse_env_flag(Some("yes")));
+        assert!(parse_env_flag(Some("YES")));
+        assert!(parse_env_flag(Some("on")));
+        assert!(parse_env_flag(Some(" 1 ")));
+        assert!(parse_env_flag(Some("\ttrue\n")));
     }
 
     #[test]
-    fn decide_full_frame_blit_falsy_values() {
-        assert!(!decide_full_frame_blit(None));
-        assert!(!decide_full_frame_blit(Some("")));
-        assert!(!decide_full_frame_blit(Some("0")));
-        assert!(!decide_full_frame_blit(Some("false")));
-        assert!(!decide_full_frame_blit(Some("no")));
-        assert!(!decide_full_frame_blit(Some("off")));
-        assert!(!decide_full_frame_blit(Some("garbage")));
+    fn parse_env_flag_falsy_values() {
+        assert!(!parse_env_flag(None));
+        assert!(!parse_env_flag(Some("")));
+        assert!(!parse_env_flag(Some("0")));
+        assert!(!parse_env_flag(Some("false")));
+        assert!(!parse_env_flag(Some("no")));
+        assert!(!parse_env_flag(Some("off")));
+        assert!(!parse_env_flag(Some("garbage")));
         // Numeric-looking but unsupported values must not coerce to true.
-        assert!(!decide_full_frame_blit(Some("2")));
+        assert!(!parse_env_flag(Some("2")));
     }
 }

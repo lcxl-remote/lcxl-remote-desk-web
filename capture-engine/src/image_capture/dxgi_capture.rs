@@ -39,8 +39,7 @@ use windows::Win32::{
             DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
             DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, DXGI_OUTPUT_DESC,
             DXGI_RESOURCE_PRIORITY_MAXIMUM, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice,
-            IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
-            IDXGISurface,
+            IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
         },
         Gdi::{DISPLAY_DEVICE_STATE_FLAGS, DISPLAY_DEVICEW, EnumDisplayDevicesW},
     },
@@ -84,6 +83,14 @@ impl ImageInfo for EmptyImageInfo {
 pub(crate) enum FrameAcquisitionResult<'a> {
     ContentFrame(SceenFrame<'a>),
     NoContentChange,
+    /// The acquired desktop texture's size diverges from
+    /// `dup_output_desc.ModeDesc`. Callers (`DxgiImageCapture::capture`)
+    /// drop the `ScreenOutput` so the next tick rebuilds it against
+    /// the new resolution. This covers the path where a mid-session
+    /// resolution change does *not* surface as
+    /// `DXGI_ERROR_ACCESS_LOST` (some drivers keep the duplication
+    /// alive but report a smaller / larger texture for the new mode).
+    Rebuild,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -492,7 +499,10 @@ pub(crate) fn select_output_by_name<'a>(
     entries: &'a [EnumeratedOutput],
     device_name: &str,
 ) -> Result<&'a EnumeratedOutput, CaptureError> {
-    let names: Vec<String> = entries.iter().map(|e| output_device_name(&e.desc)).collect();
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| output_device_name(&e.desc))
+        .collect();
     match find_device_name_index(&names, device_name) {
         Ok(idx) => Ok(&entries[idx]),
         Err(e) => {
@@ -500,7 +510,11 @@ pub(crate) fn select_output_by_name<'a>(
             // helper cannot compute (it does not see EnumeratedOutput).
             CaptureError::custom_error(
                 DeskErrorCode::INVALID_PARAMS,
-                &format!("{} adapter_summary: ({})", e, build_adapter_summary(entries)),
+                &format!(
+                    "{} adapter_summary: ({})",
+                    e,
+                    build_adapter_summary(entries)
+                ),
             )
         }
     }
@@ -1094,19 +1108,27 @@ impl ScreenOutput {
             dirty_vertex_buffer_capacity_verts: 0,
             last_cursor_rect: None,
             metadata_buffer: vec![],
+            // full_frame_blit is the default since the
+            // 2026-05-21 capture-resolution + cursor-residue fix —
+            // the legacy per-rect compose path is reachable only via
+            // the inverse opt-out env var `LCXL_DXGI_DIRTY_COMPOSE`
+            // (for A/B diagnostics). Per-rect compose leaves cursor
+            // ghosts on software-cursor frames because SyncNative
+            // mode never populates `cursor_after.rect`, so
+            // `build_dirty_hint` cannot include cursor move deltas.
             full_frame_blit: {
-                let env_val = std::env::var("LCXL_DXGI_FULL_BLIT").ok();
-                let on = dxgi_compose::decide_full_frame_blit(env_val.as_deref());
-                if on {
+                let env_val = std::env::var("LCXL_DXGI_DIRTY_COMPOSE").ok();
+                let force_dirty = dxgi_compose::parse_env_flag(env_val.as_deref());
+                if force_dirty {
                     log::warn!(
-                        "[DXGI] LCXL_DXGI_FULL_BLIT enabled (raw={:?}) — \
-                         output_index={} will skip dirty/move compose and \
-                         CopyResource the entire acquired texture each frame.",
+                        "[DXGI] LCXL_DXGI_DIRTY_COMPOSE enabled (raw={:?}) — \
+                         output_index={} will use legacy per-rect compose; may \
+                         exhibit cursor / resolution-change ghosting.",
                         env_val,
                         output_index
                     );
                 }
-                on
+                !force_dirty
             },
         })
     }
@@ -1384,6 +1406,32 @@ impl ScreenOutput {
 
         let desktop_resource = desktop_resource.unwrap();
 
+        // Cast immediately so we can run the size-mismatch guard
+        // before any of the content_changed / cursor-only early
+        // returns below. If the acquired texture's dimensions diverge
+        // from `dup_output_desc.ModeDesc` it means the OS swapped to
+        // a new display mode without surfacing
+        // DXGI_ERROR_ACCESS_LOST; we must drop ScreenOutput and
+        // rebuild against the new mode rather than keep composing
+        // into a now-stale persistent RT.
+        let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
+        let mut acq_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { acquired_desktop_image.GetDesc(&mut acq_desc) };
+        if acq_desc.Width != self.dup_output_desc.ModeDesc.Width
+            || acq_desc.Height != self.dup_output_desc.ModeDesc.Height
+        {
+            log::info!(
+                "[DXGI] acquired texture size {}x{} differs from dup_output_desc {}x{}; \
+                 signalling rebuild",
+                acq_desc.Width,
+                acq_desc.Height,
+                self.dup_output_desc.ModeDesc.Width,
+                self.dup_output_desc.ModeDesc.Height
+            );
+            unsafe { self.dup_output.ReleaseFrame().ok() };
+            return Ok(FrameAcquisitionResult::Rebuild);
+        }
+
         // LastPresentTime == 0: compositor did not present a new desktop frame (cursor-only event).
         let desktop_unchanged = frame_info.LastPresentTime == 0;
         let cursor_moved = frame_info.LastMouseUpdateTime != 0
@@ -1417,39 +1465,44 @@ impl ScreenOutput {
         let frame_width = self.dup_output_desc.ModeDesc.Width;
         let frame_height = self.dup_output_desc.ModeDesc.Height;
 
-        let acquired_desktop_image = desktop_resource.cast::<ID3D11Texture2D>()?;
-
-        // Diagnostic full-frame fallback: when LCXL_DXGI_FULL_BLIT is
-        // set, replace the entire RT with the acquired texture and
-        // skip metadata parsing + per-rect composition. Validates
-        // whether transient black bars during HTML5 video playback
-        // come from the metadata path or from the acquired texture
-        // contents themselves (hardware overlay / direct flip).
-        let (moves, dirties) = if self.full_frame_blit {
-            unsafe {
-                self.manager
-                    .device_context
-                    .CopyResource(&self.render_target_texture_2d, &acquired_desktop_image);
-            }
-            (Vec::new(), Vec::new())
-        } else {
-            // --- Read DXGI move + dirty metadata ---
-            let (move_raw, dirty_raw) = if frame_info.TotalMetadataBufferSize > 0 {
-                self.read_frame_metadata(frame_info.TotalMetadataBufferSize)?
+        // RT path:
+        // - full_frame_blit (default): full CopyResource of the
+        //   acquired texture into the persistent RT. Avoids the
+        //   cursor / resolution residue that the per-rect compose
+        //   path accumulates. Skips `read_frame_metadata` because
+        //   moves/dirties are unused in this branch.
+        // - per-rect compose (LCXL_DXGI_DIRTY_COMPOSE opt-out): MSDN
+        //   `composition_plan` — read move + dirty metadata, copy
+        //   move rects, render dirty rects. The resulting
+        //   moves/dirties feed `build_dirty_hint` below.
+        //
+        // The Option encodes "moves/dirties exist" so the
+        // dirty_rects_opt branch below can match on it without a
+        // separate Boolean.
+        let dirty_metadata: Option<(Vec<DXGI_OUTDUPL_MOVE_RECT>, Vec<RECT>)> =
+            if self.full_frame_blit {
+                unsafe {
+                    self.manager
+                        .device_context
+                        .CopyResource(&self.render_target_texture_2d, &acquired_desktop_image);
+                }
+                None
             } else {
-                (Vec::new(), Vec::new())
-            };
-            let moves = dxgi_compose::parse_move_rects(&move_raw);
-            let dirties = dxgi_compose::parse_dirty_rects(&dirty_raw);
+                let (move_raw, dirty_raw) = if frame_info.TotalMetadataBufferSize > 0 {
+                    self.read_frame_metadata(frame_info.TotalMetadataBufferSize)?
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                let moves = dxgi_compose::parse_move_rects(&move_raw);
+                let dirties = dxgi_compose::parse_dirty_rects(&dirty_raw);
 
-            // --- Compose into persistent RT ---
-            // `composition_plan` is always applied in full;
-            // fragmentation only downgrades the dirty *hint* below,
-            // never the composition.
-            self.copy_move_rects(&moves)?;
-            self.compose_dirty_rects(&dirties, &acquired_desktop_image)?;
-            (moves, dirties)
-        };
+                // composition_plan is always applied in full;
+                // fragmentation only downgrades the dirty *hint*
+                // below, never the composition.
+                self.copy_move_rects(&moves)?;
+                self.compose_dirty_rects(&dirties, &acquired_desktop_image)?;
+                Some((moves, dirties))
+            };
 
         // --- Cursor overlay pipeline ---
         // Stage 1: snapshot the clean composed desktop into
@@ -1496,13 +1549,18 @@ impl ScreenOutput {
         }
 
         // --- Dirty hint for downstream YUV partial-update ---
-        // Full-frame-blit mode rewrites the entire RT every frame, so
-        // the actual changed region is the whole screen — forcing
-        // `None` makes downstream encoders do a full BGRA→YUV pass.
-        let dirty_rects_opt = if self.full_frame_blit {
-            None
-        } else {
-            dxgi_compose::build_dirty_hint(
+        // Full-frame-blit mode (dirty_metadata == None) forces a
+        // full BGRA→YUV pass downstream. This is the safe choice on
+        // software-cursor frames: `cursor_after.visible` here is
+        // `draw_mouse && self.pointer_visible`, and shared_capture
+        // pins SyncNative (draw_mouse=false), so build_dirty_hint
+        // would see cursor_after = default() — it would not include
+        // cursor move regions in the hint, and YUV partial would
+        // leave the cursor's old position untouched (= ghost trail).
+        // Cursor-aware hint optimisation is left as a follow-up.
+        let dirty_rects_opt = match dirty_metadata {
+            None => None,
+            Some((moves, dirties)) => dxgi_compose::build_dirty_hint(
                 &moves,
                 &dirties,
                 cursor_before,
@@ -1510,7 +1568,7 @@ impl ScreenOutput {
                 cursor_after_shape_known,
                 frame_width,
                 frame_height,
-            )
+            ),
         };
 
         // Stage 3: copy the composited frame (RT + cursor) to staging
@@ -2321,6 +2379,19 @@ impl ImageCapture for DxgiImageCapture {
                 content_changed: false,
                 dirty_rects: Some(vec![]),
             }),
+            FrameAcquisitionResult::Rebuild => {
+                // Resolution change detected inside get_frame —
+                // discard ScreenOutput so the next capture() tick
+                // builds a fresh one against the new mode. Surface
+                // as ACTION_NEED_RETRY so shared_capture's 16ms
+                // back-off bridges the gap (same pattern as
+                // DXGI_ERROR_ACCESS_LOST below).
+                self.screen_output = None;
+                CaptureError::custom_error(
+                    DeskErrorCode::ACTION_NEED_RETRY,
+                    "[DXGI] resolution changed mid-session; ScreenOutput rebuild scheduled",
+                )
+            }
             FrameAcquisitionResult::ContentFrame(screen_frame) => {
                 let mut cursor_update = None;
                 if matches!(request.cursor_mode, CursorCaptureMode::SyncNative) {
@@ -2412,6 +2483,23 @@ mod tests {
     // No DXGI fixtures needed.
     // -----------------------------------------------------------------
 
+    /// Smoke test for `FrameAcquisitionResult::Rebuild`: the new
+    /// variant exists, is constructible, and is reachable via
+    /// exhaustive match. Compiler-enforced exhaustiveness on
+    /// downstream `match acq_result { ... }` is the real guarantee;
+    /// this test exists so a future reader who deletes the variant
+    /// also has to update an explicit assertion.
+    #[test]
+    fn screen_output_rebuild_variant_can_be_matched() {
+        let r: FrameAcquisitionResult<'_> = FrameAcquisitionResult::Rebuild;
+        let tag = match r {
+            FrameAcquisitionResult::Rebuild => "rebuild",
+            FrameAcquisitionResult::NoContentChange => "nochange",
+            FrameAcquisitionResult::ContentFrame(_) => "content",
+        };
+        assert_eq!(tag, "rebuild");
+    }
+
     fn luid(lo: u32, hi: i32) -> LUID {
         LUID {
             LowPart: lo,
@@ -2457,16 +2545,14 @@ mod tests {
     #[test]
     fn find_device_name_index_returns_invalid_params_when_no_match() {
         let names = make_names(&[r"\\.\DISPLAY1", r"\\.\DISPLAY7"]);
-        let err = find_device_name_index(&names, r"\\.\DISPLAY99")
-            .expect_err("unknown name must error");
+        let err =
+            find_device_name_index(&names, r"\\.\DISPLAY99").expect_err("unknown name must error");
         let msg = format!("{}", err);
         // The Debug formatter double-escapes backslashes, so the
         // assertion targets the human-recognisable suffix that is
         // stable across Display/Debug rendering.
         assert!(
-            msg.contains("DISPLAY99")
-                && msg.contains("DISPLAY1")
-                && msg.contains("DISPLAY7"),
+            msg.contains("DISPLAY99") && msg.contains("DISPLAY1") && msg.contains("DISPLAY7"),
             "error message must include the requested name and the enumerated list: {}",
             msg
         );
