@@ -111,9 +111,7 @@ impl GdiImageOutputEnumerator {
     /// in the `monitors` module — GDI cannot reuse it as-is because
     /// it walks devices lazily here to avoid the per-display
     /// `EnumDisplaySettingsW` cost when we only need one entry).
-    pub fn get_output_by_name(
-        requested: &str,
-    ) -> Result<Option<DisplayInfo>, CaptureError> {
+    pub fn get_output_by_name(requested: &str) -> Result<Option<DisplayInfo>, CaptureError> {
         let mut idevnum = 0u32;
         loop {
             let entry = Self::get_output(idevnum)?;
@@ -157,39 +155,94 @@ impl GdiImageOutputEnumerator {
             device_key
         );
 
-        let mut dev_mode = DEVMODEW::default();
-        dev_mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
-
-        let device_name_utf16 = format!("{}\0", device_name)
-            .encode_utf16()
-            .collect::<Vec<u16>>();
-        let result = unsafe {
-            EnumDisplaySettingsW(
-                PCWSTR::from_raw(device_name_utf16.as_ptr()),
-                ENUM_CURRENT_SETTINGS,
-                &mut dev_mode,
-            )
+        // Reuse the live-geometry helper instead of inlining
+        // EnumDisplaySettingsW + rect math here; this is the same
+        // syscall path that `GdiImageCapture::capture` uses every
+        // frame to pick up resolution changes.
+        let rect = match refresh_device_rect(&device_name)? {
+            Some(r) => r,
+            None => {
+                log::warn!("Failed to get current settings for device {}", device_name);
+                return Ok(None);
+            }
         };
-        if !result.as_bool() {
-            log::warn!("Failed to get current settings for device {}", device_name);
-            return Ok(None);
-        }
         let resolutions = enum_display_resolutions(&device_name)?;
         Ok(Some(DisplayInfo {
             device_name,
             display_device_name: Some(display_name),
-            desktop_coordinates: DisplayRect {
-                left: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.x },
-                top: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.y },
-                right: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.x }
-                    + dev_mode.dmPelsWidth as i32,
-                bottom: unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.y }
-                    + dev_mode.dmPelsHeight as i32,
-            },
+            desktop_coordinates: rect,
             resolutions,
             attached_to_desktop: true,
             rotation: 0,
         }))
+    }
+}
+
+/// Re-read the live geometry for `device_name` via
+/// `EnumDisplaySettingsW(ENUM_CURRENT_SETTINGS)`. Returns `Ok(None)`
+/// when the device disappeared (hot-unplug race) or the syscall
+/// otherwise refuses. Cost: one Win32 syscall, sub-millisecond. Safe
+/// to call from `GdiImageCapture::capture` every tick to pick up a
+/// mid-session resolution change — same per-frame pattern WGC uses
+/// with `frame.ContentSize()`.
+fn refresh_device_rect(device_name: &str) -> Result<Option<DisplayRect>, CaptureError> {
+    let mut dev_mode = DEVMODEW::default();
+    dev_mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+
+    let device_name_utf16 = format!("{}\0", device_name)
+        .encode_utf16()
+        .collect::<Vec<u16>>();
+    let result = unsafe {
+        EnumDisplaySettingsW(
+            PCWSTR::from_raw(device_name_utf16.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut dev_mode,
+        )
+    };
+    if !result.as_bool() {
+        return Ok(None);
+    }
+    let left = unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.x };
+    let top = unsafe { dev_mode.Anonymous1.Anonymous2.dmPosition.y };
+    Ok(Some(DisplayRect {
+        left,
+        top,
+        right: left + dev_mode.dmPelsWidth as i32,
+        bottom: top + dev_mode.dmPelsHeight as i32,
+    }))
+}
+
+/// Log levels emitted by the device-missing latch. Returned by the
+/// pure helpers so unit tests can assert on the state-machine
+/// transition without going through `log::*` macros.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceMissingLog {
+    Warn,
+    Debug,
+}
+
+/// Mark `device_missing_logged` and return the log level the caller
+/// should emit. First miss → `Warn` + flip latch to true. Subsequent
+/// misses → `Debug` (state unchanged). Pure on (&mut bool) so it can
+/// be exercised without `log::*` side effects.
+fn log_device_missing(state: &mut bool) -> DeviceMissingLog {
+    if !*state {
+        *state = true;
+        DeviceMissingLog::Warn
+    } else {
+        DeviceMissingLog::Debug
+    }
+}
+
+/// Inverse of `log_device_missing`: returns `Some(())` when the
+/// caller should emit a single recovery INFO line (and clears the
+/// latch), or `None` if no prior outage was recorded.
+fn log_device_recovered(state: &mut bool) -> Option<()> {
+    if *state {
+        *state = false;
+        Some(())
+    } else {
+        None
     }
 }
 
@@ -219,6 +272,15 @@ pub struct GdiImageCapture {
     pub device_name: String,
     pub display_info: DisplayInfo,
     last_cursor_fingerprint: Option<GdiCursorFingerprint>,
+    /// Latched flag: true while the device is currently unenumerable
+    /// (set by `log_device_missing`, cleared by
+    /// `log_device_recovered`). The capture loop polls
+    /// `EnumDisplaySettingsW` every frame to pick up mid-session
+    /// resolution changes; without this latch, a long outage would
+    /// emit one warn per frame at the OS refresh rate (60+ Hz). With
+    /// the latch we WARN once on first miss, DEBUG between, INFO once
+    /// on recovery.
+    device_missing_logged: bool,
 }
 
 impl GdiImageCapture {
@@ -281,6 +343,7 @@ impl GdiImageCapture {
             device_name,
             display_info,
             last_cursor_fingerprint: None,
+            device_missing_logged: false,
         })
     }
 
@@ -513,6 +576,56 @@ impl ImageInfo for GDIImageInfo {
 impl ImageCapture for GdiImageCapture {
     fn capture(&mut self, request: CaptureRequest) -> Result<CaptureResult, CaptureError> {
         let draw_mouse = matches!(request.cursor_mode, CursorCaptureMode::RenderInFrame);
+
+        // Pick up mid-session resolution changes (and monitor
+        // rearrangement) — analogous to WGC's per-frame
+        // `frame.ContentSize()` check. Without this, a system display
+        // settings change would leave `display_info.desktop_coordinates`
+        // stuck at the value captured by `new()`, the BitBlt below would
+        // copy the old rect, and downstream encoders / browsers would
+        // see a stretched / cropped frame proportional to the
+        // old-vs-new resolution ratio.
+        match refresh_device_rect(&self.device_name)? {
+            Some(rect) => {
+                if let Some(()) = log_device_recovered(&mut self.device_missing_logged) {
+                    log::info!(
+                        "[GDI] device {} re-enumerated; resuming capture",
+                        self.device_name
+                    );
+                }
+                if rect != self.display_info.desktop_coordinates {
+                    log::info!(
+                        "[GDI] geometry change detected for {}: {:?} -> {:?}",
+                        self.device_name,
+                        self.display_info.desktop_coordinates,
+                        rect
+                    );
+                    self.display_info.desktop_coordinates = rect;
+                }
+            }
+            None => {
+                // The device is currently unenumerable. GDI capture
+                // always returns content_changed=true, so we cannot
+                // quietly fall through with the stale rect — return
+                // ACTION_NEED_RETRY and let `shared_capture`'s 16 ms
+                // back-off bridge the gap until the device
+                // re-enumerates or the session tears down.
+                match log_device_missing(&mut self.device_missing_logged) {
+                    DeviceMissingLog::Warn => log::warn!(
+                        "[GDI] device {} not enumerable; capture will retry",
+                        self.device_name
+                    ),
+                    DeviceMissingLog::Debug => {
+                        log::debug!("[GDI] device {} still missing", self.device_name)
+                    }
+                }
+                return CaptureError::custom_error(
+                    DeskErrorCode::ACTION_NEED_RETRY,
+                    &format!("[GDI] device {} disappeared mid-session", self.device_name),
+                );
+            }
+        }
+
         let display_info = &self.display_info;
         let width = display_info.desktop_coordinates.width();
         let height = display_info.desktop_coordinates.height();
@@ -716,6 +829,7 @@ mod tests {
             device_name,
             display_info,
             last_cursor_fingerprint: None,
+            device_missing_logged: false,
         };
         let capture_result = image_capture.capture(CaptureRequest {
             cursor_mode: CursorCaptureMode::RenderInFrame,
@@ -753,5 +867,44 @@ mod tests {
         let output_list = GdiImageOutputEnumerator::new().get_output_list()?;
         log::info!("output_list={:?}", output_list);
         Ok(())
+    }
+
+    /// `EnumDisplaySettingsW` returns FALSE for a device name that
+    /// matches no GDI display. The helper must surface this as
+    /// `Ok(None)` (the "device disappeared" signal) and must not
+    /// panic. Safe to run headless.
+    #[test]
+    fn refresh_device_rect_unknown_device_returns_none() {
+        let result = refresh_device_rect(r"\\.\DISPLAY_NONEXISTENT_99")
+            .expect("refresh_device_rect should not error on unknown device");
+        assert!(result.is_none());
+    }
+
+    /// First miss flips the latch and asks the caller to WARN; the
+    /// second miss observes the latch already set and downgrades to
+    /// DEBUG. The latch survives across calls.
+    #[test]
+    fn device_missing_log_latch_warn_then_debug() {
+        let mut state = false;
+        assert_eq!(log_device_missing(&mut state), DeviceMissingLog::Warn);
+        assert!(state, "first miss must set the latch");
+        assert_eq!(log_device_missing(&mut state), DeviceMissingLog::Debug);
+        assert!(state, "second miss must keep the latch set");
+    }
+
+    /// Recovery is only signalled if a prior outage was recorded.
+    /// `None` return value (no prior outage) means the caller should
+    /// not emit anything.
+    #[test]
+    fn device_recovery_log_latch_info_when_was_missing() {
+        // Prior outage → recovery emits the signal and clears the latch.
+        let mut state = true;
+        assert!(log_device_recovered(&mut state).is_some());
+        assert!(!state, "recovery must clear the latch");
+
+        // Steady-state (no outage) → no signal.
+        let mut clean = false;
+        assert!(log_device_recovered(&mut clean).is_none());
+        assert!(!clean, "no-op call must not flip the latch");
     }
 }

@@ -12,6 +12,8 @@ use utoipa::ToSchema;
     Default,
     wincode::SchemaWrite,
     wincode::SchemaRead,
+    PartialEq,
+    Eq,
 )]
 pub struct DisplayRect {
     /// Left coordinate of the rectangle
@@ -47,6 +49,8 @@ impl DisplayRect {
     Default,
     wincode::SchemaWrite,
     wincode::SchemaRead,
+    PartialEq,
+    Eq,
 )]
 pub struct Resolution {
     /// Width of the resolution in pixels
@@ -127,5 +131,55 @@ mod wincode_tests {
         assert_eq!(back.resolutions[1].height, 1440);
         assert!(back.attached_to_desktop);
         assert_eq!(back.rotation, 90);
+    }
+
+    /// `DisplayRect` gained `PartialEq` / `Eq` so callers (the GDI
+    /// backend's per-frame geometry refresh) can compare two rects
+    /// directly with `==` / `!=`. This is a sanity check that the
+    /// derive is present and that field equality is structural.
+    #[test]
+    fn display_rect_partial_eq_equal_for_identical_fields() {
+        let a = DisplayRect {
+            left: 100,
+            top: 50,
+            right: 2020,
+            bottom: 1130,
+        };
+        let b = DisplayRect {
+            left: 100,
+            top: 50,
+            right: 2020,
+            bottom: 1130,
+        };
+        assert_eq!(a, b);
+    }
+
+    /// Flip each of the four fields independently — every variant
+    /// must differ from the canonical rect. Guards against a future
+    /// reader replacing the derive with a hand-written `impl PartialEq`
+    /// that accidentally ignores a field.
+    #[test]
+    fn display_rect_partial_eq_differs_on_any_field_change() {
+        let base = DisplayRect {
+            left: 100,
+            top: 50,
+            right: 2020,
+            bottom: 1130,
+        };
+        let changes = [
+            DisplayRect { left: 101, ..base },
+            DisplayRect { top: 51, ..base },
+            DisplayRect {
+                right: 2021,
+                ..base
+            },
+            DisplayRect {
+                bottom: 1131,
+                ..base
+            },
+        ];
+        for changed in changes {
+            assert_ne!(base, changed, "unexpected equality with {:?}", changed);
+        }
     }
 }
