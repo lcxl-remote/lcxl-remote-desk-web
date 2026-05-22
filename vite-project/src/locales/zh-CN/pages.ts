@@ -226,6 +226,8 @@ export default {
   'pages.account.settings.originUsernameRequired': '用户名有变更，请提供原密码',
   'pages.account.settings.originPasswordRequired': '密码有变更，请提供原密码',
   'pages.desk.videoSizeNotInitialized': '视频尺寸未初始化，无法发送鼠标事件',
+  'pages.desk.remoteCursorActive.title': '正在显示远程鼠标',
+  'pages.desk.remoteCursorActive.description': '由于显示驱动限制，鼠标光标直接由远程画面提供。',
   'pages.desk.initSignalingData': '初始化信令数据:',
   'pages.desk.controlRequestAccepted': '控制请求被接受，准备初始化控制通道',
   'pages.desk.controlRequestDenied': '控制请求被拒绝',

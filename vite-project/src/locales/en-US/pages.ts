@@ -228,6 +228,8 @@ export default {
   'pages.account.settings.originUsernameRequired': 'Username has changed, please provide the original password',
   'pages.account.settings.originPasswordRequired': 'Password has changed, please provide the original password',
   'pages.desk.videoSizeNotInitialized': 'Video size not initialized, cannot send mouse events',
+  'pages.desk.remoteCursorActive.title': 'Showing remote cursor',
+  'pages.desk.remoteCursorActive.description': 'Cursor is rendered by the remote frame due to display driver constraints.',
   'pages.desk.initSignalingData': 'Initialize signaling data:',
   'pages.desk.controlRequestAccepted': 'Control request accepted, preparing to initialize control channel',
   'pages.desk.controlRequestDenied': 'Control request denied',
