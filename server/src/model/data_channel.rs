@@ -28,10 +28,13 @@ pub struct CursorSyncData {
     /// Remote screen height
     pub screen_height: u32,
     /// True when the cursor pixel is already composited into the
-    /// captured desktop frame (DXGI software-cursor path). When set,
-    /// the front-end hides its local CSS cursor and trusts the video
-    /// stream's baked-in cursor, avoiding the "two cursors on screen"
-    /// artefact. Defaults to false on older payloads.
+    /// captured desktop frame (DXGI software-cursor path). The
+    /// front-end keeps showing the local CSS cursor sprite for a
+    /// responsive feel — meaning the user sees two cursors (the
+    /// low-latency local sprite plus the lagging OS cursor in the
+    /// video frame) — but the embedded flag drives a one-off toast
+    /// so the user understands the source of the second cursor.
+    /// Defaults to false on older payloads.
     pub embedded: bool,
 }
 

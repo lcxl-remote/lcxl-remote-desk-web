@@ -75,20 +75,21 @@ export function useCursorSync(
 
     const applyCursor = (data: CursorSyncData | null) => {
         // Detect a hardware→software cursor mode transition so the
-        // user knows why their local CSS cursor just disappeared.
-        // Only fire on the rising edge — sustained embedded mode
-        // would otherwise spam every cursor data tick.
+        // user gets one heads-up that the second cursor in the
+        // video is the OS baking its cursor into the frame (not a
+        // bug). Only fire on the rising edge — sustained embedded
+        // mode would otherwise spam every cursor data tick.
         const wasEmbedded = lastEmbeddedRef.current;
         const isEmbedded = !!data?.embedded;
         if (hasControl && isEmbedded && !wasEmbedded) {
             toast({
                 title: t(
                     'pages.desk.remoteCursorActive.title',
-                    'Showing remote cursor',
+                    'Remote cursor visible in frame',
                 ),
                 description: t(
                     'pages.desk.remoteCursorActive.description',
-                    'Cursor is rendered by the remote frame due to display driver constraints.',
+                    'Display driver limitation: the OS cursor is baked into the remote video, so you may see two cursors. The local one stays responsive.',
                 ),
                 duration: 5000,
             });
@@ -106,12 +107,21 @@ export function useCursorSync(
         }
 
         if (!data.visible) {
-            // Covers both genuine hidden-cursor states (IME, cursor
-            // confined) and the embedded-cursor case where the
-            // back-end has already baked the cursor pixel into the
-            // video stream. In both situations the local sprite
-            // must not be drawn — otherwise the user sees two
-            // overlapping cursors.
+            if (data.embedded) {
+                // Software-cursor (DXGI) mode: the backend reports
+                // `visible=false` because DXGI thinks the pointer
+                // plane is gone, but the OS has actually composited
+                // the cursor into the desktop frame instead. The
+                // user is still moving a real cursor — we just must
+                // not treat this as "cursor disappeared" and hide
+                // the local sprite. Leave the previous cursor style
+                // untouched so the low-latency local sprite keeps
+                // tracking the user's mouse; the user sees two
+                // cursors but the local one stays responsive.
+                return;
+            }
+            // Genuine hidden-cursor state (IME entry, cursor
+            // confined, etc.) — let the page CSS show no cursor.
             setCursorStyle('none');
             return;
         }

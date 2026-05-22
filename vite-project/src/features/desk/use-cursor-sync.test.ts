@@ -136,6 +136,62 @@ describe('useCursorSync — embed transition toast', () => {
         return { cursorSyncChannel, videoRef, channel };
     }
 
+    it('keeps the previous cursorStyle when embedded=true (does not hide the sprite)', () => {
+        // Embedded mode means the OS has baked the cursor into the
+        // video frame. We deliberately keep the local CSS cursor
+        // visible because it tracks the user's actual mouse with no
+        // video latency — losing that responsiveness would feel
+        // worse than the double-cursor artefact.
+        const { cursorSyncChannel, videoRef, channel } = makeRefs();
+        const { result } = renderHook(() =>
+            useCursorSync(cursorSyncChannel, videoRef, true),
+        );
+
+        // Before any data arrives the hook starts at 'default'.
+        expect(result.current.cursorStyle).toBe('default');
+
+        // Embedded payload (visible=false, embedded=true). The
+        // hook must NOT switch to 'none' — it should leave the
+        // cursorStyle untouched so the previously rendered sprite
+        // (or the page default) keeps tracking the mouse.
+        act(() => {
+            channel.__dispatch({
+                base64_png: '',
+                hotspot_x: 0,
+                hotspot_y: 0,
+                visible: false,
+                shape_id: 0,
+                screen_width: 1920,
+                screen_height: 1080,
+                embedded: true,
+            });
+        });
+        expect(result.current.cursorStyle).toBe('default');
+    });
+
+    it('hides the cursor when visible=false and embedded=false (genuine hidden)', () => {
+        // Legitimate hidden-cursor states (IME entry, cursor confined,
+        // text-tool with no caret) must still produce 'none' so the
+        // page reflects the OS behaviour.
+        const { cursorSyncChannel, videoRef, channel } = makeRefs();
+        const { result } = renderHook(() =>
+            useCursorSync(cursorSyncChannel, videoRef, true),
+        );
+        act(() => {
+            channel.__dispatch({
+                base64_png: '',
+                hotspot_x: 0,
+                hotspot_y: 0,
+                visible: false,
+                shape_id: 0,
+                screen_width: 1920,
+                screen_height: 1080,
+                embedded: false,
+            });
+        });
+        expect(result.current.cursorStyle).toBe('none');
+    });
+
     it('fires the remote-cursor toast when embedded transitions false → true', () => {
         const { cursorSyncChannel, videoRef, channel } = makeRefs();
         renderHook(() => useCursorSync(cursorSyncChannel, videoRef, true));

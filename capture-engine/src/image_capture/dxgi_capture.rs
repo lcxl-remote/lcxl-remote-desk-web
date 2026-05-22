@@ -2300,12 +2300,17 @@ impl DxgiImageCapture {
         screen_output: &ScreenOutput,
     ) -> Result<Option<(DxgiCursorFingerprint, CursorSyncData)>, CaptureError> {
         // Branch 1: OS has composited the cursor into the desktop
-        // frame (software-cursor path). Tell the front-end to hide
-        // its CSS cursor and trust the video stream's baked-in
-        // cursor. The Embedded fingerprint is distinct from both
-        // Hidden and Shape{...} so toggling between hardware-cursor
-        // and software-cursor modes always emits a fresh payload
-        // (PartialEq on the enum drives the dedup in the caller).
+        // frame (software-cursor path). The payload carries
+        // `embedded=true` and `visible=false`; the front-end uses
+        // `embedded=true` to keep showing the local CSS cursor
+        // sprite (instead of hiding it the way a regular
+        // `visible=false` payload would imply) while also
+        // surfacing a one-off toast that explains the second
+        // cursor in the video frame. The `Embedded` fingerprint
+        // is distinct from both Hidden and Shape{...} so toggling
+        // between hardware-cursor and software-cursor modes
+        // always emits a fresh payload (PartialEq on the enum
+        // drives the dedup in the caller).
         if screen_output.last_frame_embedded {
             let mut full_desc =
                 windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
