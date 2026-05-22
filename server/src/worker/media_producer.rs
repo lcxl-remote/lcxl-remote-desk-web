@@ -2339,6 +2339,7 @@ mod tests {
             shape_id: 99,
             screen_width: 1920,
             screen_height: 1080,
+            embedded: false,
         };
         let bytes = serde_json::to_vec(&cursor).expect("serialise");
         // Round-trip via UTF-8 + serde to confirm the bytes are
@@ -2351,6 +2352,52 @@ mod tests {
         assert_eq!(decoded.shape_id, 99);
         assert!(decoded.visible);
         assert_eq!(decoded.screen_width, 1920);
+        assert!(!decoded.embedded);
+    }
+
+    /// Embedded variant: `embedded=true` survives the JSON
+    /// round-trip and arrives at the browser-side decoder. This is
+    /// the wire signal that flips the front-end CSS cursor off
+    /// when the OS has composited the cursor into the desktop
+    /// frame.
+    #[test]
+    fn cursor_sync_data_round_trips_with_embedded_true() {
+        use crate::model::data_channel::CursorSyncData;
+        let cursor = CursorSyncData {
+            visible: false,
+            embedded: true,
+            screen_width: 2560,
+            screen_height: 1440,
+            ..Default::default()
+        };
+        let bytes = serde_json::to_vec(&cursor).expect("serialise");
+        let decoded: CursorSyncData =
+            serde_json::from_str(std::str::from_utf8(&bytes).expect("utf-8")).expect("decode");
+        assert!(!decoded.visible);
+        assert!(decoded.embedded);
+        assert_eq!(decoded.screen_width, 2560);
+        assert_eq!(decoded.screen_height, 1440);
+    }
+
+    /// Backward-compatible deserialization (codex r2 #2): a payload
+    /// without the `embedded` field defaults to `embedded=false`,
+    /// so old browsers / cached versions continue to parse cleanly.
+    #[test]
+    fn cursor_sync_data_legacy_payload_without_embedded_field_decodes_as_false() {
+        use crate::model::data_channel::CursorSyncData;
+        // Hand-written JSON missing the `embedded` key.
+        let legacy = r#"{
+            "base64_png": "",
+            "hotspot_x": 0,
+            "hotspot_y": 0,
+            "visible": true,
+            "shape_id": 42,
+            "screen_width": 1920,
+            "screen_height": 1080
+        }"#;
+        let decoded: CursorSyncData = serde_json::from_str(legacy).expect("decode legacy");
+        assert!(!decoded.embedded, "missing field must default to false");
+        assert_eq!(decoded.shape_id, 42);
     }
 
     // ---- should_recreate_for_resolution ----

@@ -27,10 +27,20 @@ use crate::{
     },
 };
 
+/// Identity key used to deduplicate `CursorSyncData` emissions.
+/// Includes `screen_width` / `screen_height` so a mid-session
+/// resolution change forces a fresh emission even when the cursor
+/// shape is unchanged (otherwise the front-end's stale
+/// `screen_width` makes the cursor sprite scale incorrectly after
+/// the resize).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GdiCursorFingerprint {
     Hidden,
-    Shape(u64),
+    Shape {
+        id: u64,
+        screen_width: u32,
+        screen_height: u32,
+    },
 }
 
 enum GDIHDCType {
@@ -535,7 +545,11 @@ impl GdiImageCapture {
         let screen_height = self.display_info.desktop_coordinates.height() as u32;
 
         Ok(Some((
-            GdiCursorFingerprint::Shape(shape_id),
+            GdiCursorFingerprint::Shape {
+                id: shape_id,
+                screen_width,
+                screen_height,
+            },
             CursorSyncData {
                 base64_png,
                 hotspot_x: icon_info.xHotspot as i32,
@@ -544,8 +558,19 @@ impl GdiImageCapture {
                 shape_id,
                 screen_width,
                 screen_height,
+                embedded: false,
             },
         )))
+    }
+
+    /// Reset the cursor fingerprint cache so the next capture pass
+    /// re-emits a full `CursorSyncData`. Defensive backstop on the
+    /// geometry-change path (`refresh_device_rect` returns a new
+    /// `DisplayRect`); the size-aware fingerprint already covers
+    /// the common case but resetting here keeps every rebuild
+    /// branch symmetric.
+    pub fn reset_cursor_cache(&mut self) {
+        self.last_cursor_fingerprint = None;
     }
 }
 
@@ -601,6 +626,13 @@ impl ImageCapture for GdiImageCapture {
                         rect
                     );
                     self.display_info.desktop_coordinates = rect;
+                    // Defensive reset: the size-aware fingerprint
+                    // already forces a fresh emission on the next
+                    // tick (Shape{..,new_w,new_h} != Shape{..,old_w,old_h}),
+                    // but resetting here keeps the geometry-change
+                    // path symmetric with DXGI's ACCESS_LOST /
+                    // Rebuild branches.
+                    self.reset_cursor_cache();
                 }
             }
             None => {
@@ -813,6 +845,56 @@ mod tests {
             // initialization code here
             let _ = init_logs(LevelFilter::Debug);
         });
+    }
+
+    /// Two `Shape` fingerprints with the same `id` but different
+    /// `screen_width` are not equal. A mid-session resolution
+    /// change (see `refresh_device_rect` in `capture()`) therefore
+    /// emits a fresh `CursorSyncData` even when the cursor shape
+    /// has not changed.
+    #[test]
+    fn gdi_fingerprint_differs_on_screen_width_change() {
+        let a = GdiCursorFingerprint::Shape {
+            id: 0xdead,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = GdiCursorFingerprint::Shape {
+            id: 0xdead,
+            screen_width: 2560,
+            screen_height: 1080,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn gdi_fingerprint_differs_on_screen_height_change() {
+        let a = GdiCursorFingerprint::Shape {
+            id: 0xdead,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = GdiCursorFingerprint::Shape {
+            id: 0xdead,
+            screen_width: 1920,
+            screen_height: 1440,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn gdi_fingerprint_equal_when_all_fields_match() {
+        let a = GdiCursorFingerprint::Shape {
+            id: 0xdead,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = GdiCursorFingerprint::Shape {
+            id: 0xdead,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        assert_eq!(a, b);
     }
     // Disabled in automated runs: this test needs an interactive GUI
     // desktop (BitBlt against a real device context). CI / headless

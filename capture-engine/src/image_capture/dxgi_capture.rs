@@ -93,10 +93,49 @@ pub(crate) enum FrameAcquisitionResult<'a> {
     Rebuild,
 }
 
+/// Identity key used to deduplicate `CursorSyncData` emissions.
+/// Includes `screen_width` / `screen_height` so that a resolution
+/// change forces a fresh emission even when the cursor shape is
+/// unchanged — otherwise the front-end's stale `screen_width` makes
+/// the cursor sprite scale incorrectly after a mid-session resize.
+/// The `Embedded` variant marks frames where the OS has composited
+/// the cursor pixel into the captured desktop image (DXGI
+/// software-cursor mode); the front-end then hides its own CSS
+/// cursor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DxgiCursorFingerprint {
     Hidden,
-    Shape(u64),
+    Embedded,
+    Shape {
+        id: u64,
+        screen_width: u32,
+        screen_height: u32,
+    },
+}
+
+/// Detects the DXGI software-cursor path: the OS has composited the
+/// cursor pixel into the desktop image returned by
+/// `AcquireNextFrame`. Mirrors the heuristic used by WebRTC's
+/// `dxgi_output_duplicator.cc`:
+///
+/// * `LastMouseUpdateTime != 0` — the duplication API actually has
+///   a pointer-position update to report for the current frame.
+///   When this is zero the pointer info is stale / absent and we
+///   cannot make any claim.
+/// * `!PointerPosition.Visible` — when visible, the pointer is
+///   delivered as a separate hardware/overlay plane and the
+///   acquired desktop image contains no cursor pixels. When the
+///   pointer-position update says "not visible" *despite* an
+///   update being reported, the OS has switched to software cursor
+///   mode and the cursor is now part of the desktop image.
+///
+/// The two predicates together rule out the "no pointer info this
+/// frame" case (where `Visible` defaults to false simply because
+/// nothing changed). Pulled out as a pure function so the state
+/// machine in `get_frame` is unit-testable without a live DXGI
+/// pipeline.
+fn frame_contains_embedded_cursor(frame_info: &DXGI_OUTDUPL_FRAME_INFO) -> bool {
+    frame_info.LastMouseUpdateTime != 0 && !frame_info.PointerPosition.Visible.as_bool()
 }
 
 #[repr(C)]
@@ -995,6 +1034,16 @@ pub struct ScreenOutput {
     /// construction time — diagnostic A/B switch only, not exposed
     /// to the UI.
     pub full_frame_blit: bool,
+    /// `true` when the most recent `AcquireNextFrame` reported a
+    /// cursor that the OS has already composited into the desktop
+    /// image (DXGI software-cursor mode). Computed via
+    /// `frame_contains_embedded_cursor` and used to (a) force
+    /// `content_changed` on cursor-only events so the video stream
+    /// follows the embedded cursor, (b) tell the front-end to hide
+    /// its CSS cursor, and (c) force the YUV dirty hint to `None` so
+    /// the cursor's old position is repainted under full-frame
+    /// conversion.
+    pub last_frame_embedded: bool,
 }
 
 impl ScreenOutput {
@@ -1130,6 +1179,7 @@ impl ScreenOutput {
                 }
                 !force_dirty
             },
+            last_frame_embedded: false,
         })
     }
 
@@ -1400,9 +1450,26 @@ impl ScreenOutput {
         if let Err(ref err) = acquire_result
             && err.code() == DXGI_ERROR_WAIT_TIMEOUT
         {
+            // Even on a timeout the previous embedded-cursor state
+            // remains observationally correct (no fresh signal to
+            // contradict it) so leave `last_frame_embedded` alone.
             return Ok(FrameAcquisitionResult::NoContentChange);
         }
         acquire_result?;
+
+        // Update embedded-cursor tracking from the *new* frame_info
+        // before any early returns below. WebRTC's
+        // `dxgi_output_duplicator.cc` interprets
+        // `LastMouseUpdateTime != 0 && !PointerPosition.Visible` as
+        // "the OS has composited the cursor into the desktop image"
+        // (software cursor); when visible, the pointer is rendered
+        // by a separate hardware overlay and the acquired image
+        // contains no cursor pixels. This signal flips between
+        // hardware and software cursor modes (e.g. after a
+        // mode-change) without any DXGI error surfacing, so we must
+        // recompute it every frame.
+        let embedded_now = frame_contains_embedded_cursor(&frame_info);
+        self.last_frame_embedded = embedded_now;
 
         let desktop_resource = desktop_resource.unwrap();
 
@@ -1437,8 +1504,14 @@ impl ScreenOutput {
         let cursor_moved = frame_info.LastMouseUpdateTime != 0
             && frame_info.LastMouseUpdateTime != self.last_mouse_update_time;
         // In RenderInFrame mode the cursor is baked into the video frame, so a cursor move with
-        // static desktop still requires encoding a new frame.
-        let content_changed = !desktop_unchanged || (draw_mouse && cursor_moved);
+        // static desktop still requires encoding a new frame. The
+        // same holds when the OS composites the cursor itself
+        // (`embedded_now`): the cursor pixel is already inside the
+        // acquired image, so a cursor-only event must propagate down
+        // the video pipeline or the embedded cursor stays frozen at
+        // its previous location.
+        let content_changed =
+            !desktop_unchanged || (draw_mouse && cursor_moved) || (embedded_now && cursor_moved);
 
         // Capture cursor's previous-frame drawn rect *before*
         // `update_mouse_info` overwrites `self.pointer_*`. We rely on
@@ -1557,18 +1630,29 @@ impl ScreenOutput {
         // would see cursor_after = default() — it would not include
         // cursor move regions in the hint, and YUV partial would
         // leave the cursor's old position untouched (= ghost trail).
+        // The same reasoning applies when the OS composites the
+        // cursor itself (`embedded_now`): the cursor pixel is
+        // baked into `acquired_desktop_image` but is not advertised
+        // in the move/dirty metadata, so even the per-rect opt-out
+        // path (`LCXL_DXGI_DIRTY_COMPOSE=1`) would miss the cursor's
+        // previous position and accumulate ghosts. Force YUV
+        // update_full whenever the cursor is embedded.
         // Cursor-aware hint optimisation is left as a follow-up.
-        let dirty_rects_opt = match dirty_metadata {
-            None => None,
-            Some((moves, dirties)) => dxgi_compose::build_dirty_hint(
-                &moves,
-                &dirties,
-                cursor_before,
-                cursor_after,
-                cursor_after_shape_known,
-                frame_width,
-                frame_height,
-            ),
+        let dirty_rects_opt = if embedded_now {
+            None
+        } else {
+            match dirty_metadata {
+                None => None,
+                Some((moves, dirties)) => dxgi_compose::build_dirty_hint(
+                    &moves,
+                    &dirties,
+                    cursor_before,
+                    cursor_after,
+                    cursor_after_shape_known,
+                    frame_width,
+                    frame_height,
+                ),
+            }
         };
 
         // Stage 3: copy the composited frame (RT + cursor) to staging
@@ -2215,6 +2299,29 @@ impl DxgiImageCapture {
     fn capture_cursor_update(
         screen_output: &ScreenOutput,
     ) -> Result<Option<(DxgiCursorFingerprint, CursorSyncData)>, CaptureError> {
+        // Branch 1: OS has composited the cursor into the desktop
+        // frame (software-cursor path). Tell the front-end to hide
+        // its CSS cursor and trust the video stream's baked-in
+        // cursor. The Embedded fingerprint is distinct from both
+        // Hidden and Shape{...} so toggling between hardware-cursor
+        // and software-cursor modes always emits a fresh payload
+        // (PartialEq on the enum drives the dedup in the caller).
+        if screen_output.last_frame_embedded {
+            let mut full_desc =
+                windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+            unsafe { screen_output.copy_buffer_texture_2d.GetDesc(&mut full_desc) };
+            return Ok(Some((
+                DxgiCursorFingerprint::Embedded,
+                CursorSyncData {
+                    visible: false,
+                    embedded: true,
+                    screen_width: full_desc.Width,
+                    screen_height: full_desc.Height,
+                    ..Default::default()
+                },
+            )));
+        }
+
         if !screen_output.pointer_visible {
             return Ok(Some((
                 DxgiCursorFingerprint::Hidden,
@@ -2308,7 +2415,11 @@ impl DxgiImageCapture {
         unsafe { screen_output.copy_buffer_texture_2d.GetDesc(&mut full_desc) };
 
         Ok(Some((
-            DxgiCursorFingerprint::Shape(shape_id),
+            DxgiCursorFingerprint::Shape {
+                id: shape_id,
+                screen_width: full_desc.Width,
+                screen_height: full_desc.Height,
+            },
             CursorSyncData {
                 base64_png,
                 hotspot_x: info.HotSpot.x,
@@ -2317,8 +2428,20 @@ impl DxgiImageCapture {
                 shape_id,
                 screen_width: full_desc.Width,
                 screen_height: full_desc.Height,
+                embedded: false,
             },
         )))
+    }
+
+    /// Reset the cursor fingerprint cache so the next capture pass
+    /// re-emits a full `CursorSyncData`. Called on the resource
+    /// rebuild paths (DXGI_ERROR_ACCESS_LOST, FrameAcquisitionResult::Rebuild)
+    /// as a defensive backstop in case the new ScreenOutput's first
+    /// fingerprint happens to coincide with the stale one (e.g. same
+    /// shape_id + same dimensions). The size-aware fingerprint
+    /// already covers the common case where dimensions change.
+    pub fn reset_cursor_cache(&mut self) {
+        self.last_cursor_fingerprint = None;
     }
 }
 
@@ -2350,6 +2473,12 @@ impl ImageCapture for DxgiImageCapture {
                     if err.code() == DXGI_ERROR_ACCESS_LOST || err.code() == DXGI_ERROR_INVALID_CALL
                     {
                         self.screen_output = None;
+                        // Defensive: a brand-new ScreenOutput might
+                        // happen to land on the same fingerprint as
+                        // the previous one (same cursor shape, same
+                        // dimensions); explicit reset guarantees the
+                        // next frame re-emits cursor metadata.
+                        self.reset_cursor_cache();
                         return CaptureError::custom_error(
                             DeskErrorCode::ACTION_NEED_RETRY,
                             &format!("capture frame is lost, will retry, error={}", err),
@@ -2387,6 +2516,8 @@ impl ImageCapture for DxgiImageCapture {
                 // back-off bridges the gap (same pattern as
                 // DXGI_ERROR_ACCESS_LOST below).
                 self.screen_output = None;
+                // Defensive: see ACCESS_LOST branch.
+                self.reset_cursor_cache();
                 CaptureError::custom_error(
                     DeskErrorCode::ACTION_NEED_RETRY,
                     "[DXGI] resolution changed mid-session; ScreenOutput rebuild scheduled",
@@ -2498,6 +2629,134 @@ mod tests {
             FrameAcquisitionResult::ContentFrame(_) => "content",
         };
         assert_eq!(tag, "rebuild");
+    }
+
+    // -----------------------------------------------------------------
+    // Cursor fingerprint (M1) — size-aware identity.
+    // -----------------------------------------------------------------
+
+    /// Two `Shape` fingerprints with the same `id` but different
+    /// `screen_width` are not equal. This guarantees a mid-session
+    /// resolution change re-emits cursor metadata even when the
+    /// cursor pixel hash is unchanged — otherwise the front-end's
+    /// stale `screen_width` would mis-scale the cursor sprite.
+    #[test]
+    fn dxgi_fingerprint_differs_on_screen_width_change() {
+        let a = DxgiCursorFingerprint::Shape {
+            id: 0xabcd,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = DxgiCursorFingerprint::Shape {
+            id: 0xabcd,
+            screen_width: 2560,
+            screen_height: 1080,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn dxgi_fingerprint_differs_on_screen_height_change() {
+        let a = DxgiCursorFingerprint::Shape {
+            id: 0xabcd,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = DxgiCursorFingerprint::Shape {
+            id: 0xabcd,
+            screen_width: 1920,
+            screen_height: 1440,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn dxgi_fingerprint_equal_when_all_fields_match() {
+        let a = DxgiCursorFingerprint::Shape {
+            id: 0xabcd,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = DxgiCursorFingerprint::Shape {
+            id: 0xabcd,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        assert_eq!(a, b);
+    }
+
+    /// `Embedded` is the third state. It must compare unequal to
+    /// both `Hidden` and any `Shape` so transitions between
+    /// hardware-cursor and software-cursor modes always emit a
+    /// fresh `CursorSyncData` (the front-end uses the new payload
+    /// to toggle its local CSS cursor visibility).
+    #[test]
+    fn dxgi_fingerprint_embedded_differs_from_hidden_and_shape() {
+        let embedded = DxgiCursorFingerprint::Embedded;
+        let hidden = DxgiCursorFingerprint::Hidden;
+        let shape = DxgiCursorFingerprint::Shape {
+            id: 1,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        assert_ne!(embedded, hidden);
+        assert_ne!(embedded, shape);
+        assert_ne!(hidden, shape);
+    }
+
+    // -----------------------------------------------------------------
+    // Embedded-cursor detection (M3) — WebRTC heuristic.
+    // -----------------------------------------------------------------
+
+    fn frame_info_for_embedded_test(
+        last_mouse_update_time: i64,
+        pointer_visible: bool,
+    ) -> DXGI_OUTDUPL_FRAME_INFO {
+        let mut frame_info: DXGI_OUTDUPL_FRAME_INFO = unsafe { std::mem::zeroed() };
+        frame_info.LastMouseUpdateTime = last_mouse_update_time;
+        frame_info.PointerPosition.Visible =
+            windows_core::BOOL(if pointer_visible { 1 } else { 0 });
+        frame_info
+    }
+
+    /// Software-cursor frame: the OS reports a fresh pointer-position
+    /// update (LastMouseUpdateTime != 0) but tags it not-visible
+    /// (i.e. there's no separate hardware pointer plane to render),
+    /// meaning the cursor pixel is already composited into the
+    /// desktop image.
+    #[test]
+    fn frame_contains_embedded_cursor_true_when_invisible_and_mouse_update() {
+        let f = frame_info_for_embedded_test(0x1234, false);
+        assert!(frame_contains_embedded_cursor(&f));
+    }
+
+    /// Hardware-cursor frame: pointer is visible as a separate
+    /// overlay plane, so it is not part of the acquired desktop
+    /// image. The fact that LastMouseUpdateTime is non-zero only
+    /// means the OS has fresh pointer position info to deliver.
+    #[test]
+    fn frame_contains_embedded_cursor_false_when_visible_with_update() {
+        let f = frame_info_for_embedded_test(0x1234, true);
+        assert!(!frame_contains_embedded_cursor(&f));
+    }
+
+    /// No pointer-position update this frame — the duplication API
+    /// gives no signal one way or the other, so we cannot claim the
+    /// cursor is embedded. Returning false here keeps the
+    /// previous-frame state machine driven by the next genuine
+    /// update.
+    #[test]
+    fn frame_contains_embedded_cursor_false_when_no_mouse_update() {
+        let f = frame_info_for_embedded_test(0, false);
+        assert!(!frame_contains_embedded_cursor(&f));
+    }
+
+    /// Both predicates inverted: no update *and* pointer marked
+    /// visible. Equivalent to the no-update case for our purposes.
+    #[test]
+    fn frame_contains_embedded_cursor_false_when_no_update_and_visible() {
+        let f = frame_info_for_embedded_test(0, true);
+        assert!(!frame_contains_embedded_cursor(&f));
     }
 
     fn luid(lo: u32, hi: i32) -> LUID {

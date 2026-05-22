@@ -11,6 +11,7 @@ pub const DATA_CHANNEL_LABEL_CURSOR_SYNC_EVENT: &str = "cursor_sync_event";
 
 /// Cursor sync data structure
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, Default)]
+#[serde(default)]
 pub struct CursorSyncData {
     /// PNG image data (Base64)
     pub base64_png: String,
@@ -26,6 +27,12 @@ pub struct CursorSyncData {
     pub screen_width: u32,
     /// Remote screen height
     pub screen_height: u32,
+    /// True when the cursor pixel is already composited into the
+    /// captured desktop frame (DXGI software-cursor path). When set,
+    /// the front-end hides its local CSS cursor and trusts the video
+    /// stream's baked-in cursor, avoiding the "two cursors on screen"
+    /// artefact. Defaults to false on older payloads.
+    pub embedded: bool,
 }
 
 /// Signal request control data

@@ -83,11 +83,20 @@ impl ImageInfo for EmptyImageInfo {
 
 /// Fingerprint used to skip emitting `cursor_update` when the cursor
 /// shape has not changed. `Shape` carries a hash of the cursor pixel
-/// buffer, not the cursor's screen position.
+/// buffer, not the cursor's screen position. `screen_width` /
+/// `screen_height` are included so a mid-session resolution change
+/// (via `frame_pool.Recreate` below) forces a fresh emission even
+/// when the cursor shape is unchanged — the front-end would
+/// otherwise reuse a stale `screen_width` and mis-scale the cursor
+/// sprite.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WgcCursorFingerprint {
     Hidden,
-    Shape(u64),
+    Shape {
+        id: u64,
+        screen_width: u32,
+        screen_height: u32,
+    },
 }
 
 /// Holds all of the WGC pipeline state. Lazy-built inside `capture()`
@@ -632,18 +641,35 @@ impl WgcImageCapture {
         use base64::Engine;
         let base64_png = base64::engine::general_purpose::STANDARD.encode(png_data.into_inner());
 
+        let screen_width = self.monitor_size.Width as u32;
+        let screen_height = self.monitor_size.Height as u32;
+
         Ok(Some((
-            WgcCursorFingerprint::Shape(shape_id),
+            WgcCursorFingerprint::Shape {
+                id: shape_id,
+                screen_width,
+                screen_height,
+            },
             CursorSyncData {
                 base64_png,
                 hotspot_x: icon_info.xHotspot as i32,
                 hotspot_y: icon_info.yHotspot as i32,
                 visible: true,
                 shape_id,
-                screen_width: self.monitor_size.Width as u32,
-                screen_height: self.monitor_size.Height as u32,
+                screen_width,
+                screen_height,
+                embedded: false,
             },
         )))
+    }
+
+    /// Reset the cursor fingerprint cache so the next capture pass
+    /// re-emits a full `CursorSyncData`. Defensive backstop on the
+    /// frame-pool-resize path; the size-aware fingerprint already
+    /// covers the common case, but resetting here keeps every
+    /// backend's rebuild branch symmetric.
+    pub fn reset_cursor_cache(&mut self) {
+        self.last_cursor_fingerprint = None;
     }
 }
 
@@ -772,6 +798,21 @@ impl ImageCapture for WgcImageCapture {
             )?;
             pipeline.staging = Self::create_staging_texture(&self.manager.device, new_w, new_h)?;
             pipeline.staging_size = (new_w, new_h);
+            // Keep `self.monitor_size` in lock-step with the
+            // frame_pool dimensions: `capture_cursor_update` reads
+            // it for `CursorSyncData.screen_width/height`, so a
+            // stale value here makes the front-end mis-scale the
+            // cursor sprite after a mid-session resize even though
+            // the size-aware fingerprint forces re-emission.
+            self.monitor_size = SizeInt32 {
+                Width: new_w as i32,
+                Height: new_h as i32,
+            };
+            // Defensive cache reset on the resize path; the
+            // size-aware fingerprint already catches the dimension
+            // change but resetting here keeps all backends'
+            // rebuild branches symmetric.
+            self.reset_cursor_cache();
             return Ok(CaptureResult {
                 image: Box::new(EmptyImageInfo),
                 cursor_update: None,
@@ -874,6 +915,59 @@ impl ImageCapture for WgcImageCapture {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Size-aware fingerprint: a mid-session frame-pool resize
+    /// (the `frame_pool.Recreate` path in `capture()`) updates
+    /// `self.monitor_size` and thus the next fingerprint differs
+    /// from the cached value even if the cursor pixel hash is
+    /// unchanged. Guards against the regression where a stale
+    /// `monitor_size` would cause `CursorSyncData.screen_width` to
+    /// stay at the pre-resize value forever, breaking front-end
+    /// cursor scaling.
+    #[test]
+    fn wgc_fingerprint_differs_on_screen_width_change() {
+        let a = WgcCursorFingerprint::Shape {
+            id: 0xcafe,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = WgcCursorFingerprint::Shape {
+            id: 0xcafe,
+            screen_width: 2560,
+            screen_height: 1080,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn wgc_fingerprint_differs_on_screen_height_change() {
+        let a = WgcCursorFingerprint::Shape {
+            id: 0xcafe,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = WgcCursorFingerprint::Shape {
+            id: 0xcafe,
+            screen_width: 1920,
+            screen_height: 1440,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn wgc_fingerprint_equal_when_all_fields_match() {
+        let a = WgcCursorFingerprint::Shape {
+            id: 0xcafe,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        let b = WgcCursorFingerprint::Shape {
+            id: 0xcafe,
+            screen_width: 1920,
+            screen_height: 1080,
+        };
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn wgc_image_output_enumerator_constructor_reflects_is_supported() {
