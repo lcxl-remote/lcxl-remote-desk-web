@@ -1,9 +1,6 @@
 //! Host Control Hub — unified Tauri-side bridge across all server deployment modes.
 //!
-//! See `agent_works/web/2026-04-30_host-control-hub-unification.md` for the
-//! original architectural rationale, and
-//! `agent_works/web/2026-05-10_aggregator-daemon-self-approval-fix.md` for the
-//! Arch IV update to the Aggregator contract described below. In short:
+//! The Aggregator contract described below was updated by Arch IV. In short:
 //!
 //! - **Local** (portable): the embedded server publishes commands to its own ws
 //!   endpoint; the embedded Tauri shell is a ws client.

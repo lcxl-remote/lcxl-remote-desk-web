@@ -3,8 +3,7 @@
 //!
 //! ## Why this module exists
 //!
-//! The daemon ↔ worker IPC migrates from bincode v2 to wincode (see
-//! workspace `agent_works/workspace/2026-05-10_bincode-to-wincode-migration-research.md`).
+//! The daemon ↔ worker IPC migrated from bincode v2 to wincode.
 //! Several `model::*` types embed `chrono::DateTime<Local>` fields and used to
 //! ride bincode 2's `#[bincode(with_serde)]` field attribute to delegate to
 //! chrono's serde impl. wincode does not delegate to serde — every IPC type

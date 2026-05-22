@@ -93,7 +93,3 @@ Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI 规范: `http://localh
 4. **代码注释**必须使用**英文 (English)**。
 5. **Git 提交信息**必须使用**英文 (English)**，并遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)。
 6. **测试用例 (CRITICAL)**：更改代码必须要增加测试用例。
-
-## 任务归档工作流
-
-成功完成计划的任务后，在 `agent_works/web/` 下创建一个文件名为 `yyyy-MM-dd_{kebab-case-title}.md` 的归档文档。内容应包括：实现计划 (implementation plan)、任务清单 (task list) 及执行总结 (execution summary)。请删除任何敏感数据。

@@ -13,15 +13,13 @@
 //! `IDXGIAdapter`), but DXGI hands back `IDXGIOutput`, not
 //! `HMONITOR`, so WGC needs its own enumerator regardless.
 //!
-//! PoC spike B (see `pocs/poc-indirect-display/src/wgc.rs` and the
-//! archive at
-//! `agent_works/workspace/2026-05-18_virtual-display-bug2-spike.md`)
-//! confirmed end-to-end that `EnumDisplayMonitors` + WGC
+//! PoC spike B confirmed end-to-end that `EnumDisplayMonitors` + WGC
 //! `CreateForMonitor(HMONITOR)` captures the IDD's independent
-//! desktop. See also
-//! `agent_works/web/2026-05-22_dxgi-idd-spike-correction.md` for the
-//! correction to the original spike's "DXGI cannot see IDD" claim.
-//! This module is the production version of spike A.
+//! desktop. The original spike's "DXGI cannot see IDD" claim was
+//! later corrected: DXGI does enumerate IDD outputs, but hands back
+//! `IDXGIOutput` rather than `HMONITOR`, so WGC still needs its own
+//! GDI-layer enumerator. This module is the production version of
+//! spike A.
 //!
 //! ## Layering
 //!

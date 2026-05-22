@@ -107,10 +107,5 @@ docker-compose up -d
 - 当 `README_CN.md` 或 `DEVELOPMENT_CN.md` 发生变更时，必须同步翻译并更新对应的英文版文件。
 - 确保翻译符合技术写作习惯，避免生硬机翻。
 
-### 5. 任务归档
-- 完成任务后，将 Implementation Plan 和 Task List 整理为 Markdown。
-- 命名格式：`agent_works/yyyy-MM-dd_{title}.md` (如 `2026-03-15_feat-add-new-api.md`)。
-- 确保已进行脱敏处理。
-
 ---
 > **注意**: 本指南旨在确保项目的一致性与稳定性。在应用变更前，务必查阅相关规范。

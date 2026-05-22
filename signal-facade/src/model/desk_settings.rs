@@ -223,10 +223,6 @@ pub struct DeskSettings {
     /// 2. Display hot-plug (attach / detach / IDD bring-up) reorders
     ///    the enumeration, so an index saved in settings would drift
     ///    onto the wrong monitor across reboots.
-    ///
-    /// See the v4 virtual-display capture-selection plan and
-    /// `agent_works/web/2026-05-22_dxgi-idd-spike-correction.md`
-    /// for full context.
     pub video_device_name: String,
     /// Video encode quality, 0-63, lower is better. Default is 22.
     pub video_quality: u32,

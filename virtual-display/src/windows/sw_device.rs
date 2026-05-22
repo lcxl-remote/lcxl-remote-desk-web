@@ -2,9 +2,8 @@
 //!
 //! Materialises the lcxl IDD as a software device via `SwDeviceCreate`,
 //! waits for the OS to confirm creation, and holds the handle so
-//! `SwDeviceClose` fires on drop. Modelled on the PoC at
-//! `pocs/poc-indirect-display/src/device.rs`, but trimmed to the
-//! signatures the production trait needs.
+//! `SwDeviceClose` fires on drop. Modelled on the IddCx sample PoC,
+//! but trimmed to the signatures the production trait needs.
 //!
 //! GDI display-name resolution (`\\.\DISPLAYn`) does **not** live here
 //! because `EnumDisplayDevicesW` is thread-desktop-bound and returns an
@@ -33,12 +32,12 @@ use windows::core::{BOOL, Owned, PCWSTR};
 
 use crate::{VirtualDisplayError, VirtualDisplayHandleInner};
 
-/// Hardware ID published by the lcxl production virtual-display INF
-/// (`enterprise/virtual-display-driver/`). Production installs MUST
-/// advertise this exact string in their INF, or the OS will not match
-/// a driver and `SwDeviceCreate` reports no-match. Deliberately
-/// distinct from the PoC HW ID `LcxlIddSampleDriver` so the two INFs
-/// can coexist on a developer test machine without overlapping.
+/// Hardware ID published by the lcxl production virtual-display INF.
+/// Production installs MUST advertise this exact string in their INF,
+/// or the OS will not match a driver and `SwDeviceCreate` reports
+/// no-match. Deliberately distinct from the PoC HW ID
+/// `LcxlIddSampleDriver` so the two INFs can coexist on a developer
+/// test machine without overlapping.
 pub const LCXL_IDD_HARDWARE_ID: &str = "LcxlVirtualDisplay";
 /// Instance ID requested when materialising the device. Stable across
 /// restarts so the PnP manager can find the same node.
@@ -496,12 +495,11 @@ mod tests {
 
     #[test]
     fn hardware_id_constants_match_inf_contract() {
-        // The production INF (enterprise/virtual-display-driver/) MUST
-        // advertise this exact hardware ID, otherwise SwDeviceCreate
-        // reports no driver match. Kept deliberately different from
-        // the PoC HW ID (`LcxlIddSampleDriver`, see
-        // pocs/poc-indirect-display/driver/IddSampleDriver.inf) so the
-        // two INFs can coexist on a dev box.
+        // The production INF MUST advertise this exact hardware ID,
+        // otherwise SwDeviceCreate reports no driver match. Kept
+        // deliberately different from the IddCx sample PoC HW ID
+        // (`LcxlIddSampleDriver`) so the two INFs can coexist on a
+        // dev box.
         assert_eq!(LCXL_IDD_HARDWARE_ID, "LcxlVirtualDisplay");
         assert_eq!(LCXL_IDD_INSTANCE_ID, "LcxlVirtualDisplay");
         assert_ne!(LCXL_IDD_HARDWARE_ID, "LcxlIddSampleDriver");

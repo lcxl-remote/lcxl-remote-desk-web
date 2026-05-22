@@ -2192,7 +2192,7 @@ fn spawn_file_transfer_writer_task(
 /// The substring `"OutboundPacketTooLarge"` is stable across
 /// webrtc-rs 0.17.x and uniquely identifies the SCTP wire-level
 /// rejection that the 256 KiB chunk-size regression hit in
-/// 2026-05-11 (see `agent_works/web/2026-05-11_ft-metrics-observability.md`).
+/// 2026-05-11.
 fn classify_dc_send_error(err: &webrtc::Error) -> FileTransferSendErrorKind {
     let rendered = err.to_string();
     if rendered.contains("OutboundPacketTooLarge") {

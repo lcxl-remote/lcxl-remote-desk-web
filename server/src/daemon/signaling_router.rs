@@ -66,9 +66,6 @@ use crate::model::settings::SharedSettings;
 /// Whether a given `SignalingType` is owned by the daemon (handled
 /// inline against the PC registry) or by the worker (forwarded over
 /// IPC). Pure function — easy to unit-test exhaustively.
-///
-/// The full audit is in `agent_works/web/2026-05-03_pr2-pre-flight-audit`
-/// (committed alongside PR 2 cut 1).
 pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
     match signaling_type {
         // ---- Daemon-owned: PC / SDP / ICE / SignalingState ----

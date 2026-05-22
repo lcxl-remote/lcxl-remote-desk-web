@@ -3,9 +3,8 @@
 //! WGC asks the DWM to deliver the composed desktop surface, including
 //! hardware-overlay regions that DXGI Desktop Duplication renders as
 //! black placeholders (the failure mode that motivated this backend —
-//! see `agent_works/2026-05-14_dxgi-dirty-rect-fix.md` for the
-//! exhaustive ruling-out of DXGI dirty-rect / per-rect-compose
-//! hypotheses).
+//! DXGI dirty-rect and per-rect-compose hypotheses were exhaustively
+//! ruled out before the switch).
 //!
 //! Trade-off: WGC does not expose dirty rect metadata in the baseline
 //! ABI; this backend always reports `dirty_rects = None`, forcing
@@ -205,11 +204,8 @@ impl ImageOutputEnumerator for WgcImageOutputEnumerator {
         // is the natural source. DXGI also enumerates IDD virtual
         // displays (the IDD driver registers a virtual IDXGIAdapter),
         // but it hands back IDXGIOutput, not HMONITOR, so we still
-        // need GDI here regardless of IDD support. PoC spike B (see
-        // `agent_works/workspace/2026-05-18_virtual-display-bug2-spike.md`,
-        // corrected in
-        // `agent_works/web/2026-05-22_dxgi-idd-spike-correction.md`)
-        // proves the round-trip end-to-end.
+        // need GDI here regardless of IDD support. PoC spike B
+        // proved the round-trip end-to-end.
         let infos = enum_display_infos()?;
         log::info!(
             "WgcImageOutputEnumerator: enumerated {} monitor(s) via EnumDisplayMonitors",
