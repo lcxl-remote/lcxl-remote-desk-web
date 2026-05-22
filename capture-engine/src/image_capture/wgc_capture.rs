@@ -199,14 +199,16 @@ impl WgcImageOutputEnumerator {
 impl ImageOutputEnumerator for WgcImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         // GDI EnumDisplayMonitors, not DXGI EnumAdapters/EnumOutputs.
-        // The OS does not allocate a dedicated IDXGIAdapter for an
-        // Indirect Display Driver (IDD) virtual monitor, so the DXGI
-        // enumeration silently omits it. WGC binds capture via
-        // `IGraphicsCaptureItemInterop::CreateForMonitor(HMONITOR)`
-        // where HMONITOR is a GDI-layer handle, so IDDs are fully
-        // capturable as long as we discover them via GDI in the first
-        // place. PoC spike B (see
-        // `agent_works/workspace/2026-05-18_virtual-display-bug2-spike.md`)
+        // WGC binds capture via
+        // `IGraphicsCaptureItemInterop::CreateForMonitor(HMONITOR)`,
+        // and `HMONITOR` is a GDI-layer handle — `EnumDisplayMonitors`
+        // is the natural source. DXGI also enumerates IDD virtual
+        // displays (the IDD driver registers a virtual IDXGIAdapter),
+        // but it hands back IDXGIOutput, not HMONITOR, so we still
+        // need GDI here regardless of IDD support. PoC spike B (see
+        // `agent_works/workspace/2026-05-18_virtual-display-bug2-spike.md`,
+        // corrected in
+        // `agent_works/web/2026-05-22_dxgi-idd-spike-correction.md`)
         // proves the round-trip end-to-end.
         let infos = enum_display_infos()?;
         log::info!(
@@ -267,11 +269,11 @@ impl WgcImageCapture {
         }
 
         // Resolve the target monitor through the GDI EnumDisplayMonitors
-        // path so IDD virtual displays — invisible to DXGI — are
-        // selectable. Selection happens before D3D11 device creation
-        // so an empty / unknown device_name surfaces INVALID_PARAMS
-        // without the cost (and the headless-CI failure mode) of
-        // building a D3D11 device.
+        // path, which is the only enumeration that returns HMONITOR
+        // (what `CreateForMonitor` needs). Selection happens before
+        // D3D11 device creation so an empty / unknown device_name
+        // surfaces INVALID_PARAMS without the cost (and the
+        // headless-CI failure mode) of building a D3D11 device.
         let infos = enum_display_infos()?;
         let display_info =
             select_display_info_by_name(&infos, &settings.video_device_name)?;
@@ -1007,9 +1009,10 @@ mod tests {
     }
 
     /// Hardware smoke: when an `lcxl` IDD virtual monitor is attached,
-    /// the new GDI-backed enumerator must list it. The legacy DXGI
-    /// path silently omitted IDDs (root cause of v4); this guards the
-    /// fix from regressing. Ignored by default because it requires the
+    /// the GDI-backed WGC enumerator must list it. WGC needs HMONITOR
+    /// (which only `EnumDisplayMonitors` returns), so this test guards
+    /// the GDI side of the cross-backend select-by-name contract from
+    /// regressing. Ignored by default because it requires the
     /// production virtual-display driver to be loaded and bound — we
     /// run it manually via `cargo test -p desk-capture-engine -- \
     /// --ignored wgc_image_output_enumerator_includes_idd_when_attached`

@@ -214,12 +214,18 @@ pub struct DeskSettings {
     pub enable_d3d_debug: bool,
     /// GDI device name of the capture target (`\\.\DISPLAYn`).
     /// Empty string means "no display selected yet" — the browser
-    /// must surface a chooser before starting media. Selection by
-    /// name (instead of by enumeration index) is required so that
-    /// IDD virtual displays — which are visible to GDI but invisible
-    /// to `IDXGIAdapter::EnumOutputs` — can be addressed unambiguously,
-    /// and so that the selected target survives display hot-plug
-    /// reordering. See the v4 virtual-display capture-selection plan
+    /// must surface a chooser before starting media. Selection is by
+    /// name (instead of enumeration index) because:
+    /// 1. DXGI and WGC backends walk different enumerations
+    ///    (`IDXGIAdapter::EnumOutputs` vs `EnumDisplayMonitors`), but
+    ///    both expose the same GDI device name — so a name-based key
+    ///    is the only stable cross-backend addressing.
+    /// 2. Display hot-plug (attach / detach / IDD bring-up) reorders
+    ///    the enumeration, so an index saved in settings would drift
+    ///    onto the wrong monitor across reboots.
+    ///
+    /// See the v4 virtual-display capture-selection plan and
+    /// `agent_works/web/2026-05-22_dxgi-idd-spike-correction.md`
     /// for full context.
     pub video_device_name: String,
     /// Video encode quality, 0-63, lower is better. Default is 22.

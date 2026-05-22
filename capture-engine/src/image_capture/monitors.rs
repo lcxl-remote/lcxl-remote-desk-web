@@ -1,21 +1,27 @@
 //! GDI-layer monitor enumeration shared by every capture backend that
-//! must select a target by GDI device name (`\\.\DISPLAYn`).
+//! must address a target through a GDI device name (`\\.\DISPLAYn`)
+//! or a raw `HMONITOR`.
 //!
 //! ## Why this exists
 //!
-//! The DXGI enumerator in `dxgi_capture::enumerate_all_outputs` walks
-//! `IDXGIFactory1::EnumAdapters1 → IDXGIAdapter1::EnumOutputs`, which
-//! is the wrong layer for picking up Indirect Display Driver (IDD)
-//! virtual monitors. The OS does not allocate a dedicated
-//! `IDXGIAdapter` for an IDD device, so its monitor never appears on
-//! the DXGI output chain — yet it is fully visible to GDI (it has its
-//! own HMONITOR, its own `\\.\DISPLAYn` name, and its own composed
-//! desktop that WGC can capture via `CreateForMonitor`). PoC spike B
-//! (see `pocs/poc-indirect-display/src/wgc.rs` and the archive at
+//! WGC capture binds via
+//! `IGraphicsCaptureItemInterop::CreateForMonitor(HMONITOR)`, and
+//! `HMONITOR` is a GDI-layer handle — the natural enumeration source
+//! is `EnumDisplayMonitors`, not `IDXGIAdapter::EnumOutputs`. DXGI
+//! also enumerates the same monitors (including IDD virtual displays
+//! attached through `LcxlVirtualDisplay`, which register a virtual
+//! `IDXGIAdapter`), but DXGI hands back `IDXGIOutput`, not
+//! `HMONITOR`, so WGC needs its own enumerator regardless.
+//!
+//! PoC spike B (see `pocs/poc-indirect-display/src/wgc.rs` and the
+//! archive at
 //! `agent_works/workspace/2026-05-18_virtual-display-bug2-spike.md`)
 //! confirmed end-to-end that `EnumDisplayMonitors` + WGC
 //! `CreateForMonitor(HMONITOR)` captures the IDD's independent
-//! desktop. This module is the production version of spike A.
+//! desktop. See also
+//! `agent_works/web/2026-05-22_dxgi-idd-spike-correction.md` for the
+//! correction to the original spike's "DXGI cannot see IDD" claim.
+//! This module is the production version of spike A.
 //!
 //! ## Layering
 //!
@@ -63,8 +69,9 @@ pub struct MonitorEntry {
 const TRUE: BOOL = BOOL(1);
 
 /// Drive `EnumDisplayMonitors` over the entire virtual desktop and
-/// collect one [`MonitorEntry`] per monitor. Includes IDD virtual
-/// monitors that DXGI never enumerates.
+/// collect one [`MonitorEntry`] per monitor, including IDD virtual
+/// monitors. Used by backends (notably WGC) that need raw HMONITORs
+/// rather than IDXGIOutput handles.
 pub fn enum_monitors() -> Result<Vec<MonitorEntry>, CaptureError> {
     let mut list: Vec<MonitorEntry> = Vec::new();
     let list_ptr: *mut Vec<MonitorEntry> = &mut list;
