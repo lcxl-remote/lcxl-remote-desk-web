@@ -2675,6 +2675,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-virtual-display-driver-ops"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
