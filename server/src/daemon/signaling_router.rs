@@ -534,9 +534,19 @@ async fn handle_change_display_settings_inbound(
         }
     };
 
-    // Auto-only gates: single-client, adaptive_web_page_resolution
-    // toggle. Apply before validate_mode so a non-authorised auto
-    // request can never poke the IDD.
+    // Auto-only gate: single-client. Apply before validate_mode so a
+    // non-authorised auto request can never poke the IDD.
+    //
+    // No `desk_settings.adaptive_web_page_resolution` check here:
+    // that field is per-connection (the browser dialog collects it and
+    // ships it via UpdateDeskSettings, which the daemon forwards to
+    // the worker without writing back to `ctx.settings.desk`). Reading
+    // the server-wide default would always see `false`, blocking the
+    // browser's request no matter how the user toggled the checkbox.
+    // The browser hook already gates on the same flag locally, so the
+    // request only reaches here when the user has opted in; defence in
+    // depth is provided by `virtual_display.enabled`, `supervisor.is_active`,
+    // and the throttle below.
     if payload.auto {
         // Multi-client guard: refuse so a second browser cannot fight
         // the first one over the IDD resolution. Manual path is
@@ -548,15 +558,6 @@ async fn handle_change_display_settings_inbound(
                 model,
                 DeskErrorCode::INVALID_STATE,
                 "auto requires single client connection",
-            );
-            return Ok(());
-        }
-        if !settings_snapshot.desk.adaptive_web_page_resolution {
-            emit_error_response(
-                ctx,
-                model,
-                DeskErrorCode::INVALID_STATE,
-                "adaptive resolution disabled in desk settings",
             );
             return Ok(());
         }
@@ -2024,16 +2025,25 @@ mod tests {
         );
     }
 
-    /// `desk.adaptive_web_page_resolution = false` ⇒ INVALID_STATE for
-    /// auto requests. This second gate lets the operator turn off
-    /// adaptive even when the IDD is otherwise ready.
+    /// Regression: the daemon must NOT gate auto requests on the
+    /// server-wide `settings.desk.adaptive_web_page_resolution` value.
+    /// That field is per-connection (the browser dialog collects it and
+    /// ships it via `UpdateDeskSettings`, which the router forwards to
+    /// the worker without writing back to `ctx.settings.desk`), so the
+    /// server-wide snapshot is always whatever the operator put in
+    /// `config.toml` — typically `false` (the `DeskSettings::default`).
+    /// A previous version of the router checked that snapshot and
+    /// rejected every browser-initiated auto resize with INVALID_STATE
+    /// even when the user had explicitly enabled adaptive in the dialog.
+    /// The browser hook is the authoritative gate; the daemon trusts
+    /// the `auto=true` marker once the request reaches the router.
     #[tokio::test]
-    async fn auto_request_rejected_when_adaptive_disabled() {
-        let (ctx, mut rx, _worker_rx) = make_ctx_with_attached_supervisor().await;
+    async fn auto_request_passes_even_when_server_desk_setting_false() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
         ctx.settings.write().await.desk.adaptive_web_page_resolution = false;
 
         let model = make_change_display_settings_model(
-            "req-disabled",
+            "req-server-default-false",
             ChangeDisplaySettingsPayload {
                 width: 1920,
                 height: 1080,
@@ -2042,9 +2052,18 @@ mod tests {
             },
         );
         route(&model, &ctx).await.expect("route must not error");
-        let response = read_response(&mut rx);
-        let state = response.response_state.expect("must have error state");
-        assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
+
+        match worker_rx
+            .try_recv()
+            .expect("auto IPC must reach the worker regardless of server-wide flag")
+        {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.width, 1920);
+                assert_eq!(p.height, 1080);
+                assert_eq!(p.refresh_hz, 60);
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
     }
 
     /// Browser hook always sends `refresh_hz=0`. With a cached
@@ -2052,7 +2071,6 @@ mod tests {
     #[tokio::test]
     async fn auto_request_substitutes_zero_refresh_with_cached() {
         let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
-        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
         // Pre-seed the supervisor cache so the daemon has an
         // authoritative value to substitute.
         ctx.virtual_display
@@ -2088,7 +2106,6 @@ mod tests {
     #[tokio::test]
     async fn auto_request_falls_back_to_60_when_cache_zero() {
         let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
-        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
         // Supervisor cache is 0 (no observation yet).
         assert_eq!(
             ctx.virtual_display
@@ -2149,7 +2166,6 @@ mod tests {
     #[tokio::test]
     async fn manual_request_unaffected_by_auto_throttle() {
         let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
-        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
 
         // First, an auto request consumes the slot.
         let auto_model = make_change_display_settings_model(
@@ -2223,7 +2239,6 @@ mod tests {
     #[tokio::test]
     async fn auto_throttle_tight_setting_drops_second_request() {
         let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
-        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
         ctx.settings
             .write()
             .await
@@ -2263,7 +2278,6 @@ mod tests {
     #[tokio::test]
     async fn auto_throttle_zero_setting_allows_back_to_back() {
         let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
-        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
         ctx.settings
             .write()
             .await
