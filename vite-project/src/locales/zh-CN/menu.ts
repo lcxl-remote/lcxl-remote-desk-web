@@ -57,6 +57,7 @@ export default {
   'menu.settings.log': '日志设置',
   'menu.settings.security': '安全设置',
   'menu.settings.deviceCode': '设备码管理',
+  'menu.settings.virtualDisplay': '虚拟显示器',
   'menu.desk': '桌面',
   'menu.desk.file-list': '文件列表',
   'menu.desk.desk': "桌面",

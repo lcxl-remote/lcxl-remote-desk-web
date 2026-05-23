@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings, FileText, Server, Key, Shield, Network } from "lucide-react";
+import { Settings, FileText, Server, Key, Shield, Network, Monitor } from "lucide-react";
 
 export function SettingsOverview() {
     const { t } = useTranslation();
@@ -116,6 +116,19 @@ export function SettingsOverview() {
                                     </div>
                                     <CardDescription className="mt-2 line-clamp-2">
                                         {t('pages.system.security.description', '管理远控权限以及授权行为')}
+                                    </CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
+                        <Link to="/system/virtual-display" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <Monitor className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('menu.settings.virtualDisplay', '虚拟显示器')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">
+                                        {t('pages.virtualDisplay.description', '管理 Windows IDD 虚拟显示器驱动以及守护进程启动开关')}
                                     </CardDescription>
                                 </CardHeader>
                             </Card>

@@ -20,6 +20,7 @@ import { UserSettings } from '@/features/settings/user-settings';
 import { DeviceCodeList } from '@/features/settings/device-code-list';
 import { SettingsLayout } from '@/features/settings/settings-layout';
 import { SettingsOverview } from '@/features/settings/settings-overview';
+import { VirtualDisplaySettings } from '@/features/settings/virtual-display-settings';
 
 export const router = createBrowserRouter([
     {
@@ -105,6 +106,10 @@ export const router = createBrowserRouter([
                     {
                         path: 'device-codes',
                         element: <DeviceCodeList />,
+                    },
+                    {
+                        path: 'virtual-display',
+                        element: <VirtualDisplaySettings />,
                     },
                 ]
             },

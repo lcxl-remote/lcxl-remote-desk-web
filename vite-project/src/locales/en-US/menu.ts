@@ -57,6 +57,7 @@ export default {
   'menu.settings.log': 'Log Settings',
   'menu.settings.security': 'Security Settings',
   'menu.settings.deviceCode': 'Device Codes',
+  'menu.settings.virtualDisplay': 'Virtual Display',
   'menu.desk': 'Desk',
   'menu.desk.file-list': 'File List',
   'menu.desk.desk': "Desktop",

@@ -18,6 +18,9 @@ import { Switch } from "@/components/ui/switch"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { useToast } from "@/hooks/use-toast"
 import { TelemetryDisclosure } from "@/components/telemetry-disclosure"
+import { ServiceInstallDialog } from "@/features/layout/service-install-dialog"
+import { ServiceUninstallDialog } from "@/features/layout/service-uninstall-dialog"
+import { useState } from "react"
 
 const systemSettingsSchema = z.object({
     enable_ipv6: z.boolean(),
@@ -42,6 +45,8 @@ export function SystemSettings() {
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateSettings()
     const { data: serverInfoResp } = useQueryServerInfo()
     const { data: backendInfoResp } = useQueryBackendInfo()
+    const [installDialogOpen, setInstallDialogOpen] = useState(false)
+    const [uninstallDialogOpen, setUninstallDialogOpen] = useState(false)
 
     const serverInfo = serverInfoResp?.data
     const backendInfo = backendInfoResp?.data
@@ -314,58 +319,14 @@ export function SystemSettings() {
                                 </p>
                             </div>
                             {serverInfo.service_installed ? (
-                                <Button 
-                                    variant="destructive" 
-                                    onClick={async () => {
-                                        try {
-                                            const res = await fetch("/api/service/uninstall", { method: "POST" });
-                                            if (res.ok) {
-                                                toast({
-                                                    title: t("pages.system.settings.success", "Success"),
-                                                    description: t("pages.system.settings.serviceManagement.uninstallSuccess", "Service uninstall request submitted. Please wait a few seconds."),
-                                                });
-                                            } else {
-                                                throw new Error("Uninstall failed");
-                                            }
-                                        } catch (error) {
-                                            console.error(error);
-                                            toast({
-                                                variant: "destructive",
-                                                title: t("pages.system.settings.error", "Error"),
-                                                description: t("pages.system.settings.serviceManagement.uninstallError", "Failed to uninstall service."),
-                                            });
-                                        }
-                                    }}
+                                <Button
+                                    variant="destructive"
+                                    onClick={() => setUninstallDialogOpen(true)}
                                 >
                                     {t("pages.system.settings.serviceManagement.uninstall", "Uninstall Service")}
                                 </Button>
                             ) : (
-                                <Button 
-                                    onClick={async () => {
-                                        try {
-                                            const res = await fetch("/api/service/install", { 
-                                                method: "POST",
-                                                headers: { "Content-Type": "application/json" },
-                                                body: JSON.stringify({ install_path: serverInfo.default_install_path })
-                                            });
-                                            if (res.ok) {
-                                                toast({
-                                                    title: t("pages.system.settings.success", "Success"),
-                                                    description: t("pages.system.settings.serviceManagement.installSuccess", "Service install request submitted. Please wait a few seconds."),
-                                                });
-                                            } else {
-                                                throw new Error("Install failed");
-                                            }
-                                        } catch (error) {
-                                            console.error(error);
-                                            toast({
-                                                variant: "destructive",
-                                                title: t("pages.system.settings.error", "Error"),
-                                                description: t("pages.system.settings.serviceManagement.installError", "Failed to install service."),
-                                            });
-                                        }
-                                    }}
-                                >
+                                <Button onClick={() => setInstallDialogOpen(true)}>
                                     {t("pages.layout.serviceBanner.installButton", "Install Service")}
                                 </Button>
                             )}
@@ -373,6 +334,16 @@ export function SystemSettings() {
                     </CardContent>
                 </Card>
             )}
+
+            <ServiceInstallDialog
+                open={installDialogOpen}
+                onOpenChange={setInstallDialogOpen}
+                defaultInstallPath={serverInfo?.default_install_path ?? ""}
+            />
+            <ServiceUninstallDialog
+                open={uninstallDialogOpen}
+                onOpenChange={setUninstallDialogOpen}
+            />
 
             <Card className="mt-6">
                 <CardHeader>
