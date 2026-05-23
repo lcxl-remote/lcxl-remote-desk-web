@@ -444,6 +444,12 @@ pub struct PcRegistry {
     /// RAII guard that decrements on drop (panics / early returns are
     /// covered).
     pending_requests: Arc<AtomicUsize>,
+    /// Test-only phantom PC counter added to `len()`. See
+    /// [`Self::set_test_len_extra`] — it lets the signaling router unit
+    /// tests simulate multi-PC topologies without building real
+    /// `PeerConnectionContext` instances.
+    #[cfg(test)]
+    test_len_extra: Arc<AtomicUsize>,
 }
 
 /// Errors produced by [`PcRegistry`] handlers. Worker-side equivalents
@@ -507,7 +513,29 @@ impl PcRegistry {
     }
 
     pub async fn len(&self) -> usize {
-        self.inner.read().await.len()
+        let real = self.inner.read().await.len();
+        #[cfg(test)]
+        {
+            real + self
+                .test_len_extra
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(test))]
+        {
+            real
+        }
+    }
+
+    /// Test-only knob: simulate additional registered PCs without having
+    /// to build real `PeerConnectionContext` instances (which depend on
+    /// a fully constructed `RTCPeerConnection`). The router's
+    /// `auto_request_rejected_when_multiple_pcs` test uses this to bump
+    /// `len()` past 1 without dragging the entire WebRTC stack into the
+    /// signaling unit-test fixture.
+    #[cfg(test)]
+    pub fn set_test_len_extra(&self, extra: usize) {
+        self.test_len_extra
+            .store(extra, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub async fn is_empty(&self) -> bool {
@@ -1395,6 +1423,21 @@ pub async fn handle_request_remote(
             desk_utils::permission::is_admin(),
         )
     };
+    // Adaptive-resolution metadata. The browser hook uses
+    // `virtual_display_active` to decide whether to start its
+    // ResizeObserver loop at all, and `adaptive_resolution` to drive
+    // the trailing-edge debounce / min-delta thresholds without
+    // needing a separate REST round-trip. `virtual_display_current_refresh_hz`
+    // is informational — the auto path always sends `refresh_hz: 0`
+    // and the daemon substitutes the cached refresh on the way out.
+    let (virtual_display_active, virtual_display_current_refresh_hz) = match virtual_display {
+        Some(s) => (s.is_active().await, s.last_refresh_hz()),
+        None => (false, 0),
+    };
+    let adaptive_resolution = desk_signal_facade::model::signal::AdaptiveResolutionParams {
+        debounce_ms: settings.virtual_display.adaptive_debounce_ms,
+        min_delta_px: settings.virtual_display.adaptive_min_delta_px,
+    };
     let init_data = InitSignalingData {
         ice_servers: vec![],
         user_name: user_name.to_string(),
@@ -1405,6 +1448,9 @@ pub async fn handle_request_remote(
         desk_settings: settings.desk.clone(),
         has_tauri,
         is_admin: is_admin_value,
+        virtual_display_active,
+        virtual_display_current_refresh_hz,
+        adaptive_resolution,
     };
     log::info!(
         "[pc_manager] Sending Init reply for {from_connection_id} \
@@ -2353,9 +2399,7 @@ async fn cleanup_pc(
         && registry.len().await == 0
         && registry.pending_requests() == 0
     {
-        log::info!(
-            "[pc_manager] last PC removed, no pending requests; detaching virtual display"
-        );
+        log::info!("[pc_manager] last PC removed, no pending requests; detaching virtual display");
         if let Err(e) = supervisor.apply(false).await {
             log::warn!("[pc_manager] N->0 virtual display detach failed: {e}");
         }

@@ -5,7 +5,7 @@
 
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503 } from "./types.ts";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -421,6 +421,42 @@ export async function regenerateTurnSecret(config: Partial<RequestConfig> & { cl
   return res.data
 }
 
+function getQueryVirtualDisplaySettingsUrl() {
+  const res = { method: 'GET', url: `/api/desk/settings/virtual-display` as const }
+  return res
+}
+
+/**
+ * @summary Get virtual display settings
+ * {@link /api/desk/settings/virtual-display}
+ */
+export async function queryVirtualDisplaySettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<QueryVirtualDisplaySettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryVirtualDisplaySettingsUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateVirtualDisplaySettingsUrl() {
+  const res = { method: 'POST', url: `/api/desk/settings/virtual-display` as const }
+  return res
+}
+
+/**
+ * @summary Update virtual display settings
+ * {@link /api/desk/settings/virtual-display}
+ */
+export async function updateVirtualDisplaySettings(data?: UpdateVirtualDisplaySettingsMutationRequest, config: Partial<RequestConfig<UpdateVirtualDisplaySettingsMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateVirtualDisplaySettingsMutationResponse, ResponseErrorConfig<Error>, UpdateVirtualDisplaySettingsMutationRequest>({ method : "POST", url : getUpdateVirtualDisplaySettingsUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
 function getOpenSignalingHandleUrl(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"]) {
   const res = { method: 'GET', url: `/api/desk/signaling` as const }
   return res
@@ -643,9 +679,9 @@ function getInstallServiceUrl() {
 }
 
 /**
- * @description The HTTP handler is stateless: it sends a command to Tauri via the
- * `service_op_sender` channel and returns 202 Accepted immediately.
- * The caller should poll `GET /api/server_info` to check `service_installed`.
+ * @description Stateless: the handler publishes a `ServiceOp` command on the host control
+ * hub and returns 202 Accepted immediately. The caller should poll
+ * `GET /api/server_info` to check `service_installed`.
  * @summary Install OS system service
  * {@link /api/service/install}
  */
@@ -673,5 +709,59 @@ export async function uninstallService(config: Partial<RequestConfig> & { client
 
 
   const res = await request<UninstallServiceMutationResponse, ResponseErrorConfig<UninstallService503>, unknown>({ method : "POST", url : getUninstallServiceUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getInstallDriverUrl() {
+  const res = { method: 'POST', url: `/api/virtual-display/driver/install` as const }
+  return res
+}
+
+/**
+ * @summary Install LcxlVirtualDisplay IDD driver
+ * {@link /api/virtual-display/driver/install}
+ */
+export async function installDriver(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<InstallDriverMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getInstallDriverUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getQueryDriverStatusUrl() {
+  const res = { method: 'GET', url: `/api/virtual-display/driver/status` as const }
+  return res
+}
+
+/**
+ * @summary Query LcxlVirtualDisplay IDD driver status
+ * {@link /api/virtual-display/driver/status}
+ */
+export async function queryDriverStatus(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<QueryDriverStatusQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryDriverStatusUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUninstallDriverUrl() {
+  const res = { method: 'POST', url: `/api/virtual-display/driver/uninstall` as const }
+  return res
+}
+
+/**
+ * @summary Uninstall every LcxlVirtualDisplay IDD driver copy
+ * {@link /api/virtual-display/driver/uninstall}
+ */
+export async function uninstallDriver(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<UninstallDriverMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getUninstallDriverUrl().url.toString(), ... requestConfig })
   return res.data
 }

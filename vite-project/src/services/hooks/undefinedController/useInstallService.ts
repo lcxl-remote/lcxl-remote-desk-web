@@ -27,9 +27,9 @@ export function installServiceMutationOptions<TContext = unknown>(config: Partia
 }
 
 /**
- * @description The HTTP handler is stateless: it sends a command to Tauri via the
- * `service_op_sender` channel and returns 202 Accepted immediately.
- * The caller should poll `GET /api/server_info` to check `service_installed`.
+ * @description Stateless: the handler publishes a `ServiceOp` command on the host control
+ * hub and returns 202 Accepted immediately. The caller should poll
+ * `GET /api/server_info` to check `service_installed`.
  * @summary Install OS system service
  * {@link /api/service/install}
  */

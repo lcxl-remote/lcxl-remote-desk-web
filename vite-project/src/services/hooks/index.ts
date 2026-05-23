@@ -7,6 +7,7 @@ export type { GetCaptchaMutationKey } from "./undefinedController/useGetCaptcha.
 export type { GetCurrentUserQueryKey } from "./undefinedController/useGetCurrentUser.ts";
 export type { GetCurrentUserSuspenseQueryKey } from "./undefinedController/useGetCurrentUserSuspense.ts";
 export type { InitSystemMutationKey } from "./undefinedController/useInitSystem.ts";
+export type { InstallDriverMutationKey } from "./undefinedController/useInstallDriver.ts";
 export type { InstallServiceMutationKey } from "./undefinedController/useInstallService.ts";
 export type { ListConnectionsQueryKey } from "./undefinedController/useListConnections.ts";
 export type { ListConnectionsSuspenseQueryKey } from "./undefinedController/useListConnectionsSuspense.ts";
@@ -25,6 +26,8 @@ export type { OpenTerminalSessionQueryKey } from "./undefinedController/useOpenT
 export type { OpenTerminalSessionSuspenseQueryKey } from "./undefinedController/useOpenTerminalSessionSuspense.ts";
 export type { QueryBackendInfoQueryKey } from "./undefinedController/useQueryBackendInfo.ts";
 export type { QueryBackendInfoSuspenseQueryKey } from "./undefinedController/useQueryBackendInfoSuspense.ts";
+export type { QueryDriverStatusQueryKey } from "./undefinedController/useQueryDriverStatus.ts";
+export type { QueryDriverStatusSuspenseQueryKey } from "./undefinedController/useQueryDriverStatusSuspense.ts";
 export type { QueryLogSettingsQueryKey } from "./undefinedController/useQueryLogSettings.ts";
 export type { QueryLogSettingsSuspenseQueryKey } from "./undefinedController/useQueryLogSettingsSuspense.ts";
 export type { QuerySecuritySettingsQueryKey } from "./undefinedController/useQuerySecuritySettings.ts";
@@ -41,8 +44,11 @@ export type { QueryTurnClientSettingsQueryKey } from "./undefinedController/useQ
 export type { QueryTurnClientSettingsSuspenseQueryKey } from "./undefinedController/useQueryTurnClientSettingsSuspense.ts";
 export type { QueryTurnSettingsQueryKey } from "./undefinedController/useQueryTurnSettings.ts";
 export type { QueryTurnSettingsSuspenseQueryKey } from "./undefinedController/useQueryTurnSettingsSuspense.ts";
+export type { QueryVirtualDisplaySettingsQueryKey } from "./undefinedController/useQueryVirtualDisplaySettings.ts";
+export type { QueryVirtualDisplaySettingsSuspenseQueryKey } from "./undefinedController/useQueryVirtualDisplaySettingsSuspense.ts";
 export type { RegenerateTurnSecretMutationKey } from "./undefinedController/useRegenerateTurnSecret.ts";
 export type { SubmitSecurityApprovalMutationKey } from "./undefinedController/useSubmitSecurityApproval.ts";
+export type { UninstallDriverMutationKey } from "./undefinedController/useUninstallDriver.ts";
 export type { UninstallServiceMutationKey } from "./undefinedController/useUninstallService.ts";
 export type { UpdateDeviceCodeMutationKey } from "./undefinedController/useUpdateDeviceCode.ts";
 export type { UpdateLogSettingsMutationKey } from "./undefinedController/useUpdateLogSettings.ts";
@@ -51,6 +57,7 @@ export type { UpdateSettingsMutationKey } from "./undefinedController/useUpdateS
 export type { UpdateTelemetryConsentMutationKey } from "./undefinedController/useUpdateTelemetryConsent.ts";
 export type { UpdateTurnClientSettingsMutationKey } from "./undefinedController/useUpdateTurnClientSettings.ts";
 export type { UpdateTurnSettingsMutationKey } from "./undefinedController/useUpdateTurnSettings.ts";
+export type { UpdateVirtualDisplaySettingsMutationKey } from "./undefinedController/useUpdateVirtualDisplaySettings.ts";
 export { batchDeleteDeviceCodesMutationKey } from "./undefinedController/useBatchDeleteDeviceCodes.ts";
 export { batchDeleteDeviceCodesMutationOptions } from "./undefinedController/useBatchDeleteDeviceCodes.ts";
 export { useBatchDeleteDeviceCodes } from "./undefinedController/useBatchDeleteDeviceCodes.ts";
@@ -78,6 +85,9 @@ export { useGetCurrentUserSuspense } from "./undefinedController/useGetCurrentUs
 export { initSystemMutationKey } from "./undefinedController/useInitSystem.ts";
 export { initSystemMutationOptions } from "./undefinedController/useInitSystem.ts";
 export { useInitSystem } from "./undefinedController/useInitSystem.ts";
+export { installDriverMutationKey } from "./undefinedController/useInstallDriver.ts";
+export { installDriverMutationOptions } from "./undefinedController/useInstallDriver.ts";
+export { useInstallDriver } from "./undefinedController/useInstallDriver.ts";
 export { installServiceMutationKey } from "./undefinedController/useInstallService.ts";
 export { installServiceMutationOptions } from "./undefinedController/useInstallService.ts";
 export { useInstallService } from "./undefinedController/useInstallService.ts";
@@ -132,6 +142,12 @@ export { useQueryBackendInfo } from "./undefinedController/useQueryBackendInfo.t
 export { queryBackendInfoSuspenseQueryKey } from "./undefinedController/useQueryBackendInfoSuspense.ts";
 export { queryBackendInfoSuspenseQueryOptions } from "./undefinedController/useQueryBackendInfoSuspense.ts";
 export { useQueryBackendInfoSuspense } from "./undefinedController/useQueryBackendInfoSuspense.ts";
+export { queryDriverStatusQueryKey } from "./undefinedController/useQueryDriverStatus.ts";
+export { queryDriverStatusQueryOptions } from "./undefinedController/useQueryDriverStatus.ts";
+export { useQueryDriverStatus } from "./undefinedController/useQueryDriverStatus.ts";
+export { queryDriverStatusSuspenseQueryKey } from "./undefinedController/useQueryDriverStatusSuspense.ts";
+export { queryDriverStatusSuspenseQueryOptions } from "./undefinedController/useQueryDriverStatusSuspense.ts";
+export { useQueryDriverStatusSuspense } from "./undefinedController/useQueryDriverStatusSuspense.ts";
 export { queryLogSettingsQueryKey } from "./undefinedController/useQueryLogSettings.ts";
 export { queryLogSettingsQueryOptions } from "./undefinedController/useQueryLogSettings.ts";
 export { useQueryLogSettings } from "./undefinedController/useQueryLogSettings.ts";
@@ -180,12 +196,21 @@ export { useQueryTurnSettings } from "./undefinedController/useQueryTurnSettings
 export { queryTurnSettingsSuspenseQueryKey } from "./undefinedController/useQueryTurnSettingsSuspense.ts";
 export { queryTurnSettingsSuspenseQueryOptions } from "./undefinedController/useQueryTurnSettingsSuspense.ts";
 export { useQueryTurnSettingsSuspense } from "./undefinedController/useQueryTurnSettingsSuspense.ts";
+export { queryVirtualDisplaySettingsQueryKey } from "./undefinedController/useQueryVirtualDisplaySettings.ts";
+export { queryVirtualDisplaySettingsQueryOptions } from "./undefinedController/useQueryVirtualDisplaySettings.ts";
+export { useQueryVirtualDisplaySettings } from "./undefinedController/useQueryVirtualDisplaySettings.ts";
+export { queryVirtualDisplaySettingsSuspenseQueryKey } from "./undefinedController/useQueryVirtualDisplaySettingsSuspense.ts";
+export { queryVirtualDisplaySettingsSuspenseQueryOptions } from "./undefinedController/useQueryVirtualDisplaySettingsSuspense.ts";
+export { useQueryVirtualDisplaySettingsSuspense } from "./undefinedController/useQueryVirtualDisplaySettingsSuspense.ts";
 export { regenerateTurnSecretMutationKey } from "./undefinedController/useRegenerateTurnSecret.ts";
 export { regenerateTurnSecretMutationOptions } from "./undefinedController/useRegenerateTurnSecret.ts";
 export { useRegenerateTurnSecret } from "./undefinedController/useRegenerateTurnSecret.ts";
 export { submitSecurityApprovalMutationKey } from "./undefinedController/useSubmitSecurityApproval.ts";
 export { submitSecurityApprovalMutationOptions } from "./undefinedController/useSubmitSecurityApproval.ts";
 export { useSubmitSecurityApproval } from "./undefinedController/useSubmitSecurityApproval.ts";
+export { uninstallDriverMutationKey } from "./undefinedController/useUninstallDriver.ts";
+export { uninstallDriverMutationOptions } from "./undefinedController/useUninstallDriver.ts";
+export { useUninstallDriver } from "./undefinedController/useUninstallDriver.ts";
 export { uninstallServiceMutationKey } from "./undefinedController/useUninstallService.ts";
 export { uninstallServiceMutationOptions } from "./undefinedController/useUninstallService.ts";
 export { useUninstallService } from "./undefinedController/useUninstallService.ts";
@@ -210,3 +235,6 @@ export { useUpdateTurnClientSettings } from "./undefinedController/useUpdateTurn
 export { updateTurnSettingsMutationKey } from "./undefinedController/useUpdateTurnSettings.ts";
 export { updateTurnSettingsMutationOptions } from "./undefinedController/useUpdateTurnSettings.ts";
 export { useUpdateTurnSettings } from "./undefinedController/useUpdateTurnSettings.ts";
+export { updateVirtualDisplaySettingsMutationKey } from "./undefinedController/useUpdateVirtualDisplaySettings.ts";
+export { updateVirtualDisplaySettingsMutationOptions } from "./undefinedController/useUpdateVirtualDisplaySettings.ts";
+export { useUpdateVirtualDisplaySettings } from "./undefinedController/useUpdateVirtualDisplaySettings.ts";

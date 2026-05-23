@@ -502,8 +502,8 @@ async fn handle_change_display_settings_inbound(
             return Ok(());
         }
     };
-    let toggle_on = ctx.settings.read().await.virtual_display.enabled;
-    if !toggle_on {
+    let settings_snapshot = ctx.settings.read().await.clone();
+    if !settings_snapshot.virtual_display.enabled {
         emit_error_response(
             ctx,
             model,
@@ -533,10 +533,53 @@ async fn handle_change_display_settings_inbound(
             return Ok(());
         }
     };
+
+    // Auto-only gates: single-client, adaptive_web_page_resolution
+    // toggle. Apply before validate_mode so a non-authorised auto
+    // request can never poke the IDD.
+    if payload.auto {
+        // Multi-client guard: refuse so a second browser cannot fight
+        // the first one over the IDD resolution. Manual path is
+        // unaffected — operators can still drive resolution from any
+        // tab through the regular UI.
+        if ctx.pc_registry.len().await != 1 {
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_STATE,
+                "auto requires single client connection",
+            );
+            return Ok(());
+        }
+        if !settings_snapshot.desk.adaptive_web_page_resolution {
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_STATE,
+                "adaptive resolution disabled in desk settings",
+            );
+            return Ok(());
+        }
+    }
+
+    // Auto refresh-hz fallback: the browser hook ships `refresh_hz=0`
+    // to let the daemon supply the authoritative value (most recent
+    // IDD echo, or 60 as a cold-start default). This stays inside the
+    // `payload.auto` branch — a manual `refresh_hz=0` must keep its
+    // original semantics (rejected by `validate_mode` as a zero
+    // dimension), which the regression test
+    // `manual_zero_refresh_still_invalid` pins.
+    let effective_refresh_hz = if payload.auto && payload.refresh_hz == 0 {
+        let cached = supervisor.last_refresh_hz();
+        if cached == 0 { 60 } else { cached }
+    } else {
+        payload.refresh_hz
+    };
+
     let mode = VirtualDisplayMode {
         width: payload.width,
         height: payload.height,
-        refresh_hz: payload.refresh_hz,
+        refresh_hz: effective_refresh_hz,
     };
     if let Err(e) = validate_mode(mode) {
         emit_error_response(
@@ -547,13 +590,31 @@ async fn handle_change_display_settings_inbound(
         );
         return Ok(());
     }
+
+    // Throttle is the last gate before IPC. Placed *after*
+    // `validate_mode` so an invalid auto payload never burns the
+    // operator's next legitimate slot.
+    if payload.auto {
+        let min_interval =
+            Duration::from_millis(settings_snapshot.virtual_display.adaptive_throttle_ms);
+        if !supervisor.try_consume_auto_slot(tokio::time::Instant::now(), min_interval) {
+            emit_error_response(
+                ctx,
+                model,
+                DeskErrorCode::INVALID_STATE,
+                "auto change throttled",
+            );
+            return Ok(());
+        }
+    }
+
     let connection_id = model.from_connection_id.clone().unwrap_or_default();
     let ipc_payload = SetVirtualDisplayModePayload {
         request_id: model.request_id.clone(),
         connection_id,
         width: payload.width,
         height: payload.height,
-        refresh_hz: payload.refresh_hz,
+        refresh_hz: effective_refresh_hz,
     };
     if let Err(e) = ctx
         .worker_mgr
@@ -1088,6 +1149,42 @@ mod tests {
         }
     }
 
+    /// `make_ctx` variant that installs an `Attached`-state supervisor
+    /// AND a mock IPC sink so the `ChangeDisplaySettings` auto-path
+    /// tests can both (a) reach the new auto-only logic past the
+    /// `is_active()` gate, and (b) observe what `send_to_worker`
+    /// actually dispatched. The returned `mpsc::UnboundedReceiver` is
+    /// the IPC stream the worker would have seen.
+    /// `virtual_display.enabled` is pre-flipped to `true` — otherwise
+    /// the FEATURE_UNAVAILABLE arm short-circuits before the auto
+    /// branch executes.
+    async fn make_ctx_with_attached_supervisor() -> (
+        RouterContext,
+        broadcast::Receiver<String>,
+        tokio::sync::mpsc::UnboundedReceiver<ServiceToWorker>,
+    ) {
+        let (mut ctx, rx) = make_ctx_with_rx();
+        // Flip the system-level toggle on.
+        ctx.settings.write().await.virtual_display.enabled = true;
+        // Build an attached supervisor sharing the same worker_mgr the
+        // ctx already holds, so `send_to_worker` and `pc_registry` both
+        // route through consistent state.
+        let supervisor =
+            crate::daemon::virtual_display::VirtualDisplaySupervisor::new_attached_for_test(
+                ctx.worker_mgr.clone(),
+                "SWD\\Test\\Test",
+            );
+        ctx.virtual_display = Some(std::sync::Arc::new(supervisor));
+        // Default to a single-client topology so auto requests reach the
+        // throttle / IPC stage. The multi-client tests override this via
+        // `set_test_len_extra` directly.
+        ctx.pc_registry.set_test_len_extra(1);
+        // Wire a mock IPC sink so send_to_worker has somewhere to go.
+        let (ipc_tx, ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        ctx.worker_mgr.install_active_for_test(ipc_tx).await;
+        (ctx, rx, ipc_rx)
+    }
+
     /// Variant of `make_ctx` that hands the caller a fresh
     /// `outbound_rx` so the test can assert on the error response
     /// the router emits via `outbound_tx`.
@@ -1541,6 +1638,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 refresh_hz: 60,
+                auto: false,
             },
         );
         assert!(route(&model, &ctx).await.is_ok());
@@ -1573,6 +1671,7 @@ mod tests {
                 width: 1280,
                 height: 720,
                 refresh_hz: 60,
+                auto: false,
             },
         );
         assert!(route(&model, &ctx).await.is_ok());
@@ -1603,6 +1702,7 @@ mod tests {
                 width: 1280,
                 height: 720,
                 refresh_hz: 60,
+                auto: false,
             },
         );
         assert!(route(&model, &ctx).await.is_ok());
@@ -1641,6 +1741,7 @@ mod tests {
                 width: 100,
                 height: 100,
                 refresh_hz: 60,
+                auto: false,
             },
         );
         assert!(route(&model, &ctx).await.is_ok());
@@ -1701,6 +1802,7 @@ mod tests {
                 width: 1280,
                 height: 720,
                 refresh_hz: 60,
+                auto: false,
             },
         );
         assert!(route(&model, &ctx).await.is_ok());
@@ -1747,6 +1849,7 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 refresh_hz: 60,
+                auto: false,
             },
         );
         assert!(route(&model, &ctx).await.is_ok());
@@ -1779,7 +1882,12 @@ mod tests {
             SignalingType::RequestRemote,
             Some(connection_id.to_string()),
             None,
-            Some(serde_json::to_value(RequestRemoteModel { ice_servers: vec![] }).unwrap()),
+            Some(
+                serde_json::to_value(RequestRemoteModel {
+                    ice_servers: vec![],
+                })
+                .unwrap(),
+            ),
             None,
         )
     }
@@ -1871,5 +1979,322 @@ mod tests {
             .await
             .expect("route must continue even when provider is unavailable");
         assert!(ctx.pc_registry.contains("conn-unavailable").await);
+    }
+
+    // ===========================================================
+    // Auto-resolution ChangeDisplaySettings tests (Phase 1.6).
+    // The shared `make_ctx_with_attached_supervisor` flips
+    // `virtual_display.enabled = true` AND installs an Attached
+    // supervisor, so each test only needs to focus on its own gate.
+    // ===========================================================
+
+    /// Multi-client guard: `pc_registry.len() != 1` ⇒ INVALID_STATE for
+    /// auto requests, no IPC sent to worker. This is the user-decided
+    /// "only single connection" strategy — manual path must keep
+    /// working, which `manual_request_unaffected_by_multi_pc_guard`
+    /// covers below.
+    #[tokio::test]
+    async fn auto_request_rejected_when_multiple_pcs() {
+        let (ctx, mut rx, _worker_rx) = make_ctx_with_attached_supervisor().await;
+        // Simulate 2 PCs via the test-only override.
+        ctx.pc_registry.set_test_len_extra(2);
+        assert_eq!(ctx.pc_registry.len().await, 2);
+
+        let model = make_change_display_settings_model(
+            "req-multi",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        let response = read_response(&mut rx);
+        let state = response.response_state.expect("must have error state");
+        assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
+        assert!(
+            state
+                .message
+                .as_deref()
+                .unwrap_or("")
+                .contains("single client"),
+            "expected single-client message, got {:?}",
+            state.message
+        );
+    }
+
+    /// `desk.adaptive_web_page_resolution = false` ⇒ INVALID_STATE for
+    /// auto requests. This second gate lets the operator turn off
+    /// adaptive even when the IDD is otherwise ready.
+    #[tokio::test]
+    async fn auto_request_rejected_when_adaptive_disabled() {
+        let (ctx, mut rx, _worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.settings.write().await.desk.adaptive_web_page_resolution = false;
+
+        let model = make_change_display_settings_model(
+            "req-disabled",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        let response = read_response(&mut rx);
+        let state = response.response_state.expect("must have error state");
+        assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
+    }
+
+    /// Browser hook always sends `refresh_hz=0`. With a cached
+    /// observation the daemon must substitute that value into the IPC.
+    #[tokio::test]
+    async fn auto_request_substitutes_zero_refresh_with_cached() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
+        // Pre-seed the supervisor cache so the daemon has an
+        // authoritative value to substitute.
+        ctx.virtual_display
+            .as_ref()
+            .expect("supervisor present")
+            .record_applied_refresh_hz(144);
+
+        let model = make_change_display_settings_model(
+            "req-cached",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 0,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+
+        match worker_rx.try_recv().expect("IPC must have been dispatched") {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.width, 1920);
+                assert_eq!(p.height, 1080);
+                assert_eq!(p.refresh_hz, 144, "must substitute cached refresh");
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
+    }
+
+    /// With no cached observation (`last_refresh_hz=0`), the daemon
+    /// falls back to 60 — a value guaranteed to live in the IDD's
+    /// `ALLOWED_REFRESH` set, so the substitute always passes
+    /// `validate_mode`.
+    #[tokio::test]
+    async fn auto_request_falls_back_to_60_when_cache_zero() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
+        // Supervisor cache is 0 (no observation yet).
+        assert_eq!(
+            ctx.virtual_display
+                .as_ref()
+                .expect("supervisor present")
+                .last_refresh_hz(),
+            0
+        );
+
+        let model = make_change_display_settings_model(
+            "req-60",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 0,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+
+        match worker_rx.try_recv().expect("IPC must have been dispatched") {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.refresh_hz, 60, "must fall back to 60 when no cache");
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
+    }
+
+    /// Manual requests must keep their original semantics — `refresh_hz=0`
+    /// fails `validate_mode` as a zero dimension, not silently rescued
+    /// by the auto fallback. Regression guard for the codex-flagged
+    /// "fallback may leak into manual path" risk.
+    #[tokio::test]
+    async fn manual_zero_refresh_still_invalid() {
+        let (ctx, mut rx, _worker_rx) = make_ctx_with_attached_supervisor().await;
+        let model = make_change_display_settings_model(
+            "req-manual-zero",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 0,
+                auto: false,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        let response = read_response(&mut rx);
+        let state = response.response_state.expect("must have error state");
+        assert_eq!(
+            state.error_code,
+            DeskErrorCode::INVALID_PARAMS.code(),
+            "manual zero refresh must surface INVALID_PARAMS, not silent fallback"
+        );
+    }
+
+    /// After an auto request consumes the throttle slot, a manual
+    /// (`auto=false`) request must still go through — auto throttling
+    /// is *only* for auto, never for operator-driven changes.
+    #[tokio::test]
+    async fn manual_request_unaffected_by_auto_throttle() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
+
+        // First, an auto request consumes the slot.
+        let auto_model = make_change_display_settings_model(
+            "req-auto",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&auto_model, &ctx).await.expect("auto must succeed");
+        let _ = worker_rx.try_recv();
+
+        // Now a manual request right after — throttle MUST be bypassed.
+        let manual_model = make_change_display_settings_model(
+            "req-manual",
+            ChangeDisplaySettingsPayload {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+                auto: false,
+            },
+        );
+        route(&manual_model, &ctx)
+            .await
+            .expect("manual must succeed");
+        match worker_rx
+            .try_recv()
+            .expect("manual IPC must still be dispatched after auto slot consumed")
+        {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.width, 1280);
+                assert_eq!(p.height, 720);
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
+    }
+
+    /// Manual auto=false requests bypass the single-client guard too.
+    /// Operator changes from any connected browser stay functional even
+    /// in multi-client topologies.
+    #[tokio::test]
+    async fn manual_request_unaffected_by_multi_pc_guard() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.pc_registry.set_test_len_extra(2);
+
+        let model = make_change_display_settings_model(
+            "req-manual-multi",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+                auto: false,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        assert!(
+            matches!(
+                worker_rx.try_recv(),
+                Ok(ServiceToWorker::SetVirtualDisplayMode(_))
+            ),
+            "manual request must reach worker even with multiple PCs",
+        );
+    }
+
+    /// `adaptive_throttle_ms` is read from `Settings` per call (not
+    /// cached on the supervisor), so a tight throttle in settings must
+    /// drop the second back-to-back auto request. Pins the live-read
+    /// behaviour for Phase 1.6.
+    #[tokio::test]
+    async fn auto_throttle_tight_setting_drops_second_request() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
+        ctx.settings
+            .write()
+            .await
+            .virtual_display
+            .adaptive_throttle_ms = 60_000; // tight: 60 s
+
+        for (req_id, w, h) in [("req-tight-1", 1920, 1080), ("req-tight-2", 1280, 720)] {
+            let model = make_change_display_settings_model(
+                req_id,
+                ChangeDisplaySettingsPayload {
+                    width: w,
+                    height: h,
+                    refresh_hz: 60,
+                    auto: true,
+                },
+            );
+            route(&model, &ctx).await.expect("route must not error");
+        }
+        assert!(
+            matches!(
+                worker_rx.try_recv(),
+                Ok(ServiceToWorker::SetVirtualDisplayMode(_))
+            ),
+            "first auto must pass through the throttle",
+        );
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "second back-to-back auto must be throttled (no IPC)",
+        );
+    }
+
+    /// `adaptive_throttle_ms = 0` is the explicit "no defense" mode.
+    /// Back-to-back auto requests must both reach the worker. Together
+    /// with `auto_throttle_tight_setting_drops_second_request` this
+    /// pins that the throttle interval really comes from settings —
+    /// flipping the value flips the behaviour.
+    #[tokio::test]
+    async fn auto_throttle_zero_setting_allows_back_to_back() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.settings.write().await.desk.adaptive_web_page_resolution = true;
+        ctx.settings
+            .write()
+            .await
+            .virtual_display
+            .adaptive_throttle_ms = 0; // disabled
+
+        for (req_id, w, h) in [("req-free-1", 1920, 1080), ("req-free-2", 1280, 720)] {
+            let model = make_change_display_settings_model(
+                req_id,
+                ChangeDisplaySettingsPayload {
+                    width: w,
+                    height: h,
+                    refresh_hz: 60,
+                    auto: true,
+                },
+            );
+            route(&model, &ctx).await.expect("route must not error");
+        }
+        assert!(
+            matches!(
+                worker_rx.try_recv(),
+                Ok(ServiceToWorker::SetVirtualDisplayMode(_))
+            ),
+            "first auto must pass when throttle disabled",
+        );
+        assert!(
+            matches!(
+                worker_rx.try_recv(),
+                Ok(ServiceToWorker::SetVirtualDisplayMode(_))
+            ),
+            "second auto must also pass when throttle disabled",
+        );
     }
 }

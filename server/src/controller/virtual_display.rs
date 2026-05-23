@@ -96,9 +96,11 @@ async fn build_status(
     // Status query — never reports `Err` upwards: a failed query simply
     // becomes `installed: None`, which the UI renders as "unknown" with
     // a retry hint.
-    let status_join =
-        tokio::time::timeout(INSTALLER_TIMEOUT, tokio::task::spawn_blocking(installer::query_install_status))
-            .await;
+    let status_join = tokio::time::timeout(
+        INSTALLER_TIMEOUT,
+        tokio::task::spawn_blocking(installer::query_install_status),
+    )
+    .await;
     let (installed, installed_oem_infs) = match status_join {
         Ok(Ok(Ok(DriverOpsStatus {
             installed,
@@ -180,19 +182,18 @@ pub async fn install_driver(
         })?;
 
     let exe_dir_clone = exe_dir.clone();
-    let discovered = tokio::task::spawn_blocking(move || {
-        installer::discover_driver_files_in(&exe_dir_clone)
-    })
-    .await
-    .map_err(|e| {
-        DeskError::new_custom_error(
-            DeskErrorCode::SYSTEM_ERROR,
-            &format!("discover join: {e}"),
-        )
-    })?
-    .map_err(|e| {
-        DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &format!("discover: {e}"))
-    })?;
+    let discovered =
+        tokio::task::spawn_blocking(move || installer::discover_driver_files_in(&exe_dir_clone))
+            .await
+            .map_err(|e| {
+                DeskError::new_custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    &format!("discover join: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                DeskError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, &format!("discover: {e}"))
+            })?;
     let files = match discovered {
         Some(f) => f,
         None => {
@@ -261,9 +262,11 @@ pub async fn uninstall_driver(
         );
     }
 
-    let uninstall_join =
-        tokio::time::timeout(INSTALLER_TIMEOUT, tokio::task::spawn_blocking(installer::uninstall_all))
-            .await;
+    let uninstall_join = tokio::time::timeout(
+        INSTALLER_TIMEOUT,
+        tokio::task::spawn_blocking(installer::uninstall_all),
+    )
+    .await;
     match uninstall_join {
         Ok(Ok(Ok(_n))) => {}
         Ok(Ok(Err(InstallerError::StatusUnknown))) => {
@@ -441,8 +444,7 @@ mod tests {
                     .service(update_virtual_display_settings),
             );
         if let Some(b) = tauri_is_admin {
-            let override_data: TauriIsAdminOverride =
-                Arc::new(std::sync::Mutex::new(Some(b)));
+            let override_data: TauriIsAdminOverride = Arc::new(std::sync::Mutex::new(Some(b)));
             app = app.app_data(web::Data::new(override_data));
         }
         app
@@ -591,7 +593,10 @@ mod tests {
         let app = test::init_service(build_app(settings_for_app, Some(true))).await;
         let req = test::TestRequest::post()
             .uri("/api/desk/settings/virtual-display")
-            .set_json(&VirtualDisplaySettings { enabled: false })
+            .set_json(&VirtualDisplaySettings {
+                enabled: false,
+                ..Default::default()
+            })
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);

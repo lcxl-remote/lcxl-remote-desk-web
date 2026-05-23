@@ -37,6 +37,7 @@
 //! `WorkerToService::VirtualDisplayAttachResult`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use desk_ipc_protocol::message::{
@@ -148,6 +149,21 @@ pub struct VirtualDisplaySupervisor {
     /// `state` (the `RwLock`) still owns field-level synchronisation;
     /// `lifecycle_lock` provides whole-operation atomicity.
     lifecycle_lock: Mutex<()>,
+    /// Most-recently observed IDD refresh rate (Hz) from the worker's
+    /// `VirtualDisplayMode::Applied` echo. `0` ⇒ no observation yet.
+    /// Used by:
+    ///   * `InitSignalingData::virtual_display_current_refresh_hz`
+    ///     (display only, not authoritative)
+    ///   * The router's auto `ChangeDisplaySettings` path to fill in a
+    ///     refresh value when the browser sends `refresh_hz=0`.
+    /// Survives detach/re-attach intentionally — operator manual tuning
+    /// during the previous attach cycle should not be lost just because
+    /// the IDD bounced.
+    last_known_refresh_hz: AtomicU32,
+    /// Timestamp of the last auto request that consumed a throttle slot.
+    /// `None` until the first call. Survives detach/re-attach (acts as a
+    /// global rate limit regardless of supervisor cycles).
+    last_auto_change_at: std::sync::Mutex<Option<Instant>>,
 }
 
 impl VirtualDisplaySupervisor {
@@ -163,6 +179,8 @@ impl VirtualDisplaySupervisor {
             worker_mgr,
             attached_capabilities_target: target_tx,
             lifecycle_lock: Mutex::new(()),
+            last_known_refresh_hz: AtomicU32::new(0),
+            last_auto_change_at: std::sync::Mutex::new(None),
         }
     }
 
@@ -171,6 +189,48 @@ impl VirtualDisplaySupervisor {
     /// Used by the router to gate inbound `ChangeDisplaySettings`.
     pub async fn is_active(&self) -> bool {
         matches!(*self.state.read().await, SupervisorState::Attached { .. })
+    }
+
+    /// Most-recently observed IDD refresh rate. `0` means the daemon has
+    /// no `VirtualDisplayMode::Applied` observation yet (cold start) or
+    /// the IDD has never reported a refresh.
+    pub fn last_refresh_hz(&self) -> u32 {
+        self.last_known_refresh_hz.load(Ordering::Relaxed)
+    }
+
+    /// Stash the refresh rate the driver actually applied, learned via
+    /// the worker's `VirtualDisplayMode::Applied` echo path. `hz==0` is
+    /// ignored (treated as "no observation") so a malformed echo never
+    /// erases a valid prior value.
+    pub fn record_applied_refresh_hz(&self, hz: u32) {
+        if hz == 0 {
+            return;
+        }
+        self.last_known_refresh_hz.store(hz, Ordering::Relaxed);
+    }
+
+    /// Throttle an auto `ChangeDisplaySettings` request: returns `true`
+    /// if `min_interval` has elapsed since the last consumed slot (or
+    /// this is the first ever call), and records `now` as the new slot.
+    /// Returns `false` if the request must be rejected.
+    ///
+    /// `min_interval == 0` always permits (operator-configured "no
+    /// defense"). The state is held in a sync `Mutex` because all calls
+    /// are short critical sections and the surrounding router code is
+    /// already async-aware; the lock is never held across `await`.
+    pub fn try_consume_auto_slot(&self, now: Instant, min_interval: Duration) -> bool {
+        let mut last = self
+            .last_auto_change_at
+            .lock()
+            .expect("last_auto_change_at mutex poisoned");
+        let allow = match *last {
+            None => true,
+            Some(prev) => now.saturating_duration_since(prev) >= min_interval,
+        };
+        if allow {
+            *last = Some(now);
+        }
+        allow
     }
 
     /// Apply the desired enabled-state — `desired=true` ⇒ create the
@@ -383,7 +443,10 @@ impl VirtualDisplaySupervisor {
                 // `display_name`) before signalling completion.
                 let cap_snapshot = self.worker_mgr.capabilities_version();
                 *state = match prev {
-                    SupervisorState::Attaching { instance_id, handle } => {
+                    SupervisorState::Attaching {
+                        instance_id,
+                        handle,
+                    } => {
                         info!(
                             virtual_display.instance_id = %instance_id,
                             virtual_display.display_name = %display_name,
@@ -426,9 +489,7 @@ impl VirtualDisplaySupervisor {
                     // would let an awaiter observe the cap bump without
                     // ever seeing the target and miss the completion edge.
                     let target = cap_snapshot + 1;
-                    let _ = self
-                        .attached_capabilities_target
-                        .send_replace(Some(target));
+                    let _ = self.attached_capabilities_target.send_replace(Some(target));
                     // The IDD HMONITOR is now visible to
                     // `monitors::enum_display_infos`; ask the worker to
                     // re-publish Capabilities so the daemon's cache (and
@@ -728,6 +789,8 @@ impl VirtualDisplaySupervisor {
             worker_mgr,
             attached_capabilities_target: target_tx,
             lifecycle_lock: Mutex::new(()),
+            last_known_refresh_hz: AtomicU32::new(0),
+            last_auto_change_at: std::sync::Mutex::new(None),
         }
     }
 }
@@ -1347,9 +1410,8 @@ mod tests {
     async fn ensure_attached_waits_when_target_satisfied_but_cache_missing_display() {
         let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
         let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
-        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
-            desk_ipc_protocol::message::ServiceToWorker,
-        >();
+        let (ipc_tx, _ipc_rx) =
+            tokio::sync::mpsc::unbounded_channel::<desk_ipc_protocol::message::ServiceToWorker>();
         worker_mgr.install_active_for_test(ipc_tx).await;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
         supervisor.apply(true).await.expect("apply(true)");
@@ -1392,9 +1454,8 @@ mod tests {
     async fn ensure_attached_ignores_unrelated_capabilities_bump_before_attached() {
         let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
         let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
-        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
-            desk_ipc_protocol::message::ServiceToWorker,
-        >();
+        let (ipc_tx, _ipc_rx) =
+            tokio::sync::mpsc::unbounded_channel::<desk_ipc_protocol::message::ServiceToWorker>();
         worker_mgr.install_active_for_test(ipc_tx).await;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
 
@@ -1422,9 +1483,8 @@ mod tests {
     async fn ensure_attached_brings_up_from_disabled() {
         let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
         let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
-        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
-            desk_ipc_protocol::message::ServiceToWorker,
-        >();
+        let (ipc_tx, _ipc_rx) =
+            tokio::sync::mpsc::unbounded_channel::<desk_ipc_protocol::message::ServiceToWorker>();
         worker_mgr.install_active_for_test(ipc_tx).await;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
 
@@ -1457,9 +1517,8 @@ mod tests {
     async fn ensure_attached_times_out_when_attach_never_completes() {
         let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
         let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
-        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
-            desk_ipc_protocol::message::ServiceToWorker,
-        >();
+        let (ipc_tx, _ipc_rx) =
+            tokio::sync::mpsc::unbounded_channel::<desk_ipc_protocol::message::ServiceToWorker>();
         worker_mgr.install_active_for_test(ipc_tx).await;
         let supervisor = VirtualDisplaySupervisor::new(provider, worker_mgr);
 
@@ -1607,9 +1666,8 @@ mod tests {
         let provider: Box<dyn VirtualDisplayLifecycle> =
             Box::new(ArcProvider(lifecycle_for_provider));
         let (worker_mgr, _to_daemon_rx) = make_worker_mgr();
-        let (ipc_tx, _ipc_rx) = tokio::sync::mpsc::unbounded_channel::<
-            desk_ipc_protocol::message::ServiceToWorker,
-        >();
+        let (ipc_tx, _ipc_rx) =
+            tokio::sync::mpsc::unbounded_channel::<desk_ipc_protocol::message::ServiceToWorker>();
         worker_mgr.install_active_for_test(ipc_tx).await;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr.clone()));
 
@@ -1628,22 +1686,141 @@ mod tests {
 
         let s1 = supervisor.clone();
         let s2 = supervisor.clone();
-        let h1 = tokio::spawn(async move {
-            s1.ensure_attached(std::time::Duration::from_secs(2)).await
-        });
-        let h2 = tokio::spawn(async move {
-            s2.ensure_attached(std::time::Duration::from_secs(2)).await
-        });
+        let h1 =
+            tokio::spawn(
+                async move { s1.ensure_attached(std::time::Duration::from_secs(2)).await },
+            );
+        let h2 =
+            tokio::spawn(
+                async move { s2.ensure_attached(std::time::Duration::from_secs(2)).await },
+            );
         let r1 = h1.await.unwrap();
         let r2 = h2.await.unwrap();
         driver.await.unwrap();
 
-        assert!(matches!(r1, EnsureAttachedOutcome::Attached), "first: {r1:?}");
-        assert!(matches!(r2, EnsureAttachedOutcome::Attached), "second: {r2:?}");
+        assert!(
+            matches!(r1, EnsureAttachedOutcome::Attached),
+            "first: {r1:?}"
+        );
+        assert!(
+            matches!(r2, EnsureAttachedOutcome::Attached),
+            "second: {r2:?}"
+        );
         assert_eq!(
             lifecycle.create_calls.load(Ordering::SeqCst),
             1,
             "provider.create must be called at most once",
         );
+    }
+
+    /// `record_applied_refresh_hz` stores the driver-applied refresh from
+    /// the worker's echo, but a `0` reading must not erase a prior valid
+    /// observation (a malformed echo cannot wipe operator-tuned state).
+    #[test]
+    fn supervisor_records_refresh_hz_on_applied() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s = VirtualDisplaySupervisor::new(
+            Box::new(MockLifecycle::returns_not_supported()),
+            worker_mgr,
+        );
+
+        // Initial state: 0 (no observation).
+        assert_eq!(s.last_refresh_hz(), 0);
+
+        // First Applied(120) caches 120.
+        s.record_applied_refresh_hz(120);
+        assert_eq!(s.last_refresh_hz(), 120);
+
+        // Stray 0 reading does NOT overwrite the cached value.
+        s.record_applied_refresh_hz(0);
+        assert_eq!(s.last_refresh_hz(), 120);
+
+        // A subsequent valid Applied(60) does overwrite.
+        s.record_applied_refresh_hz(60);
+        assert_eq!(s.last_refresh_hz(), 60);
+    }
+
+    /// The first call ever to `try_consume_auto_slot` must always
+    /// succeed — there is no prior timestamp to compare against and no
+    /// reason to make the operator wait `min_interval` after boot.
+    #[test]
+    fn supervisor_auto_slot_first_call_succeeds() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s = VirtualDisplaySupervisor::new(
+            Box::new(MockLifecycle::returns_not_supported()),
+            worker_mgr,
+        );
+
+        let allowed = s.try_consume_auto_slot(Instant::now(), Duration::from_secs(60));
+        assert!(allowed, "first try_consume_auto_slot must always succeed");
+    }
+
+    /// Two calls within `min_interval` ⇒ the second is rejected. After
+    /// the interval has elapsed the slot becomes available again. We
+    /// pass synthetic `Instant`s (relative to a baseline) so the test
+    /// is wall-clock independent.
+    #[test]
+    fn supervisor_auto_slot_throttles_within_interval() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s = VirtualDisplaySupervisor::new(
+            Box::new(MockLifecycle::returns_not_supported()),
+            worker_mgr,
+        );
+        let base = Instant::now();
+        // First call at t=0 succeeds.
+        assert!(s.try_consume_auto_slot(base, Duration::from_millis(1000)));
+        // 500 ms later — interval not elapsed ⇒ false, last_at unchanged.
+        assert!(!s.try_consume_auto_slot(
+            base + Duration::from_millis(500),
+            Duration::from_millis(1000)
+        ));
+        // 1500 ms after the first slot ⇒ interval elapsed ⇒ true.
+        assert!(s.try_consume_auto_slot(
+            base + Duration::from_millis(1500),
+            Duration::from_millis(1000)
+        ));
+    }
+
+    /// `min_interval` is taken from the caller (router reads it from
+    /// `settings.virtual_display.adaptive_throttle_ms`). Different
+    /// intervals on subsequent calls must drive different behaviour —
+    /// pins that the supervisor never caches the interval.
+    #[test]
+    fn supervisor_auto_slot_respects_dynamic_interval() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s = VirtualDisplaySupervisor::new(
+            Box::new(MockLifecycle::returns_not_supported()),
+            worker_mgr,
+        );
+        let base = Instant::now();
+        // Consume slot at t=0 with a long interval.
+        assert!(s.try_consume_auto_slot(base, Duration::from_millis(2000)));
+        // 1500 ms later, still within the 2000 ms window ⇒ false.
+        assert!(!s.try_consume_auto_slot(
+            base + Duration::from_millis(1500),
+            Duration::from_millis(2000)
+        ));
+        // Same elapsed (1500 ms), but caller now passes 500 ms ⇒ true
+        // (interval is per-call, not state).
+        assert!(s.try_consume_auto_slot(
+            base + Duration::from_millis(1500),
+            Duration::from_millis(500)
+        ));
+    }
+
+    /// `min_interval=0` is the operator-configured "no throttle" mode.
+    /// Two back-to-back calls (Δ ≈ 0) must both succeed.
+    #[test]
+    fn supervisor_auto_slot_zero_interval_never_throttles() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s = VirtualDisplaySupervisor::new(
+            Box::new(MockLifecycle::returns_not_supported()),
+            worker_mgr,
+        );
+        let now = Instant::now();
+        assert!(s.try_consume_auto_slot(now, Duration::from_millis(0)));
+        // Δ = 0 between two calls with min_interval = 0 ⇒ second
+        // still succeeds (0 >= 0).
+        assert!(s.try_consume_auto_slot(now, Duration::from_millis(0)));
     }
 }

@@ -510,7 +510,7 @@ pub async fn run_signaling_proxy(
             WorkerToService::VirtualDisplayMode(payload) => {
                 let connection_id_debug = payload.connection_id.clone();
                 let request_id_debug = payload.request_id.clone();
-                match build_virtual_display_response(payload) {
+                match build_virtual_display_response(payload, virtual_display.as_ref()) {
                     Ok(model) => match serde_json::to_string(&model) {
                         Ok(text) => {
                             let _ = outbound_tx.send(text);
@@ -546,7 +546,9 @@ pub async fn run_signaling_proxy(
 /// up the full proxy task / outbound channel infrastructure.
 async fn dispatch_attach_result(
     payload: desk_ipc_protocol::message::VirtualDisplayAttachResultPayload,
-    virtual_display: Option<&std::sync::Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
+    virtual_display: Option<
+        &std::sync::Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>,
+    >,
 ) {
     match virtual_display {
         Some(supervisor) => {
@@ -568,19 +570,31 @@ async fn dispatch_attach_result(
 /// (which may have been snapped to a nearby supported configuration);
 /// Failed → `SignalingModel::error(INVALID_STATE, reason)`.
 ///
+/// On a successful `Applied` outcome we also update the supervisor's
+/// `last_known_refresh_hz` cache — this is the daemon's authoritative
+/// source for the refresh-hz fallback when the auto-resolution browser
+/// hook sends `refresh_hz=0`. Stray responses in non-service-daemon
+/// mode (`supervisor=None`) are tolerated and the cache simply does
+/// not update.
+///
 /// Kept as a free function so the routing logic can be unit-tested
 /// without spinning up a signaling-proxy task. The call site in the
 /// proxy loop only deals with the serialisation + outbound broadcast.
 fn build_virtual_display_response(
     payload: desk_ipc_protocol::message::VirtualDisplayModeResponsePayload,
+    supervisor: Option<&std::sync::Arc<crate::daemon::virtual_display::VirtualDisplaySupervisor>>,
 ) -> Result<SignalingModel, desk_signal_facade::error::DeskSignalFacadeError> {
     let connection_id = Some(payload.connection_id);
     match payload.outcome {
         VirtualDisplayModeOutcome::Applied(data) => {
+            if let Some(supervisor) = supervisor {
+                supervisor.record_applied_refresh_hz(data.refresh_hz);
+            }
             let response = ChangeDisplaySettingsPayload {
                 width: data.width,
                 height: data.height,
                 refresh_hz: data.refresh_hz,
+                auto: false,
             };
             SignalingModel::success_response(
                 &payload.request_id,
@@ -945,7 +959,7 @@ mod tests {
                 refresh_hz: 60,
             }),
         };
-        let model = build_virtual_display_response(payload).expect("build success model");
+        let model = build_virtual_display_response(payload, None).expect("build success model");
         assert_eq!(model.request_id, "req-42");
         assert_eq!(
             model.signaling_type as i32,
@@ -972,7 +986,7 @@ mod tests {
             connection_id: "conn-8".to_string(),
             outcome: VirtualDisplayModeOutcome::Failed("driver pipe IO failed".to_string()),
         };
-        let model = build_virtual_display_response(payload).expect("build error model");
+        let model = build_virtual_display_response(payload, None).expect("build error model");
         assert_eq!(model.request_id, "req-43");
         assert_eq!(
             model.signaling_type as i32,
@@ -982,6 +996,80 @@ mod tests {
         let state = model.response_state.expect("error response carries state");
         assert_eq!(state.error_code, DeskErrorCode::INVALID_STATE.code());
         assert_eq!(state.message.as_deref(), Some("driver pipe IO failed"));
+    }
+
+    /// Applied response must update the supervisor's `last_known_refresh_hz`
+    /// cache. The cache is the daemon's authoritative source for the
+    /// refresh-hz fallback when the auto-resolution browser hook sends
+    /// `refresh_hz=0` — without this update the daemon would never learn
+    /// the driver's actual refresh rate.
+    #[test]
+    fn build_virtual_display_response_applied_updates_supervisor_cache() {
+        use crate::daemon::pc_manager::PcRegistry;
+        use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+        use crate::daemon::worker_manager::WorkerManager;
+        use crate::model::settings::{Settings, SharedSettings};
+        use actix_web::web;
+        let shared = SharedSettings::from(Settings::default());
+        let settings = web::Data::new(shared);
+        let pc_registry = PcRegistry::new();
+        let (worker_mgr, _rx) = WorkerManager::new(settings, pc_registry);
+        let supervisor =
+            std::sync::Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(worker_mgr));
+        // Pre-condition: cache is 0 (no observation yet).
+        assert_eq!(supervisor.last_refresh_hz(), 0);
+
+        let payload = VirtualDisplayModeResponsePayload {
+            request_id: "req-cache".to_string(),
+            connection_id: "conn-cache".to_string(),
+            outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 144,
+            }),
+        };
+        let _model = build_virtual_display_response(payload, Some(&supervisor))
+            .expect("build success model");
+        assert_eq!(
+            supervisor.last_refresh_hz(),
+            144,
+            "Applied outcome must update supervisor cache",
+        );
+    }
+
+    /// Failed response must NOT update the cache — the driver did not
+    /// apply anything so there is no refresh rate to remember. Guards
+    /// against a future refactor that records unconditionally and
+    /// poisons the cache with a stale value after a transient driver
+    /// failure.
+    #[test]
+    fn build_virtual_display_response_failed_does_not_update_supervisor_cache() {
+        use crate::daemon::pc_manager::PcRegistry;
+        use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+        use crate::daemon::worker_manager::WorkerManager;
+        use crate::model::settings::{Settings, SharedSettings};
+        use actix_web::web;
+        let shared = SharedSettings::from(Settings::default());
+        let settings = web::Data::new(shared);
+        let pc_registry = PcRegistry::new();
+        let (worker_mgr, _rx) = WorkerManager::new(settings, pc_registry);
+        let supervisor =
+            std::sync::Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(worker_mgr));
+        // Pre-seed the cache so the test can detect overwrites.
+        supervisor.record_applied_refresh_hz(120);
+
+        let payload = VirtualDisplayModeResponsePayload {
+            request_id: "req-fail".to_string(),
+            connection_id: "conn-fail".to_string(),
+            outcome: VirtualDisplayModeOutcome::Failed("driver pipe IO failed".to_string()),
+        };
+        let _model =
+            build_virtual_display_response(payload, Some(&supervisor)).expect("build error model");
+        assert_eq!(
+            supervisor.last_refresh_hz(),
+            120,
+            "Failed outcome must not touch supervisor cache",
+        );
     }
 
     /// Non-service-daemon startup paths leave `RouterContext.virtual_display`

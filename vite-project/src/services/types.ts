@@ -4,6 +4,26 @@
 */
 
 
+/**
+ * @description Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `InitSignalingData` so each browser session uses the\nhost operator\'s preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon\'s defensive rate limit and the browser does not need to know\nit.
+*/
+export type AdaptiveResolutionParams = {
+    /**
+     * @description Trailing-edge debounce window (ms) the browser waits after a\n`resize` settles before issuing an auto ChangeDisplaySettings.
+     * @minLength 0
+     * @default 5000
+     * @type integer | undefined, int64
+    */
+    debounce_ms?: bigint;
+    /**
+     * @description Minimum pixel delta on either axis the browser treats as\nsignificant. Below this threshold the change is ignored.
+     * @minLength 0
+     * @default 16
+     * @type integer | undefined, int32
+    */
+    min_delta_px?: number;
+};
+
 export const audioDataFlowEnum = {
     Render: "Render",
     Capture: "Capture"
@@ -556,7 +576,7 @@ export type DeskSettings = {
     */
     enable_d3d_debug?: boolean;
     /**
-     * @description Whether the encoder may honour `ImageInfo::get_dirty_rects` to only re-convert changed regions of the BGRA frame into the persistent YUV buffer. Defaults to `true` (the optimisation is on). Setting it to `false` forces every captured frame through a full BGRA→YUV conversion — useful as a kill-switch when partial updates surface rendering artefacts (e.g. transient black bars on animation-heavy content).
+     * @description Whether the encoder may honour `ImageInfo::get_dirty_rects` to only\nre-convert changed regions of the BGRA frame into the persistent YUV\nbuffer. Defaults to `true` (the optimisation is on). Setting it to\n`false` forces every captured frame through a full BGRA→YUV\nconversion — useful as a kill-switch when partial updates surface\nrendering artefacts (e.g. transient black bars on animation-heavy\ncontent).
      * @default true
      * @type boolean | undefined
     */
@@ -585,15 +605,7 @@ export type DeskSettings = {
     */
     show_mouse?: boolean;
     /**
-     * @description GDI device name of the capture target (`\\.\DISPLAYn`).
-Empty string means "no display selected yet" — the browser
-must surface a chooser before starting media. Selection by
-name (instead of by enumeration index) is required so that
-IDD virtual displays — which are visible to GDI but invisible
-to `IDXGIAdapter::EnumOutputs` — can be addressed unambiguously,
-and so that the selected target survives display hot-plug
-reordering. See the v4 virtual-display capture-selection plan
-for full context.
+     * @description GDI device name of the capture target (`\\\\.\\DISPLAYn`).\nEmpty string means \"no display selected yet\" — the browser\nmust surface a chooser before starting media. Selection is by\nname (instead of enumeration index) because:\n1. DXGI and WGC backends walk different enumerations\n   (`IDXGIAdapter::EnumOutputs` vs `EnumDisplayMonitors`), but\n   both expose the same GDI device name — so a name-based key\n   is the only stable cross-backend addressing.\n2. Display hot-plug (attach / detach / IDD bring-up) reorders\n   the enumeration, so an index saved in settings would drift\n   onto the wrong monitor across reboots.
      * @default ""
      * @type string | undefined
     */
@@ -1096,6 +1108,11 @@ export type LcxlRTCIceServer = {
 */
 export type InitSignalingData = {
     /**
+     * @description Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `InitSignalingData` so each browser session uses the\nhost operator\'s preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon\'s defensive rate limit and the browser does not need to know\nit.
+     * @type object | undefined
+    */
+    adaptive_resolution?: AdaptiveResolutionParams;
+    /**
      * @description Audio device list
      * @type object
     */
@@ -1143,12 +1160,28 @@ export type InitSignalingData = {
      * @type array
     */
     video_encoder_list: string[];
+    /**
+     * @description Whether the daemon currently has the IDD virtual display attached\n(service-daemon mode + `virtual_display.enabled=true` + attach\nresolved). The browser uses this to gate the adaptive-resolution\nhook — there is no point firing ChangeDisplaySettings against a\nhost that does not own the IDD.
+     * @type boolean | undefined
+    */
+    virtual_display_active?: boolean;
+    /**
+     * @description Most-recently-applied IDD refresh rate the daemon has seen via the\nworker\'s VirtualDisplayMode echo. `0` means the daemon has no\nobservation yet (cold start) — the browser may use it for\ndisplay purposes only; the auto path always sends `refresh_hz=0`\nand lets the daemon do the authoritative fallback.
+     * @minLength 0
+     * @type integer | undefined, int32
+    */
+    virtual_display_current_refresh_hz?: number;
 };
 
 /**
  * @description Request body for `POST /api/service/install`.
 */
 export type InstallServiceRequest = {
+    /**
+     * @description Whether to also stage the LcxlVirtualDisplay IDD driver during\nthe install flow. The Tauri shell sets this from the\n\"install IDD virtual display driver\" checkbox on the install\ndialog; defaults to `false` for older clients that don\'t send\nthe field.
+     * @type boolean | undefined
+    */
+    install_idd_driver?: boolean;
     /**
      * @description Installation directory. Uses the platform default when absent.
      * @type string,null
@@ -1249,6 +1282,12 @@ export type LogSettings = {
      * @type integer | undefined, int32
     */
     log_retention_days?: number;
+    /**
+     * @description Enable tokio-console subscriber (requires `tokio_unstable` build flag). Default false.\nEach startup mode listens on a different port to avoid conflicts:\nDefault/Signaling/DeskServer → 6669, ServiceDaemon → 6670, SessionWorker → 6671.
+     * @default false
+     * @type boolean | undefined
+    */
+    tokio_console_enabled?: boolean;
     /**
      * @description Enable Rust backtrace for errors
      * @default true
@@ -1522,6 +1561,12 @@ export type RestResponseLogSettings = {
          * @type integer | undefined, int32
         */
         log_retention_days?: number;
+        /**
+         * @description Enable tokio-console subscriber (requires `tokio_unstable` build flag). Default false.\nEach startup mode listens on a different port to avoid conflicts:\nDefault/Signaling/DeskServer → 6669, ServiceDaemon → 6670, SessionWorker → 6671.
+         * @default false
+         * @type boolean | undefined
+        */
+        tokio_console_enabled?: boolean;
         /**
          * @description Enable Rust backtrace for errors
          * @default true
@@ -1815,6 +1860,11 @@ export type RestResponseSystemSettings = {
         */
         port?: number;
         /**
+         * @description Stable cookie signing key for session middleware (hex-encoded).\nAuto-generated and persisted so sessions survive daemon restarts.
+         * @type string,null
+        */
+        session_secret_key?: string | null;
+        /**
          * @description Token for authenticating with the remote signaling server
          * @type string,null
         */
@@ -1825,10 +1875,38 @@ export type RestResponseSystemSettings = {
         */
         signaling_url?: string | null;
         /**
+         * @description Token for authenticating the Tauri IPC WebSocket connection (/ws/tauri_ipc).\nAuto-generated and persisted on first startup.
+         * @type string,null
+        */
+        tauri_ipc_token?: string | null;
+        /**
          * @description Telemetry consent status
          * @type boolean,null
         */
         telemetry_consent?: boolean | null;
+        /**
+         * @description Override for the daemon-side WebRTC ICE `disconnected` timeout\n(the duration without ICE traffic before an agent flips\n`Connected → Disconnected`). `None` means use the built-in\ndefault; see `pc_manager::DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS`.\n\nLowering it makes the daemon-side cleanup hook fire sooner when\na browser closes the tab, which is what frees the worker\'s DXGI\nduplication for the next session. Lower it too far and a real\nnetwork blip will tear down a healthy session.\n\nNot surfaced in the settings UI yet — edit the config file\ndirectly or rely on the default.
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        webrtc_ice_disconnected_timeout_secs?: number | null;
+        /**
+         * @description Override for the daemon-side WebRTC ICE `failed` timeout (the\nduration in `Disconnected` before an agent flips to `Failed`).\n`None` means use the built-in default; see\n`pc_manager::DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS`.\n\nTogether with `webrtc_ice_disconnected_timeout_secs` this caps\nhow long the daemon waits before reclaiming the\nper-`connection_id` resources. The pair-active signaling-side\n`ConnectionRemoved` notification (when present) bypasses both\ntimeouts and triggers cleanup in milliseconds; this fallback\nonly matters when signaling itself is gone too.\n\nNot surfaced in the settings UI yet — edit the config file\ndirectly or rely on the default.
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        webrtc_ice_failed_timeout_secs?: number | null;
+        /**
+         * @description Number of seconds without a worker heartbeat before the\nwatchdog declares the worker stuck and triggers a restart.\nWorkers send heartbeats every 5s; the default of 30s gives\nroughly 6 missed beats of slack so transient spikes don\'t\ntrigger spurious restarts.
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        worker_heartbeat_timeout_secs?: number | null;
+        /**
+         * @description Whether the daemon should kill+restart a session worker that\nstops sending heartbeats. Defaults to enabled. Set to `false`\nwhen investigating worker hangs so the stuck process stays\nalive long enough to attach a debugger / capture a stack dump.
+         * @type boolean,null
+        */
+        worker_heartbeat_watchdog_enabled?: boolean | null;
     };
     /**
      * @type string,null
@@ -1990,6 +2068,95 @@ export type RestResponseTurnSettings = {
         static_credentials?: {
             [key: string]: string;
         };
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseVirtualDisplayDriverStatusResponse = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Driver-side state surfaced to the UI. `installed`/`installed_oem_infs`\nare `Option`s — `None` means \"could not determine\" (typical when the\ndaemon is running without admin and neither `Get-WindowsDriver` nor\n`pnputil` returned data); the UI must treat that as \"show a retry\nhint\", not \"definitely not installed\".
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type boolean
+        */
+        can_modify: boolean;
+        /**
+         * @type boolean
+        */
+        files_available: boolean;
+        /**
+         * @type string,null
+        */
+        files_dir?: string | null;
+        /**
+         * @type boolean,null
+        */
+        installed?: boolean | null;
+        /**
+         * @type array,null
+        */
+        installed_oem_infs?: string[] | null;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseVirtualDisplaySettings = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Virtual display (Windows IDD) settings. Pulled out into its own\nsection because the knob is system-level (only the\n`ServiceDaemon` startup mode acts on it, and changing it requires\nthe `LcxlVirtualDisplay` driver to already be staged) — not a\nper-session capture setting. Kept as a struct rather than a bare\n`bool` so future fields (e.g. exclusive-mode toggle, pre-detach\nprompt duration) slot in without another schema migration.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Browser-side trailing-edge debounce window (ms) for the adaptive\nresolution hook. Resize events within this window reset the\ntimer; the send fires only after the wrapper has been stable for\nthis many ms. Sourced from `config.toml`; ferried to the browser\nvia `InitSignalingData::adaptive_resolution`.
+         * @minLength 0
+         * @default 5000
+         * @type integer | undefined, int64
+        */
+        adaptive_debounce_ms?: bigint;
+        /**
+         * @description Minimum pixel delta on either axis the browser hook treats as\nsignificant. Below this, both width and height changes are\nskipped to suppress micro-jitter from cursor-driven resize loops.
+         * @minLength 0
+         * @default 16
+         * @type integer | undefined, int32
+        */
+        adaptive_min_delta_px?: number;
+        /**
+         * @description Daemon-side minimum interval (ms) between accepted auto\nChangeDisplaySettings requests. `0` is allowed and disables the\ndefense entirely.
+         * @minLength 0
+         * @default 1000
+         * @type integer | undefined, int64
+        */
+        adaptive_throttle_ms?: bigint;
+        /**
+         * @description Whether the daemon should create the Windows IDD virtual\nmonitor at startup. Service-daemon mode only — other startup\nmodes ignore the flag entirely. The `/api/desk/settings/virtual-display`\nPOST endpoint rejects `enabled = true` (with body code\n`PRECONDITION_FAILED`) unless the driver is already staged.
+         * @default false
+         * @type boolean | undefined
+        */
+        enabled?: boolean;
     };
     /**
      * @type string,null
@@ -2321,6 +2488,11 @@ export type SystemSettings = {
     */
     port?: number;
     /**
+     * @description Stable cookie signing key for session middleware (hex-encoded).\nAuto-generated and persisted so sessions survive daemon restarts.
+     * @type string,null
+    */
+    session_secret_key?: string | null;
+    /**
      * @description Token for authenticating with the remote signaling server
      * @type string,null
     */
@@ -2331,10 +2503,38 @@ export type SystemSettings = {
     */
     signaling_url?: string | null;
     /**
+     * @description Token for authenticating the Tauri IPC WebSocket connection (/ws/tauri_ipc).\nAuto-generated and persisted on first startup.
+     * @type string,null
+    */
+    tauri_ipc_token?: string | null;
+    /**
      * @description Telemetry consent status
      * @type boolean,null
     */
     telemetry_consent?: boolean | null;
+    /**
+     * @description Override for the daemon-side WebRTC ICE `disconnected` timeout\n(the duration without ICE traffic before an agent flips\n`Connected → Disconnected`). `None` means use the built-in\ndefault; see `pc_manager::DEFAULT_DAEMON_ICE_DISCONNECTED_TIMEOUT_SECS`.\n\nLowering it makes the daemon-side cleanup hook fire sooner when\na browser closes the tab, which is what frees the worker\'s DXGI\nduplication for the next session. Lower it too far and a real\nnetwork blip will tear down a healthy session.\n\nNot surfaced in the settings UI yet — edit the config file\ndirectly or rely on the default.
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    webrtc_ice_disconnected_timeout_secs?: number | null;
+    /**
+     * @description Override for the daemon-side WebRTC ICE `failed` timeout (the\nduration in `Disconnected` before an agent flips to `Failed`).\n`None` means use the built-in default; see\n`pc_manager::DEFAULT_DAEMON_ICE_FAILED_TIMEOUT_SECS`.\n\nTogether with `webrtc_ice_disconnected_timeout_secs` this caps\nhow long the daemon waits before reclaiming the\nper-`connection_id` resources. The pair-active signaling-side\n`ConnectionRemoved` notification (when present) bypasses both\ntimeouts and triggers cleanup in milliseconds; this fallback\nonly matters when signaling itself is gone too.\n\nNot surfaced in the settings UI yet — edit the config file\ndirectly or rely on the default.
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    webrtc_ice_failed_timeout_secs?: number | null;
+    /**
+     * @description Number of seconds without a worker heartbeat before the\nwatchdog declares the worker stuck and triggers a restart.\nWorkers send heartbeats every 5s; the default of 30s gives\nroughly 6 missed beats of slack so transient spikes don\'t\ntrigger spurious restarts.
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    worker_heartbeat_timeout_secs?: number | null;
+    /**
+     * @description Whether the daemon should kill+restart a session worker that\nstops sending heartbeats. Defaults to enabled. Set to `false`\nwhen investigating worker hangs so the stuck process stays\nalive long enough to attach a debugger / capture a stack dump.
+     * @type boolean,null
+    */
+    worker_heartbeat_watchdog_enabled?: boolean | null;
 };
 
 export type TelemetryConsent = {
@@ -2574,6 +2774,65 @@ export type UserResponeNoLogintUser = {
      * @type boolean
     */
     success: boolean;
+};
+
+/**
+ * @description Driver-side state surfaced to the UI. `installed`/`installed_oem_infs`\nare `Option`s — `None` means \"could not determine\" (typical when the\ndaemon is running without admin and neither `Get-WindowsDriver` nor\n`pnputil` returned data); the UI must treat that as \"show a retry\nhint\", not \"definitely not installed\".
+*/
+export type VirtualDisplayDriverStatusResponse = {
+    /**
+     * @type boolean
+    */
+    can_modify: boolean;
+    /**
+     * @type boolean
+    */
+    files_available: boolean;
+    /**
+     * @type string,null
+    */
+    files_dir?: string | null;
+    /**
+     * @type boolean,null
+    */
+    installed?: boolean | null;
+    /**
+     * @type array,null
+    */
+    installed_oem_infs?: string[] | null;
+};
+
+/**
+ * @description Virtual display (Windows IDD) settings. Pulled out into its own\nsection because the knob is system-level (only the\n`ServiceDaemon` startup mode acts on it, and changing it requires\nthe `LcxlVirtualDisplay` driver to already be staged) — not a\nper-session capture setting. Kept as a struct rather than a bare\n`bool` so future fields (e.g. exclusive-mode toggle, pre-detach\nprompt duration) slot in without another schema migration.
+*/
+export type VirtualDisplaySettings = {
+    /**
+     * @description Browser-side trailing-edge debounce window (ms) for the adaptive\nresolution hook. Resize events within this window reset the\ntimer; the send fires only after the wrapper has been stable for\nthis many ms. Sourced from `config.toml`; ferried to the browser\nvia `InitSignalingData::adaptive_resolution`.
+     * @minLength 0
+     * @default 5000
+     * @type integer | undefined, int64
+    */
+    adaptive_debounce_ms?: bigint;
+    /**
+     * @description Minimum pixel delta on either axis the browser hook treats as\nsignificant. Below this, both width and height changes are\nskipped to suppress micro-jitter from cursor-driven resize loops.
+     * @minLength 0
+     * @default 16
+     * @type integer | undefined, int32
+    */
+    adaptive_min_delta_px?: number;
+    /**
+     * @description Daemon-side minimum interval (ms) between accepted auto\nChangeDisplaySettings requests. `0` is allowed and disables the\ndefense entirely.
+     * @minLength 0
+     * @default 1000
+     * @type integer | undefined, int64
+    */
+    adaptive_throttle_ms?: bigint;
+    /**
+     * @description Whether the daemon should create the Windows IDD virtual\nmonitor at startup. Service-daemon mode only — other startup\nmodes ignore the flag entirely. The `/api/desk/settings/virtual-display`\nPOST endpoint rejects `enabled = true` (with body code\n`PRECONDITION_FAILED`) unless the driver is already staged.
+     * @default false
+     * @type boolean | undefined
+    */
+    enabled?: boolean;
 };
 
 /**
@@ -2996,6 +3255,33 @@ export type RegenerateTurnSecretMutation = {
     Errors: any;
 };
 
+/**
+ * @description VirtualDisplaySettings
+*/
+export type QueryVirtualDisplaySettings200 = RestResponseVirtualDisplaySettings;
+
+export type QueryVirtualDisplaySettingsQueryResponse = QueryVirtualDisplaySettings200;
+
+export type QueryVirtualDisplaySettingsQuery = {
+    Response: QueryVirtualDisplaySettings200;
+    Errors: any;
+};
+
+/**
+ * @description Update result (check body `code`: 0=ok, 8=driver not staged)
+*/
+export type UpdateVirtualDisplaySettings200 = RestResponseVirtualDisplaySettings;
+
+export type UpdateVirtualDisplaySettingsMutationRequest = VirtualDisplaySettings;
+
+export type UpdateVirtualDisplaySettingsMutationResponse = UpdateVirtualDisplaySettings200;
+
+export type UpdateVirtualDisplaySettingsMutation = {
+    Response: UpdateVirtualDisplaySettings200;
+    Request: UpdateVirtualDisplaySettingsMutationRequest;
+    Errors: any;
+};
+
 export type OpenSignalingHandlePathParams = {
     /**
      * @description The version of the API. This is a simple integer that increments when API is changed.
@@ -3263,7 +3549,7 @@ export type QueryServerInfoQuery = {
 export type InstallService202 = any;
 
 /**
- * @description Not running inside Tauri (no service op channel)
+ * @description No host control hub or no Tauri shell connected
 */
 export type InstallService503 = any;
 
@@ -3283,7 +3569,7 @@ export type InstallServiceMutation = {
 export type UninstallService202 = any;
 
 /**
- * @description Not running inside Tauri (no service op channel)
+ * @description No host control hub or no Tauri shell connected
 */
 export type UninstallService503 = any;
 
@@ -3292,4 +3578,40 @@ export type UninstallServiceMutationResponse = UninstallService202;
 export type UninstallServiceMutation = {
     Response: UninstallService202;
     Errors: UninstallService503;
+};
+
+/**
+ * @description Install result (check body `code`: 0=ok, 4=permission, 11=files missing)
+*/
+export type InstallDriver200 = RestResponseVirtualDisplayDriverStatusResponse;
+
+export type InstallDriverMutationResponse = InstallDriver200;
+
+export type InstallDriverMutation = {
+    Response: InstallDriver200;
+    Errors: any;
+};
+
+/**
+ * @description Driver status (never reports failure as HTTP error; check body `code`)
+*/
+export type QueryDriverStatus200 = RestResponseVirtualDisplayDriverStatusResponse;
+
+export type QueryDriverStatusQueryResponse = QueryDriverStatus200;
+
+export type QueryDriverStatusQuery = {
+    Response: QueryDriverStatus200;
+    Errors: any;
+};
+
+/**
+ * @description Uninstall result (check body `code`)
+*/
+export type UninstallDriver200 = RestResponseVirtualDisplayDriverStatusResponse;
+
+export type UninstallDriverMutationResponse = UninstallDriver200;
+
+export type UninstallDriverMutation = {
+    Response: UninstallDriver200;
+    Errors: any;
 };

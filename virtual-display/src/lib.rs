@@ -51,10 +51,7 @@ impl VirtualDisplayHandle {
     /// Public constructor so platform implementations (including future
     /// out-of-crate impls) can build a handle.
     pub fn new(instance_id: String, inner: Box<dyn VirtualDisplayHandleInner>) -> Self {
-        Self {
-            instance_id,
-            inner,
-        }
+        Self { instance_id, inner }
     }
 }
 
@@ -103,7 +100,17 @@ pub enum VirtualDisplayError {
 
 const MIN_DIMENSION: u32 = 640;
 const MAX_DIMENSION: u32 = 7680;
-const ALIGNMENT: u32 = 8;
+// `ALIGNMENT` started life at 8 (a conservative compromise: H.264 sub-MB
+// is 8 px, AVC macroblock 16 px, GPU cache lines often 16 BGRA px). It
+// was the daemon's worry-bead — not an IDD/IddCx protocol requirement
+// (the C++ driver never validated alignment) and not a YUV requirement
+// (the capture → YUV path uses `div_ceil(2)` and survives odd
+// dimensions, see `web/capture-engine/src/video_encoder/yuv_utils.rs`).
+// Adaptive resolution needs pixel-for-pixel viewport mapping so we
+// dropped the alignment to 1. The const stays so a future regression
+// that re-introduces a non-trivial alignment requirement is a single
+// line change.
+const ALIGNMENT: u32 = 1;
 const ALLOWED_REFRESH: &[u32] = &[24, 30, 50, 60, 75, 90, 120, 144, 165, 240];
 
 /// Validate a requested mode against the conservative bounds the daemon
@@ -384,17 +391,89 @@ mod tests {
         ));
     }
 
+    /// `ALIGNMENT` is now 1, so odd dimensions must validate (provided
+    /// they stay within the `[MIN_DIMENSION, MAX_DIMENSION]` range).
+    /// Adaptive resolution depends on this — the browser hook does not
+    /// round to any boundary, only clamps to that range. This test
+    /// guards against a regression that re-raises `ALIGNMENT` to
+    /// 2 / 8 / 16 without revisiting the adaptive path.
     #[test]
-    fn validate_mode_rejects_unaligned_dimensions() {
-        let m = VirtualDisplayMode {
-            width: 1281,
-            height: 720,
-            refresh_hz: 60,
-        };
-        assert!(matches!(
-            validate_mode(m),
-            Err(VirtualDisplayError::InvalidMode(_))
-        ));
+    fn validate_mode_accepts_odd_dimensions() {
+        for m in [
+            VirtualDisplayMode {
+                width: 1003,
+                height: 641, // 641 = MIN_DIMENSION + 1, deliberately odd
+                refresh_hz: 60,
+            },
+            VirtualDisplayMode {
+                width: 1281,
+                height: 721,
+                refresh_hz: 60,
+            },
+            VirtualDisplayMode {
+                width: MIN_DIMENSION + 1,
+                height: MIN_DIMENSION + 3,
+                refresh_hz: 60,
+            },
+            VirtualDisplayMode {
+                // Pin pixel-for-pixel viewport mapping: an
+                // exactly-on-boundary even-on-one-axis-odd-on-other
+                // case that used to be rejected when ALIGNMENT=8.
+                width: 1920,
+                height: 1077,
+                refresh_hz: 60,
+            },
+        ] {
+            assert!(
+                validate_mode(m).is_ok(),
+                "expected odd dimensions to validate after ALIGNMENT=1, got error for {m:?}"
+            );
+        }
+    }
+
+    /// The other validation gates (zero / out-of-range / refresh in allow
+    /// set) must still fire — relaxing ALIGNMENT to 1 must not silently
+    /// open the door for the rest of the protocol surface.
+    #[test]
+    fn validate_mode_still_rejects_zero_and_out_of_range() {
+        let cases = [
+            VirtualDisplayMode {
+                width: 0,
+                height: 720,
+                refresh_hz: 60,
+            },
+            VirtualDisplayMode {
+                width: 1280,
+                height: 0,
+                refresh_hz: 60,
+            },
+            VirtualDisplayMode {
+                width: 1280,
+                height: 720,
+                refresh_hz: 0,
+            },
+            VirtualDisplayMode {
+                width: MIN_DIMENSION - 1,
+                height: 720,
+                refresh_hz: 60,
+            },
+            VirtualDisplayMode {
+                width: MAX_DIMENSION + 1,
+                height: 720,
+                refresh_hz: 60,
+            },
+            VirtualDisplayMode {
+                width: 1280,
+                height: 720,
+                refresh_hz: 100, // not in ALLOWED_REFRESH
+            },
+        ];
+        for m in cases {
+            assert!(
+                matches!(validate_mode(m), Err(VirtualDisplayError::InvalidMode(_))),
+                "expected error after ALIGNMENT=1 for {m:?}"
+            );
+        }
     }
 
     #[test]
@@ -460,7 +539,10 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["success"], serde_json::Value::Bool(true));
         assert_eq!(json["status_code"], serde_json::json!(0));
-        assert_eq!(json["data"]["applied_mode"]["width"], serde_json::json!(1280));
+        assert_eq!(
+            json["data"]["applied_mode"]["width"],
+            serde_json::json!(1280)
+        );
         // None fields must be skipped on the wire.
         assert!(json.get("error").is_none());
         assert!(json.get("details").is_none());

@@ -17,7 +17,12 @@ use webrtc::{
 
 use crate::{
     error::DeskSignalFacadeError,
-    model::{audio_capture::AudioDevice, desk_settings::DeskSettings, image_capture::DisplayInfo},
+    model::{
+        audio_capture::AudioDevice,
+        desk_settings::DeskSettings,
+        image_capture::DisplayInfo,
+        virtual_display::{DEFAULT_ADAPTIVE_DEBOUNCE_MS, DEFAULT_ADAPTIVE_MIN_DELTA_PX},
+    },
 };
 
 #[derive(
@@ -535,6 +540,35 @@ pub struct RequestRemoteModel {
     pub ice_servers: Vec<LcxlRTCIceServer>,
 }
 
+/// Browser-facing knobs that drive the adaptive-resolution hook. Server
+/// sources these from `Settings.virtual_display.adaptive_*` and ships
+/// them through `InitSignalingData` so each browser session uses the
+/// host operator's preference without round-tripping a separate REST
+/// query.
+///
+/// `adaptive_throttle_ms` is intentionally NOT included — it is the
+/// daemon's defensive rate limit and the browser does not need to know
+/// it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(default)]
+pub struct AdaptiveResolutionParams {
+    /// Trailing-edge debounce window (ms) the browser waits after a
+    /// `resize` settles before issuing an auto ChangeDisplaySettings.
+    pub debounce_ms: u64,
+    /// Minimum pixel delta on either axis the browser treats as
+    /// significant. Below this threshold the change is ignored.
+    pub min_delta_px: u32,
+}
+
+impl Default for AdaptiveResolutionParams {
+    fn default() -> Self {
+        Self {
+            debounce_ms: DEFAULT_ADAPTIVE_DEBOUNCE_MS,
+            min_delta_px: DEFAULT_ADAPTIVE_MIN_DELTA_PX,
+        }
+    }
+}
+
 /// InitSignalingData is used to initialize signaling data.
 /// desk server -> signaling server -> web browser
 /// see https://github.com/webrtc-rs/webrtc/blob/254bdd5d970933e847dc000de9545040ce16f19f/webrtc/src/peer_connection/configuration.rs
@@ -559,6 +593,25 @@ pub struct InitSignalingData {
     pub has_tauri: bool,
     /// Whether the server is running with administrative privileges
     pub is_admin: bool,
+    /// Whether the daemon currently has the IDD virtual display attached
+    /// (service-daemon mode + `virtual_display.enabled=true` + attach
+    /// resolved). The browser uses this to gate the adaptive-resolution
+    /// hook — there is no point firing ChangeDisplaySettings against a
+    /// host that does not own the IDD.
+    #[serde(default)]
+    pub virtual_display_active: bool,
+    /// Most-recently-applied IDD refresh rate the daemon has seen via the
+    /// worker's VirtualDisplayMode echo. `0` means the daemon has no
+    /// observation yet (cold start) — the browser may use it for
+    /// display purposes only; the auto path always sends `refresh_hz=0`
+    /// and lets the daemon do the authoritative fallback.
+    #[serde(default)]
+    pub virtual_display_current_refresh_hz: u32,
+    /// Browser-side adaptive resolution knobs sourced from
+    /// `VirtualDisplaySettings`. Missing in legacy responses ⇒
+    /// `AdaptiveResolutionParams::Default` (5000 ms / 16 px).
+    #[serde(default)]
+    pub adaptive_resolution: AdaptiveResolutionParams,
 }
 
 /// WebRTC Connection State
@@ -772,5 +825,50 @@ mod wincode_tests {
                 "wincode wire tag for {variant:?} does not match its repr(i32) discriminant",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod init_signaling_data_tests {
+    use super::*;
+
+    /// Pre-adaptive-resolution peers ship `InitSignalingData` JSON without
+    /// the three new fields. `#[serde(default)]` must populate them with
+    /// sensible defaults so the daemon stays compatible with anyone still
+    /// running the previous release of the signaling facade.
+    #[test]
+    fn init_signaling_data_legacy_json_defaults_new_fields() {
+        let raw = r#"{
+            "ice_servers": [],
+            "user_name": "tester",
+            "audio_device_list": {},
+            "audio_encoder_list": [],
+            "video_device_list": {},
+            "video_encoder_list": [],
+            "desk_settings": {},
+            "is_admin": false
+        }"#;
+        let data: InitSignalingData = serde_json::from_str(raw).expect("decode");
+        assert!(!data.virtual_display_active);
+        assert_eq!(data.virtual_display_current_refresh_hz, 0);
+        assert_eq!(
+            data.adaptive_resolution.debounce_ms,
+            DEFAULT_ADAPTIVE_DEBOUNCE_MS
+        );
+        assert_eq!(
+            data.adaptive_resolution.min_delta_px,
+            DEFAULT_ADAPTIVE_MIN_DELTA_PX
+        );
+    }
+
+    /// Empty `AdaptiveResolutionParams` JSON must fall back to the shared
+    /// constants. Pin this so a future Default-by-field-init that drifts
+    /// from `DEFAULT_ADAPTIVE_*` constants fails the test.
+    #[test]
+    fn adaptive_resolution_params_legacy_json_defaults_to_5000_16() {
+        let p: AdaptiveResolutionParams = serde_json::from_str("{}").expect("decode");
+        assert_eq!(p.debounce_ms, 5_000);
+        assert_eq!(p.min_delta_px, 16);
+        assert_eq!(p, AdaptiveResolutionParams::default());
     }
 }
