@@ -26,6 +26,7 @@ import WhiteboardCanvas from "./whiteboard-canvas"
 import WhiteboardToolbar from "./whiteboard-toolbar"
 import { useDeskMicrophone } from "./use-desk-microphone"
 import { DeskConfigDialog } from "./desk-config-dialog"
+import { useAdaptiveResolution } from "./use-adaptive-resolution"
 import type { DeskSettings } from "@/services/types"
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE,
@@ -37,6 +38,7 @@ import {
     SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN,
     SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED,
     SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR,
+    SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
 } from "./constants"
 
 export default function DeskSession() {
@@ -130,6 +132,12 @@ export default function DeskSession() {
     // adaptive-quality loop still consult it.
     const lastSettingsRef = useRef<DeskSettings | null>(null);
 
+    // Adaptive resolution: request ids the hook has emitted but not yet
+    // seen an echo for. The lastMessage listener drops the matching 205
+    // response silently — the user-visible feedback is the visible
+    // resolution change itself, not a toast.
+    const pendingAutoRequestIdsRef = useRef<Set<string>>(new Set());
+
     // Adaptive quality state
     const statsWindowRef = useRef<Array<{ packetLoss: number; rtt: number }>>([]);
     const lastQualityAdjustRef = useRef<number>(0);
@@ -215,6 +223,16 @@ export default function DeskSession() {
             if (data && data.error) {
                 console.error("Remote audio playback error:", data.error);
                 forceError(data.error);
+            }
+        } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
+            // Adaptive-resolution echo: silently drop if this is a
+            // response to a request the hook fired. We do not surface
+            // it to the user — the visible resolution change is the
+            // feedback. Manual ChangeDisplaySettings has no UI yet so
+            // unknown echoes also fall through to debug-log + drop.
+            const requestId = lastMessage.request_id;
+            if (requestId && pendingAutoRequestIdsRef.current.delete(requestId)) {
+                console.debug("[adaptive-resolution] response", lastMessage);
             }
         }
     }, [lastMessage, forceError, sendMessage, deskId]);
@@ -313,6 +331,56 @@ export default function DeskSession() {
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [rtcStats, adaptiveQualityEnabled]);
+
+    // Adaptive resolution dispatcher: wraps sendMessage so the hook
+    // gets the real wire request_id back (sendMessage signature was
+    // extended in Phase 2.1 to return it). `connection_id` defaults to
+    // `deskId` because the daemon's auto path keys per-connection.
+    const sendChangeDisplay = useCallback(
+        (payload: {
+            width: number;
+            height: number;
+            refresh_hz: number;
+            auto: true;
+        }) =>
+            sendMessage(
+                SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
+                payload,
+                deskId ?? undefined,
+            ),
+        [sendMessage, deskId],
+    );
+
+    // The hook's `enabled` aggregates every condition that must be
+    // satisfied for auto-resolution to make sense:
+    //   - deskId is real (so sendMessage has a connection target)
+    //   - WebRTC is actually connected (RTCPeerConnection up + tracks
+    //     flowing — there is no point adapting an inactive stream)
+    //   - daemon side reports the IDD is currently attached
+    //     (`virtual_display_active`); without this the daemon would
+    //     reject every auto request with FEATURE_UNAVAILABLE
+    //   - user toggled "Adaptive Resolution" on in the config dialog
+    // `lastSettingsRef.current` is populated from `handleConfigSubmit`
+    // before we ever call `connect`, so reading it here after RTC is
+    // up is always safe.
+    useAdaptiveResolution({
+        wrapperRef: videoWrapperRef,
+        enabled:
+            !!deskId &&
+            isRTCConnected &&
+            !!initData?.virtual_display_active &&
+            !!lastSettingsRef.current?.adaptive_web_page_resolution,
+        sendChangeDisplay,
+        pendingAutoRequestIds: pendingAutoRequestIdsRef,
+        // `bigint` (u64 on the wire) → `number` because setTimeout
+        // does not accept bigint. The clamp on the daemon side keeps
+        // the value comfortably inside Number's safe-integer range.
+        debounceMs:
+            initData?.adaptive_resolution?.debounce_ms !== undefined
+                ? Number(initData.adaptive_resolution.debounce_ms)
+                : undefined,
+        minDeltaPx: initData?.adaptive_resolution?.min_delta_px ?? undefined,
+    });
 
     const handleConfigSubmit = (settings: DeskSettings) => {
         lastSettingsRef.current = settings;

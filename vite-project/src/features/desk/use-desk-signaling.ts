@@ -131,9 +131,28 @@ export function useDeskSignaling(deskId: string | null) {
         };
     }, [clearHeartbeat, clearReconnectTimer]);
 
-    const sendMessage = useCallback((type: number, data: any, toConnectionId?: string) => {
+    /**
+     * Send a signaling message. Returns the actual `request_id` that
+     * went on the wire so callers can correlate the eventual response.
+     *
+     * `requestId` is optional — when omitted a fresh UUID is generated
+     * (the historical behaviour). Pass an explicit id when the caller
+     * needs to recognise its own echo (e.g. the adaptive-resolution
+     * hook silently drops auto responses by matching on a pending-id
+     * set).
+     *
+     * Earlier call sites that ignored the void return type still
+     * compile unchanged.
+     */
+    const sendMessage = useCallback((
+        type: number,
+        data: any,
+        toConnectionId?: string,
+        requestId?: string,
+    ): string => {
+        const id = requestId ?? v4();
         const msg: SignalingMessage = {
-            request_id: v4(),
+            request_id: id,
             signaling_type: type,
             signaling_data: data,
             to_connection_id: toConnectionId,
@@ -148,6 +167,7 @@ export function useDeskSignaling(deskId: string | null) {
                 connect();
             }
         }
+        return id;
     }, [connect]);
 
     useEffect(() => {
