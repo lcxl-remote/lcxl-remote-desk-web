@@ -265,7 +265,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             // RefreshCapabilities round-trip if attach eventually
             // completes in the background.
             if let Some(supervisor) = ctx.virtual_display.as_ref()
-                && s.desk.enable_virtual_display
+                && s.virtual_display.enabled
             {
                 match supervisor
                     .ensure_attached(VIRTUAL_DISPLAY_ATTACH_TIMEOUT)
@@ -473,7 +473,7 @@ fn emit_error_response(
 ///
 /// 1. Service-mode only — `ctx.virtual_display.is_none()` ⇒
 ///    `FEATURE_UNAVAILABLE` ("only supported in service mode").
-/// 2. Toggle on — `settings.desk.enable_virtual_display == false` ⇒
+/// 2. Toggle on — `settings.virtual_display.enabled == false` ⇒
 ///    `FEATURE_UNAVAILABLE` ("not enabled").
 /// 3. Supervisor live — `is_active() == false` ⇒
 ///    `FEATURE_UNAVAILABLE` ("unavailable").
@@ -502,7 +502,7 @@ async fn handle_change_display_settings_inbound(
             return Ok(());
         }
     };
-    let toggle_on = ctx.settings.read().await.desk.enable_virtual_display;
+    let toggle_on = ctx.settings.read().await.virtual_display.enabled;
     if !toggle_on {
         emit_error_response(
             ctx,
@@ -1566,7 +1566,7 @@ mod tests {
         ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
             ctx.worker_mgr.clone(),
         )));
-        // settings.desk.enable_virtual_display defaults to false.
+        // settings.virtual_display.enabled defaults to false.
         let model = make_change_display_settings_model(
             "req-2",
             ChangeDisplaySettingsPayload {
@@ -1596,7 +1596,7 @@ mod tests {
         ctx.virtual_display = Some(Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
             ctx.worker_mgr.clone(),
         )));
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         let model = make_change_display_settings_model(
             "req-3",
             ChangeDisplaySettingsPayload {
@@ -1634,7 +1634,7 @@ mod tests {
     #[tokio::test]
     async fn route_returns_error_on_invalid_mode() {
         let (ctx, mut rx) = make_ctx_with_active_supervisor();
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         let model = make_change_display_settings_model(
             "req-invalid-mode",
             ChangeDisplaySettingsPayload {
@@ -1664,7 +1664,7 @@ mod tests {
     #[tokio::test]
     async fn route_returns_error_on_payload_parse_fail() {
         let (ctx, mut rx) = make_ctx_with_active_supervisor();
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         let model = SignalingModel::new(
             "req-bad-payload",
             SignalingType::ChangeDisplaySettings,
@@ -1694,7 +1694,7 @@ mod tests {
     #[tokio::test]
     async fn route_returns_error_when_worker_unavailable() {
         let (ctx, mut rx) = make_ctx_with_active_supervisor();
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         let model = make_change_display_settings_model(
             "req-no-worker",
             ChangeDisplaySettingsPayload {
@@ -1731,7 +1731,7 @@ mod tests {
         // worker". We re-implement parts of make_ctx_with_rx to
         // attach a worker.
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         // Live worker: hook a fake IPC sender into WorkerManager so
         // send_to_worker has a destination. The minimal version is
         // to start an in-process worker via a paired transport pair.
@@ -1784,7 +1784,7 @@ mod tests {
         )
     }
 
-    /// `enable_virtual_display = false`: ensure_attached must NOT be
+    /// `virtual_display.enabled = false`: ensure_attached must NOT be
     /// called. We can't easily mock the supervisor through a trait
     /// here, but we can install a `new_attached_for_test` supervisor
     /// and verify that the route succeeds without changing state —
@@ -1795,7 +1795,7 @@ mod tests {
     async fn request_remote_skips_ensure_when_feature_disabled() {
         let (mut ctx, _rx) = make_ctx_with_rx();
         // Feature disabled by default in Settings::default(), but pin it.
-        ctx.settings.write().await.desk.enable_virtual_display = false;
+        ctx.settings.write().await.virtual_display.enabled = false;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
             ctx.worker_mgr.clone(),
             "MOCK\\DISPLAY1",
@@ -1820,7 +1820,7 @@ mod tests {
     #[tokio::test]
     async fn request_remote_skips_ensure_when_no_supervisor() {
         let (mut ctx, _rx) = make_ctx_with_rx();
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         ctx.virtual_display = None;
 
         let model = make_request_remote_model("conn-no-supervisor");
@@ -1836,7 +1836,7 @@ mod tests {
     #[tokio::test]
     async fn request_remote_invokes_ensure_when_enabled_and_supervisor_attached() {
         let (mut ctx, _rx) = make_ctx_with_rx();
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
             ctx.worker_mgr.clone(),
             "MOCK\\DISPLAY1",
@@ -1860,7 +1860,7 @@ mod tests {
     #[tokio::test]
     async fn request_remote_continues_when_provider_not_supported() {
         let (mut ctx, _rx) = make_ctx_with_rx();
-        ctx.settings.write().await.desk.enable_virtual_display = true;
+        ctx.settings.write().await.virtual_display.enabled = true;
         let supervisor = Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(
             ctx.worker_mgr.clone(),
         ));

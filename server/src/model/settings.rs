@@ -17,11 +17,13 @@ mod log_config;
 mod system;
 mod turn_client;
 mod user;
+mod virtual_display;
 
 pub use log_config::*;
 pub use system::*;
 pub use turn_client::*;
 pub use user::*;
+pub use virtual_display::*;
 
 /// Desk Settings
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
@@ -45,6 +47,9 @@ pub struct Settings {
     /// Security settings for remote access permissions
     #[serde(default)]
     pub security: SecuritySettings,
+    /// Virtual display (Windows IDD) settings
+    #[serde(default)]
+    pub virtual_display: VirtualDisplaySettings,
 
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]
