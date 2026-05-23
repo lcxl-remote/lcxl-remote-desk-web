@@ -185,11 +185,16 @@ fn handle_server_msg(
         HostControlMessage::SecurityApprovalFinished { req_id } => {
             let _ = sa_tx.send(SecurityApprovalCommand::Finish { req_id });
         }
-        HostControlMessage::ServiceOp { op, install_path } => {
+        HostControlMessage::ServiceOp {
+            op,
+            install_path,
+            install_idd_driver,
+        } => {
             let svc_op = match op {
-                ServiceOpKind::Install => {
-                    install_path.map(|path| ServiceOp::Install { install_path: path })
-                }
+                ServiceOpKind::Install => install_path.map(|path| ServiceOp::Install {
+                    install_path: path,
+                    install_idd_driver,
+                }),
                 ServiceOpKind::Uninstall => Some(ServiceOp::Uninstall),
             };
             if let Some(svc_op) = svc_op
@@ -287,6 +292,7 @@ mod tests {
             HostControlMessage::ServiceOp {
                 op: ServiceOpKind::Install,
                 install_path: Some("C:/foo".to_string()),
+                install_idd_driver: true,
             },
             &ps_tx,
             &wb_tx,
@@ -298,7 +304,13 @@ mod tests {
             .recv_timeout(std::time::Duration::from_millis(50))
             .unwrap()
         {
-            ServiceOp::Install { install_path } => assert_eq!(install_path, "C:/foo"),
+            ServiceOp::Install {
+                install_path,
+                install_idd_driver,
+            } => {
+                assert_eq!(install_path, "C:/foo");
+                assert!(install_idd_driver, "IDD flag must reach the elevation sender");
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

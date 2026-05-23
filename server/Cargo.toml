@@ -17,6 +17,7 @@ desk-capture-engine = { workspace = true }
 desk-input-injection = { workspace = true }
 desk-ipc-protocol = { workspace = true }
 desk-virtual-display = { workspace = true }
+desk-virtual-display-driver-ops = { workspace = true }
 
 actix-web = { workspace = true }
 actix-ws = { workspace = true }

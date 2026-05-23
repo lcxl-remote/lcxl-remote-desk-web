@@ -99,9 +99,13 @@ pub enum HostControlMessage {
     SecurityApprovalFinished { req_id: String },
 
     /// Service install / uninstall (UAC elevation needed on the Tauri side).
+    /// `install_idd_driver` is only honoured when `op == Install`; the
+    /// uninstall path always removes the driver as well.
     ServiceOp {
         op: ServiceOpKind,
         install_path: Option<String>,
+        #[serde(default)]
+        install_idd_driver: bool,
     },
 
     // ====================== Aggregator → Forwarder ======================
@@ -221,10 +225,17 @@ mod tests {
             HostControlMessage::ServiceOp {
                 op: ServiceOpKind::Install,
                 install_path: Some("C:\\Program Files\\app".to_string()),
+                install_idd_driver: true,
+            },
+            HostControlMessage::ServiceOp {
+                op: ServiceOpKind::Install,
+                install_path: Some("C:\\Program Files\\app".to_string()),
+                install_idd_driver: false,
             },
             HostControlMessage::ServiceOp {
                 op: ServiceOpKind::Uninstall,
                 install_path: None,
+                install_idd_driver: false,
             },
             HostControlMessage::Ready {
                 role: ClientRole::Tauri,
@@ -245,6 +256,28 @@ mod tests {
         for case in &cases {
             let restored = round_trip(case);
             assert_eq!(case, &restored, "round-trip mismatch for {case:?}");
+        }
+    }
+
+    // ServiceOp without `install_idd_driver` (older client/wire) defaults
+    // the field to false, never `true` — the `#[serde(default)]` guard
+    // is the only thing preventing a missing field from being interpreted
+    // as "user opted into IDD installation".
+    #[test]
+    fn service_op_install_missing_idd_field_defaults_false() {
+        let json = r#"{"type":"ServiceOp","op":"install","install_path":"C:/foo"}"#;
+        let msg: HostControlMessage = serde_json::from_str(json).expect("deserialise");
+        match msg {
+            HostControlMessage::ServiceOp {
+                op,
+                install_path,
+                install_idd_driver,
+            } => {
+                assert!(matches!(op, ServiceOpKind::Install));
+                assert_eq!(install_path.as_deref(), Some("C:/foo"));
+                assert!(!install_idd_driver);
+            }
+            other => panic!("unexpected: {other:?}"),
         }
     }
 

@@ -4780,6 +4780,7 @@ dependencies = [
  "desk-turn",
  "desk-utils",
  "desk-virtual-display",
+ "desk-virtual-display-driver-ops",
  "encoding_rs",
  "evdev",
  "futures",

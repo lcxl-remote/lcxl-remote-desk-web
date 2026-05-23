@@ -233,9 +233,18 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
 
 /// Service management operations that can be requested by the embedded HTTP
 /// server and fulfilled by the Tauri host (which has UAC elevation ability).
+///
+/// `install_idd_driver` rides along on the `Install` variant: when `true`,
+/// the elevated sidecar will stage the LcxlVirtualDisplay IDD driver as
+/// part of the install. The flag is intentionally part of the wire-level
+/// command (rather than a separate REST op) so the user only has to
+/// approve the UAC prompt once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceOp {
-    Install { install_path: String },
+    Install {
+        install_path: String,
+        install_idd_driver: bool,
+    },
     Uninstall,
 }
 

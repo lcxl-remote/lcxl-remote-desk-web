@@ -302,8 +302,18 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
         use windows::core::PCWSTR;
 
         let params_str = match &op {
-            lcxl_remote_desk_server::ServiceOp::Install { install_path } => {
-                format!("--install-service --install-path \"{}\"", install_path)
+            lcxl_remote_desk_server::ServiceOp::Install {
+                install_path,
+                install_idd_driver,
+            } => {
+                let mut s = format!(
+                    "--install-service --install-path {}",
+                    quote_cmd_arg(install_path)
+                );
+                if *install_idd_driver {
+                    s.push_str(" --install-idd-driver");
+                }
+                s
             }
             lcxl_remote_desk_server::ServiceOp::Uninstall => "--uninstall-service".to_string(),
         };
@@ -338,10 +348,16 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
         let mut cmd = std::process::Command::new("pkexec");
         cmd.arg(&sidecar);
         match &op {
-            lcxl_remote_desk_server::ServiceOp::Install { install_path } => {
+            lcxl_remote_desk_server::ServiceOp::Install {
+                install_path,
+                install_idd_driver,
+            } => {
                 cmd.arg("--install-service")
                     .arg("--install-path")
                     .arg(install_path);
+                if *install_idd_driver {
+                    cmd.arg("--install-idd-driver");
+                }
             }
             lcxl_remote_desk_server::ServiceOp::Uninstall => {
                 cmd.arg("--uninstall-service");
@@ -350,6 +366,135 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
         if let Err(e) = cmd.status() {
             log::error!("Service op failed: {e}");
         }
+    }
+}
+
+/// Quote a single argument for an `lpParameters`-style command line so it
+/// will round-trip back through `CommandLineToArgvW` to the exact original
+/// string. The backend controller already rejects `"` and ASCII control
+/// chars in `install_path`, but defence-in-depth: we never want a path
+/// containing spaces or backslashes to corrupt the elevated sidecar's
+/// argv. Implements the algorithm described in
+/// "Everyone quotes command line arguments the wrong way"
+/// (learn.microsoft.com/archive/blogs/twistylittlepassagesallalike).
+#[cfg(target_os = "windows")]
+fn quote_cmd_arg(arg: &str) -> String {
+    // Empty arg must still produce a single empty token.
+    if !arg.is_empty() && !arg.chars().any(|c| c.is_whitespace() || c == '"') {
+        return arg.to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for ch in arg.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            // Each backslash that precedes a quote must be escaped, and
+            // the quote itself escaped.
+            for _ in 0..(2 * backslashes + 1) {
+                out.push('\\');
+            }
+            out.push('"');
+        } else {
+            for _ in 0..backslashes {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        backslashes = 0;
+    }
+    // Trailing backslashes immediately before the closing quote must
+    // also be doubled, otherwise they would escape the closing quote.
+    for _ in 0..(2 * backslashes) {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod quote_cmd_arg_tests {
+    use super::quote_cmd_arg;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::CommandLineToArgvW;
+    use windows::core::PCWSTR;
+
+    /// Feeds `quoted` (with a dummy program prefix) through
+    /// CommandLineToArgvW and returns the parsed argv as UTF-8 strings.
+    fn parse_via_winapi(quoted: &str) -> Vec<String> {
+        let cmdline = format!("dummy.exe {quoted}");
+        let wide: Vec<u16> = std::ffi::OsStr::new(&cmdline)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut argc: i32 = 0;
+        unsafe {
+            // CommandLineToArgvW returns *mut PWSTR (an array of
+            // wide-string pointers) that the caller must LocalFree
+            // when done.
+            let argv = CommandLineToArgvW(PCWSTR(wide.as_ptr()), &mut argc);
+            assert!(!argv.is_null());
+            let mut out = Vec::with_capacity(argc as usize);
+            for i in 0..(argc as usize) {
+                let ptr = *argv.add(i);
+                let mut len = 0;
+                while *ptr.0.add(len) != 0 {
+                    len += 1;
+                }
+                let slice = std::slice::from_raw_parts(ptr.0, len);
+                out.push(String::from_utf16_lossy(slice));
+            }
+            let _ = windows::Win32::Foundation::LocalFree(Some(
+                windows::Win32::Foundation::HLOCAL(argv as *mut _),
+            ));
+            out
+        }
+    }
+
+    fn round_trip(arg: &str) {
+        let quoted = quote_cmd_arg(arg);
+        let argv = parse_via_winapi(&quoted);
+        assert_eq!(argv.len(), 2, "for {arg:?} -> {quoted:?} got {argv:?}");
+        assert_eq!(argv[1], arg, "for {arg:?} -> {quoted:?}");
+    }
+
+    #[test]
+    fn simple_unquoted_path() {
+        round_trip("C:\\foo\\bar");
+    }
+
+    #[test]
+    fn path_with_spaces() {
+        round_trip("C:\\Program Files\\LCXL Remote Desktop");
+    }
+
+    #[test]
+    fn path_with_trailing_backslash() {
+        round_trip("C:\\foo\\");
+    }
+
+    #[test]
+    fn path_with_multiple_trailing_backslashes() {
+        round_trip("C:\\foo\\\\\\");
+    }
+
+    #[test]
+    fn arg_with_embedded_quote() {
+        // The REST controller forbids `"` in install_path, but the
+        // helper itself must still round-trip the character so we can
+        // safely reuse it for other args in the future.
+        round_trip(r#"C:\with"quote"#);
+    }
+
+    #[test]
+    fn empty_arg_produces_empty_quoted_token() {
+        let quoted = quote_cmd_arg("");
+        let argv = parse_via_winapi(&quoted);
+        assert_eq!(argv.len(), 2);
+        assert_eq!(argv[1], "");
     }
 }
 

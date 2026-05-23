@@ -19,6 +19,12 @@ struct ServerArgs {
     #[cfg(target_os = "windows")]
     #[arg(long)]
     install_path: Option<String>,
+
+    /// Also stage the LcxlVirtualDisplay IDD driver during
+    /// `--install-service`. Ignored unless `--install-service` is set.
+    #[cfg(target_os = "windows")]
+    #[arg(long)]
+    install_idd_driver: bool,
 }
 
 fn main() {
@@ -33,7 +39,7 @@ fn main() {
             };
             let default_dir = default_install_dir();
             let dir = server_args.install_path.as_deref().unwrap_or(&default_dir);
-            if let Err(e) = install_service(dir) {
+            if let Err(e) = install_service(dir, server_args.install_idd_driver) {
                 eprintln!("Failed to install service: {e}");
                 std::process::exit(1);
             }
