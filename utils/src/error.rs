@@ -48,6 +48,12 @@ impl DeskErrorCode {
     /// alternative implementation instead of surfacing this as a hard
     /// error.
     pub const FEATURE_UNAVAILABLE: DeskErrorCode = DeskErrorCode(7);
+    /// The request is structurally valid but rejected because a
+    /// hard precondition is unmet (e.g. the caller asked the daemon
+    /// to enable the virtual display but the IDD driver is not
+    /// staged). Use this when the right resolution is "make the
+    /// precondition true and retry," not "fix the request body."
+    pub const PRECONDITION_FAILED: DeskErrorCode = DeskErrorCode(8);
 
     pub const FILE_PATH_NOT_FOUND: DeskErrorCode = DeskErrorCode(11);
     pub const CLIENT_ID_NOT_FOUND: DeskErrorCode = DeskErrorCode(12);

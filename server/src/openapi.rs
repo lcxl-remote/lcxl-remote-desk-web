@@ -10,12 +10,13 @@ use desk_signal_facade::model::{
 use desk_turn::model::{TurnInterface, TurnSettings};
 use utoipa::OpenApi;
 
+use crate::controller::virtual_display::VirtualDisplayDriverStatusResponse;
 use crate::model::{
     data_channel::SignalRequestControlData,
     file_transfer::FileTransferMessage,
     info::BackendInfo,
     security_approval::SecurityApprovalEventPayload,
-    settings::{TraversalMode, TurnClientSettings},
+    settings::{TraversalMode, TurnClientSettings, VirtualDisplaySettings},
 };
 use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventData};
 
@@ -43,5 +44,7 @@ use desk_input_injection::model::data_channel::{KeyboardEventData, MouseEventDat
     TurnInterface,
     TurnClientSettings,
     TraversalMode,
+    VirtualDisplaySettings,
+    VirtualDisplayDriverStatusResponse,
 )))]
 pub struct ExtraSchemas;

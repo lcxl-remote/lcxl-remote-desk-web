@@ -5,3 +5,4 @@ pub mod service_mgmt;
 pub mod settings;
 pub mod turn;
 pub mod user;
+pub mod virtual_display;

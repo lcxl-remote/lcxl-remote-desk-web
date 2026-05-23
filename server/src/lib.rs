@@ -36,6 +36,13 @@ use crate::{
             get_turn_session_statistics,
         },
         user::{get_current_user, reject_anonymous_users},
+        virtual_display::{
+            install_driver as install_virtual_display_driver,
+            query_driver_status as query_virtual_display_driver_status,
+            query_virtual_display_settings,
+            uninstall_driver as uninstall_virtual_display_driver,
+            update_virtual_display_settings,
+        },
     },
     model::turn::TurnAuthHandler,
 };
@@ -123,6 +130,11 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
             update_turn_settings,
         },
         user::{get_current_user, reject_anonymous_users},
+        virtual_display::{
+            install_driver as install_virtual_display_driver, query_driver_status,
+            query_virtual_display_settings, uninstall_driver as uninstall_virtual_display_driver,
+            update_virtual_display_settings,
+        },
     };
     use desk_signal::controller::{
         connection::list_connections,
@@ -174,6 +186,9 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
         .service(
             web::scope("/api")
                 .wrap(actix_web::middleware::from_fn(reject_anonymous_users))
+                .service(query_driver_status)
+                .service(install_virtual_display_driver)
+                .service(uninstall_virtual_display_driver)
                 .service(
                     web::scope("/desk")
                         .service(change_password)
@@ -194,6 +209,8 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
                         .service(list_connections)
                         .service(query_sysinfo)
                         .service(query_backend_info)
+                        .service(query_virtual_display_settings)
+                        .service(update_virtual_display_settings)
                         // Remote terminal + file management. The browser
                         // hits these on the daemon's 8082 port; the
                         // controllers go through the local
@@ -617,6 +634,9 @@ pub async fn run_with_hub(
                 // need to login for these routes
                 utoipa_actix_web::scope("/api")
                     .wrap(from_fn(reject_anonymous_users))
+                    .service(query_virtual_display_driver_status)
+                    .service(install_virtual_display_driver)
+                    .service(uninstall_virtual_display_driver)
                     .service(
                         utoipa_actix_web::scope("/desk")
                             .service(change_password)
@@ -639,6 +659,8 @@ pub async fn run_with_hub(
                             .service(open_terminal_session)
                             .service(query_sysinfo)
                             .service(query_backend_info)
+                            .service(query_virtual_display_settings)
+                            .service(update_virtual_display_settings)
                             .configure({
                                 let startup_mode = startup_mode.clone();
                                 move |cfg| {
@@ -860,6 +882,72 @@ mod tests {
                     // from `reject_anonymous_users`) means the route
                     // matched — which is the success criterion of this
                     // regression test.
+                }
+            }
+        }
+    }
+
+    /// Regression: the five new virtual-display endpoints
+    /// (`/api/virtual-display/driver/{status,install,uninstall}` and
+    /// `/api/desk/settings/virtual-display` GET/POST) must be
+    /// registered by `configure_api_routes` so the daemon's 8082 HTTP
+    /// App exposes them. The browser hits these on the daemon side
+    /// for both modes; missing them would leave the new UI broken on
+    /// service-daemon installs.
+    #[actix_web::test]
+    async fn configure_api_routes_registers_virtual_display_endpoints() {
+        use crate::model::settings::Settings;
+        use actix_web::test;
+        use desk_signal::model::SharedConnectionMap;
+
+        let settings = Arc::new(crate::model::settings::SharedSettings::from(
+            Settings::default(),
+        ));
+        let route_config = ApiRouteConfig {
+            settings: web::Data::from(settings),
+            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
+            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
+            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
+            tauri_is_admin: None,
+        };
+
+        let secret_key = Key::generate();
+        let app = test::init_service(
+            App::new()
+                .wrap(
+                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
+                        .cookie_secure(false)
+                        .build(),
+                )
+                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
+        )
+        .await;
+
+        let probes = [
+            ("GET", "/api/virtual-display/driver/status"),
+            ("POST", "/api/virtual-display/driver/install"),
+            ("POST", "/api/virtual-display/driver/uninstall"),
+            ("GET", "/api/desk/settings/virtual-display"),
+            ("POST", "/api/desk/settings/virtual-display"),
+        ];
+        for (method, uri) in probes {
+            let req = match method {
+                "GET" => test::TestRequest::get().uri(uri).to_request(),
+                "POST" => test::TestRequest::post().uri(uri).to_request(),
+                _ => unreachable!(),
+            };
+            match test::try_call_service(&app, req).await {
+                Ok(resp) => assert_ne!(
+                    resp.status(),
+                    actix_web::http::StatusCode::NOT_FOUND,
+                    "{method} {uri} returned 404 — route must be \
+                     registered by configure_api_routes so the daemon's \
+                     8082 port exposes the new virtual-display UI",
+                ),
+                Err(_) => {
+                    // Middleware-level rejection (401 from
+                    // `reject_anonymous_users`) means the route matched —
+                    // the success criterion.
                 }
             }
         }
