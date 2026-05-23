@@ -309,7 +309,10 @@ mod tests {
                 install_idd_driver,
             } => {
                 assert_eq!(install_path, "C:/foo");
-                assert!(install_idd_driver, "IDD flag must reach the elevation sender");
+                assert!(
+                    install_idd_driver,
+                    "IDD flag must reach the elevation sender"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }

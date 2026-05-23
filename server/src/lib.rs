@@ -39,8 +39,7 @@ use crate::{
         virtual_display::{
             install_driver as install_virtual_display_driver,
             query_driver_status as query_virtual_display_driver_status,
-            query_virtual_display_settings,
-            uninstall_driver as uninstall_virtual_display_driver,
+            query_virtual_display_settings, uninstall_driver as uninstall_virtual_display_driver,
             update_virtual_display_settings,
         },
     },

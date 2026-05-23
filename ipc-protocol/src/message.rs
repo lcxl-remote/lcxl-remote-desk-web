@@ -2529,12 +2529,11 @@ mod tests {
 
     #[test]
     fn virtual_display_attach_outcome_attached_wincode_roundtrip() {
-        let original = WorkerToService::VirtualDisplayAttachResult(
-            VirtualDisplayAttachResultPayload {
+        let original =
+            WorkerToService::VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload {
                 instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
                 outcome: VirtualDisplayAttachOutcome::Attached("\\\\.\\DISPLAY4".to_string()),
-            },
-        );
+            });
         match wincode_round_trip(&original) {
             WorkerToService::VirtualDisplayAttachResult(p) => {
                 assert_eq!(p.instance_id, "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay");
@@ -2549,14 +2548,13 @@ mod tests {
 
     #[test]
     fn virtual_display_attach_outcome_failed_wincode_roundtrip() {
-        let original = WorkerToService::VirtualDisplayAttachResult(
-            VirtualDisplayAttachResultPayload {
+        let original =
+            WorkerToService::VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload {
                 instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
                 outcome: VirtualDisplayAttachOutcome::Failed(
                     "find_display_name: seen=[] after 6 retries".to_string(),
                 ),
-            },
-        );
+            });
         match wincode_round_trip(&original) {
             WorkerToService::VirtualDisplayAttachResult(p) => {
                 assert_eq!(p.instance_id, "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay");

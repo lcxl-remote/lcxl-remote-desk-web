@@ -362,9 +362,9 @@ mod windows_impl {
         match installer.uninstall_all() {
             Ok(0) => info!("No LcxlVirtualDisplay OEM packages to uninstall"),
             Ok(n) => info!("Uninstalled {n} LcxlVirtualDisplay OEM package(s)"),
-            Err(e) => log::warn!(
-                "[uninstall] driver uninstall failed: {e}; continuing with SCM cleanup"
-            ),
+            Err(e) => {
+                log::warn!("[uninstall] driver uninstall failed: {e}; continuing with SCM cleanup")
+            }
         }
     }
 
@@ -441,10 +441,7 @@ mod windows_impl {
         }
 
         impl DriverInstallerOps for MockInstaller {
-            fn discover(
-                &self,
-                base_dir: &Path,
-            ) -> Result<Option<DriverFiles>, InstallerError> {
+            fn discover(&self, base_dir: &Path) -> Result<Option<DriverFiles>, InstallerError> {
                 if let Some(o) = self.discover_override.lock().unwrap().clone() {
                     return Ok(o);
                 }
@@ -571,7 +568,10 @@ mod windows_impl {
             seed_driver_dir(src.path());
             std::fs::create_dir_all(dst.path().join("drivers").join("stale")).unwrap();
             std::fs::write(
-                dst.path().join("drivers").join("stale").join("leftover.txt"),
+                dst.path()
+                    .join("drivers")
+                    .join("stale")
+                    .join("leftover.txt"),
                 b"",
             )
             .unwrap();
@@ -605,12 +605,11 @@ mod windows_impl {
         /// SCM cleanup still needs to run.
         #[test]
         fn uninstall_helper_tolerates_installer_failure() {
-            let installer = MockInstaller::new()
-                .set_uninstall_result(Err(InstallerError::StatusUnknown));
+            let installer =
+                MockInstaller::new().set_uninstall_result(Err(InstallerError::StatusUnknown));
             uninstall_driver_after_service_stopped(&installer);
             assert_eq!(*installer.uninstall_count.lock().unwrap(), 1);
         }
-
     }
 }
 

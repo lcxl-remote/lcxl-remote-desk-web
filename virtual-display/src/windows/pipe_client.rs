@@ -344,10 +344,9 @@ mod tests {
         let mut cursor = Cursor::new(buf);
         let err = read_framed_response(&mut cursor).expect_err("must fail");
         match err {
-            VirtualDisplayError::PipeIo(m) => assert!(
-                m.contains("parse driver response JSON"),
-                "unexpected: {m}"
-            ),
+            VirtualDisplayError::PipeIo(m) => {
+                assert!(m.contains("parse driver response JSON"), "unexpected: {m}")
+            }
             other => panic!("expected PipeIo, got {other}"),
         }
     }

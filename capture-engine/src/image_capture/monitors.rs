@@ -88,8 +88,7 @@ pub fn enum_monitors() -> Result<Vec<MonitorEntry>, CaptureError> {
 
         let mut info = MONITORINFOEXW::default();
         info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-        let ok =
-            unsafe { GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _ as *mut _) };
+        let ok = unsafe { GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _ as *mut _) };
         if ok.as_bool() {
             // `szDevice` is a `[u16; 32]` null-terminated GDI device name.
             let nul_pos = info
@@ -115,9 +114,7 @@ pub fn enum_monitors() -> Result<Vec<MonitorEntry>, CaptureError> {
         TRUE
     }
 
-    let ok = unsafe {
-        EnumDisplayMonitors(None, None, Some(callback), LPARAM(list_ptr as isize))
-    };
+    let ok = unsafe { EnumDisplayMonitors(None, None, Some(callback), LPARAM(list_ptr as isize)) };
     if !ok.as_bool() {
         let code = unsafe { GetLastError().0 };
         return CaptureError::custom_error(
@@ -194,14 +191,8 @@ fn lookup_display_device_name(device_name: &str) -> Option<String> {
         DeviceID: [0u16; 128],
         DeviceKey: [0u16; 128],
     };
-    let ok = unsafe {
-        EnumDisplayDevicesW(
-            PCWSTR::from_raw(wide.as_ptr()),
-            0,
-            &mut display_device,
-            0,
-        )
-    };
+    let ok =
+        unsafe { EnumDisplayDevicesW(PCWSTR::from_raw(wide.as_ptr()), 0, &mut display_device, 0) };
     if !ok.as_bool() {
         return None;
     }
@@ -329,16 +320,14 @@ mod tests {
     #[test]
     fn select_display_info_by_name_returns_invalid_params_when_no_match() {
         let infos = vec![make_info(r"\\.\DISPLAY1"), make_info(r"\\.\DISPLAY7")];
-        let err = select_display_info_by_name(&infos, r"\\.\DISPLAY99")
-            .expect_err("no match must error");
+        let err =
+            select_display_info_by_name(&infos, r"\\.\DISPLAY99").expect_err("no match must error");
         let msg = format!("{}", err);
         // The Debug formatter double-escapes backslashes inside the
         // message, so the assertion targets the human-recognisable
         // suffix that is stable across Display / Debug rendering.
         assert!(
-            msg.contains("DISPLAY99")
-                && msg.contains("DISPLAY1")
-                && msg.contains("DISPLAY7"),
+            msg.contains("DISPLAY99") && msg.contains("DISPLAY1") && msg.contains("DISPLAY7"),
             "error must list the requested name and the enumerated list: {}",
             msg
         );

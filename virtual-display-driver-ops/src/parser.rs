@@ -92,7 +92,11 @@ pub(crate) fn parse_pnputil_enum(stdout: &str) -> Vec<String> {
 fn field_value(after_key: &str) -> Option<String> {
     let after_colon = after_key.trim_start().strip_prefix(':')?;
     let v = after_colon.trim();
-    if v.is_empty() { None } else { Some(v.to_owned()) }
+    if v.is_empty() {
+        None
+    } else {
+        Some(v.to_owned())
+    }
 }
 
 fn matches_inf(orig: &str) -> bool {

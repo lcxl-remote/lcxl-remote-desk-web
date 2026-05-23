@@ -271,10 +271,9 @@ impl WgcImageCapture {
         // surfaces INVALID_PARAMS without the cost (and the
         // headless-CI failure mode) of building a D3D11 device.
         let infos = enum_display_infos()?;
-        let display_info =
-            select_display_info_by_name(&infos, &settings.video_device_name)?;
-        let monitor_entry = find_monitor_by_device_name(&display_info.device_name)?
-            .ok_or_else(|| {
+        let display_info = select_display_info_by_name(&infos, &settings.video_device_name)?;
+        let monitor_entry =
+            find_monitor_by_device_name(&display_info.device_name)?.ok_or_else(|| {
                 CaptureError::new_custom_error(
                     DeskErrorCode::SYSTEM_ERROR,
                     &format!(

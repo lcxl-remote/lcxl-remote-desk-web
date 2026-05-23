@@ -2,12 +2,12 @@
 //! runs on Windows / Linux / macOS regardless of which factory the platform
 //! cfg selects.
 
+#[cfg(not(target_os = "windows"))]
+use desk_virtual_display::controller_provider;
 use desk_virtual_display::{
     VirtualDisplayController, VirtualDisplayError, VirtualDisplayHandle, VirtualDisplayHandleInner,
     VirtualDisplayLifecycle, VirtualDisplayMode, lifecycle_provider, validate_mode,
 };
-#[cfg(not(target_os = "windows"))]
-use desk_virtual_display::controller_provider;
 use std::sync::Mutex;
 
 struct MockHandleInner;
@@ -97,7 +97,9 @@ fn mock_controller_rejects_invalid_mode() {
 #[test]
 fn platform_factory_returns_not_supported_on_unsupported_platforms() {
     let lc = lifecycle_provider();
-    let err = lc.create().expect_err("unsupported platform should not create");
+    let err = lc
+        .create()
+        .expect_err("unsupported platform should not create");
     assert!(matches!(err, VirtualDisplayError::NotSupported));
 
     let ctrl = controller_provider();

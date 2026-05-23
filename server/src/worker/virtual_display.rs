@@ -391,7 +391,11 @@ mod tests {
             outcome,
             VirtualDisplayAttachOutcome::Attached(ref n) if n == r"\\.\DISPLAY4"
         ));
-        assert_eq!(*calls.lock().unwrap(), 1, "first success must short-circuit");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "first success must short-circuit"
+        );
         assert!(
             sleep_log.lock().unwrap().is_empty(),
             "no backoff sleep needed on first success",
@@ -429,7 +433,10 @@ mod tests {
         assert_eq!(*calls.lock().unwrap(), 3, "must retry until success");
         // Two sleeps between the three attempts: 250, 500.
         let log = sleep_log.lock().unwrap();
-        assert_eq!(*log, vec![Duration::from_millis(250), Duration::from_millis(500)]);
+        assert_eq!(
+            *log,
+            vec![Duration::from_millis(250), Duration::from_millis(500)]
+        );
     }
 
     #[tokio::test]
@@ -453,7 +460,10 @@ mod tests {
                     msg.contains("exhausted 6 retries"),
                     "expected exhaustion summary, got {msg}",
                 );
-                assert!(msg.contains("permanent"), "expected last error in message, got {msg}");
+                assert!(
+                    msg.contains("permanent"),
+                    "expected last error in message, got {msg}"
+                );
             }
             other => panic!("expected Failed, got {other:?}"),
         }

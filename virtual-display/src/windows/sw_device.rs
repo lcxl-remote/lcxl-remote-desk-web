@@ -399,8 +399,7 @@ pub(crate) fn enum_attached_display_names() -> Result<Vec<String>, VirtualDispla
         let list = unsafe { &mut *(lparam.0 as *mut Vec<String>) };
         let mut info = MONITORINFOEXW::default();
         info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-        let ok =
-            unsafe { GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _ as *mut _) };
+        let ok = unsafe { GetMonitorInfoW(hmonitor, &mut info.monitorInfo as *mut _ as *mut _) };
         if ok.as_bool() {
             let nul_pos = info
                 .szDevice
@@ -412,9 +411,7 @@ pub(crate) fn enum_attached_display_names() -> Result<Vec<String>, VirtualDispla
         BOOL(1)
     }
 
-    let ok = unsafe {
-        EnumDisplayMonitors(None, None, Some(callback), LPARAM(list_ptr as isize))
-    };
+    let ok = unsafe { EnumDisplayMonitors(None, None, Some(callback), LPARAM(list_ptr as isize)) };
     if !ok.as_bool() {
         return Err(VirtualDisplayError::DeviceCreate(
             "EnumDisplayMonitors returned FALSE".to_string(),
@@ -509,10 +506,7 @@ mod tests {
     /// promotion is allowed.
     #[test]
     fn pick_attached_match_accepts_candidate_present_in_attached_list() {
-        let attached = vec![
-            r"\\.\DISPLAY1".to_string(),
-            r"\\.\DISPLAY13".to_string(),
-        ];
+        let attached = vec![r"\\.\DISPLAY1".to_string(), r"\\.\DISPLAY13".to_string()];
         assert!(pick_attached_match(r"\\.\DISPLAY13", &attached));
     }
 

@@ -1866,7 +1866,10 @@ mod tests {
             desktop_name: "Default".to_string(),
         };
         mgr.set_worker_capabilities(caps2);
-        watcher.changed().await.expect("watch notifies on second set");
+        watcher
+            .changed()
+            .await
+            .expect("watch notifies on second set");
         assert_eq!(mgr.capabilities_version(), 2);
     }
 

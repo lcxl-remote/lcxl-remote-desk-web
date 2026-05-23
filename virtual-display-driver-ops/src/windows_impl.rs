@@ -99,7 +99,9 @@ pub(crate) fn install(
 
 pub(crate) fn uninstall_all(runner: &dyn CommandRunner) -> Result<usize, InstallerError> {
     let status = query_install_status(runner)?;
-    let oems = status.installed_oem_infs.ok_or(InstallerError::StatusUnknown)?;
+    let oems = status
+        .installed_oem_infs
+        .ok_or(InstallerError::StatusUnknown)?;
     let mut removed = 0usize;
     for oem_name in oems {
         oem::validate(&oem_name)?;
