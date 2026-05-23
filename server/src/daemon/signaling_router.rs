@@ -478,8 +478,20 @@ fn emit_error_response(
 /// 3. Supervisor live — `is_active() == false` ⇒
 ///    `FEATURE_UNAVAILABLE` ("unavailable").
 /// 4. Payload parses — `INVALID_PARAMS`.
-/// 5. Mode within bounds — `validate_mode` ⇒ `INVALID_PARAMS`.
-/// 6. Worker reachable — `send_to_worker` ⇒ `REMOTE_DESK_OFFLINE`.
+/// 5. Auto + single-client — `payload.auto && pc_registry.len() != 1`
+///    ⇒ `INVALID_STATE` ("auto requires single client connection").
+///    Manual requests bypass this guard. Server-wide
+///    `desk_settings.adaptive_web_page_resolution` is *not* consulted
+///    here — see the inline comment in the function body for why.
+/// 6. Auto refresh-hz fallback — `payload.auto && refresh_hz == 0`
+///    substitutes `supervisor.last_refresh_hz()` (or 60 on cold start)
+///    so the daemon owns the authoritative refresh value.
+/// 7. Mode within bounds — `validate_mode` ⇒ `INVALID_PARAMS`.
+/// 8. Auto throttle — applied *after* `validate_mode` so an invalid
+///    payload never burns the next legitimate slot. Interval comes
+///    from `settings.virtual_display.adaptive_throttle_ms`; 0 disables
+///    the throttle. Manual requests bypass.
+/// 9. Worker reachable — `send_to_worker` ⇒ `REMOTE_DESK_OFFLINE`.
 ///
 /// On success the typed `SetVirtualDisplayMode` IPC carries
 /// `request_id` + `connection_id` so the worker's reply (via
@@ -534,8 +546,12 @@ async fn handle_change_display_settings_inbound(
         }
     };
 
-    // Auto-only gate: single-client. Apply before validate_mode so a
-    // non-authorised auto request can never poke the IDD.
+    // Auto-only gate: single-client. Refuses so a second browser
+    // cannot fight the first one over the IDD resolution; manual
+    // requests bypass this (operators can still drive resolution from
+    // any tab through the regular UI). Placed before `validate_mode`
+    // so a multi-client tab gets the more informative INVALID_STATE
+    // error rather than a generic INVALID_PARAMS on malformed inputs.
     //
     // No `desk_settings.adaptive_web_page_resolution` check here:
     // that field is per-connection (the browser dialog collects it and
@@ -545,22 +561,17 @@ async fn handle_change_display_settings_inbound(
     // browser's request no matter how the user toggled the checkbox.
     // The browser hook already gates on the same flag locally, so the
     // request only reaches here when the user has opted in; defence in
-    // depth is provided by `virtual_display.enabled`, `supervisor.is_active`,
-    // and the throttle below.
-    if payload.auto {
-        // Multi-client guard: refuse so a second browser cannot fight
-        // the first one over the IDD resolution. Manual path is
-        // unaffected — operators can still drive resolution from any
-        // tab through the regular UI.
-        if ctx.pc_registry.len().await != 1 {
-            emit_error_response(
-                ctx,
-                model,
-                DeskErrorCode::INVALID_STATE,
-                "auto requires single client connection",
-            );
-            return Ok(());
-        }
+    // depth is still provided by `virtual_display.enabled`,
+    // `supervisor.is_active`, the single-client guard above, and the
+    // throttle below.
+    if payload.auto && ctx.pc_registry.len().await != 1 {
+        emit_error_response(
+            ctx,
+            model,
+            DeskErrorCode::INVALID_STATE,
+            "auto requires single client connection",
+        );
+        return Ok(());
     }
 
     // Auto refresh-hz fallback: the browser hook ships `refresh_hz=0`
