@@ -588,7 +588,12 @@ fn build_virtual_display_response(
     match payload.outcome {
         VirtualDisplayModeOutcome::Applied(data) => {
             if let Some(supervisor) = supervisor {
-                supervisor.record_applied_refresh_hz(data.refresh_hz);
+                // Cache the full mode so the router's idempotent
+                // short-circuit can compare exact (width, height,
+                // refresh_hz) on the next inbound 205. `record_applied_mode`
+                // silently drops any update with a zero component, so a
+                // malformed worker echo cannot poison the cache.
+                supervisor.record_applied_mode(data.width, data.height, data.refresh_hz);
             }
             let response = ChangeDisplaySettingsPayload {
                 width: data.width,
@@ -998,11 +1003,13 @@ mod tests {
         assert_eq!(state.message.as_deref(), Some("driver pipe IO failed"));
     }
 
-    /// Applied response must update the supervisor's `last_known_refresh_hz`
-    /// cache. The cache is the daemon's authoritative source for the
-    /// refresh-hz fallback when the auto-resolution browser hook sends
-    /// `refresh_hz=0` — without this update the daemon would never learn
-    /// the driver's actual refresh rate.
+    /// Applied response must update the supervisor's full mode cache.
+    /// The cache feeds two paths:
+    ///   * `refresh_hz=0` fallback in the auto-resolution router path
+    ///   * the same-resolution idempotent short-circuit in the router
+    /// Without this update the daemon would never learn the driver's
+    /// actual mode and could neither fill in refresh nor skip redundant
+    /// IPC.
     #[test]
     fn build_virtual_display_response_applied_updates_supervisor_cache() {
         use crate::daemon::pc_manager::PcRegistry;
@@ -1016,8 +1023,9 @@ mod tests {
         let (worker_mgr, _rx) = WorkerManager::new(settings, pc_registry);
         let supervisor =
             std::sync::Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(worker_mgr));
-        // Pre-condition: cache is 0 (no observation yet).
+        // Pre-condition: cache is empty (no observation yet).
         assert_eq!(supervisor.last_refresh_hz(), 0);
+        assert!(supervisor.last_known_mode().is_none());
 
         let payload = VirtualDisplayModeResponsePayload {
             request_id: "req-cache".to_string(),
@@ -1031,17 +1039,58 @@ mod tests {
         let _model = build_virtual_display_response(payload, Some(&supervisor))
             .expect("build success model");
         assert_eq!(
+            supervisor.last_known_mode(),
+            Some((1920, 1080, 144)),
+            "Applied outcome must update the full supervisor cache (W,H,Hz)",
+        );
+        assert_eq!(
             supervisor.last_refresh_hz(),
             144,
-            "Applied outcome must update supervisor cache",
+            "refresh accessor must stay consistent with the new full-mode cache",
+        );
+    }
+
+    /// Regression: an Applied response with a zero dimension is treated
+    /// as a malformed echo and must not poison the cache. Guards against
+    /// a future driver bug that reports `width=0` on a transient race.
+    #[test]
+    fn build_virtual_display_response_applied_zero_dimension_is_ignored() {
+        use crate::daemon::pc_manager::PcRegistry;
+        use crate::daemon::virtual_display::VirtualDisplaySupervisor;
+        use crate::daemon::worker_manager::WorkerManager;
+        use crate::model::settings::{Settings, SharedSettings};
+        use actix_web::web;
+        let shared = SharedSettings::from(Settings::default());
+        let settings = web::Data::new(shared);
+        let pc_registry = PcRegistry::new();
+        let (worker_mgr, _rx) = WorkerManager::new(settings, pc_registry);
+        let supervisor =
+            std::sync::Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(worker_mgr));
+        // Pre-seed a fully-formed mode so the test can detect overwrite.
+        supervisor.record_applied_mode(1920, 1080, 60);
+
+        let payload = VirtualDisplayModeResponsePayload {
+            request_id: "req-zero".to_string(),
+            connection_id: "conn-zero".to_string(),
+            outcome: VirtualDisplayModeOutcome::Applied(VirtualDisplayModeData {
+                width: 0,
+                height: 1080,
+                refresh_hz: 60,
+            }),
+        };
+        let _model = build_virtual_display_response(payload, Some(&supervisor))
+            .expect("build success model");
+        assert_eq!(
+            supervisor.last_known_mode(),
+            Some((1920, 1080, 60)),
+            "zero-dimension Applied must be ignored — pre-seeded cache stays",
         );
     }
 
     /// Failed response must NOT update the cache — the driver did not
-    /// apply anything so there is no refresh rate to remember. Guards
-    /// against a future refactor that records unconditionally and
-    /// poisons the cache with a stale value after a transient driver
-    /// failure.
+    /// apply anything so there is no mode to remember. Guards against a
+    /// future refactor that records unconditionally and poisons the
+    /// cache with a stale value after a transient driver failure.
     #[test]
     fn build_virtual_display_response_failed_does_not_update_supervisor_cache() {
         use crate::daemon::pc_manager::PcRegistry;
@@ -1055,8 +1104,8 @@ mod tests {
         let (worker_mgr, _rx) = WorkerManager::new(settings, pc_registry);
         let supervisor =
             std::sync::Arc::new(VirtualDisplaySupervisor::new_disabled_for_test(worker_mgr));
-        // Pre-seed the cache so the test can detect overwrites.
-        supervisor.record_applied_refresh_hz(120);
+        // Pre-seed a fully-formed mode so the test can detect overwrites.
+        supervisor.record_applied_mode(1280, 720, 120);
 
         let payload = VirtualDisplayModeResponsePayload {
             request_id: "req-fail".to_string(),
@@ -1066,8 +1115,8 @@ mod tests {
         let _model =
             build_virtual_display_response(payload, Some(&supervisor)).expect("build error model");
         assert_eq!(
-            supervisor.last_refresh_hz(),
-            120,
+            supervisor.last_known_mode(),
+            Some((1280, 720, 120)),
             "Failed outcome must not touch supervisor cache",
         );
     }

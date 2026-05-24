@@ -607,6 +607,16 @@ pub struct InitSignalingData {
     /// and lets the daemon do the authoritative fallback.
     #[serde(default)]
     pub virtual_display_current_refresh_hz: u32,
+    /// GDI device name (e.g. `\\.\DISPLAY8`) of the IDD virtual display
+    /// when the daemon currently has it attached. `None` when no virtual
+    /// display is attached (default mode / IDD detached / Disabled
+    /// supervisor). The browser uses this both to label the matching
+    /// entry in the display picker AND to gate the adaptive-resolution
+    /// hook — auto requests only fire when the captured display equals
+    /// this name, otherwise resizing the browser silently changes the
+    /// IDD resolution while the worker is capturing a physical monitor.
+    #[serde(default)]
+    pub virtual_display_device_name: Option<String>,
     /// Browser-side adaptive resolution knobs sourced from
     /// `VirtualDisplaySettings`. Missing in legacy responses ⇒
     /// `AdaptiveResolutionParams::Default` (5000 ms / 16 px).
@@ -851,6 +861,10 @@ mod init_signaling_data_tests {
         let data: InitSignalingData = serde_json::from_str(raw).expect("decode");
         assert!(!data.virtual_display_active);
         assert_eq!(data.virtual_display_current_refresh_hz, 0);
+        assert!(
+            data.virtual_display_device_name.is_none(),
+            "legacy peers without virtual_display_device_name must decode to None",
+        );
         assert_eq!(
             data.adaptive_resolution.debounce_ms,
             DEFAULT_ADAPTIVE_DEBOUNCE_MS

@@ -1425,15 +1425,24 @@ pub async fn handle_request_remote(
     };
     // Adaptive-resolution metadata. The browser hook uses
     // `virtual_display_active` to decide whether to start its
-    // ResizeObserver loop at all, and `adaptive_resolution` to drive
-    // the trailing-edge debounce / min-delta thresholds without
-    // needing a separate REST round-trip. `virtual_display_current_refresh_hz`
-    // is informational — the auto path always sends `refresh_hz: 0`
-    // and the daemon substitutes the cached refresh on the way out.
-    let (virtual_display_active, virtual_display_current_refresh_hz) = match virtual_display {
-        Some(s) => (s.is_active().await, s.last_refresh_hz()),
-        None => (false, 0),
-    };
+    // ResizeObserver loop at all, `virtual_display_device_name` to
+    // confirm the captured monitor is in fact the IDD (otherwise
+    // resizing the browser would silently change the virtual display
+    // resolution while WGC keeps capturing a physical screen), and
+    // `adaptive_resolution` to drive the trailing-edge debounce /
+    // min-delta thresholds without needing a separate REST round-trip.
+    // `virtual_display_current_refresh_hz` is informational — the auto
+    // path always sends `refresh_hz: 0` and the daemon substitutes the
+    // cached refresh on the way out.
+    let (virtual_display_active, virtual_display_current_refresh_hz, virtual_display_device_name) =
+        match virtual_display {
+            Some(s) => (
+                s.is_active().await,
+                s.last_refresh_hz(),
+                s.attached_display_name().await,
+            ),
+            None => (false, 0, None),
+        };
     let adaptive_resolution = desk_signal_facade::model::signal::AdaptiveResolutionParams {
         debounce_ms: settings.virtual_display.adaptive_debounce_ms,
         min_delta_px: settings.virtual_display.adaptive_min_delta_px,
@@ -1450,6 +1459,7 @@ pub async fn handle_request_remote(
         is_admin: is_admin_value,
         virtual_display_active,
         virtual_display_current_refresh_hz,
+        virtual_display_device_name,
         adaptive_resolution,
     };
     log::info!(

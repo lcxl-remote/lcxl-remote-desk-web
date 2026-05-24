@@ -160,6 +160,26 @@ pub struct VirtualDisplaySupervisor {
     /// during the previous attach cycle should not be lost just because
     /// the IDD bounced.
     last_known_refresh_hz: AtomicU32,
+    /// Most-recently observed IDD width / height (pixels) from the
+    /// worker's `VirtualDisplayMode::Applied` echo. `0` ⇒ no observation
+    /// yet. Together with `last_known_refresh_hz` they form the
+    /// idempotency key for the router's same-resolution short-circuit:
+    /// a 205 whose `(width, height, refresh_hz)` exactly matches the
+    /// cache skips the worker IPC entirely (no IDD Departure+Arrival
+    /// driver round-trip, no WGC restart).
+    ///
+    /// **Unlike refresh, dimensions DO NOT survive attach generations.**
+    /// On detach the driver release of the IDD lets Windows lose the
+    /// negotiated mode; on the next attach the IDD comes up at whatever
+    /// the driver advertises by default (usually `1920×1080@60`). A
+    /// stale `2560×1440` cache would silently cause the router to fake
+    /// a successful response to a request that really needs to set the
+    /// mode. `reset_known_dimensions` is therefore called from every
+    /// attach-lifecycle transition point — see the body comments at
+    /// `apply` / `on_worker_attach_result`. Refresh stays put because
+    /// it only feeds the `refresh_hz=0` fallback and is informational.
+    last_known_width: AtomicU32,
+    last_known_height: AtomicU32,
     /// Timestamp of the last auto request that consumed a throttle slot.
     /// `None` until the first call. Survives detach/re-attach (acts as a
     /// global rate limit regardless of supervisor cycles).
@@ -180,6 +200,8 @@ impl VirtualDisplaySupervisor {
             attached_capabilities_target: target_tx,
             lifecycle_lock: Mutex::new(()),
             last_known_refresh_hz: AtomicU32::new(0),
+            last_known_width: AtomicU32::new(0),
+            last_known_height: AtomicU32::new(0),
             last_auto_change_at: std::sync::Mutex::new(None),
         }
     }
@@ -191,6 +213,19 @@ impl VirtualDisplaySupervisor {
         matches!(*self.state.read().await, SupervisorState::Attached { .. })
     }
 
+    /// GDI device name (e.g. `\\.\DISPLAY8`) the IDD is currently pinned
+    /// to when the supervisor is in `Attached`. `None` for every other
+    /// state. Used by `pc_manager` to populate
+    /// `InitSignalingData::virtual_display_device_name`, which the
+    /// browser then uses both to label the matching entry in the display
+    /// picker and to gate the adaptive-resolution hook.
+    pub async fn attached_display_name(&self) -> Option<String> {
+        match &*self.state.read().await {
+            SupervisorState::Attached { display_name, .. } => Some(display_name.clone()),
+            _ => None,
+        }
+    }
+
     /// Most-recently observed IDD refresh rate. `0` means the daemon has
     /// no `VirtualDisplayMode::Applied` observation yet (cold start) or
     /// the IDD has never reported a refresh.
@@ -198,15 +233,45 @@ impl VirtualDisplaySupervisor {
         self.last_known_refresh_hz.load(Ordering::Relaxed)
     }
 
-    /// Stash the refresh rate the driver actually applied, learned via
-    /// the worker's `VirtualDisplayMode::Applied` echo path. `hz==0` is
-    /// ignored (treated as "no observation") so a malformed echo never
-    /// erases a valid prior value.
-    pub fn record_applied_refresh_hz(&self, hz: u32) {
-        if hz == 0 {
+    /// Most-recently observed IDD mode `(width, height, refresh_hz)` as
+    /// reported by the worker's `VirtualDisplayMode::Applied` echo.
+    /// Returns `None` when **any** of the three is `0` — the router's
+    /// idempotency check only short-circuits on fully-observed modes,
+    /// because a half-zero cache would let a request with the same
+    /// non-zero dimensions get faked-Applied against a never-observed
+    /// refresh value.
+    pub fn last_known_mode(&self) -> Option<(u32, u32, u32)> {
+        let w = self.last_known_width.load(Ordering::Relaxed);
+        let h = self.last_known_height.load(Ordering::Relaxed);
+        let hz = self.last_known_refresh_hz.load(Ordering::Relaxed);
+        if w == 0 || h == 0 || hz == 0 {
+            None
+        } else {
+            Some((w, h, hz))
+        }
+    }
+
+    /// Stash the full mode the driver actually applied, learned via the
+    /// worker's `VirtualDisplayMode::Applied` echo path. Any zero
+    /// component is treated as "no observation" — the whole update is
+    /// skipped so a malformed echo never erases a valid prior value.
+    pub fn record_applied_mode(&self, width: u32, height: u32, refresh_hz: u32) {
+        if width == 0 || height == 0 || refresh_hz == 0 {
             return;
         }
-        self.last_known_refresh_hz.store(hz, Ordering::Relaxed);
+        self.last_known_width.store(width, Ordering::Relaxed);
+        self.last_known_height.store(height, Ordering::Relaxed);
+        self.last_known_refresh_hz
+            .store(refresh_hz, Ordering::Relaxed);
+    }
+
+    /// Clear the cached width/height (but **not** refresh). Called at
+    /// every attach lifecycle transition — see the field-level doc on
+    /// `last_known_width` for why dimensions cannot survive across
+    /// attach generations while refresh can.
+    fn reset_known_dimensions(&self) {
+        self.last_known_width.store(0, Ordering::Relaxed);
+        self.last_known_height.store(0, Ordering::Relaxed);
     }
 
     /// Throttle an auto `ChangeDisplaySettings` request: returns `true`
@@ -264,6 +329,16 @@ impl VirtualDisplaySupervisor {
                             virtual_display.instance_id = %instance_id,
                             "VirtualDisplaySupervisor created handle, moving to Attaching",
                         );
+                        // Drop stale width/height from any previous attach
+                        // generation BEFORE we transition to Attaching —
+                        // the new IDD comes up at whatever the driver
+                        // defaults to (typically 1920x1080@60), and a
+                        // cached 2560x1440 would let the router fake an
+                        // Applied response to the next 2560x1440 request
+                        // even though the driver is still at the default
+                        // mode. Refresh is preserved as an operator hint
+                        // for the auto-fallback path.
+                        self.reset_known_dimensions();
                         *state = SupervisorState::Attaching {
                             instance_id: instance_id.clone(),
                             handle,
@@ -308,6 +383,12 @@ impl VirtualDisplaySupervisor {
                 // `apply(true)` is forced to wait — guaranteeing the
                 // worker observes Detach + RefreshCapabilities of this
                 // round strictly before any next-round Attach.
+                // Same dimension-cache invariant as the bring-up branch
+                // (see comment there): tear-down ends an attach
+                // generation, so the cached mode is no longer
+                // authoritative even if we later re-attach with the
+                // same IDD instance id.
+                self.reset_known_dimensions();
                 *state = SupervisorState::Detaching;
                 drop(state); // Don't hold the write lock across the IPC await.
                 if let Err(e) = self
@@ -429,6 +510,17 @@ impl VirtualDisplaySupervisor {
         }
         match payload.outcome {
             VirtualDisplayAttachOutcome::Attached(display_name) => {
+                // Reset cached dimensions unconditionally on every
+                // Attached outcome — covering BOTH the Attaching→Attached
+                // promotion edge AND the already-Attached re-attach path
+                // worker takes after a restart. The latter is the case
+                // codex round 2 #2 caught: a worker restart re-sends
+                // AttachVirtualDisplay and lands here while the
+                // supervisor is still Attached, and the IDD has been
+                // reborn at the driver's default mode rather than the
+                // dimensions we cached pre-restart. Refresh is preserved
+                // — see `last_known_width` field doc.
+                self.reset_known_dimensions();
                 let prev = std::mem::replace(&mut *state, SupervisorState::Disabled);
                 // Edge-trigger: only the Attaching → Attached promotion
                 // fires RefreshCapabilities. A second attach-result on
@@ -706,6 +798,17 @@ impl VirtualDisplaySupervisor {
         Self::new(Box::new(NotSupportedProvider), worker_mgr)
     }
 
+    /// Test-only helper: seed only the refresh portion of the cache,
+    /// leaving width/height at zero. Models the real-world state right
+    /// after `apply(true)` (dimension reset preserved refresh from the
+    /// previous attach generation as an operator hint) and lets tests
+    /// exercise the router's `refresh_hz=0` fallback path without
+    /// triggering the idempotent short-circuit (which requires a fully
+    /// observed mode).
+    pub fn seed_refresh_hz_for_test(&self, hz: u32) {
+        self.last_known_refresh_hz.store(hz, Ordering::Relaxed);
+    }
+
     /// Test-only state inspector. `is_active()` only distinguishes
     /// `Attached` from everything else; tests for the
     /// `Attaching → Attached` promotion need finer granularity to tell
@@ -790,6 +893,8 @@ impl VirtualDisplaySupervisor {
             attached_capabilities_target: target_tx,
             lifecycle_lock: Mutex::new(()),
             last_known_refresh_hz: AtomicU32::new(0),
+            last_known_width: AtomicU32::new(0),
+            last_known_height: AtomicU32::new(0),
             last_auto_change_at: std::sync::Mutex::new(None),
         }
     }
@@ -1713,31 +1818,154 @@ mod tests {
         );
     }
 
-    /// `record_applied_refresh_hz` stores the driver-applied refresh from
-    /// the worker's echo, but a `0` reading must not erase a prior valid
-    /// observation (a malformed echo cannot wipe operator-tuned state).
+    /// `record_applied_mode` stores the full mode the driver applied
+    /// (width × height × refresh) from the worker's echo. Any zero
+    /// component skips the update so a malformed echo cannot wipe a
+    /// prior valid observation. `last_known_mode()` only reports a
+    /// fully-observed mode.
     #[test]
-    fn supervisor_records_refresh_hz_on_applied() {
+    fn supervisor_records_full_mode_on_applied() {
         let (worker_mgr, _rx) = make_worker_mgr();
         let s = VirtualDisplaySupervisor::new(
             Box::new(MockLifecycle::returns_not_supported()),
             worker_mgr,
         );
 
-        // Initial state: 0 (no observation).
+        // Initial state: nothing observed yet.
         assert_eq!(s.last_refresh_hz(), 0);
+        assert!(s.last_known_mode().is_none());
 
-        // First Applied(120) caches 120.
-        s.record_applied_refresh_hz(120);
+        // First fully-formed Applied caches all three.
+        s.record_applied_mode(2560, 1440, 120);
         assert_eq!(s.last_refresh_hz(), 120);
+        assert_eq!(s.last_known_mode(), Some((2560, 1440, 120)));
 
-        // Stray 0 reading does NOT overwrite the cached value.
-        s.record_applied_refresh_hz(0);
-        assert_eq!(s.last_refresh_hz(), 120);
+        // Any zero component is treated as "no observation" and the
+        // whole update is skipped — refresh + dimensions all stay put.
+        s.record_applied_mode(0, 1440, 60);
+        assert_eq!(s.last_known_mode(), Some((2560, 1440, 120)));
+        s.record_applied_mode(1920, 0, 60);
+        assert_eq!(s.last_known_mode(), Some((2560, 1440, 120)));
+        s.record_applied_mode(1920, 1080, 0);
+        assert_eq!(s.last_known_mode(), Some((2560, 1440, 120)));
 
-        // A subsequent valid Applied(60) does overwrite.
-        s.record_applied_refresh_hz(60);
+        // A subsequent fully-valid Applied does overwrite.
+        s.record_applied_mode(1920, 1080, 60);
+        assert_eq!(s.last_known_mode(), Some((1920, 1080, 60)));
         assert_eq!(s.last_refresh_hz(), 60);
+    }
+
+    /// `attached_display_name()` returns the GDI device name only while
+    /// the supervisor is `Attached`. Every other state (`Disabled`,
+    /// `Attaching`, `Detaching`) returns `None`. `pc_manager` reads this
+    /// to populate `InitSignalingData::virtual_display_device_name`.
+    #[tokio::test]
+    async fn supervisor_attached_display_name_only_when_attached() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        // Disabled: brand-new supervisor.
+        let disabled = VirtualDisplaySupervisor::new(
+            Box::new(MockLifecycle::returns_not_supported()),
+            worker_mgr.clone(),
+        );
+        assert_eq!(disabled.attached_display_name().await, None);
+
+        // Attached via the pre-promoted test helper.
+        let attached =
+            VirtualDisplaySupervisor::new_attached_for_test(worker_mgr.clone(), "SWD\\TEST\\TEST");
+        assert_eq!(
+            attached.attached_display_name().await.as_deref(),
+            Some("\\\\.\\TESTDISPLAY"),
+        );
+
+        // Attaching: bring up via apply(true) with a handle-returning
+        // provider, but never deliver the attach result.
+        let (worker_mgr2, _rx2) = make_worker_mgr();
+        let attaching =
+            VirtualDisplaySupervisor::new(Box::new(MockLifecycle::returns_handle()), worker_mgr2);
+        attaching.apply(true).await.expect("apply(true) succeeds");
+        assert_eq!(attaching.state_label().await, "Attaching");
+        assert_eq!(attaching.attached_display_name().await, None);
+    }
+
+    /// Codex round 1 #1: `apply(false)` ending an attach generation
+    /// must clear cached width/height (so a stale 2560x1440 cannot
+    /// fake-short-circuit the next request) while preserving the
+    /// refresh hint.
+    #[tokio::test]
+    async fn supervisor_apply_false_clears_dimensions_keeps_refresh() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s =
+            VirtualDisplaySupervisor::new(Box::new(MockLifecycle::returns_handle()), worker_mgr);
+        // Bring the supervisor up to Attaching so the (Attaching, false)
+        // arm exercises the dimension reset.
+        s.apply(true).await.expect("apply(true) succeeds");
+        // Seed a full cached mode as if the worker had echoed Applied.
+        s.record_applied_mode(2560, 1440, 60);
+        assert_eq!(s.last_known_mode(), Some((2560, 1440, 60)));
+
+        s.apply(false).await.expect("apply(false) succeeds");
+
+        assert!(
+            s.last_known_mode().is_none(),
+            "dimensions must be cleared on tear-down so a future re-attach \
+             does not inherit a stale fake-short-circuit cache",
+        );
+        assert_eq!(
+            s.last_refresh_hz(),
+            60,
+            "refresh is preserved as an operator hint across attach generations",
+        );
+    }
+
+    /// Codex round 1 #1: `apply(true)` starting an attach generation
+    /// also clears stale dimensions, regardless of what the previous
+    /// detach left behind.
+    #[tokio::test]
+    async fn supervisor_apply_true_clears_dimensions_keeps_refresh() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s =
+            VirtualDisplaySupervisor::new(Box::new(MockLifecycle::returns_handle()), worker_mgr);
+        // Pretend we previously had an attach cycle that left dimensions
+        // cached (skipping the `apply(true)` reset). This mirrors the
+        // shape `apply(false)` could not reach in the absence of a fresh
+        // bring-up.
+        s.record_applied_mode(2560, 1440, 144);
+
+        s.apply(true).await.expect("apply(true) succeeds");
+
+        assert!(s.last_known_mode().is_none());
+        assert_eq!(s.last_refresh_hz(), 144);
+    }
+
+    /// Codex round 2 #2: every `Attached` outcome — including the
+    /// already-Attached re-entry path that worker restart takes —
+    /// must clear cached dimensions. The Attaching→Attached promotion
+    /// edge is exercised implicitly by the apply(true) chain in other
+    /// tests; this one pins the *already-Attached* branch.
+    #[tokio::test]
+    async fn supervisor_on_worker_attach_result_already_attached_clears_dimensions() {
+        let (worker_mgr, _rx) = make_worker_mgr();
+        let s = VirtualDisplaySupervisor::new_attached_for_test(worker_mgr, "SWD\\TEST\\TEST");
+        // Seed cached dimensions inside an existing Attached state.
+        s.record_applied_mode(2560, 1440, 120);
+        assert_eq!(s.last_known_mode(), Some((2560, 1440, 120)));
+        assert_eq!(s.state_label().await, "Attached");
+
+        // Re-send the attach result with the same instance id; this
+        // lands on the already-Attached branch in on_worker_attach_result.
+        s.on_worker_attach_result(VirtualDisplayAttachResultPayload {
+            instance_id: "SWD\\TEST\\TEST".to_string(),
+            outcome: VirtualDisplayAttachOutcome::Attached("\\\\.\\TESTDISPLAY".to_string()),
+        })
+        .await;
+
+        assert!(
+            s.last_known_mode().is_none(),
+            "already-Attached re-entry (worker restart path) must clear \
+             stale dimensions even though no state transition fires",
+        );
+        assert_eq!(s.last_refresh_hz(), 120, "refresh must survive");
+        assert_eq!(s.state_label().await, "Attached");
     }
 
     /// The first call ever to `try_consume_auto_slot` must always

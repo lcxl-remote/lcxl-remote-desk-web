@@ -1171,6 +1171,11 @@ export type InitSignalingData = {
      * @type integer | undefined, int32
     */
     virtual_display_current_refresh_hz?: number;
+    /**
+     * @description GDI device name (e.g. `\\\\.\\DISPLAY8`) of the IDD virtual display\nwhen the daemon currently has it attached. `None` when no virtual\ndisplay is attached (default mode / IDD detached / Disabled\nsupervisor). The browser uses this both to label the matching\nentry in the display picker AND to gate the adaptive-resolution\nhook — auto requests only fire when the captured display equals\nthis name, otherwise resizing the browser silently changes the\nIDD resolution while the worker is capturing a physical monitor.
+     * @type string,null
+    */
+    virtual_display_device_name?: string | null;
 };
 
 /**
