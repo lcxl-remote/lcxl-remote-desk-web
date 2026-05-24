@@ -1,10 +1,11 @@
 import { renderHook, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useRef } from "react";
 import type { MutableRefObject, RefObject } from "react";
 import {
+    isAdaptiveResolutionGateOpen,
     normaliseDims,
     useAdaptiveResolution,
+    type AdaptiveResolutionGateInputs,
     type UseAdaptiveResolutionParams,
 } from "./use-adaptive-resolution";
 
@@ -377,5 +378,143 @@ describe("useAdaptiveResolution", () => {
     it("does not observe when initially enabled is false", () => {
         makeHarness({ enabled: false });
         expect(mockResizeObserverState.instances).toHaveLength(0);
+    });
+});
+
+describe("isAdaptiveResolutionGateOpen", () => {
+    /**
+     * Baseline of every axis satisfied — used as the spread base so
+     * each negative case only flips the single axis under test.
+     */
+    const happy: AdaptiveResolutionGateInputs = {
+        deskId: "desk-abc",
+        isRTCConnected: true,
+        virtualDisplayActive: true,
+        virtualDisplayDeviceName: "\\\\.\\DISPLAY8",
+        selectedVideoDeviceName: "\\\\.\\DISPLAY8",
+        adaptiveWebPageResolution: true,
+    };
+
+    it("opens the gate when every axis is satisfied", () => {
+        expect(isAdaptiveResolutionGateOpen(happy)).toBe(true);
+    });
+
+    it("closes when deskId is missing", () => {
+        expect(
+            isAdaptiveResolutionGateOpen({ ...happy, deskId: null }),
+        ).toBe(false);
+        expect(
+            isAdaptiveResolutionGateOpen({ ...happy, deskId: "" }),
+        ).toBe(false);
+        expect(
+            isAdaptiveResolutionGateOpen({ ...happy, deskId: undefined }),
+        ).toBe(false);
+    });
+
+    it("closes when WebRTC is not connected", () => {
+        expect(
+            isAdaptiveResolutionGateOpen({ ...happy, isRTCConnected: false }),
+        ).toBe(false);
+    });
+
+    it("closes when the daemon reports the IDD as not active", () => {
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                virtualDisplayActive: false,
+            }),
+        ).toBe(false);
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                virtualDisplayActive: null,
+            }),
+        ).toBe(false);
+    });
+
+    it("closes when the daemon omits the IDD device name", () => {
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                virtualDisplayDeviceName: null,
+            }),
+        ).toBe(false);
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                virtualDisplayDeviceName: "",
+            }),
+        ).toBe(false);
+    });
+
+    /**
+     * The exact-match check is the load-bearing defence: if the user
+     * picked a physical monitor, firing 205 would silently change the
+     * IDD resolution while WGC keeps capturing the physical screen —
+     * the change would be invisible.
+     */
+    it("closes when the selected display is not the IDD", () => {
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                selectedVideoDeviceName: "\\\\.\\DISPLAY1",
+            }),
+        ).toBe(false);
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                selectedVideoDeviceName: null,
+            }),
+        ).toBe(false);
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                selectedVideoDeviceName: "",
+            }),
+        ).toBe(false);
+    });
+
+    it("closes when the user has not ticked the adaptive toggle", () => {
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                adaptiveWebPageResolution: false,
+            }),
+        ).toBe(false);
+        expect(
+            isAdaptiveResolutionGateOpen({
+                ...happy,
+                adaptiveWebPageResolution: null,
+            }),
+        ).toBe(false);
+    });
+
+    /**
+     * Regression for the ref-vs-state bug fixed alongside this helper:
+     * before the fix the `enabled` expression in `desk-session.tsx`
+     * read settings from a ref. Mutating a ref does not trigger a
+     * re-render, so a settings change like "select IDD + tick
+     * adaptive" could leave `enabled` stuck at the previous bool until
+     * some unrelated state forced a re-render. The fix mirrors the
+     * settings to React state and routes the boolean through this
+     * helper. The test below documents the exact transition by passing
+     * the pre- and post-submit input objects through the gate.
+     */
+    it("transitions false→true when the user moves selection onto the IDD", () => {
+        const before: AdaptiveResolutionGateInputs = {
+            ...happy,
+            // Operator just connected with a physical monitor selected
+            // and the adaptive toggle still on (the dialog effect
+            // would force it off, but defence-in-depth says the gate
+            // must still close on its own).
+            selectedVideoDeviceName: "\\\\.\\DISPLAY1",
+        };
+        expect(isAdaptiveResolutionGateOpen(before)).toBe(false);
+
+        const after: AdaptiveResolutionGateInputs = {
+            ...before,
+            selectedVideoDeviceName: "\\\\.\\DISPLAY8",
+        };
+        expect(isAdaptiveResolutionGateOpen(after)).toBe(true);
     });
 });

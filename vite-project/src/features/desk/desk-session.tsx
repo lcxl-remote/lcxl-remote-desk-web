@@ -26,7 +26,7 @@ import WhiteboardCanvas from "./whiteboard-canvas"
 import WhiteboardToolbar from "./whiteboard-toolbar"
 import { useDeskMicrophone } from "./use-desk-microphone"
 import { DeskConfigDialog } from "./desk-config-dialog"
-import { useAdaptiveResolution } from "./use-adaptive-resolution"
+import { useAdaptiveResolution, isAdaptiveResolutionGateOpen } from "./use-adaptive-resolution"
 import { useResolutionToast } from "./use-resolution-toast"
 import type { DeskSettings } from "@/services/types"
 import {
@@ -132,6 +132,16 @@ export default function DeskSession() {
     // `lastSettingsRef` survives because the non-reconnect parts of the
     // adaptive-quality loop still consult it.
     const lastSettingsRef = useRef<DeskSettings | null>(null);
+    // State mirror of the user-submitted settings used solely for
+    // hooks/effects whose React-tracked deps must re-evaluate on a
+    // settings change. Refs are intentionally invisible to React's
+    // render cycle, so reading `lastSettingsRef.current` inside a hook's
+    // `enabled` prop would silently miss "user changed display to the
+    // IDD and ticked adaptive" until some other state happened to
+    // re-render the component. Mirror only fields the gating cares
+    // about — the adaptive-quality auto-adjust path keeps writing only
+    // to the ref so its per-stats-tick updates do not force a re-render.
+    const [activeSettings, setActiveSettings] = useState<DeskSettings | null>(null);
 
     // Adaptive resolution: request ids the hook has emitted but not yet
     // seen an echo for. The lastMessage listener uses this set as a
@@ -404,14 +414,14 @@ export default function DeskSession() {
     // up is always safe.
     useAdaptiveResolution({
         wrapperRef: videoWrapperRef,
-        enabled:
-            !!deskId &&
-            isRTCConnected &&
-            !!initData?.virtual_display_active &&
-            !!initData?.virtual_display_device_name &&
-            lastSettingsRef.current?.video_device_name ===
-                initData?.virtual_display_device_name &&
-            !!lastSettingsRef.current?.adaptive_web_page_resolution,
+        enabled: isAdaptiveResolutionGateOpen({
+            deskId,
+            isRTCConnected,
+            virtualDisplayActive: initData?.virtual_display_active,
+            virtualDisplayDeviceName: initData?.virtual_display_device_name,
+            selectedVideoDeviceName: activeSettings?.video_device_name,
+            adaptiveWebPageResolution: activeSettings?.adaptive_web_page_resolution,
+        }),
         sendChangeDisplay,
         pendingAutoRequestIds: pendingAutoRequestIdsRef,
         // `bigint` (u64 on the wire) → `number` because setTimeout
@@ -426,6 +436,11 @@ export default function DeskSession() {
 
     const handleConfigSubmit = (settings: DeskSettings) => {
         lastSettingsRef.current = settings;
+        // Mirror to state so `useAdaptiveResolution` re-evaluates its
+        // `enabled` gate on this submit even when no other tracked
+        // state happens to change in the same tick (e.g. the user is
+        // already connected and only flips display + adaptive toggle).
+        setActiveSettings(settings);
         if (isRTCConnected && deskId) {
             console.log("Updating desk settings dynamically...", settings);
             sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, settings, deskId);

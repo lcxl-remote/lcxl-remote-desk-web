@@ -57,6 +57,62 @@ export interface UseAdaptiveResolutionParams {
 const DEFAULT_DEBOUNCE_MS = 5_000;
 const DEFAULT_MIN_DELTA_PX = 16;
 
+/**
+ * Inputs to {@link isAdaptiveResolutionGateOpen}: the union of state
+ * pieces the `desk-session` view aggregates before letting the auto-
+ * resolution loop fire. Kept as a single explicit object so the call
+ * site documents itself and the unit tests can pin each axis.
+ */
+export interface AdaptiveResolutionGateInputs {
+    /** Truthy desk identifier — required by `sendChangeDisplay`. */
+    deskId: string | null | undefined;
+    /** WebRTC peer connection is up and tracks are flowing. */
+    isRTCConnected: boolean;
+    /** Daemon supervisor reports the IDD currently has a live handle. */
+    virtualDisplayActive: boolean | null | undefined;
+    /** GDI name (`\\.\DISPLAYn`) of the attached IDD, as reported by the daemon. */
+    virtualDisplayDeviceName: string | null | undefined;
+    /** Capture target the user picked in the config dialog. */
+    selectedVideoDeviceName: string | null | undefined;
+    /** Adaptive toggle from the config dialog form. */
+    adaptiveWebPageResolution: boolean | null | undefined;
+}
+
+/**
+ * Pure gate the `useAdaptiveResolution` hook's `enabled` prop is built
+ * from. Returns true only when **every** axis is satisfied:
+ *
+ *   - `deskId` is real (sendMessage needs a routing target)
+ *   - WebRTC is connected (no point adapting an inactive stream)
+ *   - daemon reports the IDD as currently attached
+ *     (`virtualDisplayActive`) AND surfaces its GDI device name
+ *   - the user-selected capture device equals that IDD name — without
+ *     this, firing 205 would silently change the IDD resolution while
+ *     WGC keeps capturing a physical screen
+ *   - the user ticked the adaptive toggle
+ *
+ * Extracted to its own export so the gate semantics are unit-testable
+ * without dragging the whole `DeskSession` mock surface. The previous
+ * inline expression in `desk-session.tsx` read `lastSettingsRef.current`
+ * — a React ref whose mutation does not trigger a re-render, so the
+ * hook's `enabled` could silently miss a settings change. The fix is
+ * twofold: mirror the relevant settings to state in the caller, and
+ * route the boolean calculation through this helper so a regression
+ * test can catch a future revert.
+ */
+export function isAdaptiveResolutionGateOpen(
+    args: AdaptiveResolutionGateInputs,
+): boolean {
+    return (
+        !!args.deskId &&
+        args.isRTCConnected &&
+        !!args.virtualDisplayActive &&
+        !!args.virtualDisplayDeviceName &&
+        args.selectedVideoDeviceName === args.virtualDisplayDeviceName &&
+        !!args.adaptiveWebPageResolution
+    );
+}
+
 /** IDD bounds — mirrors `web/virtual-display/src/lib.rs` constants. */
 const MIN_DIMENSION = 640;
 const MAX_DIMENSION = 7680;
