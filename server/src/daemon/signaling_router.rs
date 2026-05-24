@@ -467,6 +467,52 @@ fn emit_error_response(
     }
 }
 
+/// Synthesise an `Applied(width, height, refresh_hz)` success response
+/// for a `ChangeDisplaySettings` request whose target already matches
+/// the supervisor's cached mode. Used by the idempotent short-circuit:
+/// when the browser asks for the resolution the IDD is already at, the
+/// router replies inline without round-tripping to the worker. The
+/// payload shape mirrors `signaling_proxy::build_virtual_display_response`'s
+/// `Applied` branch (a `ChangeDisplaySettingsPayload` with `auto=false`)
+/// so the browser cannot distinguish a real `Applied` from this synth.
+fn emit_applied_response(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+) {
+    let payload = ChangeDisplaySettingsPayload {
+        width,
+        height,
+        refresh_hz,
+        auto: false,
+    };
+    match SignalingModel::success_response(
+        &model.request_id,
+        model.signaling_type,
+        None,
+        model.from_connection_id.clone(),
+        Some(&payload),
+    ) {
+        Ok(reply) => match serde_json::to_string(&reply) {
+            Ok(text) => {
+                let _ = ctx.outbound_tx.send(text);
+            }
+            Err(e) => log::warn!(
+                "[router] failed to serialise idempotent ChangeDisplaySettings reply: {e} \
+                 (request_id={})",
+                model.request_id,
+            ),
+        },
+        Err(e) => log::warn!(
+            "[router] failed to build idempotent ChangeDisplaySettings reply: {e} \
+             (request_id={})",
+            model.request_id,
+        ),
+    }
+}
+
 /// Virtual display: validate + forward a browser-issued
 /// `ChangeDisplaySettings`. Inbound model carries
 /// `ChangeDisplaySettingsPayload`; daemon checks (in order):
@@ -600,6 +646,42 @@ async fn handle_change_display_settings_inbound(
             DeskErrorCode::INVALID_PARAMS,
             &format!("invalid mode: {e}"),
         );
+        return Ok(());
+    }
+
+    // Idempotent short-circuit: if the request's (width, height,
+    // effective_refresh_hz) exactly matches the supervisor's cached
+    // mode (last seen via the worker's `VirtualDisplayMode::Applied`
+    // echo), skip the worker IPC entirely and synthesise an Applied
+    // response inline. Rationale: the worker's `set_mode` path always
+    // triggers an IDD Departure+Arrival driver cycle plus a WGC capture
+    // restart, even when the resolution is unchanged. The browser's
+    // adaptive-resolution hook frequently re-fires on devicePixelRatio
+    // jitter at the same wrapper size, so dropping these no-op
+    // round-trips removes a large source of visible WGC restart
+    // hitches.
+    //
+    // Placed *after* `validate_mode` (so an invalid payload still
+    // returns INVALID_PARAMS rather than masking the validation bug as
+    // a fake Applied) and *before* `try_consume_auto_slot` (an
+    // idempotent hit has zero IDD cost, so it should not consume a
+    // throttle slot the operator has reserved for real changes).
+    // `last_known_mode()` returns `None` until the worker has reported
+    // a fully-formed Applied (all three components non-zero) AND the
+    // current attach generation has not been torn down — dimensions
+    // are cleared on every attach lifecycle transition, see
+    // `VirtualDisplaySupervisor::reset_known_dimensions` doc.
+    if let Some((cached_w, cached_h, cached_hz)) = supervisor.last_known_mode()
+        && payload.width == cached_w
+        && payload.height == cached_h
+        && effective_refresh_hz == cached_hz
+    {
+        log::debug!(
+            "[router] ChangeDisplaySettings idempotent hit {cached_w}x{cached_h}@{cached_hz}; \
+             skipping worker IPC (request_id={})",
+            model.request_id,
+        );
+        emit_applied_response(ctx, model, cached_w, cached_h, cached_hz);
         return Ok(());
     }
 
@@ -2082,12 +2164,17 @@ mod tests {
     #[tokio::test]
     async fn auto_request_substitutes_zero_refresh_with_cached() {
         let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
-        // Pre-seed the supervisor cache so the daemon has an
-        // authoritative value to substitute.
+        // Pre-seed only the refresh portion of the supervisor cache so
+        // the daemon has an authoritative value to substitute. Using
+        // the test-only refresh-only setter (instead of
+        // `record_applied_mode`) keeps width/height at zero, which is
+        // important here: a full mode would also satisfy
+        // `last_known_mode()` and trigger the idempotent short-circuit,
+        // bypassing the IPC dispatch this test wants to observe.
         ctx.virtual_display
             .as_ref()
             .expect("supervisor present")
-            .record_applied_refresh_hz(144);
+            .seed_refresh_hz_for_test(144);
 
         let model = make_change_display_settings_model(
             "req-cached",
@@ -2321,5 +2408,288 @@ mod tests {
             ),
             "second auto must also pass when throttle disabled",
         );
+    }
+
+    // ===========================================================
+    // Idempotent short-circuit tests (Phase 2 of the UX three-pack).
+    // Cached `(width, height, refresh_hz)` matching the inbound
+    // request must skip the worker IPC and return Applied inline.
+    // ===========================================================
+
+    /// Cold start — no cache. Auto request must NOT short-circuit and
+    /// must reach the worker as IPC. This is the negative-control
+    /// baseline the rest of the idempotent tests sit on top of.
+    #[tokio::test]
+    async fn idempotent_cold_cache_dispatches_ipc_normally() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        // Sanity: nothing observed yet.
+        assert!(
+            ctx.virtual_display
+                .as_ref()
+                .expect("supervisor")
+                .last_known_mode()
+                .is_none()
+        );
+
+        let model = make_change_display_settings_model(
+            "req-cold",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        assert!(
+            matches!(
+                worker_rx.try_recv(),
+                Ok(ServiceToWorker::SetVirtualDisplayMode(_))
+            ),
+            "cold cache must dispatch IPC, not short-circuit",
+        );
+    }
+
+    /// Cache exactly matches the inbound auto request — short-circuit:
+    /// no IPC, browser receives a success response inline.
+    #[tokio::test]
+    async fn idempotent_exact_match_short_circuits_no_ipc() {
+        let (ctx, mut rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.virtual_display
+            .as_ref()
+            .expect("supervisor")
+            .record_applied_mode(1920, 1080, 60);
+
+        let model = make_change_display_settings_model(
+            "req-hit",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+
+        // Browser sees a fully-formed success response with the cached
+        // dimensions echoed back.
+        let response = read_response(&mut rx);
+        let state = response
+            .response_state
+            .as_ref()
+            .expect("must have response state");
+        assert_eq!(
+            state.error_code,
+            DeskErrorCode::SUCCESS.code(),
+            "idempotent hit must yield success, not error",
+        );
+        let echoed: ChangeDisplaySettingsPayload =
+            response.get_data().expect("response payload must decode");
+        assert_eq!(echoed.width, 1920);
+        assert_eq!(echoed.height, 1080);
+        assert_eq!(echoed.refresh_hz, 60);
+
+        // No worker IPC dispatched.
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "idempotent hit must not dispatch worker IPC",
+        );
+    }
+
+    /// Idempotent hit must NOT consume the throttle slot. Verified by
+    /// setting a tight throttle, firing a same-resolution auto (hit),
+    /// then firing a different-resolution auto that MUST reach the
+    /// worker — if the hit had consumed the slot, the second request
+    /// would be rejected with "auto change throttled". Note that we
+    /// cannot use a manual request to probe throttle consumption:
+    /// manual requests bypass the throttle gate entirely (`payload.auto`
+    /// branch in `handle_change_display_settings_inbound`).
+    #[tokio::test]
+    async fn idempotent_hit_does_not_consume_throttle_slot() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.settings
+            .write()
+            .await
+            .virtual_display
+            .adaptive_throttle_ms = 60_000; // tight: 60 s
+        ctx.virtual_display
+            .as_ref()
+            .expect("supervisor")
+            .record_applied_mode(1920, 1080, 60);
+
+        // First auto: same resolution — idempotent hit, no IPC, no
+        // throttle slot consumed.
+        let hit = make_change_display_settings_model(
+            "req-hit-throttle",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&hit, &ctx).await.expect("route must not error");
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "idempotent hit must not dispatch worker IPC",
+        );
+
+        // Second auto immediately after: different resolution — must
+        // pass through to the worker. If the previous hit had consumed
+        // the throttle slot this would be rejected with INVALID_STATE.
+        let real = make_change_display_settings_model(
+            "req-after-hit",
+            ChangeDisplaySettingsPayload {
+                width: 1280,
+                height: 720,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&real, &ctx).await.expect("route must not error");
+        match worker_rx
+            .try_recv()
+            .expect("second auto must reach worker — throttle slot must NOT have been consumed")
+        {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.width, 1280);
+                assert_eq!(p.height, 720);
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
+    }
+
+    /// Width differs ⇒ no short-circuit, IPC dispatched.
+    #[tokio::test]
+    async fn idempotent_miss_on_width_dispatches_ipc() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.virtual_display
+            .as_ref()
+            .expect("supervisor")
+            .record_applied_mode(1920, 1080, 60);
+
+        let model = make_change_display_settings_model(
+            "req-miss-w",
+            ChangeDisplaySettingsPayload {
+                width: 1280,
+                height: 1080,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Ok(ServiceToWorker::SetVirtualDisplayMode(_))
+        ));
+    }
+
+    /// Refresh differs ⇒ no short-circuit, IPC dispatched.
+    #[tokio::test]
+    async fn idempotent_miss_on_refresh_dispatches_ipc() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.virtual_display
+            .as_ref()
+            .expect("supervisor")
+            .record_applied_mode(1920, 1080, 60);
+
+        let model = make_change_display_settings_model(
+            "req-miss-hz",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 75,
+                auto: false,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        assert!(matches!(
+            worker_rx.try_recv(),
+            Ok(ServiceToWorker::SetVirtualDisplayMode(_))
+        ));
+    }
+
+    /// Auto request with `refresh_hz=0` substitutes the cached refresh
+    /// before the idempotent comparison; if the substitution lands on
+    /// the cached value AND dimensions match, the hit fires.
+    #[tokio::test]
+    async fn idempotent_hits_when_zero_refresh_resolves_to_cached() {
+        let (ctx, mut rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.virtual_display
+            .as_ref()
+            .expect("supervisor")
+            .record_applied_mode(1920, 1080, 60);
+
+        let model = make_change_display_settings_model(
+            "req-auto-zero-hit",
+            ChangeDisplaySettingsPayload {
+                width: 1920,
+                height: 1080,
+                refresh_hz: 0, // gets resolved to cached 60
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        let response = read_response(&mut rx);
+        let state = response
+            .response_state
+            .as_ref()
+            .expect("must have response state");
+        assert_eq!(state.error_code, DeskErrorCode::SUCCESS.code());
+        let echoed: ChangeDisplaySettingsPayload =
+            response.get_data().expect("response payload must decode");
+        assert_eq!(
+            echoed.refresh_hz, 60,
+            "synth response echoes cached refresh"
+        );
+        assert!(
+            worker_rx.try_recv().is_err(),
+            "auto with refresh_hz=0 and matching dims must short-circuit",
+        );
+    }
+
+    /// Codex round 1 #1 regression: after a complete detach the
+    /// dimension cache is cleared (refresh survives), so the next
+    /// same-resolution request must NOT be faked — it must reach the
+    /// worker and actually drive the IDD. This pins the fix for the
+    /// fake-Applied-on-stale-cache hazard that the codex review
+    /// caught. We model "post-reattach" state directly by injecting a
+    /// fresh Attached supervisor with only the refresh portion of the
+    /// cache populated (mirroring what `reset_known_dimensions` leaves
+    /// behind after the supervisor goes through an
+    /// attach→detach→re-attach cycle).
+    #[tokio::test]
+    async fn idempotent_does_not_short_circuit_after_reattach() {
+        let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
+        let supervisor = ctx.virtual_display.as_ref().expect("supervisor");
+        // Post-reattach state: refresh kept as operator hint, dims
+        // cleared by `reset_known_dimensions` on the attach transition.
+        supervisor.seed_refresh_hz_for_test(60);
+        assert!(
+            supervisor.last_known_mode().is_none(),
+            "post-reattach dimensions must be empty even though refresh survives",
+        );
+
+        let model = make_change_display_settings_model(
+            "req-after-reattach",
+            ChangeDisplaySettingsPayload {
+                width: 2560,
+                height: 1440,
+                refresh_hz: 60,
+                auto: true,
+            },
+        );
+        route(&model, &ctx).await.expect("route must not error");
+        match worker_rx
+            .try_recv()
+            .expect("post-reattach same-dims request must dispatch IPC, not fake-Applied")
+        {
+            ServiceToWorker::SetVirtualDisplayMode(p) => {
+                assert_eq!(p.width, 2560);
+                assert_eq!(p.height, 1440);
+                assert_eq!(p.refresh_hz, 60);
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
     }
 }
