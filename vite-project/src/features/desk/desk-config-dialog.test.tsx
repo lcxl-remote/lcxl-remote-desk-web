@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest"
-import { formatDisplayLabel } from "./desk-config-dialog"
+import {
+    canEnableAdaptiveResolution,
+    formatDisplayLabel,
+} from "./desk-config-dialog"
 import type { DisplayInfo } from "@/services/types"
 
 function makeDisplayInfo(
@@ -72,6 +75,40 @@ describe("formatDisplayLabel", () => {
         })
         expect(formatDisplayLabel(noFriendly)).toBe(
             "\\\\.\\DISPLAY8 (1500x900)",
+        )
+    })
+})
+
+describe("canEnableAdaptiveResolution", () => {
+    it("enables when the selection matches the virtual display name", () => {
+        expect(
+            canEnableAdaptiveResolution("\\\\.\\DISPLAY8", "\\\\.\\DISPLAY8"),
+        ).toBe(true)
+    })
+
+    it("disables when the user selected a physical display", () => {
+        expect(
+            canEnableAdaptiveResolution("\\\\.\\DISPLAY1", "\\\\.\\DISPLAY8"),
+        ).toBe(false)
+    })
+
+    it("disables when no virtual display is attached (daemon reports None)", () => {
+        // Even if the user happens to pick a sensible-looking device,
+        // adaptive cannot fire because the daemon would reject it with
+        // FEATURE_UNAVAILABLE. The dialog should reflect this state.
+        expect(canEnableAdaptiveResolution("\\\\.\\DISPLAY1", null)).toBe(false)
+        expect(canEnableAdaptiveResolution("\\\\.\\DISPLAY1", undefined)).toBe(
+            false,
+        )
+    })
+
+    it("disables when nothing is selected yet", () => {
+        // Initial dialog load before the user picks any device — the
+        // form state is empty string ("") and the toggle must default
+        // to disabled regardless of whether an IDD is attached.
+        expect(canEnableAdaptiveResolution("", "\\\\.\\DISPLAY8")).toBe(false)
+        expect(canEnableAdaptiveResolution(undefined, "\\\\.\\DISPLAY8")).toBe(
+            false,
         )
     })
 })

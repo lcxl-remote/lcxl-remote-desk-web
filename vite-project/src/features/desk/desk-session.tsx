@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -27,6 +27,7 @@ import WhiteboardToolbar from "./whiteboard-toolbar"
 import { useDeskMicrophone } from "./use-desk-microphone"
 import { DeskConfigDialog } from "./desk-config-dialog"
 import { useAdaptiveResolution } from "./use-adaptive-resolution"
+import { useResolutionToast } from "./use-resolution-toast"
 import type { DeskSettings } from "@/services/types"
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE,
@@ -133,10 +134,28 @@ export default function DeskSession() {
     const lastSettingsRef = useRef<DeskSettings | null>(null);
 
     // Adaptive resolution: request ids the hook has emitted but not yet
-    // seen an echo for. The lastMessage listener drops the matching 205
-    // response silently — the user-visible feedback is the visible
-    // resolution change itself, not a toast.
+    // seen an echo for. The lastMessage listener uses this set as a
+    // membership check to detect auto-resolution echoes (so manual
+    // path echoes from future UI keep working unchanged), while the
+    // `useResolutionToast` hook below drives the right-bottom toast
+    // state machine off the same `lastMessage` stream.
     const pendingAutoRequestIdsRef = useRef<Set<string>>(new Set());
+
+    // Adaptive-resolution status toast (right-bottom corner). Lives in
+    // its own hook so the state machine can be exercised in isolation:
+    //   - updating → success / failed transitions guarded by the
+    //     latest registered request id (stale echoes are dropped)
+    //   - 15 s watchdog promotes a never-acked `updating` to `failed`
+    //   - flipping `isRTCConnected` to false clears a stuck toast
+    // The `translate` closure is hand-rolled instead of passing `t`
+    // directly to keep the hook framework-agnostic for testing.
+    const { resolutionToast, registerSent: registerResolutionSent } =
+        useResolutionToast({
+            lastMessage,
+            isRTCConnected,
+            changeDisplaySettingsType: SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
+            translate: (key, fallback) => t(key, fallback),
+        });
 
     // Adaptive quality state
     const statsWindowRef = useRef<Array<{ packetLoss: number; rtt: number }>>([]);
@@ -225,11 +244,13 @@ export default function DeskSession() {
                 forceError(data.error);
             }
         } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
-            // Adaptive-resolution echo: silently drop if this is a
-            // response to a request the hook fired. We do not surface
-            // it to the user — the visible resolution change is the
-            // feedback. Manual ChangeDisplaySettings has no UI yet so
-            // unknown echoes also fall through to debug-log + drop.
+            // Adaptive-resolution echo: the right-bottom status toast
+            // is driven by `useResolutionToast`, which subscribes to
+            // `lastMessage` directly and gates transitions by the most
+            // recent request id. Here we only need to drain
+            // `pendingAutoRequestIdsRef` so the membership-tracking
+            // contract used by future manual ChangeDisplaySettings UI
+            // does not leak.
             const requestId = lastMessage.request_id;
             if (requestId && pendingAutoRequestIdsRef.current.delete(requestId)) {
                 console.debug("[adaptive-resolution] response", lastMessage);
@@ -336,19 +357,28 @@ export default function DeskSession() {
     // gets the real wire request_id back (sendMessage signature was
     // extended in Phase 2.1 to return it). `connection_id` defaults to
     // `deskId` because the daemon's auto path keys per-connection.
+    // After the send is queued we hand the same id to
+    // `useResolutionToast.registerSent` so the status toast switches
+    // to "updating" immediately and the watchdog starts ticking —
+    // even when the request never reaches the daemon (transport down),
+    // the watchdog will eventually surface a timeout instead of
+    // leaving the operator staring at a frozen spinner.
     const sendChangeDisplay = useCallback(
         (payload: {
             width: number;
             height: number;
             refresh_hz: number;
             auto: true;
-        }) =>
-            sendMessage(
+        }) => {
+            const reqId = sendMessage(
                 SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
                 payload,
                 deskId ?? undefined,
-            ),
-        [sendMessage, deskId],
+            );
+            registerResolutionSent(reqId, payload.width, payload.height);
+            return reqId;
+        },
+        [sendMessage, deskId, registerResolutionSent],
     );
 
     // The hook's `enabled` aggregates every condition that must be
@@ -359,6 +389,15 @@ export default function DeskSession() {
     //   - daemon side reports the IDD is currently attached
     //     (`virtual_display_active`); without this the daemon would
     //     reject every auto request with FEATURE_UNAVAILABLE
+    //   - daemon side surfaces the IDD's GDI name
+    //     (`virtual_display_device_name`) AND that name matches the
+    //     display the worker is actually capturing. If the operator
+    //     picked a physical monitor in the config dialog, firing 205
+    //     would silently change the IDD's resolution while WGC keeps
+    //     capturing the physical screen — invisible to the user. The
+    //     config dialog now disables the adaptive toggle in this
+    //     scenario, but defence-in-depth here keeps us safe if a
+    //     stale `adaptive_web_page_resolution=true` slips through.
     //   - user toggled "Adaptive Resolution" on in the config dialog
     // `lastSettingsRef.current` is populated from `handleConfigSubmit`
     // before we ever call `connect`, so reading it here after RTC is
@@ -369,6 +408,9 @@ export default function DeskSession() {
             !!deskId &&
             isRTCConnected &&
             !!initData?.virtual_display_active &&
+            !!initData?.virtual_display_device_name &&
+            lastSettingsRef.current?.video_device_name ===
+                initData?.virtual_display_device_name &&
             !!lastSettingsRef.current?.adaptive_web_page_resolution,
         sendChangeDisplay,
         pendingAutoRequestIds: pendingAutoRequestIdsRef,
@@ -960,6 +1002,63 @@ export default function DeskSession() {
                                 <Button variant="secondary" size="sm" className="w-full bg-white text-amber-900 hover:bg-amber-100" onClick={execFallbackToastAction}>
                                     Sync Now
                                 </Button>
+                            </div>
+                        )}
+
+                        {resolutionToast && (
+                            <div
+                                data-testid="resolution-toast"
+                                data-phase={resolutionToast.phase}
+                                className={`absolute bottom-40 right-4 z-[60] px-3 py-2 rounded-lg shadow-lg text-xs font-medium backdrop-blur-md border flex items-center gap-2 animate-in slide-in-from-bottom-4 pointer-events-none ${
+                                    resolutionToast.phase === "success"
+                                        ? "bg-emerald-500/90 text-white border-emerald-300/40"
+                                        : resolutionToast.phase === "failed"
+                                            ? "bg-red-500/90 text-white border-red-300/40"
+                                            : "bg-black/80 text-white border-white/10"
+                                }`}
+                            >
+                                {resolutionToast.phase === "updating" && (
+                                    <>
+                                        <Loader2 className="w-4 h-4 animate-spin text-blue-300" />
+                                        <span>
+                                            {t(
+                                                "pages.desk.resolutionUpdating",
+                                                "Updating resolution {{w}}×{{h}}…",
+                                                {
+                                                    w: resolutionToast.targetW,
+                                                    h: resolutionToast.targetH,
+                                                },
+                                            )}
+                                        </span>
+                                    </>
+                                )}
+                                {resolutionToast.phase === "success" && (
+                                    <>
+                                        <CheckCircle2 className="w-4 h-4" />
+                                        <span>
+                                            {t(
+                                                "pages.desk.resolutionApplied",
+                                                "Applied {{w}}×{{h}}",
+                                                {
+                                                    w: resolutionToast.appliedW,
+                                                    h: resolutionToast.appliedH,
+                                                },
+                                            )}
+                                        </span>
+                                    </>
+                                )}
+                                {resolutionToast.phase === "failed" && (
+                                    <>
+                                        <AlertCircle className="w-4 h-4" />
+                                        <span>
+                                            {t(
+                                                "pages.desk.resolutionFailed",
+                                                "Update failed: {{reason}}",
+                                                { reason: resolutionToast.reason },
+                                            )}
+                                        </span>
+                                    </>
+                                )}
                             </div>
                         )}
 

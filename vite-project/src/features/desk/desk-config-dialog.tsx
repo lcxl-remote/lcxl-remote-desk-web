@@ -59,6 +59,24 @@ export function formatDisplayLabel(device: DisplayInfo): string {
     return `${name} (${width}x${height})`
 }
 
+/**
+ * Whether the user can enable adaptive web-page resolution given the
+ * currently selected display and the daemon's reported IDD device
+ * name. Adaptive auto-resize targets the IDD; if the captured display
+ * is anything else the request would silently change the IDD
+ * resolution while WGC keeps capturing a physical screen — visually a
+ * no-op for the operator. Pure function so the unit test can pin
+ * every branch without instantiating Radix or react-hook-form.
+ */
+export function canEnableAdaptiveResolution(
+    selectedDeviceName: string | undefined | null,
+    virtualDisplayDeviceName: string | undefined | null,
+): boolean {
+    return (
+        !!virtualDisplayDeviceName && selectedDeviceName === virtualDisplayDeviceName
+    )
+}
+
 interface DeskConfigDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
@@ -118,6 +136,26 @@ export function DeskConfigDialog({
      * different display.
      */
     const [staleSavedDeviceName, setStaleSavedDeviceName] = useState<string | null>(null)
+
+    // Auto-resolution semantically targets the IDD; if the captured
+    // display is not the IDD, the request would silently change the
+    // IDD resolution while WGC keeps capturing a physical screen.
+    // Watch the selected device and force-uncheck the adaptive toggle
+    // whenever the selection drifts off the IDD, so the user can never
+    // submit a misconfiguration. The toggle is also visually disabled
+    // by the render path; this effect handles the data side.
+    const watchedDeviceName = form.watch("video_device_name")
+    const watchedAdaptive = form.watch("adaptive_web_page_resolution")
+    const virtualDisplayName = initData?.virtual_display_device_name ?? null
+    useEffect(() => {
+        const canEnable = canEnableAdaptiveResolution(
+            watchedDeviceName,
+            virtualDisplayName,
+        )
+        if (!canEnable && watchedAdaptive) {
+            form.setValue("adaptive_web_page_resolution", false)
+        }
+    }, [watchedDeviceName, watchedAdaptive, virtualDisplayName, form])
 
     /**
      * Pick a default `device_name` from a backend's
@@ -341,6 +379,24 @@ export function DeskConfigDialog({
                                                 </AlertDescription>
                                             </Alert>
                                         )}
+                                        {/* Hint surfaced only when the daemon reports an
+                                            attached IDD that also appears in the current
+                                            backend's enumeration. Without the
+                                            `.some(...)` check, switching to a non-IDD-aware
+                                            backend (e.g. legacy DXGI builds) would still
+                                            show the hint even though no entry in the
+                                            dropdown can satisfy the adaptive toggle. */}
+                                        {initData?.virtual_display_device_name &&
+                                            videoDeviceList.some(
+                                                (d) => d.device_name === initData.virtual_display_device_name,
+                                            ) && (
+                                                <p className="text-xs text-muted-foreground">
+                                                    {t(
+                                                        "pages.desk.virtualDisplayHint",
+                                                        "Only the virtual display supports adaptive resolution",
+                                                    )}
+                                                </p>
+                                            )}
                                         <FormField
                                             control={form.control}
                                             name="video_device_name"
@@ -376,14 +432,35 @@ export function DeskConfigDialog({
                                                             </SelectTrigger>
                                                         </FormControl>
                                                         <SelectContent>
-                                                            {videoDeviceList.map((device) => (
-                                                                <SelectItem
-                                                                    key={device.device_name}
-                                                                    value={device.device_name ?? ""}
-                                                                >
-                                                                    {formatDisplayLabel(device)}
-                                                                </SelectItem>
-                                                            ))}
+                                                            {videoDeviceList.map((device) => {
+                                                                // `textValue` keeps Radix's typeahead and
+                                                                // the SelectValue display text equal to the
+                                                                // plain label — otherwise the badge `<span>`
+                                                                // children would leak the word "Virtual"
+                                                                // into the selected-value rendering.
+                                                                const label = formatDisplayLabel(device)
+                                                                const isVirtual =
+                                                                    !!initData?.virtual_display_device_name &&
+                                                                    device.device_name ===
+                                                                        initData.virtual_display_device_name
+                                                                return (
+                                                                    <SelectItem
+                                                                        key={device.device_name}
+                                                                        value={device.device_name ?? ""}
+                                                                        textValue={label}
+                                                                    >
+                                                                        {isVirtual && (
+                                                                            <span className="mr-2 inline-flex items-center rounded-md bg-blue-500/15 px-1.5 py-0.5 text-xs font-medium text-blue-500">
+                                                                                {t(
+                                                                                    "pages.desk.virtualDisplayBadge",
+                                                                                    "Virtual",
+                                                                                )}
+                                                                            </span>
+                                                                        )}
+                                                                        {label}
+                                                                    </SelectItem>
+                                                                )
+                                                            })}
                                                         </SelectContent>
                                                     </Select>
                                                         )
@@ -418,21 +495,39 @@ export function DeskConfigDialog({
                                 <FormField
                                     control={form.control}
                                     name="adaptive_web_page_resolution"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
-                                            <FormControl>
-                                                <Checkbox
-                                                    checked={field.value}
-                                                    onCheckedChange={field.onChange}
-                                                />
-                                            </FormControl>
-                                            <div className="space-y-1 leading-none">
-                                                <FormLabel>
-                                                    {t('pages.desk.adaptiveResolution', 'Adaptive Resolution')}
-                                                </FormLabel>
-                                            </div>
-                                        </FormItem>
-                                    )}
+                                    render={({ field }) => {
+                                        // `canEnable` mirrors the effect above —
+                                        // re-derived per render against the same inputs
+                                        // so the visual state stays consistent.
+                                        const canEnable = canEnableAdaptiveResolution(
+                                            watchedDeviceName,
+                                            virtualDisplayName,
+                                        )
+                                        return (
+                                            <FormItem className="flex flex-row items-start space-x-3 space-y-0 p-2 rounded-md border">
+                                                <FormControl>
+                                                    <Checkbox
+                                                        checked={!!field.value}
+                                                        onCheckedChange={field.onChange}
+                                                        disabled={!canEnable}
+                                                    />
+                                                </FormControl>
+                                                <div className="space-y-1 leading-none">
+                                                    <FormLabel>
+                                                        {t('pages.desk.adaptiveResolution', 'Adaptive Resolution')}
+                                                    </FormLabel>
+                                                    {!canEnable && (
+                                                        <p className="text-xs text-muted-foreground">
+                                                            {t(
+                                                                'pages.desk.adaptiveResolutionVirtualOnly',
+                                                                'Available only when the virtual display is selected',
+                                                            )}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </FormItem>
+                                        )
+                                    }}
                                 />
 
                                 <FormField
