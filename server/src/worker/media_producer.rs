@@ -69,7 +69,7 @@
 //! connection's `show_mouse` is on.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -97,7 +97,7 @@ use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
 use log::{debug, error, info, warn};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::worker::shared_capture::SharedCaptureRegistry;
+use crate::worker::shared_capture::{CaptureKey, SharedCaptureRegistry};
 
 /// Per-connection media context. Holds the dedicated threads running
 /// the capture + encode loops (one for video, one for audio) plus the
@@ -154,7 +154,66 @@ pub struct MediaProducer {
     /// `E_INVALIDARG`, taking the second connection's video pipeline
     /// down to a black screen.
     capture_registry: Arc<SharedCaptureRegistry>,
+    /// Per-connection effective `CaptureKey`, populated by the video
+    /// pipeline thread as soon as `capture_registry.subscribe`
+    /// returns. The `SetVirtualDisplayMode` path reads this to decide
+    /// (a) whether the connection is on WGC backend at all and (b)
+    /// which `CaptureKey` to invalidate at the shared-capture
+    /// registry. Cleared by a per-thread `CaptureKeyGuard` so every
+    /// exit path (normal, error, panic) leaves no stale entry.
+    capture_keys: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
+    /// Monotonic generation counter for `CaptureKeyRecord` entries.
+    /// Bumped once per successful `capture_registry.subscribe` so the
+    /// `CaptureKeyGuard` drop check can distinguish "I wrote this
+    /// entry" from "someone overwrote it after me". See the docstring
+    /// on `CaptureKeyGuard` for the race this defeats.
+    capture_key_generation: Arc<AtomicU64>,
     inner: StdMutex<HashMap<String, ConnectionTask>>,
+}
+
+/// `(CaptureKey, generation)` record stored in the producer's
+/// `capture_keys` map. The generation tag exists solely so the
+/// `CaptureKeyGuard` Drop impl can avoid removing an entry that a
+/// later pipeline overwrote — see the doc on `CaptureKeyGuard`.
+#[derive(Clone, Debug)]
+struct CaptureKeyRecord {
+    key: CaptureKey,
+    generation: u64,
+}
+
+/// RAII guard that drops a `(connection_id, CaptureKey)` entry from
+/// the producer's `capture_keys` map on every exit path of the video
+/// pipeline thread — normal return, `?`-propagated error, or panic
+/// unwind. Without this guard a subscribe error mid-spawn would leak
+/// the previous entry (or absence of one) into the next
+/// `SetVirtualDisplayMode` decision.
+///
+/// **Generation token** — `stop_media` is fire-and-forget: it only
+/// sets the old pipeline's stop flag, it does not join the thread.
+/// `start_media` immediately spawns a new pipeline that may finish
+/// `subscribe()` and write `capture_keys[conn_id]` before the *old*
+/// pipeline's stack has unwound. If the old guard removed by
+/// `connection_id` alone it would erase the new pipeline's freshly
+/// written entry, causing the next `SetVirtualDisplayMode` to look up
+/// `connection_capture_key` and get `None` → silent WGC restart skip
+/// → the user's next browser resize freezes the frame again. The
+/// guard stores the generation that *its* pipeline wrote and only
+/// removes the entry if the current record still matches.
+struct CaptureKeyGuard {
+    map: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
+    connection_id: String,
+    generation: u64,
+}
+
+impl Drop for CaptureKeyGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = self.map.lock()
+            && m.get(&self.connection_id)
+                .is_some_and(|r| r.generation == self.generation)
+        {
+            m.remove(&self.connection_id);
+        }
+    }
 }
 
 impl MediaProducer {
@@ -168,8 +227,32 @@ impl MediaProducer {
             media_sender,
             error_tx,
             capture_registry: SharedCaptureRegistry::new(),
+            capture_keys: Arc::new(StdMutex::new(HashMap::new())),
+            capture_key_generation: Arc::new(AtomicU64::new(0)),
             inner: StdMutex::new(HashMap::new()),
         }
+    }
+
+    /// Effective `CaptureKey` for an active connection, or `None` if the
+    /// connection's video pipeline hasn't reached the post-subscribe
+    /// recording step (e.g. data-channel-only `StartMedia`, or a
+    /// subscribe error that aborted the thread). Used by
+    /// `session.rs::SetVirtualDisplayMode` to filter restart candidates
+    /// by backend.
+    pub fn connection_capture_key(&self, connection_id: &str) -> Option<CaptureKey> {
+        self.capture_keys
+            .lock()
+            .ok()?
+            .get(connection_id)
+            .map(|r| r.key.clone())
+    }
+
+    /// Force-evict a shared-capture registry slot. Thin delegate to
+    /// `SharedCaptureRegistry::invalidate_key` so `session.rs` does not
+    /// need a direct reference to the registry (which is a private
+    /// field of this producer).
+    pub fn invalidate_capture_key(&self, key: &CaptureKey) -> bool {
+        self.capture_registry.invalidate_key(key)
     }
 
     /// Start a per-connection capture + encode pipeline. Idempotent on
@@ -215,6 +298,8 @@ impl MediaProducer {
                 Arc::clone(&keyframe_requested),
                 settings_rx,
                 Arc::clone(&self.capture_registry),
+                Arc::clone(&self.capture_keys),
+                Arc::clone(&self.capture_key_generation),
             ))
         } else {
             // Drain the receiver end so settings updates targeted at this
@@ -685,6 +770,8 @@ fn spawn_video_pipeline_thread(
     keyframe_requested: Arc<AtomicBool>,
     settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
     capture_registry: Arc<SharedCaptureRegistry>,
+    capture_keys: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
+    capture_key_generation: Arc<AtomicU64>,
 ) -> thread::JoinHandle<()> {
     let connection_id = payload.connection_id.clone();
     let thread_name = format!("media-video-{}", &connection_id);
@@ -715,6 +802,8 @@ fn spawn_video_pipeline_thread(
                     keyframe_requested,
                     settings_rx,
                     capture_registry,
+                    capture_keys,
+                    capture_key_generation,
                 )
                 .await
                 {
@@ -792,6 +881,8 @@ async fn video_pipeline_loop(
     keyframe_requested: Arc<AtomicBool>,
     mut settings_rx: mpsc::UnboundedReceiver<UpdateMediaSettingsPayload>,
     capture_registry: Arc<SharedCaptureRegistry>,
+    capture_keys: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>>,
+    capture_key_generation: Arc<AtomicU64>,
 ) -> Result<(), String> {
     let connection_id = payload.connection_id.clone();
     let codec = payload.video_codec;
@@ -812,6 +903,43 @@ async fn video_pipeline_loop(
     let capture_handle = capture_registry
         .subscribe(&merged_settings)
         .map_err(|e| format!("{e}"))?;
+
+    // Publish the effective `CaptureKey` so `SetVirtualDisplayMode`
+    // can decide whether this connection's backend is WGC (needs a
+    // forced rebuild after IddCx remount) or one that self-adapts
+    // (DXGI / GDI). The RAII guard below ensures we clean up on every
+    // exit path: normal return, `?`-propagated encoder error, or panic
+    // unwind — without it a subscribe-time success followed by a later
+    // failure would leak the entry past the connection's lifetime.
+    //
+    // The generation tag is what makes the cleanup safe in the face
+    // of a Stop+Start race. `stop_media` does not block-join the
+    // outgoing thread, so the *next* `start_media` for the same
+    // connection_id may spawn a new pipeline that finishes subscribe
+    // and overwrites this entry before the old thread's stack
+    // unwinds. Tagging the record with the generation we just bumped
+    // — and re-checking it in `CaptureKeyGuard::drop` — lets the old
+    // guard recognise "the slot no longer belongs to me, leave it
+    // alone." Without this token the old guard would erase the new
+    // pipeline's freshly recorded key, and the next
+    // `SetVirtualDisplayMode` would silently skip the WGC restart.
+    let generation = capture_key_generation.fetch_add(1, Ordering::Relaxed);
+    capture_keys
+        .lock()
+        .expect("media producer capture_keys lock poisoned")
+        .insert(
+            connection_id.clone(),
+            CaptureKeyRecord {
+                key: capture_handle.key().clone(),
+                generation,
+            },
+        );
+    let _capture_key_guard = CaptureKeyGuard {
+        map: Arc::clone(&capture_keys),
+        connection_id: connection_id.clone(),
+        generation,
+    };
+
     let mut frame_rx = capture_handle.subscribe();
     let display_info = capture_handle.display_info().clone();
 
@@ -2550,5 +2678,158 @@ mod tests {
         // Sanity: device_name preserved so the encoder still keys on
         // the real device.
         assert_eq!(rebuild_di.device_name, base_display_info.device_name);
+    }
+
+    /// Unknown connection ids must not panic and must return None so
+    /// the SetVirtualDisplayMode filter can simply skip them.
+    #[test]
+    fn connection_capture_key_returns_none_for_unknown() {
+        let (sender, _rx) = inprocess::make_media();
+        let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
+        assert!(producer.connection_capture_key("never-started").is_none());
+    }
+
+    /// Round-trip: a value inserted by the pipeline thread shows up
+    /// in the public lookup. Production writes happen inside
+    /// `video_pipeline_loop` post-subscribe; the test exercises the
+    /// map contract by inserting directly so it does not need a real
+    /// capture backend.
+    #[test]
+    fn connection_capture_key_returns_recorded_value() {
+        let (sender, _rx) = inprocess::make_media();
+        let (err_tx, _err_rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let producer = MediaProducer::new(DeskSettings::default(), sender, err_tx);
+        let key = CaptureKey {
+            backend: "WGC".into(),
+            device_name: r"\\.\DISPLAY51".into(),
+        };
+        producer.capture_keys.lock().unwrap().insert(
+            "conn-A".into(),
+            CaptureKeyRecord {
+                key: key.clone(),
+                generation: 1,
+            },
+        );
+        let got = producer.connection_capture_key("conn-A").expect("present");
+        assert_eq!(got, key);
+    }
+
+    /// RAII contract: dropping the guard removes the entry so a panic
+    /// or early-`?` in the video pipeline thread cannot leave a stale
+    /// `(connection, CaptureKey)` entry behind.
+    #[test]
+    fn capture_key_guard_clears_map_on_drop() {
+        let map: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let key = CaptureKey {
+            backend: "WGC".into(),
+            device_name: r"\\.\DISPLAY51".into(),
+        };
+        map.lock()
+            .unwrap()
+            .insert("conn-A".into(), CaptureKeyRecord { key, generation: 7 });
+        {
+            let _g = CaptureKeyGuard {
+                map: Arc::clone(&map),
+                connection_id: "conn-A".into(),
+                generation: 7,
+            };
+            // guard still in scope: entry must be present.
+            assert!(map.lock().unwrap().contains_key("conn-A"));
+        }
+        assert!(
+            !map.lock().unwrap().contains_key("conn-A"),
+            "guard drop must have cleared the connection's CaptureKey entry"
+        );
+    }
+
+    /// Race regression test (codex 2026-05-24): `stop_media` is
+    /// fire-and-forget, so the old video pipeline thread may finish
+    /// unwinding *after* a `start_media` for the same connection_id
+    /// has finished subscribing and written its own
+    /// `CaptureKeyRecord`. If `CaptureKeyGuard::drop` removed by
+    /// connection_id alone the old guard would erase the new
+    /// pipeline's freshly recorded key — `connection_capture_key`
+    /// would then return `None` and the next `SetVirtualDisplayMode`
+    /// silently skips the WGC restart (visible in production as the
+    /// "second resize after a stop+start cycle freezes the frame"
+    /// symptom). The generation token defeats this: the old guard
+    /// observes that the current record carries a newer generation
+    /// and leaves it alone.
+    #[test]
+    fn capture_key_guard_drop_preserves_newer_generation_entry() {
+        let map: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        let key_old = CaptureKey {
+            backend: "WGC".into(),
+            device_name: r"\\.\DISPLAY51".into(),
+        };
+        let key_new = CaptureKey {
+            backend: "WGC".into(),
+            device_name: r"\\.\DISPLAY52".into(),
+        };
+        // Pipeline A (gen=1) writes its entry and gets its guard.
+        map.lock().unwrap().insert(
+            "conn-A".into(),
+            CaptureKeyRecord {
+                key: key_old,
+                generation: 1,
+            },
+        );
+        let guard_a = CaptureKeyGuard {
+            map: Arc::clone(&map),
+            connection_id: "conn-A".into(),
+            generation: 1,
+        };
+        // Pipeline B (gen=2) wins the next subscribe and overwrites
+        // the slot before A's stack unwinds.
+        map.lock().unwrap().insert(
+            "conn-A".into(),
+            CaptureKeyRecord {
+                key: key_new.clone(),
+                generation: 2,
+            },
+        );
+        let guard_b = CaptureKeyGuard {
+            map: Arc::clone(&map),
+            connection_id: "conn-A".into(),
+            generation: 2,
+        };
+
+        // A finally unwinds. Its Drop must NOT erase B's entry.
+        drop(guard_a);
+        let after_a = map.lock().unwrap();
+        let rec = after_a
+            .get("conn-A")
+            .expect("Pipeline B's record must survive Pipeline A's stale drop");
+        assert_eq!(rec.generation, 2, "generation must reflect Pipeline B");
+        assert_eq!(rec.key, key_new, "key must reflect Pipeline B");
+        drop(after_a);
+
+        // B unwinds normally — its generation matches, so its entry
+        // gets cleaned up.
+        drop(guard_b);
+        assert!(
+            !map.lock().unwrap().contains_key("conn-A"),
+            "B's own guard must clean up B's own entry"
+        );
+    }
+
+    /// Defensive: a guard whose generation doesn't match anything in
+    /// the map (e.g. the map was already cleared by some other path)
+    /// is a no-op rather than a panic.
+    #[test]
+    fn capture_key_guard_drop_noop_when_entry_missing() {
+        let map: Arc<StdMutex<HashMap<String, CaptureKeyRecord>>> =
+            Arc::new(StdMutex::new(HashMap::new()));
+        {
+            let _g = CaptureKeyGuard {
+                map: Arc::clone(&map),
+                connection_id: "ghost".into(),
+                generation: 42,
+            };
+        }
+        assert!(map.lock().unwrap().is_empty());
     }
 }

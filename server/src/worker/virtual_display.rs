@@ -108,6 +108,24 @@ impl VirtualDisplayState {
             })
             .collect()
     }
+
+    /// Collect a [`RestartStep`] for every currently-active connection
+    /// without mutating `attached_display`. Used by the
+    /// `SetVirtualDisplayMode` handler: a mode change does not switch
+    /// targets, so the attached display name stays the same; we just
+    /// need the per-connection active payloads to drive a Stop+Start
+    /// when the capture backend (WGC) cannot self-adapt to the
+    /// underlying monitor remount. The caller filters by per-connection
+    /// effective `CaptureKey` before issuing the Stop+Start.
+    pub fn restart_steps_for_attached(&self) -> Vec<RestartStep> {
+        self.active_start_payload
+            .iter()
+            .map(|(connection_id, active)| RestartStep {
+                connection_id: connection_id.clone(),
+                active: active.clone(),
+            })
+            .collect()
+    }
 }
 
 /// A (stop, start) instruction the caller should drive against the
@@ -189,12 +207,23 @@ pub async fn run_set_mode(
     attached_display: Option<String>,
     payload: SetVirtualDisplayModePayload,
 ) -> WorkerToService {
+    let request_id = payload.request_id.clone();
+    let connection_id = payload.connection_id.clone();
     let display = match attached_display {
         Some(d) => d,
         None => {
+            tracing::error!(
+                "run_set_mode: rejected request={} conn={} target={}x{}@{} — \
+                 no attached virtual display",
+                request_id,
+                connection_id,
+                payload.width,
+                payload.height,
+                payload.refresh_hz,
+            );
             return WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
-                request_id: payload.request_id,
-                connection_id: payload.connection_id,
+                request_id,
+                connection_id,
                 outcome: VirtualDisplayModeOutcome::Failed(
                     "virtual display not attached".to_string(),
                 ),
@@ -216,11 +245,30 @@ pub async fn run_set_mode(
             height: m.height,
             refresh_hz: m.refresh_hz,
         }),
-        Err(e) => VirtualDisplayModeOutcome::Failed(e.to_string()),
+        Err(e) => {
+            // CRITICAL: this error is currently invisible because it was
+            // previously only carried by the IPC Failed outcome (which
+            // gets ferried back to the browser, but never written to the
+            // worker log). The CDS `DISP_CHANGE_BADMODE` symptom that
+            // caused the WGC mid-session resize blackscreen could not be
+            // diagnosed without parsing browser-side traces. Log it here
+            // so future regressions are visible from `desk-worker.log`
+            // alone.
+            tracing::error!(
+                "run_set_mode FAILED: request={} conn={} target={}x{}@{} reason={}",
+                request_id,
+                connection_id,
+                payload.width,
+                payload.height,
+                payload.refresh_hz,
+                e,
+            );
+            VirtualDisplayModeOutcome::Failed(e.to_string())
+        }
     };
     WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
-        request_id: payload.request_id,
-        connection_id: payload.connection_id,
+        request_id,
+        connection_id,
         outcome,
     })
 }
@@ -302,6 +350,37 @@ mod tests {
         state.record_stop("conn-1");
         assert!(state.original_start_payload.is_empty());
         assert!(state.active_start_payload.is_empty());
+    }
+
+    #[test]
+    fn restart_steps_for_attached_returns_step_per_active_connection() {
+        let mut state = VirtualDisplayState::new();
+        state.record_start(make_payload("conn-1", Some("\\\\.\\DISPLAY1")));
+        state.record_start(make_payload("conn-2", Some("\\\\.\\DISPLAY1")));
+        let _ = state.rebuild_active_for_attach(Some("\\\\.\\DISPLAY9".to_string()));
+        // Sanity precondition: attached_display set, 2 active payloads.
+        assert_eq!(state.attached_display.as_deref(), Some("\\\\.\\DISPLAY9"));
+
+        let steps = state.restart_steps_for_attached();
+        assert_eq!(steps.len(), 2);
+        let mut ids: Vec<&str> = steps.iter().map(|s| s.connection_id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["conn-1", "conn-2"]);
+        for step in &steps {
+            // Each step carries the active payload (already rewritten
+            // to target the attached display); the SetVirtualDisplayMode
+            // handler will Stop+Start the producer with this payload.
+            assert_eq!(step.active.video_device.as_deref(), Some("\\\\.\\DISPLAY9"));
+        }
+        // restart_steps_for_attached must NOT mutate attached_display
+        // (set_mode keeps the same target, only the resolution changed).
+        assert_eq!(state.attached_display.as_deref(), Some("\\\\.\\DISPLAY9"));
+    }
+
+    #[test]
+    fn restart_steps_for_attached_returns_empty_when_no_active() {
+        let state = VirtualDisplayState::new();
+        assert!(state.restart_steps_for_attached().is_empty());
     }
 
     #[test]
@@ -569,5 +648,66 @@ mod tests {
             },
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Regression test for the WGC mid-session resize blackscreen
+    /// (2026-05-24): when the IDD pipe call succeeds but
+    /// `ChangeDisplaySettingsExW` returns `DISP_CHANGE_BADMODE`, the
+    /// `VirtualDisplayController::set_mode` implementation surfaces
+    /// `VirtualDisplayError::Cds("BADMODE for <device> @ WxH@Hz; …")`.
+    /// `run_set_mode` must preserve that string verbatim in the
+    /// `Failed` outcome so the worker-side `error!` log (and any
+    /// future browser-side display of the reason) shows the actionable
+    /// "BADMODE" keyword. If a future refactor drops that substring,
+    /// diagnosing the next resize regression would once again require
+    /// parsing browser traces.
+    #[tokio::test]
+    async fn run_set_mode_failed_outcome_preserves_cds_badmode_reason() {
+        let cds_msg =
+            "BADMODE for \\\\.\\DISPLAY9 @ 850x770@60; driver did not advertise this mode";
+        let controller: Arc<dyn VirtualDisplayController> = Arc::new(MockController {
+            applied_mode: Mutex::new(None),
+            result: |_| {
+                Err(VirtualDisplayError::Cds(
+                    "BADMODE for \\\\.\\DISPLAY9 @ 850x770@60; driver did not advertise this mode"
+                        .to_string(),
+                ))
+            },
+        });
+        let payload = SetVirtualDisplayModePayload {
+            request_id: "r-shrink".to_string(),
+            connection_id: "c-shrink".to_string(),
+            width: 850,
+            height: 770,
+            refresh_hz: 60,
+        };
+        let response = run_set_mode(controller, Some("\\\\.\\DISPLAY9".to_string()), payload).await;
+        match response {
+            WorkerToService::VirtualDisplayMode(p) => match p.outcome {
+                VirtualDisplayModeOutcome::Failed(reason) => {
+                    assert!(
+                        reason.contains(cds_msg),
+                        "BADMODE reason must reach IPC verbatim so the \
+                         worker `error!` log shows the actionable substring; \
+                         got {reason}",
+                    );
+                    assert!(
+                        reason.contains("BADMODE"),
+                        "log searchability hinges on the literal 'BADMODE' \
+                         token; got {reason}",
+                    );
+                }
+                other => panic!("unexpected outcome: {other:?}"),
+            },
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Note: the corresponding worker-side restart contract — the
+        // SetVirtualDisplayMode IPC handler MUST trigger WGC
+        // invalidate+stop+start even on this Failed outcome because
+        // `pipe_client::send_set_mode` already triggered the IDD
+        // Departure+Arrival cycle — is exercised by the `session.rs`
+        // tests `wgc_restart_runs_even_when_outcome_failed` (see
+        // there). It cannot be tested here because `run_set_mode` does
+        // not own the restart logic.
     }
 }

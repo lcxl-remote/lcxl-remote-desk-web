@@ -8,7 +8,10 @@ use crate::{
         file_transfer_dispatcher::FileTransferDispatcher,
         input_dispatcher::InputDispatcher,
         media_producer::MediaProducer,
-        virtual_display::{VirtualDisplayState, resolve_attach_with_backoff, run_set_mode},
+        shared_capture::CaptureKey,
+        virtual_display::{
+            RestartStep, VirtualDisplayState, resolve_attach_with_backoff, run_set_mode,
+        },
         whiteboard_dispatcher::WhiteboardDispatcher,
     },
 };
@@ -38,6 +41,7 @@ use desk_signal_facade::model::system_settings::RemoteSystemSettings;
 use desk_signal_facade::model::terminal::{TerminalList, TerminalOutputData};
 use desk_virtual_display::VirtualDisplayController;
 use log::{error, info, warn};
+use std::collections::HashSet;
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -350,6 +354,13 @@ fn try_route_typed_outbound(model: &SignalingModel) -> Option<WorkerToService> {
 /// — i.e. the IDD driver actually committed a new mode. `Failed` /
 /// non-VirtualDisplayMode variants return `false`.
 ///
+/// **Scope note**: this gate now only governs the input geometry
+/// refresh, NOT the WGC capture restart. The IDD driver's
+/// `Departure`+`Arrival` cycle happens at the pipe layer *before* the
+/// CDS commit runs, so a `DISP_CHANGE_BADMODE` Failed outcome still
+/// invalidates WGC's HMONITOR. The restart path is therefore
+/// decoupled from this predicate in the IPC handler.
+///
 /// Pulled out of the main IPC loop so it can be unit-tested without
 /// running the full session.
 fn should_refresh_after_set_mode(response: &WorkerToService) -> bool {
@@ -361,6 +372,57 @@ fn should_refresh_after_set_mode(response: &WorkerToService) -> bool {
                 desk_ipc_protocol::message::VirtualDisplayModeOutcome::Applied(_)
             )
     )
+}
+
+/// Filter the candidate restart steps down to the connections that
+/// actually need a forced capture-pipeline rebuild after a
+/// `SetVirtualDisplayMode` Applied: only those whose effective
+/// `CaptureKey` is WGC backend targeting the currently attached IDD
+/// display. DXGI (returns `DXGI_ERROR_ACCESS_LOST` on
+/// `AcquireNextFrame`) and GDI (re-`EnumDisplaySettingsW` every frame)
+/// self-adapt to a mid-session monitor remount — forcing a Stop+Start
+/// on them would only add a needless IDR flicker.
+///
+/// `key_lookup` is parameterised so the test suite can drive arbitrary
+/// connection → key fixtures without spinning up a real producer.
+fn select_wgc_restart_steps<F>(
+    steps: Vec<RestartStep>,
+    attached_display: Option<&str>,
+    key_lookup: F,
+) -> Vec<RestartStep>
+where
+    F: Fn(&str) -> Option<CaptureKey>,
+{
+    let Some(attached) = attached_display else {
+        return Vec::new();
+    };
+    steps
+        .into_iter()
+        .filter(|s| {
+            key_lookup(&s.connection_id)
+                .is_some_and(|k| k.backend.eq_ignore_ascii_case("WGC") && k.device_name == attached)
+        })
+        .collect()
+}
+
+/// Distinct `CaptureKey`s covered by the given restart steps, in
+/// first-seen order. Ensures each shared-capture registry slot is
+/// invalidated exactly once even when several connections share the
+/// same `(backend, device_name)` slot (the multi-browser case).
+fn dedup_capture_keys<F>(steps: &[RestartStep], key_lookup: F) -> Vec<CaptureKey>
+where
+    F: Fn(&str) -> Option<CaptureKey>,
+{
+    let mut seen: HashSet<CaptureKey> = HashSet::new();
+    let mut out: Vec<CaptureKey> = Vec::new();
+    for step in steps {
+        if let Some(k) = key_lookup(&step.connection_id)
+            && seen.insert(k.clone())
+        {
+            out.push(k);
+        }
+    }
+    out
 }
 
 /// Worker-side session. Stateless wrapper — all mutable state lives in the
@@ -1148,6 +1210,16 @@ impl WorkerSession {
                                 ServiceToWorker::SetVirtualDisplayMode(payload) => {
                                     let controller = Arc::clone(&virtual_display_controller);
                                     let attached = vd_state.attached_display.clone();
+                                    info!(
+                                        "Worker received SetVirtualDisplayMode: \
+                                         conn={}, req={}, target={}x{}@{}, attached={:?}",
+                                        payload.connection_id,
+                                        payload.request_id,
+                                        payload.width,
+                                        payload.height,
+                                        payload.refresh_hz,
+                                        attached.as_deref(),
+                                    );
                                     let response = run_set_mode(controller, attached.clone(), payload).await;
                                     // Inspect the outcome *before* moving
                                     // `response` into `writer_tx.send` so we
@@ -1158,6 +1230,35 @@ impl WorkerSession {
                                     // path and the (best-effort, infallible)
                                     // refresh off it.
                                     let should_refresh = should_refresh_after_set_mode(&response);
+                                    // Collect WGC-specific restart candidates BEFORE moving
+                                    // `response` into the writer channel. WGC restart is NOT
+                                    // gated by `should_refresh` (i.e. the IPC outcome variant):
+                                    // `pipe_client::send_set_mode` triggers the IDD
+                                    // Departure+Arrival cycle at the driver layer *before*
+                                    // `apply_cds` runs, so a `DISP_CHANGE_BADMODE` returned by
+                                    // `ChangeDisplaySettingsExW` still leaves WGC bound to a
+                                    // dead HMONITOR even though the IPC outcome surfaces as
+                                    // Failed. Refreshing input geometry, on the other hand,
+                                    // is correctly gated on Applied: it would re-read the
+                                    // unchanged display rect anyway. DXGI / GDI self-adapt
+                                    // natively so we still filter them out.
+                                    let restart_steps: Vec<RestartStep> =
+                                        if let Some(producer) = media_producer.as_ref() {
+                                            let producer_for_lookup = Arc::clone(producer);
+                                            select_wgc_restart_steps(
+                                                vd_state.restart_steps_for_attached(),
+                                                attached.as_deref(),
+                                                |id| producer_for_lookup.connection_capture_key(id),
+                                            )
+                                        } else {
+                                            Vec::new()
+                                        };
+                                    info!(
+                                        "SetVirtualDisplayMode processed: \
+                                         applied={}, wgc_restart_steps={}",
+                                        should_refresh,
+                                        restart_steps.len(),
+                                    );
                                     if writer_tx.send(response).is_err() {
                                         warn!(
                                             "writer task closed; dropping VirtualDisplayMode \
@@ -1172,6 +1273,31 @@ impl WorkerSession {
                                         // their stale rect to the
                                         // freshly-applied resolution.
                                         input_dispatcher.refresh_geometry(attached.as_deref());
+                                    }
+                                    if !restart_steps.is_empty()
+                                        && let Some(producer) = media_producer.as_ref()
+                                    {
+                                        // Dedup so two WGC connections sharing the same
+                                        // (backend, device_name) slot only trigger one
+                                        // registry eviction.
+                                        let keys_to_invalidate = dedup_capture_keys(
+                                            &restart_steps,
+                                            |id| producer.connection_capture_key(id),
+                                        );
+                                        for key in &keys_to_invalidate {
+                                            let evicted = producer.invalidate_capture_key(key);
+                                            info!(
+                                                "SetVirtualDisplayMode: invalidated capture key \
+                                                 backend={} device={} evicted={}",
+                                                key.backend, key.device_name, evicted,
+                                            );
+                                        }
+                                        for step in restart_steps {
+                                            producer.stop_media(&StopMediaPayload {
+                                                connection_id: step.connection_id.clone(),
+                                            });
+                                            producer.start_media(step.active);
+                                        }
                                     }
                                 }
                                 ServiceToWorker::AttachVirtualDisplay(payload) => {
@@ -2138,5 +2264,210 @@ mod tests {
     #[test]
     fn should_refresh_after_set_mode_returns_false_on_other_variants() {
         assert!(!should_refresh_after_set_mode(&WorkerToService::Ready));
+    }
+
+    // -----------------------------------------------------------------
+    // WGC mid-session restart helpers (see select_wgc_restart_steps +
+    // dedup_capture_keys). The SetVirtualDisplayMode handler funnels
+    // through these so the unit tests can drive arbitrary
+    // (connection, CaptureKey) fixtures without spinning up real
+    // capture backends.
+    // -----------------------------------------------------------------
+
+    use desk_ipc_protocol::message::{MediaCodec, StartMediaPayload};
+    use std::collections::HashMap;
+
+    fn make_step(connection_id: &str, device: &str) -> RestartStep {
+        RestartStep {
+            connection_id: connection_id.to_string(),
+            active: StartMediaPayload {
+                connection_id: connection_id.to_string(),
+                video_codec: MediaCodec::H264,
+                audio_codec: MediaCodec::Opus,
+                video_device: Some(device.to_string()),
+                audio_device: None,
+                fps: 60,
+                bitrate_kbps: 4_000,
+                quality: 0,
+                start_video: true,
+                start_audio: true,
+                image_capture: None,
+                enable_dirty_rect: None,
+            },
+        }
+    }
+
+    fn make_key(backend: &str, device: &str) -> CaptureKey {
+        CaptureKey {
+            backend: backend.to_string(),
+            device_name: device.to_string(),
+        }
+    }
+
+    /// The core gating contract: only WGC connections that target the
+    /// currently attached IDD display are eligible for forced rebuild.
+    /// WGC connections on a different display, and DXGI / GDI
+    /// connections on the same display, are filtered out.
+    #[test]
+    fn select_wgc_restart_steps_picks_only_wgc_on_attached() {
+        let attached = r"\\.\DISPLAY51";
+        let other_display = r"\\.\DISPLAY1";
+        let steps = vec![
+            make_step("c-wgc-attached", attached),
+            make_step("c-wgc-other", other_display),
+            make_step("c-dxgi-attached", attached),
+        ];
+        let mut keys: HashMap<String, CaptureKey> = HashMap::new();
+        keys.insert("c-wgc-attached".into(), make_key("WGC", attached));
+        keys.insert("c-wgc-other".into(), make_key("WGC", other_display));
+        keys.insert("c-dxgi-attached".into(), make_key("DXGI", attached));
+
+        let picked = select_wgc_restart_steps(steps, Some(attached), |id| keys.get(id).cloned());
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].connection_id, "c-wgc-attached");
+    }
+
+    /// No attached display ⇒ nothing to rebuild. Guards the handler
+    /// from invoking the WGC-only branch on a Detach race.
+    #[test]
+    fn select_wgc_restart_steps_empty_when_no_attached() {
+        let steps = vec![make_step("c-1", r"\\.\DISPLAY1")];
+        let keys: HashMap<String, CaptureKey> = HashMap::new();
+        let picked = select_wgc_restart_steps(steps, None, |id| keys.get(id).cloned());
+        assert!(picked.is_empty());
+    }
+
+    /// A connection whose key_lookup returns None (e.g. it never
+    /// reached the post-subscribe checkpoint) must be skipped, not
+    /// panic. Defensive against transient producer state.
+    #[test]
+    fn select_wgc_restart_steps_empty_when_lookup_returns_none() {
+        let attached = r"\\.\DISPLAY51";
+        let steps = vec![make_step("c-1", attached)];
+        let picked = select_wgc_restart_steps(steps, Some(attached), |_| None);
+        assert!(picked.is_empty());
+    }
+
+    /// `ImageCaptureType::WGC` round-trips through `<&'static str>::from`
+    /// as exactly "WGC", but `eq_ignore_ascii_case` is a cheap belt to
+    /// avoid future-mode drift if someone renames the variant in
+    /// lowercase / mixed case downstream.
+    #[test]
+    fn select_wgc_restart_steps_case_insensitive_backend() {
+        let attached = r"\\.\DISPLAY51";
+        let steps = vec![make_step("c-1", attached)];
+        let mut keys: HashMap<String, CaptureKey> = HashMap::new();
+        keys.insert("c-1".into(), make_key("wgc", attached));
+        let picked = select_wgc_restart_steps(steps, Some(attached), |id| keys.get(id).cloned());
+        assert_eq!(picked.len(), 1);
+    }
+
+    /// Two connections sharing the same (backend, device_name) slot
+    /// must yield exactly one CaptureKey so the registry is
+    /// invalidated once, not twice.
+    #[test]
+    fn dedup_capture_keys_collapses_duplicates() {
+        let attached = r"\\.\DISPLAY51";
+        let steps = vec![
+            make_step("c-1", attached),
+            make_step("c-2", attached),
+            make_step("c-3", attached),
+            make_step("c-4", r"\\.\DISPLAY1"),
+        ];
+        let mut keys: HashMap<String, CaptureKey> = HashMap::new();
+        let shared = make_key("WGC", attached);
+        keys.insert("c-1".into(), shared.clone());
+        keys.insert("c-2".into(), shared.clone());
+        keys.insert("c-3".into(), shared.clone());
+        keys.insert("c-4".into(), make_key("WGC", r"\\.\DISPLAY1"));
+
+        let distinct = dedup_capture_keys(&steps, |id| keys.get(id).cloned());
+        assert_eq!(distinct.len(), 2);
+    }
+
+    /// Regression test for the WGC mid-session resize blackscreen
+    /// **second iteration** (2026-05-24): a CDS `DISP_CHANGE_BADMODE`
+    /// (typical on browser-driven shrink to a non-standard size) makes
+    /// `run_set_mode` return Failed even though
+    /// `pipe_client::send_set_mode` already triggered the IDD
+    /// Departure+Arrival cycle. The previous gate
+    /// `if should_refresh { compute restart_steps }` would silently
+    /// skip the WGC rebuild, leaving the capture loop bound to the
+    /// dead HMONITOR (the symptom: persistent
+    /// `post-rebuild heartbeat tick produced 0 NALs` in
+    /// `desk-worker.log`). The fix decouples WGC restart from the
+    /// outcome variant — every successful IPC reception goes through
+    /// `select_wgc_restart_steps`, with `should_refresh` retained only
+    /// for the input-geometry refresh.
+    ///
+    /// Concretely this test pins the contract:
+    ///   1. `should_refresh_after_set_mode` returns `false` for Failed
+    ///      (input geometry must NOT refresh).
+    ///   2. `select_wgc_restart_steps` is independently computable —
+    ///      it does not consult the response variant at all — so the
+    ///      handler can still pick out the WGC connection on the
+    ///      attached display when the outcome is Failed.
+    /// Tested together so a future refactor that re-couples the two
+    /// fails this test rather than silently regressing the fix.
+    #[test]
+    fn wgc_restart_decoupled_from_failed_outcome() {
+        use desk_ipc_protocol::message::{
+            VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload,
+        };
+        // Failed outcome (the CDS BADMODE case).
+        let failed_response =
+            WorkerToService::VirtualDisplayMode(VirtualDisplayModeResponsePayload {
+                request_id: "r".into(),
+                connection_id: "c".into(),
+                outcome: VirtualDisplayModeOutcome::Failed(
+                    "BADMODE for \\\\.\\DISPLAY9 @ 850x770@60; \
+                     driver did not advertise this mode"
+                        .into(),
+                ),
+            });
+        assert!(
+            !should_refresh_after_set_mode(&failed_response),
+            "Failed must keep gating input geometry refresh \
+             (no actual mode change to reflect)"
+        );
+
+        // ...but the WGC restart selector still produces non-empty
+        // candidates because it is independent of the response.
+        let attached = r"\\.\DISPLAY51";
+        let steps = vec![make_step("c-wgc-attached", attached)];
+        let mut keys: HashMap<String, CaptureKey> = HashMap::new();
+        keys.insert("c-wgc-attached".into(), make_key("WGC", attached));
+        let picked = select_wgc_restart_steps(steps, Some(attached), |id| keys.get(id).cloned());
+        assert_eq!(
+            picked.len(),
+            1,
+            "select_wgc_restart_steps must NOT consult the IPC outcome — \
+             the IDD pipe replug already invalidated HMONITOR, so WGC \
+             needs rebuilding even on CDS Failed"
+        );
+        assert_eq!(picked[0].connection_id, "c-wgc-attached");
+    }
+
+    /// Order preserved: callers iterate this list in order to drive
+    /// `invalidate_capture_key`, so deterministic FIFO behaviour
+    /// keeps log output and integration traces reproducible.
+    #[test]
+    fn dedup_capture_keys_preserves_order() {
+        let attached = r"\\.\DISPLAY51";
+        let other = r"\\.\DISPLAY9";
+        let steps = vec![
+            make_step("c-A", attached),
+            make_step("c-B", other),
+            make_step("c-C", attached), // dup of A
+        ];
+        let mut keys: HashMap<String, CaptureKey> = HashMap::new();
+        let key_attached = make_key("WGC", attached);
+        let key_other = make_key("WGC", other);
+        keys.insert("c-A".into(), key_attached.clone());
+        keys.insert("c-B".into(), key_other.clone());
+        keys.insert("c-C".into(), key_attached.clone());
+
+        let distinct = dedup_capture_keys(&steps, |id| keys.get(id).cloned());
+        assert_eq!(distinct, vec![key_attached, key_other]);
     }
 }

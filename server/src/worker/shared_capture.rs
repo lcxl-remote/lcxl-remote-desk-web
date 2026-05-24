@@ -297,6 +297,34 @@ impl SharedCaptureRegistry {
         }
     }
 
+    /// Force-evict a registry slot and signal the underlying capture
+    /// loop to exit, regardless of how many `SharedCaptureHandle`
+    /// instances are still live. Used by the `SetVirtualDisplayMode`
+    /// path to bypass the WGC self-adapt gap: a mid-session
+    /// `IddCxMonitorDeparture` + Arrival invalidates the HMONITOR a
+    /// `GraphicsCaptureItem` was bound to, but WGC's `TryGetNextFrame`
+    /// keeps returning stale frames. Removing the slot here forces the
+    /// next `subscribe()` onto the slow path so it reconstructs
+    /// against the fresh HMONITOR.
+    ///
+    /// The caller is expected to follow up with
+    /// `MediaProducer::stop_media` + `start_media` on the affected
+    /// connections so their video pipeline threads observe the new
+    /// loop. Returns true when a live slot was actually evicted.
+    pub(crate) fn invalidate_key(&self, key: &CaptureKey) -> bool {
+        let mut g = self.map.lock().expect("shared capture registry poisoned");
+        let Some(weak) = g.remove(key) else {
+            return false;
+        };
+        match weak.upgrade() {
+            Some(inner) => {
+                inner.stop_flag.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Diagnostic / test introspection: count of live capture loops.
     pub fn live_count(&self) -> usize {
         let g = self.map.lock().expect("shared capture registry poisoned");
@@ -540,6 +568,28 @@ mod tests {
         })
     }
 
+    /// Variant of [`synthetic_shared_inner`] whose `registry` field is a
+    /// real `Weak<SharedCaptureRegistry>` pointer. Needed by the
+    /// `invalidate_then_reinsert_drop_preserves_new_slot` test, which
+    /// requires the inner's `Drop` impl to actually call
+    /// `registry.remove_stale_entry` so we can verify the only-if-
+    /// expired guard does not knock out a freshly-inserted slot.
+    #[cfg(target_os = "windows")]
+    fn synthetic_shared_inner_attached(
+        key: CaptureKey,
+        registry: &Arc<SharedCaptureRegistry>,
+    ) -> Arc<SharedInner> {
+        let (sender, _) = broadcast::channel::<Arc<SharedFrame>>(1);
+        Arc::new(SharedInner {
+            sender,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            join_handle: StdMutex::new(None),
+            display_info: DisplayInfo::default(),
+            key,
+            registry: Arc::downgrade(registry),
+        })
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn key_from_capture_type_pure_function() {
@@ -675,6 +725,112 @@ mod tests {
 
         assert!(decide_registry_reuse(&mut map, &dxgi_key, &dxgi_key).is_none());
         assert!(!map.contains_key(&dxgi_key));
+    }
+
+    /// Live entry must be evicted from the map AND its stop_flag set
+    /// so the capture loop exits on its next tick. Returns true to
+    /// signal "something was actually evicted" so the caller knows the
+    /// follow-up stop/start will hit a freshly-spawned loop.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn invalidate_key_removes_live_slot_and_sets_stop_flag() {
+        let reg = SharedCaptureRegistry::new();
+        let key = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY1");
+        let inner = synthetic_shared_inner_attached(key.clone(), &reg);
+        reg.map
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Arc::downgrade(&inner));
+
+        let evicted = reg.invalidate_key(&key);
+        assert!(evicted, "live slot must report as evicted");
+        assert!(
+            !reg.map.lock().unwrap().contains_key(&key),
+            "slot must be gone from the registry map"
+        );
+        assert!(
+            inner.stop_flag.load(Ordering::Acquire),
+            "stop_flag must be set so the capture loop exits"
+        );
+    }
+
+    /// An unknown key is a no-op that returns false; the caller can
+    /// distinguish "nothing to invalidate" from "we just evicted a live
+    /// loop" without inspecting the map directly.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn invalidate_key_returns_false_for_unknown_key() {
+        let reg = SharedCaptureRegistry::new();
+        let key = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY99");
+        assert!(!reg.invalidate_key(&key));
+    }
+
+    /// A stale Weak (the last strong Arc already dropped) still gets
+    /// the slot removed from the map but reports false, because there
+    /// was no live loop to signal a stop on.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn invalidate_key_returns_false_for_stale_weak() {
+        let reg = SharedCaptureRegistry::new();
+        let key = key_from_capture_type(ImageCaptureType::DXGI, r"\\.\DISPLAY1");
+        let inner = synthetic_shared_inner(key.clone());
+        let weak = Arc::downgrade(&inner);
+        drop(inner);
+        reg.map.lock().unwrap().insert(key.clone(), weak);
+
+        let evicted = reg.invalidate_key(&key);
+        assert!(!evicted, "stale weak must report nothing live to evict");
+        assert!(
+            !reg.map.lock().unwrap().contains_key(&key),
+            "stale slot must still be removed from the map"
+        );
+    }
+
+    /// Critical race: after invalidate_key clears a slot, a fresh
+    /// SharedInner can be inserted under the same key. When the old
+    /// inner finally drops, its `SharedInner::drop` calls
+    /// `remove_stale_entry`, which must observe the new slot's Weak
+    /// upgrades successfully and therefore leave the new slot alone.
+    /// Without this only-if-expired guard the SetVirtualDisplayMode
+    /// stop/start would race against the old loop's natural shutdown
+    /// and intermittently knock out the brand-new capture loop.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn invalidate_then_reinsert_drop_preserves_new_slot() {
+        let reg = SharedCaptureRegistry::new();
+        let key = key_from_capture_type(ImageCaptureType::WGC, r"\\.\DISPLAY1");
+
+        let inner_a = synthetic_shared_inner_attached(key.clone(), &reg);
+        reg.map
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Arc::downgrade(&inner_a));
+
+        assert!(reg.invalidate_key(&key));
+        assert!(!reg.map.lock().unwrap().contains_key(&key));
+
+        // SetVirtualDisplayMode path: stop_media exits old thread,
+        // start_media spawns a new one which inserts a fresh inner.
+        let inner_b = synthetic_shared_inner_attached(key.clone(), &reg);
+        reg.map
+            .lock()
+            .unwrap()
+            .insert(key.clone(), Arc::downgrade(&inner_b));
+
+        // Old loop only now finishes draining and drops inner_a.
+        // SharedInner::drop runs remove_stale_entry(&key), which must
+        // observe inner_b's still-live Weak and leave the slot intact.
+        drop(inner_a);
+
+        let g = reg.map.lock().unwrap();
+        let weak = g.get(&key).expect("new slot must survive old inner drop");
+        assert!(
+            Arc::ptr_eq(
+                &weak.upgrade().expect("new inner must still be alive"),
+                &inner_b
+            ),
+            "surviving slot must point at the freshly-inserted inner_b"
+        );
     }
 
     /// Regression: `run_capture_loop` used to call
