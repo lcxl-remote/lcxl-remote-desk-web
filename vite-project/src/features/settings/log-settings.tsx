@@ -5,8 +5,8 @@ import * as z from "zod"
 import { useTranslation } from "react-i18next"
 import { Loader2, Save } from "lucide-react"
 
-import { useQueryLogSettings } from "@/services/hooks/undefinedController/useQueryLogSettings"
-import { useUpdateLogSettings } from "@/services/hooks/undefinedController/useUpdateLogSettings"
+import { useQueryLogSettings } from "@/services/hooks/logController/useQueryLogSettings"
+import { useUpdateLogSettings } from "@/services/hooks/logController/useUpdateLogSettings"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"

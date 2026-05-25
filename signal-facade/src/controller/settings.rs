@@ -7,6 +7,8 @@ use crate::model::connection::SharedConnectionMap;
 use crate::model::signal::{ForwardSignalingSender, SignalingType};
 use crate::model::system_settings::RemoteSystemSettings;
 
+pub const TAG: &str = "Settings";
+
 /// Path parameter for settings endpoints
 #[derive(serde::Deserialize, utoipa::IntoParams)]
 pub struct SettingsPath {
@@ -15,6 +17,7 @@ pub struct SettingsPath {
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Query remote system settings via signaling",
     params(SettingsPath),
     responses(
@@ -56,6 +59,7 @@ pub async fn query_settings(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Update remote system settings via signaling",
     params(SettingsPath),
     request_body(content = RemoteSystemSettings),

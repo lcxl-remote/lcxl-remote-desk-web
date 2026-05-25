@@ -12,7 +12,10 @@ use desk_server_user::{
 };
 use log::{info, warn};
 
+pub const TAG: &str = "User";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "Get current user",
     responses(
         (status = 200, description = "Current user info", body = UserRespone<CurrentUser>),

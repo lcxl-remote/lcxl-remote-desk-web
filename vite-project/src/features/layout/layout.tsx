@@ -21,7 +21,7 @@ import { Toaster } from "@/components/ui/toaster"
 import { Button } from "@/components/ui/button"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { useTranslation } from "react-i18next"
-import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
+import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { ServiceInstallDialog } from "./service-install-dialog"
 
 function ServiceInstallBanner() {

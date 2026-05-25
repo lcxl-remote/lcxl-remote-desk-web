@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "prebuild": "node scripts/verify-services.cjs",
+    "verify-services": "node scripts/verify-services.cjs",
     "preview": "vite preview",
     "test": "vitest run"
   },

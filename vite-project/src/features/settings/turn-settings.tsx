@@ -5,9 +5,9 @@ import * as z from "zod"
 import { useTranslation } from "react-i18next"
 import { Loader2, Save, ShieldCheck, RefreshCw, Plus, Trash2 } from "lucide-react"
 
-import { useQueryTurnSettings } from "@/services/hooks/undefinedController/useQueryTurnSettings"
-import { useUpdateTurnSettings } from "@/services/hooks/undefinedController/useUpdateTurnSettings"
-import { useRegenerateTurnSecret } from "@/services/hooks/undefinedController/useRegenerateTurnSecret"
+import { useQueryTurnSettings } from "@/services/hooks/turnController/useQueryTurnSettings"
+import { useUpdateTurnSettings } from "@/services/hooks/turnController/useUpdateTurnSettings"
+import { useRegenerateTurnSecret } from "@/services/hooks/turnController/useRegenerateTurnSecret"
 import type { TurnSettings } from "@/services/types"
 
 import { Button } from "@/components/ui/button"

@@ -13,7 +13,7 @@ import {
     CardTitle,
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { useListConnections } from "@/services/hooks/undefinedController/useListConnections"
+import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
 
 export default function DeskList() {

@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Switch } from "@/components/ui/switch"
 import { useToast } from "@/hooks/use-toast"
-import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
+import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { ServiceUninstallDialog } from "@/features/layout/service-uninstall-dialog"
 
 interface DriverStatus {

@@ -5,6 +5,8 @@ use utoipa::ToSchema;
 
 use crate::{error::DeskError, model::settings::SharedSettings};
 
+pub const TAG: &str = "System";
+
 #[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
 pub struct InitParams {
     pub username: String,
@@ -13,6 +15,7 @@ pub struct InitParams {
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Initialize system",
     request_body(content = InitParams),
     responses(

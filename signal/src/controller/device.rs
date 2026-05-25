@@ -7,7 +7,10 @@ use log::{error, info, warn};
 
 use crate::{model::SharedConnectionMap, service::handle_signaling};
 
+pub const TAG: &str = "Signaling";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "Open Device Signaling Handle for Server, return websocket stream.",
     params(VersionInfo),
     responses(

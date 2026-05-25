@@ -5,8 +5,8 @@ import * as z from "zod"
 import { useTranslation } from "react-i18next"
 import { Loader2 } from "lucide-react"
 
-import { useQuerySecuritySettings } from "@/services/hooks/undefinedController/useQuerySecuritySettings"
-import { useUpdateSecuritySettings } from "@/services/hooks/undefinedController/useUpdateSecuritySettings"
+import { useQuerySecuritySettings } from "@/services/hooks/securityController/useQuerySecuritySettings"
+import { useUpdateSecuritySettings } from "@/services/hooks/securityController/useUpdateSecuritySettings"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -14,7 +14,7 @@ import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, For
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
 import { useQueryClient } from "@tanstack/react-query"
-import { querySecuritySettingsQueryKey } from "@/services/hooks/undefinedController/useQuerySecuritySettings"
+import { querySecuritySettingsQueryKey } from "@/services/hooks/securityController/useQuerySecuritySettings"
 
 const securitySettingsSchema = z.object({
     allow_remote_control: z.boolean().nullable(),

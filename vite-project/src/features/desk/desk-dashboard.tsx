@@ -4,7 +4,7 @@ import { Monitor, Terminal as TerminalIcon, Folder, ArrowLeft, Cpu, Globe, Serve
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
-import { useListConnections } from "@/services/hooks/undefinedController/useListConnections"
+import { useListConnections } from "@/services/hooks/connectionController/useListConnections"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Badge } from "@/components/ui/badge"
 

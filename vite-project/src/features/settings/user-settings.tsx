@@ -5,14 +5,14 @@ import * as z from "zod"
 import { useTranslation } from "react-i18next"
 import { Loader2, KeyRound } from "lucide-react"
 
-import { useChangePassword } from "@/services/hooks/undefinedController/useChangePassword"
+import { useChangePassword } from "@/services/hooks/authController/useChangePassword"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { useToast } from "@/hooks/use-toast"
-import { useGetCurrentUser } from "@/services/hooks/undefinedController/useGetCurrentUser"
+import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
 
 const baseSchema = z.object({
     old_password: z.string(),

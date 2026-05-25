@@ -8,6 +8,8 @@ use utoipa::ToSchema;
 
 use crate::{entity::device_code, error::DeskSignalError, model::SharedConnectionMap};
 
+pub const TAG: &str = "DeviceCode";
+
 #[derive(Serialize, Deserialize, ToSchema, Debug)]
 pub struct DeviceCodeListParams {
     pub page: Option<u64>,
@@ -56,6 +58,7 @@ impl DeviceCodeItem {
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "List device codes",
     params(
         ("page" = Option<u64>, Query, description = "Page number"),
@@ -105,6 +108,7 @@ pub async fn list_device_codes(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Create device code",
     request_body(content = DeviceCodeCreateParams),
     responses(
@@ -145,6 +149,7 @@ pub async fn create_device_code(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Update device code",
     request_body(content = DeviceCodeUpdateParams),
     responses(
@@ -190,6 +195,7 @@ pub async fn update_device_code(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Delete device code",
     responses(
         (status = 200, description = "Delete device code successfully"),
@@ -232,6 +238,7 @@ pub struct DeviceCodeBatchDeleteParams {
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Batch delete device codes",
     request_body(content = DeviceCodeBatchDeleteParams),
     responses(

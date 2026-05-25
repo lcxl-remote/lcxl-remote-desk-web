@@ -4,7 +4,10 @@ use crate::error::DeskSignalFacadeError;
 use crate::model::connection::{ConnectionModel, SharedConnectionMap};
 use crate::model::signal::RemoteDeskTypeEnum;
 
+pub const TAG: &str = "Connection";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "List all online desk connections",
     responses(
         (status = 200, description = "List of online desk connections", body = Vec<ConnectionModel>),

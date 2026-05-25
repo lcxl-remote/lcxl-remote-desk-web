@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { SecurityApprovalEventPayload } from "@/services/types";
-import { useQuerySecuritySettings } from "@/services/hooks/undefinedController/useQuerySecuritySettings";
+import { useQuerySecuritySettings } from "@/services/hooks/securityController/useQuerySecuritySettings";
 
 export function SecurityApprovalDialog() {
   const { t } = useTranslation();

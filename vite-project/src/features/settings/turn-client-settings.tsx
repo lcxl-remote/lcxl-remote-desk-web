@@ -5,8 +5,8 @@ import * as z from "zod"
 import { useTranslation } from "react-i18next"
 import { Loader2, Save } from "lucide-react"
 
-import { useQueryTurnClientSettings } from "@/services/hooks/undefinedController/useQueryTurnClientSettings"
-import { useUpdateTurnClientSettings } from "@/services/hooks/undefinedController/useUpdateTurnClientSettings"
+import { useQueryTurnClientSettings } from "@/services/hooks/turnClientController/useQueryTurnClientSettings"
+import { useUpdateTurnClientSettings } from "@/services/hooks/turnClientController/useUpdateTurnClientSettings"
 import type { TurnClientSettings } from "@/services/types"
 
 import { Button } from "@/components/ui/button"

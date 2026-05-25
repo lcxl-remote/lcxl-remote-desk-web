@@ -31,6 +31,8 @@ use crate::{
 
 const INSTALLER_TIMEOUT: Duration = Duration::from_secs(30);
 
+pub const TAG: &str = "VirtualDisplay";
+
 /// Driver-side state surfaced to the UI. `installed`/`installed_oem_infs`
 /// are `Option`s — `None` means "could not determine" (typical when the
 /// daemon is running without admin and neither `Get-WindowsDriver` nor
@@ -131,6 +133,7 @@ async fn build_status(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Query LcxlVirtualDisplay IDD driver status",
     responses(
         (status = 200, description = "Driver status (never reports failure as HTTP error; check body `code`)", body = RestResponse<VirtualDisplayDriverStatusResponse>),
@@ -150,6 +153,7 @@ pub async fn query_driver_status(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Install LcxlVirtualDisplay IDD driver",
     responses(
         (status = 200, description = "Install result (check body `code`: 0=ok, 4=permission, 11=files missing)", body = RestResponse<VirtualDisplayDriverStatusResponse>),
@@ -241,6 +245,7 @@ pub async fn install_driver(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Uninstall every LcxlVirtualDisplay IDD driver copy",
     responses(
         (status = 200, description = "Uninstall result (check body `code`)", body = RestResponse<VirtualDisplayDriverStatusResponse>),
@@ -318,6 +323,7 @@ pub async fn uninstall_driver(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Get virtual display settings",
     responses(
         (status = 200, description = "VirtualDisplaySettings", body = RestResponse<VirtualDisplaySettings>),
@@ -356,6 +362,7 @@ fn check_enable_precondition(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Update virtual display settings",
     request_body = VirtualDisplaySettings,
     responses(

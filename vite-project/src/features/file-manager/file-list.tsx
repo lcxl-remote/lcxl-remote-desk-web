@@ -33,9 +33,9 @@ import {
     BreadcrumbPage,
 } from "@/components/ui/breadcrumb"
 import { Progress } from "@/components/ui/progress"
-import { useListFiles } from "@/services/hooks/undefinedController/useListFiles"
-import { useDeleteFile } from "@/services/hooks/undefinedController/useDeleteFile"
-import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
+import { useListFiles } from "@/services/hooks/fileController/useListFiles"
+import { useDeleteFile } from "@/services/hooks/fileController/useDeleteFile"
+import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
 import { useFileTransfer, type TransferProgress } from "./use-file-transfer"

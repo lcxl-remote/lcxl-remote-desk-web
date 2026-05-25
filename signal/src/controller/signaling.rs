@@ -9,7 +9,10 @@ use log::{error, info};
 
 use crate::{model::SharedConnectionMap, service::handle_signaling};
 
+pub const TAG: &str = "Signaling";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.",
     params(VersionInfo),
     responses(

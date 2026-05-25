@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
-import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo";
+import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Settings, FileText, Server, Key, Shield, Network, Monitor } from "lucide-react";
 

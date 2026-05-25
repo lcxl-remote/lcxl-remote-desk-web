@@ -1,7 +1,7 @@
 
 import { Navigate, useLocation } from "react-router-dom";
 import { Loader2 } from "lucide-react";
-import { useGetCurrentUser } from "@/services/hooks/undefinedController/useGetCurrentUser";
+import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser";
 
 export default function RequireAuth({ children }: { children: React.ReactNode }) {
     const location = useLocation();

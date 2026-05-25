@@ -6,6 +6,8 @@ use crate::model::connection::SharedConnectionMap;
 use crate::model::signal::{ForwardSignalingSender, SignalingType};
 use crate::model::system_info::SystemInfo;
 
+pub const TAG: &str = "System";
+
 /// Query path for sysinfo
 #[derive(serde::Deserialize, utoipa::IntoParams)]
 pub struct SysInfoPath {
@@ -14,6 +16,7 @@ pub struct SysInfoPath {
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Get remote system information via signaling",
     params(SysInfoPath),
     responses(

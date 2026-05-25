@@ -15,7 +15,10 @@ use uuid::Uuid;
 // Re-export list_terminal from signal-facade's shared controller.
 pub use desk_signal_facade::controller::terminal::list_terminal;
 
+pub const TAG: &str = "Terminal";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "Open terminal connection",
     params(StartTerminalSession, StartTerminalPath),
     responses(

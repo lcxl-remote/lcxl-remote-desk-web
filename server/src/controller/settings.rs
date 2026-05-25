@@ -25,6 +25,7 @@ pub struct TelemetryConsent {
 }
 
 #[utoipa::path(
+    tag = "Settings",
     summary = "Query settings",
     responses(
         (status = 200, description = "Query settings successfully", body=RestResponse<SystemSettings>),
@@ -42,6 +43,7 @@ pub async fn query_settings(settings: web::Data<SharedSettings>) -> Result<HttpR
 }
 
 #[utoipa::path(
+    tag = "Settings",
     summary = "Update settings",
     request_body(content = SystemSettings),
     responses(
@@ -71,6 +73,7 @@ pub async fn update_settings(
 }
 
 #[utoipa::path(
+    tag = "Turn",
     summary = "Query turn settings",
     responses(
         (status = 200, description = "Query turn settings successfully", body=RestResponse<TurnSettings>),
@@ -86,6 +89,7 @@ pub async fn query_turn_settings(
 }
 
 #[utoipa::path(
+    tag = "Turn",
     summary = "Update turn settings",
     request_body(content = TurnSettings),
     responses(
@@ -113,6 +117,7 @@ pub async fn update_turn_settings(
 }
 
 #[utoipa::path(
+    tag = "Log",
     summary = "Query log settings",
     responses(
         (status = 200, description = "Query log settings successfully", body=RestResponse<LogSettings>),
@@ -132,6 +137,7 @@ pub async fn query_log_settings(
 }
 
 #[utoipa::path(
+    tag = "Log",
     summary = "Update log settings",
     request_body(content = LogSettings),
     responses(
@@ -154,6 +160,7 @@ pub async fn update_log_settings(
 }
 
 #[utoipa::path(
+    tag = "Telemetry",
     summary = "Query telemetry status",
     responses(
         (status = 200, description = "Query telemetry status successfully", body=RestResponse<TelemetryStatus>),
@@ -173,6 +180,7 @@ pub async fn query_telemetry_status(
 }
 
 #[utoipa::path(
+    tag = "Telemetry",
     summary = "Update telemetry consent",
     request_body(content = TelemetryConsent),
     responses(
@@ -197,6 +205,7 @@ pub async fn update_telemetry_consent(
 }
 
 #[utoipa::path(
+    tag = "Turn",
     summary = "Regenerate TURN static_auth_secret",
     responses(
         (status = 200, description = "Regenerate TURN static_auth_secret successfully"),
@@ -215,6 +224,7 @@ pub async fn regenerate_turn_secret(
 }
 
 #[utoipa::path(
+    tag = "Security",
     summary = "Query security settings",
     responses(
         (status = 200, description = "Query security settings successfully",
@@ -231,6 +241,7 @@ pub async fn query_security_settings(
 }
 
 #[utoipa::path(
+    tag = "Security",
     summary = "Update security settings",
     request_body(content = SecuritySettings),
     responses(
@@ -261,6 +272,7 @@ pub struct SecurityApprovalSubmitParams {
 }
 
 #[utoipa::path(
+    tag = "Security",
     summary = "Submit security approval",
     request_body(content = SecurityApprovalSubmitParams),
     responses(
@@ -295,6 +307,7 @@ pub async fn submit_security_approval(
 }
 
 #[utoipa::path(
+    tag = "TurnClient",
     summary = "Query turn client settings",
     responses(
         (status = 200, description = "Query turn client settings successfully", body=RestResponse<TurnClientSettings>),
@@ -310,6 +323,7 @@ pub async fn query_turn_client_settings(
 }
 
 #[utoipa::path(
+    tag = "TurnClient",
     summary = "Update turn client settings",
     request_body(content = TurnClientSettings),
     responses(

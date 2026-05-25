@@ -5,7 +5,10 @@ use desk_turn::model::{
 
 use crate::error::DeskError;
 
+pub const TAG: &str = "Turn";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "Get turn server info",
     responses(
         (status = 200, description = "Turn server info", body = TurnInfo),
@@ -18,6 +21,7 @@ pub async fn get_turn_info(api_state: web::Data<TurnApiState>) -> Result<HttpRes
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Get turn server session",
     params(TurnQueryParams),
     responses(
@@ -34,6 +38,7 @@ pub async fn get_turn_session(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Get turn server session statistics",
     params(TurnQueryParams),
     responses(
@@ -51,6 +56,7 @@ pub async fn get_turn_session_statistics(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Delete turn server session",
     params(TurnQueryParams),
     responses(
@@ -68,6 +74,7 @@ pub async fn delete_turn_session(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Turn server metrics",
     responses(
         (status = 200, description = "turn server metrics", body = String),

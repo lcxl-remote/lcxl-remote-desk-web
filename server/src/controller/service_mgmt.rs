@@ -17,6 +17,8 @@ use crate::{
 };
 use desk_utils::error::DeskErrorCode;
 
+pub const TAG: &str = "Service";
+
 /// Request body for `POST /api/service/install`.
 #[derive(Debug, Default, Deserialize, serde::Serialize, ToSchema)]
 pub struct InstallServiceRequest {
@@ -65,6 +67,7 @@ fn validate_install_path(path: &str) -> Result<(), DeskError> {
 /// hub and returns 202 Accepted immediately. The caller should poll
 /// `GET /api/server_info` to check `service_installed`.
 #[utoipa::path(
+    tag = TAG,
     summary = "Install OS system service",
     request_body = InstallServiceRequest,
     responses(
@@ -94,6 +97,7 @@ pub async fn install_service(
 
 /// Request the host (Tauri) to uninstall the OS system service.
 #[utoipa::path(
+    tag = TAG,
     summary = "Uninstall OS system service",
     responses(
         (status = 202, description = "Uninstall request accepted"),

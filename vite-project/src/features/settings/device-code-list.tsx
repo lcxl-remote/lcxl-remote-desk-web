@@ -17,11 +17,11 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog"
 
-import { useListDeviceCodes } from "@/services/hooks/undefinedController/useListDeviceCodes"
-import { useCreateDeviceCode } from "@/services/hooks/undefinedController/useCreateDeviceCode"
-import { useUpdateDeviceCode } from "@/services/hooks/undefinedController/useUpdateDeviceCode"
-import { useDeleteDeviceCode } from "@/services/hooks/undefinedController/useDeleteDeviceCode"
-import { useBatchDeleteDeviceCodes } from "@/services/hooks/undefinedController/useBatchDeleteDeviceCodes"
+import { useListDeviceCodes } from "@/services/hooks/deviceCodeController/useListDeviceCodes"
+import { useCreateDeviceCode } from "@/services/hooks/deviceCodeController/useCreateDeviceCode"
+import { useUpdateDeviceCode } from "@/services/hooks/deviceCodeController/useUpdateDeviceCode"
+import { useDeleteDeviceCode } from "@/services/hooks/deviceCodeController/useDeleteDeviceCode"
+import { useBatchDeleteDeviceCodes } from "@/services/hooks/deviceCodeController/useBatchDeleteDeviceCodes"
 import type { DeviceCodeItem } from "@/services/types"
 import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"

@@ -13,9 +13,9 @@ import {
 } from "lucide-react"
 import { useLocation, Link, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { useQueryServerInfo } from "@/services/hooks/undefinedController/useQueryServerInfo"
-import { useGetCurrentUser } from "@/services/hooks/undefinedController/useGetCurrentUser"
-import { useLogoutAccount } from "@/services/hooks/undefinedController/useLogoutAccount"
+import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
+import { useGetCurrentUser } from "@/services/hooks/userController/useGetCurrentUser"
+import { useLogoutAccount } from "@/services/hooks/authController/useLogoutAccount"
 import { Badge } from "@/components/ui/badge"
 
 import {

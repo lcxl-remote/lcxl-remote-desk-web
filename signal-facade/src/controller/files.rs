@@ -6,7 +6,10 @@ use crate::model::connection::SharedConnectionMap;
 use crate::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
 use crate::model::signal::{ForwardSignalingSender, SignalingType};
 
+pub const TAG: &str = "File";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "List files on remote desk",
     params(FileListParams),
     responses(
@@ -59,6 +62,7 @@ pub async fn list_files(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Delete a file on remote desk",
     request_body(content = DeleteFileRequest),
     responses(

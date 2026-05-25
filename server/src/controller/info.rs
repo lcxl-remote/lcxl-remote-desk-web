@@ -19,7 +19,10 @@ use crate::service::wayland_remote_desktop::WaylandRemoteDesktop;
 #[cfg(target_os = "linux")]
 use desk_capture_engine::image_capture::portal_client::PortalClient;
 
+pub const TAG: &str = "System";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "Get system information",
     responses(
         (status = 200, description = "Get system information successfully", body=RestResponse<SystemInfo>),
@@ -61,6 +64,7 @@ pub async fn query_sysinfo(
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Get server information",
     responses(
         (status = 200, description = "Get server information successfully", body=RestResponse<ServerInfo>),
@@ -137,6 +141,7 @@ fn server_binary_available() -> bool {
 }
 
 #[utoipa::path(
+    tag = TAG,
     summary = "Get backend diagnostics",
     responses(
         (status = 200, description = "Get backend diagnostics successfully", body=RestResponse<BackendInfo>),

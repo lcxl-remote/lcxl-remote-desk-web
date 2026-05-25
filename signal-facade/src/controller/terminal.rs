@@ -6,7 +6,10 @@ use crate::model::connection::SharedConnectionMap;
 use crate::model::signal::{ForwardSignalingSender, SignalingType};
 use crate::model::terminal::{ListTerminalPath, TerminalList};
 
+pub const TAG: &str = "Terminal";
+
 #[utoipa::path(
+    tag = TAG,
     summary = "List terminal commands on remote desk",
     params(ListTerminalPath),
     responses(
