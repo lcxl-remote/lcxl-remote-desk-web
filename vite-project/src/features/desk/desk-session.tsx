@@ -385,6 +385,11 @@ export default function DeskSession() {
                 payload,
                 deskId ?? undefined,
             );
+            console.info("[adaptive-resolution dispatch] 205 sent", {
+                reqId,
+                payload,
+                deskId,
+            });
             registerResolutionSent(reqId, payload.width, payload.height);
             return reqId;
         },
@@ -412,16 +417,41 @@ export default function DeskSession() {
     // `lastSettingsRef.current` is populated from `handleConfigSubmit`
     // before we ever call `connect`, so reading it here after RTC is
     // up is always safe.
+    const adaptiveGateInputs = {
+        deskId,
+        isRTCConnected,
+        virtualDisplayActive: initData?.virtual_display_active,
+        virtualDisplayDeviceName: initData?.virtual_display_device_name,
+        selectedVideoDeviceName: activeSettings?.video_device_name,
+        adaptiveWebPageResolution: activeSettings?.adaptive_web_page_resolution,
+    };
+    const adaptiveGateOpen = isAdaptiveResolutionGateOpen(adaptiveGateInputs);
+    // Diagnostic: log every gate evaluation. Each axis is dumped so the
+    // operator can see exactly which check is closed (the daemon-side
+    // active flag missing, the selected device not matching the IDD,
+    // the user toggle off, etc.). Grep `[adaptive-resolution gate]` in
+    // devtools. The effect's dep list is the spread of the inputs so it
+    // runs only on a real change, not on every render.
+    useEffect(() => {
+        console.info("[adaptive-resolution gate]", {
+            ...adaptiveGateInputs,
+            deviceMatch:
+                adaptiveGateInputs.selectedVideoDeviceName ===
+                adaptiveGateInputs.virtualDisplayDeviceName,
+            open: adaptiveGateOpen,
+        });
+    }, [
+        adaptiveGateInputs.deskId,
+        adaptiveGateInputs.isRTCConnected,
+        adaptiveGateInputs.virtualDisplayActive,
+        adaptiveGateInputs.virtualDisplayDeviceName,
+        adaptiveGateInputs.selectedVideoDeviceName,
+        adaptiveGateInputs.adaptiveWebPageResolution,
+        adaptiveGateOpen,
+    ]);
     useAdaptiveResolution({
         wrapperRef: videoWrapperRef,
-        enabled: isAdaptiveResolutionGateOpen({
-            deskId,
-            isRTCConnected,
-            virtualDisplayActive: initData?.virtual_display_active,
-            virtualDisplayDeviceName: initData?.virtual_display_device_name,
-            selectedVideoDeviceName: activeSettings?.video_device_name,
-            adaptiveWebPageResolution: activeSettings?.adaptive_web_page_resolution,
-        }),
+        enabled: adaptiveGateOpen,
         sendChangeDisplay,
         pendingAutoRequestIds: pendingAutoRequestIdsRef,
         // `bigint` (u64 on the wire) → `number` because setTimeout

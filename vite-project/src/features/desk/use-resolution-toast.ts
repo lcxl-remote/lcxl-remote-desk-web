@@ -119,6 +119,22 @@ export function useResolutionToast(
     // by a newer registration — is silently dropped.
     const latestReqIdRef = useRef<string | null>(null);
 
+    /**
+     * Latest-callback-in-ref for `translate`. The desk-session caller
+     * builds the translator as an inline arrow `(k, f) => t(k, f)` on
+     * every render, so the prop's identity changes ~1 Hz (rtcStats
+     * setState pulse). If the effects below listed `translate`
+     * directly in their deps, every render would re-run them; the
+     * `lastMessage` handler would then `setResolutionToast(success)`
+     * (a fresh object reference) on each tick, triggering yet another
+     * render — React error #185 (Maximum update depth exceeded) the
+     * moment a 205 echo lands. Routing through a ref keeps the
+     * effects stable while still letting them read the most recent
+     * translator at call time.
+     */
+    const translateRef = useRef(translate);
+    translateRef.current = translate;
+
     // Two independent timer slots:
     //   - `autoClearRef` for the `success` / `failed` fade-out
     //   - `watchdogRef` for the `updating → failed{timeout}` fallback
@@ -171,7 +187,7 @@ export function useResolutionToast(
                 watchdogRef.current = null;
                 setResolutionToast({
                     phase: "failed",
-                    reason: translate(
+                    reason: translateRef.current(
                         "pages.desk.resolutionTimeout",
                         "No reply within timeout",
                     ),
@@ -179,12 +195,14 @@ export function useResolutionToast(
                 armAutoClear(failureAutoClearMs);
             }, watchdogMs);
         },
+        // `translate` deliberately omitted — read via `translateRef`
+        // so caller-side re-renders don't churn this callback's
+        // identity and ripple through the downstream effects.
         [
             armAutoClear,
             clearAutoClear,
             clearWatchdog,
             failureAutoClearMs,
-            translate,
             watchdogMs,
         ],
     );
@@ -216,13 +234,16 @@ export function useResolutionToast(
                 phase: "failed",
                 reason:
                     lastMessage.response_state?.message ??
-                    translate(
+                    translateRef.current(
                         "pages.desk.resolutionFailed",
                         "Update failed",
                     ),
             });
             armAutoClear(failureAutoClearMs);
         }
+        // `translate` deliberately omitted — see translateRef block
+        // above. Including it here would make the effect re-run on
+        // every parent render and infinite-loop after a 205 echo.
     }, [
         lastMessage,
         armAutoClear,
@@ -230,7 +251,6 @@ export function useResolutionToast(
         changeDisplaySettingsType,
         failureAutoClearMs,
         successAutoClearMs,
-        translate,
     ]);
 
     // RTC drop: throw out a stuck toast — the worker is gone, no

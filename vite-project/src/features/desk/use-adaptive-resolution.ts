@@ -183,21 +183,51 @@ export function useAdaptiveResolution({
     /** Pending debounce timer handle. */
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    /**
+     * Latest-callback-in-ref pattern. The `desk-session` parent
+     * re-renders ~1Hz on `rtcStats` updates; every render builds a
+     * fresh `sendChangeDisplay` (its `useCallback` transitively depends
+     * on `useResolutionToast`'s `registerSent`, whose own deps include
+     * the inline `translate` arrow that the parent recreates each
+     * render). If the effect below depended on `sendChangeDisplay`
+     * directly, the ResizeObserver would be torn down and rebuilt
+     * every render, and the trailing-edge debounce timer would be
+     * cleared on each rebuild — meaning the 5 s debounce can NEVER
+     * complete in practice and no 205 ever fires. Routing through a
+     * ref decouples observer lifetime from the caller's render churn
+     * while still letting `fire` reach the freshest dispatcher.
+     */
+    const sendChangeDisplayRef = useRef(sendChangeDisplay);
+    sendChangeDisplayRef.current = sendChangeDisplay;
+
     useEffect(() => {
         if (!enabled) {
+            console.info(
+                "[adaptive-resolution hook] effect skipped: enabled=false",
+            );
             return;
         }
         const wrapper = wrapperRef.current;
         if (!wrapper) {
+            console.warn(
+                "[adaptive-resolution hook] effect skipped: wrapperRef.current is null",
+            );
             return;
         }
         if (typeof ResizeObserver === "undefined") {
+            console.warn(
+                "[adaptive-resolution hook] effect skipped: ResizeObserver unavailable",
+            );
             return;
         }
 
         const fire = (target: { width: number; height: number }) => {
             timerRef.current = null;
-            const id = sendChangeDisplay({
+            console.info("[adaptive-resolution hook] fire", {
+                width: target.width,
+                height: target.height,
+            });
+            const id = sendChangeDisplayRef.current({
                 width: target.width,
                 height: target.height,
                 refresh_hz: 0,
@@ -208,25 +238,39 @@ export function useAdaptiveResolution({
         };
 
         const onResize = (rect: DOMRectReadOnly) => {
-            const normalised = normaliseDims(
-                rect.width,
-                rect.height,
-                window.devicePixelRatio,
-            );
+            const dpr = window.devicePixelRatio;
+            const normalised = normaliseDims(rect.width, rect.height, dpr);
             if (!normalised) {
+                console.debug("[adaptive-resolution hook] resize ignored: invalid rect", {
+                    cssW: rect.width,
+                    cssH: rect.height,
+                    dpr,
+                });
                 return;
             }
             const last = lastSentRef.current;
-            if (
-                last &&
-                Math.abs(normalised.width - last.width) < minDeltaPx &&
-                Math.abs(normalised.height - last.height) < minDeltaPx
-            ) {
+            const dw = last ? Math.abs(normalised.width - last.width) : Infinity;
+            const dh = last ? Math.abs(normalised.height - last.height) : Infinity;
+            if (last && dw < minDeltaPx && dh < minDeltaPx) {
+                console.debug("[adaptive-resolution hook] resize ignored: below min delta", {
+                    normalised,
+                    last,
+                    dw,
+                    dh,
+                    minDeltaPx,
+                });
                 return;
             }
             if (timerRef.current !== null) {
                 clearTimeout(timerRef.current);
             }
+            console.debug("[adaptive-resolution hook] resize scheduled", {
+                cssW: rect.width,
+                cssH: rect.height,
+                dpr,
+                normalised,
+                debounceMs,
+            });
             timerRef.current = setTimeout(() => fire(normalised), debounceMs);
         };
 
@@ -237,6 +281,12 @@ export function useAdaptiveResolution({
             }
         });
         observer.observe(wrapper);
+        console.info("[adaptive-resolution hook] observer attached", {
+            wrapperRect: wrapper.getBoundingClientRect(),
+            dpr: window.devicePixelRatio,
+            debounceMs,
+            minDeltaPx,
+        });
 
         return () => {
             observer.disconnect();
@@ -244,13 +294,13 @@ export function useAdaptiveResolution({
                 clearTimeout(timerRef.current);
                 timerRef.current = null;
             }
+            console.info("[adaptive-resolution hook] observer disconnected");
         };
-    }, [
-        enabled,
-        wrapperRef,
-        sendChangeDisplay,
-        pendingAutoRequestIds,
-        debounceMs,
-        minDeltaPx,
-    ]);
+        // `sendChangeDisplay` is intentionally absent — it is reached
+        // through `sendChangeDisplayRef` so caller-side render churn
+        // does not tear down the observer. `pendingAutoRequestIds`
+        // stays in the deps because its identity is stable across
+        // renders (the parent holds it in a `useRef`), and React's
+        // exhaustive-deps lint expects it.
+    }, [enabled, wrapperRef, pendingAutoRequestIds, debounceMs, minDeltaPx]);
 }

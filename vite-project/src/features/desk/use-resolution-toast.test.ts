@@ -207,6 +207,85 @@ describe("useResolutionToast", () => {
     });
 
     /**
+     * Regression for React error #185 (Maximum update depth exceeded).
+     * The `desk-session` parent passes `translate` as an inline arrow
+     * `(k, f) => t(k, f)` rebuilt on every render. When the hook's
+     * effect listed `translate` in its dep array, every parent render
+     * re-ran the lastMessage effect; once a 205 echo had landed and
+     * `latestReqIdRef` matched, each re-run produced a fresh
+     * `setResolutionToast({ phase: 'success', ... })` object, which
+     * re-rendered the parent, which built yet another translate
+     * arrow, looping forever and crashing the app the moment 205
+     * actually completed. The fix routes translate through a ref so
+     * the effect's dep set ignores it. This test pins that
+     * invariant: rerendering with a brand-new translate identity on
+     * top of the same lastMessage must NOT mutate the toast state or
+     * re-invoke the translator.
+     */
+    it("ignores translate prop identity changes after an echo has settled", () => {
+        const t1 = vi.fn((_key: string, fallback: string) => fallback);
+        const t2 = vi.fn((_key: string, fallback: string) => fallback);
+        type Props = {
+            lastMessage: ResolutionEchoMessage | null;
+            isRTCConnected: boolean;
+            translate: (k: string, f: string) => string;
+        };
+        const { result, rerender } = renderHook(
+            (p: Props) =>
+                useResolutionToast({
+                    lastMessage: p.lastMessage,
+                    isRTCConnected: p.isRTCConnected,
+                    changeDisplaySettingsType: CHANGE_DISPLAY_SETTINGS,
+                    translate: p.translate,
+                }),
+            {
+                initialProps: {
+                    lastMessage: null,
+                    isRTCConnected: true,
+                    translate: t1,
+                },
+            },
+        );
+        act(() => result.current.registerSent("r-loop", 1280, 720));
+        // Land a failed echo with no `message` so the translate
+        // fallback path activates (`message ?? translate(...)`).
+        // This is the same code path that crashed the app in
+        // production once a 205 echo arrived.
+        const failedEcho: ResolutionEchoMessage = {
+            signaling_type: CHANGE_DISPLAY_SETTINGS,
+            request_id: "r-loop",
+            response_state: { error_code: 7 },
+        };
+        rerender({
+            lastMessage: failedEcho,
+            isRTCConnected: true,
+            translate: t1,
+        });
+        const t1CallsAfterEcho = t1.mock.calls.length;
+        const toastAfterEcho = result.current.resolutionToast;
+        expect(toastAfterEcho?.phase).toBe("failed");
+        expect(t1CallsAfterEcho).toBeGreaterThanOrEqual(1);
+
+        // Now rerender 5x with a brand-new translate identity each
+        // time but the SAME lastMessage object. Before the fix, this
+        // would re-fire the effect on every rerender and re-set the
+        // toast, tripping React's #185 in the real app. After the
+        // fix the effect's deps no longer include translate, so
+        // neither t1 nor t2 gets called again and the toast object
+        // stays identical (referential equality).
+        for (let i = 0; i < 5; i += 1) {
+            rerender({
+                lastMessage: failedEcho,
+                isRTCConnected: true,
+                translate: t2,
+            });
+        }
+        expect(t1.mock.calls.length).toBe(t1CallsAfterEcho);
+        expect(t2).not.toHaveBeenCalled();
+        expect(result.current.resolutionToast).toBe(toastAfterEcho);
+    });
+
+    /**
      * A new registration mid-flight cancels the previous watchdog.
      * Otherwise the older request's watchdog could fire and flip the
      * new updating toast to "timeout" even though the new request is

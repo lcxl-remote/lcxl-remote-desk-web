@@ -379,6 +379,86 @@ describe("useAdaptiveResolution", () => {
         makeHarness({ enabled: false });
         expect(mockResizeObserverState.instances).toHaveLength(0);
     });
+
+    /**
+     * Regression for the "observer remounts every render" bug:
+     * `desk-session` re-renders ~1 Hz on `rtcStats` updates, and each
+     * render produced a fresh `sendChangeDisplay` (its `useCallback`
+     * transitively depended on `useResolutionToast`'s `registerSent`,
+     * whose own deps included an inline `translate` arrow). When the
+     * effect listed `sendChangeDisplay` in its dep list, every render
+     * tore down the ResizeObserver AND cleared the in-flight debounce
+     * timer — so the 5 s trailing-edge timer could never elapse and
+     * no 205 ever fired. The fix routes the dispatcher through a ref
+     * so the observer survives caller churn. This test verifies BOTH
+     * halves: the observer instance is the same after a rerender with
+     * a new dispatcher, AND the eventual fire uses the latest
+     * dispatcher (not a stale captured one).
+     */
+    it("survives a sendChangeDisplay reference change without remount, and fires through the latest dispatcher", () => {
+        const callsV1: Array<{ width: number; height: number }> = [];
+        const callsV2: Array<{ width: number; height: number }> = [];
+        const sendV1 = (p: {
+            width: number;
+            height: number;
+            refresh_hz: number;
+            auto: true;
+        }) => {
+            callsV1.push({ width: p.width, height: p.height });
+            return "req-v1";
+        };
+        const sendV2 = (p: {
+            width: number;
+            height: number;
+            refresh_hz: number;
+            auto: true;
+        }) => {
+            callsV2.push({ width: p.width, height: p.height });
+            return "req-v2";
+        };
+        const pendingIds: MutableRefObject<Set<string>> = { current: new Set() };
+        const wrapperRef: RefObject<HTMLDivElement | null> = {
+            current: document.createElement("div"),
+        };
+        const initialProps: UseAdaptiveResolutionParams = {
+            wrapperRef,
+            enabled: true,
+            sendChangeDisplay: sendV1,
+            pendingAutoRequestIds: pendingIds,
+            debounceMs: 1_000,
+        };
+        const { rerender } = renderHook<void, UseAdaptiveResolutionParams>(
+            (params) => useAdaptiveResolution(params),
+            { initialProps },
+        );
+        expect(mockResizeObserverState.instances).toHaveLength(1);
+        const observerBefore = mockResizeObserverState.instances[0];
+
+        // Start a debounce window with v1 in place.
+        act(() => {
+            mockResizeObserverState.fire({ width: 1280, height: 720 });
+        });
+        // Halfway through the debounce, swap to v2 — simulates the
+        // parent re-rendering with a new useCallback identity.
+        act(() => {
+            vi.advanceTimersByTime(500);
+        });
+        rerender({ ...initialProps, sendChangeDisplay: sendV2 });
+
+        // Same observer instance — no disconnect/attach churn.
+        expect(mockResizeObserverState.instances).toHaveLength(1);
+        expect(mockResizeObserverState.instances[0]).toBe(observerBefore);
+
+        // Complete the debounce. v2 must be the dispatcher used, and
+        // v1 must NOT have been called at all (a stale-closure
+        // regression would surface as a v1 hit).
+        act(() => {
+            vi.advanceTimersByTime(600);
+        });
+        expect(callsV1).toHaveLength(0);
+        expect(callsV2).toEqual([{ width: 1280, height: 720 }]);
+        expect(pendingIds.current.has("req-v2")).toBe(true);
+    });
 });
 
 describe("isAdaptiveResolutionGateOpen", () => {
