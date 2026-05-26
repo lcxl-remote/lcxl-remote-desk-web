@@ -526,17 +526,21 @@ pub async fn run_signaling_proxy(
                     ),
                 }
             }
-            // Stage 2 stub: the supervisor's `on_exclusive_result`
-            // handler lands in stage 3 alongside the 4-state machine.
-            // For now we log and drop so the IPC loop stays exhaustive.
+            // Route to the supervisor; the driver loop and op_id gate
+            // live there. Routing is a no-op when this is a non-
+            // service-daemon mode that does not own a supervisor
+            // (Default/DeskServer pass `virtual_display = None`).
             WorkerToService::ExclusiveResult(payload) => {
-                log::debug!(
-                    "[SignalingProxy] ExclusiveResult op_id={} direction={:?} outcome={:?} \
-                     (supervisor handler not wired yet)",
-                    payload.op_id,
-                    payload.direction,
-                    payload.outcome
-                );
+                if let Some(supervisor) = virtual_display.as_ref() {
+                    supervisor.on_exclusive_result(payload).await;
+                } else {
+                    log::debug!(
+                        "[SignalingProxy] ExclusiveResult arrived but no supervisor in this mode; \
+                         op_id={} direction={:?}",
+                        payload.op_id,
+                        payload.direction,
+                    );
+                }
             }
         }
     }

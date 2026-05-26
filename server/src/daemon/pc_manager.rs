@@ -512,6 +512,29 @@ impl PcRegistry {
         self.inner.write().await.remove(connection_id)
     }
 
+    /// Whether any registered `PeerConnectionContext` currently has
+    /// `signaling_state.accept_control == true`. Used by the daemon's
+    /// `update_exclusive_after_control_change` helper to decide
+    /// whether the worker should keep the exclusive layer active —
+    /// the gate is "any holder", not "all holders", so a second
+    /// browser releasing while a first still holds control keeps the
+    /// physical displays detached.
+    pub async fn any_with_accept_control(&self) -> bool {
+        // Snapshot the connection list first so we do not hold the
+        // outer read lock while awaiting each per-connection lock.
+        let pcs: Vec<Arc<RwLock<PeerConnectionContext>>> = {
+            let inner = self.inner.read().await;
+            inner.values().cloned().collect()
+        };
+        for pc in pcs {
+            let ctx = pc.read().await;
+            if ctx.signaling_state.read().await.accept_control {
+                return true;
+            }
+        }
+        false
+    }
+
     pub async fn len(&self) -> usize {
         let real = self.inner.read().await.len();
         #[cfg(test)]
@@ -2546,7 +2569,7 @@ pub async fn handle_require_control(
     settings: &SharedSettings,
     host_control_hub: &Arc<HostControlHub>,
     model: &SignalingModel,
-) -> Result<(), DeskError> {
+) -> Result<ControlOutcome, DeskError> {
     let from_connection_id = model.check_and_get_from_connection_id()?;
     let ctx = registry.get(from_connection_id).await.ok_or_else(|| {
         DeskError::CustomError(CustomDeskError::new(
@@ -2608,7 +2631,15 @@ pub async fn handle_require_control(
             from_connection_id,
             None,
         )?;
-        return Ok(());
+        // Denial sets accept_control = false; this PC's value changed
+        // iff it was previously holding control. Short-circuiting the
+        // current value avoids spurious exclusive-mode updates when the
+        // user denies a brand-new RequireControl.
+        return Ok(ControlOutcome {
+            connection_id: from_connection_id.to_string(),
+            accept_control: false,
+            changed: currently_has_control,
+        });
     }
 
     let clipboard_approved = if !control_data.accept_clipboard_sync {
@@ -2660,7 +2691,27 @@ pub async fn handle_require_control(
         reply_type,
         from_connection_id,
         None,
-    )
+    )?;
+    Ok(ControlOutcome {
+        connection_id: from_connection_id.to_string(),
+        accept_control: control_data.accept,
+        changed: control_data.accept != currently_has_control,
+    })
+}
+
+/// Outcome the router needs to update the exclusive-mode layer. The
+/// `changed` flag is true iff `accept_control` actually moved (a
+/// re-grant of an already-accepted permission short-circuits in
+/// `handle_require_control` but still returns `changed = false`),
+/// letting the router skip the exclusive recompute entirely in that
+/// common case. `connection_id` is the PC whose state moved; the
+/// router does not currently key off it but the field is in place so
+/// per-connection logging stays useful.
+#[derive(Debug, Clone)]
+pub struct ControlOutcome {
+    pub connection_id: String,
+    pub accept_control: bool,
+    pub changed: bool,
 }
 
 #[cfg(test)]
@@ -3094,6 +3145,64 @@ mod tests {
         let mut s = Settings::default();
         s.args.startup_mode = mode;
         s
+    }
+
+    /// `any_with_accept_control` reflects each PC's
+    /// `signaling_state.accept_control` flag: empty registry returns
+    /// false; a single PC with `accept_control = false` returns false;
+    /// flipping it true returns true; clearing it on one PC while
+    /// another is still holding control keeps the answer true (any,
+    /// not all). Pins the "any holder keeps exclusive alive" gate
+    /// used by `update_exclusive_after_control_change`.
+    #[tokio::test]
+    async fn any_with_accept_control_covers_empty_single_and_multi() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+
+        assert!(
+            !registry.any_with_accept_control().await,
+            "empty registry must report false"
+        );
+
+        let ctx_a = registry
+            .create_for_request_remote("conn-a", &request_remote, &s)
+            .await
+            .expect("seed a");
+        assert!(
+            !registry.any_with_accept_control().await,
+            "fresh PC has accept_control = false"
+        );
+
+        // Flip A: now any() should be true.
+        {
+            let ctx = ctx_a.read().await;
+            ctx.signaling_state.write().await.accept_control = true;
+        }
+        assert!(registry.any_with_accept_control().await);
+
+        // Add B without flipping; A still holds.
+        let ctx_b = registry
+            .create_for_request_remote("conn-b", &request_remote, &s)
+            .await
+            .expect("seed b");
+        assert!(registry.any_with_accept_control().await);
+
+        // Flip A back to false; B still false. None hold -> false.
+        {
+            let ctx = ctx_a.read().await;
+            ctx.signaling_state.write().await.accept_control = false;
+        }
+        assert!(!registry.any_with_accept_control().await);
+
+        // Flip B to true; one holder -> true again.
+        {
+            let ctx = ctx_b.read().await;
+            ctx.signaling_state.write().await.accept_control = true;
+        }
+        assert!(registry.any_with_accept_control().await);
     }
 
     /// Round-trip: create, contains, get, remove.

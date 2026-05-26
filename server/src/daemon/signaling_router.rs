@@ -361,7 +361,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         }
         SignalingType::RequireControl => {
             let settings: &SharedSettings = &ctx.settings;
-            pc_manager::handle_require_control(
+            let outcome = pc_manager::handle_require_control(
                 &ctx.pc_registry,
                 &ctx.outbound_tx,
                 settings,
@@ -369,6 +369,7 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
                 model,
             )
             .await?;
+            update_exclusive_after_control_change(ctx, &outcome).await;
             Ok(())
         }
         // Daemon-emitted or dead inbound; the browser should never
@@ -430,6 +431,55 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             handle_change_display_settings_inbound(ctx, model).await
         }
     }
+}
+
+/// Computes whether the daemon currently wants the worker in
+/// exclusive mode, plus the pre-detach prompt duration to use when
+/// entering. Both router (on control change) and supervisor (on
+/// attach edge) reach the answer through this helper so there is a
+/// single source of truth.
+///
+/// `active` is the supervisor's `is_active()` snapshot the caller has
+/// already taken (the helper does **not** call back into the
+/// supervisor — that would risk a lock cycle and re-introduce the
+/// self-reference path codex round 7 #1 closed).
+pub async fn compute_desired_with_active(
+    settings: &crate::model::settings::SharedSettings,
+    pc_registry: &PcRegistry,
+    active: bool,
+) -> (bool, u32) {
+    let s = settings.read().await;
+    let on = s.virtual_display.enabled && s.virtual_display.exclusive;
+    let prompt_ms = s.virtual_display.prompt_ms;
+    drop(s);
+    if !on || !active {
+        return (false, prompt_ms);
+    }
+    let any = pc_registry.any_with_accept_control().await;
+    (any, prompt_ms)
+}
+
+/// Called by the `RequireControl` route after `handle_require_control`
+/// settles the per-PC `accept_control` flag. Pokes the supervisor's
+/// `set_desired_exclusive` so its internal driver loop can recompute
+/// the IPC to send (if any).
+///
+/// `outcome.changed = false` short-circuits — a re-grant of an
+/// already-accepted permission never moves the desired flag.
+pub async fn update_exclusive_after_control_change(
+    ctx: &RouterContext,
+    outcome: &crate::daemon::pc_manager::ControlOutcome,
+) {
+    if !outcome.changed {
+        return;
+    }
+    let Some(supervisor) = ctx.virtual_display.as_ref() else {
+        return;
+    };
+    let active = supervisor.is_active().await;
+    let (desired, prompt_ms) =
+        compute_desired_with_active(&ctx.settings, &ctx.pc_registry, active).await;
+    supervisor.set_desired_exclusive(desired, prompt_ms);
 }
 
 /// Emit an error response back to the browser via `outbound_tx`. The
@@ -2691,5 +2741,78 @@ mod tests {
             }
             other => panic!("unexpected IPC: {other:?}"),
         }
+    }
+
+    // ───── Exclusive helper tests (stage 3.3) ─────
+
+    fn settings_with_exclusive(
+        enabled: bool,
+        exclusive: bool,
+        prompt_ms: u32,
+    ) -> Arc<crate::model::settings::SharedSettings> {
+        let mut s = crate::model::settings::Settings::default();
+        s.virtual_display.enabled = enabled;
+        s.virtual_display.exclusive = exclusive;
+        s.virtual_display.prompt_ms = prompt_ms;
+        Arc::new(crate::model::settings::SharedSettings::from(s))
+    }
+
+    /// settings off OR active=false ⇒ (false, prompt_ms).
+    #[tokio::test]
+    async fn compute_desired_off_when_settings_disable_or_inactive() {
+        let s_off = settings_with_exclusive(false, true, 2500);
+        let s_excl_off = settings_with_exclusive(true, false, 3300);
+        let s_on = settings_with_exclusive(true, true, 4400);
+        let registry = PcRegistry::new();
+
+        assert_eq!(
+            compute_desired_with_active(&s_off, &registry, true).await,
+            (false, 2500)
+        );
+        assert_eq!(
+            compute_desired_with_active(&s_excl_off, &registry, true).await,
+            (false, 3300)
+        );
+        // settings on but supervisor not active ⇒ desired false.
+        assert_eq!(
+            compute_desired_with_active(&s_on, &registry, false).await,
+            (false, 4400)
+        );
+    }
+
+    /// `update_exclusive_after_control_change` short-circuits when
+    /// `outcome.changed = false`. The supervisor's exclusive state
+    /// watch must not see any transition.
+    #[tokio::test]
+    async fn update_exclusive_skips_when_outcome_unchanged() {
+        use crate::daemon::pc_manager::ControlOutcome;
+        let mut ctx = make_ctx();
+        ctx.settings.write().await.virtual_display.enabled = true;
+        ctx.settings.write().await.virtual_display.exclusive = true;
+        let supervisor =
+            crate::daemon::virtual_display::VirtualDisplaySupervisor::new_attached_for_test(
+                ctx.worker_mgr.clone(),
+                "SWD\\MOCK\\MOCK",
+            );
+        let supervisor = Arc::new(supervisor);
+        ctx.virtual_display = Some(supervisor.clone());
+        // Observation: the watch carries `Idle` initially; a changed=false
+        // outcome must not produce any send_replace (the helper short-
+        // circuits before touching the supervisor).
+        let mut rx = supervisor.subscribe_exclusive_state();
+        // First borrow is the initial value (Idle).
+        assert_eq!(*rx.borrow(), crate::daemon::virtual_display::ExclusiveState::Idle);
+        let outcome = ControlOutcome {
+            connection_id: "conn-x".into(),
+            accept_control: true,
+            changed: false,
+        };
+        update_exclusive_after_control_change(&ctx, &outcome).await;
+        // No state change to consume — `try_changed` returns NotChanged
+        // because nothing was send_replace'd. We can verify by polling
+        // with a tiny timeout.
+        let res =
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.changed()).await;
+        assert!(res.is_err(), "no state change must arrive");
     }
 }

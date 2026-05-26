@@ -36,22 +36,97 @@
 //! attached display. The fix is to gate the promotion on
 //! `WorkerToService::VirtualDisplayAttachResult`.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use desk_ipc_protocol::message::{
-    AttachVirtualDisplayPayload, ServiceToWorker, VirtualDisplayAttachOutcome,
+    AttachVirtualDisplayPayload, ExclusiveDirection, ExclusiveOutcome, ExclusiveResultPayload,
+    ServiceToWorker, SetVirtualDisplayExclusivePayload, VirtualDisplayAttachOutcome,
     VirtualDisplayAttachResultPayload,
 };
 use desk_virtual_display::{VirtualDisplayError, VirtualDisplayHandle, VirtualDisplayLifecycle};
-use tokio::sync::{Mutex, RwLock, watch};
+use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use desk_utils::error::DeskErrorCode;
+
+/// Lifecycle of the exclusive-mode layer that sits on top of the
+/// `Attached` lifecycle state. Disjoint from `SupervisorState` —
+/// exclusive can only meaningfully exist while the attach lifecycle
+/// is in `Attached`, but the gate that decides whether to enter or
+/// leave (control accepted? settings allow it?) lives entirely
+/// outside the attach state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveState {
+    Idle,
+    Entering,
+    Active,
+    Leaving,
+}
+
+/// `state` + `current_op_id` co-mutate under a single write lock so
+/// the codex round 6 #3 invariant ("op_id and state are always
+/// observed together") is enforced by the type system. Reading
+/// `current_op_id` without holding the lock is intentionally
+/// unsupported — the field is private to this module.
+#[derive(Debug)]
+struct ExclusiveInner {
+    state: ExclusiveState,
+    /// Monotonically incremented at every `prepare_next_action`,
+    /// `rollback_send_failure`, and `reset_exclusive_state` call.
+    /// The worker echoes the op_id from
+    /// [`SetVirtualDisplayExclusivePayload::op_id`] back via
+    /// [`ExclusiveResultPayload::op_id`]; the daemon's
+    /// `on_exclusive_result` drops anything whose `op_id` does not
+    /// equal `current_op_id` (i.e. came from a superseded request).
+    current_op_id: u64,
+}
+
+/// Callback the router injects to let the supervisor recompute the
+/// desired exclusive state at attach edges (where the supervisor is
+/// the only party that knows the transition just happened).
+///
+/// Signature is `Fn(active: bool) -> (desired, prompt_ms)` — codex
+/// round 7 #1 forced the `active` parameter out of the closure body
+/// so the closure never has to reach back into the supervisor (which
+/// would form a self-reference and a potential lock cycle). The
+/// supervisor takes `active = self.is_active().await` itself before
+/// calling the closure.
+pub type DesiredComputerFn = Arc<
+    dyn Fn(bool) -> Pin<Box<dyn Future<Output = (bool, u32)> + Send>> + Send + Sync,
+>;
+
+/// Action returned by [`VirtualDisplaySupervisor::prepare_next_action`].
+/// `Send` carries the pre-built IPC plus the state pair needed for
+/// guarded rollback on send failure.
+#[derive(Debug)]
+enum ExclusiveAction {
+    None,
+    Send {
+        ipc: ServiceToWorker,
+        next_state: ExclusiveState,
+        op_id: u64,
+        prev_state: ExclusiveState,
+    },
+}
+
+/// Driver loop teardown timeout — how long the supervisor waits for
+/// the worker to acknowledge a leave (or report enter failure) before
+/// it gives up and forces the state back to Idle. 30 s is generous
+/// for a CDS round-trip (~1 s per physical display); going higher
+/// would let an unresponsive worker block daemon shutdown.
+const EXCLUSIVE_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Initial driver-loop backoff between IPC send retries. Doubles up
+/// to `MAX_BACKOFF` to keep a runaway loop from hammering the worker.
+const MIN_BACKOFF: Duration = Duration::from_millis(200);
+const MAX_BACKOFF: Duration = Duration::from_secs(10);
 
 /// Internal lifecycle state. Only `Attached` makes the supervisor
 /// `is_active()`; `Attaching` and `Detaching` are transition states
@@ -184,6 +259,45 @@ pub struct VirtualDisplaySupervisor {
     /// `None` until the first call. Survives detach/re-attach (acts as a
     /// global rate limit regardless of supervisor cycles).
     last_auto_change_at: std::sync::Mutex<Option<Instant>>,
+
+    // ───── Exclusive-mode layer ─────
+    //
+    // The exclusive state machine sits on top of the attach lifecycle:
+    // the worker can only meaningfully enter exclusive while the
+    // supervisor is in Attached, but the *decision* to enter is
+    // driven by remote-control state, which arrives via signaling. A
+    // dedicated driver loop owns the IPC sends + retries; the public
+    // surface is `set_desired_exclusive` (write the desired flag) and
+    // `on_exclusive_result` (apply the worker's reply).
+    /// State + op_id co-mutated under one RwLock. Type-level
+    /// enforcement of codex round 6 #3.
+    exclusive_inner: Arc<RwLock<ExclusiveInner>>,
+    /// Desired state set by the router (control change / settings
+    /// change) and by `recompute_desired()` at attach edges.
+    exclusive_desired: Arc<AtomicBool>,
+    /// Prompt duration the worker should use the next time it
+    /// receives `desired = true`. Stored separately so the router can
+    /// update it without taking the exclusive_inner lock.
+    exclusive_desired_prompt_ms: Arc<AtomicU32>,
+    /// Watch channel populated on every state transition (including
+    /// reset / rollback). `await_exclusive_idle` subscribes and
+    /// returns once the state observed is `Idle`.
+    exclusive_state_watch: watch::Sender<ExclusiveState>,
+    /// Wake the driver loop when desired changes or a result lands.
+    /// Also poked from `reset_exclusive_state` so a sleeping backoff
+    /// re-evaluates immediately after an attach swap.
+    reconcile_notify: Arc<Notify>,
+    /// One-shot owned by `new_arc` so `shutdown_driver_loop` can stop
+    /// the background task. `None` after shutdown.
+    exclusive_shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// Router-injected callback (`Fn(active) -> (desired, prompt_ms)`).
+    /// Installed via [`Self::set_desired_computer`] after the
+    /// supervisor is constructed because the closure captures handles
+    /// that themselves reference the supervisor's owning context.
+    /// `None` until set — `recompute_desired()` is a no-op in that
+    /// window, which is fine because nothing has driven the state
+    /// machine into a non-Idle state yet either.
+    desired_computer: Mutex<Option<DesiredComputerFn>>,
 }
 
 impl VirtualDisplaySupervisor {
@@ -193,6 +307,8 @@ impl VirtualDisplaySupervisor {
     /// Starts in `Disabled`.
     pub fn new(provider: Box<dyn VirtualDisplayLifecycle>, worker_mgr: WorkerManager) -> Self {
         let (target_tx, _target_rx) = watch::channel::<Option<u64>>(None);
+        let (exclusive_watch_tx, _exclusive_watch_rx) =
+            watch::channel::<ExclusiveState>(ExclusiveState::Idle);
         Self {
             state: RwLock::new(SupervisorState::Disabled),
             provider,
@@ -203,6 +319,16 @@ impl VirtualDisplaySupervisor {
             last_known_width: AtomicU32::new(0),
             last_known_height: AtomicU32::new(0),
             last_auto_change_at: std::sync::Mutex::new(None),
+            exclusive_inner: Arc::new(RwLock::new(ExclusiveInner {
+                state: ExclusiveState::Idle,
+                current_op_id: 0,
+            })),
+            exclusive_desired: Arc::new(AtomicBool::new(false)),
+            exclusive_desired_prompt_ms: Arc::new(AtomicU32::new(0)),
+            exclusive_state_watch: exclusive_watch_tx,
+            reconcile_notify: Arc::new(Notify::new()),
+            exclusive_shutdown_tx: Mutex::new(None),
+            desired_computer: Mutex::new(None),
         }
     }
 
@@ -315,6 +441,39 @@ impl VirtualDisplaySupervisor {
         // apply / shutdown calls cannot interleave their IPC sends. See
         // the `lifecycle_lock` field doc.
         let _lifecycle = self.lifecycle_lock.lock().await;
+        // Exclusive teardown must precede the SwDevice drop on
+        // apply(false) — otherwise the worker would receive
+        // SetVirtualDisplayExclusive(false) after the virtual display
+        // has already disappeared from the OS (codex round 2 #1).
+        // For apply(true), reset before the Attach IPC so the driver
+        // loop sees a clean (Idle, desired=false) slate for the new
+        // attach cycle (codex round 7 #5).
+        if !desired {
+            self.set_desired_exclusive(false, 0);
+            if let Err(e) = self
+                .await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT)
+                .await
+            {
+                warn!(
+                    "[virtual-display] exclusive teardown timed out: {e}; \
+                     dropping virtual display handle anyway, physical \
+                     displays will recover via registry on next logon"
+                );
+            }
+            self.reset_exclusive_state().await;
+        } else {
+            // codex round 7 #5: reset BEFORE the Attach IPC. The
+            // driver loop must see a clean state machine for the new
+            // attach cycle so a stale result from a previous cycle
+            // cannot pollute the new op_id space.
+            let needs_reset = matches!(
+                &*self.state.read().await,
+                SupervisorState::Disabled | SupervisorState::Detaching
+            );
+            if needs_reset {
+                self.reset_exclusive_state().await;
+            }
+        }
         let mut state = self.state.write().await;
         match (&*state, desired) {
             // Already in the desired direction — no-op.
@@ -603,6 +762,16 @@ impl VirtualDisplaySupervisor {
                              until the next worker restart",
                         );
                     }
+                    // codex round 6 #1 + round 7 #1: attach just
+                    // promoted to Attached, so `is_active()` is now
+                    // true. The router-injected desired_computer may
+                    // have returned `false` while we were still
+                    // Attaching; recompute now so the driver loop can
+                    // pick up the new desired state. State write
+                    // lock has already been dropped above; the
+                    // recompute_desired helper does its own brief
+                    // `is_active().await` read.
+                    self.recompute_desired().await;
                 }
             }
             VirtualDisplayAttachOutcome::Failed(message) => {
@@ -628,6 +797,17 @@ impl VirtualDisplaySupervisor {
         // wedge an Attach send between our Detach and the final state
         // transition to Disabled.
         let _lifecycle = self.lifecycle_lock.lock().await;
+        // codex round 6 #2: shutdown must also tear down the
+        // exclusive layer before the SwDevice handle is dropped.
+        self.set_desired_exclusive(false, 0);
+        if let Err(e) = self
+            .await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT)
+            .await
+        {
+            warn!("[virtual-display] shutdown exclusive teardown timed out: {e}");
+        }
+        self.reset_exclusive_state().await;
+        self.shutdown_driver_loop().await;
         let send_detach = {
             let state = self.state.read().await;
             matches!(
@@ -721,6 +901,11 @@ impl VirtualDisplaySupervisor {
 
         loop {
             if self.is_attach_cache_synced().await {
+                // codex round 6 #1: defensive recompute on the
+                // ensure_attached return path so a race where on_worker_
+                // attach_result's recompute fires before is_active() is
+                // observably true still surfaces the new desired state.
+                self.recompute_desired().await;
                 return EnsureAttachedOutcome::Attached;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -774,11 +959,291 @@ impl VirtualDisplaySupervisor {
 /// Helper used by callers that want the supervisor wrapped in
 /// `Arc<...>` so it can be cloned into `RouterContext.virtual_display`
 /// and the `signaling_proxy` Capabilities hook simultaneously.
+///
+/// Spawns the exclusive-mode driver loop and stores the shutdown
+/// one-shot back on the supervisor. The driver loop is alive even
+/// before any `desired_computer` is installed; it simply produces
+/// `ExclusiveAction::None` until exclusive becomes desired.
 pub fn new_arc(
     provider: Box<dyn VirtualDisplayLifecycle>,
     worker_mgr: WorkerManager,
 ) -> Arc<VirtualDisplaySupervisor> {
-    Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr))
+    let supervisor = Arc::new(VirtualDisplaySupervisor::new(provider, worker_mgr));
+    spawn_driver_loop(supervisor.clone());
+    supervisor
+}
+
+fn spawn_driver_loop(supervisor: Arc<VirtualDisplaySupervisor>) {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    {
+        let mut guard = supervisor.exclusive_shutdown_tx.try_lock().expect(
+            "spawn_driver_loop runs once on a fresh supervisor; lock cannot be contended",
+        );
+        *guard = Some(shutdown_tx);
+    }
+    let supervisor_for_loop = Arc::downgrade(&supervisor);
+    tokio::spawn(async move {
+        // The loop holds a Weak so a dropped supervisor (e.g. tests
+        // that forget to call shutdown) lets the task exit on the
+        // next iteration.
+        let mut shutdown_rx = shutdown_rx;
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => return,
+                _ = async {
+                    if let Some(s) = supervisor_for_loop.upgrade() {
+                        s.reconcile_notify.notified().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {}
+            }
+            let Some(supervisor) = supervisor_for_loop.upgrade() else { return; };
+            supervisor.reconcile_once_with_retry(&mut shutdown_rx).await;
+        }
+    });
+}
+
+impl VirtualDisplaySupervisor {
+    /// Install the router-injected desired-state callback. Called once
+    /// at daemon startup after the supervisor and the router context
+    /// are both wired up. Idempotent re-installations are tolerated
+    /// (the latest closure wins).
+    pub async fn set_desired_computer(&self, computer: DesiredComputerFn) {
+        let mut guard = self.desired_computer.lock().await;
+        *guard = Some(computer);
+    }
+
+    /// Router-facing: change the desired exclusive state. Does not
+    /// emit an IPC by itself — the driver loop reads the flag at the
+    /// next reconcile and produces the right action.
+    pub fn set_desired_exclusive(&self, desired: bool, prompt_ms: u32) {
+        self.exclusive_desired.store(desired, Ordering::SeqCst);
+        self.exclusive_desired_prompt_ms
+            .store(prompt_ms, Ordering::SeqCst);
+        self.reconcile_notify.notify_one();
+    }
+
+    /// codex round 6 #1 + round 7 #1: re-derive the desired flag at
+    /// attach edges. The supervisor takes the `is_active()` snapshot
+    /// itself (in this method, *not* inside the closure) so the
+    /// closure body never reaches back into the supervisor's locks.
+    /// Callers must `drop(state_guard)` before awaiting this — the
+    /// helper itself only takes `is_active()`'s read lock briefly.
+    pub async fn recompute_desired(&self) {
+        let computer = {
+            let guard = self.desired_computer.lock().await;
+            guard.clone()
+        };
+        let Some(computer) = computer else {
+            return; // no router wired up yet (e.g. tests / in-process mode)
+        };
+        let active = self.is_active().await;
+        let (desired, prompt_ms) = computer(active).await;
+        self.set_desired_exclusive(desired, prompt_ms);
+    }
+
+    /// Subscribe to a watch reader of the exclusive state. Used by
+    /// `await_exclusive_idle` and by tests that need to observe the
+    /// transition sequence.
+    pub fn subscribe_exclusive_state(&self) -> watch::Receiver<ExclusiveState> {
+        self.exclusive_state_watch.subscribe()
+    }
+
+    /// Wait until the exclusive state becomes `Idle` or the timeout
+    /// fires. `Ok(())` on idle; `Err(_)` on timeout.
+    pub async fn await_exclusive_idle(&self, timeout: Duration) -> Result<(), DeskError> {
+        let mut rx = self.exclusive_state_watch.subscribe();
+        if *rx.borrow() == ExclusiveState::Idle {
+            return Ok(());
+        }
+        match tokio::time::timeout(timeout, async {
+            while rx.changed().await.is_ok() {
+                if *rx.borrow() == ExclusiveState::Idle {
+                    return Ok::<(), ()>(());
+                }
+            }
+            Err(())
+        })
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            _ => DeskError::custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "exclusive teardown timed out",
+            ),
+        }
+    }
+
+    /// Forcibly drop the exclusive layer's state to `(Idle, desired=false)`
+    /// and bump `op_id`. Called from `apply(true)` before sending the
+    /// next Attach (so a stale result from a previous attach cycle
+    /// can never poison the fresh state machine) and from
+    /// `apply(false)` / `shutdown` after the await idle settles
+    /// (covers both success and timeout paths).
+    pub async fn reset_exclusive_state(&self) {
+        let mut inner = self.exclusive_inner.write().await;
+        inner.state = ExclusiveState::Idle;
+        inner.current_op_id = inner.current_op_id.wrapping_add(1);
+        self.exclusive_desired.store(false, Ordering::SeqCst);
+        let _ = self
+            .exclusive_state_watch
+            .send_replace(ExclusiveState::Idle);
+    }
+
+    /// Apply a worker result. Drops stale results whose `op_id` does
+    /// not match `current_op_id`. State transition runs in the same
+    /// write lock that loaded `current_op_id` so codex round 5 #1's
+    /// "load + take write" race is closed by construction.
+    pub async fn on_exclusive_result(&self, payload: ExclusiveResultPayload) {
+        let mut inner = self.exclusive_inner.write().await;
+        if payload.op_id != inner.current_op_id {
+            debug!(
+                "drop stale ExclusiveResult: op_id={} current={}",
+                payload.op_id, inner.current_op_id
+            );
+            return;
+        }
+        let new_state = apply_result_transition(inner.state, &payload);
+        inner.state = new_state;
+        let _ = self.exclusive_state_watch.send_replace(new_state);
+        drop(inner);
+        self.reconcile_notify.notify_one();
+    }
+
+    /// Compute the next IPC to send given the current `(state, desired)`
+    /// pair. Mutates `exclusive_inner` in the same write lock: state
+    /// advances to the transitional value (`Entering` / `Leaving`)
+    /// and `current_op_id` bumps once. If the round-trip fails
+    /// (worker IPC error), `rollback_send_failure` reverses both.
+    async fn prepare_next_action(&self) -> ExclusiveAction {
+        let mut inner = self.exclusive_inner.write().await;
+        let current = inner.state;
+        let desired = self.exclusive_desired.load(Ordering::SeqCst);
+        let prompt_ms = self.exclusive_desired_prompt_ms.load(Ordering::SeqCst);
+        let (kind, next_state) = match (current, desired) {
+            (ExclusiveState::Idle, true) => (true, ExclusiveState::Entering),
+            (ExclusiveState::Entering, false) => (false, ExclusiveState::Leaving),
+            (ExclusiveState::Active, false) => (false, ExclusiveState::Leaving),
+            _ => return ExclusiveAction::None,
+        };
+        inner.current_op_id = inner.current_op_id.wrapping_add(1);
+        let op_id = inner.current_op_id;
+        let prev_state = inner.state;
+        inner.state = next_state;
+        let _ = self.exclusive_state_watch.send_replace(next_state);
+        ExclusiveAction::Send {
+            ipc: ServiceToWorker::SetVirtualDisplayExclusive(SetVirtualDisplayExclusivePayload {
+                op_id,
+                desired: kind,
+                prompt_duration_ms: prompt_ms,
+            }),
+            next_state,
+            op_id,
+            prev_state,
+        }
+    }
+
+    /// Guarded rollback. Only reverses if `current_op_id` and
+    /// observed `state` still match the values that `prepare_next_action`
+    /// recorded — codex round 5 #2 prevents a concurrent reset from
+    /// being clobbered.
+    async fn rollback_send_failure(
+        &self,
+        failed_op_id: u64,
+        expected_state: ExclusiveState,
+        prev_state: ExclusiveState,
+    ) {
+        let mut inner = self.exclusive_inner.write().await;
+        if inner.current_op_id != failed_op_id {
+            return;
+        }
+        if inner.state != expected_state {
+            return;
+        }
+        inner.state = prev_state;
+        inner.current_op_id = inner.current_op_id.wrapping_add(1);
+        let _ = self.exclusive_state_watch.send_replace(prev_state);
+    }
+
+    /// Stop the driver loop. Idempotent — sending on a dropped
+    /// receiver is a no-op.
+    pub async fn shutdown_driver_loop(&self) {
+        let tx = {
+            let mut guard = self.exclusive_shutdown_tx.lock().await;
+            guard.take()
+        };
+        if let Some(tx) = tx {
+            let _ = tx.send(());
+        }
+    }
+
+    /// One iteration of the driver loop. Repeats `prepare_next_action`
+    /// + send + backoff until either there is no work to do or the
+    /// shutdown signal fires.
+    async fn reconcile_once_with_retry(&self, shutdown_rx: &mut oneshot::Receiver<()>) {
+        let mut backoff = MIN_BACKOFF;
+        loop {
+            let action = self.prepare_next_action().await;
+            let ExclusiveAction::Send {
+                ipc,
+                next_state,
+                op_id,
+                prev_state,
+            } = action
+            else {
+                return;
+            };
+            match self.worker_mgr.send_to_worker(ipc).await {
+                Ok(()) => return,
+                Err(e) => {
+                    warn!(
+                        "[virtual-display] reconcile IPC send failed: {e}; retry in {backoff:?}"
+                    );
+                    self.rollback_send_failure(op_id, next_state, prev_state)
+                        .await;
+                    tokio::select! {
+                        _ = &mut *shutdown_rx => return,
+                        _ = self.reconcile_notify.notified() => {
+                            backoff = MIN_BACKOFF;
+                        }
+                        _ = tokio::time::sleep(backoff) => {
+                            backoff = (backoff * 2).min(MAX_BACKOFF);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// State transition table driven by an `ExclusiveResult`. Implements
+/// the codex round 6 #5 acceptance (4 outcomes only — EnterCancelled
+/// deleted). The `Leaving + Entered` row is defensive (a stale
+/// `Entered` should never reach here thanks to the op_id gate, but
+/// keeping the row guards against a wire regression).
+fn apply_result_transition(
+    state: ExclusiveState,
+    payload: &ExclusiveResultPayload,
+) -> ExclusiveState {
+    match (state, &payload.outcome, payload.direction) {
+        (ExclusiveState::Entering, ExclusiveOutcome::Entered, ExclusiveDirection::Entering) => {
+            ExclusiveState::Active
+        }
+        (
+            ExclusiveState::Entering,
+            ExclusiveOutcome::EnterFailed(_),
+            ExclusiveDirection::Entering,
+        ) => ExclusiveState::Idle,
+        (
+            ExclusiveState::Leaving,
+            ExclusiveOutcome::Left | ExclusiveOutcome::LeftWithErrors(_),
+            ExclusiveDirection::Leaving,
+        ) => ExclusiveState::Idle,
+        // Defensive: state already absorbed the transition, or stale
+        // ack made it past op_id gating (shouldn't happen). Stay put.
+        _ => state,
+    }
 }
 
 #[cfg(test)]
@@ -882,6 +1347,8 @@ impl VirtualDisplaySupervisor {
         });
         let cap_version = worker_mgr.capabilities_version();
         let (target_tx, _target_rx) = watch::channel(Some(cap_version));
+        let (exclusive_watch_tx, _exclusive_watch_rx) =
+            watch::channel::<ExclusiveState>(ExclusiveState::Idle);
         Self {
             state: RwLock::new(SupervisorState::Attached {
                 instance_id: instance_id.to_string(),
@@ -896,6 +1363,16 @@ impl VirtualDisplaySupervisor {
             last_known_width: AtomicU32::new(0),
             last_known_height: AtomicU32::new(0),
             last_auto_change_at: std::sync::Mutex::new(None),
+            exclusive_inner: Arc::new(RwLock::new(ExclusiveInner {
+                state: ExclusiveState::Idle,
+                current_op_id: 0,
+            })),
+            exclusive_desired: Arc::new(AtomicBool::new(false)),
+            exclusive_desired_prompt_ms: Arc::new(AtomicU32::new(0)),
+            exclusive_state_watch: exclusive_watch_tx,
+            reconcile_notify: Arc::new(Notify::new()),
+            exclusive_shutdown_tx: Mutex::new(None),
+            desired_computer: Mutex::new(None),
         }
     }
 }
@@ -2050,5 +2527,275 @@ mod tests {
         // Δ = 0 between two calls with min_interval = 0 ⇒ second
         // still succeeds (0 >= 0).
         assert!(s.try_consume_auto_slot(now, Duration::from_millis(0)));
+    }
+
+    // ───── Exclusive-mode tests ─────
+
+    fn fresh_supervisor() -> Arc<VirtualDisplaySupervisor> {
+        let provider: Box<dyn VirtualDisplayLifecycle> =
+            Box::new(MockLifecycle::returns_handle());
+        let (worker_mgr, _rx) = make_worker_mgr();
+        new_arc(provider, worker_mgr)
+    }
+
+    async fn read_inner(s: &VirtualDisplaySupervisor) -> (ExclusiveState, u64) {
+        let inner = s.exclusive_inner.read().await;
+        (inner.state, inner.current_op_id)
+    }
+
+    /// `set_desired_exclusive(true)` updates the flag + prompt and
+    /// notifies the driver loop. With no `desired_computer` installed
+    /// and no active state behind the supervisor, the driver loop
+    /// produces `Send { Enter }` once because (Idle, true) matches
+    /// the transition table. We do not assert the IPC went out here;
+    /// the worker_mgr has no installed channel so the send errors,
+    /// the rollback brings state back to Idle, and the driver loop
+    /// goes to sleep on the next notification.
+    #[tokio::test]
+    async fn set_desired_exclusive_idle_true_advances_to_entering_and_bumps_op_id() {
+        let s = fresh_supervisor();
+        // Manually drive prepare_next_action to inspect state advancement
+        // without depending on the driver loop's send result.
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+        match s.prepare_next_action().await {
+            ExclusiveAction::Send {
+                next_state,
+                op_id,
+                prev_state,
+                ..
+            } => {
+                assert_eq!(next_state, ExclusiveState::Entering);
+                assert_eq!(prev_state, ExclusiveState::Idle);
+                assert_eq!(op_id, 1);
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+        let (state, op_id) = read_inner(&s).await;
+        assert_eq!(state, ExclusiveState::Entering);
+        assert_eq!(op_id, 1);
+        s.shutdown_driver_loop().await;
+    }
+
+    /// `prepare_next_action` returns None when (Idle, false): no
+    /// state advancement, no op_id bump.
+    #[tokio::test]
+    async fn prepare_next_action_idle_false_is_none() {
+        let s = fresh_supervisor();
+        match s.prepare_next_action().await {
+            ExclusiveAction::None => {}
+            other => panic!("expected None, got {other:?}"),
+        }
+        let (state, op_id) = read_inner(&s).await;
+        assert_eq!(state, ExclusiveState::Idle);
+        assert_eq!(op_id, 0);
+        s.shutdown_driver_loop().await;
+    }
+
+    /// `on_exclusive_result` with matching `op_id` advances Entering
+    /// to Active; with a mismatched `op_id` it is a no-op.
+    #[tokio::test]
+    async fn on_exclusive_result_op_id_gate() {
+        let s = fresh_supervisor();
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+        s.prepare_next_action().await; // state -> Entering, op_id -> 1
+
+        // Stale op_id: dropped silently.
+        s.on_exclusive_result(ExclusiveResultPayload {
+            op_id: 999,
+            direction: ExclusiveDirection::Entering,
+            outcome: ExclusiveOutcome::Entered,
+        })
+        .await;
+        let (state, op_id) = read_inner(&s).await;
+        assert_eq!(state, ExclusiveState::Entering, "stale op must not advance");
+        assert_eq!(op_id, 1);
+
+        // Matching op_id: transitions to Active.
+        s.on_exclusive_result(ExclusiveResultPayload {
+            op_id: 1,
+            direction: ExclusiveDirection::Entering,
+            outcome: ExclusiveOutcome::Entered,
+        })
+        .await;
+        let (state, op_id) = read_inner(&s).await;
+        assert_eq!(state, ExclusiveState::Active);
+        assert_eq!(op_id, 1, "successful result does not bump op_id");
+        s.shutdown_driver_loop().await;
+    }
+
+    /// `apply_result_transition` table (codex round 6 #5: only four
+    /// outcomes; EnterCancelled was removed).
+    #[test]
+    fn apply_result_transition_table() {
+        // Entering + Entered -> Active
+        assert_eq!(
+            apply_result_transition(
+                ExclusiveState::Entering,
+                &ExclusiveResultPayload {
+                    op_id: 1,
+                    direction: ExclusiveDirection::Entering,
+                    outcome: ExclusiveOutcome::Entered,
+                }
+            ),
+            ExclusiveState::Active
+        );
+        // Entering + EnterFailed -> Idle
+        assert_eq!(
+            apply_result_transition(
+                ExclusiveState::Entering,
+                &ExclusiveResultPayload {
+                    op_id: 1,
+                    direction: ExclusiveDirection::Entering,
+                    outcome: ExclusiveOutcome::EnterFailed("bad".into()),
+                }
+            ),
+            ExclusiveState::Idle
+        );
+        // Leaving + Left -> Idle
+        assert_eq!(
+            apply_result_transition(
+                ExclusiveState::Leaving,
+                &ExclusiveResultPayload {
+                    op_id: 1,
+                    direction: ExclusiveDirection::Leaving,
+                    outcome: ExclusiveOutcome::Left,
+                }
+            ),
+            ExclusiveState::Idle
+        );
+        // Leaving + LeftWithErrors -> Idle
+        assert_eq!(
+            apply_result_transition(
+                ExclusiveState::Leaving,
+                &ExclusiveResultPayload {
+                    op_id: 1,
+                    direction: ExclusiveDirection::Leaving,
+                    outcome: ExclusiveOutcome::LeftWithErrors("partial".into()),
+                }
+            ),
+            ExclusiveState::Idle
+        );
+        // Defensive: Leaving + Entered stays Leaving (stale ack would
+        // already be dropped by op_id gate before reaching here; but
+        // if it does, do not regress to Active).
+        assert_eq!(
+            apply_result_transition(
+                ExclusiveState::Leaving,
+                &ExclusiveResultPayload {
+                    op_id: 1,
+                    direction: ExclusiveDirection::Entering,
+                    outcome: ExclusiveOutcome::Entered,
+                }
+            ),
+            ExclusiveState::Leaving
+        );
+    }
+
+    /// `rollback_send_failure` only reverses when (op_id, state) both
+    /// match the recorded values. A concurrent reset that bumped
+    /// op_id between the send attempt and the rollback must NOT
+    /// regress the state.
+    #[tokio::test]
+    async fn rollback_send_failure_is_guarded() {
+        let s = fresh_supervisor();
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+        let (op_before, prev_state) = {
+            let inner = s.exclusive_inner.read().await;
+            (inner.current_op_id, inner.state)
+        };
+        s.prepare_next_action().await; // -> Entering, op_id +1
+        let after_op = {
+            let inner = s.exclusive_inner.read().await;
+            inner.current_op_id
+        };
+        assert_eq!(after_op, op_before + 1);
+
+        // Simulate a concurrent reset that bumps op_id again and
+        // restores Idle. The pending rollback (which thinks it
+        // recorded after_op + Entering) must NOT clobber it.
+        s.reset_exclusive_state().await;
+        let after_reset = {
+            let inner = s.exclusive_inner.read().await;
+            inner.current_op_id
+        };
+        assert!(after_reset > after_op);
+
+        // Rollback referencing the stale (op_id, state) is a no-op.
+        s.rollback_send_failure(after_op, ExclusiveState::Entering, prev_state)
+            .await;
+        let (state, op_id) = read_inner(&s).await;
+        assert_eq!(state, ExclusiveState::Idle, "reset must survive rollback");
+        assert_eq!(op_id, after_reset);
+        s.shutdown_driver_loop().await;
+    }
+
+    /// `reset_exclusive_state` always returns state to Idle, bumps
+    /// op_id, and flips desired off.
+    #[tokio::test]
+    async fn reset_exclusive_state_clears_and_bumps() {
+        let s = fresh_supervisor();
+        // Move into Active manually.
+        {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Active;
+            inner.current_op_id = 5;
+        }
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+        s.reset_exclusive_state().await;
+        let (state, op_id) = read_inner(&s).await;
+        assert_eq!(state, ExclusiveState::Idle);
+        assert_eq!(op_id, 6);
+        assert!(!s.exclusive_desired.load(Ordering::SeqCst));
+        s.shutdown_driver_loop().await;
+    }
+
+    /// `await_exclusive_idle` returns immediately when already Idle.
+    #[tokio::test]
+    async fn await_exclusive_idle_returns_immediately_on_idle() {
+        let s = fresh_supervisor();
+        s.await_exclusive_idle(Duration::from_millis(100))
+            .await
+            .expect("immediate Ok");
+        s.shutdown_driver_loop().await;
+    }
+
+    /// `await_exclusive_idle` times out when state is non-Idle and no
+    /// transition arrives.
+    #[tokio::test]
+    async fn await_exclusive_idle_times_out_when_stuck() {
+        let s = fresh_supervisor();
+        {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Entering;
+            let _ = s
+                .exclusive_state_watch
+                .send_replace(ExclusiveState::Entering);
+        }
+        // No state transition to Idle will arrive in the next 50ms.
+        let res = s.await_exclusive_idle(Duration::from_millis(50)).await;
+        assert!(res.is_err(), "expected timeout");
+        s.shutdown_driver_loop().await;
+    }
+
+    /// `await_exclusive_idle` resolves when a state transition lands
+    /// it on Idle.
+    #[tokio::test]
+    async fn await_exclusive_idle_resolves_on_transition() {
+        let s = fresh_supervisor();
+        {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Leaving;
+            let _ = s
+                .exclusive_state_watch
+                .send_replace(ExclusiveState::Leaving);
+        }
+        let s_clone = Arc::clone(&s);
+        let waiter =
+            tokio::spawn(async move { s_clone.await_exclusive_idle(Duration::from_secs(2)).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        s.reset_exclusive_state().await;
+        let res = waiter.await.expect("join");
+        assert!(res.is_ok());
+        s.shutdown_driver_loop().await;
     }
 }

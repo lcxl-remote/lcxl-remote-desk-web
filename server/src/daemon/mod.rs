@@ -180,6 +180,31 @@ pub async fn run_service_daemon_inner(
     let virtual_display_supervisor = {
         let provider = desk_virtual_display::lifecycle_provider();
         let supervisor = virtual_display::new_arc(provider, worker_mgr.clone());
+        // Inject the router-side desired-state computer. The closure
+        // captures `settings` and `pc_registry` Arc clones but
+        // intentionally does NOT capture the supervisor itself; the
+        // supervisor invokes the closure with `active` it has
+        // already taken from `is_active()` (codex round 7 #1, breaks
+        // the self-reference + lock cycle the previous round
+        // would have introduced).
+        {
+            let settings = shared_settings_data.clone().into_inner();
+            let pc_registry = pc_registry.clone();
+            let computer: virtual_display::DesiredComputerFn =
+                Arc::new(move |active: bool| {
+                    let settings = settings.clone();
+                    let pc_registry = pc_registry.clone();
+                    Box::pin(async move {
+                        signaling_router::compute_desired_with_active(
+                            &settings,
+                            &pc_registry,
+                            active,
+                        )
+                        .await
+                    })
+                });
+            supervisor.set_desired_computer(computer).await;
+        }
         Some(supervisor)
     };
 
