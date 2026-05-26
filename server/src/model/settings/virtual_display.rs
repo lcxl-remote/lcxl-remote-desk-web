@@ -11,6 +11,12 @@ use utoipa::ToSchema;
 /// never trips it.
 pub const DEFAULT_ADAPTIVE_THROTTLE_MS: u64 = 1_000;
 
+/// Default pre-detach prompt duration (ms) before entering exclusive
+/// mode. 5 seconds matches the design: enough time for the local user
+/// to react before physical displays go dark, short enough that the
+/// remote user does not have to wait long.
+pub const DEFAULT_EXCLUSIVE_PROMPT_MS: u32 = 5_000;
+
 /// Virtual display (Windows IDD) settings. Pulled out into its own
 /// section because the knob is system-level (only the
 /// `ServiceDaemon` startup mode acts on it, and changing it requires
@@ -41,6 +47,18 @@ pub struct VirtualDisplaySettings {
     /// significant. Below this, both width and height changes are
     /// skipped to suppress micro-jitter from cursor-driven resize loops.
     pub adaptive_min_delta_px: u32,
+    /// Exclusive mode: when a remote control session is accepted and
+    /// the virtual display is attached, the daemon asks the worker to
+    /// detach all physical displays so Windows migrates existing
+    /// windows onto the virtual display. Gated on accept_control to
+    /// avoid locking the local user out of the UAC / authorization
+    /// surface. Default off so a fresh install keeps the existing
+    /// "extend mode" behavior.
+    pub exclusive: bool,
+    /// Pre-detach prompt window duration (ms) shown on physical
+    /// displays before they are detached. Gives the local user time
+    /// to react. `0` skips the prompt entirely.
+    pub prompt_ms: u32,
 }
 
 impl Default for VirtualDisplaySettings {
@@ -50,6 +68,8 @@ impl Default for VirtualDisplaySettings {
             adaptive_debounce_ms: DEFAULT_ADAPTIVE_DEBOUNCE_MS,
             adaptive_throttle_ms: DEFAULT_ADAPTIVE_THROTTLE_MS,
             adaptive_min_delta_px: DEFAULT_ADAPTIVE_MIN_DELTA_PX,
+            exclusive: false,
+            prompt_ms: DEFAULT_EXCLUSIVE_PROMPT_MS,
         }
     }
 }
@@ -77,6 +97,11 @@ impl VirtualDisplaySettings {
     /// almost certainly a typo. 1024 px is generous enough not to
     /// surprise legitimate operator preferences.
     const DELTA_MAX_PX: u32 = 1024;
+    /// Exclusive-mode prompt ceiling. A full minute is already extreme;
+    /// anything higher is almost certainly a typo. `0` is allowed (skip
+    /// the prompt entirely) so the floor is the same as the value.
+    const PROMPT_MIN_MS: u32 = 0;
+    const PROMPT_MAX_MS: u32 = 60_000;
 
     /// Clamp out-of-range values that may arrive from a hand-edited
     /// `config.toml`. Called from `Settings::new` after deserialisation.
@@ -104,6 +129,15 @@ impl VirtualDisplaySettings {
         );
         // Safe: the lo / hi bounds fit in u32 by construction.
         self.adaptive_min_delta_px = delta as u32;
+        let mut prompt = u64::from(self.prompt_ms);
+        clamp_u64(
+            &mut prompt,
+            u64::from(Self::PROMPT_MIN_MS),
+            u64::from(Self::PROMPT_MAX_MS),
+            "exclusive_prompt_ms",
+        );
+        // Safe: the lo / hi bounds fit in u32 by construction.
+        self.prompt_ms = prompt as u32;
     }
 }
 
@@ -131,6 +165,11 @@ mod tests {
         assert_eq!(s.adaptive_debounce_ms, 5_000);
         assert_eq!(s.adaptive_throttle_ms, 1_000);
         assert_eq!(s.adaptive_min_delta_px, 16);
+        // Exclusive mode defaults to off; a fresh install must keep the
+        // existing "extend mode" behavior so a service-daemon upgrade
+        // does not surprise existing operators.
+        assert!(!s.exclusive);
+        assert_eq!(s.prompt_ms, 5_000);
     }
 
     /// TOML deserialised from an empty section populates each field with
@@ -153,6 +192,10 @@ mod tests {
         assert_eq!(s.adaptive_debounce_ms, 5_000);
         assert_eq!(s.adaptive_throttle_ms, 1_000);
         assert_eq!(s.adaptive_min_delta_px, 16);
+        // Hosts upgrading from pre-exclusive configs must reach the
+        // defaults via #[serde(default)] without writing the new keys.
+        assert!(!s.exclusive);
+        assert_eq!(s.prompt_ms, 5_000);
     }
 
     /// `enabled = true` round-trips through JSON intact, plus the three
@@ -177,10 +220,36 @@ mod tests {
             adaptive_debounce_ms: 4_321,
             adaptive_throttle_ms: 567,
             adaptive_min_delta_px: 32,
+            exclusive: true,
+            prompt_ms: 3_000,
         };
         let toml_str = toml::to_string(&s).expect("encode");
         let back: VirtualDisplaySettings = toml::from_str(&toml_str).expect("decode");
         assert_eq!(back, s);
+    }
+
+    /// `prompt_ms = 0` is explicitly allowed (skip the prompt entirely).
+    /// `sanitize` must leave it untouched.
+    #[test]
+    fn sanitize_allows_prompt_ms_zero() {
+        let mut s = VirtualDisplaySettings {
+            prompt_ms: 0,
+            ..Default::default()
+        };
+        s.sanitize();
+        assert_eq!(s.prompt_ms, 0);
+    }
+
+    /// Above the ceiling — a multi-minute prompt is almost certainly a
+    /// typo. Clamp to PROMPT_MAX_MS (60s).
+    #[test]
+    fn sanitize_clamps_prompt_ms_above_maximum() {
+        let mut s = VirtualDisplaySettings {
+            prompt_ms: 300_000,
+            ..Default::default()
+        };
+        s.sanitize();
+        assert_eq!(s.prompt_ms, 60_000);
     }
 
     /// Below the floor — `0` is the most common "I disabled it" mistake
@@ -243,6 +312,8 @@ mod tests {
             adaptive_debounce_ms: 2_500,
             adaptive_throttle_ms: 500,
             adaptive_min_delta_px: 8,
+            exclusive: true,
+            prompt_ms: 4_500,
         };
         let mut s = original.clone();
         s.sanitize();
