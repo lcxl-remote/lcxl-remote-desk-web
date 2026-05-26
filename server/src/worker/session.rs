@@ -1415,6 +1415,50 @@ impl WorkerSession {
                                         );
                                     }
                                 }
+                                // Stage 2 stub: the worker
+                                // `ExclusiveCoordinator` lands in
+                                // stage 4. For now, log and emit a
+                                // stub failure result so the daemon
+                                // sees a matching op_id back and does
+                                // not deadlock waiting forever.
+                                ServiceToWorker::SetVirtualDisplayExclusive(payload) => {
+                                    info!(
+                                        "Worker received SetVirtualDisplayExclusive \
+                                         op_id={} desired={} prompt_ms={} (coordinator \
+                                         not wired yet, replying with stub failure)",
+                                        payload.op_id,
+                                        payload.desired,
+                                        payload.prompt_duration_ms
+                                    );
+                                    let direction = if payload.desired {
+                                        desk_ipc_protocol::message::ExclusiveDirection::Entering
+                                    } else {
+                                        desk_ipc_protocol::message::ExclusiveDirection::Leaving
+                                    };
+                                    let outcome = if payload.desired {
+                                        desk_ipc_protocol::message::ExclusiveOutcome::EnterFailed(
+                                            "exclusive coordinator not implemented yet"
+                                                .to_string(),
+                                        )
+                                    } else {
+                                        desk_ipc_protocol::message::ExclusiveOutcome::Left
+                                    };
+                                    let result =
+                                        desk_ipc_protocol::message::ExclusiveResultPayload {
+                                            op_id: payload.op_id,
+                                            direction,
+                                            outcome,
+                                        };
+                                    if writer_tx
+                                        .send(WorkerToService::ExclusiveResult(result))
+                                        .is_err()
+                                    {
+                                        warn!(
+                                            "writer task closed; dropping stub \
+                                             ExclusiveResult"
+                                        );
+                                    }
+                                }
                             }
                         }
                         Some(None) => {

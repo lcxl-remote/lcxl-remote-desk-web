@@ -196,6 +196,22 @@ pub enum ServiceToWorker {
     /// writer. Unit variant — the worker re-reads `desktop_name` /
     /// `has_tauri` from its cached `WorkerInitPayload`.
     RefreshCapabilities,
+
+    /// Daemon → worker: toggle the exclusive layer on top of the
+    /// existing virtual-display attach. `desired = true` asks the
+    /// worker to (a) show the pre-detach prompt for
+    /// `prompt_duration_ms` ms on the physical displays then (b)
+    /// snapshot + detach those physicals so Windows migrates windows
+    /// onto the virtual display. `desired = false` reverses: reattach
+    /// every physical to its snapshotted devmode.
+    ///
+    /// `op_id` is the daemon's monotonically-increasing operation
+    /// counter; the worker echoes it back via
+    /// [`WorkerToService::ExclusiveResult`] so the daemon can drop
+    /// stale replies from a previous op (a fast user toggling control
+    /// can leave one runner in flight while a newer one already
+    /// supersedes it; the op_id gate disambiguates them).
+    SetVirtualDisplayExclusive(SetVirtualDisplayExclusivePayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -339,6 +355,15 @@ pub enum WorkerToService {
     /// reflected to the browser indirectly via `is_active()` →
     /// `FEATURE_UNAVAILABLE` on subsequent `ChangeDisplaySettings`.
     VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload),
+
+    /// Worker → daemon reply to
+    /// [`ServiceToWorker::SetVirtualDisplayExclusive`]. The worker
+    /// echoes the request's `op_id` back so the daemon's supervisor
+    /// can `on_exclusive_result` op_id-gate: a stale result whose
+    /// op_id no longer matches `current_op_id` is dropped without
+    /// touching state. The supervisor's `ExclusiveState`
+    /// transitions are driven exclusively from this reply.
+    ExclusiveResult(ExclusiveResultPayload),
 }
 
 // ==================== Payload Types ====================
@@ -1073,6 +1098,59 @@ pub enum VirtualDisplayAttachOutcome {
 pub struct VirtualDisplayAttachResultPayload {
     pub instance_id: String,
     pub outcome: VirtualDisplayAttachOutcome,
+}
+
+/// Payload for [`ServiceToWorker::SetVirtualDisplayExclusive`].
+///
+/// `op_id` is monotonically incremented by the daemon's supervisor
+/// each time it issues a new exclusive command (enter or leave). The
+/// worker stores it on the runner currently doing the work and feeds
+/// it back via [`ExclusiveResultPayload::op_id`] so the daemon can
+/// drop stale results from a superseded runner.
+///
+/// `prompt_duration_ms` is the system-level
+/// `Settings.virtual_display.prompt_ms` snapshot at the moment the
+/// daemon decided to enter exclusive. `0` skips the prompt entirely.
+/// Ignored on a `desired = false` request.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct SetVirtualDisplayExclusivePayload {
+    pub op_id: u64,
+    pub desired: bool,
+    pub prompt_duration_ms: u32,
+}
+
+/// Direction the worker was driving when it produced this result.
+/// Disambiguates [`ExclusiveOutcome::Entered`] vs `Left` at the
+/// daemon state machine, which transitions different states for each.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExclusiveDirection {
+    Entering,
+    Leaving,
+}
+
+/// Outcome reported by the worker's exclusive runner. Four variants
+/// only — `EnterCancelled` was removed in design review round 6
+/// because the new pipeline never emits one: a cancelled enter
+/// returns silently and the next runner publishes the actual final
+/// state (Entered / Left).
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+#[serde(tag = "status", content = "data")]
+pub enum ExclusiveOutcome {
+    Entered,
+    EnterFailed(String),
+    Left,
+    LeftWithErrors(String),
+}
+
+/// Payload for [`WorkerToService::ExclusiveResult`]. `op_id` echoes
+/// the originating request; the daemon's supervisor drops anything
+/// whose `op_id != current_op_id` at the lock boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead, PartialEq, Eq)]
+pub struct ExclusiveResultPayload {
+    pub op_id: u64,
+    pub direction: ExclusiveDirection,
+    pub outcome: ExclusiveOutcome,
 }
 
 #[cfg(test)]
@@ -2678,5 +2756,141 @@ mod tests {
             },
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// `desired = true` round-trips with a non-trivial `op_id` and
+    /// `prompt_duration_ms`. Pins the wire shape (struct layout +
+    /// field order) so a future schema-write edit immediately surfaces
+    /// in CI.
+    #[test]
+    fn set_virtual_display_exclusive_enter_round_trips_wincode() {
+        let msg = ServiceToWorker::SetVirtualDisplayExclusive(SetVirtualDisplayExclusivePayload {
+            op_id: 42,
+            desired: true,
+            prompt_duration_ms: 5_000,
+        });
+        match wincode_round_trip(&msg) {
+            ServiceToWorker::SetVirtualDisplayExclusive(p) => {
+                assert_eq!(p.op_id, 42);
+                assert!(p.desired);
+                assert_eq!(p.prompt_duration_ms, 5_000);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `desired = false` round-trips. `prompt_duration_ms` is preserved
+    /// even though the worker ignores it for leave requests — the
+    /// wire format does not get to skip the field.
+    #[test]
+    fn set_virtual_display_exclusive_leave_round_trips_wincode() {
+        let msg = ServiceToWorker::SetVirtualDisplayExclusive(SetVirtualDisplayExclusivePayload {
+            op_id: u64::MAX - 1,
+            desired: false,
+            prompt_duration_ms: 0,
+        });
+        match wincode_round_trip(&msg) {
+            ServiceToWorker::SetVirtualDisplayExclusive(p) => {
+                assert_eq!(p.op_id, u64::MAX - 1);
+                assert!(!p.desired);
+                assert_eq!(p.prompt_duration_ms, 0);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// JSON encoding is the secondary wire (used by some test helpers
+    /// and the manager's REST surface for debugging). The op_id must
+    /// round-trip through JSON too — `serde_json` defaults to a u64
+    /// number which is fine up to 2^53 in JSON parsers; tests pin the
+    /// representation so a switch to a string encoding (e.g. to avoid
+    /// the JS precision cliff) shows up as a failing test.
+    #[test]
+    fn set_virtual_display_exclusive_round_trips_serde_json() {
+        let msg = ServiceToWorker::SetVirtualDisplayExclusive(SetVirtualDisplayExclusivePayload {
+            op_id: 7,
+            desired: true,
+            prompt_duration_ms: 5_000,
+        });
+        let json = serde_json::to_string(&msg).expect("encode");
+        let back: ServiceToWorker = serde_json::from_str(&json).expect("decode");
+        match back {
+            ServiceToWorker::SetVirtualDisplayExclusive(p) => {
+                assert_eq!(p.op_id, 7);
+                assert!(p.desired);
+                assert_eq!(p.prompt_duration_ms, 5_000);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Every `ExclusiveOutcome` variant must round-trip. The pipeline
+    /// emits exactly these four shapes; a regression that adds or
+    /// removes one is a wire break. EnterCancelled is intentionally
+    /// absent (removed in design round 6).
+    #[test]
+    fn exclusive_result_all_four_outcomes_round_trip_wincode() {
+        let cases = [
+            (
+                100u64,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::Entered,
+            ),
+            (
+                101u64,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::EnterFailed("snapshot failed".to_string()),
+            ),
+            (102u64, ExclusiveDirection::Leaving, ExclusiveOutcome::Left),
+            (
+                103u64,
+                ExclusiveDirection::Leaving,
+                ExclusiveOutcome::LeftWithErrors("partial: \\\\.\\DISPLAY2".to_string()),
+            ),
+        ];
+        for (op_id, direction, outcome) in cases {
+            let msg = WorkerToService::ExclusiveResult(ExclusiveResultPayload {
+                op_id,
+                direction,
+                outcome: outcome.clone(),
+            });
+            match wincode_round_trip(&msg) {
+                WorkerToService::ExclusiveResult(p) => {
+                    assert_eq!(p.op_id, op_id);
+                    assert_eq!(p.direction, direction);
+                    assert_eq!(p.outcome, outcome);
+                }
+                other => panic!("unexpected: {other:?}"),
+            }
+        }
+    }
+
+    /// `op_id` is a u64 — must serialise as 8 bytes little-endian
+    /// when used through the wincode `Configuration<true, _>` setup
+    /// the IPC pipeline uses (FixInt + LittleEndian). The first 8
+    /// bytes after the enum tag + struct framing belong to op_id.
+    ///
+    /// We don't pin the absolute offset because the enum tag width
+    /// is wincode-controlled — but encoding a known op_id value of
+    /// `0x_01_02_03_04_05_06_07_08` (i.e. each byte distinct) and
+    /// scanning the produced bytes lets us assert the byte sequence
+    /// `08 07 06 05 04 03 02 01` appears as a contiguous run — the
+    /// LE bit-pattern. A flip to BE or Varint would not produce that
+    /// run, so a wire regression fails this test immediately.
+    #[test]
+    fn op_id_is_serialized_le_8_bytes() {
+        let msg = ServiceToWorker::SetVirtualDisplayExclusive(SetVirtualDisplayExclusivePayload {
+            op_id: 0x_01_02_03_04_05_06_07_08,
+            desired: true,
+            prompt_duration_ms: 0,
+        });
+        let config: WincodeUnbounded = Configuration::new();
+        let bytes = wincode::config::serialize(&msg, config).expect("encode");
+        let needle = [0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+        let found = bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            found,
+            "expected LE u64 bit pattern in encoded bytes; got {bytes:?}"
+        );
     }
 }

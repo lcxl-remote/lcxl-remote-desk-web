@@ -526,6 +526,18 @@ pub async fn run_signaling_proxy(
                     ),
                 }
             }
+            // Stage 2 stub: the supervisor's `on_exclusive_result`
+            // handler lands in stage 3 alongside the 4-state machine.
+            // For now we log and drop so the IPC loop stays exhaustive.
+            WorkerToService::ExclusiveResult(payload) => {
+                log::debug!(
+                    "[SignalingProxy] ExclusiveResult op_id={} direction={:?} outcome={:?} \
+                     (supervisor handler not wired yet)",
+                    payload.op_id,
+                    payload.direction,
+                    payload.outcome
+                );
+            }
         }
     }
 
