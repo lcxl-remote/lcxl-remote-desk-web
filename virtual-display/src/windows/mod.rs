@@ -26,6 +26,7 @@ use crate::{
 };
 
 pub mod cds;
+pub mod physical;
 pub mod pipe_client;
 pub mod sw_device;
 

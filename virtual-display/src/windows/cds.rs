@@ -8,14 +8,15 @@
 //! this is the natural place to issue the call.
 
 use windows::Win32::Graphics::Gdi::{
-    CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODE_FIELD_FLAGS, DEVMODEW, DISP_CHANGE,
-    DISP_CHANGE_BADMODE, DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
+    CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODE_FIELD_FLAGS, DEVMODEW,
+    DISP_CHANGE, DISP_CHANGE_BADMODE, DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT,
+    DM_PELSWIDTH,
 };
 use windows::core::PCWSTR;
 
 use crate::{VirtualDisplayError, VirtualDisplayMode};
 
-fn encode_device_name(name: &str) -> Vec<u16> {
+pub(crate) fn encode_device_name(name: &str) -> Vec<u16> {
     let mut v: Vec<u16> = name.encode_utf16().collect();
     v.push(0);
     v
@@ -39,35 +40,56 @@ fn build_devmode(mode: VirtualDisplayMode) -> DEVMODEW {
 /// (e.g. `\\.\DISPLAY3`). `CDS_UPDATEREGISTRY` makes the change
 /// persistent across logoff/login.
 pub fn apply_cds(device_name: &str, mode: VirtualDisplayMode) -> Result<(), VirtualDisplayError> {
-    let name = encode_device_name(device_name);
     let devmode = build_devmode(mode);
+    let context = format!("{device_name} @ {}x{}@{}", mode.width, mode.height, mode.refresh_hz);
+    apply_cds_with_flags(Some(device_name), Some(&devmode), CDS_UPDATEREGISTRY, &context)
+}
 
-    // SAFETY: name and devmode outlive this call; CDS_UPDATEREGISTRY is
-    // a documented flag value.
-    let result: DISP_CHANGE = unsafe {
-        ChangeDisplaySettingsExW(
-            PCWSTR(name.as_ptr()),
-            Some(&devmode),
-            None,
-            CDS_UPDATEREGISTRY,
-            None,
-        )
-    };
+/// Lower-level CDS commit. `device_name = None` + `devmode = None`
+/// performs the "apply pending changes" call (after a batch of
+/// `CDS_NORESET` ops). `flags` controls persistence and side-effects:
+///
+/// - `CDS_UPDATEREGISTRY` → write through to the registry; the change
+///   survives logoff/restart.
+/// - `CDS_NORESET` → queue the change without committing; pair with a
+///   subsequent call with `flags = CDS_TYPE(0)` and both args `None`
+///   to commit the batch.
+/// - `CDS_SET_PRIMARY` → also make this display the primary monitor.
+///
+/// The `context` string is only used to build the error message; it
+/// has no semantic meaning to the OS.
+pub fn apply_cds_with_flags(
+    device_name: Option<&str>,
+    devmode: Option<&DEVMODEW>,
+    flags: CDS_TYPE,
+    context: &str,
+) -> Result<(), VirtualDisplayError> {
+    let wide = device_name.map(encode_device_name);
+    let pcwstr = wide
+        .as_ref()
+        .map_or(PCWSTR::null(), |buf| PCWSTR(buf.as_ptr()));
+    let devmode_ptr = devmode.map(|d| d as *const DEVMODEW);
+    // SAFETY: PCWSTR is null or points at the locally owned `wide`
+    // buffer which outlives the call; devmode_ptr (if Some) is borrowed
+    // from the caller for the duration of the call (lifetime tied to
+    // the borrow that produced the &DEVMODEW).
+    let result: DISP_CHANGE =
+        unsafe { ChangeDisplaySettingsExW(pcwstr, devmode_ptr, None, flags, None) };
     if result == DISP_CHANGE_SUCCESSFUL {
         return Ok(());
     }
     let msg = if result == DISP_CHANGE_BADMODE {
-        format!(
-            "BADMODE for {device_name} @ {}x{}@{}; driver did not advertise this mode",
-            mode.width, mode.height, mode.refresh_hz
-        )
+        format!("BADMODE for {context}; driver did not advertise this mode")
     } else {
-        format!(
-            "DISP_CHANGE code {} for {device_name} @ {}x{}@{}",
-            result.0, mode.width, mode.height, mode.refresh_hz
-        )
+        format!("DISP_CHANGE code {} for {context}", result.0)
     };
     Err(VirtualDisplayError::Cds(msg))
+}
+
+/// Commit any queued `CDS_NORESET` operations. Equivalent to
+/// `ChangeDisplaySettingsEx(NULL, NULL, NULL, 0, NULL)` per MSDN.
+pub fn commit_pending_changes() -> Result<(), VirtualDisplayError> {
+    apply_cds_with_flags(None, None, CDS_TYPE(0), "(commit batch)")
 }
 
 #[cfg(test)]

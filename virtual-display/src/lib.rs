@@ -17,6 +17,18 @@ pub mod unsupported;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+/// Exclusive-mode helpers re-exported so the worker `ExclusiveCoordinator`
+/// can import them via a single path on Windows. Other platforms get
+/// permanent stubs from [`unsupported`].
+#[cfg(target_os = "windows")]
+pub use windows::physical::{
+    ExclusiveLayout, PhysicalDisplaySnapshot, enter_exclusive, leave_exclusive, snapshot_layout,
+};
+#[cfg(not(target_os = "windows"))]
+pub use unsupported::{
+    ExclusiveLayout, PhysicalDisplaySnapshot, enter_exclusive, leave_exclusive, snapshot_layout,
+};
+
 /// Lifecycle owner: held by the LocalSystem daemon. Creating a handle
 /// allocates the OS-level virtual monitor resource; dropping the handle
 /// releases it.

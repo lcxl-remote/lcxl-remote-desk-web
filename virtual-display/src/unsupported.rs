@@ -27,6 +27,40 @@ impl VirtualDisplayController for UnsupportedController {
     }
 }
 
+// ───── Exclusive-mode stubs ─────
+//
+// Mirrors the Windows-side types so cross-platform builds compile and
+// daemon-level logic can name the types without `cfg`-gating. The
+// helper functions all return `NotSupported` since detaching physical
+// displays is meaningless on Linux/macOS hosts (the worker that drives
+// CDS is Windows-only).
+
+/// Stand-in for the Windows snapshot. Carries an opaque
+/// `device_name` so debug prints look sensible.
+#[derive(Debug, Clone)]
+pub struct PhysicalDisplaySnapshot {
+    pub device_name: String,
+    pub is_primary: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExclusiveLayout {
+    pub physical_snapshots: Vec<PhysicalDisplaySnapshot>,
+    pub virtual_snapshot: PhysicalDisplaySnapshot,
+}
+
+pub fn snapshot_layout(_virtual_display_name: &str) -> Result<ExclusiveLayout, VirtualDisplayError> {
+    Err(VirtualDisplayError::NotSupported)
+}
+
+pub fn enter_exclusive(_layout: &ExclusiveLayout) -> Result<(), VirtualDisplayError> {
+    Err(VirtualDisplayError::NotSupported)
+}
+
+pub fn leave_exclusive(_layout: &ExclusiveLayout) -> Result<(), VirtualDisplayError> {
+    Err(VirtualDisplayError::NotSupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
