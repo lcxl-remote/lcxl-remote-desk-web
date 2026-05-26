@@ -86,6 +86,23 @@ struct ExclusiveInner {
     /// `on_exclusive_result` drops anything whose `op_id` does not
     /// equal `current_op_id` (i.e. came from a superseded request).
     current_op_id: u64,
+    /// Number of consecutive `LeftWithErrors` results received since
+    /// the last successful `Left` / explicit reset (codex follow-up
+    /// P1, 2026-05-26). When this reaches [`MAX_LEAVE_RETRIES`] the
+    /// supervisor force-Idles and stops auto-retrying, leaving the
+    /// worker's `ExclusiveGuard` Drop / OS logoff as the final
+    /// recovery path. Reset on every successful `Left` and on
+    /// `reset_exclusive_state`.
+    leave_retry_count: u8,
+    /// Earliest instant at which the reconciler is allowed to issue
+    /// the next `(Active, desired=false) → Leaving` transition.
+    /// `None` ⇒ no backoff in effect. Set after each `LeftWithErrors`
+    /// based on `leave_retry_count` and the doubling schedule.
+    /// `prepare_next_action` returns `ExclusiveAction::None` if
+    /// `now < next_leave_at`, and `on_exclusive_result` spawns a
+    /// delayed `reconcile_notify` so the driver loop wakes up at the
+    /// right time.
+    next_leave_at: Option<Instant>,
 }
 
 /// Callback the router injects to let the supervisor recompute the
@@ -127,6 +144,24 @@ const EXCLUSIVE_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// to `MAX_BACKOFF` to keep a runaway loop from hammering the worker.
 const MIN_BACKOFF: Duration = Duration::from_millis(200);
 const MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Cap on how many consecutive `LeftWithErrors` results the daemon
+/// will auto-retry before forcing the state back to `Idle` and
+/// logging an operator-visible error (codex follow-up P1,
+/// 2026-05-26). Three retries with the schedule below gives the
+/// worker ~14 s total (2 s + 4 s + 8 s); after that, the layout
+/// retained on the worker side is left to `ExclusiveGuard::drop`
+/// at session end + CDS transient logoff fallback. Picking a low
+/// cap is intentional: `leave_exclusive` is mostly deterministic
+/// (DEVMODE-driven), so repeated failures usually indicate a state
+/// the daemon cannot resolve from here.
+const MAX_LEAVE_RETRIES: u8 = 3;
+/// Base delay for the exponential `LeftWithErrors` retry schedule:
+/// retry N waits `LEAVE_RETRY_BASE_DELAY * 2^N` before firing, so
+/// the three retries land at 2 s, 4 s, 8 s after their respective
+/// failures. Total wall-clock window from the first failure to the
+/// final give-up: ~14 s, comparable to one ICE failed-timeout.
+const LEAVE_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 
 /// Internal lifecycle state. Only `Attached` makes the supervisor
 /// `is_active()`; `Attaching` and `Detaching` are transition states
@@ -322,6 +357,8 @@ impl VirtualDisplaySupervisor {
             exclusive_inner: Arc::new(RwLock::new(ExclusiveInner {
                 state: ExclusiveState::Idle,
                 current_op_id: 0,
+                leave_retry_count: 0,
+                next_leave_at: None,
             })),
             exclusive_desired: Arc::new(AtomicBool::new(false)),
             exclusive_desired_prompt_ms: Arc::new(AtomicU32::new(0)),
@@ -1085,6 +1122,12 @@ impl VirtualDisplaySupervisor {
         let mut inner = self.exclusive_inner.write().await;
         inner.state = ExclusiveState::Idle;
         inner.current_op_id = inner.current_op_id.wrapping_add(1);
+        // Codex follow-up P1: reset the leave-retry bookkeeping too —
+        // a fresh apply(true) / apply(false) / shutdown must not
+        // inherit a stale retry-budget counter from the previous
+        // generation.
+        inner.leave_retry_count = 0;
+        inner.next_leave_at = None;
         self.exclusive_desired.store(false, Ordering::SeqCst);
         let _ = self
             .exclusive_state_watch
@@ -1104,25 +1147,71 @@ impl VirtualDisplaySupervisor {
             );
             return;
         }
-        // Codex P1 #2: surface a partial-restore failure prominently
-        // so operators / log scrapers notice. Daemon transitions to
-        // Idle to keep the reconciler loop bounded; the worker side
-        // retains the layout in its slot, so `ExclusiveGuard::drop` at
-        // session end (or an explicit subsequent leave) is the actual
-        // recovery path. CDS was issued without `CDS_UPDATEREGISTRY`,
-        // so a logoff also fully restores the physical layout.
-        if let ExclusiveOutcome::LeftWithErrors(msg) = &payload.outcome {
-            error!(
-                "[virtual-display] worker reported LeftWithErrors (op_id={}): {}; \
-                 layout retained worker-side for Drop-guard retry; transient CDS \
-                 ensures logoff also restores",
-                payload.op_id, msg
-            );
+        let mut new_state = apply_result_transition(inner.state, &payload);
+        // Codex follow-up P1 (2026-05-26): bounded backoff retry on
+        // `LeftWithErrors`. The pure `apply_result_transition` puts
+        // us into `Active` so the reconciler can drive another leave;
+        // the retry budget + delayed `reconcile_notify` live here
+        // because they depend on `leave_retry_count` (the inner field
+        // the pure transition function does not see).
+        let mut delayed_notify: Option<Duration> = None;
+        match &payload.outcome {
+            ExclusiveOutcome::LeftWithErrors(msg) => {
+                let retries_so_far = inner.leave_retry_count;
+                if retries_so_far + 1 >= MAX_LEAVE_RETRIES {
+                    error!(
+                        "[virtual-display] worker LeftWithErrors after {} attempts \
+                         (op_id={}): {}; giving up auto-retry, forcing state to Idle; \
+                         layout retained worker-side for ExclusiveGuard::drop / \
+                         logoff CDS fallback",
+                        retries_so_far + 1,
+                        payload.op_id,
+                        msg,
+                    );
+                    new_state = ExclusiveState::Idle;
+                    inner.leave_retry_count = 0;
+                    inner.next_leave_at = None;
+                } else {
+                    let next_count = retries_so_far + 1;
+                    let delay = LEAVE_RETRY_BASE_DELAY * (1u32 << next_count);
+                    inner.leave_retry_count = next_count;
+                    inner.next_leave_at = Some(Instant::now() + delay);
+                    delayed_notify = Some(delay);
+                    warn!(
+                        "[virtual-display] worker LeftWithErrors (op_id={}, attempt {}/{}): \
+                         {}; will retry leave in {:?}",
+                        payload.op_id, next_count, MAX_LEAVE_RETRIES, msg, delay,
+                    );
+                }
+            }
+            ExclusiveOutcome::Left => {
+                // Successful leave: clear any retry bookkeeping.
+                if inner.leave_retry_count > 0 || inner.next_leave_at.is_some() {
+                    info!(
+                        "[virtual-display] leave succeeded after {} retry attempt(s); \
+                         resetting backoff state",
+                        inner.leave_retry_count,
+                    );
+                }
+                inner.leave_retry_count = 0;
+                inner.next_leave_at = None;
+            }
+            // Enter outcomes don't touch leave-retry bookkeeping.
+            ExclusiveOutcome::Entered | ExclusiveOutcome::EnterFailed(_) => {}
         }
-        let new_state = apply_result_transition(inner.state, &payload);
         inner.state = new_state;
         let _ = self.exclusive_state_watch.send_replace(new_state);
         drop(inner);
+        // Spawn the delayed retry notification before the regular
+        // notify_one so the driver loop doesn't immediately see a
+        // ready `notified()` and skip past the backoff gate.
+        if let Some(delay) = delayed_notify {
+            let notify = self.reconcile_notify.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                notify.notify_one();
+            });
+        }
         self.reconcile_notify.notify_one();
     }
 
@@ -1142,6 +1231,24 @@ impl VirtualDisplaySupervisor {
             (ExclusiveState::Active, false) => (false, ExclusiveState::Leaving),
             _ => return ExclusiveAction::None,
         };
+        // Codex follow-up P1 (2026-05-26): gate the
+        // (Active, desired=false) retry path on `next_leave_at`. Any
+        // earlier wake-up just re-arms the timer and returns None;
+        // `on_exclusive_result` already scheduled the matching delayed
+        // notify so the loop will revisit at the right time. Other
+        // transitions ignore the gate — only the retry path uses it.
+        if matches!(current, ExclusiveState::Active) && !desired {
+            if let Some(retry_at) = inner.next_leave_at {
+                let now = Instant::now();
+                if now < retry_at {
+                    return ExclusiveAction::None;
+                }
+                // Backoff elapsed — clear the marker so the retry
+                // fires this round (count stays until a successful
+                // Left clears it via on_exclusive_result).
+                inner.next_leave_at = None;
+            }
+        }
         inner.current_op_id = inner.current_op_id.wrapping_add(1);
         let op_id = inner.current_op_id;
         let prev_state = inner.state;
@@ -1237,6 +1344,13 @@ impl VirtualDisplaySupervisor {
 /// deleted). The `Leaving + Entered` row is defensive (a stale
 /// `Entered` should never reach here thanks to the op_id gate, but
 /// keeping the row guards against a wire regression).
+///
+/// Codex follow-up P1 (2026-05-26): `(Leaving, LeftWithErrors)` now
+/// transitions to `Active` instead of `Idle` so the worker-side
+/// retained layout has a daemon-side counterpart that can drive a
+/// bounded backoff retry. The actual "give up after N retries →
+/// force Idle" decision lives in `on_exclusive_result` (it depends
+/// on `leave_retry_count`, not visible to this pure function).
 fn apply_result_transition(
     state: ExclusiveState,
     payload: &ExclusiveResultPayload,
@@ -1250,11 +1364,14 @@ fn apply_result_transition(
             ExclusiveOutcome::EnterFailed(_),
             ExclusiveDirection::Entering,
         ) => ExclusiveState::Idle,
+        (ExclusiveState::Leaving, ExclusiveOutcome::Left, ExclusiveDirection::Leaving) => {
+            ExclusiveState::Idle
+        }
         (
             ExclusiveState::Leaving,
-            ExclusiveOutcome::Left | ExclusiveOutcome::LeftWithErrors(_),
+            ExclusiveOutcome::LeftWithErrors(_),
             ExclusiveDirection::Leaving,
-        ) => ExclusiveState::Idle,
+        ) => ExclusiveState::Active,
         // Defensive: state already absorbed the transition, or stale
         // ack made it past op_id gating (shouldn't happen). Stay put.
         _ => state,
@@ -1381,6 +1498,8 @@ impl VirtualDisplaySupervisor {
             exclusive_inner: Arc::new(RwLock::new(ExclusiveInner {
                 state: ExclusiveState::Idle,
                 current_op_id: 0,
+                leave_retry_count: 0,
+                next_leave_at: None,
             })),
             exclusive_desired: Arc::new(AtomicBool::new(false)),
             exclusive_desired_prompt_ms: Arc::new(AtomicU32::new(0)),
@@ -2678,7 +2797,10 @@ mod tests {
             ),
             ExclusiveState::Idle
         );
-        // Leaving + LeftWithErrors -> Idle
+        // Codex follow-up P1 (2026-05-26):
+        // Leaving + LeftWithErrors -> Active (was Idle). The bounded
+        // retry budget + force-Idle on exhaustion lives in
+        // `on_exclusive_result`, not in this pure transition function.
         assert_eq!(
             apply_result_transition(
                 ExclusiveState::Leaving,
@@ -2688,7 +2810,7 @@ mod tests {
                     outcome: ExclusiveOutcome::LeftWithErrors("partial".into()),
                 }
             ),
-            ExclusiveState::Idle
+            ExclusiveState::Active
         );
         // Defensive: Leaving + Entered stays Leaving (stale ack would
         // already be dropped by op_id gate before reaching here; but
@@ -2704,6 +2826,168 @@ mod tests {
             ),
             ExclusiveState::Leaving
         );
+    }
+
+    /// Codex follow-up P1 (2026-05-26): a first `LeftWithErrors`
+    /// must transition the supervisor to `Active` (not `Idle`) so
+    /// the reconciler can drive a retry, bump `leave_retry_count`,
+    /// and set `next_leave_at` to the doubling schedule entry.
+    /// `prepare_next_action` must then return `None` while the
+    /// backoff is still in effect.
+    #[tokio::test]
+    async fn on_exclusive_result_left_with_errors_arms_retry() {
+        let s = fresh_supervisor();
+        // Move directly to Leaving with a known op_id so the gate fires.
+        let op_id = {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Leaving;
+            inner.current_op_id = 42;
+            let _ = s.exclusive_state_watch.send_replace(ExclusiveState::Leaving);
+            inner.current_op_id
+        };
+        // Mark exclusive as still desired-off so the reconciler would
+        // want to drive Leaving again.
+        s.exclusive_desired.store(false, Ordering::SeqCst);
+
+        let before = Instant::now();
+        s.on_exclusive_result(ExclusiveResultPayload {
+            op_id,
+            direction: ExclusiveDirection::Leaving,
+            outcome: ExclusiveOutcome::LeftWithErrors("partial".into()),
+        })
+        .await;
+
+        let inner = s.exclusive_inner.read().await;
+        assert_eq!(inner.state, ExclusiveState::Active, "must go to Active for retry");
+        assert_eq!(inner.leave_retry_count, 1);
+        let next_at = inner.next_leave_at.expect("backoff timer must be set");
+        // Schedule entry for the first retry is LEAVE_RETRY_BASE_DELAY * 2^1 = 4 s.
+        let scheduled_delay = next_at.saturating_duration_since(before);
+        assert!(
+            scheduled_delay >= Duration::from_secs(3),
+            "expected ~4s delay, got {scheduled_delay:?}",
+        );
+        drop(inner);
+
+        // While backoff is in effect, prepare_next_action must NOT
+        // produce a leave action — even though state=Active &&
+        // desired=false would otherwise transition to Leaving.
+        let action = s.prepare_next_action().await;
+        assert!(
+            matches!(action, ExclusiveAction::None),
+            "backoff gate must short-circuit prepare_next_action",
+        );
+
+        s.shutdown_driver_loop().await;
+    }
+
+    /// Codex follow-up P1: after [`MAX_LEAVE_RETRIES`] consecutive
+    /// `LeftWithErrors`, the supervisor must force-Idle and reset
+    /// `leave_retry_count` so a fresh enter cycle can proceed without
+    /// inheriting stale budget.
+    #[tokio::test]
+    async fn on_exclusive_result_left_with_errors_exhausts_after_max_retries() {
+        let s = fresh_supervisor();
+        let mut op_id = {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Leaving;
+            inner.current_op_id = 100;
+            inner.current_op_id
+        };
+
+        for attempt in 1..=MAX_LEAVE_RETRIES {
+            // Each result must match the current op_id.
+            {
+                let inner = s.exclusive_inner.read().await;
+                op_id = inner.current_op_id;
+                assert_eq!(inner.state, ExclusiveState::Leaving);
+            }
+            s.on_exclusive_result(ExclusiveResultPayload {
+                op_id,
+                direction: ExclusiveDirection::Leaving,
+                outcome: ExclusiveOutcome::LeftWithErrors(format!("attempt {attempt}")),
+            })
+            .await;
+            // Between retries, drive the state back to Leaving as if
+            // the reconciler had picked it up (this isolates the unit
+            // we are testing — on_exclusive_result's retry budget).
+            if attempt < MAX_LEAVE_RETRIES {
+                let mut inner = s.exclusive_inner.write().await;
+                assert_eq!(inner.state, ExclusiveState::Active, "intermediate state");
+                inner.state = ExclusiveState::Leaving;
+            }
+        }
+
+        // After the final LeftWithErrors, state must be Idle and the
+        // retry budget reset.
+        let inner = s.exclusive_inner.read().await;
+        assert_eq!(
+            inner.state,
+            ExclusiveState::Idle,
+            "exhausted budget must force-Idle"
+        );
+        assert_eq!(inner.leave_retry_count, 0, "count must reset on give-up");
+        assert!(inner.next_leave_at.is_none(), "no further retry scheduled");
+        drop(inner);
+        s.shutdown_driver_loop().await;
+    }
+
+    /// Codex follow-up P1: a successful `Left` (after one or more
+    /// failed retries) must reset both `leave_retry_count` and
+    /// `next_leave_at` — otherwise the *next* leave cycle inherits
+    /// the stale backoff timer.
+    #[tokio::test]
+    async fn on_exclusive_result_left_resets_retry_state() {
+        let s = fresh_supervisor();
+        // Seed state as if we had just had a LeftWithErrors and are
+        // now retrying Leaving.
+        let op_id = {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Leaving;
+            inner.current_op_id = 50;
+            inner.leave_retry_count = 2;
+            inner.next_leave_at = Some(Instant::now() + Duration::from_secs(60));
+            inner.current_op_id
+        };
+
+        s.on_exclusive_result(ExclusiveResultPayload {
+            op_id,
+            direction: ExclusiveDirection::Leaving,
+            outcome: ExclusiveOutcome::Left,
+        })
+        .await;
+
+        let inner = s.exclusive_inner.read().await;
+        assert_eq!(inner.state, ExclusiveState::Idle);
+        assert_eq!(inner.leave_retry_count, 0);
+        assert!(inner.next_leave_at.is_none());
+        drop(inner);
+        s.shutdown_driver_loop().await;
+    }
+
+    /// Codex follow-up P1: `prepare_next_action` only honours the
+    /// `next_leave_at` gate for the `(Active, desired=false)` retry
+    /// row. Other rows ignore the gate entirely.
+    #[tokio::test]
+    async fn prepare_next_action_ignores_backoff_for_unrelated_transitions() {
+        let s = fresh_supervisor();
+        // Pre-seed a backoff timer + count as if a prior retry was in flight,
+        // but switch state to Idle so the active row does NOT trigger.
+        {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Idle;
+            inner.leave_retry_count = 1;
+            inner.next_leave_at = Some(Instant::now() + Duration::from_secs(60));
+        }
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+
+        let action = s.prepare_next_action().await;
+        // (Idle, true) -> Entering: must NOT be gated by next_leave_at.
+        assert!(
+            matches!(action, ExclusiveAction::Send { next_state: ExclusiveState::Entering, .. }),
+            "non-leave transitions must ignore the backoff gate",
+        );
+        s.shutdown_driver_loop().await;
     }
 
     /// `rollback_send_failure` only reverses when (op_id, state) both
