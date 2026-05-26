@@ -41,11 +41,15 @@ use tokio::task::JoinHandle;
 /// dedicated `std::sync::Mutex` so the Drop guard can take the lock
 /// from a sync context (codex round 9 #3). The design notes called
 /// for `parking_lot::Mutex` to avoid poisoning; we use `std::sync`
-/// to skip the extra dependency and explicitly treat lock poisoning
-/// as a failure path (codex P2 #3): `run_enter` rolls back via
-/// `leave_exclusive` and reports `EnterFailed`, `run_leave` reports
-/// `LeftWithErrors`, and `ExclusiveGuard::drop` logs the leak so
-/// operators can diagnose a stuck detach.
+/// to skip the extra dependency and treat poisoning as a
+/// **recoverable** condition (codex follow-up P2, 2026-05-26):
+/// every path that locks this slot uses `PoisonError::into_inner()`
+/// to read or write the inner `Option<ExclusiveLayout>` instead of
+/// bailing out. That preserves the invariant "the slot is the
+/// authoritative record of what physical displays need restoring",
+/// which is critical because both `ExclusiveGuard::drop` and the
+/// daemon-requested leave depend on reading the slot to find the
+/// `ExclusiveLayout` they must restore.
 #[derive(Default)]
 pub struct VirtualDisplayState {
     /// `\\.\DISPLAYn` device name pushed by the daemon's
@@ -321,13 +325,21 @@ impl Drop for ExclusiveGuard {
         // are trivial set/take/clone calls that cannot deadlock.
         // codex round 9 #3: explicit error logging — silent swallow
         // would let a stuck partial detach disappear from the log.
+        //
+        // codex follow-up P2 (2026-05-26): poison MUST NOT skip the
+        // recovery attempt. This guard is the last chance to restore
+        // physical displays before the session terminates; if we
+        // bail on poison we lose the layout that
+        // `PoisonError::into_inner()` could still hand us. Recover
+        // the inner `Option<ExclusiveLayout>` and proceed with leave.
         let layout = match self.layout.lock() {
             Ok(mut g) => g.take(),
             Err(p) => {
                 tracing::error!(
-                    "[virtual-display] ExclusiveGuard drop: layout mutex poisoned: {p}"
+                    "[virtual-display] ExclusiveGuard drop: layout mutex poisoned: {p}; \
+                     recovering via PoisonError::into_inner() to attempt leave"
                 );
-                return;
+                p.into_inner().take()
             }
         };
         if let Some(layout) = layout {
@@ -428,7 +440,24 @@ async fn run_exclusive_reconciler(
 ) {
     // codex round 5 #4: idempotent paths must still ack — the daemon
     // gates state advancement on receiving a matching op_id.
-    let currently_active = layout.lock().map(|g| g.is_some()).unwrap_or(false);
+    //
+    // codex follow-up P2 (2026-05-26): poison MUST NOT degrade to
+    // `currently_active = false`. A poisoned slot containing
+    // `Some(layout)` means we are still detached; treating it as
+    // false would drive `(true, _) → run_enter` (re-detach catastrophe)
+    // or `(false, _) → idempotent Left` (daemon thinks done but layout
+    // still in the slot). `PoisonError::into_inner()` lets us read
+    // the inner Option regardless of poison status.
+    let currently_active = match layout.lock() {
+        Ok(g) => g.is_some(),
+        Err(p) => {
+            tracing::warn!(
+                "[virtual-display] reconciler: layout slot poisoned; \
+                 recovering via PoisonError::into_inner()"
+            );
+            p.into_inner().is_some()
+        }
+    };
     match (desired, currently_active) {
         (true, true) => {
             send_exclusive_result(
@@ -526,54 +555,34 @@ async fn run_enter(
         Ok(Ok(())) => {
             // CDS has already detached — we are committed to "exclusive".
             // The slot store is the only handle the Drop guard / future
-            // leave path will have to undo this. If the lock is
-            // poisoned we MUST NOT report Entered: the daemon would
-            // think the operation completed but no retainer holds the
-            // layout, so leave would be a no-op and physical displays
-            // stay detached until logoff. Codex P2 #3.
+            // leave path will have to undo this.
             //
-            // Block scoped so the `PoisonError`'s inner `MutexGuard`
-            // does not live across the rollback await — tokio::spawn
-            // requires the surrounding future to be `Send`.
-            let poison_msg: Option<String> = {
-                match layout_slot.lock() {
-                    Ok(mut slot) => {
-                        *slot = Some(layout.clone());
-                        None
-                    }
-                    Err(p) => Some(p.to_string()),
+            // Codex follow-up P2 (2026-05-26): poison MUST recover via
+            // `PoisonError::into_inner()` and store the layout anyway.
+            // The prior "poison ⇒ rollback + EnterFailed" path was a
+            // safe default under the "treat poison as failure" policy,
+            // but discarded the inner data the guard still owned —
+            // leaving every other poison path with the same choice to
+            // recover OR roll back. Unifying on recovery keeps the
+            // semantics identical to `attempt_leave_with_fn` /
+            // `ExclusiveGuard::drop` (both also `into_inner()`).
+            match layout_slot.lock() {
+                Ok(mut slot) => *slot = Some(layout),
+                Err(p) => {
+                    tracing::warn!(
+                        "[virtual-display] run_enter: layout slot poisoned after \
+                         CDS detach; recovering via PoisonError::into_inner() \
+                         and storing layout so leave / Drop guard can restore"
+                    );
+                    *p.into_inner() = Some(layout);
                 }
-            };
-            if let Some(msg) = poison_msg {
-                tracing::error!(
-                    "[virtual-display] layout slot poisoned after enter; \
-                     attempting immediate rollback via leave_exclusive: {msg}"
-                );
-                let layout_for_rollback = layout.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(e) = leave_exclusive(&layout_for_rollback) {
-                        tracing::error!(
-                            "[virtual-display] rollback leave_exclusive failed after \
-                             poisoned slot: {e}; physical displays may stay detached \
-                             until logoff (transient CDS)"
-                        );
-                    }
-                })
-                .await;
-                send_exclusive_result(
-                    writer_tx,
-                    op_id,
-                    ExclusiveDirection::Entering,
-                    ExclusiveOutcome::EnterFailed(format!("layout slot poisoned: {msg}")),
-                );
-            } else {
-                send_exclusive_result(
-                    writer_tx,
-                    op_id,
-                    ExclusiveDirection::Entering,
-                    ExclusiveOutcome::Entered,
-                );
             }
+            send_exclusive_result(
+                writer_tx,
+                op_id,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::Entered,
+            );
         }
         Ok(Err(e)) => send_exclusive_result(
             writer_tx,
@@ -605,11 +614,6 @@ enum LeaveOutcome {
     /// `SetVirtualDisplayExclusive(false)`, or the session-end
     /// [`ExclusiveGuard`] Drop — can try again. Codex P1 #2.
     Failed(String),
-    /// `layout_slot.lock()` returned `Err(PoisonError)`. Slot is in
-    /// an unknown state, but conceptually the layout (if any) is
-    /// still in there — we do not touch it. Equivalent to `Failed`
-    /// for daemon-side bookkeeping but carries the poison source.
-    PoisonedLock(String),
 }
 
 /// Sync core of `run_leave`. Locks the slot to copy the layout, runs
@@ -617,6 +621,14 @@ enum LeaveOutcome {
 /// implementation `take()`d the layout before calling `leave_exclusive`;
 /// a partial reattach failure then left the daemon with no
 /// recoverable state and the worker with an empty slot. Codex P1 #2.
+///
+/// Codex follow-up P2 (2026-05-26): lock poisoning recovers via
+/// `PoisonError::into_inner()` rather than aborting the leave. A
+/// poisoned slot may still contain a valid `Some(layout)` — the
+/// previous "treat poison as failure" path would ack
+/// `LeftWithErrors` to the daemon while leaving the slot's data
+/// unread, so neither the daemon nor the worker had any handle on
+/// the still-detached displays.
 fn attempt_leave_with_fn<F>(
     layout_slot: &Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
     leave_fn: F,
@@ -626,25 +638,30 @@ where
 {
     let layout = match layout_slot.lock() {
         Ok(g) => g.clone(),
-        Err(p) => return LeaveOutcome::PoisonedLock(p.to_string()),
+        Err(p) => {
+            tracing::warn!(
+                "[virtual-display] attempt_leave: layout slot poisoned; \
+                 recovering via PoisonError::into_inner()"
+            );
+            p.into_inner().clone()
+        }
     };
     let Some(layout) = layout else {
         return LeaveOutcome::Empty;
     };
     match leave_fn(&layout) {
         Ok(()) => {
-            // Success: clear the slot. If the second lock is itself
-            // poisoned (extremely unlikely — would imply another task
-            // panicked between our two locks), keep the layout around
-            // so a future Drop guard can retry; daemon-side this is
-            // still reported as `Left`.
+            // Success: clear the slot. Recover from poison again on
+            // the second lock so the take always lands.
             match layout_slot.lock() {
                 Ok(mut g) => *g = None,
-                Err(p) => tracing::error!(
-                    "[virtual-display] leave_exclusive succeeded but layout slot \
-                     poisoned on clear: {p}; stale layout will be retried by \
-                     Drop guard but daemon will see Left"
-                ),
+                Err(p) => {
+                    tracing::warn!(
+                        "[virtual-display] attempt_leave: slot poisoned on clear; \
+                         recovering via PoisonError::into_inner()"
+                    );
+                    *p.into_inner() = None;
+                }
             }
             LeaveOutcome::Succeeded
         }
@@ -677,9 +694,6 @@ async fn run_leave(
         // daemon's `current_op_id` gate fires (codex round 5 #4).
         LeaveOutcome::Empty | LeaveOutcome::Succeeded => ExclusiveOutcome::Left,
         LeaveOutcome::Failed(msg) => ExclusiveOutcome::LeftWithErrors(msg),
-        LeaveOutcome::PoisonedLock(p) => {
-            ExclusiveOutcome::LeftWithErrors(format!("layout mutex poisoned: {p}"))
-        }
     };
     send_exclusive_result(
         writer_tx,
@@ -1382,14 +1396,92 @@ mod tests {
         assert!(slot.lock().unwrap().is_some());
     }
 
-    /// Codex P2 #3: `attempt_leave_with_fn` must classify a poisoned
-    /// slot as `PoisonedLock` rather than silently no-op or panic.
-    /// The IPC layer maps this to `LeftWithErrors(...)` so the daemon
-    /// gets a result for the op_id (gate fires) and an operator-
-    /// visible failure reason. Constructs the poison the standard
-    /// way: a worker thread panics while holding the guard.
+    /// Codex follow-up P2 (2026-05-26): a poisoned slot containing
+    /// `Some(layout)` must still drive `leave_fn` against that layout
+    /// — the previous "treat poison as failure" returned without
+    /// calling `leave_fn`, leaving the still-detached physical
+    /// displays inaccessible to any recovery path. The recovery
+    /// uses `PoisonError::into_inner()` to read the inner Option
+    /// through the poison.
     #[test]
-    fn attempt_leave_poisoned_slot_returns_poisoned_outcome() {
+    fn attempt_leave_poisoned_slot_recovers_and_calls_leave_fn() {
+        let slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>> =
+            Arc::new(std::sync::Mutex::new(Some(make_dummy_layout())));
+        // Poison the mutex with a panic-holding-guard pattern.
+        let slot_for_panic = Arc::clone(&slot);
+        let _ = std::thread::spawn(move || {
+            let _g = slot_for_panic.lock().unwrap();
+            panic!("intentional poison for test");
+        })
+        .join();
+        assert!(slot.is_poisoned(), "mutex must be poisoned for this test");
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+        let outcome = attempt_leave_with_fn(&slot, move |_| {
+            called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(
+            matches!(outcome, LeaveOutcome::Succeeded),
+            "poison must NOT abort — leave_fn ran and returned Ok",
+        );
+        assert!(
+            called.load(std::sync::atomic::Ordering::SeqCst),
+            "leave_fn must be invoked despite poison",
+        );
+        // The slot was successfully cleared via the second-lock
+        // into_inner() recovery path.
+        let inner = match slot.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        assert!(inner.is_none(), "slot must be empty after successful leave");
+    }
+
+    /// Codex follow-up P2 sibling test: a poisoned **empty** slot
+    /// must still classify as `Empty` (idempotent path) — the
+    /// recovery `into_inner()` reads `None`, no `leave_fn` call.
+    #[test]
+    fn attempt_leave_poisoned_empty_slot_returns_empty() {
+        let slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot_for_panic = Arc::clone(&slot);
+        let _ = std::thread::spawn(move || {
+            let _g = slot_for_panic.lock().unwrap();
+            panic!("intentional poison for test");
+        })
+        .join();
+        assert!(slot.is_poisoned());
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+        let outcome = attempt_leave_with_fn(&slot, move |_| {
+            called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(matches!(outcome, LeaveOutcome::Empty));
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "leave_fn must NOT run for an empty (even poisoned) slot",
+        );
+    }
+
+    /// Codex follow-up P2: `ExclusiveGuard::drop` must recover the
+    /// layout via `PoisonError::into_inner()` and STILL attempt
+    /// `leave_exclusive`. The previous code returned on poison,
+    /// throwing away the last recovery chance.
+    ///
+    /// `leave_exclusive` itself needs Win32 GDI — we can't drive
+    /// the actual leave here. Instead we observe that Drop calls
+    /// `take()` against the slot (recovered via into_inner) — i.e.
+    /// after drop, the slot must be `None` regardless of poison.
+    /// That post-condition is enough to prove the recovery path
+    /// reached the inner Option.
+    #[test]
+    fn exclusive_guard_drop_recovers_layout_from_poisoned_slot() {
+        // Use a layout with no physical_snapshots so leave_exclusive
+        // is effectively a no-op (only the virtual_snapshot restore
+        // is attempted; CDS may fail in test env but the take() will
+        // still have happened before).
         let slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>> =
             Arc::new(std::sync::Mutex::new(Some(make_dummy_layout())));
         let slot_for_panic = Arc::clone(&slot);
@@ -1398,12 +1490,23 @@ mod tests {
             panic!("intentional poison for test");
         })
         .join();
-        assert!(slot.is_poisoned(), "mutex must be poisoned for this test");
-        let outcome = attempt_leave_with_fn(&slot, |_| Ok(()));
-        match outcome {
-            LeaveOutcome::PoisonedLock(_) => {}
-            other => panic!("expected PoisonedLock, got {other:?}"),
-        }
+        assert!(slot.is_poisoned());
+
+        let guard = ExclusiveGuard::new(Arc::clone(&slot));
+        drop(guard);
+
+        // After Drop: slot was take()n out, regardless of poison.
+        // The leave_exclusive call may have logged an error in test
+        // env (no real Win32 displays) but the recovery path was
+        // exercised.
+        let inner = match slot.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        assert!(
+            inner.is_none(),
+            "Drop must take() the layout even from a poisoned slot",
+        );
     }
 
     /// `attempt_leave_with_fn` on an empty slot is a fast no-op —
