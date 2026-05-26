@@ -24,9 +24,12 @@ pub mod windows;
 pub use windows::physical::{
     ExclusiveLayout, PhysicalDisplaySnapshot, enter_exclusive, leave_exclusive, snapshot_layout,
 };
+#[cfg(target_os = "windows")]
+pub use windows::prompt::{PromptController, PromptWaiter, show_pre_detach_prompt};
 #[cfg(not(target_os = "windows"))]
 pub use unsupported::{
-    ExclusiveLayout, PhysicalDisplaySnapshot, enter_exclusive, leave_exclusive, snapshot_layout,
+    ExclusiveLayout, PhysicalDisplaySnapshot, PromptController, PromptWaiter, enter_exclusive,
+    leave_exclusive, show_pre_detach_prompt, snapshot_layout,
 };
 
 /// Lifecycle owner: held by the LocalSystem daemon. Creating a handle

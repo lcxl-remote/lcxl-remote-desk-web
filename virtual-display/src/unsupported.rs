@@ -61,6 +61,28 @@ pub fn leave_exclusive(_layout: &ExclusiveLayout) -> Result<(), VirtualDisplayEr
     Err(VirtualDisplayError::NotSupported)
 }
 
+// ───── Prompt stubs ─────
+//
+// The pre-detach prompt is Windows-only (it relies on a Win32 message
+// loop). On other platforms the controller is a no-op and the waiter
+// resolves immediately, so the caller's select! shape stays uniform.
+
+pub struct PromptController;
+
+impl PromptController {
+    pub fn cancel(&self) {}
+}
+
+pub struct PromptWaiter;
+
+impl PromptWaiter {
+    pub async fn wait(&mut self) {}
+}
+
+pub fn show_pre_detach_prompt(_duration: std::time::Duration) -> (PromptController, PromptWaiter) {
+    (PromptController, PromptWaiter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
