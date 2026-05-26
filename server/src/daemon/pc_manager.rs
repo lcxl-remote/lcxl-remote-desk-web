@@ -2412,6 +2412,22 @@ async fn cleanup_pc(
         log::debug!("[pc_manager] StopMedia for {connection_id} could not reach worker: {e}");
     }
 
+    // Codex P1 #1: re-derive the exclusive-mode desired flag on
+    // every actual removal — not just the N → 0 case. If the
+    // departing PC was the sole `accept_control=true` holder but
+    // other view-only PCs remain (registry.len() stays > 0), the
+    // old code never recomputed and the supervisor stayed pinned
+    // at `desired=true` with no control holder → physical displays
+    // left detached. `recompute_desired` is a no-op when no router
+    // closure is installed (e.g. tests / in-process mode), and
+    // costs only a read lock + one closure call otherwise, so it is
+    // safe to run unconditionally on `removed.is_some()`.
+    if let Some(supervisor) = virtual_display
+        && removed.is_some()
+    {
+        supervisor.recompute_desired().await;
+    }
+
     // N -> 0 virtual display detach. Three gates, all required:
     //   (1) `removed.is_some()` — only the call that actually pulled
     //       a live PC out triggers detach. Stale `ConnectionRemoved`
@@ -4327,6 +4343,161 @@ mod tests {
             supervisor.state_label().await,
             "Attached",
             "stale ConnectionRemoved must not trigger detach",
+        );
+    }
+
+    /// Codex P1 #1 regression: when the departing PC was the sole
+    /// `accept_control=true` holder but another PC remains live (so
+    /// `registry.len() > 0` blocks the N→0 detach), the old code
+    /// never recomputed the exclusive-mode desired flag — the
+    /// supervisor stayed pinned at `desired=true` with no control
+    /// holder, leaving physical displays detached. cleanup_pc now
+    /// calls `supervisor.recompute_desired()` unconditionally on a
+    /// real removal so the registered closure (which queries
+    /// `any_with_accept_control`) fires.
+    ///
+    /// The test installs an observable closure (records each call's
+    /// `active` argument) and asserts it runs at least once. The
+    /// supervisor's `set_desired_exclusive` was already covered by
+    /// the daemon::virtual_display tests, so we only need to prove
+    /// the cleanup path reaches the closure.
+    #[tokio::test]
+    async fn cleanup_pc_triggers_exclusive_recompute_when_other_pcs_remain() {
+        use crate::daemon::virtual_display::{DesiredComputerFn, VirtualDisplaySupervisor};
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let ctx_a = registry
+            .create_for_request_remote("conn-a", &request_remote, &s)
+            .await
+            .expect("seed a");
+        registry
+            .create_for_request_remote("conn-b", &request_remote, &s)
+            .await
+            .expect("seed b");
+        // A is the sole control holder; B is view-only.
+        {
+            let ctx = ctx_a.read().await;
+            ctx.signaling_state.write().await.accept_control = true;
+        }
+        assert!(registry.any_with_accept_control().await);
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            worker_mgr.clone(),
+            "SWD\\TEST\\TEST",
+        ));
+
+        // Install a desired_computer that mirrors the real router's
+        // shape (queries any_with_accept_control on the registry) and
+        // records the call count + the last `active` it received.
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let last_active = Arc::new(AtomicBool::new(false));
+        let registry_for_closure = registry.clone();
+        let call_count_cl = Arc::clone(&call_count);
+        let last_active_cl = Arc::clone(&last_active);
+        let computer: DesiredComputerFn = Arc::new(move |active: bool| {
+            let registry = registry_for_closure.clone();
+            let call_count = Arc::clone(&call_count_cl);
+            let last_active = Arc::clone(&last_active_cl);
+            Box::pin(async move {
+                call_count.fetch_add(1, Ordering::SeqCst);
+                last_active.store(active, Ordering::SeqCst);
+                if !active {
+                    return (false, 0u32);
+                }
+                let any = registry.any_with_accept_control().await;
+                (any, 0u32)
+            }) as Pin<Box<dyn Future<Output = (bool, u32)> + Send>>
+        });
+        supervisor.set_desired_computer(computer).await;
+
+        // Sanity: the registry currently has a control holder, but
+        // it is `conn-a` — the one we are about to remove.
+        cleanup_pc(
+            &registry,
+            &worker_mgr,
+            Some(&supervisor),
+            "conn-a",
+            "test-recompute",
+        )
+        .await;
+
+        // PC A removed, PC B remains.
+        assert!(!registry.contains("conn-a").await);
+        assert!(registry.contains("conn-b").await);
+        // The supervisor must remain attached (N→0 gate not hit).
+        assert_eq!(supervisor.state_label().await, "Attached");
+
+        // The recompute closure must have been invoked at least once
+        // with the supervisor's real `active` snapshot. Without the
+        // P1 #1 fix it would never run on this path.
+        assert!(
+            call_count.load(Ordering::SeqCst) >= 1,
+            "recompute_desired closure must be invoked at least once on cleanup",
+        );
+        // And after the cleanup, no remaining PC holds accept_control.
+        assert!(!registry.any_with_accept_control().await);
+    }
+
+    /// Codex P1 #1 sanity: cleanup of an unknown connection
+    /// (stale ConnectionRemoved) must NOT trigger recompute — the
+    /// gate is `removed.is_some()`.
+    #[tokio::test]
+    async fn cleanup_pc_does_not_recompute_on_stale_unknown_removal() {
+        use crate::daemon::virtual_display::{DesiredComputerFn, VirtualDisplaySupervisor};
+        use std::future::Future;
+        use std::pin::Pin;
+
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        registry
+            .create_for_request_remote("conn-live", &request_remote, &s)
+            .await
+            .expect("seed");
+
+        let shared = SharedSettings::from(s);
+        let settings = actix_web::web::Data::new(shared);
+        let (worker_mgr, _rx) = WorkerManager::new(settings, registry.clone());
+        let supervisor = Arc::new(VirtualDisplaySupervisor::new_attached_for_test(
+            worker_mgr.clone(),
+            "SWD\\TEST\\TEST",
+        ));
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_cl = Arc::clone(&call_count);
+        let computer: DesiredComputerFn = Arc::new(move |_active: bool| {
+            let call_count = Arc::clone(&call_count_cl);
+            Box::pin(async move {
+                call_count.fetch_add(1, Ordering::SeqCst);
+                (false, 0u32)
+            }) as Pin<Box<dyn Future<Output = (bool, u32)> + Send>>
+        });
+        supervisor.set_desired_computer(computer).await;
+
+        cleanup_pc(
+            &registry,
+            &worker_mgr,
+            Some(&supervisor),
+            "conn-ghost",
+            "stale-ConnectionRemoved",
+        )
+        .await;
+
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "stale removal must not invoke the recompute closure",
         );
     }
 
