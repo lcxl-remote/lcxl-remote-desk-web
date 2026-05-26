@@ -243,14 +243,12 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
     // committed once every step has succeeded.
     let virtual_primary = build_virtual_primary_devmode(&layout.virtual_snapshot.devmode);
     let virtual_name = layout.virtual_snapshot.device_name.clone();
-    if let Err(e) = apply_cds_with_flags(
+    apply_cds_with_flags(
         Some(&virtual_name),
         Some(&virtual_primary),
         CDS_NORESET | CDS_SET_PRIMARY,
         &format!("set primary on {virtual_name}"),
-    ) {
-        return Err(e);
-    }
+    )?;
 
     // Step 2..N: detach each physical display. If any fails, roll back
     // the already-queued operations by re-issuing the snapshot
