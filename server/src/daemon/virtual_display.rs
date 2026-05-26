@@ -50,7 +50,7 @@ use desk_ipc_protocol::message::{
 use desk_virtual_display::{VirtualDisplayError, VirtualDisplayHandle, VirtualDisplayLifecycle};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 use tokio::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
@@ -1103,6 +1103,21 @@ impl VirtualDisplaySupervisor {
                 payload.op_id, inner.current_op_id
             );
             return;
+        }
+        // Codex P1 #2: surface a partial-restore failure prominently
+        // so operators / log scrapers notice. Daemon transitions to
+        // Idle to keep the reconciler loop bounded; the worker side
+        // retains the layout in its slot, so `ExclusiveGuard::drop` at
+        // session end (or an explicit subsequent leave) is the actual
+        // recovery path. CDS was issued without `CDS_UPDATEREGISTRY`,
+        // so a logoff also fully restores the physical layout.
+        if let ExclusiveOutcome::LeftWithErrors(msg) = &payload.outcome {
+            error!(
+                "[virtual-display] worker reported LeftWithErrors (op_id={}): {}; \
+                 layout retained worker-side for Drop-guard retry; transient CDS \
+                 ensures logoff also restores",
+                payload.op_id, msg
+            );
         }
         let new_state = apply_result_transition(inner.state, &payload);
         inner.state = new_state;

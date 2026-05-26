@@ -38,8 +38,14 @@ use tokio::task::JoinHandle;
 /// Worker-side virtual display state. All mutations happen from the
 /// main message loop, so no synchronisation is needed beyond
 /// `&mut self` — except for `exclusive_layout` which is owned by a
-/// dedicated `parking_lot::Mutex` so the Drop guard can take the
-/// lock from a sync context (codex round 9 #3).
+/// dedicated `std::sync::Mutex` so the Drop guard can take the lock
+/// from a sync context (codex round 9 #3). The design notes called
+/// for `parking_lot::Mutex` to avoid poisoning; we use `std::sync`
+/// to skip the extra dependency and explicitly treat lock poisoning
+/// as a failure path (codex P2 #3): `run_enter` rolls back via
+/// `leave_exclusive` and reports `EnterFailed`, `run_leave` reports
+/// `LeftWithErrors`, and `ExclusiveGuard::drop` logs the leak so
+/// operators can diagnose a stuck detach.
 #[derive(Default)]
 pub struct VirtualDisplayState {
     /// `\\.\DISPLAYn` device name pushed by the daemon's
@@ -518,15 +524,56 @@ async fn run_enter(
         tokio::task::spawn_blocking(move || enter_exclusive(&layout_for_enter)).await;
     match enter_join {
         Ok(Ok(())) => {
-            if let Ok(mut slot) = layout_slot.lock() {
-                *slot = Some(layout);
+            // CDS has already detached — we are committed to "exclusive".
+            // The slot store is the only handle the Drop guard / future
+            // leave path will have to undo this. If the lock is
+            // poisoned we MUST NOT report Entered: the daemon would
+            // think the operation completed but no retainer holds the
+            // layout, so leave would be a no-op and physical displays
+            // stay detached until logoff. Codex P2 #3.
+            //
+            // Block scoped so the `PoisonError`'s inner `MutexGuard`
+            // does not live across the rollback await — tokio::spawn
+            // requires the surrounding future to be `Send`.
+            let poison_msg: Option<String> = {
+                match layout_slot.lock() {
+                    Ok(mut slot) => {
+                        *slot = Some(layout.clone());
+                        None
+                    }
+                    Err(p) => Some(p.to_string()),
+                }
+            };
+            if let Some(msg) = poison_msg {
+                tracing::error!(
+                    "[virtual-display] layout slot poisoned after enter; \
+                     attempting immediate rollback via leave_exclusive: {msg}"
+                );
+                let layout_for_rollback = layout.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(e) = leave_exclusive(&layout_for_rollback) {
+                        tracing::error!(
+                            "[virtual-display] rollback leave_exclusive failed after \
+                             poisoned slot: {e}; physical displays may stay detached \
+                             until logoff (transient CDS)"
+                        );
+                    }
+                })
+                .await;
+                send_exclusive_result(
+                    writer_tx,
+                    op_id,
+                    ExclusiveDirection::Entering,
+                    ExclusiveOutcome::EnterFailed(format!("layout slot poisoned: {msg}")),
+                );
+            } else {
+                send_exclusive_result(
+                    writer_tx,
+                    op_id,
+                    ExclusiveDirection::Entering,
+                    ExclusiveOutcome::Entered,
+                );
             }
-            send_exclusive_result(
-                writer_tx,
-                op_id,
-                ExclusiveDirection::Entering,
-                ExclusiveOutcome::Entered,
-            );
         }
         Ok(Err(e)) => send_exclusive_result(
             writer_tx,
@@ -543,55 +590,103 @@ async fn run_enter(
     }
 }
 
+/// Outcome of [`attempt_leave_with_fn`]. Kept as a separate type so
+/// the (pure, sync) slot-retention logic can be exhaustively unit
+/// tested without driving a tokio runtime or holding a real
+/// `mpsc::UnboundedSender`.
+#[derive(Debug)]
+enum LeaveOutcome {
+    /// Slot was empty — idempotent leave. No-op on the slot.
+    Empty,
+    /// `leave_fn` returned `Ok(())`. Slot has been cleared.
+    Succeeded,
+    /// `leave_fn` returned `Err`. **Slot retains the layout** so a
+    /// subsequent leave attempt — explicit retry, future
+    /// `SetVirtualDisplayExclusive(false)`, or the session-end
+    /// [`ExclusiveGuard`] Drop — can try again. Codex P1 #2.
+    Failed(String),
+    /// `layout_slot.lock()` returned `Err(PoisonError)`. Slot is in
+    /// an unknown state, but conceptually the layout (if any) is
+    /// still in there — we do not touch it. Equivalent to `Failed`
+    /// for daemon-side bookkeeping but carries the poison source.
+    PoisonedLock(String),
+}
+
+/// Sync core of `run_leave`. Locks the slot to copy the layout, runs
+/// `leave_fn`, and clears the slot **only on success**. The previous
+/// implementation `take()`d the layout before calling `leave_exclusive`;
+/// a partial reattach failure then left the daemon with no
+/// recoverable state and the worker with an empty slot. Codex P1 #2.
+fn attempt_leave_with_fn<F>(
+    layout_slot: &Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
+    leave_fn: F,
+) -> LeaveOutcome
+where
+    F: FnOnce(&ExclusiveLayout) -> Result<(), VirtualDisplayError>,
+{
+    let layout = match layout_slot.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => return LeaveOutcome::PoisonedLock(p.to_string()),
+    };
+    let Some(layout) = layout else {
+        return LeaveOutcome::Empty;
+    };
+    match leave_fn(&layout) {
+        Ok(()) => {
+            // Success: clear the slot. If the second lock is itself
+            // poisoned (extremely unlikely — would imply another task
+            // panicked between our two locks), keep the layout around
+            // so a future Drop guard can retry; daemon-side this is
+            // still reported as `Left`.
+            match layout_slot.lock() {
+                Ok(mut g) => *g = None,
+                Err(p) => tracing::error!(
+                    "[virtual-display] leave_exclusive succeeded but layout slot \
+                     poisoned on clear: {p}; stale layout will be retried by \
+                     Drop guard but daemon will see Left"
+                ),
+            }
+            LeaveOutcome::Succeeded
+        }
+        Err(e) => {
+            tracing::error!(
+                "[virtual-display] leave_exclusive failed: {e}; layout retained \
+                 in slot so Drop guard / next leave can retry"
+            );
+            LeaveOutcome::Failed(e.to_string())
+        }
+    }
+}
+
 async fn run_leave(
     op_id: u64,
     layout_slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
     writer_tx: &mpsc::UnboundedSender<WorkerToService>,
 ) {
-    let layout = match layout_slot.lock() {
-        Ok(mut g) => g.take(),
-        Err(p) => {
-            send_exclusive_result(
-                writer_tx,
-                op_id,
-                ExclusiveDirection::Leaving,
-                ExclusiveOutcome::LeftWithErrors(format!("layout mutex poisoned: {p}")),
-            );
-            return;
+    let slot_for_blocking = Arc::clone(&layout_slot);
+    let leave_join = tokio::task::spawn_blocking(move || {
+        attempt_leave_with_fn(&slot_for_blocking, |l| leave_exclusive(l))
+    })
+    .await;
+    let outcome = match leave_join {
+        Ok(o) => o,
+        Err(join_err) => LeaveOutcome::Failed(format!("leave join: {join_err}")),
+    };
+    let exclusive_outcome = match outcome {
+        // Idempotent (slot was empty) still acks `Left` so the
+        // daemon's `current_op_id` gate fires (codex round 5 #4).
+        LeaveOutcome::Empty | LeaveOutcome::Succeeded => ExclusiveOutcome::Left,
+        LeaveOutcome::Failed(msg) => ExclusiveOutcome::LeftWithErrors(msg),
+        LeaveOutcome::PoisonedLock(p) => {
+            ExclusiveOutcome::LeftWithErrors(format!("layout mutex poisoned: {p}"))
         }
     };
-    let Some(layout) = layout else {
-        // Idempotent: nothing to leave. Still ack so the daemon
-        // recognises this op_id (codex round 5 #4).
-        send_exclusive_result(
-            writer_tx,
-            op_id,
-            ExclusiveDirection::Leaving,
-            ExclusiveOutcome::Left,
-        );
-        return;
-    };
-    let leave_join = tokio::task::spawn_blocking(move || leave_exclusive(&layout)).await;
-    match leave_join {
-        Ok(Ok(())) => send_exclusive_result(
-            writer_tx,
-            op_id,
-            ExclusiveDirection::Leaving,
-            ExclusiveOutcome::Left,
-        ),
-        Ok(Err(e)) => send_exclusive_result(
-            writer_tx,
-            op_id,
-            ExclusiveDirection::Leaving,
-            ExclusiveOutcome::LeftWithErrors(e.to_string()),
-        ),
-        Err(join_err) => send_exclusive_result(
-            writer_tx,
-            op_id,
-            ExclusiveDirection::Leaving,
-            ExclusiveOutcome::LeftWithErrors(format!("leave join: {join_err}")),
-        ),
-    }
+    send_exclusive_result(
+        writer_tx,
+        op_id,
+        ExclusiveDirection::Leaving,
+        exclusive_outcome,
+    );
 }
 
 fn send_exclusive_result(
@@ -1248,4 +1343,85 @@ mod tests {
             },
         }
     }
+
+    // ───────────────────────────────────────────────────────────────
+    // Codex P1 #2 regression — slot retention on leave failure
+    // ───────────────────────────────────────────────────────────────
+
+    /// `attempt_leave_with_fn` clears the slot only on success — the
+    /// happy path. Verifies the post-condition that a subsequent
+    /// `run_leave` would see the slot empty (and hit the idempotent
+    /// `Left` ack).
+    #[test]
+    fn attempt_leave_clears_slot_on_success() {
+        let slot = Arc::new(std::sync::Mutex::new(Some(make_dummy_layout())));
+        let outcome = attempt_leave_with_fn(&slot, |_| Ok(()));
+        assert!(matches!(outcome, LeaveOutcome::Succeeded));
+        assert!(slot.lock().unwrap().is_none());
+    }
+
+    /// Codex P1 #2: when `leave_fn` returns `Err`, the slot must
+    /// retain the layout so a future Drop guard / explicit retry can
+    /// try again. The previous implementation `take()`d before
+    /// calling `leave_exclusive`, irreversibly destroying state.
+    #[test]
+    fn attempt_leave_retains_slot_on_failure() {
+        let slot = Arc::new(std::sync::Mutex::new(Some(make_dummy_layout())));
+        let outcome = attempt_leave_with_fn(&slot, |_| {
+            Err(VirtualDisplayError::Cds("simulated partial reattach".into()))
+        });
+        match outcome {
+            LeaveOutcome::Failed(msg) => assert!(
+                msg.contains("simulated partial reattach"),
+                "outcome must carry the original error: {msg}"
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // The critical post-condition: the layout is still in the
+        // slot. The Drop guard depends on this.
+        assert!(slot.lock().unwrap().is_some());
+    }
+
+    /// Codex P2 #3: `attempt_leave_with_fn` must classify a poisoned
+    /// slot as `PoisonedLock` rather than silently no-op or panic.
+    /// The IPC layer maps this to `LeftWithErrors(...)` so the daemon
+    /// gets a result for the op_id (gate fires) and an operator-
+    /// visible failure reason. Constructs the poison the standard
+    /// way: a worker thread panics while holding the guard.
+    #[test]
+    fn attempt_leave_poisoned_slot_returns_poisoned_outcome() {
+        let slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>> =
+            Arc::new(std::sync::Mutex::new(Some(make_dummy_layout())));
+        let slot_for_panic = Arc::clone(&slot);
+        let _ = std::thread::spawn(move || {
+            let _g = slot_for_panic.lock().unwrap();
+            panic!("intentional poison for test");
+        })
+        .join();
+        assert!(slot.is_poisoned(), "mutex must be poisoned for this test");
+        let outcome = attempt_leave_with_fn(&slot, |_| Ok(()));
+        match outcome {
+            LeaveOutcome::PoisonedLock(_) => {}
+            other => panic!("expected PoisonedLock, got {other:?}"),
+        }
+    }
+
+    /// `attempt_leave_with_fn` on an empty slot is a fast no-op —
+    /// `leave_fn` must NOT be invoked. Pins the Empty short-circuit
+    /// so a future refactor doesn't call `leave_exclusive` with a
+    /// zeroed `ExclusiveLayout`.
+    #[test]
+    fn attempt_leave_empty_slot_skips_leave_fn() {
+        let slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = Arc::clone(&called);
+        let outcome = attempt_leave_with_fn(&slot, move |_| {
+            called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(matches!(outcome, LeaveOutcome::Empty));
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
 }
