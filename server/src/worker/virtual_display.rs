@@ -24,15 +24,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use desk_ipc_protocol::message::{
-    SetVirtualDisplayModePayload, StartMediaPayload, VirtualDisplayAttachOutcome,
-    VirtualDisplayModeData, VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload,
-    WorkerToService,
+    ExclusiveDirection, ExclusiveOutcome, ExclusiveResultPayload, SetVirtualDisplayModePayload,
+    StartMediaPayload, VirtualDisplayAttachOutcome, VirtualDisplayModeData,
+    VirtualDisplayModeOutcome, VirtualDisplayModeResponsePayload, WorkerToService,
 };
-use desk_virtual_display::{VirtualDisplayController, VirtualDisplayError, VirtualDisplayMode};
+use desk_virtual_display::{
+    ExclusiveLayout, PromptController, PromptWaiter, VirtualDisplayController, VirtualDisplayError,
+    VirtualDisplayMode, enter_exclusive, leave_exclusive, show_pre_detach_prompt, snapshot_layout,
+};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 /// Worker-side virtual display state. All mutations happen from the
 /// main message loop, so no synchronisation is needed beyond
-/// `&mut self`.
+/// `&mut self` — except for `exclusive_layout` which is owned by a
+/// dedicated `parking_lot::Mutex` so the Drop guard can take the
+/// lock from a sync context (codex round 9 #3).
 #[derive(Default)]
 pub struct VirtualDisplayState {
     /// `\\.\DISPLAYn` device name pushed by the daemon's
@@ -49,6 +56,15 @@ pub struct VirtualDisplayState {
     /// except `video_device` is overridden to the attached display
     /// name when attached.
     pub active_start_payload: HashMap<String, StartMediaPayload>,
+    /// Per-session exclusive layout — `Some` only while the worker
+    /// has detached the physical displays to migrate windows onto
+    /// the virtual one. Wrapped in a sync `std::sync::Mutex` so the
+    /// Drop guard can take the lock from a sync context; the rest
+    /// of the session loop accesses it via `lock()` which never
+    /// holds across an await (codex round 9 #3). All critical
+    /// sections are trivial set/take/clone so mutex poisoning is not
+    /// a concern in practice.
+    pub exclusive_layout: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
 }
 
 impl VirtualDisplayState {
@@ -271,6 +287,332 @@ pub async fn run_set_mode(
         connection_id,
         outcome,
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Exclusive-mode pipeline (stage 4)
+// ═══════════════════════════════════════════════════════════════════
+
+/// RAII guard that drives `leave_exclusive` when the worker session
+/// ends without an explicit teardown (panic catch / IPC reader EOF /
+/// normal exit). Best-effort by design — `TerminateProcess` skips
+/// Drop entirely, which is the fallback path the
+/// non-`CDS_UPDATEREGISTRY` enter relies on (the OS restores the
+/// physical layout on the next logon).
+pub struct ExclusiveGuard {
+    layout: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
+}
+
+impl ExclusiveGuard {
+    pub fn new(layout: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>) -> Self {
+        Self { layout }
+    }
+}
+
+impl Drop for ExclusiveGuard {
+    fn drop(&mut self) {
+        // Blocking lock; the critical sections that hold this mutex
+        // are trivial set/take/clone calls that cannot deadlock.
+        // codex round 9 #3: explicit error logging — silent swallow
+        // would let a stuck partial detach disappear from the log.
+        let layout = match self.layout.lock() {
+            Ok(mut g) => g.take(),
+            Err(p) => {
+                tracing::error!(
+                    "[virtual-display] ExclusiveGuard drop: layout mutex poisoned: {p}"
+                );
+                return;
+            }
+        };
+        if let Some(layout) = layout {
+            if let Err(e) = leave_exclusive(&layout) {
+                tracing::error!(
+                    "[virtual-display] ExclusiveGuard drop leave_exclusive failed: {e:?}; \
+                     physical displays may stay detached until logoff/restart (transient CDS)"
+                );
+            }
+        }
+    }
+}
+
+/// Worker-side coordinator: serialises enter / leave runners over a
+/// single cancel oneshot. `request(op_id, desired, ...)` replaces any
+/// in-flight runner with a new one; the old runner observes the
+/// cancel and returns silently without emitting a result (codex
+/// round 5 #3). Only the surviving runner publishes a matching
+/// `op_id` result, which keeps the daemon's op_id gate simple.
+pub struct ExclusiveCoordinator {
+    cancel: Option<oneshot::Sender<()>>,
+    runner: Option<JoinHandle<()>>,
+}
+
+impl Default for ExclusiveCoordinator {
+    fn default() -> Self {
+        Self {
+            cancel: None,
+            runner: None,
+        }
+    }
+}
+
+impl ExclusiveCoordinator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace the in-flight runner with a new one. The previous
+    /// runner is cancelled via the oneshot drop; it will return
+    /// without emitting a result. The new runner is awaited on top
+    /// of the previous to keep CDS calls serialised.
+    pub fn request(
+        &mut self,
+        op_id: u64,
+        desired: bool,
+        prompt_ms: u32,
+        attached: Option<String>,
+        layout: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
+        writer_tx: mpsc::UnboundedSender<WorkerToService>,
+    ) {
+        // Cancel any in-flight runner.
+        if let Some(tx) = self.cancel.take() {
+            let _ = tx.send(());
+        }
+        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+        self.cancel = Some(cancel_tx);
+        let prev = self.runner.take();
+        self.runner = Some(tokio::spawn(async move {
+            // Wait for the previous runner to finish so CDS calls
+            // serialise. The cancel oneshot is the unconditional way
+            // to stop — abort() does not wake the blocking CDS call.
+            if let Some(h) = prev {
+                let _ = h.await;
+            }
+            // codex round 9 #1: after the previous runner has been
+            // collected but before any side-effect runs, check the
+            // cancel oneshot. If the controller already cancelled us
+            // (a faster third request landed during prev.await), the
+            // CDS calls inside run_* are skipped entirely and no
+            // result is emitted — the new op's runner will publish
+            // the actual outcome.
+            if cancel_rx.try_recv().is_ok() {
+                return;
+            }
+            run_exclusive_reconciler(
+                op_id,
+                desired,
+                prompt_ms,
+                attached,
+                layout,
+                cancel_rx,
+                writer_tx,
+            )
+            .await;
+        }));
+    }
+}
+
+async fn run_exclusive_reconciler(
+    op_id: u64,
+    desired: bool,
+    prompt_ms: u32,
+    attached: Option<String>,
+    layout: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
+    cancel: oneshot::Receiver<()>,
+    writer_tx: mpsc::UnboundedSender<WorkerToService>,
+) {
+    // codex round 5 #4: idempotent paths must still ack — the daemon
+    // gates state advancement on receiving a matching op_id.
+    let currently_active = layout.lock().map(|g| g.is_some()).unwrap_or(false);
+    match (desired, currently_active) {
+        (true, true) => {
+            send_exclusive_result(
+                &writer_tx,
+                op_id,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::Entered,
+            );
+        }
+        (false, false) => {
+            send_exclusive_result(
+                &writer_tx,
+                op_id,
+                ExclusiveDirection::Leaving,
+                ExclusiveOutcome::Left,
+            );
+        }
+        (true, false) => {
+            run_enter(op_id, prompt_ms, attached, layout, cancel, &writer_tx).await;
+        }
+        (false, true) => {
+            run_leave(op_id, layout, &writer_tx).await;
+        }
+    }
+}
+
+async fn run_enter(
+    op_id: u64,
+    prompt_ms: u32,
+    attached: Option<String>,
+    layout_slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
+    mut cancel: oneshot::Receiver<()>,
+    writer_tx: &mpsc::UnboundedSender<WorkerToService>,
+) {
+    let Some(name) = attached else {
+        send_exclusive_result(
+            writer_tx,
+            op_id,
+            ExclusiveDirection::Entering,
+            ExclusiveOutcome::EnterFailed(
+                "no attached virtual display; cannot enter exclusive mode".to_string(),
+            ),
+        );
+        return;
+    };
+    let (prompt_ctrl, mut prompt_waiter): (PromptController, PromptWaiter) =
+        show_pre_detach_prompt(Duration::from_millis(prompt_ms as u64));
+    // Wait for either the prompt to complete naturally or cancel.
+    tokio::select! {
+        _ = &mut cancel => {
+            // codex round 5 #3: old runner cancelled — return without
+            // emitting a result. The new runner will publish the
+            // actual final state.
+            prompt_ctrl.cancel();
+            prompt_waiter.wait().await;
+            return;
+        }
+        _ = prompt_waiter.wait() => {}
+    }
+    // Second cancel check before the (blocking) CDS work begins.
+    if cancel.try_recv().is_ok() {
+        return;
+    }
+    let name_for_snapshot = name.clone();
+    let snapshot_join =
+        tokio::task::spawn_blocking(move || snapshot_layout(&name_for_snapshot)).await;
+    let layout = match snapshot_join {
+        Ok(Ok(layout)) => layout,
+        Ok(Err(e)) => {
+            send_exclusive_result(
+                writer_tx,
+                op_id,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::EnterFailed(format!("snapshot_layout failed: {e}")),
+            );
+            return;
+        }
+        Err(join_err) => {
+            send_exclusive_result(
+                writer_tx,
+                op_id,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::EnterFailed(format!("snapshot join: {join_err}")),
+            );
+            return;
+        }
+    };
+    if cancel.try_recv().is_ok() {
+        return;
+    }
+    let layout_for_enter = layout.clone();
+    let enter_join =
+        tokio::task::spawn_blocking(move || enter_exclusive(&layout_for_enter)).await;
+    match enter_join {
+        Ok(Ok(())) => {
+            if let Ok(mut slot) = layout_slot.lock() {
+                *slot = Some(layout);
+            }
+            send_exclusive_result(
+                writer_tx,
+                op_id,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::Entered,
+            );
+        }
+        Ok(Err(e)) => send_exclusive_result(
+            writer_tx,
+            op_id,
+            ExclusiveDirection::Entering,
+            ExclusiveOutcome::EnterFailed(e.to_string()),
+        ),
+        Err(join_err) => send_exclusive_result(
+            writer_tx,
+            op_id,
+            ExclusiveDirection::Entering,
+            ExclusiveOutcome::EnterFailed(format!("enter join: {join_err}")),
+        ),
+    }
+}
+
+async fn run_leave(
+    op_id: u64,
+    layout_slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
+    writer_tx: &mpsc::UnboundedSender<WorkerToService>,
+) {
+    let layout = match layout_slot.lock() {
+        Ok(mut g) => g.take(),
+        Err(p) => {
+            send_exclusive_result(
+                writer_tx,
+                op_id,
+                ExclusiveDirection::Leaving,
+                ExclusiveOutcome::LeftWithErrors(format!("layout mutex poisoned: {p}")),
+            );
+            return;
+        }
+    };
+    let Some(layout) = layout else {
+        // Idempotent: nothing to leave. Still ack so the daemon
+        // recognises this op_id (codex round 5 #4).
+        send_exclusive_result(
+            writer_tx,
+            op_id,
+            ExclusiveDirection::Leaving,
+            ExclusiveOutcome::Left,
+        );
+        return;
+    };
+    let leave_join = tokio::task::spawn_blocking(move || leave_exclusive(&layout)).await;
+    match leave_join {
+        Ok(Ok(())) => send_exclusive_result(
+            writer_tx,
+            op_id,
+            ExclusiveDirection::Leaving,
+            ExclusiveOutcome::Left,
+        ),
+        Ok(Err(e)) => send_exclusive_result(
+            writer_tx,
+            op_id,
+            ExclusiveDirection::Leaving,
+            ExclusiveOutcome::LeftWithErrors(e.to_string()),
+        ),
+        Err(join_err) => send_exclusive_result(
+            writer_tx,
+            op_id,
+            ExclusiveDirection::Leaving,
+            ExclusiveOutcome::LeftWithErrors(format!("leave join: {join_err}")),
+        ),
+    }
+}
+
+fn send_exclusive_result(
+    writer_tx: &mpsc::UnboundedSender<WorkerToService>,
+    op_id: u64,
+    direction: ExclusiveDirection,
+    outcome: ExclusiveOutcome,
+) {
+    let payload = ExclusiveResultPayload {
+        op_id,
+        direction,
+        outcome,
+    };
+    if writer_tx
+        .send(WorkerToService::ExclusiveResult(payload))
+        .is_err()
+    {
+        tracing::warn!(
+            "[virtual-display] writer task closed; dropping ExclusiveResult op_id={op_id}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -709,5 +1051,201 @@ mod tests {
         // tests `wgc_restart_runs_even_when_outcome_failed` (see
         // there). It cannot be tested here because `run_set_mode` does
         // not own the restart logic.
+    }
+
+    // ───── Exclusive-mode pipeline tests ─────
+
+    fn empty_layout() -> Arc<std::sync::Mutex<Option<ExclusiveLayout>>> {
+        Arc::new(std::sync::Mutex::new(None))
+    }
+
+    /// `run_enter` without an attached display name reports
+    /// `EnterFailed` immediately — covers the path where the daemon
+    /// asks for exclusive but the virtual display attach has not
+    /// produced a usable `\\.\DISPLAYn` yet.
+    #[tokio::test]
+    async fn run_enter_without_attached_reports_failed_immediately() {
+        let layout = empty_layout();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        run_enter(7, 0, None, layout, cancel_rx, &tx).await;
+        let msg = rx.recv().await.expect("result");
+        match msg {
+            WorkerToService::ExclusiveResult(p) => {
+                assert_eq!(p.op_id, 7);
+                matches!(p.outcome, ExclusiveOutcome::EnterFailed(_));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `run_leave` on an already-empty slot is idempotent — replies
+    /// with `Left` (codex round 5 #4) so the daemon's `current_op_id`
+    /// gate still sees the ack.
+    #[tokio::test]
+    async fn run_leave_idempotent_when_no_layout() {
+        let layout = empty_layout();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
+        run_leave(13, layout, &tx).await;
+        let msg = rx.recv().await.expect("result");
+        match msg {
+            WorkerToService::ExclusiveResult(p) => {
+                assert_eq!(p.op_id, 13);
+                matches!(p.outcome, ExclusiveOutcome::Left);
+                assert!(matches!(p.direction, ExclusiveDirection::Leaving));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `run_exclusive_reconciler` (true, true) — desired enter while
+    /// already active — must still emit `Entered(op_id)` so the
+    /// daemon's op_id gate fires (codex round 5 #4).
+    #[tokio::test]
+    async fn reconciler_idempotent_true_true_acks_entered() {
+        let layout = empty_layout();
+        // Pretend we are already in exclusive: drop a dummy snapshot
+        // in the slot so `currently_active = true`. The slot only
+        // cares about `is_some`, the contents are not inspected.
+        {
+            let mut g = layout.lock().unwrap();
+            *g = Some(make_dummy_layout());
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (_c_tx, c_rx) = oneshot::channel::<()>();
+        run_exclusive_reconciler(
+            21,
+            true,
+            5_000,
+            Some("\\\\.\\DISPLAY1".to_string()),
+            layout,
+            c_rx,
+            tx,
+        )
+        .await;
+        let msg = rx.recv().await.expect("result");
+        match msg {
+            WorkerToService::ExclusiveResult(p) => {
+                assert_eq!(p.op_id, 21);
+                assert!(matches!(p.outcome, ExclusiveOutcome::Entered));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `run_exclusive_reconciler` (false, false) — desired leave while
+    /// already idle — must still emit `Left(op_id)` (codex round 5 #4).
+    #[tokio::test]
+    async fn reconciler_idempotent_false_false_acks_left() {
+        let layout = empty_layout();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (_c_tx, c_rx) = oneshot::channel::<()>();
+        run_exclusive_reconciler(
+            22,
+            false,
+            0,
+            Some("\\\\.\\DISPLAY1".to_string()),
+            layout,
+            c_rx,
+            tx,
+        )
+        .await;
+        let msg = rx.recv().await.expect("result");
+        match msg {
+            WorkerToService::ExclusiveResult(p) => {
+                assert_eq!(p.op_id, 22);
+                assert!(matches!(p.outcome, ExclusiveOutcome::Left));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ExclusiveGuard::drop` on an empty slot does not panic and
+    /// does not attempt to call leave_exclusive (which would need
+    /// real Win32 GDI). Pins the "layout None ⇒ Drop is a no-op"
+    /// contract.
+    #[test]
+    fn exclusive_guard_drop_on_empty_slot_is_noop() {
+        let layout = empty_layout();
+        let guard = ExclusiveGuard::new(Arc::clone(&layout));
+        drop(guard);
+        // Slot still None; no panic.
+        assert!(layout.lock().unwrap().is_none());
+    }
+
+    /// `ExclusiveCoordinator::request(false, layout=None)` synthesises
+    /// `Left(op_id)` via the idempotent reconciler branch. The first
+    /// request seeds the runner; we await the result channel and
+    /// assert the matching op_id comes through.
+    #[tokio::test]
+    async fn coordinator_request_false_idempotent_emits_left() {
+        let layout = empty_layout();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let mut coord = ExclusiveCoordinator::new();
+        coord.request(
+            99,
+            false,
+            0,
+            Some("\\\\.\\DISPLAY1".to_string()),
+            layout,
+            tx,
+        );
+        let msg =
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("must produce a result")
+                .expect("channel still open");
+        match msg {
+            WorkerToService::ExclusiveResult(p) => {
+                assert_eq!(p.op_id, 99);
+                assert!(matches!(p.outcome, ExclusiveOutcome::Left));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `ExclusiveCoordinator`: a follow-up request cancels the prior
+    /// runner; only the surviving op's runner must emit a result
+    /// (codex round 5 #3 + round 9 #1). The first runner is fast
+    /// enough on the idempotent path that it may race the cancel —
+    /// the contract is "at most one extra Left(100), the Left(101)
+    /// is guaranteed". So the test asserts: (a) the final op_id 101
+    /// is observed and (b) the channel produces at most two results
+    /// (we accept either 1 or 2 depending on the cancel race).
+    #[tokio::test]
+    async fn coordinator_serialises_and_at_most_two_results_with_final_op_observed() {
+        let layout = empty_layout();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let mut coord = ExclusiveCoordinator::new();
+        coord.request(100, false, 0, None, Arc::clone(&layout), tx.clone());
+        coord.request(101, false, 0, None, layout, tx);
+        // Drain everything that arrives in a generous window.
+        let mut ids: Vec<u64> = vec![];
+        loop {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(WorkerToService::ExclusiveResult(p))) => ids.push(p.op_id),
+                Ok(Some(other)) => panic!("unexpected: {other:?}"),
+                Ok(None) | Err(_) => break,
+            }
+        }
+        assert!(
+            ids.last() == Some(&101),
+            "final op_id 101 must reach the writer (got {ids:?})"
+        );
+        assert!(
+            ids.len() <= 2,
+            "at most two results (cancelled prior + winning new) (got {ids:?})"
+        );
+    }
+
+    fn make_dummy_layout() -> ExclusiveLayout {
+        ExclusiveLayout {
+            physical_snapshots: vec![],
+            virtual_snapshot: desk_virtual_display::PhysicalDisplaySnapshot {
+                device_name: "\\\\.\\DISPLAY9".into(),
+                devmode: unsafe { std::mem::zeroed() },
+                is_primary: true,
+            },
+        }
     }
 }

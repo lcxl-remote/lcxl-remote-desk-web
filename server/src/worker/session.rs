@@ -799,6 +799,17 @@ impl WorkerSession {
         let virtual_display_controller: Arc<dyn VirtualDisplayController> =
             Arc::from(desk_virtual_display::controller_provider());
         let mut vd_state = VirtualDisplayState::new();
+        // Coordinator + Drop guard for the exclusive-mode pipeline.
+        // The guard owns an Arc clone of the layout slot; on session
+        // exit (normal or panic) it drives leave_exclusive so the
+        // physical displays come back. TerminateProcess skips Drop —
+        // that is the path enter_exclusive's missing CDS_UPDATEREGISTRY
+        // covers (the registry replays the physical layout on next
+        // logon).
+        let mut exclusive_coord = crate::worker::virtual_display::ExclusiveCoordinator::new();
+        let _exclusive_guard = crate::worker::virtual_display::ExclusiveGuard::new(
+            Arc::clone(&vd_state.exclusive_layout),
+        );
 
         // Reader task: drain the inbound `EventReceiver<ServiceToWorker>`
         // and forward into an unbounded mpsc the main loop selects on. A
@@ -1370,6 +1381,43 @@ impl WorkerSession {
                                 }
                                 ServiceToWorker::DetachVirtualDisplay => {
                                     info!("Worker received DetachVirtualDisplay");
+                                    // codex round 2 #5 + round 7 #5: by this
+                                    // point the daemon should have already
+                                    // sent SetVirtualDisplayExclusive(false)
+                                    // and awaited idle. But if a protocol
+                                    // violation lands a Detach while
+                                    // exclusive_layout is still Some, run
+                                    // leave_exclusive on a spawned task so
+                                    // the IPC loop is never blocked by CDS.
+                                    let leftover = vd_state
+                                        .exclusive_layout
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut g| g.take());
+                                    if let Some(layout) = leftover {
+                                        error!(
+                                            "daemon protocol violation: \
+                                             DetachVirtualDisplay arrived while exclusive_layout \
+                                             is still Some; spawning fire-and-forget leave"
+                                        );
+                                        tokio::spawn(async move {
+                                            let res = tokio::task::spawn_blocking(move || {
+                                                desk_virtual_display::leave_exclusive(&layout)
+                                            })
+                                            .await;
+                                            match res {
+                                                Ok(Ok(())) => {}
+                                                Ok(Err(e)) => warn!(
+                                                    "[virtual-display] fire-and-forget \
+                                                     leave_exclusive failed: {e:?}"
+                                                ),
+                                                Err(je) => warn!(
+                                                    "[virtual-display] fire-and-forget leave \
+                                                     join: {je}"
+                                                ),
+                                            }
+                                        });
+                                    }
                                     let steps = vd_state.rebuild_active_for_attach(None);
                                     for step in steps {
                                         if let Some(producer) = media_producer.as_ref() {
@@ -1415,49 +1463,27 @@ impl WorkerSession {
                                         );
                                     }
                                 }
-                                // Stage 2 stub: the worker
-                                // `ExclusiveCoordinator` lands in
-                                // stage 4. For now, log and emit a
-                                // stub failure result so the daemon
-                                // sees a matching op_id back and does
-                                // not deadlock waiting forever.
                                 ServiceToWorker::SetVirtualDisplayExclusive(payload) => {
                                     info!(
                                         "Worker received SetVirtualDisplayExclusive \
-                                         op_id={} desired={} prompt_ms={} (coordinator \
-                                         not wired yet, replying with stub failure)",
+                                         op_id={} desired={} prompt_ms={}",
                                         payload.op_id,
                                         payload.desired,
                                         payload.prompt_duration_ms
                                     );
-                                    let direction = if payload.desired {
-                                        desk_ipc_protocol::message::ExclusiveDirection::Entering
-                                    } else {
-                                        desk_ipc_protocol::message::ExclusiveDirection::Leaving
-                                    };
-                                    let outcome = if payload.desired {
-                                        desk_ipc_protocol::message::ExclusiveOutcome::EnterFailed(
-                                            "exclusive coordinator not implemented yet"
-                                                .to_string(),
-                                        )
-                                    } else {
-                                        desk_ipc_protocol::message::ExclusiveOutcome::Left
-                                    };
-                                    let result =
-                                        desk_ipc_protocol::message::ExclusiveResultPayload {
-                                            op_id: payload.op_id,
-                                            direction,
-                                            outcome,
-                                        };
-                                    if writer_tx
-                                        .send(WorkerToService::ExclusiveResult(result))
-                                        .is_err()
-                                    {
-                                        warn!(
-                                            "writer task closed; dropping stub \
-                                             ExclusiveResult"
-                                        );
-                                    }
+                                    // Hand off to the coordinator; the
+                                    // IPC loop does NOT await here so
+                                    // a multi-second prompt + CDS does
+                                    // not stall heartbeats or block
+                                    // subsequent Detach commands.
+                                    exclusive_coord.request(
+                                        payload.op_id,
+                                        payload.desired,
+                                        payload.prompt_duration_ms,
+                                        vd_state.attached_display.clone(),
+                                        Arc::clone(&vd_state.exclusive_layout),
+                                        writer_tx.clone(),
+                                    );
                                 }
                             }
                         }
