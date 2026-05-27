@@ -374,7 +374,13 @@ pub async fn update_virtual_display_settings(
     settings: web::Data<SharedSettings>,
     body: web::Json<VirtualDisplaySettings>,
 ) -> Result<HttpResponse, DeskError> {
-    let new_value = body.into_inner();
+    let mut new_value = body.into_inner();
+    // Clamp any out-of-range fields (e.g. `prompt_ms` > 60_000) BEFORE
+    // they reach disk. Without this the boundary value would land in
+    // `config.toml` verbatim and only get clamped by `Settings::new`
+    // on the next daemon boot — meanwhile the live runtime would keep
+    // serving the unclamped value back to the browser.
+    new_value.sanitize();
 
     if new_value.enabled {
         let status_join = tokio::time::timeout(
@@ -417,6 +423,26 @@ mod tests {
         let mut settings = Settings::default();
         settings.args = Args {
             startup_mode: mode,
+            ..Default::default()
+        };
+        settings.virtual_display.enabled = enabled;
+        Arc::new(SharedSettings::from(settings))
+    }
+
+    /// Variant of [`build_settings`] that lets the caller pin
+    /// `config_file_path` to a `tempfile::TempDir`-owned path so
+    /// `Settings::save()` writes to a sandbox, not the developer's
+    /// real `config.toml`. The caller keeps the `TempDir` alive for
+    /// the duration of the test (drop = cleanup).
+    fn build_settings_with_config(
+        mode: StartupMode,
+        enabled: bool,
+        config_file_path: String,
+    ) -> Arc<SharedSettings> {
+        let mut settings = Settings::default();
+        settings.args = Args {
+            startup_mode: mode,
+            config_file_path,
             ..Default::default()
         };
         settings.virtual_display.enabled = enabled;
@@ -661,5 +687,99 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["code"].as_i64(), Some(0));
         assert_eq!(body["data"]["enabled"], serde_json::Value::Bool(true));
+    }
+
+    /// POST a body with `exclusive: true` and a custom `prompt_ms`
+    /// persists both fields through `Settings::save()`. Uses
+    /// `enabled: false` to skip the daemon-side driver-installed
+    /// precondition check (line 379-390) which would otherwise
+    /// return PRECONDITION_FAILED on a CI/dev machine without the
+    /// IDD driver installed.
+    #[actix_web::test]
+    async fn update_virtual_display_settings_persists_exclusive_and_prompt_ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let settings = build_settings_with_config(
+            StartupMode::Default,
+            false,
+            cfg.to_string_lossy().into_owned(),
+        );
+
+        let app = test::init_service(build_app(Arc::clone(&settings), Some(true))).await;
+        let req = test::TestRequest::post()
+            .uri("/api/desk/settings/virtual-display")
+            .set_json(&VirtualDisplaySettings {
+                enabled: false,
+                exclusive: true,
+                prompt_ms: 3_000,
+                ..Default::default()
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        assert_eq!(body["data"]["exclusive"], serde_json::Value::Bool(true));
+        assert_eq!(body["data"]["prompt_ms"].as_u64(), Some(3_000));
+
+        // Verify the SharedSettings was updated in-memory.
+        let s = settings.read().await;
+        assert!(s.virtual_display.exclusive);
+        assert_eq!(s.virtual_display.prompt_ms, 3_000);
+    }
+
+    /// POST a `prompt_ms` above the [0, 60_000] sanitize ceiling is
+    /// clamped to 60_000 by the handler BEFORE it lands on disk.
+    /// The previous behaviour wrote the unclamped value, which the
+    /// model layer would only correct on the next daemon boot.
+    #[actix_web::test]
+    async fn update_virtual_display_settings_clamps_prompt_ms_above_maximum() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        let settings = build_settings_with_config(
+            StartupMode::Default,
+            false,
+            cfg.to_string_lossy().into_owned(),
+        );
+
+        let app = test::init_service(build_app(Arc::clone(&settings), Some(true))).await;
+        let req = test::TestRequest::post()
+            .uri("/api/desk/settings/virtual-display")
+            .set_json(&VirtualDisplaySettings {
+                enabled: false,
+                prompt_ms: 300_000,
+                ..Default::default()
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        assert_eq!(
+            body["data"]["prompt_ms"].as_u64(),
+            Some(60_000),
+            "handler must clamp prompt_ms before persisting",
+        );
+        let s = settings.read().await;
+        assert_eq!(s.virtual_display.prompt_ms, 60_000);
+    }
+
+    /// `GET` against a freshly-constructed `Settings::default()` must
+    /// report the documented defaults (`exclusive: false`,
+    /// `prompt_ms: 5000`). Pins the wire defaults so a future
+    /// model-layer reshuffle does not silently change them.
+    #[actix_web::test]
+    async fn query_virtual_display_settings_returns_default_exclusive_and_prompt() {
+        let settings = build_settings(StartupMode::Default, false);
+        let app = test::init_service(build_app(settings, Some(true))).await;
+        let req = test::TestRequest::get()
+            .uri("/api/desk/settings/virtual-display")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["code"].as_i64(), Some(0));
+        assert_eq!(body["data"]["exclusive"], serde_json::Value::Bool(false));
+        assert_eq!(body["data"]["prompt_ms"].as_u64(), Some(5_000));
     }
 }
