@@ -2162,6 +2162,19 @@ export type RestResponseVirtualDisplaySettings = {
          * @type boolean | undefined
         */
         enabled?: boolean;
+        /**
+         * @description Exclusive mode: when a remote control session is accepted and\nthe virtual display is attached, the daemon asks the worker to\ndetach all physical displays so Windows migrates existing\nwindows onto the virtual display. Gated on accept_control to\navoid locking the local user out of the UAC / authorization\nsurface. Default off so a fresh install keeps the existing\n\"extend mode\" behavior.
+         * @default false
+         * @type boolean | undefined
+        */
+        exclusive?: boolean;
+        /**
+         * @description Pre-detach prompt window duration (ms) shown on physical\ndisplays before they are detached. Gives the local user time\nto react. `0` skips the prompt entirely.
+         * @minLength 0
+         * @default 5000
+         * @type integer | undefined, int32
+        */
+        prompt_ms?: number;
     };
     /**
      * @type string,null
@@ -2838,6 +2851,19 @@ export type VirtualDisplaySettings = {
      * @type boolean | undefined
     */
     enabled?: boolean;
+    /**
+     * @description Exclusive mode: when a remote control session is accepted and\nthe virtual display is attached, the daemon asks the worker to\ndetach all physical displays so Windows migrates existing\nwindows onto the virtual display. Gated on accept_control to\navoid locking the local user out of the UAC / authorization\nsurface. Default off so a fresh install keeps the existing\n\"extend mode\" behavior.
+     * @default false
+     * @type boolean | undefined
+    */
+    exclusive?: boolean;
+    /**
+     * @description Pre-detach prompt window duration (ms) shown on physical\ndisplays before they are detached. Gives the local user time\nto react. `0` skips the prompt entirely.
+     * @minLength 0
+     * @default 5000
+     * @type integer | undefined, int32
+    */
+    prompt_ms?: number;
 };
 
 /**
