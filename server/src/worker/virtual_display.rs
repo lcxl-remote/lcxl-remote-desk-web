@@ -353,6 +353,30 @@ impl Drop for ExclusiveGuard {
     }
 }
 
+/// Worker-internal event emitted right after a CDS batch commit
+/// (enter or leave) has been confirmed by the OS, so the session
+/// loop can refresh anything that depended on the previous
+/// HMONITOR mapping. Specifically: WGC capture sessions bound via
+/// `CreateForMonitor(HMONITOR)` survive the CDS commit at the API
+/// level but stop emitting fresh frames because the IDD's
+/// framebuffer mapping moves underneath them — observed in e2e on
+/// 2026-05-27 as a 26 s blackout that only cleared after the user
+/// triggered `SetVirtualDisplayMode` by resizing the browser.
+///
+/// This event drives the same eviction + Stop/Start media cycle
+/// `SetVirtualDisplayMode` already performs for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusiveCommitEvent {
+    /// `enter_exclusive` returned `Ok(())` — the virtual display is
+    /// now primary at `(0, 0)` and the physicals are detached.
+    Entered,
+    /// `leave_exclusive` returned `Ok(())` (or `LeftWithErrors`) —
+    /// the physicals are back, virtual is restored to its
+    /// pre-exclusive position. WGC needs to rebind to the original
+    /// HMONITOR-with-original-position too.
+    Left,
+}
+
 /// Worker-side coordinator: serialises enter / leave runners over a
 /// single cancel oneshot. `request(op_id, desired, ...)` replaces any
 /// in-flight runner with a new one; the old runner observes the
@@ -362,6 +386,12 @@ impl Drop for ExclusiveGuard {
 pub struct ExclusiveCoordinator {
     cancel: Option<oneshot::Sender<()>>,
     runner: Option<JoinHandle<()>>,
+    /// Optional channel for emitting [`ExclusiveCommitEvent`] after a
+    /// CDS batch commit succeeds. The session loop creates the
+    /// channel once and clones the sender into each `request` call;
+    /// in tests this stays `None` so the coordinator can be exercised
+    /// without wiring up the consumer side.
+    commit_tx: Option<mpsc::UnboundedSender<ExclusiveCommitEvent>>,
 }
 
 impl Default for ExclusiveCoordinator {
@@ -369,6 +399,7 @@ impl Default for ExclusiveCoordinator {
         Self {
             cancel: None,
             runner: None,
+            commit_tx: None,
         }
     }
 }
@@ -376,6 +407,17 @@ impl Default for ExclusiveCoordinator {
 impl ExclusiveCoordinator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Install the channel that receives [`ExclusiveCommitEvent`]
+    /// notifications after each successful CDS batch commit. Called
+    /// once by the session loop during init; subsequent calls
+    /// overwrite the previous sender (used in tests).
+    pub fn set_commit_channel(
+        &mut self,
+        commit_tx: mpsc::UnboundedSender<ExclusiveCommitEvent>,
+    ) {
+        self.commit_tx = Some(commit_tx);
     }
 
     /// Replace the in-flight runner with a new one. The previous
@@ -398,6 +440,7 @@ impl ExclusiveCoordinator {
         let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
         self.cancel = Some(cancel_tx);
         let prev = self.runner.take();
+        let commit_tx = self.commit_tx.clone();
         self.runner = Some(tokio::spawn(async move {
             // Wait for the previous runner to finish so CDS calls
             // serialise. The cancel oneshot is the unconditional way
@@ -423,6 +466,7 @@ impl ExclusiveCoordinator {
                 layout,
                 cancel_rx,
                 writer_tx,
+                commit_tx,
             )
             .await;
         }));
@@ -437,6 +481,7 @@ async fn run_exclusive_reconciler(
     layout: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
     cancel: oneshot::Receiver<()>,
     writer_tx: mpsc::UnboundedSender<WorkerToService>,
+    commit_tx: Option<mpsc::UnboundedSender<ExclusiveCommitEvent>>,
 ) {
     // codex round 5 #4: idempotent paths must still ack — the daemon
     // gates state advancement on receiving a matching op_id.
@@ -476,10 +521,11 @@ async fn run_exclusive_reconciler(
             );
         }
         (true, false) => {
-            run_enter(op_id, prompt_ms, attached, layout, cancel, &writer_tx).await;
+            run_enter(op_id, prompt_ms, attached, layout, cancel, &writer_tx, commit_tx.as_ref())
+                .await;
         }
         (false, true) => {
-            run_leave(op_id, layout, &writer_tx).await;
+            run_leave(op_id, layout, &writer_tx, commit_tx.as_ref()).await;
         }
     }
 }
@@ -491,8 +537,19 @@ async fn run_enter(
     layout_slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
     mut cancel: oneshot::Receiver<()>,
     writer_tx: &mpsc::UnboundedSender<WorkerToService>,
+    commit_tx: Option<&mpsc::UnboundedSender<ExclusiveCommitEvent>>,
 ) {
     let Some(name) = attached else {
+        // Diagnostic log (2026-05-27): every EnterFailed branch in this
+        // function must surface `op_id` + the underlying reason at
+        // `error!` level. Without these the daemon's bounded-backoff
+        // retry loop looks like an infinite repeat from the outside —
+        // the actual CDS / GDI failure that produced the EnterFailed
+        // is invisible.
+        tracing::error!(
+            "[virtual-display] run_enter op_id={op_id}: \
+             no attached virtual display; cannot enter exclusive mode"
+        );
         send_exclusive_result(
             writer_tx,
             op_id,
@@ -527,6 +584,10 @@ async fn run_enter(
     let layout = match snapshot_join {
         Ok(Ok(layout)) => layout,
         Ok(Err(e)) => {
+            tracing::error!(
+                "[virtual-display] run_enter op_id={op_id} display={name}: \
+                 snapshot_layout failed: {e}"
+            );
             send_exclusive_result(
                 writer_tx,
                 op_id,
@@ -536,6 +597,10 @@ async fn run_enter(
             return;
         }
         Err(join_err) => {
+            tracing::error!(
+                "[virtual-display] run_enter op_id={op_id} display={name}: \
+                 snapshot_layout spawn_blocking join failed: {join_err}"
+            );
             send_exclusive_result(
                 writer_tx,
                 op_id,
@@ -583,19 +648,44 @@ async fn run_enter(
                 ExclusiveDirection::Entering,
                 ExclusiveOutcome::Entered,
             );
+            // E2E fix 2026-05-27: notify the session loop that the
+            // CDS batch committed so it can restart WGC capture for
+            // any connection bound to the (now-stale) HMONITOR. A
+            // closed channel is benign — only the test path leaves
+            // commit_tx unset.
+            if let Some(tx) = commit_tx
+                && tx.send(ExclusiveCommitEvent::Entered).is_err()
+            {
+                tracing::debug!(
+                    "[virtual-display] run_enter op_id={op_id}: commit channel \
+                     closed; session loop already shut down"
+                );
+            }
         }
-        Ok(Err(e)) => send_exclusive_result(
-            writer_tx,
-            op_id,
-            ExclusiveDirection::Entering,
-            ExclusiveOutcome::EnterFailed(e.to_string()),
-        ),
-        Err(join_err) => send_exclusive_result(
-            writer_tx,
-            op_id,
-            ExclusiveDirection::Entering,
-            ExclusiveOutcome::EnterFailed(format!("enter join: {join_err}")),
-        ),
+        Ok(Err(e)) => {
+            tracing::error!(
+                "[virtual-display] run_enter op_id={op_id} display={name}: \
+                 enter_exclusive (CDS detach) failed: {e}"
+            );
+            send_exclusive_result(
+                writer_tx,
+                op_id,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::EnterFailed(e.to_string()),
+            )
+        }
+        Err(join_err) => {
+            tracing::error!(
+                "[virtual-display] run_enter op_id={op_id} display={name}: \
+                 enter_exclusive spawn_blocking join failed: {join_err}"
+            );
+            send_exclusive_result(
+                writer_tx,
+                op_id,
+                ExclusiveDirection::Entering,
+                ExclusiveOutcome::EnterFailed(format!("enter join: {join_err}")),
+            )
+        }
     }
 }
 
@@ -679,6 +769,7 @@ async fn run_leave(
     op_id: u64,
     layout_slot: Arc<std::sync::Mutex<Option<ExclusiveLayout>>>,
     writer_tx: &mpsc::UnboundedSender<WorkerToService>,
+    commit_tx: Option<&mpsc::UnboundedSender<ExclusiveCommitEvent>>,
 ) {
     let slot_for_blocking = Arc::clone(&layout_slot);
     let leave_join = tokio::task::spawn_blocking(move || {
@@ -689,6 +780,18 @@ async fn run_leave(
         Ok(o) => o,
         Err(join_err) => LeaveOutcome::Failed(format!("leave join: {join_err}")),
     };
+    // E2E fix 2026-05-27: notify the session loop after every leave
+    // attempt that touched CDS — `Succeeded` and `Failed` both
+    // committed (or partially-committed) the reattach + position
+    // restore batch, so WGC's HMONITOR mapping has shifted either
+    // way. `Empty` (slot was already None) is the idempotent path
+    // that did NOT touch CDS, so it does not need a refresh.
+    // Compute this BEFORE the match below consumes the `Failed`
+    // String payload via `LeftWithErrors(msg)`.
+    let needs_refresh = matches!(
+        outcome,
+        LeaveOutcome::Succeeded | LeaveOutcome::Failed(_)
+    );
     let exclusive_outcome = match outcome {
         // Idempotent (slot was empty) still acks `Left` so the
         // daemon's `current_op_id` gate fires (codex round 5 #4).
@@ -701,6 +804,15 @@ async fn run_leave(
         ExclusiveDirection::Leaving,
         exclusive_outcome,
     );
+    if needs_refresh
+        && let Some(tx) = commit_tx
+        && tx.send(ExclusiveCommitEvent::Left).is_err()
+    {
+        tracing::debug!(
+            "[virtual-display] run_leave op_id={op_id}: commit channel \
+             closed; session loop already shut down"
+        );
+    }
 }
 
 fn send_exclusive_result(
@@ -1177,7 +1289,7 @@ mod tests {
         let layout = empty_layout();
         let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
         let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
-        run_enter(7, 0, None, layout, cancel_rx, &tx).await;
+        run_enter(7, 0, None, layout, cancel_rx, &tx, None).await;
         let msg = rx.recv().await.expect("result");
         match msg {
             WorkerToService::ExclusiveResult(p) => {
@@ -1195,7 +1307,7 @@ mod tests {
     async fn run_leave_idempotent_when_no_layout() {
         let layout = empty_layout();
         let (tx, mut rx) = mpsc::unbounded_channel::<WorkerToService>();
-        run_leave(13, layout, &tx).await;
+        run_leave(13, layout, &tx, None).await;
         let msg = rx.recv().await.expect("result");
         match msg {
             WorkerToService::ExclusiveResult(p) => {
@@ -1230,6 +1342,7 @@ mod tests {
             layout,
             c_rx,
             tx,
+            None,
         )
         .await;
         let msg = rx.recv().await.expect("result");
@@ -1257,6 +1370,7 @@ mod tests {
             layout,
             c_rx,
             tx,
+            None,
         )
         .await;
         let msg = rx.recv().await.expect("result");
@@ -1267,6 +1381,66 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// E2E fix 2026-05-27: `run_enter` without an attached display
+    /// MUST NOT post `ExclusiveCommitEvent::Entered` on the commit
+    /// channel — the early-EnterFailed return short-circuits before
+    /// any CDS commit happens, so there is nothing for the session
+    /// loop to refresh. (`run_enter`'s normal success path posts the
+    /// event after `enter_exclusive` returns Ok, which is the
+    /// scenario we cannot exercise from a unit test without real
+    /// Win32 GDI; this test pins the negative half.)
+    #[tokio::test]
+    async fn run_enter_failed_does_not_post_commit_event() {
+        let layout = empty_layout();
+        let (tx, _rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (commit_tx, mut commit_rx) =
+            mpsc::unbounded_channel::<ExclusiveCommitEvent>();
+        let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        run_enter(8, 0, None, layout, cancel_rx, &tx, Some(&commit_tx)).await;
+        // Drop the sender we control so try_recv reports `Disconnected`
+        // (no event) instead of `Empty` (just timing).
+        drop(commit_tx);
+        match commit_rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {}
+            other => panic!("expected no commit event on EnterFailed, got: {other:?}"),
+        }
+    }
+
+    /// E2E fix 2026-05-27: `run_leave` on an empty slot is the
+    /// idempotent path that does NOT touch CDS — it must NOT post
+    /// `ExclusiveCommitEvent::Left` either, otherwise the session
+    /// loop would Stop+Start media for nothing on every redundant
+    /// leave request. The positive halves (Succeeded / Failed both
+    /// touched CDS) cannot be unit-tested without real Win32 GDI.
+    #[tokio::test]
+    async fn run_leave_empty_slot_does_not_post_commit_event() {
+        let layout = empty_layout();
+        let (tx, _rx) = mpsc::unbounded_channel::<WorkerToService>();
+        let (commit_tx, mut commit_rx) =
+            mpsc::unbounded_channel::<ExclusiveCommitEvent>();
+        run_leave(14, layout, &tx, Some(&commit_tx)).await;
+        drop(commit_tx);
+        match commit_rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {}
+            other => panic!("expected no commit event on Empty leave, got: {other:?}"),
+        }
+    }
+
+    /// E2E fix 2026-05-27: `set_commit_channel` installs the sender;
+    /// subsequent `request()` calls clone it through to the runner.
+    /// We cannot exercise the actual `Entered` / `Left` post without
+    /// real GDI, but we can pin that the channel install is wired
+    /// (compile-time guarantee + struct field non-None).
+    #[test]
+    fn coordinator_set_commit_channel_installs_sender() {
+        let (commit_tx, _commit_rx) =
+            mpsc::unbounded_channel::<ExclusiveCommitEvent>();
+        let mut coord = ExclusiveCoordinator::new();
+        assert!(coord.commit_tx.is_none(), "fresh coord starts without a channel");
+        coord.set_commit_channel(commit_tx);
+        assert!(coord.commit_tx.is_some(), "channel must be installed after set");
     }
 
     /// `ExclusiveGuard::drop` on an empty slot does not panic and

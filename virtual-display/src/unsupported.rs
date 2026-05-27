@@ -61,6 +61,17 @@ pub fn leave_exclusive(_layout: &ExclusiveLayout) -> Result<(), VirtualDisplayEr
     Err(VirtualDisplayError::NotSupported)
 }
 
+/// Non-Windows stub for the diagnostic display-layout helper. Returns
+/// an empty list because the host has no IDD pipeline to inspect.
+pub fn enumerate_active_displays_for_diagnostics()
+-> Result<Vec<PhysicalDisplaySnapshot>, VirtualDisplayError> {
+    Ok(Vec::new())
+}
+
+/// Non-Windows stub: callers can keep the same call shape across
+/// platforms; on Linux / macOS the log line is suppressed.
+pub fn log_active_displays_for_diagnostics(_context: &str) {}
+
 // ───── Prompt stubs ─────
 //
 // The pre-detach prompt is Windows-only (it relies on a Win32 message

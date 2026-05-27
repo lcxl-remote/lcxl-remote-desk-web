@@ -103,6 +103,22 @@ struct ExclusiveInner {
     /// delayed `reconcile_notify` so the driver loop wakes up at the
     /// right time.
     next_leave_at: Option<Instant>,
+    /// Number of consecutive `EnterFailed` results received since the
+    /// last successful `Entered` / explicit reset (e2e fix
+    /// 2026-05-27, symmetric to `leave_retry_count`). Without this
+    /// gate, `(Entering, EnterFailed) → Idle` is immediately
+    /// re-triggered by `prepare_next_action` because `desired=true`
+    /// is still set — producing the infinite "5 s prompt, fail,
+    /// repeat" loop the user hit in e2e. When this reaches
+    /// [`MAX_ENTER_RETRIES`] the supervisor force-clears
+    /// `exclusive_desired` so the loop terminates; the user must
+    /// re-acquire control (or toggle the setting) to retry.
+    enter_retry_count: u8,
+    /// Earliest instant at which the reconciler is allowed to issue
+    /// the next `(Idle, desired=true) → Entering` transition.
+    /// `None` ⇒ no backoff in effect. Same semantics as
+    /// `next_leave_at` but for the enter path.
+    next_enter_at: Option<Instant>,
 }
 
 /// Callback the router injects to let the supervisor recompute the
@@ -162,6 +178,18 @@ const MAX_LEAVE_RETRIES: u8 = 3;
 /// failures. Total wall-clock window from the first failure to the
 /// final give-up: ~14 s, comparable to one ICE failed-timeout.
 const LEAVE_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
+
+/// E2E fix 2026-05-27: cap on consecutive `EnterFailed` results
+/// before the supervisor stops auto-retrying. Symmetric to
+/// [`MAX_LEAVE_RETRIES`]. When the budget is exhausted, the
+/// supervisor clears `exclusive_desired` so the
+/// `(Idle, desired=true) → Entering` row stops firing; the user
+/// must re-acquire control or toggle the setting to retry.
+const MAX_ENTER_RETRIES: u8 = 3;
+/// Same doubling schedule as [`LEAVE_RETRY_BASE_DELAY`] — retry N
+/// waits `ENTER_RETRY_BASE_DELAY * 2^N`. Keeps the two paths in
+/// rough wall-clock parity (~14 s window before give-up).
+const ENTER_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 
 /// Internal lifecycle state. Only `Attached` makes the supervisor
 /// `is_active()`; `Attaching` and `Detaching` are transition states
@@ -359,6 +387,8 @@ impl VirtualDisplaySupervisor {
                 current_op_id: 0,
                 leave_retry_count: 0,
                 next_leave_at: None,
+                enter_retry_count: 0,
+                next_enter_at: None,
             })),
             exclusive_desired: Arc::new(AtomicBool::new(false)),
             exclusive_desired_prompt_ms: Arc::new(AtomicU32::new(0)),
@@ -1125,9 +1155,12 @@ impl VirtualDisplaySupervisor {
         // Codex follow-up P1: reset the leave-retry bookkeeping too —
         // a fresh apply(true) / apply(false) / shutdown must not
         // inherit a stale retry-budget counter from the previous
-        // generation.
+        // generation. E2E fix 2026-05-27: same applies to the enter
+        // retry bookkeeping.
         inner.leave_retry_count = 0;
         inner.next_leave_at = None;
+        inner.enter_retry_count = 0;
+        inner.next_enter_at = None;
         self.exclusive_desired.store(false, Ordering::SeqCst);
         let _ = self
             .exclusive_state_watch
@@ -1196,8 +1229,55 @@ impl VirtualDisplaySupervisor {
                 inner.leave_retry_count = 0;
                 inner.next_leave_at = None;
             }
-            // Enter outcomes don't touch leave-retry bookkeeping.
-            ExclusiveOutcome::Entered | ExclusiveOutcome::EnterFailed(_) => {}
+            // E2E fix 2026-05-27: enter side gets its own bounded
+            // backoff symmetric to the leave path. Without this gate
+            // `(Entering, EnterFailed) → Idle` is immediately
+            // re-triggered by `prepare_next_action` because
+            // `desired=true` is still set, producing an infinite
+            // "5 s prompt, fail, repeat" loop.
+            ExclusiveOutcome::EnterFailed(msg) => {
+                let retries_so_far = inner.enter_retry_count;
+                if retries_so_far + 1 >= MAX_ENTER_RETRIES {
+                    error!(
+                        "[virtual-display] worker EnterFailed after {} attempts \
+                         (op_id={}): {}; giving up auto-retry, clearing \
+                         exclusive_desired so the loop stops; user must \
+                         re-acquire control or toggle the setting to retry",
+                        retries_so_far + 1,
+                        payload.op_id,
+                        msg,
+                    );
+                    inner.enter_retry_count = 0;
+                    inner.next_enter_at = None;
+                    // Drop the user wish so `(Idle, true) → Entering`
+                    // stops firing. AtomicBool is safe to mutate while
+                    // holding the inner write lock — no lock cycle.
+                    self.exclusive_desired.store(false, Ordering::SeqCst);
+                } else {
+                    let next_count = retries_so_far + 1;
+                    let delay = ENTER_RETRY_BASE_DELAY * (1u32 << next_count);
+                    inner.enter_retry_count = next_count;
+                    inner.next_enter_at = Some(Instant::now() + delay);
+                    delayed_notify = Some(delay);
+                    warn!(
+                        "[virtual-display] worker EnterFailed (op_id={}, attempt {}/{}): \
+                         {}; will retry enter in {:?}",
+                        payload.op_id, next_count, MAX_ENTER_RETRIES, msg, delay,
+                    );
+                }
+            }
+            ExclusiveOutcome::Entered => {
+                // Successful enter: clear any retry bookkeeping.
+                if inner.enter_retry_count > 0 || inner.next_enter_at.is_some() {
+                    info!(
+                        "[virtual-display] enter succeeded after {} retry attempt(s); \
+                         resetting backoff state",
+                        inner.enter_retry_count,
+                    );
+                }
+                inner.enter_retry_count = 0;
+                inner.next_enter_at = None;
+            }
         }
         inner.state = new_state;
         let _ = self.exclusive_state_watch.send_replace(new_state);
@@ -1247,6 +1327,20 @@ impl VirtualDisplaySupervisor {
                 // fires this round (count stays until a successful
                 // Left clears it via on_exclusive_result).
                 inner.next_leave_at = None;
+            }
+        }
+        // E2E fix 2026-05-27: same gate for the symmetric
+        // `(Idle, desired=true) → Entering` retry path. Without it,
+        // `apply_result_transition` puts EnterFailed back into Idle
+        // and the reconciler immediately resends — producing the
+        // infinite re-prompt loop observed in e2e.
+        if matches!(current, ExclusiveState::Idle) && desired {
+            if let Some(retry_at) = inner.next_enter_at {
+                let now = Instant::now();
+                if now < retry_at {
+                    return ExclusiveAction::None;
+                }
+                inner.next_enter_at = None;
             }
         }
         inner.current_op_id = inner.current_op_id.wrapping_add(1);
@@ -1500,6 +1594,8 @@ impl VirtualDisplaySupervisor {
                 current_op_id: 0,
                 leave_retry_count: 0,
                 next_leave_at: None,
+                enter_retry_count: 0,
+                next_enter_at: None,
             })),
             exclusive_desired: Arc::new(AtomicBool::new(false)),
             exclusive_desired_prompt_ms: Arc::new(AtomicU32::new(0)),
@@ -2962,6 +3058,178 @@ mod tests {
         assert_eq!(inner.leave_retry_count, 0);
         assert!(inner.next_leave_at.is_none());
         drop(inner);
+        s.shutdown_driver_loop().await;
+    }
+
+    /// E2E fix 2026-05-27: a first `EnterFailed` must arm the
+    /// enter-side backoff (count → 1, `next_enter_at` → now + 4 s)
+    /// and `prepare_next_action` must short-circuit while the gate
+    /// is still in effect. Symmetric to the LeftWithErrors test.
+    #[tokio::test]
+    async fn on_exclusive_result_enter_failed_arms_retry() {
+        let s = fresh_supervisor();
+        let op_id = {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Entering;
+            inner.current_op_id = 11;
+            let _ = s
+                .exclusive_state_watch
+                .send_replace(ExclusiveState::Entering);
+            inner.current_op_id
+        };
+        // Desired stays true so the reconciler would want to retry.
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+
+        let before = Instant::now();
+        s.on_exclusive_result(ExclusiveResultPayload {
+            op_id,
+            direction: ExclusiveDirection::Entering,
+            outcome: ExclusiveOutcome::EnterFailed("CDS BADMODE".into()),
+        })
+        .await;
+
+        let inner = s.exclusive_inner.read().await;
+        assert_eq!(
+            inner.state,
+            ExclusiveState::Idle,
+            "EnterFailed transitions back to Idle (pure transition unchanged)"
+        );
+        assert_eq!(inner.enter_retry_count, 1);
+        let next_at = inner.next_enter_at.expect("backoff timer must be set");
+        let scheduled_delay = next_at.saturating_duration_since(before);
+        // Schedule entry for first retry: ENTER_RETRY_BASE_DELAY * 2^1 = 4 s.
+        assert!(
+            scheduled_delay >= Duration::from_secs(3),
+            "expected ~4s delay, got {scheduled_delay:?}",
+        );
+        // Desired is preserved while retries are still available — only
+        // exhaustion drops it.
+        assert!(
+            s.exclusive_desired.load(Ordering::SeqCst),
+            "desired must stay true while retries remain",
+        );
+        drop(inner);
+
+        // Backoff gate must block (Idle, true) → Entering until the
+        // timer elapses.
+        let action = s.prepare_next_action().await;
+        assert!(
+            matches!(action, ExclusiveAction::None),
+            "enter backoff gate must short-circuit prepare_next_action",
+        );
+
+        s.shutdown_driver_loop().await;
+    }
+
+    /// E2E fix 2026-05-27: after `MAX_ENTER_RETRIES` consecutive
+    /// `EnterFailed`, the supervisor must clear `exclusive_desired`
+    /// so the `(Idle, desired=true) → Entering` row stops firing.
+    /// Counts must reset too so a fresh acquire later starts at zero.
+    #[tokio::test]
+    async fn on_exclusive_result_enter_failed_exhausts_after_max_retries() {
+        let s = fresh_supervisor();
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+        let mut op_id;
+        {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Entering;
+            inner.current_op_id = 200;
+        }
+
+        for attempt in 1..=MAX_ENTER_RETRIES {
+            {
+                let inner = s.exclusive_inner.read().await;
+                op_id = inner.current_op_id;
+                assert_eq!(inner.state, ExclusiveState::Entering);
+            }
+            s.on_exclusive_result(ExclusiveResultPayload {
+                op_id,
+                direction: ExclusiveDirection::Entering,
+                outcome: ExclusiveOutcome::EnterFailed(format!("attempt {attempt}")),
+            })
+            .await;
+            // Drive the state back to Entering between retries as if
+            // the reconciler had picked it up (isolates the unit
+            // under test — on_exclusive_result's retry budget).
+            if attempt < MAX_ENTER_RETRIES {
+                let mut inner = s.exclusive_inner.write().await;
+                assert_eq!(inner.state, ExclusiveState::Idle, "intermediate state");
+                inner.state = ExclusiveState::Entering;
+                // Bump op_id like prepare_next_action would so each
+                // retry round simulates the real reconciler.
+                inner.current_op_id = inner.current_op_id.wrapping_add(1);
+            }
+        }
+
+        // After exhaustion: state is Idle (always, on EnterFailed),
+        // the retry budget is reset, AND desired has been cleared so
+        // the reconciler will not pick this up again.
+        let inner = s.exclusive_inner.read().await;
+        assert_eq!(inner.state, ExclusiveState::Idle);
+        assert_eq!(inner.enter_retry_count, 0, "count must reset on give-up");
+        assert!(inner.next_enter_at.is_none(), "no further retry scheduled");
+        drop(inner);
+        assert!(
+            !s.exclusive_desired.load(Ordering::SeqCst),
+            "exhaustion must clear exclusive_desired to break the loop",
+        );
+        s.shutdown_driver_loop().await;
+    }
+
+    /// E2E fix 2026-05-27: a successful `Entered` (after one or more
+    /// failed retries) must clear `enter_retry_count` and
+    /// `next_enter_at` — otherwise the next attach inherits stale
+    /// backoff bookkeeping.
+    #[tokio::test]
+    async fn on_exclusive_result_entered_resets_retry_state() {
+        let s = fresh_supervisor();
+        let op_id = {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Entering;
+            inner.current_op_id = 77;
+            inner.enter_retry_count = 2;
+            inner.next_enter_at = Some(Instant::now() + Duration::from_secs(60));
+            inner.current_op_id
+        };
+
+        s.on_exclusive_result(ExclusiveResultPayload {
+            op_id,
+            direction: ExclusiveDirection::Entering,
+            outcome: ExclusiveOutcome::Entered,
+        })
+        .await;
+
+        let inner = s.exclusive_inner.read().await;
+        assert_eq!(inner.state, ExclusiveState::Active);
+        assert_eq!(inner.enter_retry_count, 0);
+        assert!(inner.next_enter_at.is_none());
+        drop(inner);
+        s.shutdown_driver_loop().await;
+    }
+
+    /// E2E fix 2026-05-27: `prepare_next_action` gates the enter
+    /// path symmetrically to the leave path. With a pending
+    /// `next_enter_at` in the future and `(Idle, desired=true)`, the
+    /// call must return `None` instead of advancing to Entering.
+    #[tokio::test]
+    async fn prepare_next_action_gates_idle_true_on_next_enter_at() {
+        let s = fresh_supervisor();
+        {
+            let mut inner = s.exclusive_inner.write().await;
+            inner.state = ExclusiveState::Idle;
+            inner.enter_retry_count = 1;
+            inner.next_enter_at = Some(Instant::now() + Duration::from_secs(60));
+        }
+        s.exclusive_desired.store(true, Ordering::SeqCst);
+
+        let action = s.prepare_next_action().await;
+        assert!(
+            matches!(action, ExclusiveAction::None),
+            "enter backoff timer must short-circuit (Idle, true)",
+        );
+        // State must remain Idle (no spurious advance).
+        let inner = s.exclusive_inner.read().await;
+        assert_eq!(inner.state, ExclusiveState::Idle);
         s.shutdown_driver_loop().await;
     }
 

@@ -22,14 +22,17 @@ pub mod windows;
 /// permanent stubs from [`unsupported`].
 #[cfg(target_os = "windows")]
 pub use windows::physical::{
-    ExclusiveLayout, PhysicalDisplaySnapshot, enter_exclusive, leave_exclusive, snapshot_layout,
+    ExclusiveLayout, PhysicalDisplaySnapshot, enter_exclusive,
+    enumerate_active_displays_for_diagnostics, leave_exclusive,
+    log_active_displays_for_diagnostics, snapshot_layout,
 };
 #[cfg(target_os = "windows")]
 pub use windows::prompt::{PromptController, PromptWaiter, show_pre_detach_prompt};
 #[cfg(not(target_os = "windows"))]
 pub use unsupported::{
     ExclusiveLayout, PhysicalDisplaySnapshot, PromptController, PromptWaiter, enter_exclusive,
-    leave_exclusive, show_pre_detach_prompt, snapshot_layout,
+    enumerate_active_displays_for_diagnostics, leave_exclusive,
+    log_active_displays_for_diagnostics, show_pre_detach_prompt, snapshot_layout,
 };
 
 /// Lifecycle owner: held by the LocalSystem daemon. Creating a handle

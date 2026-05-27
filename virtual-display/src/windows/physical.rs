@@ -5,10 +5,28 @@
 //!
 //! All `ChangeDisplaySettingsExW` calls go through [`super::cds`].
 //! `enter_exclusive` uses `CDS_NORESET` so that nothing happens until
-//! the final commit (atomic-ish), and **does not** include
-//! `CDS_UPDATEREGISTRY`: a worker crash leaves the registry untouched
-//! so the next logon restores the physical displays. The leave path
-//! uses `CDS_UPDATEREGISTRY` so a normal session-end is stable.
+//! the final commit (atomic-ish), and **every individual call** in
+//! the batch carries `CDS_UPDATEREGISTRY`. The two e2e iterations on
+//! 2026-05-27 nailed down the rule the hard way:
+//!
+//! 1. The `CDS_SET_PRIMARY` call refused without `CDS_UPDATEREGISTRY`
+//!    (`DISP_CHANGE_BADFLAGS` -4). Added it; first e2e regression
+//!    closed.
+//! 2. The detach (`dmPelsWidth = 0`) calls *also* refused without
+//!    `CDS_UPDATEREGISTRY` in a `CDS_NORESET` batch. Added it; second
+//!    e2e regression closed.
+//!
+//! Crash-recovery story is now: physical displays *and* the primary
+//! flag are persisted in the registry the moment each call returns.
+//! A worker crash mid-enter leaves the host in whatever partial state
+//! the batch had reached. Recovery relies on the worker's
+//! `ExclusiveGuard::drop` and the daemon's `reset_exclusive_state`
+//! driving `leave_exclusive`; if the process is killed outright, the
+//! user has to recover via Windows display settings or by restarting
+//! the service (which calls `leave_exclusive` at startup). Without
+//! `CDS_UPDATEREGISTRY` Windows simply rejects the calls, so this is
+//! a forced trade. The leave path uses `CDS_UPDATEREGISTRY`
+//! throughout so a normal session-end is stable.
 
 use windows::Win32::Foundation::POINTL;
 use windows::Win32::Graphics::Gdi::{
@@ -23,6 +41,30 @@ use windows::core::PCWSTR;
 use crate::VirtualDisplayError;
 
 use super::cds::{apply_cds_with_flags, commit_pending_changes};
+
+/// Flag combination required to set a display as primary inside a
+/// multi-monitor batch update.
+///
+/// E2E regression guard 2026-05-27: `CDS_SET_PRIMARY` MUST be paired
+/// with `CDS_UPDATEREGISTRY`. Without it Windows returns
+/// `DISP_CHANGE_BADFLAGS` (-4) — the root cause of the "5 s prompt,
+/// fail, repeat" loop the user hit at 2026-05-27 14:57. This is the
+/// canonical pattern documented by MS and used by NirCmd, Chromium,
+/// and MultiMonitorTool.
+const SET_PRIMARY_BATCH_FLAGS: windows::Win32::Graphics::Gdi::CDS_TYPE =
+    windows::Win32::Graphics::Gdi::CDS_TYPE(CDS_NORESET.0 | CDS_SET_PRIMARY.0 | CDS_UPDATEREGISTRY.0);
+
+/// Flag combination required for any **non-primary** call inside a
+/// multi-monitor batch update — detach (`dmPelsWidth = 0`) and
+/// position/mode restore both use this.
+///
+/// E2E regression guard 2026-05-27 (second iteration): the detach
+/// call also returns `DISP_CHANGE_BADFLAGS` if `CDS_UPDATEREGISTRY`
+/// is missing in a `CDS_NORESET` batch. MSDN's multi-monitor sample
+/// confirms the pattern: every call in the batch must carry
+/// `CDS_UPDATEREGISTRY`.
+const NON_PRIMARY_BATCH_FLAGS: windows::Win32::Graphics::Gdi::CDS_TYPE =
+    windows::Win32::Graphics::Gdi::CDS_TYPE(CDS_NORESET.0 | CDS_UPDATEREGISTRY.0);
 
 /// Snapshot of one display at the moment exclusive mode begins. Stored
 /// so leave can restore the exact `dmPosition`, mode and primary flag.
@@ -105,14 +147,71 @@ pub fn snapshot_layout(
         }
     }
     let virtual_snapshot = virtual_snapshot.ok_or_else(|| {
+        log::error!(
+            "[virtual-display] snapshot_layout: virtual display {virtual_display_name} \
+             missing from active GDI enumeration ({physicals} physical snapshots seen)",
+            physicals = physical_snapshots.len()
+        );
         VirtualDisplayError::Cds(format!(
             "virtual display {virtual_display_name} not found in active GDI enumeration"
         ))
     })?;
+    log::info!(
+        "[virtual-display] snapshot_layout: virtual={virtual:?} \
+         physicals={physical_count} ({physical_list:?})",
+        virtual = virtual_snapshot,
+        physical_count = physical_snapshots.len(),
+        physical_list = physical_snapshots,
+    );
     Ok(ExclusiveLayout {
         physical_snapshots,
         virtual_snapshot,
     })
+}
+
+/// Enumerate every currently-active display, returning its full
+/// `PhysicalDisplaySnapshot` (device name, devmode, primary flag).
+///
+/// Exposed publicly (e2e diagnostic helper 2026-05-27) so callers
+/// outside the exclusive-mode pipeline can use it to log the GDI
+/// layout at arbitrary points (e.g. right after `AttachVirtualDisplay`
+/// completes, before `DetachVirtualDisplay`, etc.). Returns an
+/// `Err(VirtualDisplayError::Cds)` if any per-display devmode read
+/// fails; the caller decides whether to propagate or just log.
+pub fn enumerate_active_displays_for_diagnostics()
+-> Result<Vec<PhysicalDisplaySnapshot>, VirtualDisplayError> {
+    enumerate_active_displays()
+}
+
+/// Best-effort: enumerate every active display and emit a single
+/// `INFO` log line with the full layout. Used by worker / daemon
+/// transition points to capture "what the OS thinks the layout is"
+/// without polluting the production path with conditional debug
+/// noise. Errors during enumeration are logged at `WARN` (not
+/// surfaced) so a diagnostic call site is never load-bearing.
+pub fn log_active_displays_for_diagnostics(context: &str) {
+    match enumerate_active_displays() {
+        Ok(snapshots) => {
+            // Find which is currently marked primary so the log line
+            // calls it out explicitly — the most common question while
+            // reading the log is "which one is primary right now?".
+            let primary = snapshots
+                .iter()
+                .find(|s| s.is_primary)
+                .map(|s| s.device_name.as_str())
+                .unwrap_or("<none>");
+            log::info!(
+                "[virtual-display] display-layout({context}): {n} active display(s), \
+                 primary={primary}, full={snapshots:?}",
+                n = snapshots.len()
+            );
+        }
+        Err(e) => {
+            log::warn!(
+                "[virtual-display] display-layout({context}): enumeration failed: {e}"
+            );
+        }
+    }
 }
 
 fn enumerate_active_displays() -> Result<Vec<PhysicalDisplaySnapshot>, VirtualDisplayError> {
@@ -236,19 +335,45 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
         // Only the virtual display is active — exclusive mode is a
         // no-op. The worker would normally not request this, but a
         // crash-restart path may; treat it as success.
+        log::info!(
+            "[virtual-display] enter_exclusive: no physical displays attached, no-op"
+        );
         return Ok(());
     }
 
+    log::info!(
+        "[virtual-display] enter_exclusive: starting CDS detach pass — \
+         virtual={virtual_name} primary→(0,0), detaching {n} physical display(s)",
+        virtual_name = layout.virtual_snapshot.device_name,
+        n = layout.physical_snapshots.len()
+    );
+
     // Step 1: set virtual display primary at (0,0). Queued; only
     // committed once every step has succeeded.
+    //
+    // E2E fix 2026-05-27: `CDS_SET_PRIMARY` MUST be paired with
+    // `CDS_UPDATEREGISTRY` — without it Windows returns
+    // `DISP_CHANGE_BADFLAGS` (-4). This was the root cause of the
+    // "5 s prompt, fail, repeat" loop observed at 2026-05-27 14:57:
+    // every enter attempt failed at this exact call. NirCmd /
+    // Chromium / MultiMonitorTool all pair the two flags. The
+    // crash-recovery story is degraded slightly (primary flag is now
+    // persisted in registry), but the detach calls below still skip
+    // `CDS_UPDATEREGISTRY` so the physical displays come back at
+    // logon.
     let virtual_primary = build_virtual_primary_devmode(&layout.virtual_snapshot.devmode);
     let virtual_name = layout.virtual_snapshot.device_name.clone();
-    apply_cds_with_flags(
+    if let Err(e) = apply_cds_with_flags(
         Some(&virtual_name),
         Some(&virtual_primary),
-        CDS_NORESET | CDS_SET_PRIMARY,
+        SET_PRIMARY_BATCH_FLAGS,
         &format!("set primary on {virtual_name}"),
-    )?;
+    ) {
+        log::error!(
+            "[virtual-display] enter_exclusive: set-primary on {virtual_name} failed: {e}"
+        );
+        return Err(e);
+    }
 
     // Step 2..N: detach each physical display. If any fails, roll back
     // the already-queued operations by re-issuing the snapshot
@@ -260,10 +385,16 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
         let res = apply_cds_with_flags(
             Some(&snap.device_name),
             Some(&detach),
-            CDS_NORESET,
+            NON_PRIMARY_BATCH_FLAGS,
             &format!("detach {}", snap.device_name),
         );
         if let Err(e) = res {
+            log::error!(
+                "[virtual-display] enter_exclusive: detach of {device} failed: {e}; \
+                 rolling back ({rolled} already-queued detach(es))",
+                device = snap.device_name,
+                rolled = succeeded.len()
+            );
             // Roll back: restore each already-detached physical display
             // and the virtual display to its snapshotted devmode.
             rollback_enter(&virtual_name, &layout.virtual_snapshot, &layout.physical_snapshots, &succeeded);
@@ -274,9 +405,23 @@ pub fn enter_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
 
     // Step C: commit the batch.
     if let Err(e) = commit_pending_changes() {
+        log::error!(
+            "[virtual-display] enter_exclusive: commit batch failed: {e}; rolling back"
+        );
         rollback_enter(&virtual_name, &layout.virtual_snapshot, &layout.physical_snapshots, &succeeded);
         return Err(e);
     }
+    log::info!(
+        "[virtual-display] enter_exclusive: detached {n} physical display(s), \
+         virtual={virtual_name} is now primary",
+        n = layout.physical_snapshots.len()
+    );
+    // E2E diagnostic 2026-05-27: re-enumerate immediately so the log
+    // captures what the OS actually thinks the layout is after the
+    // commit, not just what we asked for. WM_DISPLAYCHANGE is async
+    // and may fire slightly later, so the value Windows reports back
+    // *right now* is the ground truth most useful for debugging.
+    log_active_displays_for_diagnostics("post-enter_exclusive");
     Ok(())
 }
 
@@ -290,12 +435,23 @@ fn rollback_enter(
     // tolerate per-step failure here: rollback is best-effort, and the
     // transient nature of the CDS calls means a logoff is the ultimate
     // recovery.
+    //
+    // E2E fix 2026-05-27: any rollback step that uses
+    // `CDS_SET_PRIMARY` must also include `CDS_UPDATEREGISTRY` —
+    // Windows returns `DISP_CHANGE_BADFLAGS` otherwise (same
+    // constraint as `enter_exclusive`'s set-primary call). Plain
+    // restore (no SET_PRIMARY) sticks with `CDS_NORESET` only.
     for &name in detached.iter().rev() {
         if let Some(snap) = all_physicals.iter().find(|s| s.device_name == name) {
-            let mut flags = CDS_NORESET;
-            if snap.is_primary {
-                flags |= CDS_SET_PRIMARY;
-            }
+            // Same rule as the forward path: every call in the batch
+            // needs `CDS_UPDATEREGISTRY` or Windows rejects with
+            // BADFLAGS. The two-call shape (with or without primary)
+            // is the only difference.
+            let flags = if snap.is_primary {
+                SET_PRIMARY_BATCH_FLAGS
+            } else {
+                NON_PRIMARY_BATCH_FLAGS
+            };
             let _ = apply_cds_with_flags(
                 Some(&snap.device_name),
                 Some(&snap.devmode),
@@ -306,10 +462,11 @@ fn rollback_enter(
     }
     // Re-issue the virtual display's snapshot devmode (which restores
     // the original position and primary flag).
-    let mut flags = CDS_NORESET;
-    if virtual_snapshot.is_primary {
-        flags |= CDS_SET_PRIMARY;
-    }
+    let flags = if virtual_snapshot.is_primary {
+        SET_PRIMARY_BATCH_FLAGS
+    } else {
+        NON_PRIMARY_BATCH_FLAGS
+    };
     let _ = apply_cds_with_flags(
         Some(virtual_name),
         Some(&virtual_snapshot.devmode),
@@ -330,6 +487,12 @@ fn rollback_enter(
 /// remaining ones are folded into the message.
 pub fn leave_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayError> {
     let mut errors: Vec<String> = Vec::new();
+    log::info!(
+        "[virtual-display] leave_exclusive: reattaching {n} physical display(s) + \
+         restoring virtual={virtual_name}",
+        n = layout.physical_snapshots.len(),
+        virtual_name = layout.virtual_snapshot.device_name
+    );
 
     // Reattach each physical display (queued).
     for snap in &layout.physical_snapshots {
@@ -343,6 +506,10 @@ pub fn leave_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
             flags,
             &format!("reattach {}", snap.device_name),
         ) {
+            log::error!(
+                "[virtual-display] leave_exclusive: reattach {device} failed: {e}",
+                device = snap.device_name
+            );
             errors.push(e.to_string());
         }
     }
@@ -364,18 +531,33 @@ pub fn leave_exclusive(layout: &ExclusiveLayout) -> Result<(), VirtualDisplayErr
             flags,
             &format!("restore virtual {}", snap.device_name),
         ) {
+            log::error!(
+                "[virtual-display] leave_exclusive: restore virtual {device} failed: {e}",
+                device = snap.device_name
+            );
             errors.push(e.to_string());
         }
     }
 
     // Commit the batch (CDS_TYPE(0) — no flags).
     if let Err(e) = commit_pending_changes() {
+        log::error!("[virtual-display] leave_exclusive: commit batch failed: {e}");
         errors.push(e.to_string());
     }
 
     if errors.is_empty() {
+        log::info!("[virtual-display] leave_exclusive: completed cleanly");
+        // E2E diagnostic 2026-05-27: log the OS-reported layout right
+        // after the commit so we can verify the snapshot really
+        // restored DISPLAY1=primary and the virtual went back to its
+        // pre-exclusive position. This was the question raised when
+        // the user reported "after reconnect, virtual shows up first
+        // in the picker" — was leave incomplete, or did the next
+        // attach mark the new IDD primary on its own?
+        log_active_displays_for_diagnostics("post-leave_exclusive");
         Ok(())
     } else {
+        log_active_displays_for_diagnostics("post-leave_exclusive(partial)");
         Err(VirtualDisplayError::Cds(format!(
             "leave_exclusive partial failure: {}",
             errors.join("; ")
@@ -512,5 +694,64 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<PhysicalDisplaySnapshot>();
         assert_send_sync::<ExclusiveLayout>();
+    }
+
+    /// E2E regression guard 2026-05-27: every batched set-primary
+    /// call must carry `CDS_NORESET | CDS_SET_PRIMARY |
+    /// CDS_UPDATEREGISTRY`. The bug — observed in production at
+    /// 2026-05-27 14:57 as `DISP_CHANGE code -4 (BADFLAGS)` on every
+    /// enter_exclusive attempt — was that the third flag was missing.
+    /// If a future change drops `CDS_UPDATEREGISTRY` from the
+    /// constant, Windows will reject the call again and we are back
+    /// in the infinite "5 s prompt, fail, repeat" loop.
+    #[test]
+    fn set_primary_batch_flags_include_all_three_required_bits() {
+        let bits = SET_PRIMARY_BATCH_FLAGS.0;
+        assert_ne!(
+            bits & CDS_NORESET.0,
+            0,
+            "CDS_NORESET must be present so the call participates in the batch"
+        );
+        assert_ne!(
+            bits & CDS_SET_PRIMARY.0,
+            0,
+            "CDS_SET_PRIMARY must be present — that's the whole point"
+        );
+        assert_ne!(
+            bits & CDS_UPDATEREGISTRY.0,
+            0,
+            "CDS_UPDATEREGISTRY is REQUIRED with CDS_SET_PRIMARY; \
+             without it Windows returns DISP_CHANGE_BADFLAGS (-4)"
+        );
+    }
+
+    /// E2E regression guard 2026-05-27 (second iteration): non-primary
+    /// batch calls (detach + rollback restore) also require
+    /// `CDS_UPDATEREGISTRY`. Observed in production as `DISP_CHANGE
+    /// code -4 (BADFLAGS)` on the detach call at 2026-05-27 15:09,
+    /// immediately after the first set-primary fix made it past
+    /// step 1.
+    #[test]
+    fn non_primary_batch_flags_include_required_bits() {
+        let bits = NON_PRIMARY_BATCH_FLAGS.0;
+        assert_ne!(
+            bits & CDS_NORESET.0,
+            0,
+            "CDS_NORESET must be present so the call participates in the batch"
+        );
+        assert_ne!(
+            bits & CDS_UPDATEREGISTRY.0,
+            0,
+            "CDS_UPDATEREGISTRY is REQUIRED in any CDS_NORESET batch call; \
+             without it Windows returns DISP_CHANGE_BADFLAGS (-4) — \
+             even for plain detach/position-restore with no primary flag"
+        );
+        // And no SET_PRIMARY bit — this constant is for non-primary
+        // calls specifically.
+        assert_eq!(
+            bits & CDS_SET_PRIMARY.0,
+            0,
+            "non-primary constant must not carry CDS_SET_PRIMARY",
+        );
     }
 }

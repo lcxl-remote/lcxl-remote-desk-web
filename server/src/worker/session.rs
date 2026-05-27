@@ -810,6 +810,18 @@ impl WorkerSession {
         let _exclusive_guard = crate::worker::virtual_display::ExclusiveGuard::new(
             Arc::clone(&vd_state.exclusive_layout),
         );
+        // E2E fix 2026-05-27: WGC capture sessions bound via
+        // `CreateForMonitor(HMONITOR)` survive the CDS commit at the
+        // API level but stop emitting fresh frames after exclusive
+        // enter/leave because the IDD's framebuffer mapping moves
+        // underneath them. The reconciler posts an
+        // `ExclusiveCommitEvent` on this channel after each
+        // successful enter or leave so the main loop can run the
+        // same `invalidate_capture_key + Stop/Start media` cycle
+        // `SetVirtualDisplayMode` already uses for the same reason.
+        let (exclusive_commit_tx, mut exclusive_commit_rx) =
+            mpsc::unbounded_channel::<crate::worker::virtual_display::ExclusiveCommitEvent>();
+        exclusive_coord.set_commit_channel(exclusive_commit_tx);
 
         // Reader task: drain the inbound `EventReceiver<ServiceToWorker>`
         // and forward into an unbounded mpsc the main loop selects on. A
@@ -940,6 +952,19 @@ impl WorkerSession {
                                             payload.connection_id,
                                             payload.video_codec,
                                             payload.fps,
+                                        );
+                                        // E2E diagnostic 2026-05-27: snapshot
+                                        // layout when capture starts so we
+                                        // can correlate "which device the
+                                        // browser picked" (payload.video_device)
+                                        // with "the current OS layout / which
+                                        // monitor is primary right now".
+                                        desk_virtual_display::log_active_displays_for_diagnostics(
+                                            &format!(
+                                                "StartMedia conn={} video_device={:?}",
+                                                payload.connection_id,
+                                                payload.video_device,
+                                            ),
                                         );
                                         // Virtual display: cache the
                                         // original (preserves the user's
@@ -1338,6 +1363,15 @@ impl WorkerSession {
                                             "Resolved virtual display instance_id {} -> {}",
                                             instance_id, display_name,
                                         );
+                                        // E2E diagnostic 2026-05-27: log full
+                                        // GDI layout right after a new IDD
+                                        // monitor attaches, so we can see if
+                                        // Windows put it at primary by
+                                        // default (the suspected cause of
+                                        // "虚拟屏排第一 / Tauri 弹窗跑到虚拟屏").
+                                        desk_virtual_display::log_active_displays_for_diagnostics(
+                                            &format!("post-attach virtual={display_name}")
+                                        );
                                         let steps = vd_state
                                             .rebuild_active_for_attach(Some(display_name.clone()));
                                         for step in steps {
@@ -1381,6 +1415,16 @@ impl WorkerSession {
                                 }
                                 ServiceToWorker::DetachVirtualDisplay => {
                                     info!("Worker received DetachVirtualDisplay");
+                                    // E2E diagnostic 2026-05-27: snapshot
+                                    // layout the instant the worker is told
+                                    // to detach, before any teardown runs.
+                                    // Useful for understanding what state
+                                    // we were in just before the IDD goes
+                                    // away (paired with the post-attach log
+                                    // for the next cycle).
+                                    desk_virtual_display::log_active_displays_for_diagnostics(
+                                        "pre-detach",
+                                    );
                                     // codex round 2 #5 + round 7 #5: by this
                                     // point the daemon should have already
                                     // sent SetVirtualDisplayExclusive(false)
@@ -1563,7 +1607,69 @@ impl WorkerSession {
                          connections",
                         evt.seq
                     );
+                    // E2E diagnostic 2026-05-27: WM_DISPLAYCHANGE is the
+                    // OS broadcast that fires after every CDS commit
+                    // (enter_exclusive, leave_exclusive, IDD attach,
+                    // user manually changing display settings, etc.).
+                    // Logging the resulting layout here gives us a
+                    // per-event snapshot of "what the OS thinks the
+                    // layout is" right after each transition.
+                    desk_virtual_display::log_active_displays_for_diagnostics(
+                        &format!("WM_DISPLAYCHANGE seq={}", evt.seq),
+                    );
                     input_dispatcher.refresh_geometry(None);
+                }
+
+                // E2E fix 2026-05-27: the exclusive coordinator posts
+                // here after each successful enter_exclusive /
+                // leave_exclusive CDS batch. We run the same
+                // `invalidate_capture_key + Stop/Start media` cycle
+                // SetVirtualDisplayMode already does — WGC bound to
+                // the now-stale HMONITOR keeps emitting frozen frames
+                // otherwise. Modelled after the SetVirtualDisplayMode
+                // arm above; the dedup + restart steps logic is the
+                // same.
+                Some(commit_evt) = exclusive_commit_rx.recv() => {
+                    info!(
+                        "ExclusiveCommit received ({:?}); restarting WGC capture for \
+                         attached virtual display",
+                        commit_evt,
+                    );
+                    let attached = vd_state.attached_display.clone();
+                    if let Some(producer) = media_producer.as_ref() {
+                        let producer_for_lookup = Arc::clone(producer);
+                        let restart_steps: Vec<RestartStep> = select_wgc_restart_steps(
+                            vd_state.restart_steps_for_attached(),
+                            attached.as_deref(),
+                            |id| producer_for_lookup.connection_capture_key(id),
+                        );
+                        if restart_steps.is_empty() {
+                            info!(
+                                "ExclusiveCommit({:?}): no WGC restart candidates \
+                                 (attached={:?}, restart_steps=0)",
+                                commit_evt, attached,
+                            );
+                        } else {
+                            let keys_to_invalidate = dedup_capture_keys(
+                                &restart_steps,
+                                |id| producer.connection_capture_key(id),
+                            );
+                            for key in &keys_to_invalidate {
+                                let evicted = producer.invalidate_capture_key(key);
+                                info!(
+                                    "ExclusiveCommit({:?}): invalidated capture key \
+                                     backend={} device={} evicted={}",
+                                    commit_evt, key.backend, key.device_name, evicted,
+                                );
+                            }
+                            for step in restart_steps {
+                                producer.stop_media(&StopMediaPayload {
+                                    connection_id: step.connection_id.clone(),
+                                });
+                                producer.start_media(step.active);
+                            }
+                        }
+                    }
                 }
             }
         }
