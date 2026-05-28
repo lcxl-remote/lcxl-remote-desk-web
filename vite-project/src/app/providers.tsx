@@ -3,7 +3,6 @@ import { RouterProvider } from 'react-router-dom';
 import { Toaster } from '@/components/ui/toaster';
 import { ThemeProvider } from '@/components/theme-provider';
 import { GlobalErrorBoundary } from '@/components/error-boundary';
-import { SecurityApprovalDialog } from '@/components/security-approval-dialog';
 import { router } from './router';
 const queryClient = new QueryClient({
     defaultOptions: {
@@ -21,7 +20,6 @@ export function AppProviders() {
             <ThemeProvider defaultTheme="dark" storageKey="vite-ui-theme">
                 <GlobalErrorBoundary>
                     <RouterProvider router={router} />
-                    <SecurityApprovalDialog />
                 </GlobalErrorBoundary>
                 <Toaster />
             </ThemeProvider>

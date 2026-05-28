@@ -306,6 +306,41 @@ pub async fn submit_security_approval(
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(true)))
 }
 
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct ApprovalAckParams {
+    pub req_id: String,
+}
+
+/// Acknowledge that an approval dialog has mounted and can reach the backend.
+///
+/// This is the readiness signal for the host-control hub's UI-ready probe (see
+/// `HostControlHub::request_approval`). The response `data` is `true` when the
+/// request is known to the hub (the dialog should enable its buttons) and
+/// `false` when it is unknown (the dialog should show a "not ready" state and
+/// must NOT submit — the hub's probe timeout produces the authoritative deny).
+/// A stale browser session yields a 401 from the session middleware, which the
+/// dialog also treats as "not ready".
+#[utoipa::path(
+    tag = "Security",
+    summary = "Acknowledge security approval dialog readiness",
+    request_body(content = ApprovalAckParams),
+    responses(
+        (status = 200, description = "Acknowledge security approval readiness"),
+    ),
+)]
+#[post("/security-settings/approval/ack")]
+pub async fn ack_security_approval(
+    request_json: web::Json<ApprovalAckParams>,
+    hub: web::Data<Option<Arc<HostControlHub>>>,
+) -> Result<HttpResponse, AWError> {
+    let params = request_json.into_inner();
+    let ready = match hub.as_ref() {
+        Some(hub) => hub.notify_approval_ack(&params.req_id),
+        None => false,
+    };
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(ready)))
+}
+
 #[utoipa::path(
     tag = "TurnClient",
     summary = "Query turn client settings",
@@ -342,4 +377,64 @@ pub async fn update_turn_client_settings(
     settings.save()?;
     info!("Update turn client settings successfully");
     Ok(HttpResponse::Ok().finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host_control::HostControlHub;
+    use crate::model::security_approval::SecurityPermissionType;
+    use actix_web::{App, test};
+
+    fn hub_data(hub: Option<HostControlHub>) -> web::Data<Option<Arc<HostControlHub>>> {
+        web::Data::new(hub.map(Arc::new))
+    }
+
+    // A known req_id (here registered as worker-originated) acks as ready.
+    #[actix_web::test]
+    async fn ack_known_req_returns_ready_true() {
+        let hub = HostControlHub::new_aggregator();
+        hub.register_upstream_request("r1".to_string(), 1, SecurityPermissionType::Terminal, None);
+
+        let app = test::init_service(
+            App::new()
+                .app_data(hub_data(Some(hub)))
+                .service(ack_security_approval),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/security-settings/approval/ack")
+            .set_json(ApprovalAckParams {
+                req_id: "r1".to_string(),
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["data"].as_bool(), Some(true));
+    }
+
+    // An unknown req_id acks as not-ready (ready:false).
+    #[actix_web::test]
+    async fn ack_unknown_req_returns_ready_false() {
+        let hub = HostControlHub::new_local();
+        let app = test::init_service(
+            App::new()
+                .app_data(hub_data(Some(hub)))
+                .service(ack_security_approval),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/security-settings/approval/ack")
+            .set_json(ApprovalAckParams {
+                req_id: "ghost".to_string(),
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["data"].as_bool(), Some(false));
+    }
 }

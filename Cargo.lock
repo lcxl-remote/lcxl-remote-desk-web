@@ -4883,6 +4883,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tokio",
  "ureq",
+ "url",
  "uuid",
  "windows 0.61.3",
  "x11rb",

@@ -145,7 +145,10 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
             let wb_manager = WhiteboardManager::new(handle.clone(), daemon_url.clone());
             wb_manager.start(wb_cmd_rx);
 
-            let sa_manager = crate::security_approval::SecurityApprovalManager::new(handle.clone());
+            let sa_manager = crate::security_approval::SecurityApprovalManager::new(
+                handle.clone(),
+                daemon_url.clone(),
+            );
             sa_manager.start(sa_rx);
 
             // Tray: show + quit only (no elevate in service-shell mode).
@@ -554,7 +557,10 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             let wb_manager = WhiteboardManager::new(handle.clone(), frontend_url.clone());
             wb_manager.start(wb_cmd_rx);
 
-            let sa_manager = crate::security_approval::SecurityApprovalManager::new(handle.clone());
+            let sa_manager = crate::security_approval::SecurityApprovalManager::new(
+                handle.clone(),
+                frontend_url.clone(),
+            );
             sa_manager.start(sa_rx);
 
             // Spawn handler for Install / Uninstall operations.

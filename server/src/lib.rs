@@ -25,11 +25,11 @@ use crate::{
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
         service_mgmt::{install_service, uninstall_service},
         settings::{
-            query_log_settings, query_security_settings, query_settings, query_telemetry_status,
-            query_turn_client_settings, query_turn_settings, regenerate_turn_secret,
-            submit_security_approval, update_log_settings, update_security_settings,
-            update_settings, update_telemetry_consent, update_turn_client_settings,
-            update_turn_settings,
+            ack_security_approval, query_log_settings, query_security_settings, query_settings,
+            query_telemetry_status, query_turn_client_settings, query_turn_settings,
+            regenerate_turn_secret, submit_security_approval, update_log_settings,
+            update_security_settings, update_settings, update_telemetry_consent,
+            update_turn_client_settings, update_turn_settings,
         },
         turn::{
             delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
@@ -122,11 +122,11 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
         service_mgmt::{install_service, uninstall_service},
         settings::{
-            query_log_settings, query_security_settings, query_settings, query_telemetry_status,
-            query_turn_client_settings, query_turn_settings, regenerate_turn_secret,
-            submit_security_approval, update_log_settings, update_security_settings,
-            update_settings, update_telemetry_consent, update_turn_client_settings,
-            update_turn_settings,
+            ack_security_approval, query_log_settings, query_security_settings, query_settings,
+            query_telemetry_status, query_turn_client_settings, query_turn_settings,
+            regenerate_turn_secret, submit_security_approval, update_log_settings,
+            update_security_settings, update_settings, update_telemetry_consent,
+            update_turn_client_settings, update_turn_settings,
         },
         user::{get_current_user, reject_anonymous_users},
         virtual_display::{
@@ -202,6 +202,7 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
                         .service(query_security_settings)
                         .service(update_security_settings)
                         .service(submit_security_approval)
+                        .service(ack_security_approval)
                         .service(regenerate_turn_secret)
                         .service(query_telemetry_status)
                         .service(update_telemetry_consent)
@@ -650,6 +651,7 @@ pub async fn run_with_hub(
                             .service(query_security_settings)
                             .service(update_security_settings)
                             .service(submit_security_approval)
+                            .service(ack_security_approval)
                             .service(regenerate_turn_secret)
                             .service(query_telemetry_status)
                             .service(update_telemetry_consent)

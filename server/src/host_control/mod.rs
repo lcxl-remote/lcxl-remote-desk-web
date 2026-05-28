@@ -43,7 +43,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -59,6 +59,14 @@ pub use upstream::UpstreamForwarder;
 /// Capacity of internal broadcast channels.
 const CMD_BROADCAST_CAPACITY: usize = 256;
 const STATE_BROADCAST_CAPACITY: usize = 64;
+
+/// How long `request_approval` waits for at least one approval UI to acknowledge
+/// it is mounted and able to talk to the backend before denying. This is a pure
+/// readiness probe (loopback-local), not a user-decision timeout: if any UI acks
+/// in time the request proceeds to an unbounded wait for the user's decision,
+/// preserving the "wait forever while a working dialog exists" semantics. Only
+/// applies to Local / Aggregator (daemon-self) requests; Forwarder is exempt.
+const APPROVAL_UI_READY_PROBE: Duration = Duration::from_secs(10);
 
 /// Identifier for an aggregator-side worker forwarder connection.
 pub type UpstreamSessionId = u64;
@@ -121,6 +129,13 @@ struct HubInner {
     /// Used by Local and Aggregator. Forwarder does not replay (the worker is the
     /// authoritative source — it will re-request if it survives a daemon restart).
     pending_replay: Mutex<HashMap<String, ReplaySnapshot>>,
+    /// Local / Aggregator (daemon-self) only: req_id → oneshot fired when an
+    /// approval UI acks that it is mounted and able to reach the backend. The
+    /// readiness-probe phase of `request_approval` awaits this. Lifecycle is
+    /// owned exclusively by `request_approval_inner` (every exit arm cleans its
+    /// own entry); `submit_approval` must never touch it, otherwise dropping the
+    /// sender mid-probe races the user-result arm of the `select!`.
+    pending_acks: Mutex<HashMap<String, oneshot::Sender<()>>>,
     /// Aggregator-only: req_id → which upstream forwarder session originated it.
     pending_routes: Mutex<HashMap<String, UpstreamSessionId>>,
     /// Aggregator-only: per-forwarder-session outbound mpsc, used for directional
@@ -171,6 +186,7 @@ impl HostControlHub {
             state_tx,
             pending_approvals: Mutex::new(HashMap::new()),
             pending_replay: Mutex::new(HashMap::new()),
+            pending_acks: Mutex::new(HashMap::new()),
             pending_routes: Mutex::new(HashMap::new()),
             forwarder_sessions: Mutex::new(HashMap::new()),
             upstream,
@@ -287,7 +303,29 @@ impl HostControlHub {
     /// at submit time: routes registered via `register_upstream_request` win the
     /// directional dispatch, otherwise the local oneshot is resolved.
     pub async fn request_approval(&self, req: ApprovalRequest) -> ApprovalResponse {
-        // Fail-fast when no UI can serve the request.
+        self.request_approval_inner(req, APPROVAL_UI_READY_PROBE)
+            .await
+    }
+
+    /// Core of [`request_approval`] with an injectable readiness-probe duration so
+    /// tests do not have to wait the real [`APPROVAL_UI_READY_PROBE`].
+    ///
+    /// Local / Aggregator (daemon-self) is two-phase:
+    ///   * Phase 1 (readiness probe): wait for any approval UI to ack, while also
+    ///     racing a possible direct submit and the probe timeout.
+    ///   * Phase 2 (user decision): once ready, await the user's response with no
+    ///     timeout, preserving the "wait forever while a working dialog exists"
+    ///     semantics.
+    ///
+    /// Forwarder is exempt from the probe: the worker is authoritative and the
+    /// daemon drives the dialog, so it awaits the upstream-delivered response
+    /// directly (registering a local ack would wait for an ack that never comes).
+    async fn request_approval_inner(
+        &self,
+        req: ApprovalRequest,
+        probe: Duration,
+    ) -> ApprovalResponse {
+        // Phase 0: fail-fast when no UI can serve the request.
         match self.inner.mode {
             HubMode::Local | HubMode::Aggregator => {
                 if !self.has_tauri_ui() {
@@ -316,6 +354,7 @@ impl HostControlHub {
         }
 
         let (tx, rx) = oneshot::channel();
+        let mut rx = rx;
         let permission_type = req.permission_type.clone();
         let snapshot = ReplaySnapshot {
             req_id: req.req_id.clone(),
@@ -354,26 +393,112 @@ impl HostControlHub {
         };
         let _ = self.send_command(outbound);
 
-        match rx.await {
-            Ok(response) => {
-                self.inner
-                    .pending_replay
-                    .lock()
-                    .unwrap()
-                    .remove(&req.req_id);
-                response
+        // Forwarder: no local readiness probe (see method docs).
+        if self.inner.mode == HubMode::Forwarder {
+            return match rx.await {
+                Ok(response) => response,
+                Err(_) => ApprovalResponse::deny(),
+            };
+        }
+
+        // Local / Aggregator — Phase 1: readiness probe.
+        let (ack_tx, mut ack_rx) = oneshot::channel();
+        self.inner
+            .pending_acks
+            .lock()
+            .unwrap()
+            .insert(req.req_id.clone(), ack_tx);
+
+        tokio::select! {
+            ack = &mut ack_rx => match ack {
+                // At least one UI acked — proceed to phase 2.
+                Ok(()) => {
+                    self.inner.pending_acks.lock().unwrap().remove(&req.req_id);
+                }
+                // Ack sender dropped (deny_all_pending / hub teardown) — deny.
+                Err(_) => {
+                    self.cleanup_local_pending(&req.req_id);
+                    return ApprovalResponse::deny();
+                }
+            },
+            resp = &mut rx => {
+                // Direct submit inside the probe window. submit_approval only
+                // resolves `rx` (never drops the ack sender), so this is the sole
+                // ready arm and the user's result wins unambiguously.
+                self.inner.pending_acks.lock().unwrap().remove(&req.req_id);
+                self.inner.pending_replay.lock().unwrap().remove(&req.req_id);
+                return resp.unwrap_or_else(|_| ApprovalResponse::deny());
             }
-            Err(_) => {
-                // Sender was dropped — typically because the hub itself called
-                // deny_all_pending. Fall back to deny.
-                self.inner
-                    .pending_replay
-                    .lock()
-                    .unwrap()
-                    .remove(&req.req_id);
-                ApprovalResponse::deny()
+            _ = tokio::time::sleep(probe) => {
+                // No UI reachable in time: clean up, deny, and broadcast Finished
+                // so any dialog windows that were created get destroyed.
+                debug!(
+                    "[Hub/{:?}] No approval UI acked within probe; denying req_id={}",
+                    self.inner.mode, req.req_id
+                );
+                self.cleanup_local_pending(&req.req_id);
+                self.notify_tauri_finished(&req.req_id);
+                return ApprovalResponse::deny();
             }
         }
+
+        // Phase 2: await the user's decision (no timeout).
+        let response = match rx.await {
+            Ok(response) => response,
+            Err(_) => ApprovalResponse::deny(),
+        };
+        self.inner
+            .pending_replay
+            .lock()
+            .unwrap()
+            .remove(&req.req_id);
+        self.inner.pending_acks.lock().unwrap().remove(&req.req_id);
+        response
+    }
+
+    /// Remove all daemon-self bookkeeping for a req_id (Local / Aggregator).
+    fn cleanup_local_pending(&self, req_id: &str) {
+        self.inner.pending_approvals.lock().unwrap().remove(req_id);
+        self.inner.pending_replay.lock().unwrap().remove(req_id);
+        self.inner.pending_acks.lock().unwrap().remove(req_id);
+    }
+
+    /// Resolve the readiness probe for `req_id`. Returns whether the request is
+    /// known (so the UI can enable its buttons). Layered so the ack is idempotent
+    /// and never breaks worker-originated requests:
+    ///   1. A probe oneshot is waiting -> fire it (daemon-self, phase 1).
+    ///   2. Otherwise the daemon-self request is already past the probe (phase 2)
+    ///      or being replayed -> still ready.
+    ///   3. Otherwise a worker-originated request (routes/replay) -> ready, but
+    ///      no probe is created (worker path is out of scope for P2 fallback).
+    ///   4. Truly unknown -> not ready.
+    pub fn notify_approval_ack(&self, req_id: &str) -> bool {
+        if let Some(tx) = self.inner.pending_acks.lock().unwrap().remove(req_id) {
+            let _ = tx.send(());
+            return true;
+        }
+        if self
+            .inner
+            .pending_approvals
+            .lock()
+            .unwrap()
+            .contains_key(req_id)
+        {
+            return true;
+        }
+        let known_route = self
+            .inner
+            .pending_routes
+            .lock()
+            .unwrap()
+            .contains_key(req_id);
+        let known_replay = self
+            .inner
+            .pending_replay
+            .lock()
+            .unwrap()
+            .contains_key(req_id);
+        known_route || known_replay
     }
 
     /// Resolve an approval. The dispatch depends on hub mode and request origin:
@@ -638,6 +763,10 @@ impl HostControlHub {
             let _ = entry.response_tx.send(ApprovalResponse::deny());
         }
         self.inner.pending_replay.lock().unwrap().clear();
+        // Drop any in-flight readiness-probe senders so probes resolve at once.
+        // Safe to do here: deny_all_pending denies, so whichever select! arm wins
+        // (rx-deny or ack-Err) yields a deny — there is no good result to clobber.
+        self.inner.pending_acks.lock().unwrap().clear();
     }
 
     /// Aggregator-only count: how many pending approvals are currently routed.
@@ -1828,5 +1957,259 @@ mod tests {
             .unwrap();
         assert!(!r1.approved && !r2.approved);
         assert_eq!(hub.pending_replay_count(), 0);
+    }
+
+    // P2: helper to wait until the readiness-probe entry for `req_id` exists.
+    async fn wait_for_pending_ack(hub: &HostControlHub, req_id: &str) {
+        for _ in 0..200 {
+            if hub.inner.pending_acks.lock().unwrap().contains_key(req_id) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!("pending_acks never registered for {req_id}");
+    }
+
+    // P2: an ack within the probe window advances to phase 2 (unbounded wait),
+    // where a later submit resolves the request normally.
+    #[tokio::test]
+    async fn local_ack_enters_wait_then_submit_resolves() {
+        let hub = HostControlHub::new_local();
+        let _outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval_inner(approval_req("r1"), Duration::from_secs(2))
+                .await
+        });
+        wait_for_pending_ack(&hub, "r1").await;
+
+        assert!(hub.notify_approval_ack("r1"), "ack must hit the probe");
+        // Now in phase 2 (no timeout). Submit after a short delay.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(hub.submit_approval(
+            "r1",
+            ApprovalResponse {
+                approved: true,
+                remember: false,
+            }
+        ));
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(resp.approved);
+        assert_eq!(hub.pending_replay_count(), 0);
+        assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
+    }
+
+    // P2 (codex #1): zero ack within the probe window denies, clears all
+    // daemon-self bookkeeping, and broadcasts Finished so any created windows die.
+    #[tokio::test]
+    async fn local_probe_timeout_denies_and_broadcasts_finished() {
+        let hub = HostControlHub::new_local();
+        let mut outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval_inner(approval_req("r1"), Duration::from_millis(50))
+                .await
+        });
+
+        // The initial Request is broadcast.
+        match tokio::time::timeout(Duration::from_millis(200), outbound_rx.recv())
+            .await
+            .expect("Request must broadcast")
+            .expect("channel ok")
+        {
+            HostControlMessage::SecurityApprovalRequest { req_id, .. } => assert_eq!(req_id, "r1"),
+            other => panic!("expected Request, got {other:?}"),
+        }
+
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(!resp.approved, "probe timeout must deny");
+
+        // Finished is broadcast so per-monitor windows get destroyed.
+        match tokio::time::timeout(Duration::from_millis(200), outbound_rx.recv())
+            .await
+            .expect("Finished must broadcast")
+            .expect("channel ok")
+        {
+            HostControlMessage::SecurityApprovalFinished { req_id } => assert_eq!(req_id, "r1"),
+            other => panic!("expected Finished, got {other:?}"),
+        }
+
+        assert_eq!(hub.pending_replay_count(), 0);
+        assert!(hub.inner.pending_approvals.lock().unwrap().is_empty());
+        assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
+    }
+
+    // P2 (codex #2): ack is idempotent. The first ack fires the probe oneshot;
+    // a replayed ack after the request has entered phase 2 still reports ready
+    // (pending_approvals still holds it).
+    #[tokio::test]
+    async fn notify_approval_ack_idempotent_in_phase2() {
+        let hub = HostControlHub::new_local();
+        let _outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval_inner(approval_req("r1"), Duration::from_secs(2))
+                .await
+        });
+        wait_for_pending_ack(&hub, "r1").await;
+
+        assert!(hub.notify_approval_ack("r1"), "first ack fires the probe");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            hub.notify_approval_ack("r1"),
+            "replayed ack in phase 2 must still be ready"
+        );
+
+        assert!(hub.submit_approval("r1", ApprovalResponse::deny()));
+        let _ = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+    }
+
+    // P2 (codex #3): worker-originated requests are "ready" without creating a
+    // probe, so the shared approval page does not break them; the directional
+    // route remains intact for submit.
+    #[test]
+    fn notify_approval_ack_worker_originated_is_ready_without_probe() {
+        let hub = HostControlHub::new_aggregator();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        hub.register_forwarder_session(9, tx);
+        hub.register_upstream_request("r-w".to_string(), 9, SecurityPermissionType::Terminal, None);
+
+        assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
+        assert!(
+            hub.notify_approval_ack("r-w"),
+            "worker req must report ready"
+        );
+        // No probe was created.
+        assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
+        // Directional route still resolves.
+        assert_eq!(hub.pop_upstream_for_req("r-w"), Some(9));
+    }
+
+    // P2: a truly unknown req_id is not ready.
+    #[test]
+    fn notify_approval_ack_unknown_returns_false() {
+        let hub = HostControlHub::new_local();
+        assert!(!hub.notify_approval_ack("ghost"));
+    }
+
+    // P2 (codex #2/four-round): a direct submit inside the probe window must win
+    // over the probe deny. submit_approval never touches pending_acks, so the
+    // select! `rx` arm is the only ready arm. Looped to shake out select!
+    // randomness.
+    #[tokio::test]
+    async fn direct_submit_during_probe_wins_over_deny() {
+        for _ in 0..20 {
+            let hub = HostControlHub::new_local();
+            let _outbound_rx = hub.subscribe_outbound();
+            hub.mark_tauri_connected();
+
+            let hub_clone = hub.clone();
+            let task = tokio::spawn(async move {
+                hub_clone
+                    .request_approval_inner(approval_req("r1"), Duration::from_secs(2))
+                    .await
+            });
+            wait_for_pending_ack(&hub, "r1").await;
+
+            // Direct submit, no ack.
+            assert!(hub.submit_approval(
+                "r1",
+                ApprovalResponse {
+                    approved: true,
+                    remember: false,
+                }
+            ));
+            let resp = tokio::time::timeout(Duration::from_millis(500), task)
+                .await
+                .expect("must resolve")
+                .unwrap();
+            assert!(resp.approved, "direct submit result must win over deny");
+            assert!(
+                hub.inner.pending_acks.lock().unwrap().is_empty(),
+                "pending_acks must not leak"
+            );
+        }
+    }
+
+    // P2 (codex #1, three-round): Forwarder never registers a readiness probe and
+    // resolves via the upstream-delivered submit (the worker is authoritative).
+    #[tokio::test]
+    async fn forwarder_request_registers_no_pending_acks() {
+        let upstream = UpstreamForwarder::new_for_test(true);
+        let upstream_clone = Arc::clone(&upstream);
+        let hub = HostControlHub::new_forwarder(upstream);
+
+        let hub_clone = hub.clone();
+        let task =
+            tokio::spawn(async move { hub_clone.request_approval(approval_req("r1")).await });
+        for _ in 0..50 {
+            if hub
+                .inner
+                .pending_approvals
+                .lock()
+                .unwrap()
+                .contains_key("r1")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            hub.inner.pending_acks.lock().unwrap().is_empty(),
+            "Forwarder must not create a readiness probe"
+        );
+
+        upstream_clone.test_inject_inbound(HostControlMessage::SecurityApprovalSubmit {
+            req_id: "r1".to_string(),
+            approved: true,
+            remember: false,
+        });
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(resp.approved);
+    }
+
+    // P2: deny_all_pending also drops any in-flight readiness probes.
+    #[tokio::test]
+    async fn deny_all_pending_clears_pending_acks() {
+        let hub = HostControlHub::new_local();
+        let _outbound_rx = hub.subscribe_outbound();
+        hub.mark_tauri_connected();
+
+        let hub_clone = hub.clone();
+        let task = tokio::spawn(async move {
+            hub_clone
+                .request_approval_inner(approval_req("r1"), Duration::from_secs(5))
+                .await
+        });
+        wait_for_pending_ack(&hub, "r1").await;
+
+        hub.deny_all_pending();
+        let resp = tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .expect("must resolve")
+            .unwrap();
+        assert!(!resp.approved);
+        assert!(hub.inner.pending_acks.lock().unwrap().is_empty());
     }
 }

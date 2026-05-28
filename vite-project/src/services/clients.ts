@@ -5,7 +5,7 @@
 
 import fetch from "@/lib/kubb-client";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
-import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { GetCurrentUserQueryResponse, GetCurrentUser401, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 
 function getGetCurrentUserUrl() {
   const res = { method: 'GET', url: `/api/currentUser` as const }
@@ -238,6 +238,31 @@ export async function updateSecuritySettings(data?: UpdateSecuritySettingsMutati
   const requestData = data
 
   const res = await request<UpdateSecuritySettingsMutationResponse, ResponseErrorConfig<Error>, UpdateSecuritySettingsMutationRequest>({ method : "POST", url : getUpdateSecuritySettingsUrl().url.toString(), data : requestData, ... requestConfig })
+  return res.data
+}
+
+function getAckSecurityApprovalUrl() {
+  const res = { method: 'POST', url: `/api/desk/security-settings/approval/ack` as const }
+  return res
+}
+
+/**
+ * @description This is the readiness signal for the host-control hub's UI-ready probe (see
+ * `HostControlHub::request_approval`). The response `data` is `true` when the
+ * request is known to the hub (the dialog should enable its buttons) and
+ * `false` when it is unknown (the dialog should show a "not ready" state and
+ * must NOT submit — the hub's probe timeout produces the authoritative deny).
+ * A stale browser session yields a 401 from the session middleware, which the
+ * dialog also treats as "not ready".
+ * @summary Acknowledge security approval dialog readiness
+ * {@link /api/desk/security-settings/approval/ack}
+ */
+export async function ackSecurityApproval(data: AckSecurityApprovalMutationRequest, config: Partial<RequestConfig<AckSecurityApprovalMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<AckSecurityApprovalMutationResponse, ResponseErrorConfig<Error>, AckSecurityApprovalMutationRequest>({ method : "POST", url : getAckSecurityApprovalUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 

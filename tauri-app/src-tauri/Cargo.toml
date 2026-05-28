@@ -29,6 +29,7 @@ futures-util = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 ureq = { workspace = true }
 config = { workspace = true }
+url = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 

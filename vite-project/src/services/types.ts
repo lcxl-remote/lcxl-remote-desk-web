@@ -24,6 +24,13 @@ export type AdaptiveResolutionParams = {
     min_delta_px?: number;
 };
 
+export type ApprovalAckParams = {
+    /**
+     * @type string
+    */
+    req_id: string;
+};
+
 export const audioDataFlowEnum = {
     Render: "Render",
     Capture: "Capture"
@@ -3148,6 +3155,21 @@ export type UpdateSecuritySettingsMutationResponse = UpdateSecuritySettings200;
 export type UpdateSecuritySettingsMutation = {
     Response: UpdateSecuritySettings200;
     Request: UpdateSecuritySettingsMutationRequest;
+    Errors: any;
+};
+
+/**
+ * @description Acknowledge security approval readiness
+*/
+export type AckSecurityApproval200 = any;
+
+export type AckSecurityApprovalMutationRequest = ApprovalAckParams;
+
+export type AckSecurityApprovalMutationResponse = AckSecurityApproval200;
+
+export type AckSecurityApprovalMutation = {
+    Response: AckSecurityApproval200;
+    Request: AckSecurityApprovalMutationRequest;
     Errors: any;
 };
 

@@ -4,6 +4,7 @@ import LoginPage from '@/features/auth/login-page';
 import InitPage from '@/features/auth/init-page';
 import PrivateScreenPage from '@/features/desk/private-screen-page';
 import WhiteboardPage from '@/features/desk/whiteboard-page';
+import SecurityApprovalPage from '@/features/desk/security-approval-page';
 import Layout from '@/features/layout/layout';
 import DeskList from '@/features/desk/desk-list';
 import DeskDashboard from '@/features/desk/desk-dashboard';
@@ -38,6 +39,10 @@ export const router = createBrowserRouter([
     {
         path: '/whiteboard',
         element: <WhiteboardPage />,
+    },
+    {
+        path: '/security-approval',
+        element: <SecurityApprovalPage />,
     },
     {
         path: '/',

@@ -95,6 +95,7 @@ pub struct ExtraSchemas;
     crate::controller::settings::query_security_settings,
     crate::controller::settings::update_security_settings,
     crate::controller::settings::submit_security_approval,
+    crate::controller::settings::ack_security_approval,
     crate::controller::settings::query_turn_client_settings,
     crate::controller::settings::update_turn_client_settings,
     // web/signal-facade/src/controller/ (paths shared with manager via desk_proxy)
