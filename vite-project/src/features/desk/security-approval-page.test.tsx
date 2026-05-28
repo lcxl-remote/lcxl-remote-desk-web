@@ -172,6 +172,55 @@ describe("SecurityApprovalPage", () => {
         expect(navigator.sendBeacon).toHaveBeenCalledTimes(1);
     });
 
+    it("exposes window.__lcxlApprovalDeny which sends a deny beacon", async () => {
+        mockFetch({ ackReady: true });
+        renderPage(QUERY);
+        await waitFor(() =>
+            expect(screen.getByRole("button", { name: "Allow" })).not.toBeDisabled(),
+        );
+        type Hook = { __lcxlApprovalDeny?: () => void };
+        const deny = (window as unknown as Hook).__lcxlApprovalDeny;
+        expect(typeof deny).toBe("function");
+        deny!();
+        expect(navigator.sendBeacon).toHaveBeenCalledTimes(1);
+        const [url, blob] = (navigator.sendBeacon as ReturnType<typeof vi.fn>).mock.calls[0];
+        expect(url).toBe(SUBMIT);
+        const text = await (blob as Blob).text();
+        expect(JSON.parse(text)).toMatchObject({ req_id: "r1", approved: false });
+    });
+
+    it("__lcxlApprovalDeny works even while ack is still pending", () => {
+        mockDeferredAck();
+        renderPage(QUERY);
+        type Hook = { __lcxlApprovalDeny?: () => void };
+        (window as unknown as Hook).__lcxlApprovalDeny!();
+        expect(navigator.sendBeacon).toHaveBeenCalledTimes(1);
+    });
+
+    it("hook + beforeunload are idempotent (single deny beacon)", async () => {
+        mockFetch({ ackReady: true });
+        renderPage(QUERY);
+        await waitFor(() =>
+            expect(screen.getByRole("button", { name: "Allow" })).not.toBeDisabled(),
+        );
+        type Hook = { __lcxlApprovalDeny?: () => void };
+        (window as unknown as Hook).__lcxlApprovalDeny!();
+        window.dispatchEvent(new Event("beforeunload"));
+        expect(navigator.sendBeacon).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not send a deny via the hook after a successful submit", async () => {
+        mockFetch({ ackReady: true, submitOk: true });
+        renderPage(QUERY);
+        const allow = screen.getByRole("button", { name: "Allow" });
+        await waitFor(() => expect(allow).not.toBeDisabled());
+        fireEvent.click(allow);
+        await waitFor(() => expect(submitCalls()).toHaveLength(1));
+        type Hook = { __lcxlApprovalDeny?: () => void };
+        (window as unknown as Hook).__lcxlApprovalDeny!();
+        expect(navigator.sendBeacon).not.toHaveBeenCalled();
+    });
+
     it("does not send a deny beacon after a successful submit (program close)", async () => {
         mockFetch({ ackReady: true, submitOk: true });
         renderPage(QUERY);

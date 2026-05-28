@@ -22,7 +22,9 @@ const SUBMIT_URL = "/api/desk/security-settings/approval/submit";
 // available. All backend interaction is plain REST (cookie session, same
 // origin). The window is closed by the backend (Finish broadcast -> Rust
 // `destroy()`), never by the page itself. A user closing the native window is
-// mapped to a Deny via `beforeunload` + `sendBeacon`.
+// mapped to a Deny: the webview never fires `beforeunload` on a native close,
+// so Rust calls the exposed `window.__lcxlApprovalDeny` hook from its
+// CloseRequested handler (the page only exposes the hook + a browser fallback).
 type AckState = "pending" | "ready" | "failed";
 
 export default function SecurityApprovalPage() {
@@ -41,8 +43,11 @@ export default function SecurityApprovalPage() {
 
     const submittingRef = useRef(false);
     // True once this window has submitted a result successfully, so the
-    // beforeunload fallback does not send a spurious deny afterwards.
+    // close fallback does not send a spurious deny afterwards.
     const submittedOkRef = useRef(false);
+    // True once a deny-on-close has been sent, so the Rust hook and the
+    // browser beforeunload fallback never double-submit for the same close.
+    const denySentRef = useRef(false);
 
     const { data: settingsResponse } = useQuerySecuritySettings({
         query: { retry: 3, retryDelay: 1000 },
@@ -78,23 +83,40 @@ export default function SecurityApprovalPage() {
         };
     }, [reqId]);
 
-    // A user closing the native window (X) is a Deny. sendBeacon survives the
-    // unload. submittedOkRef guards against double-submit; a beacon for an
-    // already-resolved req_id (e.g. programmatic destroy after the decision) is
-    // a harmless backend no-op. This also covers the "closed while ack still
-    // pending" race: the deny resolves whichever phase the hub is in, so the
-    // request never deadlocks.
+    // A user closing the native window (X) is a Deny. The external-URL webview
+    // does NOT fire `beforeunload` on a native window close, so the Rust side
+    // (which owns the window) invokes `window.__lcxlApprovalDeny` from its
+    // CloseRequested handler instead. `beforeunload` is kept only as a fallback
+    // for a real browser context. The deny is sent regardless of ackState: the
+    // hub may be in its readiness-probe phase or already waiting for the user,
+    // and a deny resolves either, so the request never deadlocks. Guards:
+    // submittedOkRef/submittingRef skip a deny when a real decision is in
+    // flight; denySentRef makes the two triggers idempotent. sendBeacon is used
+    // so it still works if the page is genuinely unloading.
     useEffect(() => {
-        const onBeforeUnload = () => {
-            if (submittedOkRef.current || !reqId) return;
+        const sendDeny = () => {
+            if (
+                submittedOkRef.current ||
+                submittingRef.current ||
+                denySentRef.current ||
+                !reqId
+            ) {
+                return;
+            }
+            denySentRef.current = true;
             const blob = new Blob(
                 [JSON.stringify({ req_id: reqId, approved: false, remember: false })],
                 { type: "application/json" },
             );
             navigator.sendBeacon(SUBMIT_URL, blob);
         };
-        window.addEventListener("beforeunload", onBeforeUnload);
-        return () => window.removeEventListener("beforeunload", onBeforeUnload);
+        const w = window as unknown as { __lcxlApprovalDeny?: () => void };
+        w.__lcxlApprovalDeny = sendDeny;
+        window.addEventListener("beforeunload", sendDeny);
+        return () => {
+            window.removeEventListener("beforeunload", sendDeny);
+            if (w.__lcxlApprovalDeny === sendDeny) delete w.__lcxlApprovalDeny;
+        };
     }, [reqId]);
 
     const submit = (approved: boolean) => {

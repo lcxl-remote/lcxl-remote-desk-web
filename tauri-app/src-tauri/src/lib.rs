@@ -252,12 +252,18 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
             event: window_event,
             ..
         } => {
-            if label == MAIN_WINDOW_LABEL
-                && let tauri::WindowEvent::CloseRequested { api, .. } = window_event
-            {
-                api.prevent_close();
-                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                    let _ = window.hide();
+            if let tauri::WindowEvent::CloseRequested { api, .. } = &window_event {
+                if label == MAIN_WINDOW_LABEL {
+                    api.prevent_close();
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                        let _ = window.hide();
+                    }
+                } else if label.starts_with(security_approval::APPROVAL_LABEL_PREFIX) {
+                    // A user closed an approval window: keep it alive long enough
+                    // to submit a Deny via the page's hook, then let the backend
+                    // tear it down. The webview can't detect a native close itself.
+                    api.prevent_close();
+                    security_approval::on_approval_window_close(app, &label);
                 }
             }
         }
@@ -852,12 +858,19 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                 event: window_event,
                 ..
             } => {
-                if label == MAIN_WINDOW_LABEL
-                    && let tauri::WindowEvent::CloseRequested { api, .. } = window_event
-                {
-                    api.prevent_close();
-                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                        let _ = window.hide();
+                if let tauri::WindowEvent::CloseRequested { api, .. } = &window_event {
+                    if label == MAIN_WINDOW_LABEL {
+                        api.prevent_close();
+                        if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                            let _ = window.hide();
+                        }
+                    } else if label.starts_with(security_approval::APPROVAL_LABEL_PREFIX) {
+                        // A user closed an approval window: keep it alive long
+                        // enough to submit a Deny via the page's hook, then let
+                        // the backend tear it down. The webview can't detect a
+                        // native close itself.
+                        api.prevent_close();
+                        security_approval::on_approval_window_close(app, &label);
                     }
                 }
             }

@@ -13,6 +13,15 @@ use url::Url;
 const APPROVAL_WINDOW_INNER_W: f64 = 520.0;
 const APPROVAL_WINDOW_INNER_H: f64 = 320.0;
 
+/// Shared prefix for every per-monitor approval window label. The run-loop close
+/// handler uses it to recognize approval windows among all app windows.
+pub(crate) const APPROVAL_LABEL_PREFIX: &str = "security-approval-";
+
+/// How long to wait after a user-initiated close before force-destroying the
+/// window, in case the backend never resolves the request (and therefore never
+/// broadcasts Finish to destroy it). Prevents a window the user can't close.
+const APPROVAL_CLOSE_FALLBACK_DESTROY: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct SecurityApprovalManager {
     app_handle: AppHandle,
     /// Base URL the approval page is served from (daemon URL in service-shell
@@ -58,7 +67,8 @@ pub(crate) fn sanitize_label_token(s: &str) -> String {
 /// Deterministic window label for a given request and monitor index.
 pub(crate) fn build_window_label(req_id: &str, mon_idx: usize) -> String {
     format!(
-        "security-approval-{}-mon-{}",
+        "{}{}-mon-{}",
+        APPROVAL_LABEL_PREFIX,
         sanitize_label_token(req_id),
         mon_idx
     )
@@ -143,6 +153,9 @@ fn build_approval_window(
         .skip_taskbar(true)
         .resizable(false)
         .minimizable(false)
+        // Build hidden so we can position it before its first paint — otherwise
+        // the window flashes at the default top-left spot, then jumps to center.
+        .visible(false)
         .focused(true);
     // Without a known monitor, let Tauri center the window on the active display.
     if monitor.is_none() {
@@ -161,7 +174,10 @@ fn build_approval_window(
         let _ = window.set_position(PhysicalPosition::new(x, y));
     }
 
-    // Bypass modern background focus-stealing restrictions (Windows/macOS).
+    // Reveal only after positioning so the user never sees the top-left flash.
+    // Re-assert always-on-top after show: on Windows the builder flag alone is
+    // unreliable and the window ends up easily occluded by other windows.
+    let _ = window.show();
     let _ = window.set_always_on_top(true);
     let _ = window.set_focus();
     let _ = window.request_user_attention(Some(UserAttentionType::Critical));
@@ -233,6 +249,11 @@ impl SecurityApprovalManager {
             while let Ok(cmd) = receiver.recv() {
                 match &cmd {
                     SecurityApprovalCommand::Request(req) => {
+                        // Fire the toast first, before any approval window grabs
+                        // foreground focus. Windows suppresses the toast banner
+                        // (routing it silently to the Action Center) when the
+                        // originating app is already in the foreground.
+                        show_tray_notification(&app_handle, &req.permission_type);
                         let monitors = resolve_monitors(&app_handle);
                         let monitor_count = monitors.len().max(1);
                         let effect = compute_effect(&state, &cmd, monitor_count);
@@ -263,7 +284,6 @@ impl SecurityApprovalManager {
                                 refocus_window(&app_handle, &label);
                             }
                         }
-                        show_tray_notification(&app_handle, &req.permission_type);
                     }
                     SecurityApprovalCommand::Finish { req_id } => {
                         log::info!("SecurityApprovalCommand::Finish req_id={}", req_id);
@@ -300,6 +320,31 @@ fn destroy_window(app_handle: &AppHandle, label: &str) {
             log::error!("Failed to destroy approval window {}: {}", label, e);
         }
     }
+}
+
+/// Handle a user closing an approval window via the native X button. The
+/// external-URL webview never fires JS `beforeunload` on a native close, so the
+/// page cannot self-detect it; instead Rust drives the page's deny hook over
+/// `eval`, which submits a Deny on the page's authenticated REST session. The
+/// caller MUST have already prevented the default close so the eval has time to
+/// run — the window is then torn down by the backend's Finish broadcast
+/// (`destroy`). A best-effort fallback destroy guarantees the window can never
+/// trap the user if the backend fails to resolve the request.
+///
+/// `destroy()` (Finish / Reset) does NOT emit CloseRequested, so this path is
+/// reached only for genuine user-initiated closes — never for programmatic ones.
+pub(crate) fn on_approval_window_close(app_handle: &AppHandle, label: &str) {
+    if let Some(window) = app_handle.get_webview_window(label) {
+        let _ = window.eval("window.__lcxlApprovalDeny && window.__lcxlApprovalDeny();");
+    }
+    let app_handle = app_handle.clone();
+    let label = label.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(APPROVAL_CLOSE_FALLBACK_DESTROY);
+        if let Some(window) = app_handle.get_webview_window(&label) {
+            let _ = window.destroy();
+        }
+    });
 }
 
 // TODO(virtual-display): a per-monitor approval window is also created on the
@@ -351,6 +396,17 @@ mod tests {
     fn build_label_is_stable() {
         assert_eq!(build_window_label("r1", 0), "security-approval-r1-mon-0");
         assert_eq!(build_window_label("r1", 2), "security-approval-r1-mon-2");
+    }
+
+    #[test]
+    fn build_label_carries_close_handler_prefix() {
+        // The run-loop close handler recognizes approval windows by this prefix,
+        // so every label must start with it (including sanitized/odd req_ids).
+        for req in ["r1", "a&b#c d", "3f8a1c2d-4b5e-6789-abcd-ef0123456789"] {
+            for idx in 0..3 {
+                assert!(build_window_label(req, idx).starts_with(APPROVAL_LABEL_PREFIX));
+            }
+        }
     }
 
     #[test]
