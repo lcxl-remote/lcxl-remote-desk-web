@@ -15,7 +15,7 @@ use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
 #[cfg(target_os = "linux")]
-use crate::service::wayland_remote_desktop::WaylandRemoteDesktop;
+use desk_input_injection::service::wayland_remote_desktop::WaylandRemoteDesktop;
 #[cfg(target_os = "linux")]
 use desk_capture_engine::image_capture::portal_client::PortalClient;
 
@@ -157,7 +157,10 @@ pub async fn query_backend_info(
     };
 
     let resolved = desk_settings.get_image_capture_type()?;
-    let backend_info = BackendInfo {
+    // Only the `#[cfg(target_os = "linux")]` block below mutates this; on
+    // other platforms the binding is left untouched.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut backend_info = BackendInfo {
         os: std::env::consts::OS.to_string(),
         wayland_env: std::env::var("WAYLAND_DISPLAY").is_ok(),
         x11_env: std::env::var("DISPLAY").is_ok(),

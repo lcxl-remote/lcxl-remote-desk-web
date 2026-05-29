@@ -17,6 +17,12 @@ pub enum InputError {
     WindowsResultError(Backtrace, windows_result::Error),
     /// An arboard clipboard error occurred.
     ArboardError(Backtrace, arboard::Error),
+    /// A zbus (D-Bus) error occurred (Wayland portal).
+    #[cfg(target_os = "linux")]
+    ZbusError(zbus::Error),
+    /// A zbus zvariant error occurred (Wayland portal).
+    #[cfg(target_os = "linux")]
+    ZbusZvariantError(zbus::zvariant::Error),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -66,6 +72,10 @@ impl Display for InputError {
             InputError::ArboardError(backtrace, error) => {
                 desk_utils::error::format_backtrace(f, backtrace, error)
             }
+            #[cfg(target_os = "linux")]
+            InputError::ZbusError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            InputError::ZbusZvariantError(error) => error.fmt(f),
             InputError::CustomError(error) => error.fmt(f),
         }
     }
@@ -96,4 +106,69 @@ impl From<arboard::Error> for InputError {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl From<zbus::Error> for InputError {
+    fn from(err: zbus::Error) -> Self {
+        InputError::ZbusError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<zbus::zvariant::Error> for InputError {
+    fn from(err: zbus::zvariant::Error) -> Self {
+        InputError::ZbusZvariantError(err)
+    }
+}
+
+/// Bridge capture-engine errors raised by the shared Wayland portal
+/// helpers (`pipewire_utils`) into the input-injection error type,
+/// preserving the original [`DeskErrorCode`].
+#[cfg(target_os = "linux")]
+impl From<desk_capture_engine::error::CaptureError> for InputError {
+    fn from(err: desk_capture_engine::error::CaptureError) -> Self {
+        InputError::new_custom_error(err.to_error_code(), &err.to_string())
+    }
+}
+
 impl std::error::Error for InputError {}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// A raw zbus error must surface as `InputError::ZbusError` so the
+    /// Wayland portal `?` propagation in `service::wayland_remote_desktop`
+    /// keeps the original D-Bus failure text.
+    #[test]
+    fn zbus_error_maps_to_zbus_variant() {
+        let err: InputError = zbus::Error::Failure("boom".to_owned()).into();
+        assert!(matches!(err, InputError::ZbusError(_)));
+        assert!(err.to_string().contains("boom"));
+        // Non-custom errors fall back to SYSTEM_ERROR.
+        assert_eq!(err.to_error_code(), DeskErrorCode::SYSTEM_ERROR);
+    }
+
+    /// A failed `OwnedObjectPath::try_from` raises a zvariant error, which
+    /// the portal session-handle construction propagates via `?`.
+    #[test]
+    fn zvariant_error_maps_to_zvariant_variant() {
+        let err: InputError = zbus::zvariant::OwnedObjectPath::try_from("not a path")
+            .expect_err("invalid object path must error")
+            .into();
+        assert!(matches!(err, InputError::ZbusZvariantError(_)));
+    }
+
+    /// Capture-engine errors raised by the shared `pipewire_utils` helpers
+    /// must keep their original [`DeskErrorCode`] after bridging into
+    /// `InputError`, so portal probes report the right code upstream.
+    #[test]
+    fn capture_error_bridge_preserves_error_code() {
+        let capture_err = desk_capture_engine::error::CaptureError::new_custom_error(
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "portal missing",
+        );
+        let err: InputError = capture_err.into();
+        assert_eq!(err.to_error_code(), DeskErrorCode::FEATURE_UNAVAILABLE);
+        assert!(err.to_string().contains("portal missing"));
+    }
+}

@@ -17,3 +17,6 @@ pub mod display_watcher;
 pub mod host_control;
 pub mod keyboard_event;
 pub mod mouse_event;
+
+#[cfg(target_os = "linux")]
+pub mod service;

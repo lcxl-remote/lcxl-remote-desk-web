@@ -49,6 +49,7 @@ alsa = { workspace = true }
 pipewire = { workspace = true }
 xcb = { workspace = true }
 zbus = { workspace = true }
+rand = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { workspace = true }

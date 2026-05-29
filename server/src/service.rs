@@ -8,6 +8,4 @@ pub mod keyboard_event;
 pub mod mouse_event;
 pub mod signaling;
 pub mod terminal;
-#[cfg(target_os = "linux")]
-pub mod wayland_remote_desktop;
 pub mod whiteboard_event;

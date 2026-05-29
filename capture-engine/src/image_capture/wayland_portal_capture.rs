@@ -4,6 +4,7 @@ use desk_signal_facade::model::{
     desk_settings::DeskSettings,
     image_capture::{DisplayInfo, DisplayRect},
 };
+use desk_utils::error::DeskErrorCode;
 
 use crate::{
     error::CaptureError,
@@ -47,7 +48,7 @@ impl WaylandPortalImageCapture {
         if std::env::var("WAYLAND_DISPLAY").is_err() {
             log::error!("Wayland capture: WAYLAND_DISPLAY is not set");
             return CaptureError::custom_error(
-                crate::error::DeskErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 "WAYLAND_DISPLAY is not set, cannot use wayland portal capture",
             );
         }
@@ -153,7 +154,7 @@ impl ImageOutputEnumerator for WaylandPortalImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         if std::env::var("WAYLAND_DISPLAY").is_err() {
             return CaptureError::custom_error(
-                crate::error::DeskErrorCode::SYSTEM_ERROR,
+                DeskErrorCode::SYSTEM_ERROR,
                 "WAYLAND_DISPLAY is not set",
             );
         }

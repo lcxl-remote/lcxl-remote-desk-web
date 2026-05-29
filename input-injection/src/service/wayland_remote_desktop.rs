@@ -7,7 +7,7 @@ use zbus::{
     zvariant::{DeserializeDict, OwnedObjectPath, OwnedValue, Type},
 };
 
-use crate::error::DeskError;
+use crate::error::InputError;
 use desk_capture_engine::image_capture::pipewire_utils::{
     get_zbus_connection, get_zbus_portal_request, wait_zbus_response,
 };
@@ -31,6 +31,11 @@ struct RemoteDesktopStartResponse {
     streams: Option<Vec<(u32, RemoteDesktopStartStream)>>,
 }
 
+/// Wayland `org.freedesktop.portal.RemoteDesktop` client.
+///
+/// This is the single source of truth for the portal RemoteDesktop
+/// session, shared by both the Wayland portal keyboard and mouse input
+/// handlers and re-used by the `server` crate's portal health-probe.
 pub struct WaylandRemoteDesktop {
     session: OwnedObjectPath,
     stream_id: u32,
@@ -40,7 +45,7 @@ pub struct WaylandRemoteDesktop {
 static SHARED_REMOTE_DESKTOP: OnceLock<Arc<WaylandRemoteDesktop>> = OnceLock::new();
 
 impl WaylandRemoteDesktop {
-    pub fn probe_portal() -> Result<(), DeskError> {
+    pub fn probe_portal() -> Result<(), InputError> {
         let conn = get_zbus_connection()?;
         log::info!("Wayland RemoteDesktop: probing portal availability");
         let _proxy = Proxy::new(
@@ -53,7 +58,7 @@ impl WaylandRemoteDesktop {
         Ok(())
     }
 
-    pub fn new(types: u32) -> Result<Self, DeskError> {
+    pub fn new(types: u32) -> Result<Self, InputError> {
         let conn = get_zbus_connection()?;
         log::info!("Wayland RemoteDesktop: creating proxy, types={}", types);
         let proxy = Proxy::new(
@@ -84,7 +89,7 @@ impl WaylandRemoteDesktop {
 
         let unique_name = conn
             .unique_name()
-            .ok_or(DeskError::ZbusError(zbus::Error::Failure(
+            .ok_or(InputError::ZbusError(zbus::Error::Failure(
                 "Failed to get dbus unique name".to_owned(),
             )))?;
         let unique_identifier = unique_name.trim_start_matches(':').replace('.', "_");
@@ -97,7 +102,7 @@ impl WaylandRemoteDesktop {
                 session.as_str(),
                 response.session_handle
             );
-            return Err(DeskError::ZbusError(zbus::Error::Failure(
+            return Err(InputError::ZbusError(zbus::Error::Failure(
                 "portal returned mismatched session handle".to_owned(),
             )));
         }
@@ -146,7 +151,7 @@ impl WaylandRemoteDesktop {
         })
     }
 
-    pub fn shared() -> Result<Arc<Self>, DeskError> {
+    pub fn shared() -> Result<Arc<Self>, InputError> {
         if let Some(remote) = SHARED_REMOTE_DESKTOP.get() {
             log::debug!("Wayland RemoteDesktop: using existing shared instance");
             return Ok(remote.clone());
@@ -162,7 +167,7 @@ impl WaylandRemoteDesktop {
         }
     }
 
-    pub fn notify_pointer_motion_absolute(&self, x: f64, y: f64) -> Result<(), DeskError> {
+    pub fn notify_pointer_motion_absolute(&self, x: f64, y: f64) -> Result<(), InputError> {
         let options: HashMap<String, zbus::zvariant::Value<'_>> = HashMap::new();
         self.proxy.call_method(
             "NotifyPointerMotionAbsolute",
@@ -171,7 +176,7 @@ impl WaylandRemoteDesktop {
         Ok(())
     }
 
-    pub fn notify_pointer_button(&self, button: u32, state: u32) -> Result<(), DeskError> {
+    pub fn notify_pointer_button(&self, button: u32, state: u32) -> Result<(), InputError> {
         let options: HashMap<String, zbus::zvariant::Value<'_>> = HashMap::new();
         self.proxy.call_method(
             "NotifyPointerButton",
@@ -180,7 +185,7 @@ impl WaylandRemoteDesktop {
         Ok(())
     }
 
-    pub fn notify_pointer_axis(&self, delta_x: f64, delta_y: f64) -> Result<(), DeskError> {
+    pub fn notify_pointer_axis(&self, delta_x: f64, delta_y: f64) -> Result<(), InputError> {
         let options: HashMap<String, zbus::zvariant::Value<'_>> = HashMap::new();
         self.proxy.call_method(
             "NotifyPointerAxis",
@@ -189,7 +194,7 @@ impl WaylandRemoteDesktop {
         Ok(())
     }
 
-    pub fn notify_keyboard_keycode(&self, keycode: i32, state: u32) -> Result<(), DeskError> {
+    pub fn notify_keyboard_keycode(&self, keycode: i32, state: u32) -> Result<(), InputError> {
         let options: HashMap<String, zbus::zvariant::Value<'_>> = HashMap::new();
         self.proxy.call_method(
             "NotifyKeyboardKeycode",
