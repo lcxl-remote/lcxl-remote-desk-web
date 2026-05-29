@@ -489,7 +489,7 @@ pub async fn run_with_hub(
     // Start the desk pipeline.
     //
     // Both **Default (portable)** and **DeskServer (headless)** route
-    // through the Arch IV in-process daemon-worker pipeline so the WebRTC
+    // through the in-process daemon-worker pipeline so the WebRTC
     // PeerConnection lives in the daemon-side code path identical to
     // ServiceDaemon mode. The signaling proxy's `local_handle` skips
     // itself in DeskServer mode (only Default + ServiceDaemon expose a
@@ -498,7 +498,7 @@ pub async fn run_with_hub(
     // headless "connect to remote signal server" role.
     match startup_mode {
         StartupMode::Default | StartupMode::DeskServer => {
-            info!("Starting desk pipeline (Arch IV in-process daemon, mode={startup_mode:?})");
+            info!("Starting desk pipeline (in-process daemon, mode={startup_mode:?})");
             let settings_clone = shared_settings_data.clone();
             let session_hub = host_control_hub_arc.clone();
             let args_clone = settings.args.clone();

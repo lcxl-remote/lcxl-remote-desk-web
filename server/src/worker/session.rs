@@ -467,7 +467,7 @@ impl WorkerSession {
     /// stream in `framed` event transports and connects the optional media
     /// pipe before delegating to [`Self::run_with_transports`]. The
     /// transport-agnostic main loop is shared with the in-process portable
-    /// path (PR 5) — only the way transports are constructed differs.
+    /// path — only the way transports are constructed differs.
     async fn ipc_loop<R, W>(
         &self,
         mut reader: R,
@@ -508,7 +508,7 @@ impl WorkerSession {
         let event_tx: Arc<dyn EventSender<WorkerToService>> = framed::spawn_event_sender(writer);
         let event_rx: Box<dyn EventReceiver<ServiceToWorker>> = framed::make_event_receiver(reader);
 
-        // Arch IV cut 4: optional media pipe. Connect failure is non-fatal —
+        // Optional media pipe. Connect failure is non-fatal —
         // the worker continues to serve event-pipe traffic (mouse / clipboard
         // / file transfer / ...) and reports `Capabilities` so the daemon can
         // populate `RequestRemote` Init replies even if no frames flow.
@@ -529,7 +529,7 @@ impl WorkerSession {
             None => None,
         };
 
-        // Arch IV file lane: dedicated bidirectional pipe for download
+        // File lane: dedicated bidirectional pipe for download
         // chunks / control replies / upload chunks / cancels — split
         // off from the event lane so SCTP backpressure on a slow
         // browser DataChannel does not head-of-line block heartbeats /
@@ -575,7 +575,7 @@ impl WorkerSession {
     ///
     /// - the named-pipe / Unix-socket path (after Ready/Init handshake on the
     ///   raw byte stream); and
-    /// - the in-process portable path (PR 5) where daemon and worker share
+    /// - the in-process portable path where daemon and worker share
     ///   one process and transports are tokio mpsc channels — no byte
     ///   serialization, no handshake required because the caller just hands
     ///   the [`WorkerInitPayload`] directly.
@@ -589,7 +589,7 @@ impl WorkerSession {
     /// approval prompt) cannot stall heartbeats / IDR write-throughs.
     ///
     /// `shared_hub` is the in-process bypass for the host-control hub. When
-    /// `Some`, the supplied hub is used directly (PR 5 portable mode where
+    /// `Some`, the supplied hub is used directly (portable mode where
     /// daemon and worker share the same `Arc<HostControlHub>`); when `None`
     /// the worker constructs its own hub from `init_payload.host_upstream_url`
     /// (named-pipe daemon mode — Forwarder bridges via ws back to the
@@ -668,7 +668,7 @@ impl WorkerSession {
         // Build the host-control hub. In named-pipe daemon mode the daemon
         // supplied a `host_upstream_url` so we run as a Forwarder and bridge
         // approval / private-screen / whiteboard traffic over ws back to the
-        // daemon's aggregator. In PR 5 portable mode the caller hands us the
+        // daemon's aggregator. In portable mode the caller hands us the
         // daemon's hub directly via `shared_hub` — no ws, no extra task,
         // both ends share the same `Arc`. Standalone / test runs (no
         // upstream and no shared hub) fall back to a Local hub whose
@@ -710,8 +710,8 @@ impl WorkerSession {
         let (writer_tx, writer_rx) = mpsc::unbounded_channel::<WorkerToService>();
         let writer_task = spawn_event_forwarder_task(writer_rx, Arc::clone(&event_tx));
 
-        // Arch IV cut 4: build the media producer when the caller supplied a
-        // media transport. In named-pipe mode this is the secondary pipe; in
+        // Build the media producer when the caller supplied a media
+        // transport. In named-pipe mode this is the secondary pipe; in
         // in-process mode it's an mpsc-backed `MediaSender`. Either way the
         // producer's policy is identical (drop-on-backpressure for P-frames,
         // 500 ms timeout for I-frames).
@@ -730,7 +730,7 @@ impl WorkerSession {
             init_payload.desktop_name.as_deref(),
             init_payload.host_upstream_url.is_some(),
         );
-        // Cut 5: per-connection input handlers. Constructed once per
+        // Per-connection input handlers. Constructed once per
         // worker; `start_connection` / `stop_connection` keyed off the
         // same `connection_id` the daemon ships in `StartMedia` /
         // `StopMedia`.
@@ -738,7 +738,7 @@ impl WorkerSession {
             let desk_settings = shared_settings.read().await.desk.clone();
             Arc::new(InputDispatcher::new(desk_settings))
         };
-        // PR 4 cut 1: clipboard dispatcher. Construction can fail when
+        // Clipboard dispatcher. Construction can fail when
         // the platform host-control helper cannot be initialised
         // (Linux without a clipboard backend, etc.); on failure the
         // worker continues without clipboard sync — the IPC variants
@@ -753,7 +753,7 @@ impl WorkerSession {
                 }
             }
         };
-        // PR 4 cut 2: file transfer dispatcher. Always constructible —
+        // File transfer dispatcher. Always constructible —
         // it owns no resource that can fail at init time. Holds the
         // shared settings + host-control hub so it can run the per-
         // connection `allow_file_transfer` gate (which the daemon-side
@@ -768,7 +768,7 @@ impl WorkerSession {
             shared_settings.clone(),
             Arc::clone(&host_control_hub),
         );
-        // PR 4 cut 3: whiteboard dispatcher. Spawns a bridge thread to
+        // Whiteboard dispatcher. Spawns a bridge thread to
         // the host_control_hub on construction; reuses the same hub
         // the DeskSession (legacy / portable path) uses so messages
         // flow through a single Tauri overlay manager.
@@ -792,8 +792,8 @@ impl WorkerSession {
 
         info!("DeskSession created successfully, entering main loop");
 
-        // Virtual display: platform controller (Windows IDD impl in
-        // phase 2; NotSupported stub everywhere else) + per-worker
+        // Virtual display: platform controller (Windows IDD impl on
+        // Windows; NotSupported stub everywhere else) + per-worker
         // state (attached_display + dual StartMedia cache). Owned by
         // the main loop so all mutations are single-threaded.
         let virtual_display_controller: Arc<dyn VirtualDisplayController> =
@@ -868,7 +868,7 @@ impl WorkerSession {
 
         // Independent heartbeat task: pushes `Heartbeat` to the writer queue
         // every 5 s regardless of what the main loop is doing.
-        // active_connections is reported as 0 because in Arch IV the
+        // active_connections is reported as 0 because the
         // PeerConnections live on the daemon side; the worker has no
         // map to count. The daemon only logs the field at trace level —
         // its watchdog cares about IPC freshness, not the count.
@@ -939,7 +939,7 @@ impl WorkerSession {
                                 ServiceToWorker::Init(_) => {
                                     warn!("Received duplicate Init, ignoring");
                                 }
-                                // Arch IV cut 4: media-control IPC. Routed
+                                // Media-control IPC. Routed
                                 // straight to the producer; the producer
                                 // returns immediately (start_media spawns a
                                 // dedicated capture thread) so the IPC loop
@@ -975,22 +975,22 @@ impl WorkerSession {
                                         // video_device overridden to the
                                         // attached virtual display).
                                         let active = vd_state.record_start(payload);
-                                        // Cut 5: spin up per-connection input
+                                        // Spin up per-connection input
                                         // handlers alongside the encoder so
                                         // mouse / keyboard input is ready as
                                         // soon as the browser opens its DCs.
                                         input_dispatcher.start_connection(&active);
-                                        // PR 4 cut 1: subscribe the connection
+                                        // Subscribe the connection
                                         // to clipboard sync; the dispatcher
                                         // starts its polling loop on the first
                                         // active connection.
                                         if let Some(d) = clipboard_dispatcher.as_ref() {
                                             d.start_connection(&active).await;
                                         }
-                                        // PR 4 cut 2: subscribe the connection
+                                        // Subscribe the connection
                                         // to file transfer commands.
                                         file_transfer_dispatcher.start_connection(&active).await;
-                                        // PR 4 cut 3: subscribe the connection
+                                        // Subscribe the connection
                                         // to whiteboard draw commands.
                                         whiteboard_dispatcher.start_connection(&active).await;
                                         producer.start_media(active);
@@ -1023,7 +1023,7 @@ impl WorkerSession {
                                         producer.update_settings(payload);
                                     }
                                 }
-                                // Cut 5: input IPC. The daemon already
+                                // Input IPC. The daemon already
                                 // gated on `accept_control` /
                                 // `accept_clipboard_sync` before sending,
                                 // so the worker injects unconditionally.
@@ -1036,7 +1036,7 @@ impl WorkerSession {
                                 ServiceToWorker::KeyboardInput(payload) => {
                                     input_dispatcher.dispatch_keyboard(&payload);
                                 }
-                                // PR 4 cut 1: clipboard handlers route to
+                                // Clipboard handlers route to
                                 // the per-worker clipboard dispatcher when
                                 // it was successfully constructed; otherwise
                                 // log + drop so a worker without a clipboard
@@ -1237,12 +1237,12 @@ impl WorkerSession {
                                 // Virtual display: the daemon owns the
                                 // SwDevice handle; the worker owns
                                 // attached_display tracking + the
-                                // controller (driver pipe + CDS). Phase
-                                // 1 ships a NotSupported stub
-                                // controller so these arms exercise
-                                // the data path against an inert
-                                // backend; phase 2 swaps in the real
-                                // Windows IDD implementation.
+                                // controller (driver pipe + CDS). The
+                                // controller is the real Windows IDD
+                                // implementation on Windows and a
+                                // NotSupported stub on other platforms,
+                                // so these arms run against an inert
+                                // backend off-Windows.
                                 ServiceToWorker::SetVirtualDisplayMode(payload) => {
                                     let controller = Arc::clone(&virtual_display_controller);
                                     let attached = vd_state.attached_display.clone();
@@ -1773,7 +1773,7 @@ impl WorkerSession {
 /// onto it via the framed transport from `desk-ipc-protocol`.
 ///
 /// Reader half is dropped because the media transport is uni-
-/// directional in Arch IV (worker → daemon). The daemon does not push
+/// directional (worker → daemon). The daemon does not push
 /// commands on this pipe — it uses the event pipe for that.
 async fn connect_media_pipe(
     pipe_name: &str,

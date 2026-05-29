@@ -17,7 +17,7 @@ use crate::mouse_event::mac;
 /// Construct a platform mouse event handler bound to a hot-updatable
 /// captured-monitor [`SharedMonitorGeometry`].
 ///
-/// The geometry is shared with the worker (Arch IV `InputDispatcher`):
+/// The geometry is shared with the worker (`InputDispatcher`):
 /// when display reconfiguration happens mid-session (`WM_DISPLAYCHANGE`,
 /// IDD `SetMode`, virtual display Attach / Detach) the worker writes
 /// new `(left, top, width, height)` values through its clone of the

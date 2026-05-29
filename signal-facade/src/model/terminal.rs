@@ -106,7 +106,7 @@ mod wincode_tests {
 
     /// PTY content frequently carries escape codes — verify they
     /// survive wincode round-trip verbatim. A regression here would
-    /// silently corrupt terminal output in PR-2's `ReplyFromTerminal`
+    /// silently corrupt terminal output in the `ReplyFromTerminal`
     /// IPC payload.
     #[test]
     fn terminal_input_data_preserves_escape_sequences() {

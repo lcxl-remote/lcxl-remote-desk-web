@@ -31,7 +31,7 @@ pub enum ServiceToWorker {
     /// Force the worker to shut down immediately.
     Shutdown,
 
-    // ---------- Arch IV media control (event pipe) ----------
+    // ---------- Media control (event pipe) ----------
     /// Start a per-connection media pipeline (capture + per-connection
     /// video/audio encoder). Capture is shared across connections; the
     /// encoder is exclusive to `connection_id`.
@@ -53,7 +53,7 @@ pub enum ServiceToWorker {
     /// IDR bursts on unrelated browsers).
     ForceKeyframe(ForceKeyframePayload),
 
-    // ---------- Arch IV input / clipboard (event pipe) ----------
+    // ---------- Input / clipboard (event pipe) ----------
     /// Mouse non-move (button / wheel) event from the browser DataChannel.
     /// `data` is the raw payload as decoded from the channel (currently
     /// JSON; the worker re-decodes with its existing input handler).
@@ -76,7 +76,7 @@ pub enum ServiceToWorker {
     /// Worker replies via [`WorkerToService::ClipboardRead`].
     ClipboardRequest(ConnectionRefPayload),
 
-    // ---------- Arch IV whiteboard pass-through ----------
+    // ---------- Whiteboard pass-through ----------
     // (File-transfer commands moved to a dedicated file lane; see
     // `dual_transport::FILE_QUEUE_CAP` and `WorkerInitPayload::file_pipe_name`.)
     /// Opaque whiteboard / private-screen / Tauri-shell command from the
@@ -84,7 +84,7 @@ pub enum ServiceToWorker {
     /// host_control forwarder.
     WhiteboardCommand(OpaqueConnectionPayload),
 
-    // ---------- Arch IV typed-IPC migration batch 1 ----------
+    // ---------- Typed control plane ----------
     /// Browser-issued private-screen toggle. Worker enables / disables
     /// the per-connection private screen via its `host_control_helper`.
     EnablePrivateScreen(EnablePrivateScreenPayload),
@@ -98,7 +98,7 @@ pub enum ServiceToWorker {
     /// broadcast_media_settings_update`).
     UpdateDeskSettings(UpdateDeskSettingsPayload),
 
-    // ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
+    // ---------- Manager plane (typed) ----------
     /// Browser → worker request for the host's [`SystemInfo`]. Worker
     /// replies via [`WorkerToService::ManagerSystemInfoResponse`].
     ManagerSystemInfoRequest(ManagerRequestRefPayload),
@@ -120,7 +120,7 @@ pub enum ServiceToWorker {
     /// [`WorkerToService::ManagerUpdateSettingsResponse`] (empty body).
     ManagerUpdateSettingsRequest(ManagerUpdateSettingsRequestPayload),
 
-    // ---------- Arch IV typed-IPC migration batch 3 (terminal plane) ----------
+    // ---------- Terminal plane (typed) ----------
     /// Browser → worker request to launch a new PTY-backed terminal
     /// session. Worker replies via
     /// [`WorkerToService::TerminalStarted`] (empty body) on success;
@@ -148,7 +148,7 @@ pub enum ServiceToWorker {
     /// [`TerminalList`]).
     ListTerminalRequest(ListTerminalRequestPayload),
 
-    // ---------- Arch IV file-transfer error feedback (event pipe) ----------
+    // ---------- File-transfer error feedback (event pipe) ----------
     /// Daemon → worker notification that a `dc.send` for a file-transfer
     /// payload failed. The daemon writer task only sees the wire-level
     /// SCTP send error; the worker owns transfer state (upload buffers,
@@ -163,7 +163,7 @@ pub enum ServiceToWorker {
     /// already saturated.
     FileTransferSendFailed(FileTransferSendFailedPayload),
 
-    // ---------- Arch IV virtual display (event pipe) ----------
+    // ---------- Virtual display (event pipe) ----------
     /// Daemon → worker: apply a new mode to the virtual monitor. Worker
     /// pushes the mode through the driver named-pipe and then calls
     /// `ChangeDisplaySettingsExW` on the attached `\\.\DISPLAYn`. Reply
@@ -258,7 +258,7 @@ pub enum WorkerToService {
     /// Worker reports an error
     Error(ErrorPayload),
 
-    // ---------- Arch IV upstream events (event pipe) ----------
+    // ---------- Upstream events (event pipe) ----------
     /// Worker → daemon clipboard read: either spontaneous (host clipboard
     /// changed and `accept_clipboard_sync` is on for some connection) or
     /// in response to [`ServiceToWorker::ClipboardRequest`]. Daemon writes
@@ -272,7 +272,7 @@ pub enum WorkerToService {
     // (File-transfer responses moved to a dedicated file lane; see
     // `dual_transport::FILE_QUEUE_CAP` and `WorkerInitPayload::file_pipe_name`.)
 
-    // ---------- Arch IV typed-IPC migration batch 1 ----------
+    // ---------- Typed control plane ----------
     /// Worker → daemon notification that the per-connection private
     /// screen visibility / support state changed. Sourced from the
     /// worker's `HostControlHub::subscribe_state` broadcast bus.
@@ -281,7 +281,7 @@ pub enum WorkerToService {
     /// signaling websocket.
     PrivateScreenStateChanged(PrivateScreenStateChangedPayload),
 
-    // ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
+    // ---------- Manager plane (typed) ----------
     /// Worker → daemon response to
     /// [`ServiceToWorker::ManagerSystemInfoRequest`]. Daemon
     /// rebuilds the matching `SignalingType::ManagerSystemInfo`
@@ -306,7 +306,7 @@ pub enum WorkerToService {
     /// body — settings persistence happens on the worker side).
     ManagerUpdateSettingsResponse(ManagerResponseRefPayload),
 
-    // ---------- Arch IV typed-IPC migration batch 3 (terminal plane) ----------
+    // ---------- Terminal plane (typed) ----------
     /// Worker → daemon success reply for
     /// [`ServiceToWorker::StartTerminalRequest`]. Empty body — the
     /// `request_id` correlates with the original request. The daemon
@@ -333,7 +333,7 @@ pub enum WorkerToService {
     /// index).
     ListTerminalResponse(ListTerminalResponsePayload),
 
-    // ---------- Arch IV virtual display (event pipe) ----------
+    // ---------- Virtual display (event pipe) ----------
     /// Worker → daemon reply to
     /// [`ServiceToWorker::SetVirtualDisplayMode`]. `outcome` carries
     /// either the mode the driver actually applied (which may have been
@@ -392,17 +392,16 @@ pub struct WorkerInitPayload {
     #[serde(default)]
     pub host_upstream_url: Option<String>,
 
-    /// Arch IV media pipe name. The worker connects to this pipe *in
+    /// Media pipe name. The worker connects to this pipe *in
     /// addition* to the event pipe (the `--pipe` CLI arg) so encoded
     /// video / audio frames travel over a dedicated transport
-    /// independent of the event traffic. `None` on Arch III workers
-    /// and on portable / standalone runs that do not need a separate
-    /// media pipe — the worker treats this as "fall back to single-pipe
-    /// mode" until the cut that wires media_producer (PR 2 / cut 4).
+    /// independent of the event traffic. `None` on portable / standalone
+    /// runs that do not need a separate media pipe — the worker treats
+    /// this as "fall back to single-pipe mode".
     #[serde(default)]
     pub media_pipe_name: Option<String>,
 
-    /// Arch IV file-transfer pipe name. The worker connects to this
+    /// File-transfer pipe name. The worker connects to this
     /// pipe in addition to the event + media pipes so file-transfer
     /// chunks (download responses, upload commands) travel over a
     /// dedicated bidirectional transport. Carries
@@ -449,7 +448,7 @@ pub struct SignalingErrorPayload {
     pub error_message: Option<String>,
 }
 
-// =============== Arch IV: media + per-connection control ===============
+// =============== Media + per-connection control ===============
 
 /// One encoded media frame travelling worker → daemon over the dedicated
 /// `MediaTransport`. Sized for 4K H.264 IDR frames (up to ~2 MB) which
@@ -788,7 +787,7 @@ pub struct ErrorPayload {
     pub connection_id: Option<String>,
 }
 
-// ---------- Arch IV typed-IPC migration batch 1 ----------
+// ---------- Typed control plane ----------
 
 /// Payload for [`ServiceToWorker::EnablePrivateScreen`]. Mirrors the
 /// JSON shape of `desk_signal_facade::model::private_screen::
@@ -821,7 +820,7 @@ pub struct PrivateScreenStateChangedPayload {
     pub data: PrivateScreenStateChangedData,
 }
 
-// ---------- Arch IV typed-IPC migration batch 2 (manager plane) ----------
+// ---------- Manager plane (typed) ----------
 
 /// Shared envelope for body-less manager *requests*
 /// (`ManagerSystemInfoRequest`, `ManagerQuerySettingsRequest`).
@@ -909,7 +908,7 @@ pub struct ManagerQuerySettingsResponsePayload {
     pub settings: RemoteSystemSettings,
 }
 
-// ---------- Arch IV typed-IPC migration batch 3 (terminal plane) ----------
+// ---------- Terminal plane (typed) ----------
 
 /// Payload for [`ServiceToWorker::StartTerminalRequest`]. Carries the
 /// browser-supplied [`StartTerminalSession`] (the comma-separated
@@ -1006,7 +1005,7 @@ pub struct DesktopChangedPayload {
     pub name: String,
 }
 
-// ============= Arch IV: virtual display IPC payloads =============
+// ============= Virtual display IPC payloads =============
 
 /// Payload for [`ServiceToWorker::SetVirtualDisplayMode`]. The browser
 /// sends a `SignalingType::ChangeDisplaySettings`; the daemon validates
@@ -1220,7 +1219,7 @@ mod tests {
         assert!(decoded.config_file_path.is_none());
     }
 
-    // ============== Arch IV variants — wincode round-trips ==============
+    // ============== IPC variants — wincode round-trips ==============
 
     use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
 
@@ -1710,7 +1709,7 @@ mod tests {
         assert_eq!(decoded.payload, payload);
     }
 
-    // === Arch IV typed-IPC migration batch 1 — round-trip tests ===
+    // === Typed control plane — round-trip tests ===
 
     /// `EnablePrivateScreen` carries the same bool the legacy
     /// `EnablePrivateScreenData` JSON used. Round-tripping it under
@@ -1735,7 +1734,7 @@ mod tests {
     }
 
     /// `UpdateDeskSettings` ferries `DeskSettings` over the wincode
-    /// derive added in PR-1B. Verify non-default media + non-media
+    /// derive. Verify non-default media + non-media
     /// fields both survive — these are the ones the worker's
     /// `handle_update_desk_settings` and the daemon's
     /// `broadcast_media_settings_update` both read.
@@ -1788,7 +1787,7 @@ mod tests {
         }
     }
 
-    // === Arch IV typed-IPC migration batch 2 — round-trip tests ===
+    // === Manager plane — round-trip tests ===
 
     /// Body-less manager request envelopes carry only `request_id` +
     /// `connection_id`; verify the field order survives wincode (a
@@ -1824,8 +1823,8 @@ mod tests {
     }
 
     /// `ManagerFileListRequest` ferries `FileListParams` (carries 4
-    /// `Option<DateTime<Local>>` fields via the wincode chrono adapter
-    /// added in PR-1B). Use a non-default page_count (and filename
+    /// `Option<DateTime<Local>>` fields via the wincode chrono adapter).
+    /// Use a non-default page_count (and filename
     /// filter) so a stripped field shows up as a test failure.
     #[test]
     fn manager_file_list_request_round_trips_wincode() {
@@ -1855,7 +1854,7 @@ mod tests {
     }
 
     /// `ManagerUpdateSettingsRequest` ferries `RemoteSystemSettings`
-    /// over the wincode derive added in PR-1B. Round-trip a
+    /// over the wincode derive. Round-trip a
     /// non-default payload so a reorder/strip in the facade struct
     /// trips here rather than silently corrupting persisted settings.
     #[test]
@@ -1934,10 +1933,10 @@ mod tests {
         }
     }
 
-    // === Arch IV typed-IPC migration batch 3 — round-trip tests ===
+    // === Terminal plane — round-trip tests ===
 
     /// `StartTerminalRequest` ferries `StartTerminalSession` over the
-    /// wincode derive added in PR-1B. A non-trivial `command` (with
+    /// wincode derive. A non-trivial `command` (with
     /// comma-separated args) survives the round-trip — a stripped or
     /// reordered field would break terminal launch on matched-version
     /// daemon/worker pairs.
@@ -2101,11 +2100,11 @@ mod tests {
         }
     }
 
-    // === Arch IV typed-IPC migration batch 4 — round-trip tests ===
+    // === Additional payloads — round-trip tests ===
 
     /// `SignalingError.signaling_type` is `SignalingType`, a facade enum
     /// whose wincode derive uses `tag_encoding = "i32"` matched to its
-    /// `#[repr(i32)]` discriminants (PR-1B). Round-trip a representative
+    /// `#[repr(i32)]` discriminants. Round-trip a representative
     /// type + non-zero `error_code` + an explicit message so a
     /// wire-format drift on any field shows up as a test failure rather
     /// than a silent corruption that swaps which `SignalingType` the
@@ -2149,7 +2148,7 @@ mod tests {
     }
 
     /// `ListTerminalResponse` ferries `TerminalList` over the wincode
-    /// derive added in PR-1B. Round-trip a non-empty list so a
+    /// derive. Round-trip a non-empty list so a
     /// stripped field shows up as a test failure rather than a silent
     /// wire-format drift.
     #[test]
@@ -2178,7 +2177,7 @@ mod tests {
         }
     }
 
-    // === PR-2 G2: ServiceToWorker / WorkerToService full-variant coverage ===
+    // === ServiceToWorker / WorkerToService full-variant coverage ===
 
     /// Exhaustive `ServiceToWorker` round-trip. Per-variant tests above
     /// cover the field-level invariants for the high-traffic variants;
@@ -2460,10 +2459,10 @@ mod tests {
         }
     }
 
-    // === PR-2 G3: SignalingErrorPayload full SignalingType coverage ===
+    // === SignalingErrorPayload full SignalingType coverage ===
 
     /// `SignalingErrorPayload.signaling_type` rides the wincode tag
-    /// PR-1B added to the `SignalingType` enum. Iterate every one of
+    /// on the `SignalingType` enum. Iterate every one of
     /// the 36 variants so a missing `#[wincode(tag = N)]` (or a
     /// wrongly-numbered one) surfaces here instead of as a silent
     /// browser-side mismatch on a SignalingError reply.

@@ -1,6 +1,6 @@
-//! Named-pipe ACL helpers for the daemon ↔ worker IPC (Arch IV).
+//! Named-pipe ACL helpers for the daemon ↔ worker IPC.
 //!
-//! The Arch III implementation created the pipe with `D:(A;;GA;;;WD)` —
+//! An earlier implementation created the pipe with `D:(A;;GA;;;WD)` —
 //! "Allow Generic All to Everyone" — which lets any same-machine process
 //! impersonate the worker (inject fake mouse / keyboard events; intercept
 //! clipboard; feed bogus encoded video frames into the daemon). This
@@ -14,7 +14,7 @@
 //!   the worker, started under that user via `CreateProcessAsUserW`, can
 //!   connect.
 //!
-//! The Arch IV dual-pipe design (PR 1) hands every connected pipe to the
+//! The dual-pipe design hands every connected pipe to the
 //! framed-transport helpers in `desk-ipc-protocol::dual_transport`, but
 //! pipe creation itself stays here — the platform-specific Win32 ACL
 //! plumbing has no business living in `desk-ipc-protocol`.
@@ -122,7 +122,7 @@ mod tests {
 
     /// SDDL must include all three ACEs in the documented order and
     /// must never contain the permissive `WD` (Everyone / World) SID
-    /// that the Arch III code used.
+    /// that the earlier code used.
     #[test]
     fn sddl_with_user_sid_grants_sy_ba_user_only() {
         let sid = "S-1-5-21-1234567890-1-2-1001";

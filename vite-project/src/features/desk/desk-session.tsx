@@ -124,7 +124,7 @@ export default function DeskSession() {
         sendMessage
     });
 
-    // PR 6 (Arch IV): the daemon keeps the WebRTC PC alive across worker
+    // The daemon keeps the WebRTC PC alive across worker
     // swaps. The desktop-switch reconnect state machine
     // (`reconnectTimedOut`, `autoReconnectRef`, `switchTimeoutRef`) is
     // gone — the browser sees worker swaps as a brief frame freeze that
@@ -277,8 +277,8 @@ export default function DeskSession() {
     }, [isConnected]);
 
     // Wait for INIT data, then show the config dialog so the user can
-    // pick capture settings. PR 6 (Arch IV): the auto-reconnect path
-    // that fired after `DesktopReady` is gone — the daemon-held PC
+    // pick capture settings. The auto-reconnect path that fired after
+    // `DesktopReady` is gone — the daemon-held PC
     // survives worker swaps so INIT only ever arrives once per session.
     useEffect(() => {
         if (initData && !isRTCConnected && !document.getElementById("desk-config-dialog")) {
@@ -364,8 +364,8 @@ export default function DeskSession() {
     }, [rtcStats, adaptiveQualityEnabled]);
 
     // Adaptive resolution dispatcher: wraps sendMessage so the hook
-    // gets the real wire request_id back (sendMessage signature was
-    // extended in Phase 2.1 to return it). `connection_id` defaults to
+    // gets the real wire request_id back (sendMessage returns it).
+    // `connection_id` defaults to
     // `deskId` because the daemon's auto path keys per-connection.
     // After the send is queued we hand the same id to
     // `useResolutionToast.registerSent` so the status toast switches
@@ -1011,11 +1011,11 @@ export default function DeskSession() {
                             </div>
                         )}
 
-                        {/* PR 6 (Arch IV): the desktop-switching /
-                         * reconnecting / reconnect-timeout overlays were
-                         * removed when the daemon-side keep-PC swap path
-                         * landed — worker swaps no longer tear down the
-                         * browser PC, so there is nothing to overlay. */}
+                        {/* The desktop-switching / reconnecting /
+                         * reconnect-timeout overlays are gone because the
+                         * daemon-side keep-PC swap path means worker swaps
+                         * no longer tear down the browser PC, so there is
+                         * nothing to overlay. */}
 
                         {isWaitingApproval && (
                             <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80 text-white px-6 py-4 rounded-lg shadow-2xl backdrop-blur-md border border-white/10 flex flex-col items-center gap-4 animate-in fade-in slide-in-from-bottom-4">

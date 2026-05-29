@@ -190,7 +190,7 @@ pub async fn run_signaling_proxy(
                     caps.is_admin,
                 );
                 worker_mgr.set_worker_capabilities(caps);
-                // PR 6 keep-PC: every Capabilities arrival is the
+                // Keep-PC: every Capabilities arrival is the
                 // signal the worker is ready to accept media work.
                 // Re-issue cached `StartMedia` + `ForceKeyframe` for
                 // every PC that already negotiated an offer; the
@@ -279,7 +279,7 @@ pub async fn run_signaling_proxy(
                 // Run the switch on a separate task so the message loop
                 // keeps draining (notify_desktop_switch awaits worker
                 // mailbox flushes; bridge_loop pushes more messages while
-                // we wait). PR 6 path: notify_desktop_switch pauses every
+                // we wait). notify_desktop_switch pauses every
                 // PC and tells the dying worker to shut down its
                 // encoders, then start_worker spawns the replacement.
                 // The new worker's `Capabilities` arrival above triggers
@@ -309,8 +309,8 @@ pub async fn run_signaling_proxy(
                     err.code, err.message, err.recoverable, err.connection_id
                 );
                 // MediaTransportStuck self-heal: I-frame send timed out
-                // on the worker side. Per the Arch IV plan the daemon
-                // (not the worker) owns recovery — issue StopMedia +
+                // on the worker side. The daemon (not the worker) owns
+                // recovery — issue StopMedia +
                 // StartMedia + ForceKeyframe so the encoder pipeline
                 // is rebuilt and a fresh IDR clears the paused flag.
                 if err.code == ERROR_CODE_MEDIA_TRANSPORT_STUCK {
@@ -328,7 +328,7 @@ pub async fn run_signaling_proxy(
                     }
                 }
             }
-            // PR 3 cursor sync: worker emits CursorData when its
+            // Cursor sync: worker emits CursorData when its
             // capture loop sees a cursor shape / position update;
             // daemon writes the JSON bytes to the matching browser's
             // `cursor_sync_event` DC. Lookup happens in
@@ -337,7 +337,7 @@ pub async fn run_signaling_proxy(
             WorkerToService::CursorData(payload) => {
                 crate::daemon::pc_manager::write_cursor_data(&pc_registry, payload).await;
             }
-            // PR 4 cut 1 clipboard write-back: worker emits
+            // Clipboard write-back: worker emits
             // ClipboardRead when its polling task observes a local
             // clipboard change (or in response to ClipboardRequest);
             // daemon writes the JSON to the matching browser's

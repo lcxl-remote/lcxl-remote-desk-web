@@ -1,4 +1,4 @@
-//! # Worker-side input dispatcher (Arch IV cut 5)
+//! # Worker-side input dispatcher
 //!
 //! Per-`connection_id` mouse / keyboard injection handlers. The
 //! daemon's `on_data_channel` router (see `daemon::pc_manager::
@@ -61,14 +61,14 @@ use desk_signal_facade::model::image_capture::DisplayInfo;
 use log::{debug, error, info, warn};
 
 /// Per-connection injection state. Mirrors the per-DC `Arc<Mutex<...>>`
-/// pattern used by Arch III's `service::mouse_event` /
+/// pattern used by the legacy `service::mouse_event` /
 /// `service::keyboard_event` handlers; the difference is the dispatcher
 /// constructs them at `StartMedia` time rather than at first DC open.
 struct ConnectionInputState {
     mouse: Box<dyn MouseEventHandler + Send + Sync>,
     keyboard: Box<dyn KeyboardEventHandler + Send + Sync>,
     /// Last sequence number observed for mouse events. Discards late
-    /// out-of-order packets to match Arch III `handle_mouse_event`
+    /// out-of-order packets to match the legacy `handle_mouse_event`
     /// behaviour (browser sends `sequence_number` to deduplicate
     /// retransmits / late deliveries).
     last_mouse_seq: u64,
@@ -92,7 +92,7 @@ pub struct InputDispatcher {
     /// Initial DeskSettings; used to pull `wayland_control_mode`. The
     /// dispatcher does not refresh this snapshot mid-session — settings
     /// changes that affect input semantics (e.g. wayland mode flip)
-    /// are out of scope for cut 5 and would require an explicit IPC
+    /// are not currently supported and would require an explicit IPC
     /// notify path anyway.
     desk_settings: DeskSettings,
     inner: Arc<StdMutex<HashMap<String, ConnectionInputState>>>,
@@ -225,8 +225,7 @@ impl InputDispatcher {
     }
 
     /// Decode + inject a mouse non-move event. Late out-of-order
-    /// packets (sequence_number < last) are silently dropped to match
-    /// Arch III behaviour.
+    /// packets (sequence_number < last) are silently dropped.
     pub fn dispatch_mouse(&self, payload: &InputPayload) {
         let event = match decode_mouse(&payload.data) {
             Some(e) => e,
@@ -261,8 +260,8 @@ impl InputDispatcher {
 
     /// Decode + inject a mouse-move event. Same path as
     /// [`dispatch_mouse`]; the daemon ships moves on a distinct IPC
-    /// variant only so the worker can apply move-specific coalescing
-    /// in a future cut. Cut 5 treats them identically.
+    /// variant only so the worker can later apply move-specific
+    /// coalescing. They are currently treated identically.
     pub fn dispatch_mouse_move(&self, payload: &InputPayload) {
         self.dispatch_mouse(payload);
     }

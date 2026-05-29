@@ -1,4 +1,4 @@
-//! # Multi-pipe IPC transport (Arch IV)
+//! # Multi-pipe IPC transport
 //!
 //! Three independent transports run in parallel between daemon and worker:
 //!
@@ -37,8 +37,8 @@
 //! ## Design notes
 //!
 //! - The trait surface is intentionally minimal. Concrete implementations
-//!   ([`InProcess`] and [`framed`]) live alongside; PR 1 commit 5 adds
-//!   the strict-ACL named-pipe constructor in `server`.
+//!   ([`InProcess`] and [`framed`]) live alongside; the strict-ACL
+//!   named-pipe constructor lives in `server`.
 //! - `MediaSender` distinguishes I-frame vs P-frame at send time so the
 //!   transport applies different policies. The default
 //!   [`MediaSender::send_frame`] dispatches by [`MediaFrameKind`].
@@ -70,7 +70,7 @@
 //! - `ForceKeyframe` is **never broadcast** — a PLI from browser A must
 //!   not trigger an IDR burst from connection B's encoder.
 //! - `StopMedia { connection_id }` is the *only* worker-side cleanup
-//!   trigger in Arch IV. Workers do not infer connection-close from
+//!   trigger. Workers do not infer connection-close from
 //!   anything else; daemon owns connection lifecycle (PC close →
 //!   StopMedia). `PerConnectionContext::Drop` releases the encoder
 //!   handle, the per-connection IPC senders, and the cursor channel.
@@ -109,7 +109,7 @@ pub const EVENT_QUEUE_CAP: usize = 256;
 /// queue → file lane → worker download / upload loop) without
 /// head-of-line blocking the event lane (heartbeat, signaling, manager
 /// responses). 32 chunks × 60 KB ≈ 1.9 MB single-direction buffer
-/// cap, mirroring the Arch III high-watermark.
+/// cap, matching the previous single-pipe high-watermark.
 pub const FILE_QUEUE_CAP: usize = 32;
 
 /// Default I-frame send timeout. If the media queue is full and an
@@ -293,7 +293,7 @@ pub mod inprocess {
     /// `FILE_QUEUE_CAP`. The semantics are identical to `make_event`
     /// (await-backpressure, never-drop) but with the smaller capacity
     /// reserved for the file lane so each direction's buffer is
-    /// bounded near the Arch III watermark.
+    /// bounded near the previous single-pipe watermark.
     pub fn make_file_inprocess<M: Send + 'static>()
     -> (Arc<dyn EventSender<M>>, Box<dyn EventReceiver<M>>) {
         make_event_inprocess_with_cap(FILE_QUEUE_CAP)
@@ -813,9 +813,9 @@ mod tests {
         );
     }
 
-    // === PR-2 G1: production payload-size coverage on the framed path ===
+    // === Production payload-size coverage on the framed path ===
 
-    /// PR-2 G1 — A wincode-encoded event payload comfortably above
+    /// A wincode-encoded event payload comfortably above
     /// wincode's 4 MiB default preallocation guard must round-trip
     /// through the framed event lane. If `spawn_event_sender` or
     /// `make_event_receiver` falls back to the default
@@ -848,7 +848,7 @@ mod tests {
         }
     }
 
-    /// PR-2 G1 — A 2 MB I-frame (the upper-end of a 4K H.264 IDR seen
+    /// A 2 MB I-frame (the upper-end of a 4K H.264 IDR seen
     /// in the POC) must round-trip through the framed media lane.
     /// Combined with `framed_event_above_4mib_round_trips`, this
     /// covers both the media and event framed paths against the

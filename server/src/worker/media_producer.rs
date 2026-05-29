@@ -1,27 +1,26 @@
-//! # Worker-side media producer (Arch IV)
+//! # Worker-side media producer
 //!
 //! Owns the screen capture loop and the per-`connection_id` video
 //! encoder pool. Replaces the in-`service::signaling`-mod
-//! `capture_screen_task` that ran one capture pipeline per peer
-//! connection in Arch III; in Arch IV the daemon owns the
+//! `capture_screen_task` that used to run one capture pipeline per peer
+//! connection in the worker; the daemon now owns the
 //! `RTCPeerConnection` and the worker pushes encoded
 //! [`MediaFrame`](desk_ipc_protocol::message::MediaFrame)s over a
 //! dedicated [media transport](desk_ipc_protocol::dual_transport::MediaSender).
 //!
-//! ## What cut 4 implements
+//! ## Video capture + encode
 //!
 //! - Per-`connection_id` capture + encoder pair, each driven by a
 //!   dedicated OS thread with its own current-thread Tokio runtime
-//!   (mirrors the Arch III pattern — DXGI / WASAPI handles are COM-
-//!   bound and thread-affine, so a dedicated thread per pipeline is
-//!   the safe choice).
+//!   (DXGI / WASAPI handles are COM-bound and thread-affine, so a
+//!   dedicated thread per pipeline is the safe choice).
 //! - `StartMedia` / `StopMedia` / `ForceKeyframe` / `UpdateMediaSettings`
 //!   handlers driven from the worker event loop.
 //! - `MediaCapabilities` snapshot constructor used by `worker::session`
 //!   to send a one-shot `WorkerToService::Capabilities` to the daemon
 //!   on Init.
 //!
-//! ## What PR 3 adds
+//! ## Audio + cursor sync
 //!
 //! - **Audio** — a sibling thread alongside video that drives
 //!   `desk-capture-engine`'s audio capture + Opus encoder, ships
@@ -36,7 +35,7 @@
 //!   `pc_manager::write_cursor_data` looks up the matching
 //!   `cursor_sync_event` DC and forwards via `dc.send_text(...)`.
 //!
-//! ## What PR 7 follow-up adds
+//! ## Live settings updates
 //!
 //! - **`UpdateMediaSettings` live-apply** — fps / quality changes
 //!   surface through `update_settings` → per-pipeline mpsc, drained
@@ -54,7 +53,7 @@
 //! same key reuse one capture loop and one OS-level capture
 //! instance; the broadcast channel fans frames out to each encoder
 //! thread. This is the **correctness** layer for the multi-browser
-//! scenario, not just an optimisation: the cut 4 docstring claimed
+//! scenario, not just an optimisation: an earlier design assumed
 //! "DXGI duplications can coexist when targeting the same output",
 //! which is false — `IDXGIOutputDuplication::DuplicateOutput()`
 //! returns `E_INVALIDARG` on the second call, taking the second
@@ -118,10 +117,10 @@ struct ConnectionTask {
     /// Held so the video task can be joined on `shutdown()`. None
     /// after the thread exits naturally on stop_flag observation.
     video_handle: Option<thread::JoinHandle<()>>,
-    /// Audio pipeline handle (PR 3). `None` when the worker did not
-    /// build an audio pipeline for this connection — currently always
-    /// spawned alongside video, but kept Optional so a future cut can
-    /// disable audio per connection without changing the field shape.
+    /// Audio pipeline handle. `None` when the worker did not build an
+    /// audio pipeline for this connection — currently always spawned
+    /// alongside video, but kept Optional so audio can later be disabled
+    /// per connection without changing the field shape.
     audio_handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -309,11 +308,10 @@ impl MediaProducer {
             debug!("[MediaProducer] {connection_id}: skipping video pipeline (start_video=false)");
             None
         };
-        // PR 3: audio pipeline runs in its own dedicated thread (WASAPI
+        // Audio pipeline runs in its own dedicated thread (WASAPI
         // / PipeWire / SCKit handles are COM/system-thread-bound the
         // same way as the video capture, so a separate thread + a
-        // current-thread Tokio runtime is the right shape — same
-        // pattern Arch III used in `capture_audio_task`).
+        // current-thread Tokio runtime is the right shape).
         let audio_handle = if payload.start_audio {
             Some(spawn_audio_pipeline_thread(
                 self.desk_settings.clone(),
@@ -471,7 +469,7 @@ impl MediaProducer {
         // Daemon's `pc_manager` echoes these maps verbatim into
         // `InitSignalingData::{video,audio}_device_list`, so the
         // browser's capture-source picker keeps the per-driver
-        // grouping it had in the Arch III worker-owned-PC path.
+        // grouping it had in the legacy worker-owned-PC path.
         let video_device_list = list_image_capture();
         let audio_device_list = list_audio_capture();
         MediaCapabilities {
@@ -816,7 +814,7 @@ fn spawn_video_pipeline_thread(
         .expect("spawn media video pipeline thread")
 }
 
-/// PR 3: spawn the dedicated thread that owns one connection's audio
+/// Spawn the dedicated thread that owns one connection's audio
 /// capture + Opus encoder. Same threading rationale as
 /// [`spawn_video_pipeline_thread`] — WASAPI / PipeWire / SCKit handles
 /// are system-thread-bound, so audio gets its own thread + runtime.
@@ -870,8 +868,8 @@ fn spawn_audio_pipeline_thread(
 /// encoder. fps is honoured by per-connection throttling — the
 /// shared capture loop runs at the OS refresh rate; this loop drops
 /// frames when its own quality knob asks for a lower rate. Heartbeat-
-/// frame behaviour mirrors Arch III: on a static desktop emit one
-/// cached frame per second so the receiver does not stall.
+/// frame behaviour: on a static desktop emit one cached frame per
+/// second so the receiver does not stall.
 async fn video_pipeline_loop(
     base_settings: DeskSettings,
     payload: StartMediaPayload,
@@ -1274,8 +1272,8 @@ async fn video_pipeline_loop(
     Ok(())
 }
 
-/// PR 3 inner async loop for audio. Mirrors Arch III's
-/// `capture_audio_task`: 5 ms ticker drives an inner buffer-drain loop
+/// Inner async loop for audio. Mirrors the legacy `capture_audio_task`:
+/// 5 ms ticker drives an inner buffer-drain loop
 /// that pulls 20 ms Opus packets out of the encoder and ships each one
 /// as a `MediaFrame { Audio }` to the daemon. The daemon's
 /// `write_video_frame` already routes `MediaFrameKind::Audio` to the
@@ -1314,7 +1312,7 @@ async fn audio_pipeline_loop(
     let mut encoder =
         create_audio_encoder(&base_settings, wave_format).map_err(|e| format!("{e}"))?;
 
-    // 5 ms outer tick + inner drain loop matches Arch III's pacing —
+    // 5 ms outer tick + inner drain loop sets the pacing —
     // capture buffers fill at the OS audio cadence (typically 10 ms),
     // and at 5 ms ticks we drain everything sitting in the buffer
     // before sleeping again. Opus encoded packets carry 20 ms of audio
@@ -1343,8 +1341,8 @@ async fn audio_pipeline_loop(
                     if err.error_code == desk_utils::error::DeskErrorCode::ACTION_NEED_RETRY =>
                 {
                     // Capture stream went away (device unplug, format
-                    // change, sleep/resume). Recreate per Arch III's
-                    // behaviour and continue from the next tick.
+                    // change, sleep/resume). Recreate the capture and
+                    // continue from the next tick.
                     warn!(
                         "[MediaProducer:{connection_id}] audio capture needs retry — \
                          recreating capture"
@@ -1388,8 +1386,7 @@ async fn audio_pipeline_loop(
                 }
             };
             // Empty buffer = capture had nothing this tick — go back
-            // to the ticker without sending. Arch III followed the
-            // same convention.
+            // to the ticker without sending.
             if encoded.data.is_empty() {
                 break;
             }
@@ -2428,7 +2425,7 @@ mod tests {
         );
     }
 
-    // ============== PR 3 audio + cursor sync tests ==============
+    // ============== audio + cursor sync tests ==============
 
     /// `build_media_frame` for an audio packet stamps the right
     /// `MediaFrameKind` + `MediaCodec` and the daemon's

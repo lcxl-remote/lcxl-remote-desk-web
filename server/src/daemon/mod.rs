@@ -132,7 +132,7 @@ pub async fn run_service_daemon_inner(
         ),
     }
 
-    // Daemon-wide per-`connection_id` PeerConnection registry (Arch IV).
+    // Daemon-wide per-`connection_id` PeerConnection registry.
     // Shared between `WorkerManager` (so the media-pipe receiver task
     // can look up `video_track`s) and `signaling_proxy` (so the
     // `RouterContext` referenced by every signaling endpoint sees the
@@ -272,9 +272,9 @@ fn get_current_session_id() -> u32 {
     0
 }
 
-/// Single-process entry into the Arch IV daemon-worker pipeline, used by
+/// Single-process entry into the daemon-worker pipeline, used by
 /// [`crate::run_with_hub`] for both `StartupMode::Default` (portable) and
-/// `StartupMode::DeskServer` (headless desk node). Replaces the Arch III
+/// `StartupMode::DeskServer` (headless desk node). Replaces the legacy
 /// `start_desk_session` path so that even in single-process modes the
 /// WebRTC PeerConnection lives in the daemon-side code, not in a
 /// `DeskSession`-coupled `capture` task.
@@ -304,7 +304,7 @@ pub async fn start_inprocess_daemon(
     settings: web::Data<SharedSettings>,
     host_control_hub: Arc<crate::host_control::HostControlHub>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("Starting in-process daemon (Arch IV portable mode)");
+    info!("Starting in-process daemon (portable mode)");
 
     let pc_registry = PcRegistry::new();
     let (worker_mgr, worker_rx) =

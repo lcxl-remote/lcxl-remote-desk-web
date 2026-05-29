@@ -1,14 +1,11 @@
 //! Virtual display abstraction.
 //!
 //! Defines a platform-agnostic contract for creating and controlling
-//! virtual monitors. The Windows backend (phase 2) drives a Microsoft
-//! Indirect Display Driver (IDD) via a named-pipe control channel; other
-//! platforms fulfil the contract with a permanent `NotSupported` stub.
-//!
-//! Phase 1 ships only the protocol skeleton — every platform impl is a
-//! stub returning `NotSupported`. Phase 2 replaces the Windows stub
-//! with the real `SwDeviceCreate` + driver-pipe + `ChangeDisplaySettings`
-//! pipeline.
+//! virtual monitors. The Windows backend drives a Microsoft Indirect
+//! Display Driver (IDD) via a named-pipe control channel (the real
+//! `SwDeviceCreate` + driver-pipe + `ChangeDisplaySettings` pipeline);
+//! other platforms fulfil the contract with a permanent `NotSupported`
+//! stub.
 
 use serde::{Deserialize, Serialize};
 
@@ -184,7 +181,7 @@ pub const PIPE_NAME: &str = r"\\.\pipe\LcxlVirtualDisplay";
 // are tolerated by older peers thanks to `serde`'s default skip-unknown
 // behaviour for structs and the explicit `command` tag for requests). A
 // breaking change to the wire format MUST bump `DRIVER_PROTOCOL_VERSION`
-// on both sides — runtime version negotiation is a phase-5 follow-up.
+// on both sides — runtime version negotiation is not yet implemented.
 
 /// Request envelope sent from the worker to the driver.
 ///
@@ -258,8 +255,8 @@ impl DriverResponse {
 
 /// Schema version for the driver named-pipe protocol. Bump whenever the
 /// wire format changes in a way an older peer cannot parse; both Rust
-/// and C++ sides MUST be rebuilt together. Runtime negotiation is a
-/// phase-5 follow-up — for now we rely on lockstep deployment of the
+/// and C++ sides MUST be rebuilt together. Runtime negotiation is not
+/// yet implemented — for now we rely on lockstep deployment of the
 /// driver and the user-mode controller.
 pub const DRIVER_PROTOCOL_VERSION: u32 = 1;
 

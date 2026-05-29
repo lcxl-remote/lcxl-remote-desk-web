@@ -91,5 +91,6 @@ Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI 规范: `http://localh
 2. **Rust:** 使用 `rustfmt` 格式化，函数/模块名使用 `snake_case`，类型名使用 `PascalCase`，常量使用 `SCREAMING_SNAKE_CASE`。
 3. **TypeScript/React:** 4 个空格缩进，组件名使用 `PascalCase`，钩子名使用 `useXxx`，`src/components/ui` 中的文件名使用 `kebab-case`。
 4. **代码注释**必须使用**英文 (English)**。
-5. **Git 提交信息**必须使用**英文 (English)**，并遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)。
-6. **测试用例 (CRITICAL)**：更改代码必须要增加测试用例。
+5. **注释只描述当前代码 (CRITICAL)**：注释只能说明代码**当前**的行为、意图与约束，**禁止保留开发阶段标记**——例如 `PR-A` / `PR 6` / `cut 4` / `Cut 5` / `phase-1` / `Arch III` / `Arch IV` / `batch 2` 这类指代某次 PR、某个开发阶段或某代架构的字样。这些标记对读代码的人毫无意义、只会造成困惑。改写时把"曾经如何、某阶段会做什么"重述为对现状的客观描述（如需保留历史背景，用 "previously" / "legacy" / "an earlier design" 等中性措辞，不要带阶段代号）。**例外**：描述算法/状态机当前运行步骤的 "Phase 1/2/3"、"Step N" 属于对当前逻辑的说明，可保留。
+6. **Git 提交信息**必须使用**英文 (English)**，并遵循 Conventional Commits 规范 (`feat:`, `fix:`, `chore:`)。
+7. **测试用例 (CRITICAL)**：更改代码必须要增加测试用例。

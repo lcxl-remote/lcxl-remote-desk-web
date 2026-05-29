@@ -118,7 +118,7 @@ fn platform_factory_returns_not_supported_on_unsupported_platforms() {
 /// rather than an inert stub. We can't reach the driver from CI, so we
 /// only verify that the lifecycle attempt fails with `DeviceCreate`
 /// (driver missing) — never with `NotSupported`, which would mean we
-/// regressed to the phase-1 stub.
+/// regressed to the inert stub.
 #[cfg(target_os = "windows")]
 #[test]
 fn platform_factory_returns_real_windows_provider() {
@@ -128,7 +128,7 @@ fn platform_factory_returns_real_windows_provider() {
         .expect_err("CI host has no lcxl IDD driver installed");
     assert!(
         !matches!(err, VirtualDisplayError::NotSupported),
-        "Windows factory regressed to the phase-1 NotSupported stub: {err}"
+        "Windows factory regressed to the NotSupported stub: {err}"
     );
     // The only reasonable error on a stock CI host is DeviceCreate
     // (driver missing / no driver match). Anything else means the

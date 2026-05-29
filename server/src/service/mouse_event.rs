@@ -9,13 +9,13 @@ use desk_input_injection::model::data_channel::MouseEventData;
 use desk_input_injection::model::geometry::{MonitorGeometry, shared as shared_geometry};
 use desk_input_injection::mouse_event::mouse_event_factory::create_mouse_event_handler;
 
-// NOTE: This function is currently dead code (Arch III). The
+// NOTE: This function is currently dead code. The
 // `service/data_channel.rs::handle_data_channel_event` caller is never
 // installed — every startup mode now routes data channels through
 // `daemon/pc_manager.rs::on_data_channel`, which forwards mouse
 // events to the worker via `ServiceToWorker::MouseInput` IPC. The
 // real handler lives in `worker/input_dispatcher.rs`. This file is
-// preserved only so a future cleanup PR can remove the entire
+// preserved only so a future cleanup can remove the entire
 // `service/{data_channel,mouse_event,keyboard_event,clipboard_event,
 // file_transfer,whiteboard_event}.rs` group in one go.
 pub async fn handle_mouse_event(

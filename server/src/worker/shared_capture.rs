@@ -1,11 +1,11 @@
-﻿//! Shared image-capture broadcaster for the worker side of Arch IV.
+﻿//! Shared image-capture broadcaster for the worker side.
 //!
 //! Two browsers connecting to the same desktop both want a frame
 //! stream from `(backend, output_index)` 鈥?but the OS-level capture
 //! sources (DXGI Output Duplication in particular) treat
 //! `IDXGIOutputDuplication::DuplicateOutput` as exclusive: the second
 //! call against the same output in the same process returns
-//! `E_INVALIDARG`. Pre-Arch IV the worker spawned a dedicated
+//! `E_INVALIDARG`. Previously the worker spawned a dedicated
 //! `ImageCapture` per connection; the second connection therefore
 //! crashed its video pipeline and the user saw a black screen on the
 //! second browser tab.

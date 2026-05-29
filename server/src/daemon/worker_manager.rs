@@ -30,7 +30,7 @@ pub struct WorkerManager {
     settings: web::Data<SharedSettings>,
     inner: Arc<Mutex<WorkerManagerInner>>,
     worker_msg_tx: Arc<mpsc::UnboundedSender<WorkerToService>>,
-    /// Daemon-side per-`connection_id` PeerConnection registry (Arch IV).
+    /// Daemon-side per-`connection_id` PeerConnection registry.
     /// Held as a clonable handle so the media-pipe receiver task can
     /// look up `video_track`s and call `write_sample` without going back
     /// through `signaling_proxy`. The registry itself is shared with
@@ -328,7 +328,7 @@ impl WorkerManager {
         Ok(())
     }
 
-    /// In-process variant of [`Self::start_worker`] used by PR 5 portable
+    /// In-process variant of [`Self::start_worker`] used by portable
     /// mode. Skips `CreateProcessAsUserW` and the named-pipe handshake;
     /// instead constructs in-process tokio mpsc transports
     /// ([`inprocess::make_event`] + [`inprocess::make_media`]) and spawns
@@ -546,8 +546,8 @@ impl WorkerManager {
     /// Take a snapshot of the latest reported worker capabilities.
     /// Returns `None` until the worker has sent Capabilities at least
     /// once after Init; in that window the daemon ships an empty
-    /// device list, which is the same behaviour as Arch III on first
-    /// connection.
+    /// device list, the same behaviour as the legacy single-process
+    /// path on first connection.
     pub fn worker_capabilities(&self) -> Option<MediaCapabilities> {
         self.worker_capabilities.lock().unwrap().clone()
     }
@@ -726,7 +726,7 @@ impl WorkerManager {
     /// worker are dropped instead of pushed onto the browser PC. The first
     /// IDR from the replacement worker clears each per-PC flag in place.
     ///
-    /// **Keep-PC semantics**: Arch IV holds the WebRTC PC in the daemon,
+    /// **Keep-PC semantics**: the daemon holds the WebRTC PC,
     /// so worker swaps are invisible to the browser apart from a brief
     /// frame-freeze that resolves on the new worker's first IDR. There
     /// is no browser-facing `SignalingType::DesktopSwitching` emission and
@@ -1109,7 +1109,7 @@ async fn run_pipe_server(
 
     let server = create_named_pipe_with_sddl(&pipe_path, &sddl_str)?;
 
-    // Arch IV cut 4: pre-create the secondary "media" pipe under the
+    // Pre-create the secondary "media" pipe under the
     // same ACL so it exists by the time the worker (which receives the
     // pipe name in Init) tries to connect. Creating both up-front means
     // the worker never races against pipe creation; it only ever races
@@ -1118,7 +1118,7 @@ async fn run_pipe_server(
     let media_pipe_path = format!(r"\\.\pipe\{media_pipe_name}");
     let media_server = create_named_pipe_with_sddl(&media_pipe_path, &sddl_str)?;
 
-    // Arch IV file lane: third dedicated pipe for file-transfer data
+    // File lane: third dedicated pipe for file-transfer data
     // (download chunks / control replies / upload chunks / cancels)
     // running independent of event + media so SCTP backpressure on a
     // slow browser DC propagates end-to-end without HOL-blocking
@@ -1278,7 +1278,7 @@ async fn run_pipe_server(
 
 /// Build a `tokio::net::windows::named_pipe::NamedPipeServer` whose
 /// DACL is derived from the supplied SDDL string. Pulled out so the
-/// event pipe and the Arch IV media pipe share exactly the same ACL
+/// event pipe and the media pipe share exactly the same ACL
 /// path — the security analysis in `pipe_security` covers both.
 #[cfg(target_os = "windows")]
 fn create_named_pipe_with_sddl(
@@ -1442,8 +1442,9 @@ async fn run_pipe_server(
             signaling_url: None,
             auth_token: ipc_token,
             host_upstream_url: Some(host_upstream_url),
-            // Arch IV media pipe wiring lands in PR 2 cut 4. Until then
-            // the worker stays single-pipe (Arch III).
+            // This Unix-socket path does not create a dedicated media
+            // socket, so the worker runs without a separate media
+            // transport (single-pipe fallback).
             media_pipe_name: None,
             file_pipe_name: Some(file_socket_path.clone()),
             // Carry the daemon's settings file path so worker-side
@@ -1750,8 +1751,8 @@ mod tests {
     /// a replacement worker. In portable mode there is no external
     /// process to relaunch, and `start_worker` would call
     /// `CreateProcessAsUserW` from a non-SYSTEM context — succeeding
-    /// only by accident, mostly failing in confusing ways. The fix in
-    /// PR 7 audit cut: short-circuit the recovery before any spawn.
+    /// only by accident, mostly failing in confusing ways. The fix:
+    /// short-circuit the recovery before any spawn.
     #[tokio::test]
     async fn handle_crash_recovery_is_noop_when_inprocess() {
         let (mgr, _rx) = test_manager();
@@ -1964,7 +1965,7 @@ mod tests {
 }
 
 /// Cross-platform tests for the transport-agnostic bridge — exercises the
-/// in-process `EventSender` / `EventReceiver` path the PR 5 portable mode
+/// in-process `EventSender` / `EventReceiver` path the portable mode
 /// uses without needing Windows named pipes or a daemon process. The
 /// Windows-only `tests` module above stays gated because it pulls in
 /// `WTSQueryUserToken` / Windows token APIs.

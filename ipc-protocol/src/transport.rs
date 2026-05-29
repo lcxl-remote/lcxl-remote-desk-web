@@ -196,7 +196,7 @@ mod tests {
         wire.clear();
     }
 
-    /// PR-2 G1 — A payload comfortably above wincode's 4 MiB default
+    /// A payload comfortably above wincode's 4 MiB default
     /// preallocation guard but below the 16 MB transport ceiling must
     /// round-trip via `write_message` + `read_message`. If anything in
     /// the IPC path falls back to a default `wincode::serialize` /

@@ -1,4 +1,4 @@
-//! # Worker-side whiteboard dispatcher (Arch IV PR 4 cut 3)
+//! # Worker-side whiteboard dispatcher
 //!
 //! Mirrors `service::whiteboard_event::handle_whiteboard_event` but
 //! receives draw messages over the IPC event pipe instead of from a
@@ -10,24 +10,25 @@
 //!
 //! ## Show / Hide lifecycle
 //!
-//! Arch III sends a `WhiteboardCommand::Show(connection_id)` on every
-//! incoming draw message (the Tauri overlay is idempotent w.r.t.
-//! Show), and `WhiteboardCommand::Hide(...)` on DC close. PR 4 cut 3
-//! preserves the Show-on-every-message behaviour so the overlay
-//! semantics stay identical, and emits Hide on `stop_connection` —
-//! that's the closest worker-side analogue of the browser closing the
-//! DC. (In Arch IV the daemon owns the DC's `on_close` callback; we
-//! could surface a dedicated IPC for it later, but `StopMedia`
-//! already fires when the browser disconnects.)
+//! A `WhiteboardCommand::Show(connection_id)` is sent on every incoming
+//! draw message (the Tauri overlay is idempotent w.r.t. Show), and
+//! `WhiteboardCommand::Hide(...)` on DC close. The dispatcher keeps the
+//! Show-on-every-message behaviour so the overlay semantics stay
+//! identical, and emits Hide on `stop_connection` — that's the closest
+//! worker-side analogue of the browser closing the DC. (The daemon owns
+//! the DC's `on_close` callback; we could surface a dedicated IPC for
+//! it later, but `StopMedia` already fires when the browser
+//! disconnects.)
 //!
 //! ## Permission gating
 //!
 //! The daemon's DC router gates browser→worker forwarding on
-//! `accept_control` (`pc_manager::route_is_permitted`). Arch III
-//! additionally cached `check_security_permission(allow_whiteboard)`
-//! per-DC; that finer-grained gate is not yet plumbed across the
-//! daemon/worker boundary. Like file_transfer (cut 2) the worker
-//! trusts the daemon's gate and does not re-check.
+//! `accept_control` (`pc_manager::route_is_permitted`). The legacy
+//! single-process path additionally cached
+//! `check_security_permission(allow_whiteboard)` per-DC; that
+//! finer-grained gate is not yet plumbed across the daemon/worker
+//! boundary. Like file_transfer the worker trusts the daemon's gate
+//! and does not re-check.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -54,7 +55,7 @@ pub struct WhiteboardDispatcher {
 impl WhiteboardDispatcher {
     /// Construct a dispatcher whose draw / show / hide commands fan
     /// into the supplied `host_control_hub`. Spawns the bridge thread
-    /// once (same shape as Arch III's `DeskSession::new`).
+    /// once (same shape as the legacy `DeskSession::new`).
     pub fn new(host_control_hub: Arc<HostControlHub>) -> Self {
         let sender = bridge_whiteboard_to_hub(host_control_hub);
         Self {
@@ -152,7 +153,7 @@ impl WhiteboardDispatcher {
                 return;
             }
         };
-        // Mirror Arch III: send Show on every message so the overlay
+        // Send Show on every message so the overlay
         // is guaranteed to be visible even if the user dismissed it
         // mid-session. The Tauri manager dedupes.
         if let Err(e) = inner

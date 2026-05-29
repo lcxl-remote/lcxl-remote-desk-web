@@ -123,8 +123,8 @@ describe("normaliseDims", () => {
     });
 
     /**
-     * No 8-alignment after Phase 1.3 — odd numbers must come through
-     * untouched. Both clamps still fire: undersized → MIN_DIMENSION,
+     * No 8-alignment — odd numbers must come through untouched. Both
+     * clamps still fire: undersized → MIN_DIMENSION,
      * oversized → MAX_DIMENSION.
      */
     it("clamps to [640, 7680] without alignment rounding", () => {

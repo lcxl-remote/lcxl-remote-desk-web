@@ -106,7 +106,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         const { signaling_type, signaling_data } = lastMessage;
 
         const handleSignaling = async () => {
-            // PR 6 (Arch IV): the daemon now owns the WebRTC PC and
+            // The daemon owns the WebRTC PC and
             // keeps it alive across worker swaps (UAC / lock screen /
             // session change). Browser-facing DesktopSwitching /
             // DesktopReady signals are no longer emitted, so the

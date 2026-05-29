@@ -302,7 +302,7 @@ pub fn from_dxgi_output_desc(output_desc: &DXGI_OUTPUT_DESC) -> DisplayInfo {
 }
 
 // ============================================================================
-// Cross-adapter output enumeration (phase 1)
+// Cross-adapter output enumeration
 // ============================================================================
 
 /// One DXGI output joined with the adapter that owns it. The flat

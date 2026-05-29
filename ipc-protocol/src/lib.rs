@@ -1,10 +1,9 @@
 //! # desk-ipc-protocol
 //!
 //! IPC protocol definitions for Service ↔ Worker and Service ↔ UI
-//! communication. Two architectures coexist in this crate while the
-//! Arch IV migration lands incrementally:
+//! communication. The crate supports two transport topologies:
 //!
-//! ## Arch III (legacy, single bidirectional pipe)
+//! ## Single bidirectional pipe (portable / in-process mode)
 //!
 //! ```text
 //!  Service Core (SYSTEM) ── single named pipe ── Desk Worker (User Session)
@@ -17,7 +16,7 @@
 //! transport layer. Messages travel as
 //! [`message::ServiceToWorker`] / [`message::WorkerToService`].
 //!
-//! ## Arch IV (target, dual independent pipes)
+//! ## Dual independent pipes (ServiceDaemon mode)
 //!
 //! ```text
 //!                                                    ┌─ media (worker → daemon, single direction)
@@ -77,9 +76,8 @@
 //!     `Drop`. The worker never infers connection-close from any other
 //!     signal — daemon owns connection lifecycle.
 //!
-//! Rationale captured here so it survives PR-by-PR refactoring; the
-//! dispatch tables themselves live in the daemon / worker modules
-//! (PR 2 onward).
+//! Rationale captured here; the dispatch tables themselves live in the
+//! daemon / worker modules.
 
 pub mod dual_transport;
 pub mod message;

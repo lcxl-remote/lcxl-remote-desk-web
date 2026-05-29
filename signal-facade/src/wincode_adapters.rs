@@ -43,7 +43,7 @@
 //! }
 //! ```
 //!
-//! The `Option<DateTimeLocalWincode>` syntax is validated by the PR-1A spike
+//! The `Option<DateTimeLocalWincode>` syntax is validated by the spike
 //! in `pocs/poc-ipc-bench` — wincode-derive resolves it against the
 //! `SchemaWrite` / `SchemaRead` impls below whose `Src` / `Dst` is
 //! `DateTime<Local>`, so a single adapter type suffices for both bare and
@@ -123,7 +123,7 @@ mod tests {
     }
 
     /// `Option<DateTime<Local>>` field — `#[wincode(with = "Option<...>")]`
-    /// resolution against the bare adapter is the central PR-1A finding
+    /// resolution against the bare adapter is the central finding
     /// that this module relies on, and it's re-verified here on the
     /// production crate so a future wincode-derive update that breaks
     /// the resolution shows up as a facade test failure.

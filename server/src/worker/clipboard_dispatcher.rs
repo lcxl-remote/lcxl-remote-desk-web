@@ -1,7 +1,7 @@
-//! # Worker-side clipboard dispatcher (Arch IV PR 4 cut 1)
+//! # Worker-side clipboard dispatcher
 //!
 //! Per-worker, multi-`connection_id` clipboard handler. Mirrors the
-//! Arch III bidirectional logic in
+//! legacy bidirectional logic in
 //! `service::clipboard_event::handle_clipboard_event` but split across
 //! the IPC boundary:
 //!
@@ -30,7 +30,7 @@
 //! clipboard, it also stamps `last_written_hash` with the hash of what
 //! it just wrote. The polling task skips emissions whose hash matches
 //! that stamp, so a browser-supplied paste does not bounce back as a
-//! "host clipboard changed" event. Same logic the Arch III handler used.
+//! "host clipboard changed" event. Same logic the legacy handler used.
 //!
 //! ## Permission gating
 //!
@@ -60,24 +60,24 @@ use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tokio::task::JoinHandle;
 
 /// Polling cadence for the host-clipboard read loop. Matches the
-/// Arch III `service::clipboard_event` value so user-perceptible
+/// legacy `service::clipboard_event` value so user-perceptible
 /// latency is identical.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 1 MB cap for clipboard text. Matches Arch III.
+/// 1 MB cap for clipboard text.
 const MAX_TEXT_SIZE: usize = 1024 * 1024;
 
-/// 25 MB cap for clipboard image (PNG-encoded). Matches Arch III.
+/// 25 MB cap for clipboard image (PNG-encoded).
 const MAX_IMAGE_SIZE: usize = 25 * 1024 * 1024;
 
-/// 32 KB chunk size for image transfer. Matches Arch III; sized for
-/// safe SCTP DataChannel transmit.
+/// 32 KB chunk size for image transfer. Sized for safe SCTP DataChannel
+/// transmit.
 const IMAGE_CHUNK_SIZE: usize = 32 * 1024;
 
 /// Wire-format JSON ferried over the `clipboard_event` DC and the
 /// `ClipboardWrite`/`ClipboardRead` IPC variants. Identical shape to
-/// Arch III's `crate::model::data_channel::ClipboardEventData` so the
-/// browser is unaware of the daemon/worker split.
+/// `crate::model::data_channel::ClipboardEventData` so the browser is
+/// unaware of the daemon/worker split.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClipboardEventData {
@@ -313,7 +313,7 @@ async fn run_poll_loop(
 /// hash *and* from the last written hash (echo guard), build the JSON
 /// message(s) we should fan out. Returns `None` when nothing changed.
 fn read_local_clipboard(inner: &mut ClipboardInner) -> Option<Vec<Vec<u8>>> {
-    // Text first — matches Arch III ordering. If text is present and
+    // Text first. If text is present and
     // unchanged, image is not consulted (avoids racing the same
     // shell put-text-then-put-image flow).
     match inner.helper.get_text_from_clipboard() {

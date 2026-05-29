@@ -1,8 +1,8 @@
-//! # Daemon-side signaling router (Arch IV)
+//! # Daemon-side signaling router
 //!
-//! Successor to `service::signaling::DeskSession::handle_message`. In
-//! Arch III the worker process owned `DeskSession` and routed every
-//! `SignalingType` from there; Arch IV splits the routing two ways
+//! Successor to `service::signaling::DeskSession::handle_message`. The
+//! worker process used to own `DeskSession` and route every
+//! `SignalingType` from there; the routing is now split two ways
 //! around the daemon-held PeerConnection:
 //!
 //! - **Daemon-owned**: types that touch the [`RTCPeerConnection`] /
@@ -77,7 +77,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::CloseControl
         | SignalingType::ConnectionRemoved => RouteOwnership::Daemon,
 
-        // Cut 6: daemon owns SignalingState now, so the per-connection
+        // The daemon owns SignalingState, so the per-connection
         // accept-control flow runs daemon-side (browser → daemon →
         // host_control_hub → user → daemon updates SignalingState +
         // emits AcceptControl/DenyControl back). Worker no longer
@@ -94,8 +94,8 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // confusing errors back to the browser).
         SignalingType::AcceptControl | SignalingType::DenyControl => RouteOwnership::Daemon,
 
-        // Batch 1 of the typed-IPC migration: types that only flow
-        // *outbound* from the host (worker → daemon → browser) or
+        // Types that only flow *outbound* from the host
+        // (worker → daemon → browser) or
         // are dead enums no client/worker handles. An inbound copy
         // is a protocol error from the browser; daemon swallows it
         // here rather than bridging — the worker would either fall
@@ -104,18 +104,18 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //
         // - `PrivateScreenStateChanged`: worker → browser only;
         //   emitted by `WorkerToService::PrivateScreenStateChanged`
-        //   typed IPC since this batch.
+        //   typed IPC.
         // - `AudioPlaybackError`: emitted from the PC's `on_track`
-        //   callback; in Arch IV daemon-worker mode the daemon's
+        //   callback; in daemon-worker mode the daemon's
         //   pc_manager does not attach an `on_track` handler so the
         //   variant is dead until that work lands. Portable mode
         //   still produces it from `service::signaling`, but that
         //   path bypasses the router entirely.
-        // - `ManagerSystemStatue` (batch 2): a dead-enum variant —
+        // - `ManagerSystemStatue`: a dead-enum variant —
         //   the worker's `handle_message` has no arm and the
         //   front-end never emits it.
-        // - `ReplyFromTerminal` / `TerminalStarted` / `TerminalClosed`
-        //   (batch 3): worker → browser only. Worker emits them via
+        // - `ReplyFromTerminal` / `TerminalStarted` / `TerminalClosed`:
+        //   worker → browser only. Worker emits them via
         //   typed `WorkerToService::ReplyFromTerminal` /
         //   `TerminalStarted` / `TerminalClosed`; the browser never
         //   echoes them back. A stray inbound copy is a protocol
@@ -224,7 +224,7 @@ pub struct RouterContext {
     pub outbound_tx: broadcast::Sender<String>,
     pub settings: web::Data<SharedSettings>,
     pub host_control_hub: Arc<HostControlHub>,
-    /// Cut 4: handle_request_remote reads `worker_capabilities` from
+    /// handle_request_remote reads `worker_capabilities` from
     /// here to populate the Init reply, and handle_offer issues
     /// `ServiceToWorker::StartMedia` through it once the SDP exchange
     /// completes (so the worker knows to spin up the per-connection
@@ -2126,7 +2126,7 @@ mod tests {
     }
 
     // ===========================================================
-    // Auto-resolution ChangeDisplaySettings tests (Phase 1.6).
+    // Auto-resolution ChangeDisplaySettings tests.
     // The shared `make_ctx_with_attached_supervisor` flips
     // `virtual_display.enabled = true` AND installs an Attached
     // supervisor, so each test only needs to focus on its own gate.
@@ -2383,7 +2383,7 @@ mod tests {
     /// `adaptive_throttle_ms` is read from `Settings` per call (not
     /// cached on the supervisor), so a tight throttle in settings must
     /// drop the second back-to-back auto request. Pins the live-read
-    /// behaviour for Phase 1.6.
+    /// behaviour.
     #[tokio::test]
     async fn auto_throttle_tight_setting_drops_second_request() {
         let (ctx, _rx, mut worker_rx) = make_ctx_with_attached_supervisor().await;
@@ -2461,7 +2461,7 @@ mod tests {
     }
 
     // ===========================================================
-    // Idempotent short-circuit tests (Phase 2 of the UX three-pack).
+    // Idempotent short-circuit tests.
     // Cached `(width, height, refresh_hz)` matching the inbound
     // request must skip the worker IPC and return Applied inline.
     // ===========================================================

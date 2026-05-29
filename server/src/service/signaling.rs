@@ -1,6 +1,6 @@
 //! Worker-side signaling glue.
 //!
-//! Arch IV split removed the WebRTC PeerConnection from this module —
+//! The WebRTC PeerConnection no longer lives in this module —
 //! `daemon::pc_manager` owns the PC lifecycle and `daemon::signaling_router`
 //! owns inbound dispatch. What remains here is the worker-side
 //! [`DeskSession`] used by the worker IPC loop to dispatch typed-IPC
@@ -45,8 +45,8 @@ use desk_input_injection::host_control::host_control_factory::create_host_contro
 use desk_input_injection::model::host_control::{HostControlHelper, WhiteboardCommand};
 
 /// Outbound channel message produced by [`DeskSession`] for the
-/// surrounding IPC loop. Only `Text` carries real signaling traffic in
-/// Arch IV; the other variants are kept so the worker session match
+/// surrounding IPC loop. Only `Text` carries real signaling traffic
+/// now; the other variants are kept so the worker session match
 /// stays exhaustive without forcing a wire-protocol change.
 #[derive(Debug)]
 pub enum DeskSessionMessage {
@@ -301,7 +301,7 @@ impl DeskSession {
         })
     }
 
-    /// Shutdown the session. Arch IV: only terminals are owned by the
+    /// Shutdown the session. Only terminals are owned by the
     /// worker-side `DeskSession`; PeerConnections are managed by
     /// `daemon::pc_manager` and their teardown happens through
     /// `StopMedia` / `daemon::worker_manager` instead.
@@ -324,7 +324,7 @@ impl DeskSession {
     /// typed-IPC fan-out. Daemon-owned types (`RequestRemote`, `Offer`,
     /// `Answer`, `Canid`, `RequireControl`, `CloseControl`,
     /// `AcceptControl`, `DenyControl`, `AudioPlaybackError`) never reach
-    /// this dispatcher in Arch IV — `daemon::signaling_router` handles
+    /// this dispatcher — `daemon::signaling_router` handles
     /// them inline against the daemon-held PC and never forwards them
     /// through the worker IPC loop.
     pub async fn handle_message(
@@ -333,7 +333,7 @@ impl DeskSession {
     ) -> Result<(), DeskError> {
         match signaling_model.signaling_type {
             SignalingType::UpdateDeskSettings => {
-                // Arch IV: encoder fps / quality live-apply runs on the
+                // Encoder fps / quality live-apply runs on the
                 // daemon side via `UpdateMediaSettings`; the worker
                 // `DeskSession` no longer owns capture / encode state
                 // and has nothing to do with the rest of the

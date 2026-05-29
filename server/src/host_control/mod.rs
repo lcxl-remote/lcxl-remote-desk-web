@@ -1,16 +1,15 @@
 //! Host Control Hub — unified Tauri-side bridge across all server deployment modes.
 //!
-//! The Aggregator contract described below was updated by Arch IV. In short:
+//! The Aggregator contract works as follows:
 //!
 //! - **Local** (portable): the embedded server publishes commands to its own ws
 //!   endpoint; the embedded Tauri shell is a ws client.
-//! - **Aggregator** (ServiceDaemon): under Arch IV the daemon plays *two* roles
+//! - **Aggregator** (ServiceDaemon): the daemon plays *two* roles
 //!   simultaneously — it is both a router for worker→Tauri approval traffic
-//!   *and* the originator of daemon-self approvals (the WebRTC PeerConnection
-//!   was moved into the daemon process by Arch IV PR 2, so `RequireControl`
-//!   driven approvals are now raised by `daemon::pc_manager` directly through
-//!   `request_approval`). Pre-Arch IV docs that described the aggregator as
-//!   "owns no business logic, only routes" are obsolete.
+//!   *and* the originator of daemon-self approvals. The WebRTC PeerConnection
+//!   lives in the daemon process, so `RequireControl`-driven approvals are
+//!   raised by `daemon::pc_manager` directly through `request_approval`. The
+//!   aggregator therefore owns business logic, not just routing.
 //! - **Forwarder** (SessionWorker): the worker server connects to the daemon as
 //!   a ws client and forwards business approvals (FileBrowse / FileTransfer /
 //!   Terminal / Whiteboard / FileTransfer dispatcher cache) upstream.
@@ -296,7 +295,7 @@ impl HostControlHub {
     /// when no UI is available (Local / Aggregator with no Tauri shell connected,
     /// or Forwarder with offline upstream). Otherwise awaits the user's response.
     ///
-    /// Aggregator note: under Arch IV the daemon process owns the WebRTC PC and
+    /// Aggregator note: the daemon process owns the WebRTC PC and
     /// therefore originates `RequireControl`-driven approvals itself (in addition
     /// to relaying worker-originated requests via `handle_upstream_approval_request`).
     /// The two sources share the same broadcast → Tauri path and are disambiguated
@@ -507,7 +506,7 @@ impl HostControlHub {
     ///   send a directional `SecurityApprovalSubmit` to that forwarder's session
     ///   — never broadcast.
     /// - Aggregator with a daemon-self request (no route, but local oneshot in
-    ///   `pending_approvals`): resolve the oneshot directly. This is the Arch IV
+    ///   `pending_approvals`): resolve the oneshot directly. This is the
     ///   path where the daemon owns the WebRTC PC and originates the approval.
     ///
     /// Returns `true` if the response was successfully dispatched (oneshot
@@ -628,7 +627,7 @@ impl HostControlHub {
     ///
     /// "upstream" here refers strictly to a worker Forwarder session connected
     /// over `/ws/host_upstream`. Daemon-self approvals raised inside the
-    /// aggregator process (Arch IV `daemon::pc_manager` path) do **not** call
+    /// aggregator process (`daemon::pc_manager` path) do **not** call
     /// this API — they go through `request_approval` and store their oneshot
     /// in `pending_approvals` instead. Keeping the two sources in separate
     /// tables (`pending_routes` for upstream, `pending_approvals` for
@@ -666,7 +665,7 @@ impl HostControlHub {
     ///
     /// "upstream" here means the worker Forwarder ws session — this API is
     /// **only** for worker-originated approvals. Daemon-self approvals raised
-    /// by `daemon::pc_manager` under Arch IV are issued via `request_approval`
+    /// by `daemon::pc_manager` are issued via `request_approval`
     /// directly and never enter this path; the no-Tauri-deny short-circuit for
     /// daemon-self lives in `request_approval` itself.
     ///
@@ -1410,7 +1409,7 @@ mod tests {
         }
     }
 
-    // Arch IV: Aggregator now originates daemon-self approvals (the daemon owns
+    // Aggregator originates daemon-self approvals (the daemon owns
     // the WebRTC PC and runs `check_security_permission` for RequireControl).
     // Without a Tauri shell connected the request denies fast — same shape as
     // the Local-no-subscriber path.
@@ -1429,11 +1428,11 @@ mod tests {
         assert_eq!(hub.pending_replay_count(), 0);
     }
 
-    // Arch IV regression: Aggregator with a Tauri shell present must broadcast
+    // Regression: Aggregator with a Tauri shell present must broadcast
     // the SecurityApprovalRequest and pend until submit_approval resolves the
-    // oneshot. This is the exact path RequireControl takes after PR 2 moved the
-    // PC into daemon — before the fix it hit the old "router does not request"
-    // hard-deny and the Tauri shell never saw a dialog.
+    // oneshot. This is the exact path RequireControl takes now that the
+    // PC lives in the daemon — before the fix it hit the old "router does not
+    // request" hard-deny and the Tauri shell never saw a dialog.
     #[tokio::test]
     async fn aggregator_request_approval_pends_until_submit() {
         let hub = HostControlHub::new_aggregator();

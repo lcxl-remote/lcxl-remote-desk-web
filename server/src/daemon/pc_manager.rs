@@ -1,35 +1,23 @@
-//! # Daemon-side WebRTC PeerConnection manager (Arch IV)
+//! # Daemon-side WebRTC PeerConnection manager
 //!
 //! Owner of the [`webrtc::peer_connection::RTCPeerConnection`] lifecycle.
-//! In Arch III the worker process held the PC, which meant every UAC /
+//! The daemon owns the PC so WebRTC negotiation happens once per browser
+//! session and survives every worker swap. Worker replacement becomes
+//! invisible to the browser apart from a ~1 s frame freeze waiting for the
+//! next IDR from the new encoder.
+//!
+//! Were the worker process to hold the PC instead, every UAC /
 //! lock-screen / OS-session-switch (any event that respawns the worker)
-//! tore down the PC and forced the browser through full SDP renegotiation
-//! + ICE restart — a path that became unstable under SYSTEM-token +
-//! Winlogon desktop combinations and showed up as "video garbled / ICE
-//! checking → failed" during UAC.
+//! would tear down the PC and force the browser through full SDP
+//! renegotiation + ICE restart — a path that becomes unstable under
+//! SYSTEM-token + Winlogon desktop combinations and shows up as "video
+//! garbled / ICE checking → failed" during UAC.
 //!
-//! Arch IV moves the PC into the daemon: WebRTC negotiation happens once
-//! per browser session and survives every worker swap. Worker replacement
-//! becomes invisible to the browser apart from a ~1 s frame freeze waiting
-//! for the next IDR from the new encoder.
-//!
-//! ## Status
-//!
-//! Cut 3b of PR 2: `PcRegistry` + per-`SignalingType` handlers for the
-//! five WebRTC SDP/ICE messages the daemon now owns
-//! (`RequestRemote` / `Offer` / `Answer` / `Canid` / `CloseControl`).
-//! Cut 4 wires the worker's media transport into the per-PC tracks
-//! the registry holds; cut 5 registers the DataChannel handlers on
-//! top.
-//!
-//! ### Known intermediate state (cut 3b → cut 4)
-//!
-//! Browsers can complete SDP/ICE successfully against the daemon, but
-//! no media frames flow yet — the per-PC `video_track` /
-//! `audio_track` exist (so the SDP m-lines come back as `sendonly`),
-//! they are just never written to. Cut 4 hooks the worker
-//! `media_producer` → daemon `MediaTransport receiver` →
-//! `track.write_sample(...)` chain.
+//! The [`PcRegistry`] holds per-`SignalingType` handlers for the five
+//! WebRTC SDP/ICE messages the daemon owns
+//! (`RequestRemote` / `Offer` / `Answer` / `Canid` / `CloseControl`),
+//! feeds the worker's media transport into the per-PC tracks it holds,
+//! and registers the DataChannel handlers on top.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -341,38 +329,37 @@ pub async fn build_peer_connection(
 /// gets exactly one of these; multi-browser concurrency = many
 /// `PeerConnectionContext`s sharing the same daemon process.
 ///
-/// Cut 3b populates `pc` + `signaling_state` + (when the offer
-/// includes media) `video_track` / `audio_track`. Cut 4 starts
-/// writing samples into the tracks from worker `MediaFrame`s; cut 5
-/// installs the `on_data_channel` handler that routes browser DC
-/// traffic over IPC to the worker (mouse / keyboard / clipboard /
-/// file / whiteboard) and stashes the cursor-sync DC in
-/// `cursor_data_channel` for PR 3 to push cursor updates back to.
+/// `pc` + `signaling_state` are populated on `RequestRemote` / `Offer`,
+/// along with (when the offer includes media) `video_track` /
+/// `audio_track`, which are fed samples from worker `MediaFrame`s. The
+/// `on_data_channel` handler routes browser DC traffic over IPC to the
+/// worker (mouse / keyboard / clipboard / file / whiteboard) and stashes
+/// the cursor-sync DC in `cursor_data_channel` for worker-side cursor
+/// updates to be pushed back to.
 pub struct PeerConnectionContext {
     pub connection_id: String,
     pub pc: Arc<RTCPeerConnection>,
     pub signaling_state: Arc<RwLock<SignalingState>>,
-    /// Set on the first `Offer` whose SDP carries `m=video`. Cut 4
-    /// drives this from worker-side `MediaFrame`s (`MediaFrameKind::
-    /// VideoI`/`VideoP`).
+    /// Set on the first `Offer` whose SDP carries `m=video`. Driven from
+    /// worker-side `MediaFrame`s (`MediaFrameKind::VideoI`/`VideoP`).
     pub video_track: Option<Arc<TrackLocalStaticSample>>,
     /// Set on the first `Offer` whose SDP carries `m=audio`. Same
     /// fill timing as `video_track`.
     pub audio_track: Option<Arc<TrackLocalStaticSample>>,
     /// Set when the browser opens the `cursor_sync_event` DataChannel.
-    /// Cut 5 only writes to this slot from the daemon `on_data_channel`
-    /// handler; PR 3 wires worker-side `WorkerToService::CursorData` to
+    /// The daemon `on_data_channel` handler writes to this slot, and
+    /// worker-side `WorkerToService::CursorData` is routed to
     /// `dc.send(...)` here.
     pub cursor_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     /// Set when the browser opens the `clipboard_event` DataChannel.
-    /// PR 4 cut 1 wires worker-side `WorkerToService::ClipboardRead` to
-    /// `dc.send_text(...)` here. Browser→host clipboard writes still
-    /// flow through the standard router (DC `on_message` →
+    /// Worker-side `WorkerToService::ClipboardRead` is routed to
+    /// `dc.send_text(...)` here. Browser→host clipboard writes flow
+    /// through the standard router (DC `on_message` →
     /// `ServiceToWorker::ClipboardWrite`).
     pub clipboard_data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     /// Set when the browser opens the `file_transfer_event`
-    /// DataChannel. PR 4 cut 2 wires worker-side download chunks +
-    /// control replies (received over the **file lane** — see
+    /// DataChannel. Worker-side download chunks + control replies
+    /// (received over the **file lane** — see
     /// `desk-ipc-protocol::dual_transport`) to `dc.send_text(...)` /
     /// `dc.send(...)` here. Browser→worker chunks and control
     /// messages do **not** flow through `ServiceToWorker` anymore;
@@ -397,7 +384,7 @@ pub struct PeerConnectionContext {
     /// this `PeerConnectionContext` (i.e. after
     /// `cleanup_pc → registry.remove`).
     pub file_transfer_writer_tx: mpsc::Sender<FileTransferPayload>,
-    /// PR 6: pause flag set by [`PcRegistry::pause_all_media`] before a
+    /// Pause flag set by [`PcRegistry::pause_all_media`] before a
     /// worker swap. While set, [`write_video_frame`] drops samples so
     /// `webrtc-rs` does not push frames the new encoder hasn't anchored
     /// yet. The first `MediaFrameKind::VideoI` after the pause clears
@@ -405,7 +392,7 @@ pub struct PeerConnectionContext {
     /// resync. Audio falls under the same flag — the brief silence is
     /// preferable to playing audio against a frozen video frame.
     pub media_paused: Arc<AtomicBool>,
-    /// PR 6: cached payload from the most recent `handle_offer` for
+    /// Cached payload from the most recent `handle_offer` for
     /// this connection. After a worker swap [`PcRegistry::resume_active_media`]
     /// re-issues this (plus a `ForceKeyframe`) so the new worker
     /// re-arms its per-`connection_id` encoder without a fresh SDP
@@ -416,8 +403,8 @@ pub struct PeerConnectionContext {
 
 /// Daemon-wide registry of active per-browser
 /// `PeerConnectionContext`s, indexed by `connection_id`. Equivalent
-/// to the `DeskSession::rtc_peer_connection_map` the worker held in
-/// Arch III but lives in the daemon process so it survives every
+/// to the `DeskSession::rtc_peer_connection_map` the worker process
+/// used to hold, but lives in the daemon process so it survives every
 /// worker swap.
 ///
 /// The registry also holds an optional [`WorkerManager`] handle used
@@ -430,7 +417,7 @@ pub struct PeerConnectionContext {
 /// `PcRegistry`, so passing it by argument would re-introduce the
 /// constructor-time cycle that the runtime-injection design was
 /// chosen to break. Tests that never set the handle keep the legacy
-/// "log + drop" behaviour, matching pre-F1 semantics.
+/// "log + drop" behaviour.
 #[derive(Clone, Default)]
 pub struct PcRegistry {
     inner: Arc<RwLock<HashMap<String, Arc<RwLock<PeerConnectionContext>>>>>,
@@ -494,8 +481,7 @@ impl PcRegistry {
     /// Returns the registered [`WorkerManager`] handle if one was
     /// installed via [`Self::set_worker_manager`]. Tests that never
     /// register one observe `None`, which short-circuits the
-    /// reverse-feedback path back to its pre-F1 "log + drop"
-    /// behaviour.
+    /// reverse-feedback path back to its "log + drop" behaviour.
     pub fn worker_manager(&self) -> Option<WorkerManager> {
         self.worker_mgr.get().cloned()
     }
@@ -596,9 +582,8 @@ impl PcRegistry {
     /// 3. Insert empty-state `PeerConnectionContext` into the map.
     ///
     /// Init reply (codecs / device list) is intentionally NOT sent
-    /// here — that requires `MediaCapabilities` from the worker which
-    /// only land in cut 4. Until then the caller composes a
-    /// best-effort Init reply with empty device lists.
+    /// here — that requires `MediaCapabilities` from the worker, which
+    /// the caller folds into the Init reply once the worker reports them.
     pub async fn create_for_request_remote(
         &self,
         connection_id: &str,
@@ -659,7 +644,7 @@ impl PcRegistry {
         Ok(ctx)
     }
 
-    /// PR 6: mark every active PC as paused before a worker swap.
+    /// Mark every active PC as paused before a worker swap.
     /// Subsequent `write_video_frame` calls drop frames per PC until the
     /// first `MediaFrameKind::VideoI` after the swap clears the flag in
     /// place. Counterpart to [`Self::resume_active_media`] which re-issues
@@ -673,7 +658,7 @@ impl PcRegistry {
         }
     }
 
-    /// PR 6: re-issue the cached `StartMediaPayload` + a `ForceKeyframe`
+    /// Re-issue the cached `StartMediaPayload` + a `ForceKeyframe`
     /// to the worker for every PC that already negotiated an offer.
     /// Called by `signaling_proxy` once the new worker reports
     /// `Capabilities` after a desktop / crash swap. PCs without a cached
@@ -847,7 +832,7 @@ impl PcRegistry {
 }
 
 // =====================================================================
-// Cut 5: DataChannel routing daemon → worker
+// DataChannel routing daemon → worker
 // =====================================================================
 
 /// DataChannel labels the browser opens against the daemon-held PC.
@@ -880,7 +865,7 @@ enum DcRoute {
     /// Whiteboard commands. Gated by `accept_control`.
     Whiteboard,
     /// Cursor-sync DataChannel — the browser doesn't push to it; we
-    /// stash the channel handle so PR 3's worker→daemon CursorData
+    /// stash the channel handle so the worker→daemon CursorData
     /// path has somewhere to write to.
     CursorSync,
 }
@@ -902,12 +887,12 @@ fn classify_dc_label(label: &str) -> Option<DcRoute> {
 
 /// Build the `ServiceToWorker` IPC variant a given DcRoute should
 /// forward as. Used by the daemon's `on_data_channel.on_message`
-/// handler. Cut 5 only handles browser→host directions; the
+/// handler. Only browser→host directions are handled here; the
 /// `Clipboard` arm uses `ClipboardWrite` (browser writing to host
 /// clipboard); a future browser→host clipboard *request* DC would map
 /// to `ClipboardRequest` but the current protocol multiplexes both
 /// over the same `clipboard_event` channel and the worker disambiguates
-/// by payload, so cut 5 always emits `ClipboardWrite`.
+/// by payload, so this always emits `ClipboardWrite`.
 fn route_to_service_msg(
     route: DcRoute,
     connection_id: &str,
@@ -956,8 +941,8 @@ fn route_to_service_msg(
 
 /// Permission gate. Returns `true` if the message should be forwarded
 /// to the worker given the current `SignalingState`. Mirrors the
-/// per-handler gating that lived in the worker's `handle_*_event`
-/// functions in Arch III; consolidating it here means the worker can
+/// per-handler gating that used to live in the worker's `handle_*_event`
+/// functions; consolidating it here means the worker can
 /// trust every IPC variant it receives — gating is a daemon-side
 /// concern only for routes whose access category lines up with a
 /// SignalingState flag. `CursorSync` is filtered out before this is
@@ -970,17 +955,15 @@ fn route_to_service_msg(
 /// `accept_control` would silently drop every download/upload. We let
 /// file_transfer_event traffic through here and the worker's
 /// `FileTransferDispatcher` runs the actual `check_security_permission`
-/// per connection (matching Arch III's per-DC permission cache).
+/// per connection (the same per-DC permission cache the worker maintains).
 async fn route_is_permitted(route: DcRoute, state: &Arc<RwLock<SignalingState>>) -> bool {
     let s = state.read().await;
     match route {
         DcRoute::Mouse | DcRoute::MouseMove | DcRoute::Keyboard => s.accept_control,
         DcRoute::Clipboard => s.accept_clipboard_sync,
         DcRoute::FileTransfer => true,
-        // Whiteboard rides on the control grant in Arch III; PR 4 may
-        // split it onto its own switch but cut 5 matches Arch III's
-        // behaviour exactly to avoid behaviour regressions during the
-        // cutover.
+        // Whiteboard rides on the control grant, matching the worker's
+        // historical per-handler gating.
         DcRoute::Whiteboard => s.accept_control,
         DcRoute::CursorSync => unreachable!("CursorSync DC has no message route"),
     }
@@ -991,8 +974,8 @@ async fn route_is_permitted(route: DcRoute, state: &Arc<RwLock<SignalingState>>)
 /// IPC-forwarding closure that ships to the worker via
 /// `ServiceToWorker::*`, or (b) for `cursor_sync_event`, has its
 /// `Arc<RTCDataChannel>` stashed in the per-connection
-/// `cursor_data_channel` slot for PR 3 cursor-write-back. PR 4 cut 1
-/// adds a third path: `clipboard_event` channels are *both* stashed
+/// `cursor_data_channel` slot for cursor-write-back. A third path:
+/// `clipboard_event` channels are *both* stashed
 /// (so the worker can push back via `WorkerToService::ClipboardRead`)
 /// *and* wired with the on_message forwarder (so browser→host writes
 /// flow through `ServiceToWorker::ClipboardWrite`).
@@ -1035,7 +1018,7 @@ pub fn register_data_channel_router(
                 *slot = Some(Arc::clone(&dc));
                 log::info!(
                     "[DcRouter] {connection_id}: stashed cursor_sync_event channel \
-                     for PR 3 worker→daemon cursor write-back"
+                     for worker→daemon cursor write-back"
                 );
                 return;
             }
@@ -1044,7 +1027,7 @@ pub fn register_data_channel_router(
                 *slot = Some(Arc::clone(&dc));
                 log::info!(
                     "[DcRouter] {connection_id}: stashed clipboard_event channel \
-                     for PR 4 worker→daemon clipboard write-back"
+                     for worker→daemon clipboard write-back"
                 );
                 // Fall through to install the on_message forwarder so
                 // browser→host writes still flow as ClipboardWrite IPC.
@@ -1054,7 +1037,7 @@ pub fn register_data_channel_router(
                 *slot = Some(Arc::clone(&dc));
                 log::info!(
                     "[DcRouter] {connection_id}: stashed file_transfer_event channel \
-                     for PR 4 worker→daemon file write-back"
+                     for worker→daemon file write-back"
                 );
                 // Fall through to install the on_message forwarder so
                 // browser→host commands and chunks flow over the
@@ -1146,7 +1129,7 @@ fn install_browser_dc_message_forwarder(
 }
 
 // =====================================================================
-// Cut 5: RTCP reader → ForceKeyframe IPC
+// RTCP reader → ForceKeyframe IPC
 // =====================================================================
 
 /// Spawn a task that reads RTCP feedback off `rtp_sender` and translates
@@ -1246,8 +1229,8 @@ fn send_response<T: serde::Serialize + ?Sized>(
 }
 
 /// Forward locally-gathered ICE candidates back to the browser via the
-/// signaling channel. Mirrors the Arch III worker behaviour where each
-/// host / srflx / relay candidate emitted by libwebrtc was wrapped in a
+/// signaling channel. Each host / srflx / relay candidate emitted by
+/// libwebrtc is wrapped in a
 /// `SignalingType::Canid` message — without this the browser only ever
 /// learns about the daemon's transport addresses through peer-reflexive
 /// discovery, which only works for single-m-line PCs (DataChannel-only
@@ -1319,11 +1302,10 @@ fn register_local_ice_candidate_forwarder(
 
 /// Daemon side of `SignalingType::RequestRemote`. Creates the PC and
 /// emits the matching `Init` reply. Mirrors the worker's
-/// `init_ptc_peer_connection` minus the Arch III preapproved
-/// restoration (PC now lives in the daemon and never has to be
-/// rehydrated across worker swaps) and minus the device-list
-/// enumeration (replaced in cut 4 by the worker's `Capabilities`
-/// message).
+/// `init_ptc_peer_connection` minus the preapproved restoration (PC
+/// lives in the daemon and never has to be rehydrated across worker
+/// swaps) and minus the device-list enumeration (supplied instead by
+/// the worker's `Capabilities` message).
 #[allow(
     clippy::too_many_arguments,
     reason = "Daemon-side RequestRemote handler aggregates state from the \
@@ -1361,7 +1343,7 @@ pub async fn handle_request_remote(
         );
     }
 
-    // Cut 5: install the daemon-side `on_data_channel` router on the
+    // Install the daemon-side `on_data_channel` router on the
     // freshly-created PC. Done before the Offer arrives so any
     // DataChannel the browser opens during SDP setup has its handlers
     // attached on first onopen / onmessage. `worker_mgr` is `Option`
@@ -1393,7 +1375,7 @@ pub async fn handle_request_remote(
         );
     }
 
-    // Cut 4: populate the Init reply from the worker's
+    // Populate the Init reply from the worker's
     // `WorkerToService::Capabilities` snapshot when available; fall
     // back to capture-engine's static factory enumerations for the
     // codec lists when the worker hasn't reported yet (first-Init
@@ -1545,7 +1527,7 @@ fn video_encoder_to_media_codec(t: VideoEncoderType) -> MediaCodec {
 /// Daemon side of `SignalingType::Offer`. Adds video / audio tracks
 /// (when the offer SDP carries the matching m-lines) before running
 /// the SDP exchange so the answer comes back with proper media
-/// directions; cut 4 starts feeding the tracks from the worker.
+/// directions; the tracks are then fed from the worker.
 pub async fn handle_offer(
     registry: &PcRegistry,
     outbound: &OutboundSink,
@@ -1607,7 +1589,7 @@ pub async fn handle_offer(
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
         ctx_guard.video_track = Some(video_track);
-        // Cut 5: spawn the RTCP reader. Browser sends PLI / FIR when
+        // Spawn the RTCP reader. Browser sends PLI / FIR when
         // it detects packet loss or just joined an in-progress stream;
         // we translate either into `ServiceToWorker::ForceKeyframe`
         // so the per-connection encoder emits an IDR on its next
@@ -1652,11 +1634,10 @@ pub async fn handle_offer(
         )?;
     }
 
-    // Cut 4: now that the SDP exchange has populated tracks, tell the
-    // worker to start its per-`connection_id` encoder. Without this
-    // the daemon would have a video_track that nobody ever feeds.
-    // Audio codec defaults to OPUS — PR 3 picks the worker's chosen
-    // codec for real once the audio path lands.
+    // Now that the SDP exchange has populated tracks, tell the worker
+    // to start its per-`connection_id` encoder. Without this the daemon
+    // would have a video_track that nobody ever feeds. Audio codec is
+    // currently fixed to OPUS.
     let video_codec = video_encoder_to_media_codec(offer.desk_settings.get_video_encoder_type()?);
     // v4 capture-selection fix: thread the browser-chosen GDI device
     // name through to the worker so capture binds to the right
@@ -1694,7 +1675,7 @@ pub async fn handle_offer(
         // `UpdateDeskSettings` round-trip.
         enable_dirty_rect: Some(offer.desk_settings.enable_dirty_rect),
     };
-    // PR 6: stash the payload so a worker swap can re-issue it via
+    // Stash the payload so a worker swap can re-issue it via
     // `resume_active_media` without forcing the browser through a fresh
     // SDP offer. Done before `drop(ctx_guard)` so the cache is published
     // ahead of any concurrent resume that races the swap.
@@ -1760,7 +1741,7 @@ pub async fn handle_canid(registry: &PcRegistry, model: &SignalingModel) -> Resu
 }
 
 // =====================================================================
-// MediaFrame ingestion (Arch IV cut 4)
+// MediaFrame ingestion
 // =====================================================================
 
 /// Write one decoded `MediaFrame` to the appropriate per-`connection_id`
@@ -1779,9 +1760,8 @@ pub async fn handle_canid(registry: &PcRegistry, model: &SignalingModel) -> Resu
 ///   because the caller is a long-running receiver loop and there is
 ///   nothing useful to do at that level besides keep reading frames.
 ///
-/// Cut 4 only handles video; audio is shaped through the same entry
-/// point so PR 3 can fill in the audio path without re-plumbing the
-/// receiver.
+/// Video and audio frames are shaped through the same entry point,
+/// differing only in which per-connection track they target.
 pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
     let ctx = match registry.get(&frame.connection_id).await {
         Some(c) => c,
@@ -1807,7 +1787,7 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
         (t, g.media_paused.clone())
     };
 
-    // PR 6: while a worker swap is in progress every frame except the
+    // While a worker swap is in progress every frame except the
     // first IDR is dropped. Writing P frames or audio against the
     // browser's existing reference would either decode wrong (P) or
     // play sound against a frozen video frame (audio). The first
@@ -1865,12 +1845,10 @@ pub async fn write_video_frame(registry: &PcRegistry, frame: MediaFrame) {
     }
 }
 
-/// PR 3: write a worker-emitted cursor-sync payload to the matching
-/// connection's `cursor_sync_event` DataChannel. Mirrors the Arch III
-/// path in `service::signaling::capture_screen_task` that did the same
-/// `channel.send_text(json)` call inline; here the daemon performs it
-/// based on a `WorkerToService::CursorData` IPC the worker pushes from
-/// its capture loop.
+/// Write a worker-emitted cursor-sync payload to the matching
+/// connection's `cursor_sync_event` DataChannel. The daemon performs the
+/// `channel.send_text(json)` based on a `WorkerToService::CursorData` IPC
+/// the worker pushes from its capture loop.
 ///
 /// All "channel-not-open" / "connection-unknown" paths are silent:
 ///
@@ -1919,7 +1897,7 @@ pub async fn write_cursor_data(registry: &PcRegistry, payload: CursorDataPayload
     // Worker ships JSON bytes (see CursorSyncData serialisation in
     // model::data_channel); the daemon hands them through unchanged.
     // We use `send_text` rather than `send` so the browser receives a
-    // text frame matching the legacy Arch III shape exactly.
+    // text frame matching the legacy wire shape exactly.
     let s = match std::str::from_utf8(&payload.data) {
         Ok(s) => s,
         Err(e) => {
@@ -1938,13 +1916,12 @@ pub async fn write_cursor_data(registry: &PcRegistry, payload: CursorDataPayload
     }
 }
 
-/// PR 4 cut 1: write a worker-emitted clipboard payload (text or
-/// chunked image — already JSON-encoded as `ClipboardEventData`) to
-/// the matching connection's `clipboard_event` DataChannel. Mirrors
-/// the Arch III polling-task `dc.send_text(...)` calls in
-/// `service::clipboard_event::handle_clipboard_event`; here the daemon
-/// writes the JSON unchanged so the browser sees the exact same wire
-/// shape.
+/// Write a worker-emitted clipboard payload (text or chunked image —
+/// already JSON-encoded as `ClipboardEventData`) to the matching
+/// connection's `clipboard_event` DataChannel. The daemon writes the
+/// JSON unchanged so the browser sees the same wire shape the worker's
+/// `service::clipboard_event::handle_clipboard_event` polling task
+/// used to emit.
 ///
 /// Permission gating is applied here (not the worker): the worker
 /// emits unconditionally for every active connection so it does not
@@ -2027,8 +2004,8 @@ pub async fn write_clipboard_data(registry: &PcRegistry, payload: ClipboardPaylo
     }
 }
 
-/// PR 4 cut 2: route a worker-emitted file-transfer payload onto the
-/// matching connection's per-connection writer task (queued via
+/// Route a worker-emitted file-transfer payload onto the matching
+/// connection's per-connection writer task (queued via
 /// `PeerConnectionContext::file_transfer_writer_tx`). The actual
 /// `dc.send` / `dc.send_text` runs inside the spawned task — see
 /// [`spawn_file_transfer_writer_task`] for the write logic and the
@@ -2107,9 +2084,8 @@ pub async fn write_file_transfer_data(registry: &PcRegistry, payload: FileTransf
 /// ([`FileTransferSendErrorKind`]) so the worker (and the daemon log)
 /// can distinguish a configuration bug (`PacketTooLarge`) from normal
 /// teardown (`TransportClosed`). When `worker_mgr` is `None`
-/// (test-only path / pre-F1 callers), the failure is logged and
-/// dropped — matching the legacy semantics so PR-scope-tests don't
-/// need to wire a real `WorkerManager`.
+/// (test-only callers), the failure is logged and dropped so tests
+/// don't need to wire a real `WorkerManager`.
 ///
 /// Silent-drop branches inside the task:
 ///
@@ -2462,9 +2438,9 @@ async fn cleanup_pc(
 /// Without this hook the worker keeps the per-connection encoder running and
 /// the per-output DXGI duplication held; the next browser to connect then
 /// hits `DuplicateOutput → 0x80070057 (E_INVALIDARG)` because Windows only
-/// allows one duplication per (process, output) pair. Mirrors the Arch III
+/// allows one duplication per (process, output) pair. Replaces the
 /// `peer_state_change_sender → DeskSessionMessage::WebRTCDropped` chain
-/// that lived in `service::signaling::DeskSession::init_ptc_peer_connection`.
+/// that used to live in `service::signaling::DeskSession::init_ptc_peer_connection`.
 ///
 /// Only `Failed` and `Closed` trigger cleanup. `Disconnected` is transient
 /// (a momentary network blip can recover) and webrtc-rs will follow it
@@ -2563,8 +2539,8 @@ pub async fn handle_connection_removed(
 }
 
 /// Daemon side of `SignalingType::RequireControl`. Mirrors the
-/// worker-side `DeskSession::handle_request_control` from Arch III but
-/// runs against the daemon-held PC. The browser sends this to either
+/// worker-side `DeskSession::handle_request_control` but runs against
+/// the daemon-held PC. The browser sends this to either
 /// (a) request control + clipboard grants (`accept = true`) or (b)
 /// release them (`accept = false`); the daemon dispatches to the
 /// host-control hub for user approval (subject to settings allow /
@@ -2575,7 +2551,7 @@ pub async fn handle_connection_removed(
 /// - `accept = true` && denied → `DenyControl` (state stays false)
 /// - `accept = false` (release) → `CloseControl` (state goes false)
 ///
-/// Cut 5's daemon `on_data_channel` router gates each forwarded
+/// The daemon `on_data_channel` router gates each forwarded
 /// browser-input event on the resulting `accept_control` /
 /// `accept_clipboard_sync` flags, so the worker only ever sees IPC
 /// payloads the user has authorised.
@@ -3318,8 +3294,8 @@ mod tests {
 
     /// Frames arriving before the offer has populated the per-PC
     /// `video_track` (race window during initial setup) are dropped
-    /// with a debug log, not propagated. Cut 4 must keep the receiver
-    /// task running through that window.
+    /// with a debug log, not propagated. The receiver task must keep
+    /// running through that window.
     #[tokio::test]
     async fn write_video_frame_no_track_yet_is_silent_noop() {
         let registry = PcRegistry::new();
@@ -3333,7 +3309,7 @@ mod tests {
             .expect("create");
         // Registry has the context, but `video_track` is still None
         // because no Offer ran (Offer is what populates the tracks in
-        // cut 3b's `handle_offer`).
+        // `handle_offer`).
         let frame = MediaFrame {
             connection_id: "conn-no-track".into(),
             seq: 0,
@@ -3346,7 +3322,7 @@ mod tests {
         write_video_frame(&registry, frame).await;
     }
 
-    /// PR 6: `pause_all_media` flips the per-PC flag for every
+    /// `pause_all_media` flips the per-PC flag for every
     /// connection in the registry. Test isolates the registry-side
     /// behaviour without involving worker IPC.
     #[tokio::test]
@@ -3380,7 +3356,7 @@ mod tests {
         }
     }
 
-    /// PR 6: with `media_paused = true`, a P frame must be dropped and
+    /// With `media_paused = true`, a P frame must be dropped and
     /// the flag must remain set (next IDR is the resync barrier).
     /// Verified by checking the flag stays `true` after the call —
     /// `write_video_frame` swallows errors silently so we can't observe
@@ -3416,7 +3392,7 @@ mod tests {
         );
     }
 
-    /// PR 6: `MediaFrameKind::VideoI` arriving while paused clears the
+    /// `MediaFrameKind::VideoI` arriving while paused clears the
     /// flag in place. Subsequent frames flow normally. We cannot
     /// observe the actual write_sample call (no track set), but the
     /// flag transition is the contract that gates resume — verifying
@@ -3452,7 +3428,7 @@ mod tests {
         );
     }
 
-    /// PR 6: `resume_active_media` over an empty registry must be a
+    /// `resume_active_media` over an empty registry must be a
     /// silent no-op (no WorkerManager IPC, no panic). Guards the
     /// post-shutdown / pre-first-RequestRemote race window.
     #[tokio::test]
@@ -3600,7 +3576,7 @@ mod tests {
         assert!(ctx.read().await.cached_start_media.read().await.is_none());
     }
 
-    /// PR 6: a PC that hasn't yet received an Offer has
+    /// A PC that hasn't yet received an Offer has
     /// `cached_start_media = None`; resume must skip it (rather than
     /// trying to send a default StartMedia, which would tell the
     /// worker to start an encoder for a connection that hasn't
@@ -3632,9 +3608,9 @@ mod tests {
     }
 
     /// Audio frames go through the same entry point but route to
-    /// `audio_track` instead of `video_track`. Until PR 3 wires the
-    /// audio capture path, the daemon-side handler must still accept
-    /// the variant without panicking when no audio track exists.
+    /// `audio_track` instead of `video_track`. The daemon-side handler
+    /// must accept the variant without panicking when no audio track
+    /// exists.
     #[tokio::test]
     async fn write_video_frame_audio_kind_uses_audio_track_slot() {
         let registry = PcRegistry::new();
@@ -4560,7 +4536,7 @@ mod tests {
         );
     }
 
-    // ============== Cut 5: DataChannel routing tests ==============
+    // ============== DataChannel routing tests ==============
 
     /// Every known DC label must classify to a `DcRoute`. Pin so a new
     /// label added to `model::data_channel` without a matching route
@@ -4762,7 +4738,7 @@ mod tests {
         );
     }
 
-    // ============== PR 3: cursor sync write_cursor_data ==============
+    // ============== cursor sync write_cursor_data ==============
 
     /// `write_cursor_data` for an unknown connection_id is a silent
     /// no-op (no panic). Critical: the IPC receiver loop must keep
@@ -4829,7 +4805,7 @@ mod tests {
         write_cursor_data(&registry, payload).await;
     }
 
-    // ============== PR 4 cut 1: write_clipboard_data ==============
+    // ============== write_clipboard_data ==============
 
     /// `write_clipboard_data` for an unknown connection_id is a silent
     /// no-op — race against `CloseControl` must not panic.
@@ -4845,7 +4821,7 @@ mod tests {
 
     /// Permission gate: a connection that has neither `accept_control`
     /// nor `accept_clipboard_sync` set must not receive clipboard
-    /// pushes. Mirrors the Arch III polling-task gate that read both
+    /// pushes. Mirrors the worker polling-task gate that read both
     /// flags from `SignalingState`.
     #[tokio::test]
     async fn write_clipboard_data_drops_when_permission_not_granted() {
@@ -4922,7 +4898,7 @@ mod tests {
         write_clipboard_data(&registry, payload).await;
     }
 
-    // ============== PR 4 cut 2: write_file_transfer_data ==============
+    // ============== write_file_transfer_data ==============
 
     /// `write_file_transfer_data` for an unknown connection_id is a
     /// silent no-op — race against `CloseControl` must not panic.
@@ -5201,7 +5177,7 @@ mod tests {
         .expect("post-drain write should complete");
     }
 
-    // ============== Cut 5: RTCP PLI/FIR identity ==============
+    // ============== RTCP PLI/FIR identity ==============
 
     /// Identifying RTCP packets via `as_any().is::<T>()` is the path
     /// `spawn_rtcp_force_keyframe_task` uses to decide whether to
@@ -5229,7 +5205,7 @@ mod tests {
         assert!(!fir.as_any().is::<PictureLossIndication>());
     }
 
-    // ============== Cut 6: handle_require_control tests ==============
+    // ============== handle_require_control tests ==============
 
     /// Build a SharedSettings whose security knobs are set to the
     /// given allow-state for control / clipboard. `Some(true)` means
@@ -5308,7 +5284,7 @@ mod tests {
     }
 
     /// Control denied via settings: state stays false, DenyControl
-    /// reply. Subsequent Cut 5 mouse / keyboard IPC must remain blocked
+    /// reply. Subsequent mouse / keyboard IPC must remain blocked
     /// because the daemon's permission gate reads from the same state.
     #[tokio::test]
     async fn handle_require_control_auto_denies_and_emits_deny() {
@@ -5459,8 +5435,7 @@ mod tests {
     }
 
     /// Multi-connection: independent contexts coexist; closing one
-    /// leaves the other intact (multi-browser concurrency contract
-    /// from PR 1's transport docs).
+    /// leaves the other intact (multi-browser concurrency contract).
     #[tokio::test]
     async fn pc_registry_supports_multiple_independent_connections() {
         let registry = PcRegistry::new();

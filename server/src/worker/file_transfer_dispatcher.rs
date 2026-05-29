@@ -1,6 +1,6 @@
-//! # Worker-side file-transfer dispatcher (Arch IV PR 4 cut 2)
+//! # Worker-side file-transfer dispatcher
 //!
-//! Mirrors the Arch III bidirectional protocol from
+//! Mirrors the legacy bidirectional protocol from
 //! `service::file_transfer::handle_file_transfer_event` but split
 //! across the daemon/worker IPC boundary on a *dedicated* file lane —
 //! see [`desk_ipc_protocol::dual_transport`] for the three-pipe IPC
@@ -28,7 +28,7 @@
 //!
 //! File IO runs in the worker process which is launched on the user's
 //! token. Reading and writing files therefore respects the desktop
-//! user's permissions, the same as Arch III. The daemon (SYSTEM) is
+//! user's permissions. The daemon (SYSTEM) is
 //! deliberately a byte pump and never opens a file directly — that
 //! would bypass per-user ACLs.
 //!
@@ -39,8 +39,8 @@
 //! that the worker re-checks the finer-grained
 //! `check_security_permission(allow_file_transfer, FileTransfer)` gate
 //! once per connection — see `permission_for` and the
-//! `DispatcherInner::permission_cache` field. The cache mirrors Arch
-//! III's per-DC behaviour: each connection prompts at most once
+//! `DispatcherInner::permission_cache` field. The cache mirrors the
+//! legacy per-DC behaviour: each connection prompts at most once
 //! (further commands hit the cache), the entry is dropped on
 //! `stop_connection`, and the whole map clears on `shutdown`. The
 //! settings-level "remember = allow" / "remember = deny" choice
@@ -49,9 +49,10 @@
 //!
 //! ## Backpressure
 //!
-//! The Arch III handler watched `dc.buffered_amount()` to throttle
-//! download chunk emission when SCTP buffers grew above 2 MB. Arch IV
-//! re-establishes the same end-to-end backpressure by routing all
+//! The legacy single-process handler watched `dc.buffered_amount()` to
+//! throttle download chunk emission when SCTP buffers grew above 2 MB.
+//! The split worker/daemon path re-establishes the same end-to-end
+//! backpressure by routing all
 //! file traffic over the dedicated file lane (`FILE_QUEUE_CAP = 32`
 //! per direction). When the browser DataChannel slows, SCTP fills →
 //! `dc.send().await` blocks → the daemon's per-connection bounded
@@ -320,7 +321,7 @@ struct DispatcherInner {
     cancelled_transfers: HashSet<String>,
     active_connections: HashSet<String>,
     /// Per-connection cached `allow_file_transfer` decision. Mirrors the
-    /// per-DC permission cache from Arch III's
+    /// per-DC permission cache from the legacy
     /// `service::file_transfer::handle_file_transfer_event` so each
     /// connection only triggers the Tauri approval prompt at most once,
     /// regardless of how many DownloadRequest / UploadRequest /

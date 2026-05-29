@@ -365,8 +365,8 @@ pub struct VirtualDisplaySupervisor {
 
 impl VirtualDisplaySupervisor {
     /// Construct the supervisor with a real `provider` (the platform
-    /// factory returns the stub in phase 1, the Windows IDD impl in
-    /// phase 2) and a clone of the daemon's `WorkerManager` for IPC.
+    /// factory returns the Windows IDD impl on Windows and a stub
+    /// elsewhere) and a clone of the daemon's `WorkerManager` for IPC.
     /// Starts in `Disabled`.
     pub fn new(provider: Box<dyn VirtualDisplayLifecycle>, worker_mgr: WorkerManager) -> Self {
         let (target_tx, _target_rx) = watch::channel::<Option<u64>>(None);
@@ -582,7 +582,7 @@ impl VirtualDisplaySupervisor {
                     Err(VirtualDisplayError::NotSupported) => {
                         warn!(
                             "VirtualDisplaySupervisor.create returned NotSupported \
-                             (phase 1 stub or unsupported platform); staying in Disabled",
+                             (stub or unsupported platform); staying in Disabled",
                         );
                         *state = SupervisorState::Disabled;
                         DeskError::custom_error(
@@ -2386,8 +2386,8 @@ mod tests {
         );
     }
 
-    /// `Unavailable`: provider returns `NotSupported` (phase 1 / stub
-    /// platforms). ensure_attached must surface the error promptly.
+    /// `Unavailable`: provider returns `NotSupported` (stub platforms).
+    /// ensure_attached must surface the error promptly.
     #[tokio::test]
     async fn ensure_attached_returns_unavailable_when_provider_not_supported() {
         let provider: Box<dyn VirtualDisplayLifecycle> =
