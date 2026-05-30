@@ -15,9 +15,9 @@ use desk_server_version::SERVER_API_VERSION;
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
 #[cfg(target_os = "linux")]
-use desk_input_injection::service::wayland_remote_desktop::WaylandRemoteDesktop;
-#[cfg(target_os = "linux")]
 use desk_capture_engine::image_capture::portal_client::PortalClient;
+#[cfg(target_os = "linux")]
+use desk_input_injection::service::wayland_remote_desktop::WaylandRemoteDesktop;
 
 pub const TAG: &str = "System";
 

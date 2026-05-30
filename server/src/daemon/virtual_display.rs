@@ -131,9 +131,8 @@ struct ExclusiveInner {
 /// would form a self-reference and a potential lock cycle). The
 /// supervisor takes `active = self.is_active().await` itself before
 /// calling the closure.
-pub type DesiredComputerFn = Arc<
-    dyn Fn(bool) -> Pin<Box<dyn Future<Output = (bool, u32)> + Send>> + Send + Sync,
->;
+pub type DesiredComputerFn =
+    Arc<dyn Fn(bool) -> Pin<Box<dyn Future<Output = (bool, u32)> + Send>> + Send + Sync>;
 
 /// Action returned by [`VirtualDisplaySupervisor::prepare_next_action`].
 /// `Send` carries the pre-built IPC plus the state pair needed for
@@ -517,10 +516,7 @@ impl VirtualDisplaySupervisor {
         // attach cycle (codex round 7 #5).
         if !desired {
             self.set_desired_exclusive(false, 0);
-            if let Err(e) = self
-                .await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT)
-                .await
-            {
+            if let Err(e) = self.await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT).await {
                 warn!(
                     "[virtual-display] exclusive teardown timed out: {e}; \
                      dropping virtual display handle anyway, physical \
@@ -867,10 +863,7 @@ impl VirtualDisplaySupervisor {
         // codex round 6 #2: shutdown must also tear down the
         // exclusive layer before the SwDevice handle is dropped.
         self.set_desired_exclusive(false, 0);
-        if let Err(e) = self
-            .await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT)
-            .await
-        {
+        if let Err(e) = self.await_exclusive_idle(EXCLUSIVE_TEARDOWN_TIMEOUT).await {
             warn!("[virtual-display] shutdown exclusive teardown timed out: {e}");
         }
         self.reset_exclusive_state().await;
@@ -1043,9 +1036,10 @@ pub fn new_arc(
 fn spawn_driver_loop(supervisor: Arc<VirtualDisplaySupervisor>) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     {
-        let mut guard = supervisor.exclusive_shutdown_tx.try_lock().expect(
-            "spawn_driver_loop runs once on a fresh supervisor; lock cannot be contended",
-        );
+        let mut guard = supervisor
+            .exclusive_shutdown_tx
+            .try_lock()
+            .expect("spawn_driver_loop runs once on a fresh supervisor; lock cannot be contended");
         *guard = Some(shutdown_tx);
     }
     let supervisor_for_loop = Arc::downgrade(&supervisor);
@@ -1065,7 +1059,9 @@ fn spawn_driver_loop(supervisor: Arc<VirtualDisplaySupervisor>) {
                     }
                 } => {}
             }
-            let Some(supervisor) = supervisor_for_loop.upgrade() else { return; };
+            let Some(supervisor) = supervisor_for_loop.upgrade() else {
+                return;
+            };
             supervisor.reconcile_once_with_retry(&mut shutdown_rx).await;
         }
     });
@@ -1135,10 +1131,9 @@ impl VirtualDisplaySupervisor {
         .await
         {
             Ok(Ok(())) => Ok(()),
-            _ => DeskError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                "exclusive teardown timed out",
-            ),
+            _ => {
+                DeskError::custom_error(DeskErrorCode::SYSTEM_ERROR, "exclusive teardown timed out")
+            }
         }
     }
 
@@ -1413,9 +1408,7 @@ impl VirtualDisplaySupervisor {
             match self.worker_mgr.send_to_worker(ipc).await {
                 Ok(()) => return,
                 Err(e) => {
-                    warn!(
-                        "[virtual-display] reconcile IPC send failed: {e}; retry in {backoff:?}"
-                    );
+                    warn!("[virtual-display] reconcile IPC send failed: {e}; retry in {backoff:?}");
                     self.rollback_send_failure(op_id, next_state, prev_state)
                         .await;
                     tokio::select! {
@@ -2762,8 +2755,7 @@ mod tests {
     // ───── Exclusive-mode tests ─────
 
     fn fresh_supervisor() -> Arc<VirtualDisplaySupervisor> {
-        let provider: Box<dyn VirtualDisplayLifecycle> =
-            Box::new(MockLifecycle::returns_handle());
+        let provider: Box<dyn VirtualDisplayLifecycle> = Box::new(MockLifecycle::returns_handle());
         let (worker_mgr, _rx) = make_worker_mgr();
         new_arc(provider, worker_mgr)
     }
@@ -2938,7 +2930,9 @@ mod tests {
             let mut inner = s.exclusive_inner.write().await;
             inner.state = ExclusiveState::Leaving;
             inner.current_op_id = 42;
-            let _ = s.exclusive_state_watch.send_replace(ExclusiveState::Leaving);
+            let _ = s
+                .exclusive_state_watch
+                .send_replace(ExclusiveState::Leaving);
             inner.current_op_id
         };
         // Mark exclusive as still desired-off so the reconciler would
@@ -2954,7 +2948,11 @@ mod tests {
         .await;
 
         let inner = s.exclusive_inner.read().await;
-        assert_eq!(inner.state, ExclusiveState::Active, "must go to Active for retry");
+        assert_eq!(
+            inner.state,
+            ExclusiveState::Active,
+            "must go to Active for retry"
+        );
         assert_eq!(inner.leave_retry_count, 1);
         let next_at = inner.next_leave_at.expect("backoff timer must be set");
         // Schedule entry for the first retry is LEAVE_RETRY_BASE_DELAY * 2^1 = 4 s.
@@ -3252,7 +3250,13 @@ mod tests {
         let action = s.prepare_next_action().await;
         // (Idle, true) -> Entering: must NOT be gated by next_leave_at.
         assert!(
-            matches!(action, ExclusiveAction::Send { next_state: ExclusiveState::Entering, .. }),
+            matches!(
+                action,
+                ExclusiveAction::Send {
+                    next_state: ExclusiveState::Entering,
+                    ..
+                }
+            ),
             "non-leave transitions must ignore the backoff gate",
         );
         s.shutdown_driver_loop().await;

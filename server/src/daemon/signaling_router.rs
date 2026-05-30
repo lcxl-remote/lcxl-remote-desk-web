@@ -2801,7 +2801,10 @@ mod tests {
         // circuits before touching the supervisor).
         let mut rx = supervisor.subscribe_exclusive_state();
         // First borrow is the initial value (Idle).
-        assert_eq!(*rx.borrow(), crate::daemon::virtual_display::ExclusiveState::Idle);
+        assert_eq!(
+            *rx.borrow(),
+            crate::daemon::virtual_display::ExclusiveState::Idle
+        );
         let outcome = ControlOutcome {
             connection_id: "conn-x".into(),
             accept_control: true,
@@ -2811,8 +2814,7 @@ mod tests {
         // No state change to consume — `try_changed` returns NotChanged
         // because nothing was send_replace'd. We can verify by polling
         // with a tiny timeout.
-        let res =
-            tokio::time::timeout(std::time::Duration::from_millis(50), rx.changed()).await;
+        let res = tokio::time::timeout(std::time::Duration::from_millis(50), rx.changed()).await;
         assert!(res.is_err(), "no state change must arrive");
     }
 }

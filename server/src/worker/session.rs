@@ -878,9 +878,9 @@ impl WorkerSession {
         // covers (the registry replays the physical layout on next
         // logon).
         let mut exclusive_coord = crate::worker::virtual_display::ExclusiveCoordinator::new();
-        let _exclusive_guard = crate::worker::virtual_display::ExclusiveGuard::new(
-            Arc::clone(&vd_state.exclusive_layout),
-        );
+        let _exclusive_guard = crate::worker::virtual_display::ExclusiveGuard::new(Arc::clone(
+            &vd_state.exclusive_layout,
+        ));
         // E2E fix 2026-05-27: WGC capture sessions bound via
         // `CreateForMonitor(HMONITOR)` survive the CDS commit at the
         // API level but stop emitting fresh frames after exclusive

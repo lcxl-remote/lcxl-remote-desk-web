@@ -190,19 +190,14 @@ pub async fn run_service_daemon_inner(
         {
             let settings = shared_settings_data.clone().into_inner();
             let pc_registry = pc_registry.clone();
-            let computer: virtual_display::DesiredComputerFn =
-                Arc::new(move |active: bool| {
-                    let settings = settings.clone();
-                    let pc_registry = pc_registry.clone();
-                    Box::pin(async move {
-                        signaling_router::compute_desired_with_active(
-                            &settings,
-                            &pc_registry,
-                            active,
-                        )
+            let computer: virtual_display::DesiredComputerFn = Arc::new(move |active: bool| {
+                let settings = settings.clone();
+                let pc_registry = pc_registry.clone();
+                Box::pin(async move {
+                    signaling_router::compute_desired_with_active(&settings, &pc_registry, active)
                         .await
-                    })
-                });
+                })
+            });
             supervisor.set_desired_computer(computer).await;
         }
         Some(supervisor)

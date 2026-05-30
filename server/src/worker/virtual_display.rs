@@ -413,10 +413,7 @@ impl ExclusiveCoordinator {
     /// notifications after each successful CDS batch commit. Called
     /// once by the session loop during init; subsequent calls
     /// overwrite the previous sender (used in tests).
-    pub fn set_commit_channel(
-        &mut self,
-        commit_tx: mpsc::UnboundedSender<ExclusiveCommitEvent>,
-    ) {
+    pub fn set_commit_channel(&mut self, commit_tx: mpsc::UnboundedSender<ExclusiveCommitEvent>) {
         self.commit_tx = Some(commit_tx);
     }
 
@@ -459,14 +456,7 @@ impl ExclusiveCoordinator {
                 return;
             }
             run_exclusive_reconciler(
-                op_id,
-                desired,
-                prompt_ms,
-                attached,
-                layout,
-                cancel_rx,
-                writer_tx,
-                commit_tx,
+                op_id, desired, prompt_ms, attached, layout, cancel_rx, writer_tx, commit_tx,
             )
             .await;
         }));
@@ -521,8 +511,16 @@ async fn run_exclusive_reconciler(
             );
         }
         (true, false) => {
-            run_enter(op_id, prompt_ms, attached, layout, cancel, &writer_tx, commit_tx.as_ref())
-                .await;
+            run_enter(
+                op_id,
+                prompt_ms,
+                attached,
+                layout,
+                cancel,
+                &writer_tx,
+                commit_tx.as_ref(),
+            )
+            .await;
         }
         (false, true) => {
             run_leave(op_id, layout, &writer_tx, commit_tx.as_ref()).await;
@@ -614,8 +612,7 @@ async fn run_enter(
         return;
     }
     let layout_for_enter = layout.clone();
-    let enter_join =
-        tokio::task::spawn_blocking(move || enter_exclusive(&layout_for_enter)).await;
+    let enter_join = tokio::task::spawn_blocking(move || enter_exclusive(&layout_for_enter)).await;
     match enter_join {
         Ok(Ok(())) => {
             // CDS has already detached — we are committed to "exclusive".
@@ -788,10 +785,7 @@ async fn run_leave(
     // that did NOT touch CDS, so it does not need a refresh.
     // Compute this BEFORE the match below consumes the `Failed`
     // String payload via `LeftWithErrors(msg)`.
-    let needs_refresh = matches!(
-        outcome,
-        LeaveOutcome::Succeeded | LeaveOutcome::Failed(_)
-    );
+    let needs_refresh = matches!(outcome, LeaveOutcome::Succeeded | LeaveOutcome::Failed(_));
     let exclusive_outcome = match outcome {
         // Idempotent (slot was empty) still acks `Left` so the
         // daemon's `current_op_id` gate fires (codex round 5 #4).
@@ -1395,8 +1389,7 @@ mod tests {
     async fn run_enter_failed_does_not_post_commit_event() {
         let layout = empty_layout();
         let (tx, _rx) = mpsc::unbounded_channel::<WorkerToService>();
-        let (commit_tx, mut commit_rx) =
-            mpsc::unbounded_channel::<ExclusiveCommitEvent>();
+        let (commit_tx, mut commit_rx) = mpsc::unbounded_channel::<ExclusiveCommitEvent>();
         let (_cancel_tx, cancel_rx) = oneshot::channel::<()>();
         run_enter(8, 0, None, layout, cancel_rx, &tx, Some(&commit_tx)).await;
         // Drop the sender we control so try_recv reports `Disconnected`
@@ -1418,8 +1411,7 @@ mod tests {
     async fn run_leave_empty_slot_does_not_post_commit_event() {
         let layout = empty_layout();
         let (tx, _rx) = mpsc::unbounded_channel::<WorkerToService>();
-        let (commit_tx, mut commit_rx) =
-            mpsc::unbounded_channel::<ExclusiveCommitEvent>();
+        let (commit_tx, mut commit_rx) = mpsc::unbounded_channel::<ExclusiveCommitEvent>();
         run_leave(14, layout, &tx, Some(&commit_tx)).await;
         drop(commit_tx);
         match commit_rx.try_recv() {
@@ -1435,12 +1427,17 @@ mod tests {
     /// (compile-time guarantee + struct field non-None).
     #[test]
     fn coordinator_set_commit_channel_installs_sender() {
-        let (commit_tx, _commit_rx) =
-            mpsc::unbounded_channel::<ExclusiveCommitEvent>();
+        let (commit_tx, _commit_rx) = mpsc::unbounded_channel::<ExclusiveCommitEvent>();
         let mut coord = ExclusiveCoordinator::new();
-        assert!(coord.commit_tx.is_none(), "fresh coord starts without a channel");
+        assert!(
+            coord.commit_tx.is_none(),
+            "fresh coord starts without a channel"
+        );
         coord.set_commit_channel(commit_tx);
-        assert!(coord.commit_tx.is_some(), "channel must be installed after set");
+        assert!(
+            coord.commit_tx.is_some(),
+            "channel must be installed after set"
+        );
     }
 
     /// `ExclusiveGuard::drop` on an empty slot does not panic and
@@ -1473,11 +1470,10 @@ mod tests {
             layout,
             tx,
         );
-        let msg =
-            tokio::time::timeout(Duration::from_secs(2), rx.recv())
-                .await
-                .expect("must produce a result")
-                .expect("channel still open");
+        let msg = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("must produce a result")
+            .expect("channel still open");
         match msg {
             WorkerToService::ExclusiveResult(p) => {
                 assert_eq!(p.op_id, 99);
@@ -1559,7 +1555,9 @@ mod tests {
     fn attempt_leave_retains_slot_on_failure() {
         let slot = Arc::new(std::sync::Mutex::new(Some(make_dummy_layout())));
         let outcome = attempt_leave_with_fn(&slot, |_| {
-            Err(VirtualDisplayError::Cds("simulated partial reattach".into()))
+            Err(VirtualDisplayError::Cds(
+                "simulated partial reattach".into(),
+            ))
         });
         match outcome {
             LeaveOutcome::Failed(msg) => assert!(
@@ -1703,5 +1701,4 @@ mod tests {
         assert!(matches!(outcome, LeaveOutcome::Empty));
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
     }
-
 }
