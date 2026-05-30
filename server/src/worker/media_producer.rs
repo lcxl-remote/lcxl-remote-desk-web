@@ -254,6 +254,15 @@ impl MediaProducer {
         self.capture_registry.invalidate_key(key)
     }
 
+    /// Cached `DisplayInfo` of the surface a connection is capturing, or
+    /// `None` if it has no live capture slot. On Wayland this carries the
+    /// portal stream's real position/size, which the display-change
+    /// refresh uses as a geometry anchor.
+    pub fn connection_display_info(&self, connection_id: &str) -> Option<DisplayInfo> {
+        let key = self.connection_capture_key(connection_id)?;
+        self.capture_registry.display_info_for_key(&key)
+    }
+
     /// Start a per-connection capture + encode pipeline. Idempotent on
     /// duplicate `connection_id` — duplicates log a warning and are
     /// ignored (the daemon should never legitimately double-start).

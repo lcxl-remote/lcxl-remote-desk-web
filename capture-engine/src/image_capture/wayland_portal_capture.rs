@@ -123,22 +123,45 @@ impl ImageCapture for WaylandPortalImageCapture {
     }
 
     fn get_current_output(&self) -> Result<DisplayInfo, CaptureError> {
-        let size = self.inner.format.as_ref().map(|f| f.size());
-        let width = size.map(|s| s.width).unwrap_or(0) as i32;
-        let height = size.map(|s| s.height).unwrap_or(0) as i32;
-        Ok(DisplayInfo {
-            device_name: "wayland-portal-display".to_string(),
-            display_device_name: Some("wayland-portal-display".to_string()),
-            desktop_coordinates: DisplayRect {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            },
-            attached_to_desktop: true,
-            rotation: 0,
-            resolutions: vec![],
-        })
+        let format_size = self
+            .inner
+            .format
+            .as_ref()
+            .map(|f| (f.size().width as i32, f.size().height as i32));
+        Ok(resolve_current_output(
+            self.inner.current_output.as_ref(),
+            format_size,
+        ))
+    }
+}
+
+/// Resolve the captured surface's `DisplayInfo`, preferring the real
+/// geometry the portal reported for the stream (position + size). The
+/// worker anchors per-connection cursor geometry on this surface's
+/// **position**, so returning the true coordinates — not a hardcoded
+/// `0,0` — is required to address the right monitor on multi-output
+/// setups. Falls back to synthesising from the live PipeWire format size
+/// only when the portal supplied no stream geometry.
+fn resolve_current_output(
+    current: Option<&DisplayInfo>,
+    format_size: Option<(i32, i32)>,
+) -> DisplayInfo {
+    if let Some(output) = current {
+        return output.clone();
+    }
+    let (width, height) = format_size.unwrap_or((0, 0));
+    DisplayInfo {
+        device_name: "wayland-portal-display".to_string(),
+        display_device_name: Some("wayland-portal-display".to_string()),
+        desktop_coordinates: DisplayRect {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: height,
+        },
+        attached_to_desktop: true,
+        rotation: 0,
+        resolutions: vec![],
     }
 }
 
@@ -194,5 +217,46 @@ impl ImageOutputEnumerator for WaylandPortalImageOutputEnumerator {
         })();
         close_portal_session(&session_path);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_output_preserves_real_portal_position() {
+        // A captured second monitor at (1920,0). The anchor must carry
+        // the real position, not 0,0.
+        let real = DisplayInfo {
+            device_name: "42".to_string(),
+            display_device_name: Some("DP-2".to_string()),
+            desktop_coordinates: DisplayRect {
+                left: 1920,
+                top: 0,
+                right: 1920 + 2560,
+                bottom: 1440,
+            },
+            attached_to_desktop: true,
+            rotation: 0,
+            resolutions: vec![],
+        };
+        let out = resolve_current_output(Some(&real), Some((2560, 1440)));
+        assert_eq!(out.desktop_coordinates.left, 1920);
+        assert_eq!(out.desktop_coordinates.top, 0);
+    }
+
+    #[test]
+    fn current_output_falls_back_to_format_size_at_origin() {
+        let out = resolve_current_output(None, Some((1280, 720)));
+        assert_eq!(
+            out.desktop_coordinates,
+            DisplayRect {
+                left: 0,
+                top: 0,
+                right: 1280,
+                bottom: 720
+            }
+        );
     }
 }

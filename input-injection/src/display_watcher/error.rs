@@ -34,6 +34,14 @@ pub enum DisplayWatcherError {
     /// while setting up the watcher.
     #[cfg(target_os = "linux")]
     X11Reply(x11rb::errors::ReplyError),
+    /// Linux: failed to connect to the Wayland compositor when starting
+    /// the `wl_output` watcher.
+    #[cfg(target_os = "linux")]
+    WaylandConnect(wayland_client::ConnectError),
+    /// Linux: a Wayland dispatch (registry roundtrip, socket read, or
+    /// pending-event dispatch) failed while running the watcher.
+    #[cfg(target_os = "linux")]
+    WaylandReply(wayland_client::DispatchError),
 }
 
 impl std::fmt::Display for DisplayWatcherError {
@@ -52,7 +60,34 @@ impl std::fmt::Display for DisplayWatcherError {
             DisplayWatcherError::X11Connect(e) => write!(f, "X11 connect: {e}"),
             #[cfg(target_os = "linux")]
             DisplayWatcherError::X11Reply(e) => write!(f, "X11 RandR setup: {e}"),
+            #[cfg(target_os = "linux")]
+            DisplayWatcherError::WaylandConnect(e) => write!(f, "Wayland connect: {e}"),
+            #[cfg(target_os = "linux")]
+            DisplayWatcherError::WaylandReply(e) => write!(f, "Wayland dispatch: {e}"),
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<wayland_client::ConnectError> for DisplayWatcherError {
+    fn from(e: wayland_client::ConnectError) -> Self {
+        DisplayWatcherError::WaylandConnect(e)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<wayland_client::DispatchError> for DisplayWatcherError {
+    fn from(e: wayland_client::DispatchError) -> Self {
+        DisplayWatcherError::WaylandReply(e)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<wayland_client::backend::WaylandError> for DisplayWatcherError {
+    fn from(e: wayland_client::backend::WaylandError) -> Self {
+        // `conn.flush()` / `guard.read()` surface a backend I/O error;
+        // fold it into the dispatch variant via `DispatchError::Backend`.
+        DisplayWatcherError::WaylandReply(wayland_client::DispatchError::Backend(e))
     }
 }
 

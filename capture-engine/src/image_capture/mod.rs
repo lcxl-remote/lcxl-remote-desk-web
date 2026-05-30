@@ -23,6 +23,8 @@ pub mod pipewire_utils;
 #[cfg(target_os = "linux")]
 pub mod portal_client;
 #[cfg(target_os = "linux")]
+pub mod wayland_output_geometry;
+#[cfg(target_os = "linux")]
 pub mod wayland_portal_capture;
 
 #[cfg(target_os = "macos")]

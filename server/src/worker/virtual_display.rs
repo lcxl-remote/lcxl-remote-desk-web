@@ -1526,6 +1526,9 @@ mod tests {
             physical_snapshots: vec![],
             virtual_snapshot: desk_virtual_display::PhysicalDisplaySnapshot {
                 device_name: "\\\\.\\DISPLAY9".into(),
+                // The Windows snapshot carries a `DEVMODEW`; the
+                // cross-platform stub does not.
+                #[cfg(windows)]
                 devmode: unsafe { std::mem::zeroed() },
                 is_primary: true,
             },

@@ -227,6 +227,8 @@ x11rb = { version = "0.13", features = ["all-extensions"] }
 evdev = { version = "0.13", features = ["stream-trait"] }
 raw-window-handle = "0.6"
 xcb = { version = "1.5", features = ["randr"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 # for macos
 screencapturekit = "0.2"

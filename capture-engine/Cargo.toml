@@ -50,6 +50,8 @@ pipewire = { workspace = true }
 xcb = { workspace = true }
 zbus = { workspace = true }
 rand = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { workspace = true }

@@ -193,6 +193,24 @@ impl InputDispatcher {
         refresh_geometry_in(&map, &displays, device_name);
     }
 
+    /// Snapshot of the currently active connection ids. Used by the
+    /// Wayland display-change path, which resolves each connection's
+    /// captured surface against the live `wl_output` list rather than
+    /// re-enumerating via the portal (which would pop a picker).
+    pub fn connection_ids(&self) -> Vec<String> {
+        let map = self.inner.lock().expect("input dispatcher lock poisoned");
+        map.keys().cloned().collect()
+    }
+
+    /// Overwrite one connection's captured-monitor rect in place.
+    /// Unknown ids are a no-op (the connection may have stopped between
+    /// the snapshot and this call). Used by the Wayland refresh once the
+    /// captured surface has been matched to its current output geometry.
+    pub fn set_connection_geometry(&self, connection_id: &str, rect: (i32, i32, i32, i32)) {
+        let map = self.inner.lock().expect("input dispatcher lock poisoned");
+        set_connection_geometry_in(&map, connection_id, rect);
+    }
+
     /// Retarget one connection to a new video device — used after a
     /// virtual display Attach/Detach swaps the capture target. Updates
     /// both `video_device` and `geometry` in place; preserves
@@ -388,6 +406,21 @@ fn refresh_geometry_in(
         let mut w = state.geometry.write().expect("monitor geometry poisoned");
         *w = MonitorGeometry::new(g.0, g.1, g.2, g.3);
     }
+}
+
+/// Pure geometry write for one connection: rewrite its captured-monitor
+/// rect in place. Unknown ids are a no-op. Tested with a hand-built
+/// `HashMap` so we don't need real connections.
+fn set_connection_geometry_in(
+    map: &HashMap<String, ConnectionInputState>,
+    connection_id: &str,
+    rect: (i32, i32, i32, i32),
+) {
+    let Some(state) = map.get(connection_id) else {
+        return;
+    };
+    let mut w = state.geometry.write().expect("monitor geometry poisoned");
+    *w = MonitorGeometry::new(rect.0, rect.1, rect.2, rect.3);
 }
 
 /// Pure retarget: look up `payload.connection_id`, rewrite both
@@ -741,6 +774,49 @@ mod tests {
         );
         // Suppress unused-variable warning on `displays`.
         let _ = displays;
+    }
+
+    /// `set_connection_geometry_in` rewrites only the addressed
+    /// connection's rect (the Wayland display-change path, which already
+    /// knows the exact new rect for each connection).
+    #[test]
+    fn set_connection_geometry_in_updates_only_target() {
+        let g_a = shared_geometry(MonitorGeometry::new(0, 0, 1920, 1080));
+        let g_b = shared_geometry(MonitorGeometry::new(1920, 0, 2560, 1440));
+        let mut map = HashMap::new();
+        map.insert("conn-a".to_string(), fake_state(None, g_a.clone()));
+        map.insert("conn-b".to_string(), fake_state(None, g_b.clone()));
+
+        // conn-b's monitor switched 1440p -> 1080p at the same origin.
+        set_connection_geometry_in(&map, "conn-b", (1920, 0, 1920, 1080));
+
+        assert_eq!(
+            *g_b.read().unwrap(),
+            MonitorGeometry::new(1920, 0, 1920, 1080),
+            "target connection picks up the new rect",
+        );
+        assert_eq!(
+            *g_a.read().unwrap(),
+            MonitorGeometry::new(0, 0, 1920, 1080),
+            "sibling connection untouched",
+        );
+    }
+
+    /// Unknown connection id is a no-op (the connection may have stopped
+    /// between the snapshot and the geometry write).
+    #[test]
+    fn set_connection_geometry_in_unknown_id_is_noop() {
+        let g = shared_geometry(MonitorGeometry::new(0, 0, 1280, 800));
+        let mut map = HashMap::new();
+        map.insert("conn-a".to_string(), fake_state(None, g.clone()));
+
+        set_connection_geometry_in(&map, "conn-missing", (10, 20, 800, 600));
+
+        assert_eq!(
+            *g.read().unwrap(),
+            MonitorGeometry::new(0, 0, 1280, 800),
+            "no connection matched — nothing written",
+        );
     }
 
     /// `refresh_geometry_in(Some(device))` with a device that no

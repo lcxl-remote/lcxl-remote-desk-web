@@ -12,10 +12,11 @@
 //!   `WM_DISPLAYCHANGE` on a dedicated thread. **Not** an `HWND_MESSAGE`
 //!   message-only window — broadcast messages (which `WM_DISPLAYCHANGE`
 //!   is) are not delivered to message-only windows.
-//! - **Linux** (`linux.rs`): dedicated thread holding an X11 connection
-//!   that listens for RandR screen / CRTC / output change notifications
-//!   on the root window. Wayland sessions (where the native compositor
-//!   does not expose an X11 connection) fall through to the stub.
+//! - **Linux** (`linux/`): dispatches by session type at runtime — X11
+//!   listens for RandR screen / CRTC / output changes on the root
+//!   window; Wayland listens on the core `wl_registry` / `wl_output`
+//!   protocol (output add/remove, mode, geometry, scale); a headless
+//!   session (no `DISPLAY` / `WAYLAND_DISPLAY`) returns `Unsupported`.
 //! - **Other platforms** (`stub.rs`): no-op. `spawn()` returns
 //!   `Err(DisplayWatcherError::Unsupported)` so the caller can degrade
 //!   gracefully. macOS would use `CGDisplayRegisterReconfigurationCallback`.

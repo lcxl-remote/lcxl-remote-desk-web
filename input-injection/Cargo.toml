@@ -28,6 +28,8 @@ zbus = { workspace = true }
 rand = { workspace = true }
 desk-capture-engine = { workspace = true }
 x11rb = { workspace = true }
+wayland-client = { workspace = true }
+libc = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.23", features = ["highsierra"] }

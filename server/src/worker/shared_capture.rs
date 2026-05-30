@@ -325,6 +325,17 @@ impl SharedCaptureRegistry {
         }
     }
 
+    /// Read-only peek at the cached `DisplayInfo` of a live capture slot.
+    /// Returns `None` for an unknown or already-dropped key. Does **not**
+    /// subscribe or spawn — used by the worker's Wayland display-change
+    /// refresh to recover the captured surface's geometry anchor.
+    pub(crate) fn display_info_for_key(&self, key: &CaptureKey) -> Option<DisplayInfo> {
+        let g = self.map.lock().expect("shared capture registry poisoned");
+        g.get(key)
+            .and_then(|weak| weak.upgrade())
+            .map(|inner| inner.display_info.clone())
+    }
+
     /// Diagnostic / test introspection: count of live capture loops.
     pub fn live_count(&self) -> usize {
         let g = self.map.lock().expect("shared capture registry poisoned");
@@ -510,7 +521,10 @@ mod tests {
     /// Key derivation must include both backend and device_name so
     /// "DXGI display 1" and "GDI display 1" produce distinct keys
     /// (otherwise they would collide and the second subscriber would
-    /// be handed the wrong backend's frames).
+    /// be handed the wrong backend's frames). Windows-only: it relies on
+    /// the DXGI / GDI backends, which do not exist on other platforms
+    /// (every type collapses to the single native backend there).
+    #[cfg(windows)]
     #[test]
     fn key_derivation_separates_backend_and_device_name() {
         let mut s = DeskSettings::default();

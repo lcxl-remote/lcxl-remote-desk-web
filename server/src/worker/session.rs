@@ -425,6 +425,77 @@ where
     out
 }
 
+/// React to a display-change event by refreshing per-connection cursor
+/// geometry. On Wayland this resolves each connection's captured surface
+/// against the live `wl_output` geometry (no portal picker); on every
+/// other platform it re-queries the attached-display list.
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn refresh_geometry_after_display_change(
+    input_dispatcher: &InputDispatcher,
+    media_producer: Option<&MediaProducer>,
+) {
+    #[cfg(target_os = "linux")]
+    {
+        use desk_input_injection::linux_display::{Backend, detect_backend};
+        if detect_backend() == Backend::Wayland {
+            refresh_wayland_geometry(input_dispatcher, media_producer);
+            return;
+        }
+    }
+    input_dispatcher.refresh_geometry(None);
+}
+
+/// Wayland display-change refresh. Enumerates the current `wl_output`
+/// logical geometry without the portal, then re-anchors each connection
+/// on the captured surface's recorded position. Anything unresolved
+/// (no producer, empty/failed enumeration, no anchor match) leaves the
+/// connection's geometry untouched — it never re-points to a different
+/// monitor.
+#[cfg(target_os = "linux")]
+fn refresh_wayland_geometry(
+    input_dispatcher: &InputDispatcher,
+    media_producer: Option<&MediaProducer>,
+) {
+    use desk_capture_engine::image_capture::wayland_output_geometry::{
+        enumerate_wayland_outputs, match_output_by_anchor,
+    };
+    let Some(producer) = media_producer else {
+        return;
+    };
+    let outputs = match enumerate_wayland_outputs() {
+        Ok(o) if !o.is_empty() => o,
+        Ok(_) => {
+            log::debug!(
+                "display-change: no Wayland output geometry available; keeping current geometry"
+            );
+            return;
+        }
+        Err(e) => {
+            log::debug!(
+                "display-change: Wayland output enumeration failed: {e}; keeping current geometry"
+            );
+            return;
+        }
+    };
+    for id in input_dispatcher.connection_ids() {
+        let Some(info) = producer.connection_display_info(&id) else {
+            continue;
+        };
+        let anchor = info.desktop_coordinates;
+        match match_output_by_anchor(&outputs, anchor) {
+            Some(geo) => {
+                let r = geo.logical;
+                input_dispatcher
+                    .set_connection_geometry(&id, (r.left, r.top, r.width(), r.height()));
+            }
+            None => log::debug!(
+                "display-change: no Wayland output matches connection {id} anchor {anchor:?}; \
+                 keeping current geometry"
+            ),
+        }
+    }
+}
+
 /// Worker-side session. Stateless wrapper — all mutable state lives in the
 /// dispatchers / `DeskSession` instances built per-session inside
 /// [`Self::run_with_transports`]. The struct exists so the named-pipe
@@ -1617,7 +1688,10 @@ impl WorkerSession {
                     desk_virtual_display::log_active_displays_for_diagnostics(
                         &format!("display change seq={}", evt.seq),
                     );
-                    input_dispatcher.refresh_geometry(None);
+                    refresh_geometry_after_display_change(
+                        &input_dispatcher,
+                        media_producer.as_deref(),
+                    );
                 }
 
                 // E2E fix 2026-05-27: the exclusive coordinator posts
