@@ -10,30 +10,14 @@ use crate::{
     error::CaptureError,
     image_capture::{
         pipewire_capture::{PipewireImageCapture, PipewireSetup},
-        pipewire_utils::get_zbus_connection,
         portal_client::PortalClient,
+        wayland_output_geometry::{WaylandOutputGeometry, enumerate_wayland_outputs},
     },
     model::image_capture::{
         CaptureRequest, CaptureResult, CursorCaptureMode, ImageCapture, ImageCaptureType,
         ImageOutputEnumerator,
     },
 };
-use zbus::blocking::Proxy;
-
-fn close_portal_session(session_path: &str) {
-    let Ok(conn) = get_zbus_connection() else {
-        return;
-    };
-    let proxy = Proxy::new(
-        conn,
-        "org.freedesktop.portal.Desktop",
-        session_path,
-        "org.freedesktop.portal.Session",
-    );
-    if let Ok(proxy) = proxy {
-        let _ = proxy.call_method("Close", &());
-    }
-}
 
 pub struct WaylandPortalImageCapture {
     inner: PipewireImageCapture,
@@ -189,6 +173,16 @@ impl WaylandPortalImageOutputEnumerator {
     }
 }
 
+/// Stable device name advertised for the Wayland portal capture source.
+///
+/// The portal's own screen-cast picker is the authority over which monitor
+/// gets captured, so the enumerator exposes a single backend-level entry
+/// rather than per-output devices the UI could "pre-select" out of sync with
+/// the picker. A constant name keeps the input side's non-interactive
+/// re-enumeration matching the same entry (and thus the same geometry) across
+/// calls.
+const WAYLAND_PORTAL_DEVICE_NAME: &str = "wayland-portal-display";
+
 impl ImageOutputEnumerator for WaylandPortalImageOutputEnumerator {
     fn get_output_list(&self) -> Result<Vec<DisplayInfo>, CaptureError> {
         if std::env::var("WAYLAND_DISPLAY").is_err() {
@@ -197,48 +191,189 @@ impl ImageOutputEnumerator for WaylandPortalImageOutputEnumerator {
                 "WAYLAND_DISPLAY is not set",
             );
         }
-
-        let portal = PortalClient::new()?;
-        let session = portal.create_screencast_session()?;
-        let session_path = session.handle.as_str().to_string();
-        let result = (|| -> Result<Vec<DisplayInfo>, CaptureError> {
-            portal.select_sources(&session)?;
-            let response = portal.start(&session)?;
-            let selected_stream = response
-                .streams
-                .and_then(|mut streams| streams.drain(..).next())
-                .ok_or(CaptureError::ZbusError(zbus::Error::Failure(
-                    "portal did not return stream".to_owned(),
-                )))?;
-
-            let (left, top) = selected_stream.1.position.unwrap_or((0, 0));
-            let (width, height) = selected_stream.1.size.unwrap_or((0, 0));
-            Ok(vec![DisplayInfo {
-                device_name: selected_stream
-                    .1
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| "wayland-portal-display".to_string()),
-                display_device_name: selected_stream.1.mapping_id.clone(),
-                desktop_coordinates: DisplayRect {
-                    left,
-                    top,
-                    right: left + width,
-                    bottom: top + height,
-                },
-                attached_to_desktop: true,
-                rotation: 0,
-                resolutions: vec![],
-            }])
-        })();
-        close_portal_session(&session_path);
-        result
+        // Enumerate outputs without the portal. The screen-cast `Start`
+        // handshake pops an interactive "Share Screen" picker and blocks on
+        // the user's choice, which must never happen during capability
+        // listing (it would surface at worker startup, before any peer
+        // connects). The real portal consent is requested later, only when a
+        // peer actually begins capture — see `WaylandPortalImageCapture::new`.
+        Ok(portal_outputs_to_display_info(enumerate_wayland_outputs()))
     }
+}
+
+/// Collapse the non-interactive Wayland output enumeration into the single
+/// backend-level [`DisplayInfo`] advertised for portal capture.
+///
+/// Always returns exactly one entry so the UI's capture-source list is never
+/// empty. Its geometry is the "primary" output (see [`select_primary_output`]).
+/// An empty result or an enumeration error yields a zero-geometry placeholder;
+/// errors are logged rather than silently swallowed.
+fn portal_outputs_to_display_info(
+    result: Result<Vec<WaylandOutputGeometry>, CaptureError>,
+) -> Vec<DisplayInfo> {
+    let primary = match result {
+        Ok(outputs) => select_primary_output(outputs),
+        Err(e) => {
+            log::warn!(
+                "Wayland portal enumeration failed: {e}; advertising placeholder capture source"
+            );
+            None
+        }
+    };
+    let (desktop_coordinates, display_device_name) = match primary {
+        Some(geo) => (geo.logical, geo.name),
+        None => (
+            DisplayRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            None,
+        ),
+    };
+    vec![DisplayInfo {
+        device_name: WAYLAND_PORTAL_DEVICE_NAME.to_string(),
+        display_device_name,
+        desktop_coordinates,
+        attached_to_desktop: true,
+        rotation: 0,
+        resolutions: vec![],
+    }]
+}
+
+/// Pick the primary output deterministically: prefer the output anchored at
+/// the compositor origin (0,0); otherwise the smallest by `(left, top, name)`.
+/// The explicit ordering matters because `enumerate_wayland_outputs` draws
+/// from an unordered map, so "the first one" would be non-deterministic.
+fn select_primary_output(outputs: Vec<WaylandOutputGeometry>) -> Option<WaylandOutputGeometry> {
+    outputs.into_iter().min_by(|a, b| {
+        // `false` sorts before `true`, so origin-anchored outputs win.
+        let key = |g: &WaylandOutputGeometry| {
+            let not_at_origin = !(g.logical.left == 0 && g.logical.top == 0);
+            (not_at_origin, g.logical.left, g.logical.top, g.name.clone())
+        };
+        key(a).cmp(&key(b))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn geo(
+        name: Option<&str>,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    ) -> WaylandOutputGeometry {
+        WaylandOutputGeometry {
+            name: name.map(str::to_string),
+            logical: DisplayRect {
+                left,
+                top,
+                right,
+                bottom,
+            },
+        }
+    }
+
+    #[test]
+    fn single_output_uses_real_geometry() {
+        let infos = portal_outputs_to_display_info(Ok(vec![geo(Some("DP-1"), 0, 0, 1280, 800)]));
+        assert_eq!(infos.len(), 1);
+        let d = &infos[0];
+        assert_eq!(d.device_name, WAYLAND_PORTAL_DEVICE_NAME);
+        assert_eq!(d.display_device_name.as_deref(), Some("DP-1"));
+        assert_eq!(
+            d.desktop_coordinates,
+            DisplayRect {
+                left: 0,
+                top: 0,
+                right: 1280,
+                bottom: 800
+            }
+        );
+    }
+
+    #[test]
+    fn multiple_outputs_collapse_to_single_primary() {
+        // DP-2 is listed first, but DP-1 sits at the origin -> DP-1 wins, and
+        // the result is still a single entry (no per-output devices).
+        let infos = portal_outputs_to_display_info(Ok(vec![
+            geo(Some("DP-2"), 1280, 0, 1280 + 1920, 1080),
+            geo(Some("DP-1"), 0, 0, 1280, 800),
+        ]));
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].display_device_name.as_deref(), Some("DP-1"));
+        assert_eq!(infos[0].desktop_coordinates.left, 0);
+    }
+
+    #[test]
+    fn non_origin_outputs_pick_deterministic_minimum() {
+        // No output at the origin: the smallest (left, top, name) wins
+        // regardless of enumeration order.
+        let forward = portal_outputs_to_display_info(Ok(vec![
+            geo(Some("B"), 100, 0, 1000, 800),
+            geo(Some("A"), 100, 0, 1000, 800),
+        ]));
+        let reversed = portal_outputs_to_display_info(Ok(vec![
+            geo(Some("A"), 100, 0, 1000, 800),
+            geo(Some("B"), 100, 0, 1000, 800),
+        ]));
+        assert_eq!(forward[0].display_device_name.as_deref(), Some("A"));
+        assert_eq!(reversed[0].display_device_name.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn empty_ok_yields_zero_geometry_placeholder() {
+        let infos = portal_outputs_to_display_info(Ok(vec![]));
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].device_name, WAYLAND_PORTAL_DEVICE_NAME);
+        assert!(infos[0].display_device_name.is_none());
+        assert_eq!(
+            infos[0].desktop_coordinates,
+            DisplayRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0
+            }
+        );
+    }
+
+    #[test]
+    fn error_yields_placeholder() {
+        let err = CaptureError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, "boom");
+        let infos = portal_outputs_to_display_info(Err(err));
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].device_name, WAYLAND_PORTAL_DEVICE_NAME);
+        assert_eq!(
+            infos[0].desktop_coordinates,
+            DisplayRect {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0
+            }
+        );
+    }
+
+    #[test]
+    fn device_name_is_stable_constant() {
+        let cases = [
+            portal_outputs_to_display_info(Ok(vec![geo(Some("DP-1"), 0, 0, 1280, 800)])),
+            portal_outputs_to_display_info(Ok(vec![])),
+            portal_outputs_to_display_info(Err(CaptureError::new_custom_error(
+                DeskErrorCode::SYSTEM_ERROR,
+                "x",
+            ))),
+        ];
+        for infos in cases {
+            assert_eq!(infos[0].device_name, WAYLAND_PORTAL_DEVICE_NAME);
+        }
+    }
 
     #[test]
     fn current_output_preserves_real_portal_position() {
