@@ -187,9 +187,13 @@ impl Dispatch<WlOutput, u32> for OutputWatchState {
 
 /// Outcome of waiting on the Wayland socket fd.
 enum PollOutcome {
+    /// Data is available, or the socket signalled an error / hangup.
+    /// Both route into `guard.read()`, which drains pending events and,
+    /// on a broken socket, surfaces the real error so the watcher exits
+    /// instead of spinning silently.
     Readable,
-    /// Timed out, interrupted, or an error condition without readable
-    /// data — the caller re-checks the stop flag and loops.
+    /// Timed out or was interrupted — the caller re-checks the stop flag
+    /// and loops.
     Idle,
 }
 
@@ -201,7 +205,11 @@ fn poll_readable(fd: std::os::fd::RawFd, timeout: std::time::Duration) -> PollOu
     };
     let ms = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
     let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
-    if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
+    // POLLHUP / POLLERR / POLLNVAL are reported in `revents` regardless of
+    // `events`; treat them as readable so `read()` propagates the failure
+    // (a dead compositor socket must stop the watcher, not spin).
+    let signalled = libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL;
+    if ret > 0 && (pfd.revents & signalled) != 0 {
         PollOutcome::Readable
     } else {
         PollOutcome::Idle

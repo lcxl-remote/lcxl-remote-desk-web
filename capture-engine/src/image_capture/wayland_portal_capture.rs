@@ -140,13 +140,29 @@ impl ImageCapture for WaylandPortalImageCapture {
 /// worker anchors per-connection cursor geometry on this surface's
 /// **position**, so returning the true coordinates — not a hardcoded
 /// `0,0` — is required to address the right monitor on multi-output
-/// setups. Falls back to synthesising from the live PipeWire format size
-/// only when the portal supplied no stream geometry.
+/// setups. The live PipeWire format size backfills the dimensions when
+/// the portal supplied no stream geometry at all, or supplied a
+/// degenerate zero-area rect (size omitted) while still reporting a
+/// position.
 fn resolve_current_output(
     current: Option<&DisplayInfo>,
     format_size: Option<(i32, i32)>,
 ) -> DisplayInfo {
     if let Some(output) = current {
+        // Portal reported a position but a zero/absent size: keep its
+        // position and identity, fill the dimensions from the negotiated
+        // PipeWire format so the anchor rect is usable.
+        let coords = output.desktop_coordinates;
+        if (coords.width() <= 0 || coords.height() <= 0)
+            && let Some((w, h)) = format_size
+            && w > 0
+            && h > 0
+        {
+            let mut fixed = output.clone();
+            fixed.desktop_coordinates.right = coords.left + w;
+            fixed.desktop_coordinates.bottom = coords.top + h;
+            return fixed;
+        }
         return output.clone();
     }
     let (width, height) = format_size.unwrap_or((0, 0));
@@ -258,5 +274,37 @@ mod tests {
                 bottom: 720
             }
         );
+    }
+
+    #[test]
+    fn current_output_fills_zero_portal_size_from_format() {
+        // Portal reported a position (100,50) but omitted the size,
+        // leaving a degenerate rect. The format size backfills the
+        // dimensions while position and identity are preserved.
+        let zero_size = DisplayInfo {
+            device_name: "7".to_string(),
+            display_device_name: Some("DP-1".to_string()),
+            desktop_coordinates: DisplayRect {
+                left: 100,
+                top: 50,
+                right: 100,
+                bottom: 50,
+            },
+            attached_to_desktop: true,
+            rotation: 0,
+            resolutions: vec![],
+        };
+        let out = resolve_current_output(Some(&zero_size), Some((1920, 1080)));
+        assert_eq!(
+            out.desktop_coordinates,
+            DisplayRect {
+                left: 100,
+                top: 50,
+                right: 100 + 1920,
+                bottom: 50 + 1080,
+            },
+            "size filled from format, position preserved"
+        );
+        assert_eq!(out.device_name, "7", "portal identity preserved");
     }
 }
