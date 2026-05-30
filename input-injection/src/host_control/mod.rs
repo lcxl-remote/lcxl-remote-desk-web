@@ -1,5 +1,7 @@
 pub mod host_control_factory;
 #[cfg(target_os = "linux")]
+pub mod input_grab;
+#[cfg(target_os = "linux")]
 pub mod linux_host_control;
 
 #[cfg(target_os = "windows")]

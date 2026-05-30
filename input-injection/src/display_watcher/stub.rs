@@ -1,10 +1,11 @@
-//! Non-Windows stub: returns `Err(Unsupported)` from `spawn()`.
+//! Fallback stub for platforms without a display-change watcher
+//! (currently macOS): returns `Err(Unsupported)` from `spawn()`.
 //!
-//! The Linux RandR / Wayland and macOS `CGDisplayRegisterReconfigurationCallback`
-//! equivalents are not implemented in this PR — the worker's explicit
-//! triggers (IDD `SetMode`, virtual display Attach / Detach) still
-//! work on those platforms because they go through worker IPC, not the
-//! OS broadcast path.
+//! A macOS implementation would use
+//! `CGDisplayRegisterReconfigurationCallback`. Until then, the worker's
+//! explicit triggers (virtual display SetMode / Attach / Detach) still
+//! work there because they go through worker IPC, not the OS broadcast
+//! path.
 
 use super::error::DisplayWatcherError;
 use tokio::sync::mpsc;

@@ -1,4 +1,5 @@
-use std::{env, process::Command};
+use std::process::Command;
+use std::sync::Mutex;
 
 use arboard::Clipboard;
 use desk_signal_facade::model::desk_settings::DeskSettings;
@@ -6,12 +7,18 @@ use desk_utils::error::DeskErrorCode;
 
 use crate::{
     error::InputError,
+    host_control::input_grab::{EvdevGrabber, LocalInputBlocker},
+    linux_display::{self, Backend},
     model::host_control::{DisplaySettings, HostControlHelper, PrivateScreenCommand},
 };
 
 pub struct LinuxHostControlHelper {
     clipboard: Option<Clipboard>,
     cmd_sender: Option<std::sync::mpsc::Sender<PrivateScreenCommand>>,
+    /// Holds the grabbed physical input devices while local input is
+    /// blocked. Behind a `Mutex` because `block_input` takes `&self`
+    /// (the helper is shared as `dyn HostControlHelper + Send + Sync`).
+    input_blocker: Mutex<LocalInputBlocker>,
 }
 
 impl LinuxHostControlHelper {
@@ -31,6 +38,7 @@ impl LinuxHostControlHelper {
         Ok(Self {
             clipboard,
             cmd_sender,
+            input_blocker: Mutex::new(LocalInputBlocker::new(Box::new(EvdevGrabber::new()))),
         })
     }
 }
@@ -40,45 +48,57 @@ impl HostControlHelper for LinuxHostControlHelper {
         &self,
         display_settings: &DisplaySettings,
     ) -> Result<(), InputError> {
-        // FIXME Implement the logic to change display settings on Linux
-        if let Ok(env_value) = env::var("WAYLAND_DISPLAY") {
-            log::info!("Current Wayland display: {}", env_value);
-            Command::new("wlr-randr")
-                .arg("--output")
-                .arg("eDP-1")
-                .arg("--mode")
-                .arg(format!(
-                    "{}x{}@{}",
-                    display_settings.width.unwrap_or(1920),
-                    display_settings.height.unwrap_or(1080),
-                    display_settings.frequency.unwrap_or(60)
-                ))
-                .status()?;
-        } else if let Ok(env_value) = env::var("DISPLAY") {
-            log::info!("Current X11 display: {}", env_value);
-            Command::new("xrandr")
-                .arg("--output")
-                .arg("eDP-1")
-                .arg("--mode")
-                .arg(format!(
-                    "{}x{}",
-                    display_settings.width.unwrap_or(1920),
-                    display_settings.height.unwrap_or(1080)
-                ))
-                .status()?;
-        } else {
-            log::warn!("No display environment variable found");
-            return InputError::custom_error(
-                DeskErrorCode::SYSTEM_ERROR,
-                "No display environment variable found",
-            );
+        let width = display_settings.width.unwrap_or(1920);
+        let height = display_settings.height.unwrap_or(1080);
+        match linux_display::detect_backend() {
+            Backend::X11 => {
+                let ops = linux_display::RealX11Ops::new()?;
+                linux_display::apply_display_settings(
+                    &ops,
+                    &display_settings.device_name,
+                    width,
+                    height,
+                    display_settings.frequency,
+                )
+            }
+            Backend::Wayland => {
+                // Wayland display mode changes go through the external
+                // wlr-randr backend; the output name and refresh-rate
+                // handling there are not yet on par with the X11 path.
+                log::info!("Changing Wayland display settings via wlr-randr");
+                Command::new("wlr-randr")
+                    .arg("--output")
+                    .arg("eDP-1")
+                    .arg("--mode")
+                    .arg(format!(
+                        "{}x{}@{}",
+                        width,
+                        height,
+                        display_settings.frequency.unwrap_or(60)
+                    ))
+                    .status()?;
+                Ok(())
+            }
+            Backend::Headless => {
+                log::warn!("No display environment variable found");
+                InputError::custom_error(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    "No display environment variable found",
+                )
+            }
         }
-        Ok(())
     }
 
-    fn block_input(&self, _block: bool) -> Result<(), InputError> {
-        // FIXME
-        InputError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
+    fn block_input(&self, block: bool) -> Result<(), InputError> {
+        let mut blocker = self
+            .input_blocker
+            .lock()
+            .expect("input blocker mutex poisoned");
+        if block {
+            blocker.block()
+        } else {
+            blocker.unblock()
+        }
     }
 
     fn enable_private_screen(
@@ -103,8 +123,14 @@ impl HostControlHelper for LinuxHostControlHelper {
         Ok(())
     }
 
-    fn control_monitor_power(&self, _turn_off: bool) -> Result<(), InputError> {
-        InputError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, "")
+    fn control_monitor_power(&self, turn_off: bool) -> Result<(), InputError> {
+        match linux_display::detect_backend() {
+            Backend::X11 => {
+                let ops = linux_display::RealX11Ops::new()?;
+                linux_display::control_monitor_power(&ops, turn_off)
+            }
+            _ => InputError::custom_error(DeskErrorCode::NOT_IMPLEMENTED_YET, ""),
+        }
     }
 
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), InputError> {

@@ -12,11 +12,13 @@
 //!   `WM_DISPLAYCHANGE` on a dedicated thread. **Not** an `HWND_MESSAGE`
 //!   message-only window — broadcast messages (which `WM_DISPLAYCHANGE`
 //!   is) are not delivered to message-only windows.
-//! - **Non-Windows** (`stub.rs`): no-op. `spawn()` returns
+//! - **Linux** (`linux.rs`): dedicated thread holding an X11 connection
+//!   that listens for RandR screen / CRTC / output change notifications
+//!   on the root window. Wayland sessions (where the native compositor
+//!   does not expose an X11 connection) fall through to the stub.
+//! - **Other platforms** (`stub.rs`): no-op. `spawn()` returns
 //!   `Err(DisplayWatcherError::Unsupported)` so the caller can degrade
-//!   gracefully. The Linux equivalent would be RandR / Wayland portal
-//!   events; macOS would use `CGDisplayRegisterReconfigurationCallback`.
-//!   Both are out of scope for the present PR.
+//!   gracefully. macOS would use `CGDisplayRegisterReconfigurationCallback`.
 
 mod error;
 
@@ -25,11 +27,17 @@ pub use error::DisplayWatcherError;
 #[cfg(target_os = "windows")]
 mod windows;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+mod linux;
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 mod stub;
 
 #[cfg(target_os = "windows")]
 pub use self::windows::{DisplayChangeEvent, DisplayChangeWatcher, spawn};
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub use self::linux::{DisplayChangeEvent, DisplayChangeWatcher, spawn};
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub use self::stub::{DisplayChangeEvent, DisplayChangeWatcher, spawn};

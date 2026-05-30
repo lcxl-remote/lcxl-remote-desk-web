@@ -19,4 +19,7 @@ pub mod keyboard_event;
 pub mod mouse_event;
 
 #[cfg(target_os = "linux")]
+pub mod linux_display;
+
+#[cfg(target_os = "linux")]
 pub mod service;

@@ -23,6 +23,15 @@ pub enum InputError {
     /// A zbus zvariant error occurred (Wayland portal).
     #[cfg(target_os = "linux")]
     ZbusZvariantError(zbus::zvariant::Error),
+    /// Failed to connect to the X11 display server.
+    #[cfg(target_os = "linux")]
+    X11ConnectError(x11rb::errors::ConnectError),
+    /// An X11 request failed to be sent / the connection broke.
+    #[cfg(target_os = "linux")]
+    X11ConnectionError(x11rb::errors::ConnectionError),
+    /// An X11 request returned an error reply (e.g. RandR / DPMS).
+    #[cfg(target_os = "linux")]
+    X11ReplyError(x11rb::errors::ReplyError),
     /// Desk custom error
     CustomError(CustomDeskError),
 }
@@ -76,6 +85,12 @@ impl Display for InputError {
             InputError::ZbusError(error) => error.fmt(f),
             #[cfg(target_os = "linux")]
             InputError::ZbusZvariantError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            InputError::X11ConnectError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            InputError::X11ConnectionError(error) => error.fmt(f),
+            #[cfg(target_os = "linux")]
+            InputError::X11ReplyError(error) => error.fmt(f),
             InputError::CustomError(error) => error.fmt(f),
         }
     }
@@ -120,6 +135,27 @@ impl From<zbus::zvariant::Error> for InputError {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl From<x11rb::errors::ConnectError> for InputError {
+    fn from(err: x11rb::errors::ConnectError) -> Self {
+        InputError::X11ConnectError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<x11rb::errors::ConnectionError> for InputError {
+    fn from(err: x11rb::errors::ConnectionError) -> Self {
+        InputError::X11ConnectionError(err)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<x11rb::errors::ReplyError> for InputError {
+    fn from(err: x11rb::errors::ReplyError) -> Self {
+        InputError::X11ReplyError(err)
+    }
+}
+
 /// Bridge capture-engine errors raised by the shared Wayland portal
 /// helpers (`pipewire_utils`) into the input-injection error type,
 /// preserving the original [`DeskErrorCode`].
@@ -156,6 +192,16 @@ mod tests {
             .expect_err("invalid object path must error")
             .into();
         assert!(matches!(err, InputError::ZbusZvariantError(_)));
+    }
+
+    /// An X11 connection error (raised by the RandR / DPMS host-control
+    /// paths) maps to `X11ConnectionError` and falls back to
+    /// `SYSTEM_ERROR` as a non-custom error.
+    #[test]
+    fn x11_connection_error_maps_to_x11_variant() {
+        let err: InputError = x11rb::errors::ConnectionError::UnknownError.into();
+        assert!(matches!(err, InputError::X11ConnectionError(_)));
+        assert_eq!(err.to_error_code(), DeskErrorCode::SYSTEM_ERROR);
     }
 
     /// Capture-engine errors raised by the shared `pipewire_utils` helpers

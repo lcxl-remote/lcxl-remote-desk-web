@@ -23,9 +23,17 @@ pub enum DisplayWatcherError {
     /// inside the thread body.
     ThreadDiedBeforeInit,
     /// Platform doesn't support a display-change watcher. Stub
-    /// platforms (non-Windows) return this from `spawn()` so callers
+    /// platforms (currently macOS) return this from `spawn()` so callers
     /// can detect and treat it as "no OS-driven refresh available".
     Unsupported,
+    /// Linux: failed to connect to the X11 display server when starting
+    /// the RandR watcher.
+    #[cfg(target_os = "linux")]
+    X11Connect(x11rb::errors::ConnectError),
+    /// Linux: an X11 request (RandR version query / select-input) failed
+    /// while setting up the watcher.
+    #[cfg(target_os = "linux")]
+    X11Reply(x11rb::errors::ReplyError),
 }
 
 impl std::fmt::Display for DisplayWatcherError {
@@ -40,6 +48,10 @@ impl std::fmt::Display for DisplayWatcherError {
             DisplayWatcherError::Unsupported => {
                 write!(f, "display watcher not supported on this platform")
             }
+            #[cfg(target_os = "linux")]
+            DisplayWatcherError::X11Connect(e) => write!(f, "X11 connect: {e}"),
+            #[cfg(target_os = "linux")]
+            DisplayWatcherError::X11Reply(e) => write!(f, "X11 RandR setup: {e}"),
         }
     }
 }

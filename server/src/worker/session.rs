@@ -901,12 +901,13 @@ impl WorkerSession {
             desktop_monitor::spawn(init_payload.desktop_name.clone(), desktop_change_tx);
         }
 
-        // Display-change watcher: hidden top-level window listening for
-        // `WM_DISPLAYCHANGE` so we can refresh the per-connection mouse
-        // geometry without tearing down the connection. Spawn failure
-        // is non-fatal — the worker falls back to refreshing only on
-        // explicit IPC triggers (SetVirtualDisplayMode / Attach /
-        // Detach). See `display_watcher` module doc.
+        // Display-change watcher: an OS listener (Windows
+        // `WM_DISPLAYCHANGE`, Linux RandR) that lets us refresh the
+        // per-connection mouse geometry without tearing down the
+        // connection. Spawn failure is non-fatal — the worker falls back
+        // to refreshing only on explicit IPC triggers
+        // (SetVirtualDisplayMode / Attach / Detach). See `display_watcher`
+        // module doc.
         let (display_watcher_handle, mut display_change_rx) = match display_watcher::spawn() {
             Ok((w, rx)) => (Some(w), rx),
             Err(e) => {
@@ -1603,19 +1604,18 @@ impl WorkerSession {
                 // a single RwLock write per connection.
                 Some(evt) = display_change_rx.recv() => {
                     info!(
-                        "WM_DISPLAYCHANGE received (seq={}); refreshing input geometry for all \
-                         connections",
+                        "Display configuration change received (seq={}); refreshing input \
+                         geometry for all connections",
                         evt.seq
                     );
-                    // E2E diagnostic 2026-05-27: WM_DISPLAYCHANGE is the
-                    // OS broadcast that fires after every CDS commit
-                    // (enter_exclusive, leave_exclusive, IDD attach,
-                    // user manually changing display settings, etc.).
-                    // Logging the resulting layout here gives us a
-                    // per-event snapshot of "what the OS thinks the
-                    // layout is" right after each transition.
+                    // The OS display-change notification fires after every
+                    // layout transition (exclusive enter/leave, virtual
+                    // display attach, a user manually changing display
+                    // settings, etc.). Logging the resulting layout here
+                    // gives a per-event snapshot of what the OS reports
+                    // right after each transition.
                     desk_virtual_display::log_active_displays_for_diagnostics(
-                        &format!("WM_DISPLAYCHANGE seq={}", evt.seq),
+                        &format!("display change seq={}", evt.seq),
                     );
                     input_dispatcher.refresh_geometry(None);
                 }

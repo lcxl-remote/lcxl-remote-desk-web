@@ -5,6 +5,7 @@ use evdev::{
 
 use crate::{
     error::InputError,
+    linux_display::UINPUT_MOUSE_DEVICE_NAME,
     model::{
         data_channel::{MouseEventData, MouseEventHandler},
         geometry::SharedMonitorGeometry,
@@ -52,7 +53,7 @@ impl UinputMouseEventHandler {
         rel_axes.insert(evdev::RelativeAxisCode::REL_HWHEEL);
         //let keyset = AttributeSetRef::from(keys);
         let virtual_device = VirtualDevice::builder()?
-            .name("lcxl-web-remote-desk-mouse")
+            .name(UINPUT_MOUSE_DEVICE_NAME)
             .input_id(evdev::InputId::new(
                 evdev::BusType::BUS_USB,
                 0x1234,

@@ -2,6 +2,7 @@ use evdev::{KeyCode, KeyEvent, uinput::VirtualDevice};
 
 use crate::{
     error::InputError,
+    linux_display::UINPUT_KEYBOARD_DEVICE_NAME,
     model::data_channel::{KeyboardEventData, KeyboardEventHandler},
 };
 
@@ -17,7 +18,7 @@ impl UinputKeyboardEventHandler {
             keys.insert(KeyCode(code));
         }
         let virtual_device = VirtualDevice::builder()?
-            .name("lcxl-web-remote-desk-keyboard")
+            .name(UINPUT_KEYBOARD_DEVICE_NAME)
             .input_id(evdev::InputId::new(
                 evdev::BusType::BUS_USB,
                 0x1234,
