@@ -252,6 +252,8 @@ export default {
   'pages.desk.enableClipboardSync': '开启剪贴板同步',
   'pages.desk.disableClipboardSync': '关闭剪贴板同步',
   'pages.desk.clipboardHttpsRequired': '(需要 HTTPS)',
+  'pages.desk.webrtcUnavailableTitle': '无法使用 WebRTC',
+  'pages.desk.webrtcUnavailableDesc': '当前客户端的内置浏览器不支持 WebRTC，无法建立远程桌面连接。',
   'pages.desk.showStats': '显示远程桌面指标统计',
   'pages.desk.hideStats': '隐藏远程桌面指标统计',
   'pages.desk.statsPanel.title': '远程桌面指标统计',

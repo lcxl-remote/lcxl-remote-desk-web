@@ -4893,6 +4893,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "webkit2gtk",
  "windows 0.61.3",
  "x11rb",
 ]

@@ -254,6 +254,8 @@ export default {
   'pages.desk.enableClipboardSync': 'Enable Clipboard Sync',
   'pages.desk.disableClipboardSync': 'Disable Clipboard Sync',
   'pages.desk.clipboardHttpsRequired': '(HTTPS Required)',
+  'pages.desk.webrtcUnavailableTitle': 'WebRTC unavailable',
+  'pages.desk.webrtcUnavailableDesc': "This client's built-in browser does not support WebRTC, so the remote desktop connection cannot be established.",
   'pages.desk.showStats': 'Show Remote Desk Metrics',
   'pages.desk.hideStats': 'Hide Remote Desk Metrics',
   'pages.desk.statsPanel.title': 'Remote Desk Metrics',

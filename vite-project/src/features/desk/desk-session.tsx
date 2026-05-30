@@ -28,6 +28,8 @@ import { useDeskMicrophone } from "./use-desk-microphone"
 import { DeskConfigDialog } from "./desk-config-dialog"
 import { useAdaptiveResolution, isAdaptiveResolutionGateOpen } from "./use-adaptive-resolution"
 import { useResolutionToast } from "./use-resolution-toast"
+import { isWebRtcAvailable } from "./webrtc-support"
+import { useToast } from "@/hooks/use-toast"
 import type { DeskSettings } from "@/services/types"
 import {
     SIGNALING_TYPE_CODE_REQUEST_REMOTE,
@@ -46,6 +48,7 @@ export default function DeskSession() {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
+    const { toast } = useToast()
 
     // Control state
     const [hasControl, setHasControl] = useState(false);
@@ -465,6 +468,21 @@ export default function DeskSession() {
     });
 
     const handleConfigSubmit = (settings: DeskSettings) => {
+        // Some webviews (notably Linux WebKitGTK with WebRTC disabled) lack
+        // RTCPeerConnection. Surface a clear message instead of letting the
+        // connection attempt throw an unhandled rejection that the user never
+        // sees.
+        if (!isWebRtcAvailable()) {
+            toast({
+                variant: "destructive",
+                title: t("pages.desk.webrtcUnavailableTitle", "WebRTC unavailable"),
+                description: t(
+                    "pages.desk.webrtcUnavailableDesc",
+                    "This client's built-in browser does not support WebRTC, so the remote desktop connection cannot be established.",
+                ),
+            });
+            return;
+        }
         lastSettingsRef.current = settings;
         // Mirror to state so `useAdaptiveResolution` re-evaluates its
         // `enabled` gate on this submit even when no other tracked

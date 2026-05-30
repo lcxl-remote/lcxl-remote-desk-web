@@ -37,6 +37,10 @@ windows = { workspace = true }
 x11rb = { workspace = true }
 raw-window-handle = { workspace = true }
 evdev = { workspace = true }
+# Enable WebRTC (RTCPeerConnection) in the WebKitGTK webview, which gates it off
+# by default. Matches the webkit2gtk version wry already resolves; v2_38 exposes
+# `set_enable_webrtc`.
+webkit2gtk = { version = "2.0", features = ["v2_38"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.23", features = ["highsierra"] }

@@ -3,6 +3,7 @@ mod ipc_client;
 mod platform;
 mod private_screen;
 mod security_approval;
+mod webview_webrtc;
 mod whiteboard;
 
 use std::sync::{
@@ -22,7 +23,7 @@ use crate::error::DeskTauriError;
 
 rust_i18n::i18n!("locales");
 
-const MAIN_WINDOW_LABEL: &str = "main";
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 
 /// Windows service name registered by the install flow.
 const SERVICE_NAME: &str = "LcxlDeskService";
@@ -231,7 +232,12 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
                             })
                             .build()
                             {
-                                Ok(_) => {}
+                                Ok(window) => {
+                                    webview_webrtc::enable_webrtc_if_needed(
+                                        &window,
+                                        MAIN_WINDOW_LABEL,
+                                    );
+                                }
                                 Err(e) => log::error!("[ServiceShell] Window build error: {e}"),
                             }
                         });
@@ -837,6 +843,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                     .build()
                     {
                         Ok(window) => {
+                            webview_webrtc::enable_webrtc_if_needed(&window, MAIN_WINDOW_LABEL);
                             log::info!("Window built successfully. Waiting for page load to finish...");
                         }
                         Err(e) => {
