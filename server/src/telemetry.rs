@@ -234,8 +234,71 @@ pub fn log_directory() -> std::path::PathBuf {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        std::path::PathBuf::from("/var/log/lcxl-remote-desk")
+        // Privileged system services (ServiceDaemon / SessionWorker, typically
+        // euid 0 with no usable `$HOME`) keep the system-wide `/var/log`
+        // location. Unprivileged desktop / dev runs cannot create `/var/log`
+        // subdirectories, so they fall back to the user's XDG state directory.
+        let xdg_state_home = std::env::var("XDG_STATE_HOME").ok();
+        let home = std::env::var("HOME").ok();
+        xdg_state_log_dir(
+            xdg_state_home.as_deref(),
+            home.as_deref(),
+            current_process_is_root(),
+        )
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/log/lcxl-remote-desk"))
     }
+}
+
+/// Resolve the per-user log directory on non-Windows platforms following the
+/// XDG Base Directory Specification.
+///
+/// Returns `None` when the caller should fall back to the system-wide
+/// `/var/log` location — i.e. when running as a privileged system service
+/// (`is_root`) or when no per-user home can be determined.
+///
+/// Kept as a pure function of its inputs so the resolution rules can be unit
+/// tested without mutating the real process environment.
+#[cfg(not(target_os = "windows"))]
+fn xdg_state_log_dir(
+    xdg_state_home: Option<&str>,
+    home: Option<&str>,
+    is_root: bool,
+) -> Option<std::path::PathBuf> {
+    if is_root {
+        return None;
+    }
+    // The XDG spec mandates absolute paths; a relative `$XDG_STATE_HOME` must be
+    // ignored as if it were unset.
+    if let Some(state) = xdg_state_home.filter(|s| !s.is_empty()) {
+        let state = std::path::Path::new(state);
+        if state.is_absolute() {
+            return Some(state.join("lcxl-remote-desk"));
+        }
+    }
+    let home = home.filter(|s| !s.is_empty())?;
+    Some(
+        std::path::Path::new(home)
+            .join(".local/state")
+            .join("lcxl-remote-desk"),
+    )
+}
+
+/// Whether the current process runs with root privileges. Used to keep
+/// system-service logs under `/var/log` while routing unprivileged runs to the
+/// user's XDG state directory.
+#[cfg(target_os = "linux")]
+fn current_process_is_root() -> bool {
+    // SAFETY: `geteuid` takes no arguments, never fails, and has no
+    // preconditions.
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Non-Linux Unix targets (macOS) ship desktop apps that run unprivileged;
+/// treat them as non-root so logs land under the user's home rather than
+/// `/var/log`.
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
+fn current_process_is_root() -> bool {
+    false
 }
 
 /// Standard log file name for a given startup mode. Kept beside `log_directory`
@@ -418,8 +481,66 @@ mod tests {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            assert_eq!(dir, std::path::PathBuf::from("/var/log/lcxl-remote-desk"));
+            // The resolved root depends on privilege / environment (XDG state
+            // dir for unprivileged runs, `/var/log` for system services), but
+            // every component must agree on the same leaf so the cleanup task
+            // can prune them together.
+            assert!(
+                dir.ends_with("lcxl-remote-desk"),
+                "unexpected log dir: {dir:?}"
+            );
         }
+    }
+
+    /// Unprivileged runs honour an absolute `$XDG_STATE_HOME`.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn xdg_state_log_dir_prefers_absolute_xdg_state_home() {
+        let dir = xdg_state_log_dir(Some("/run/user/1000/state"), Some("/home/alice"), false);
+        assert_eq!(
+            dir,
+            Some(std::path::PathBuf::from(
+                "/run/user/1000/state/lcxl-remote-desk"
+            ))
+        );
+    }
+
+    /// A missing / empty / relative `$XDG_STATE_HOME` falls back to
+    /// `$HOME/.local/state` per the XDG spec.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn xdg_state_log_dir_falls_back_to_home_local_state() {
+        let expected = Some(std::path::PathBuf::from(
+            "/home/alice/.local/state/lcxl-remote-desk",
+        ));
+        assert_eq!(
+            xdg_state_log_dir(None, Some("/home/alice"), false),
+            expected
+        );
+        assert_eq!(
+            xdg_state_log_dir(Some(""), Some("/home/alice"), false),
+            expected
+        );
+        // Relative XDG_STATE_HOME is ignored as if unset.
+        assert_eq!(
+            xdg_state_log_dir(Some("relative/path"), Some("/home/alice"), false),
+            expected
+        );
+    }
+
+    /// Root processes (system services) and homeless environments fall through
+    /// to the system-wide `/var/log` location signalled by `None`.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn xdg_state_log_dir_returns_none_for_root_or_homeless() {
+        // Root always uses /var/log, even with XDG / HOME set.
+        assert_eq!(
+            xdg_state_log_dir(Some("/run/user/0/state"), Some("/root"), true),
+            None
+        );
+        // No HOME and no usable XDG_STATE_HOME -> system fallback.
+        assert_eq!(xdg_state_log_dir(None, None, false), None);
+        assert_eq!(xdg_state_log_dir(Some(""), Some(""), false), None);
     }
 
     /// Mode-to-file-name mapping is part of the install-time contract: the
