@@ -741,8 +741,26 @@ pub async fn run_with_hub(
             settings.system.listen_addr_ipv4, settings.system.port
         );
     }
+    if embedded_should_disable_signals(host_control_hub.is_some()) {
+        // The Tauri shell owns the process lifecycle. Letting actix trap SIGINT
+        // would stop only the HTTP server while the GUI keeps running, so the
+        // process never exits on Ctrl+C — see `embedded_should_disable_signals`.
+        http_server = http_server.disable_signals();
+    }
     let server = http_server.run();
     Ok((server, telemetry_guard))
+}
+
+/// Whether the embedded HTTP server should suppress actix's default
+/// SIGINT/SIGTERM handling.
+///
+/// True only when a shared hub is supplied, i.e. the server is embedded in the
+/// Tauri shell, which owns the process lifecycle: if actix traps SIGINT there it
+/// gracefully stops only the HTTP server while the GUI event loop and the IPC
+/// reconnect loop keep running, so Ctrl+C never terminates the app. Standalone /
+/// headless runs (no shared hub) keep actix's graceful shutdown.
+fn embedded_should_disable_signals(has_shared_hub: bool) -> bool {
+    has_shared_hub
 }
 
 #[cfg(test)]
@@ -753,6 +771,19 @@ mod tests {
     #[test]
     fn constant_time_eq_equal() {
         assert!(constant_time_eq(b"hello", b"hello"));
+    }
+
+    // Embedded (Tauri) runs pass a shared hub and must suppress actix signal
+    // handling so Ctrl+C terminates the whole process.
+    #[test]
+    fn embedded_disables_signals_when_hub_present() {
+        assert!(embedded_should_disable_signals(true));
+    }
+
+    // Standalone / headless runs keep actix's graceful SIGINT shutdown.
+    #[test]
+    fn standalone_keeps_signals_without_hub() {
+        assert!(!embedded_should_disable_signals(false));
     }
 
     #[test]
