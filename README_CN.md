@@ -10,23 +10,9 @@ LCXL Remote Desk Web 是一个现代化的、基于 WebRTC 技术的远程桌面
 
 ---
 
-## 🏗️ 核心架构与模块
-
-项目采用了模块化设计，满足不同场景下的部署需求：
-
-*   **`server`**: 远程桌面服务端，运行在受控端（Windows/Linux/MacOS）。提供屏幕捕获、音频采集、指令执行、文件管理等核心功能（无界面版）。
-*   **`signal`**: 信令服务器。默认集成在 `server` 中启用，也可独立部署，使用 WebSocket 协议协调对等连接。
-*   **`vite-project`**: 前端 Web 应用服务。既是管理页面，也是远程连接的 Web 客户端。
-*   **`tauri-app`**: 带界面的增强版服务端。提供了如隐私屏、白板等依赖被控端本地显示的增强功能。
-*   **`turn`**: 集成的 TURN/STUN 服务（目前与信令服务绑定），确保在复杂网络环境下的 NAT 穿透。
-*   **`utils`**: 通用工具包。
-*   **`signal-facade`**: 信令服务接口定义。
-
----
-
 ## ✨ 核心功能
 
-- 🖥️ **高性能桌面连接**：基于 WebRTC 视频流，支持 AV1 (rav1e) / H264 / VP8 / VP9 硬件/软件编码，极速低延迟。
+- 🖥️ **高性能桌面连接**：基于 WebRTC 视频流，支持 AV1 (rav1e) / H.264 (x264 / OpenH264) / VP8 / VP9 软硬件编码，音频采用 Opus，极速低延迟。
 - ⌨️ **功能完备的终端**：内置基于 xterm.js 的远程终端，完美支持 shell 交互。
 - 📂 **文件管理系统**：支持文件的上传、下载、删除及**回收站**功能，轻松同步数据。
 - 📋 **双向剪贴板**：支持文本剪贴板同步。
@@ -37,29 +23,34 @@ LCXL Remote Desk Web 是一个现代化的、基于 WebRTC 技术的远程桌面
 
 ---
 
-## 📡 网络架构图
-
-```mermaid
-graph LR
-    browser[浏览器]<-->Signaling[信令服务]
-    Signaling<-->DeskServer[远程桌面服务]
-    browser<-->STUN[STUN/TURN 服务器]<-->DeskServer
-    browser<-- P2P 连接/中继传输 -->DeskServer
-```
-
-> **注**：信令服务器和 TURN 服务器已默认集成到 `server` 中。在公网或局域网环境下，系统将自动尝试建立 P2P 直连。
-
----
-
 ## 🚀 快速开始
 
-### 方式 1：源码运行（推荐开发者）
+### 方式 1：Docker 部署（推荐普通用户）
+
+使用 Docker Compose 一键启动：
+
+```bash
+docker-compose up -d
+```
+
+启动后访问 `http://localhost:8081`，首次访问需设置管理员账号即可开始使用。
+
+### 方式 2：Tauri 桌面客户端
+
+适用于需要“隐私屏”“白板”等依赖本地显示的增强功能的场景：
+
+```bash
+cd tauri-app
+cargo tauri dev
+```
+
+### 方式 3：源码运行（开发者）
 
 1. **环境准备**：
    - 安装 [Rust](https://www.rust-lang.org/) (latest stable)
-   - 安装 [Node.js](https://nodejs.org/) 和 [pnpm](https://pnpm.io/)
-   - **AV1 编码支持（可选但推荐）**: 使用 AV1 编码需要安装 [nasm](https://www.nasm.us/)。
-     Windows 下安装示例:
+   - 安装 [Node.js](https://nodejs.org/)（前端使用 npm）
+   - **AV1 编码支持（可选但推荐）**：使用 AV1 编码需要安装 [nasm](https://www.nasm.us/)。
+     Windows 下安装示例：
      ```bash
      $NASM_VERSION="2.15.05" # or newer
      $LINK="https://www.nasm.us/pub/nasm/releasebuilds/$NASM_VERSION/win64"
@@ -69,9 +60,8 @@ graph LR
      set PATH="%PATH%;C:\nasm"
      ```
 
-2. **启动后端**：
+2. **启动后端**（默认启用信令和桌面服务）：
    ```bash
-   # 进入 server 目录运行（默认启用信令和桌面服务）
    cargo run --release
    ```
 
@@ -83,34 +73,43 @@ graph LR
    ```
    访问 `http://localhost:5174`。
 
-### 方式 2：Docker 部署
-
-推荐使用 Docker Compose 进行一键部署：
-
-```bash
-docker-compose up -d
-```
-启动后访问 `http://localhost:8081`。首次访问需设置管理员账号。
-
-### 方式 3：Tauri 客户端版
-
-适用于需要“隐私屏”和“白板”功能的场景：
-```bash
-cd tauri-app
-cargo tauri dev
-```
-
 ---
 
 ## ⚙️ 核心配置说明
 
 项目通过 `conf/config.toml` 进行参数微调。部分关键配置：
 
-- **系统设置**: `listen_addr`, `log_level`, `port`。
-- **桌面设置**: `fps`, `encoder_type` (vpx/openh264/manual), `show_cursor`。
-- **模式切换**: `-m` 参数支持 `default`, `signaling`, `desk-server` 多种工作模式。
+- **系统设置**：监听地址、端口、日志级别等。
+- **桌面 / 编码**：帧率、视频编码器（X264 / VP8 / VP9 / H264 / AV1）、是否显示光标等，可在连接发起时随会话设置下发。
+- **模式切换**：`--startup-mode`（简写 `-s`）支持 `default`, `signaling`, `desk-server`, `service-daemon`, `session-worker` 多种工作模式；配置文件路径默认为 `conf/config.toml`（`-c` / `--config-file-path` 指定）。
 
 > 📚 更多细节请参考 [开发指南 (DEVELOPMENT_CN.md)](DEVELOPMENT_CN.md)。
+
+---
+
+## 📡 工作原理
+
+```mermaid
+graph LR
+    browser[浏览器]<-->Signaling[信令服务]
+    Signaling<-->DeskServer[远程桌面服务]
+    browser<-->STUN[STUN/TURN 服务器]<-->DeskServer
+    browser<-- P2P 连接/中继传输 -->DeskServer
+```
+
+浏览器与远程桌面服务通过信令服务交换连接信息，随后借助 STUN/TURN 完成 NAT 穿透，尽可能建立 P2P 直连、必要时回退中继。信令服务器和 TURN 服务器已默认集成到 `server` 中，在公网或局域网环境下系统会自动尝试 P2P 直连。
+
+---
+
+## 🧩 项目结构
+
+面向使用者，项目主要有三种形态：
+
+- **`server`**：无界面的远程桌面服务端，内置信令与 TURN，适合服务器 / 命令行环境部署，支持完整、仅信令、仅被控端等多种启动模式。
+- **`tauri-app`**：带界面的桌面增强版，在 `server` 基础上额外提供隐私屏、白板等需要本地显示的功能。
+- **`vite-project`**：基于浏览器的 Web 前端，既是管理后台，也是远程连接的 Web 客户端。
+
+> 其余为内部库（屏幕 / 音频采集与编码、输入注入、信令协议、IPC 通信等）。完整的模块划分与开发说明见 [开发指南 (DEVELOPMENT_CN.md)](DEVELOPMENT_CN.md)。
 
 ---
 
