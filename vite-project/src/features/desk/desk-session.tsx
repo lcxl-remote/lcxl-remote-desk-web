@@ -478,7 +478,7 @@ export default function DeskSession() {
                 title: t("pages.desk.webrtcUnavailableTitle", "WebRTC unavailable"),
                 description: t(
                     "pages.desk.webrtcUnavailableDesc",
-                    "This client's built-in browser does not support WebRTC, so the remote desktop connection cannot be established.",
+                    "This client's built-in browser does not support WebRTC. Please open the web console in a standard browser such as Chrome to connect.",
                 ),
             });
             return;
