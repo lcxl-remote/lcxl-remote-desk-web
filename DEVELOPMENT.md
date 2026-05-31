@@ -25,12 +25,12 @@ This document provides a comprehensive guide for the LCXL Remote Desk Web projec
 
 - **Language**: Rust (Edition 2024, Rust 1.90+)
 - **Web Framework**: Actix-Web 4.11
-- **WebRTC**: webrtc-rs 0.13
+- **WebRTC**: webrtc-rs 0.17
 - **Session Management**: Actix-Session with Cookie
 - **Logging**: env_logger 0.11
 - **Configuration**: config 0.15 (TOML)
 - **API Documentation**: Utoipa 5 (Swagger, Redoc, RapiDoc, Scalar)
-- **TURN Service**: turn-server 3.4
+- **TURN Service**: turn 0.17
 - **Monitoring**: Prometheus 0.13.4
 
 #### Frontend
@@ -45,9 +45,9 @@ This document provides a comprehensive guide for the LCXL Remote Desk Web projec
 
 #### Multimedia
 
-- **Video Capture**: Windows (DirectX), Linux (X11RB)
-- **Video Encoding**: VP8, VP9 (libvpx)
-- **Audio Capture**: Windows (WASAPI), Linux (ALSA, PipeWire)
+- **Video Capture**: Windows (DXGI / WGC), Linux (X11 / Wayland portal + PipeWire)
+- **Video Encoding**: X264 / OpenH264 (H.264), VP8 / VP9 (libvpx), AV1 (rav1e)
+- **Audio Capture**: Windows (WASAPI), Linux (ALSA / PipeWire)
 - **Audio Encoding**: Opus (libopus)
 
 ### System Requirements
@@ -59,8 +59,8 @@ This document provides a comprehensive guide for the LCXL Remote Desk Web projec
 
 ### Frontend Development
 
-- Node.js 12.0.0 or higher
-- npm, yarn, or pnpm
+- Node.js 20 or higher (required by Vite 7)
+- npm (the frontend uses npm)
 
 ### Linux System Dependencies
 
@@ -96,8 +96,15 @@ npm run dev
 - `port`: Server listening port.
 - `listen_addr_ipv4`: IPv4 listening address.
 - `listen_addr_ipv6`: IPv6 listening address.
+
+#### Log [log]
+
 - `log_level`: Logging level (error, warn, info, debug, trace).
 - `traceback`: Whether to enable Rust error backtrace.
+- `log_retention_days`: Log retention in days (default 7).
+- `log_cleanup_threshold_percent`: Disk usage threshold that triggers cleanup (default 90).
+- `log_cleanup_interval_hours`: Interval in hours for the cleanup task (default 12).
+- `tokio_console_enabled`: Enable the tokio-console subscriber (requires the `tokio_unstable` build flag, default false).
 
 #### User [user]
 
@@ -107,21 +114,31 @@ npm run dev
 #### TURN Server [turn]
 
 - `realm`: TURN server realm for authentication.
-- `interfaces`: Network interface configuration. Supports `udp` and `tcp` protocols and ports.
-- `static_credentials`: Static credentials including `user` and `password`.
+- `interfaces`: Network interface configuration (`udp` / `tcp` protocols, listen and external addresses).
+- `static_auth_secret`: Static authentication secret.
+- `enable_stun` / `enable_turn`: Toggle STUN and TURN relay respectively.
+- `relay_min_port` / `relay_max_port`: Relay port allocation range.
+- `[turn.static_credentials]`: Optional static username / password credential table.
 
 #### Desktop [desk]
 
 - `video_fps`: Video frame rate (default 60). Lowering this value reduces CPU and bandwidth usage.
-- `video_encoder`: Video encoder. `VP8` or `VP9` are recommended.
-- `audio_encoder`: Audio encoder. `OPUS` is primarily supported.
+- `video_quality`: Video encoding quality (0-63, lower is better, default 22).
+- `video_encoder` / `audio_encoder`: Optional; auto-selected when omitted. Video may be `X264` / `VP8` / `VP9` / `H264` / `AV1`; audio is `OPUS`.
 - `video_device_name`: GDI device name of the monitor to capture (`\\.\DISPLAYn`); empty string means "ask the browser to pick on first connection".
 - `show_mouse`: Whether to capture and display the mouse cursor.
+- `enable_dirty_rect`: Whether to enable dirty-rectangle incremental encoding.
+- `[desk.private_screen]`: Privacy screen settings (`enabled`, etc.).
+
+#### Virtual Display [virtual_display]
+
+- `enabled`: Whether to enable the virtual display (requires an installed IddCx driver; effective only in specific modes).
+- `exclusive` / `prompt_ms` / `adaptive_*`: Exclusive-mode and adaptive-resolution parameters.
 
 ### Recommended Development Config
 
 ```toml
-[system]
+[log]
 log_level = "debug"
 traceback = true
 
@@ -133,10 +150,17 @@ video_fps = 30               # Reduce FPS during development to save resources
 
 ### Project Structure
 
-- `server/`: Main server application
+- `server/`: Main server application (supports default / signaling / desk-server / service-daemon / session-worker startup modes; `daemon/` and `worker/` hold the system daemon and session worker)
 - `signal/`: WebRTC signaling & TURN services
+- `signal-facade/`: Shared signaling protocol models
+- `turn/`: TURN/STUN service
+- `capture-engine/`: Screen / audio capture and encoding
+- `input-injection/`: Mouse / keyboard input injection and clipboard
+- `ipc-protocol/`: IPC message definitions for daemon ↔ worker
+- `virtual-display/`: Virtual display (IddCx) userspace wrapper
 - `vite-project/`: React frontend
-- `utils/`: Common utilities
+- `tauri-app/`: GUI desktop edition (Privacy Screen / Whiteboard)
+- `utils/` / `server-version/`: Common utilities and API version constants
 
 ## API Documentation
 
@@ -158,10 +182,12 @@ cargo run -- --help
 Available arguments:
 
 - `-c, --config-file-path <PATH>`: Path to configuration file (default: conf/config)
-- `-m, --startup-mode <MODE>`: Startup mode
+- `-s, --startup-mode <MODE>`: Startup mode
   - `default`: Full mode with signaling and desk server
   - `signaling`: Signaling mode only (Signaling + TURN)
   - `desk-server`: Desk server mode only
+  - `service-daemon`: System service daemon (SYSTEM / root) that manages session workers
+  - `session-worker`: Worker process launched by the daemon inside the user's desktop session
 
 ### Adding Features
 

@@ -21,12 +21,12 @@
 
 - **语言**: Rust (Edition 2024, Rust 1.90+)
 - **Web 框架**: Actix-Web 4.11
-- **WebRTC**: webrtc-rs 0.13
+- **WebRTC**: webrtc-rs 0.17
 - **会话管理**: Actix-Session with Cookie
 - **日志**: env_logger 0.11
 - **配置管理**: config 0.15 (TOML)
 - **API 文档**: Utoipa 5 (支持 Swagger, Redoc, RapiDoc, Scalar)
-- **TURN 服务**: turn-server 3.4
+- **TURN 服务**: turn 0.17
 - **Prometheus 监控**: Prometheus 0.13.4
 
 #### 前端
@@ -41,9 +41,9 @@
 
 #### 多媒体处理
 
-- **视频捕获**: Windows (DirectX), Linux (X11RB)
-- **视频编码**: VP8, VP9 (libvpx)
-- **音频捕获**: Windows (WASAPI), Linux (ALSA, PipeWire)
+- **视频捕获**: Windows (DXGI / WGC), Linux (X11 / Wayland portal + PipeWire)
+- **视频编码**: X264 / OpenH264 (H.264)、VP8 / VP9 (libvpx)、AV1 (rav1e)
+- **音频捕获**: Windows (WASAPI), Linux (ALSA / PipeWire)
 - **音频编码**: Opus (libopus)
 
 ### 系统环境
@@ -55,8 +55,8 @@
 
 ### Node.js 前端开发
 
-- Node.js 12.0.0 或更高版本
-- npm 或 yarn 或 pnpm
+- Node.js 20 或更高版本（Vite 7 要求）
+- 前端使用 npm
 
 ### Linux (包括WSL)系统依赖
 
@@ -93,21 +93,37 @@ cd lcxl-remote-desk-web
 
 ```toml
 [system]
-enable_ipv6 = true          # 是否启用 IPv6
-port = 8081                  # 服务器端口
-listen_addr_ipv4 = "0.0.0.0" # IPv4 监听地址
-listen_addr_ipv6 = "::"       # IPv6 监听地址
-log_level = "debug"          # 日志级别
+enable_ipv6 = true            # 是否启用 IPv6
+port = 8081                   # 服务器端口
+listen_addr_ipv4 = "0.0.0.0"  # IPv4 监听地址
+listen_addr_ipv6 = "::"        # IPv6 监听地址
+
+[log]
+log_level = "info"            # 日志级别 (error/warn/info/debug/trace)
+traceback = true              # 是否启用 Rust 错误回溯
 
 [user]
-login_user_name = "admin"    # 登录用户名
-login_password = "admin"     # 登录密码
+login_user_name = "admin"     # 登录用户名
+login_password = "admin"      # 登录密码
+
+[turn]
+realm = "localhost"           # TURN 域
+enable_stun = true            # 启用 STUN
+enable_turn = false           # 启用 TURN 中继
+relay_min_port = 50000        # 中继端口范围下限
+relay_max_port = 50050        # 中继端口范围上限
 
 [desk]
-video_fps = 60               # 视频帧率
-video_encoder = "VP8"        # 视频编码器 (VP8/VP9)
-audio_encoder = "OPUS"       # 音频编码器
+video_fps = 60                # 视频帧率
+video_quality = 22            # 编码质量 (0-63，越低越好)
+show_mouse = true             # 是否显示鼠标指针
+# 编码器默认自动选择；如需固定可设 video_encoder = "VP8" 等
+
+[virtual_display]
+enabled = false               # 是否启用虚拟显示器
 ```
+
+> 实际首次启动会自动生成包含全部字段的 `conf/config.toml`，上面仅列出常用项。
 
 #### 构建并运行服务器
 
@@ -167,8 +183,15 @@ npm run build
 - `port`: 服务器监听端口
 - `listen_addr_ipv4`: IPv4 监听地址
 - `listen_addr_ipv6`: IPv6 监听地址
+
+#### 日志设置 [log]
+
 - `log_level`: 日志级别 (error, warn, info, debug, trace)
 - `traceback`: 是否启用 Rust 错误回溯
+- `log_retention_days`: 日志保留天数（默认 7）
+- `log_cleanup_threshold_percent`: 触发日志清理的磁盘占用阈值（默认 90）
+- `log_cleanup_interval_hours`: 清理任务执行间隔小时数（默认 12）
+- `tokio_console_enabled`: 是否启用 tokio-console（需 `tokio_unstable` 构建标志，默认 false）
 
 #### 用户设置 [user]
 
@@ -178,21 +201,31 @@ npm run build
 #### TURN 服务器 [turn]
 
 - `realm`: TURN 服务器域，用于身份验证。
-- `interfaces`: 网络接口配置。支持 `udp` 和 `tcp` 协议，及监听端口。
-- `static_credentials`: 静态凭据配置，包含 `user` 和 `password`。
+- `interfaces`: 网络接口配置（`udp` / `tcp` 协议、监听与对外地址）。
+- `static_auth_secret`: 静态鉴权密钥。
+- `enable_stun` / `enable_turn`: 分别开关 STUN 与 TURN 中继。
+- `relay_min_port` / `relay_max_port`: 中继端口分配范围。
+- `[turn.static_credentials]`: 可选的静态用户名 / 密码凭据表。
 
 #### 桌面设置 [desk]
 
 - `video_fps`: 视频帧率 (默认 60)。降低此值可减少 CPU 和带宽占用。
-- `video_encoder`: 视频编码器。建议根据硬件支持选择 `VP8` 或 `VP9`。
-- `audio_encoder`: 音频编码器。目前主要支持 `OPUS`。
+- `video_quality`: 视频编码质量 (0-63，越低越好，默认 22)。
+- `video_encoder` / `audio_encoder`: 可选项，省略时自动选择。视频可选 `X264` / `VP8` / `VP9` / `H264` / `AV1`，音频为 `OPUS`。
 - `video_device_name`: 指定要捕获的显示器的 GDI 设备名（`\\.\DISPLAYn`）；为空串时由浏览器在首次连接时弹框选择。
 - `show_mouse`: 是否在远程画面中捕捉并显示移动的鼠标指针。
+- `enable_dirty_rect`: 是否启用脏矩形增量编码。
+- `[desk.private_screen]`: 隐私屏设置（`enabled` 等）。
+
+#### 虚拟显示器 [virtual_display]
+
+- `enabled`: 是否启用虚拟显示器（依赖已安装的 IddCx 驱动，仅特定模式生效）。
+- `exclusive` / `prompt_ms` / `adaptive_*`: 独占模式与自适应分辨率相关参数。
 
 ### 开发模式推荐配置
 
 ```toml
-[system]
+[log]
 log_level = "debug"          # 开发时使用 debug 级别日志
 traceback = true             # 启用错误回溯
 
@@ -255,13 +288,21 @@ API 规范定义：<http://localhost:8081/openapi.json>
 
 项目采用模块化设计，主要分为以下几个部分：
 
-- **server/**: 主服务器应用
+- **server/**: 主服务器应用（支持 default / signaling / desk-server / service-daemon / session-worker 多种启动模式）
   - **controller/**: 处理 HTTP 请求和路由
   - **model/**: 数据模型定义
   - **service/**: 业务逻辑实现
+  - **daemon/** 与 **worker/**: 系统服务守护进程与会话工作进程
 - **signal/**: WebRTC 信令服务 (及内置 TURN)
+- **signal-facade/**: 信令协议共享模型
+- **turn/**: TURN/STUN 服务
+- **capture-engine/**: 屏幕 / 音频采集与编码
+- **input-injection/**: 鼠标 / 键盘输入注入与剪贴板
+- **ipc-protocol/**: 守护进程 ↔ 工作进程 IPC 消息定义
+- **virtual-display/**: 虚拟显示器（IddCx）用户态封装
 - **vite-project/**: React + Vite 前端应用
-- **utils/**: 公共工具类库
+- **tauri-app/**: 带界面的桌面增强版（隐私屏 / 白板）
+- **utils/** / **server-version/**: 公共工具类库与 API 版本常量
 
 ### 添加新功能
 
@@ -323,7 +364,7 @@ npm run lint
 
 ### 前端调试
 
-1. **开发服务器**：运行 `npm start` 启动带热重载的开发服务器
+1. **开发服务器**：运行 `npm run dev` 启动带热重载的开发服务器
 2. **浏览器开发工具**：使用 Chrome/Firefox DevTools 调试
 3. **React DevTools**：安装 React 浏览器扩展进行组件调试
 
@@ -407,10 +448,12 @@ cargo run -- --help
 可用参数：
 
 - `-c, --config-file-path <PATH>`: 配置文件路径 (默认: conf/config)
-- `-m, --startup-mode <MODE>`: 启动模式
+- `-s, --startup-mode <MODE>`: 启动模式
   - `default`: 默认模式，包含信令和桌面服务器
   - `signaling`: 仅信令模式 (信令 + TURN)
   - `desk-server`: 仅桌面服务器
+  - `service-daemon`: 系统服务守护进程（SYSTEM / root），管理会话工作进程
+  - `session-worker`: 由守护进程在用户桌面会话中启动的工作进程
 
 ## 常见问题
 
