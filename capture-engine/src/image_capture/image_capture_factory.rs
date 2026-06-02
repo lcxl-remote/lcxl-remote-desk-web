@@ -191,6 +191,49 @@ pub fn list_image_output(
     Ok(output_list)
 }
 
+/// Decides whether enumerating `backend` failing with `err` should retry on a
+/// different backend, mirroring `create_image_capture`'s WGC→DXGI fallback:
+/// only WGC that is structurally unavailable (SYSTEM / secure-desktop worker)
+/// falls back to DXGI. Returns the backend to enumerate instead, or `None` to
+/// surface `err` unchanged — so other WGC failures are not masked, and non-WGC
+/// backends never fall back. Pure so the branches are unit-testable.
+#[cfg(target_os = "windows")]
+fn fallback_image_output_backend(
+    backend: ImageCaptureType,
+    err: &CaptureError,
+) -> Option<ImageCaptureType> {
+    if matches!(backend, ImageCaptureType::WGC) && is_wgc_unavailable_error(err) {
+        Some(ImageCaptureType::DXGI)
+    } else {
+        None
+    }
+}
+
+/// Enumerate the displays for the backend that `create_image_capture` would
+/// actually use for `settings`, applying the same WGC→DXGI fallback so callers
+/// validate a capture target against the list that will really be used (e.g.
+/// on a SYSTEM / secure-desktop worker where WGC is unavailable and the
+/// factory silently builds a DXGI capture instead).
+pub fn list_effective_image_output(
+    settings: &DeskSettings,
+) -> Result<Vec<DisplayInfo>, CaptureError> {
+    let backend = settings.get_image_capture_type()?;
+    match list_image_output(backend) {
+        Ok(list) => Ok(list),
+        Err(e) => {
+            #[cfg(target_os = "windows")]
+            if let Some(fallback) = fallback_image_output_backend(backend, &e) {
+                log::warn!(
+                    "[capture-factory] {backend:?} enumeration unavailable ({e}); \
+                     enumerating {fallback:?} displays for effective target resolution"
+                );
+                return list_image_output(fallback);
+            }
+            Err(e)
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
@@ -220,5 +263,48 @@ mod tests {
                 code
             );
         }
+    }
+
+    #[test]
+    fn fallback_backend_wgc_unavailable_falls_back_to_dxgi() {
+        let err = CaptureError::new_custom_error(
+            DeskErrorCode::FEATURE_UNAVAILABLE,
+            "WGC RuntimeBroker not running",
+        );
+        assert!(
+            matches!(
+                fallback_image_output_backend(ImageCaptureType::WGC, &err),
+                Some(ImageCaptureType::DXGI)
+            ),
+            "WGC + FEATURE_UNAVAILABLE must fall back to DXGI"
+        );
+    }
+
+    #[test]
+    fn fallback_backend_wgc_other_error_is_not_masked() {
+        for code in [
+            DeskErrorCode::SYSTEM_ERROR,
+            DeskErrorCode::WINDOWS_ERROR,
+            DeskErrorCode::INVALID_PARAMS,
+        ] {
+            let err = CaptureError::new_custom_error(code, "x");
+            assert!(
+                fallback_image_output_backend(ImageCaptureType::WGC, &err).is_none(),
+                "WGC + {:?} must not be masked by a DXGI fallback",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_backend_non_wgc_never_falls_back() {
+        let err = CaptureError::new_custom_error(DeskErrorCode::FEATURE_UNAVAILABLE, "unavailable");
+        // Even with the WGC-unavailable code, non-WGC backends must surface
+        // their own error rather than retry on a different backend.
+        assert!(fallback_image_output_backend(ImageCaptureType::DXGI, &err).is_none());
+        assert!(fallback_image_output_backend(ImageCaptureType::GDI, &err).is_none());
+
+        let other = CaptureError::new_custom_error(DeskErrorCode::SYSTEM_ERROR, "x");
+        assert!(fallback_image_output_backend(ImageCaptureType::GDI, &other).is_none());
     }
 }

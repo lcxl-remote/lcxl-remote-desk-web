@@ -79,7 +79,9 @@ use desk_capture_engine::audio_capture::audio_capture_factory::{
 use desk_capture_engine::audio_encoder::audio_encoder_factory::{
     create_audio_encoder, list_audio_encoder,
 };
-use desk_capture_engine::image_capture::image_capture_factory::list_image_capture;
+use desk_capture_engine::image_capture::image_capture_factory::{
+    list_effective_image_output, list_image_capture,
+};
 use desk_capture_engine::model::image_capture::ImageInfo;
 use desk_capture_engine::model::video_encoder::VideoEncoder;
 use desk_capture_engine::video_encoder::video_encoder_factory::{
@@ -753,6 +755,39 @@ fn display_info_for_size(base: &DisplayInfo, size: (u32, u32)) -> DisplayInfo {
     di
 }
 
+/// Returns a live, capturable device name for `requested` given `live` (the
+/// display list for the effective capture backend): the requested name if it
+/// is attached and capturable, otherwise the primary (origin 0,0), otherwise
+/// the first usable display. Only `attached_to_desktop` displays with a
+/// non-zero surface are considered — mirroring the input dispatcher
+/// (`enumerate_attached_displays` + `geometry_for_device_in`). Returns `None`
+/// when no substitution should happen: empty `requested` (preserve the
+/// downstream "no display selected" hard error) or no usable display (leave
+/// the name untouched and let the capture backend surface its own error).
+fn capturable_device_name(live: &[DisplayInfo], requested: &str) -> Option<String> {
+    if requested.is_empty() {
+        return None;
+    }
+    let usable: Vec<&DisplayInfo> = live
+        .iter()
+        .filter(|d| {
+            d.attached_to_desktop
+                && d.desktop_coordinates.width() > 0
+                && d.desktop_coordinates.height() > 0
+        })
+        .collect();
+    if usable.is_empty() {
+        return None;
+    }
+    if usable.iter().any(|d| d.device_name == requested) {
+        return Some(requested.to_string());
+    }
+    let primary = usable
+        .iter()
+        .find(|d| d.desktop_coordinates.left == 0 && d.desktop_coordinates.top == 0);
+    Some(primary.unwrap_or(&usable[0]).device_name.clone())
+}
+
 /// Inverse of [`codec_from_str`] for the video subset.
 fn video_codec_name(c: MediaCodec) -> Option<&'static str> {
     match c {
@@ -900,6 +935,23 @@ async fn video_pipeline_loop(
          enable_dirty_rect={}",
         merged_settings.video_fps, merged_settings.enable_dirty_rect
     );
+
+    // Guard against a stale capability snapshot: an IDD virtual display can be
+    // advertised in INIT (and chosen by the client) yet be gone by capture
+    // time. Substitute a live, capturable display instead of hard-erroring,
+    // mirroring the input dispatcher's geometry fallback.
+    if !merged_settings.video_device_name.is_empty()
+        && let Ok(live) = list_effective_image_output(&merged_settings)
+        && let Some(name) = capturable_device_name(&live, &merged_settings.video_device_name)
+        && name != merged_settings.video_device_name
+    {
+        warn!(
+            "[MediaProducer:{connection_id}] requested display {:?} not live; \
+             falling back to {:?}",
+            merged_settings.video_device_name, name
+        );
+        merged_settings.video_device_name = name;
+    }
 
     // Subscribe to the shared capture loop for this `(backend,
     // output)`. If no loop exists the registry spawns one;
@@ -2837,5 +2889,116 @@ mod tests {
             };
         }
         assert!(map.lock().unwrap().is_empty());
+    }
+
+    // ---- capturable_device_name ----
+
+    fn disp(
+        name: &str,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+        attached: bool,
+    ) -> DisplayInfo {
+        DisplayInfo {
+            device_name: name.to_string(),
+            display_device_name: None,
+            desktop_coordinates: DisplayRect {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            },
+            resolutions: Vec::new(),
+            attached_to_desktop: attached,
+            rotation: 0,
+        }
+    }
+
+    #[test]
+    fn capturable_device_name_keeps_requested_when_live_and_capturable() {
+        let live = vec![
+            disp(r"\\.\DISPLAY1", 0, 0, 1280, 800, true),
+            disp(r"\\.\DISPLAY2", 1280, 0, 1920, 1080, true),
+        ];
+        assert_eq!(
+            capturable_device_name(&live, r"\\.\DISPLAY2").as_deref(),
+            Some(r"\\.\DISPLAY2")
+        );
+    }
+
+    #[test]
+    fn capturable_device_name_falls_back_to_primary_when_requested_missing() {
+        let live = vec![
+            disp(r"\\.\DISPLAY2", 1280, 0, 1920, 1080, true),
+            disp(r"\\.\DISPLAY1", 0, 0, 1280, 800, true),
+        ];
+        // Requested target is gone; substitute the primary at origin (0,0),
+        // not merely the first enumerated display.
+        assert_eq!(
+            capturable_device_name(&live, r"\\.\DISPLAY33").as_deref(),
+            Some(r"\\.\DISPLAY1")
+        );
+    }
+
+    #[test]
+    fn capturable_device_name_falls_back_to_first_when_no_origin_primary() {
+        let live = vec![
+            disp(r"\\.\DISPLAY2", 1280, 0, 1920, 1080, true),
+            disp(r"\\.\DISPLAY3", 3200, 0, 1280, 800, true),
+        ];
+        assert_eq!(
+            capturable_device_name(&live, r"\\.\DISPLAY33").as_deref(),
+            Some(r"\\.\DISPLAY2")
+        );
+    }
+
+    #[test]
+    fn capturable_device_name_treats_detached_requested_as_uncapturable() {
+        let live = vec![
+            disp(r"\\.\DISPLAY33", 0, 0, 1920, 1080, false), // requested, but detached
+            disp(r"\\.\DISPLAY1", 0, 0, 1280, 800, true),
+        ];
+        // The requested name exists but is not attached, so it is not usable;
+        // fall back to the live primary instead of returning it.
+        assert_eq!(
+            capturable_device_name(&live, r"\\.\DISPLAY33").as_deref(),
+            Some(r"\\.\DISPLAY1")
+        );
+    }
+
+    #[test]
+    fn capturable_device_name_treats_zero_size_requested_as_uncapturable() {
+        let live = vec![
+            disp(r"\\.\DISPLAY33", 0, 0, 0, 0, true), // requested, attached, zero surface
+            disp(r"\\.\DISPLAY1", 0, 0, 1280, 800, true),
+        ];
+        assert_eq!(
+            capturable_device_name(&live, r"\\.\DISPLAY33").as_deref(),
+            Some(r"\\.\DISPLAY1")
+        );
+    }
+
+    #[test]
+    fn capturable_device_name_none_when_no_usable_display() {
+        let live = vec![
+            disp(r"\\.\DISPLAY1", 0, 0, 1280, 800, false), // detached
+            disp(r"\\.\DISPLAY2", 1280, 0, 0, 0, true),    // zero surface
+        ];
+        // No usable display at all -> leave the name untouched (the capture
+        // backend will surface its own error).
+        assert!(capturable_device_name(&live, r"\\.\DISPLAY1").is_none());
+    }
+
+    #[test]
+    fn capturable_device_name_none_for_empty_requested() {
+        let live = vec![disp(r"\\.\DISPLAY1", 0, 0, 1280, 800, true)];
+        assert!(capturable_device_name(&live, "").is_none());
+    }
+
+    #[test]
+    fn capturable_device_name_none_for_empty_live() {
+        assert!(capturable_device_name(&[], r"\\.\DISPLAY1").is_none());
     }
 }
