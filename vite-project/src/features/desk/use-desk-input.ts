@@ -16,6 +16,10 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
     const sequenceNumberRef = useRef(0);
     const pressedKeysRef = useRef<Set<number>>(new Set());
     const pressedButtonsRef = useRef<Set<number>>(new Set());
+    // Last cursor position (normalised ratios) reported to the backend.
+    // Reused for the synthetic mouseup sent on blur so the release lands
+    // where the cursor actually is instead of the surface's top-left.
+    const lastPositionRef = useRef({ x: 0, y: 0 });
 
     useEffect(() => {
         const element = videoRef.current;
@@ -74,6 +78,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
 
             const x_ratio = trueX / renderedWidth;
             const y_ratio = trueY / renderedHeight;
+            lastPositionRef.current = { x: x_ratio, y: y_ratio };
             let delta_x = 0;
             let delta_y = 0;
             if (eventType === "wheel") {
@@ -175,6 +180,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
 
             const x_ratio = trueX / renderedWidth;
             const y_ratio = trueY / renderedHeight;
+            lastPositionRef.current = { x: x_ratio, y: y_ratio };
 
             const mouseEvent = {
                 event: eventType,
@@ -201,8 +207,8 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
                 pressedButtonsRef.current.forEach(button => {
                     const mouseEvent = {
                         event: "mouseup",
-                        x: 0,
-                        y: 0,
+                        x: lastPositionRef.current.x,
+                        y: lastPositionRef.current.y,
                         button: button,
                         buttons: 0,
                         alt_key: false,
