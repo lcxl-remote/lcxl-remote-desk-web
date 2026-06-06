@@ -726,6 +726,14 @@ pub trait SignalingUser: Send + Sync {
 
 pub trait TurnProvider: Send + Sync {
     fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer;
+
+    /// Build an ICE server with a self-signed TURN REST credential for `name`,
+    /// valid for `ttl_secs`. Returns `None` when the provider cannot issue one
+    /// (no static auth secret / no interface), so callers never inject an
+    /// unusable entry. Default `None` keeps non-TURN providers compiling.
+    fn get_rest_ice_servers(&self, _name: &str, _ttl_secs: u64) -> Option<LcxlRTCIceServer> {
+        None
+    }
 }
 
 #[cfg(test)]

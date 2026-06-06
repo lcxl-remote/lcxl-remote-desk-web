@@ -17,12 +17,98 @@ use crate::{
     model::{
         connection::{ConnectionList, ConnectionModel, ConnectionState, SharedConnectionMap},
         signal::{
-            ForwardSignalingSender, InitSignalingData, RemoteDeskTypeEnum, RequestRemoteModel,
-            SignalingModel, SignalingType, SignalingUser, TurnProvider,
+            ForwardSignalingSender, InitSignalingData, LcxlRTCIceServer, RemoteDeskTypeEnum,
+            RequestRemoteModel, SignalingModel, SignalingType, SignalingUser, TurnProvider,
         },
         version::VersionInfo,
     },
 };
+
+/// TTL (seconds) for the REST TURN credential injected into a forwarded
+/// REQUEST_REMOTE. 24h comfortably covers a single desk session; a longer
+/// session re-issues a fresh credential when the host reconnects.
+const REQUEST_REMOTE_TURN_TTL_SECS: u64 = 86_400;
+
+/// Build the TURN REST ICE server to inject into a forwarded REQUEST_REMOTE,
+/// keyed on the **recipient** (`to_connection_id`) so the desk server/host — not
+/// the requesting browser — receives usable credentials. Returns `None` when
+/// there is no recipient or the provider cannot issue a credential. Pure (no
+/// I/O), so it is unit-testable without a WebSocket session.
+fn build_request_remote_ice(
+    model: &SignalingModel,
+    turn: Option<&Arc<dyn TurnProvider>>,
+    ttl_secs: u64,
+) -> Option<LcxlRTCIceServer> {
+    let to_connection_id = model.to_connection_id.as_deref()?;
+    turn?.get_rest_ice_servers(to_connection_id, ttl_secs)
+}
+
+#[cfg(test)]
+mod request_remote_ice_tests {
+    use super::*;
+
+    /// Fake provider that records nothing — `get_ice_servers` must never be hit
+    /// (REQUEST_REMOTE must use the REST path), and `get_rest_ice_servers`
+    /// echoes the requested name into the username so the test can assert the
+    /// recipient identity was used.
+    struct FakeTurn {
+        issue: bool,
+    }
+    impl TurnProvider for FakeTurn {
+        fn get_ice_servers(&self, _username: &str, _credential: &str) -> LcxlRTCIceServer {
+            unreachable!("REQUEST_REMOTE injection must use get_rest_ice_servers")
+        }
+        fn get_rest_ice_servers(&self, name: &str, _ttl: u64) -> Option<LcxlRTCIceServer> {
+            self.issue.then(|| LcxlRTCIceServer {
+                urls: vec!["turn:host:3478?transport=udp".to_string()],
+                username: format!("9999999999:{name}"),
+                credential: "pw".to_string(),
+            })
+        }
+    }
+
+    fn model(to: Option<&str>) -> SignalingModel {
+        SignalingModel::new(
+            "req-1",
+            SignalingType::RequestRemote,
+            Some("browser-conn".to_string()),
+            to.map(str::to_string),
+            None,
+            None,
+        )
+    }
+
+    fn provider(issue: bool) -> Arc<dyn TurnProvider> {
+        Arc::new(FakeTurn { issue })
+    }
+
+    #[test]
+    fn injects_for_recipient_via_trait_object() {
+        let turn = provider(true);
+        let ice = build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60)
+            .expect("ice server");
+        // Username embeds the RECIPIENT id, proving recipient identity is used
+        // (not the sender `browser-conn`), through the trait-object override.
+        assert!(ice.username.ends_with(":host-1"));
+    }
+
+    #[test]
+    fn none_without_recipient() {
+        let turn = provider(true);
+        assert!(build_request_remote_ice(&model(None), Some(&turn), 60).is_none());
+    }
+
+    #[test]
+    fn none_without_turn() {
+        assert!(build_request_remote_ice(&model(Some("host-1")), None, 60).is_none());
+    }
+
+    #[test]
+    fn none_when_provider_declines() {
+        let turn = provider(false);
+        assert!(build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60).is_none());
+    }
+}
 
 // ====== DeviceCodeService trait ======
 
@@ -484,31 +570,18 @@ impl<U: SignalingUser> SignalingHandler<U> {
 
             SignalingType::RequestRemote => {
                 let mut data = signaling_model.get_data_with_default::<RequestRemoteModel>()?;
-                // TODO need to support static auth secret
-                // ice servers
-                // username is connection_id
-                // password is client id
-                let client_id_opt = self.connection_state.model.version_info.client_id.clone();
-                if let Some(client_id) = client_id_opt {
-                    if let Some(turn) = &self.turn {
-                        let ice_server = turn.get_ice_servers(
-                            &self.connection_state.model.connection_id,
-                            &client_id,
-                        );
-                        if !ice_server.urls.is_empty() {
-                            data.ice_servers.push(ice_server);
-                        } else {
-                            log::warn!(
-                                "Skipping empty TURN ICE servers for connection {}",
-                                self.connection_state.model.connection_id
-                            );
-                        }
-                    } else {
-                        log::warn!(
-                            "TURN settings unavailable, skip injecting TURN ICE for connection {}",
-                            self.connection_state.model.connection_id
-                        );
-                    }
+                // Inject a TURN REST ICE server for the RECIPIENT (the desk
+                // server / host this REQUEST_REMOTE is forwarded to) so it can
+                // gather srflx/relay candidates for NAT traversal. Keyed on
+                // `to_connection_id`, not the sender: a browser requester has no
+                // usable TURN identity, which would otherwise leave the host
+                // with no ICE servers (`iceServers=0`).
+                if let Some(ice_server) = build_request_remote_ice(
+                    &signaling_model,
+                    self.turn.as_ref(),
+                    REQUEST_REMOTE_TURN_TTL_SECS,
+                ) {
+                    data.ice_servers.push(ice_server);
                 }
                 let data = Some(serde_json::to_value(data)?);
                 let new_signaling_model = SignalingModel::new(

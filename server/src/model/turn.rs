@@ -1,11 +1,8 @@
 use std::net::SocketAddr;
 
 use actix_web::web;
-use base64::prelude::*;
 use desk_signal::model::SharedConnectionMap;
 use desk_turn::model::TurnSettings;
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
 
 use tokio::runtime::Handle;
 use webrtc::turn;
@@ -65,25 +62,73 @@ impl turn::auth::AuthHandler for TurnAuthHandler {
             }
         }
 
-        // Check static auth secret
+        // Check static auth secret: REST credential `{expiration}:{name}` with
+        // server-side expiry enforcement, shared with the manager handler.
         if let Some(secret) = &self.turn_settings.static_auth_secret {
-            // TURN REST API password generation
-            let mut mac = Hmac::<Sha1>::new_from_slice(secret.as_bytes())
-                .map_err(|e| turn::Error::Other(e.to_string()))?;
-            mac.update(username.as_bytes());
-            let result = mac.finalize();
-            let password_bytes = result.into_bytes();
-            let password = BASE64_STANDARD.encode(password_bytes);
-
-            let key = turn::auth::generate_auth_key(username, realm, &password);
-            log::info!(
-                "auth_handle static_auth_secret success for username={}",
-                username
-            );
-            return Ok(key);
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(u64::MAX); // fail closed: clock error → treat as expired
+            return match desk_turn::utils::validate_rest_credential(
+                secret, username, realm, now_secs,
+            ) {
+                Some(key) => {
+                    log::info!("auth_handle REST credential success for username={}", username);
+                    Ok(key)
+                }
+                None => {
+                    log::warn!(
+                        "auth_handle REST credential rejected (malformed/expired) for username={}",
+                        username
+                    );
+                    Err(turn::Error::Other("Unauthorized".to_owned()))
+                }
+            };
         }
 
         log::info!("username not found, auth failed for {}", username);
         Err(turn::Error::Other("Unauthorized".to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use webrtc::turn::auth::AuthHandler;
+
+    fn handler(secret: Option<&str>) -> TurnAuthHandler {
+        let turn_settings = TurnSettings {
+            static_auth_secret: secret.map(str::to_owned),
+            ..TurnSettings::default()
+        };
+        let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
+        TurnAuthHandler::new(turn_settings, connection_map)
+    }
+
+    fn addr() -> SocketAddr {
+        "127.0.0.1:0".parse().unwrap()
+    }
+
+    // `auth_handle` calls `Handle::try_current()` + `block_on(spawn_blocking)`,
+    // so the test needs a Tokio runtime (multi-thread so the blocking lookup of
+    // the empty connection map can complete while we block on it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rest_credential_unexpired_is_accepted() {
+        // Far-future expiration → time-independent; empty map falls to static branch.
+        let result = handler(Some("secret")).auth_handle("9999999999:host-1", "localhost", addr());
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rest_credential_expired_is_rejected() {
+        let result = handler(Some("secret")).auth_handle("1:host-1", "localhost", addr());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_rest_username_is_rejected() {
+        let result = handler(Some("secret")).auth_handle("no-expiration", "localhost", addr());
+        assert!(result.is_err());
     }
 }

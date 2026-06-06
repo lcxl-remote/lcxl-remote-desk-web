@@ -124,31 +124,102 @@ pub struct TurnSettings {
 }
 
 impl TurnSettings {
-    pub fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer {
-        let mut urls = vec![];
-        for interface in self.interfaces.iter() {
-            urls.push(format!(
-                "turn:{}?transport={}",
-                interface.external,
-                if interface.transport == TurnTransport::UDP {
-                    "udp"
-                } else {
-                    "tcp"
-                }
-            ));
-        }
+    /// `turn:{external}?transport=...` URLs for every configured interface.
+    fn turn_urls(&self) -> Vec<String> {
+        self.interfaces
+            .iter()
+            .map(|interface| {
+                format!(
+                    "turn:{}?transport={}",
+                    interface.external,
+                    if interface.transport == TurnTransport::UDP {
+                        "udp"
+                    } else {
+                        "tcp"
+                    }
+                )
+            })
+            .collect()
+    }
 
+    pub fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer {
         LcxlRTCIceServer {
-            urls,
+            urls: self.turn_urls(),
             username: username.to_owned(),
             credential: credential.to_owned(),
         }
+    }
+
+    /// Build an ICE server carrying a freshly-signed TURN REST credential
+    /// (username `{expiration}:{name}`, password `HMAC(secret, username)`) valid
+    /// for `ttl_secs`. Returns `None` when there is no `static_auth_secret` or no
+    /// TURN interface to advertise, so callers never inject an unusable entry.
+    pub fn get_rest_ice_servers(&self, name: &str, ttl_secs: u64) -> Option<LcxlRTCIceServer> {
+        let secret = self.static_auth_secret.as_ref()?;
+        let urls = self.turn_urls();
+        if urls.is_empty() {
+            return None;
+        }
+        let (username, credential) =
+            crate::utils::generate_turn_credentials(secret, name, ttl_secs);
+        Some(LcxlRTCIceServer {
+            urls,
+            username,
+            credential,
+        })
+    }
+}
+
+#[cfg(test)]
+mod rest_ice_server_tests {
+    use super::*;
+
+    fn settings(secret: Option<&str>, with_interface: bool) -> TurnSettings {
+        let interfaces = if with_interface {
+            vec![TurnInterface {
+                listen: "0.0.0.0:3478".to_owned(),
+                external: "192.168.50.5:3478".to_owned(),
+                transport: TurnTransport::UDP,
+            }]
+        } else {
+            vec![]
+        };
+        TurnSettings {
+            interfaces,
+            static_auth_secret: secret.map(str::to_owned),
+            ..TurnSettings::default()
+        }
+    }
+
+    #[test]
+    fn none_without_secret_or_interface() {
+        assert!(settings(None, true).get_rest_ice_servers("host-1", 60).is_none());
+        assert!(
+            settings(Some("s"), false)
+                .get_rest_ice_servers("host-1", 60)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn some_with_secret_and_interface() {
+        let ice = settings(Some("s"), true)
+            .get_rest_ice_servers("host-1", 60)
+            .expect("ice server");
+        assert_eq!(ice.urls, vec!["turn:192.168.50.5:3478?transport=udp"]);
+        // username = "{expiration}:host-1"
+        assert!(ice.username.ends_with(":host-1"));
+        assert!(ice.username.split(':').next().unwrap().parse::<u64>().is_ok());
     }
 }
 
 impl desk_signal_facade::model::signal::TurnProvider for TurnSettings {
     fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer {
         self.get_ice_servers(username, credential)
+    }
+
+    fn get_rest_ice_servers(&self, name: &str, ttl_secs: u64) -> Option<LcxlRTCIceServer> {
+        self.get_rest_ice_servers(name, ttl_secs)
     }
 }
 
