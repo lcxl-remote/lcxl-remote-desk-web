@@ -212,10 +212,9 @@ jobs:
           key: tauri-${{ matrix.target }}
 
       - name: Build Tauri Shell + Server
-        run: |
-          cargo build --release --target ${{ matrix.target }} \
-            --bin lcxl-remote-desk-tauri \
-            --bin lcxl-remote-desk-server
+        # Single line: Windows runners default to PowerShell, which does not
+        # understand bash `\` line continuations.
+        run: cargo build --release --target ${{ matrix.target }} --bin lcxl-remote-desk-tauri --bin lcxl-remote-desk-server
 
       - name: Assemble Package (Linux)
         if: matrix.platform == 'linux'
