@@ -1,0 +1,369 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Allow manual dry-runs from the Actions tab (builds artifacts, skips the
+  # GitHub Release creation step which is guarded on a tag ref).
+  workflow_dispatch:
+
+# Least-privilege default: build jobs only read. The docker job grants itself
+# packages: write and the release job grants itself contents: write.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.90.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build the React frontend once and share it with every server package so the
+  # binary ships with its static assets (the server reads ./static at runtime).
+  # ---------------------------------------------------------------------------
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: vite-project/package-lock.json
+      - name: Build Frontend
+        working-directory: vite-project
+        run: |
+          npm ci
+          npm run build
+      - name: Upload Frontend Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: vite-project/dist
+
+  # ---------------------------------------------------------------------------
+  # Build the server binary on every target and package it with its static
+  # assets. macOS x86_64 builds natively on the Intel runner (macos-15-intel)
+  # instead of cross-compiling on Apple Silicon, which avoids libvpx/x264 link
+  # failures.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: lcxl-remote-desk-server
+          - platform: windows
+            arch: x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_name: lcxl-remote-desk-server.exe
+          - platform: macos
+            arch: aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin_name: lcxl-remote-desk-server
+          - platform: macos
+            arch: x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            bin_name: lcxl-remote-desk-server
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp Version
+        uses: ./.github/actions/stamp-version
+
+      - name: Download Frontend Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: server/static
+
+      - name: Install Linux Dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpipewire-0.3-dev pkg-config \
+            libclang-dev libasound2-dev libssl-dev libvpx-dev cmake nasm \
+            libx11-dev libxcb1-dev libxcb-randr0-dev libxext-dev
+
+      - name: Install macOS Dependencies
+        if: matrix.platform == 'macos'
+        run: brew install libvpx nasm pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: server-${{ matrix.target }}
+
+      - name: Build Server
+        run: cargo build --release --bin lcxl-remote-desk-server --target ${{ matrix.target }}
+
+      - name: Create Package (Unix)
+        if: matrix.platform != 'windows'
+        run: |
+          mkdir -p release
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" release/
+          cp -r server/static release/static
+          tar -czf "${{ matrix.platform }}-${{ matrix.arch }}-server.tar.gz" -C release .
+
+      - name: Create Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\${{ matrix.bin_name }}" -Destination release\
+          Copy-Item -Recurse "server\static" -Destination release\static
+          Compress-Archive -Path release\* -DestinationPath "${{ matrix.platform }}-${{ matrix.arch }}-server.zip"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  # ---------------------------------------------------------------------------
+  # Build the Tauri desktop shell as a portable zip. The shell spawns the
+  # lcxl-remote-desk-server sidecar from its own directory (find_server_binary)
+  # and that server serves the frontend from a sibling static/ dir, so the zip
+  # ships all three flat in one directory:
+  #   lcxl-remote-desk-tauri[.exe] + lcxl-remote-desk-server[.exe] + static/
+  # This sidesteps installer-bundle layouts (.dmg/.msi/.AppImage) entirely; the
+  # icon is embedded at build time by tauri-build, so no cargo tauri build /
+  # bundling toolchain is needed.
+  # ---------------------------------------------------------------------------
+  tauri:
+    needs: frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            arch: x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - platform: windows
+            arch: x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - platform: macos
+            arch: aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - platform: macos
+            arch: x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp Version
+        uses: ./.github/actions/stamp-version
+
+      - name: Download Frontend Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: server/static
+
+      - name: Install System Dependencies (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          # Tauri 2 GUI deps (note: webkit2gtk-4.1, not 4.0) + the capture/input
+          # native deps pulled in transitively via lcxl-remote-desk-server.
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            patchelf libayatana-appindicator3-dev build-essential pkg-config \
+            libpipewire-0.3-dev libclang-dev libasound2-dev libssl-dev libvpx-dev \
+            cmake nasm libx11-dev libxcb1-dev libxcb-randr0-dev libxext-dev
+
+      - name: Install macOS Dependencies
+        if: matrix.platform == 'macos'
+        run: brew install libvpx nasm pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: tauri-${{ matrix.target }}
+
+      - name: Build Tauri Shell + Server
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            --bin lcxl-remote-desk-tauri \
+            --bin lcxl-remote-desk-server
+
+      - name: Assemble Package (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          mkdir -p release
+          cp "target/${{ matrix.target }}/release/lcxl-remote-desk-tauri" release/
+          cp "target/${{ matrix.target }}/release/lcxl-remote-desk-server" release/
+          cp -r server/static release/static
+          (cd release && zip -r "../tauri-${{ matrix.platform }}-${{ matrix.arch }}.zip" .)
+
+      - name: Assemble Package (macOS .dmg)
+        if: matrix.platform == 'macos'
+        run: |
+          # Derive the version from the git tag (v0.2.0 -> 0.2.0) so the .app
+          # metadata matches the Release/Docker version; fall back for manual
+          # (non-tag) runs.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          APP="dist/LCXL Remote Desktop.app"
+          # Shell, sidecar and static all sit under Contents/MacOS so that the
+          # shell's find_server_binary() (looks next to its own exe) and the
+          # server's static lookup (looks next to its own exe) both resolve.
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/lcxl-remote-desk-tauri" "$APP/Contents/MacOS/"
+          cp "target/${{ matrix.target }}/release/lcxl-remote-desk-server" "$APP/Contents/MacOS/"
+          cp -R server/static "$APP/Contents/MacOS/static"
+          cp tauri-app/src-tauri/icons/icon.icns "$APP/Contents/Resources/icon.icns"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>LCXL Remote Desktop</string>
+            <key>CFBundleDisplayName</key><string>LCXL Remote Desktop</string>
+            <key>CFBundleIdentifier</key><string>com.lcxl.remote-desk</string>
+            <key>CFBundleExecutable</key><string>lcxl-remote-desk-tauri</string>
+            <key>CFBundleIconFile</key><string>icon.icns</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleVersion</key><string>__VERSION__</string>
+            <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>LSMinimumSystemVersion</key><string>10.15</string>
+            <key>NSMicrophoneUsageDescription</key><string>Audio capture for remote desktop sessions.</string>
+            <key>NSCameraUsageDescription</key><string>Camera access for remote desktop sessions.</string>
+          </dict>
+          </plist>
+          PLIST
+          sed -i '' "s/__VERSION__/${VERSION}/g" "$APP/Contents/Info.plist"
+          # Ad-hoc sign (--deep covers the nested sidecar). Apple Silicon refuses
+          # to launch an unsigned binary, so this is required even without a cert.
+          codesign --force --deep --sign - "$APP"
+          # Lay out a drag-to-Applications disk image and compress it.
+          mkdir -p dmg
+          cp -R "$APP" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "LCXL Remote Desktop" -srcfolder dmg -ov -format UDZO \
+            "tauri-${{ matrix.platform }}-${{ matrix.arch }}.dmg"
+
+      - name: Assemble Package (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\lcxl-remote-desk-tauri.exe" -Destination release\
+          Copy-Item "target\${{ matrix.target }}\release\lcxl-remote-desk-server.exe" -Destination release\
+          Copy-Item -Recurse "server\static" -Destination release\static
+          Compress-Archive -Path release\* -DestinationPath "tauri-${{ matrix.platform }}-${{ matrix.arch }}.zip"
+
+      - name: Upload Tauri Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-${{ matrix.platform }}-${{ matrix.arch }}
+          if-no-files-found: error
+          path: |
+            tauri-*.zip
+            tauri-*.dmg
+
+  # ---------------------------------------------------------------------------
+  # Build the signaling server Docker image and push it to GHCR. The Dockerfile
+  # builds the frontend itself, so this job does not need the frontend artifact.
+  # ---------------------------------------------------------------------------
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp Version
+        uses: ./.github/actions/stamp-version
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Image Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # Collect the server + tauri packages and publish them as a GitHub Release.
+  # Runs only for tag pushes; workflow_dispatch runs stop after the build jobs.
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [build, tauri, docker]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create the GitHub Release
+    steps:
+      # Only the packaged artifacts — never the internal frontend-dist, which
+      # is a build input consumed by other jobs, not a release asset.
+      - name: Download Release Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: '{server,tauri}-*'
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            artifacts/**/*

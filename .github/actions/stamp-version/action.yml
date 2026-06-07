@@ -1,0 +1,33 @@
+name: Stamp Version
+description: >-
+  Patch the workspace and Tauri version from the pushed git tag (e.g. v0.2.0 ->
+  0.2.0) so every built binary's --version matches the Release/Docker tag. This
+  edits the working tree only (never committed) and is a no-op on non-tag runs.
+
+runs:
+  using: composite
+  steps:
+    # shell: bash works on all runners (Windows uses git-bash). Writing to a
+    # temp file and moving it avoids the GNU vs BSD `sed -i` incompatibility.
+    - shell: bash
+      run: |
+        if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+          echo "Not a tag ref ($GITHUB_REF); keeping the in-source version."
+          exit 0
+        fi
+        VERSION="${GITHUB_REF_NAME#v}"
+        echo "Stamping version: $VERSION"
+
+        tmp=$(mktemp)
+        sed -E "s/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/version = \"$VERSION\"/" \
+          Cargo.toml > "$tmp" && mv "$tmp" Cargo.toml
+
+        tmp=$(mktemp)
+        sed -E "s/(\"version\": )\"[0-9]+\.[0-9]+\.[0-9]+\"/\1\"$VERSION\"/" \
+          tauri-app/src-tauri/tauri.conf.json > "$tmp" \
+          && mv "$tmp" tauri-app/src-tauri/tauri.conf.json
+
+        echo "--- Cargo.toml [workspace.package] ---"
+        grep -E '^version = ' Cargo.toml
+        echo "--- tauri.conf.json ---"
+        grep -E '"version":' tauri-app/src-tauri/tauri.conf.json
