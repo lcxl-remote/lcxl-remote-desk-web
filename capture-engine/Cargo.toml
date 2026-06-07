@@ -36,6 +36,13 @@ png = { workspace = true }
 image = { workspace = true }
 prometheus = { workspace = true }
 
+# vpx-encode bundles pregenerated FFI bindings only up to libvpx 1.15.2 and, on
+# Windows, downloads a fixed 1.13 prebuilt. On Linux/macOS the system libvpx may
+# be newer (e.g. Homebrew 1.16), so generate the bindings with bindgen instead
+# of depending on a matching pregenerated file.
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+vpx-encode = { workspace = true, features = ["ffi-generate"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
 windows-result = { workspace = true }
