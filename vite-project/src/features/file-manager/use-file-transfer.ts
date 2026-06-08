@@ -8,6 +8,14 @@ import {
     SIGNALING_TYPE_CODE_CANID,
     SIGNALING_TYPE_CODE_CLOSE_CONTROL,
 } from '../desk/constants';
+import { createAcceptGate } from './upload-accept-gate';
+import {
+    BufferedDownloadSink,
+    StreamingDownloadSink,
+    type BlobSaver,
+    type DownloadSink,
+    type WritableFileStreamLike,
+} from './download-sink';
 
 // Per-chunk DC payload size for uploads (browser → host). Must stay in
 // sync with `FILE_TRANSFER_CHUNK_SIZE_TX` in the Rust dispatcher
@@ -98,14 +106,16 @@ export interface TransferProgress {
     errorMessage?: string;
 }
 
-// --- Internal state for active downloads ---
-interface DownloadState {
+// Lightweight per-download progress metadata. The actual file bytes go
+// straight into the DownloadSink (streamed to disk or, on the fallback
+// path, buffered inside `BufferedDownloadSink`) — they are deliberately
+// NOT held here so peak memory does not track the file size.
+interface DownloadMeta {
     fileName: string;
     fileSize: number;
     totalChunks: number;
     receivedChunks: number;
     transferredBytes: number;
-    chunks: Uint8Array[];
 }
 
 
@@ -140,13 +150,47 @@ function triggerBrowserDownload(blob: Blob, fileName: string) {
     URL.revokeObjectURL(url);
 }
 
+/** Whether the browser can stream a download straight to disk. */
+function canStreamToDisk(): boolean {
+    return typeof window !== 'undefined' && 'showSaveFilePicker' in window;
+}
+
+/**
+ * Open a streaming writable for `fileName` inside a user gesture.
+ * Returns the writable, or `null` if the user cancelled the picker or
+ * the API is unavailable. Must be the first await in the click handler
+ * so the transient user activation is still valid.
+ */
+async function openStreamingWritable(fileName: string): Promise<WritableFileStreamLike | null> {
+    if (!canStreamToDisk()) return null;
+    try {
+        const handle = await (window as any).showSaveFilePicker({ suggestedName: fileName });
+        return (await handle.createWritable()) as WritableFileStreamLike;
+    } catch {
+        // User cancelled the dialog or the API errored.
+        return null;
+    }
+}
+
+/** Saver used by the in-memory fallback sink (no File System Access API). */
+const fallbackBlobSaver: BlobSaver = async (blob, fileName) => {
+    const saved = await saveFileWithPicker(blob, fileName);
+    if (!saved) triggerBrowserDownload(blob, fileName);
+};
+
 export function useFileTransfer(deskId: string | undefined) {
     const wsRef = useRef<WebSocket | null>(null);
     const pcRef = useRef<RTCPeerConnection | null>(null);
     const dcRef = useRef<RTCDataChannel | null>(null);
     const [transfers, setTransfers] = useState<TransferProgress[]>([]);
-    const downloadStates = useRef<Map<string, DownloadState>>(new Map());
+    const downloadMetas = useRef<Map<string, DownloadMeta>>(new Map());
+    // Per-transfer download landing strategy (streaming-to-disk or
+    // buffered fallback), keyed by transfer_id so interleaved chunks of
+    // concurrent downloads route to the correct sink.
+    const downloadSinks = useRef<Map<string, DownloadSink>>(new Map());
     const cancelledTransfers = useRef<Set<string>>(new Set());
+    // Gate that holds an upload's chunk loop until the host accepts.
+    const acceptGate = useRef(createAcceptGate());
     // Track transfer speed state for EMA smoothing
     const transferSpeedState = useRef<Map<string, {
         startTime: number;
@@ -224,39 +268,178 @@ export function useFileTransfer(deskId: string | undefined) {
         return buf;
     }, []);
 
+    // Best-effort send of a control message to the host. Swallows any
+    // error: this runs from failure-cleanup paths where a second
+    // failure must not produce an unhandled rejection.
+    const sendControlBestEffort = useCallback((msg: FileTransferMessage) => {
+        try {
+            if (dcRef.current && dcRef.current.readyState === 'open') {
+                dcRef.current.send(JSON.stringify(msg));
+            }
+        } catch {
+            // ignore — the channel is already gone
+        }
+    }, []);
+
+    // Tear down a download's local state. Every step is best-effort so
+    // a failure while handling a failure cannot escape as an unhandled
+    // rejection (e.g. `writable.abort()` itself rejecting).
+    const cleanupDownload = useCallback(async (transferId: string) => {
+        const sink = downloadSinks.current.get(transferId);
+        downloadSinks.current.delete(transferId);
+        downloadMetas.current.delete(transferId);
+        transferSpeedState.current.delete(transferId);
+        if (sink) {
+            try {
+                await sink.abort();
+            } catch {
+                // ignore — releasing the handle is best-effort
+            }
+        }
+    }, []);
+
+    // Handle a download write/finalize failure: mark error, release the
+    // sink, and ask the host to stop sending. Best-effort throughout.
+    const failDownload = useCallback((transferId: string, message: string) => {
+        updateTransfer(transferId, { status: 'error', errorMessage: message });
+        sendControlBestEffort({ type: 'transfer_cancel', transfer_id: transferId });
+        void cleanupDownload(transferId);
+        removeTransferAfterDelay(transferId);
+    }, [updateTransfer, sendControlBestEffort, cleanupDownload, removeTransferAfterDelay]);
+
+    const handleControlMessage = useCallback(async (msg: FileTransferMessage) => {
+        switch (msg.type) {
+            case 'download_response': {
+                const resp = msg as DownloadResponse;
+                downloadMetas.current.set(resp.transfer_id, {
+                    fileName: resp.file_name,
+                    fileSize: resp.file_size,
+                    totalChunks: resp.total_chunks,
+                    receivedChunks: 0,
+                    transferredBytes: 0,
+                });
+                // Streaming sinks are created up-front in `downloadFile`
+                // (inside the user gesture). The buffered fallback sink
+                // needs `total_chunks`, so it is created here.
+                if (!downloadSinks.current.has(resp.transfer_id)) {
+                    downloadSinks.current.set(
+                        resp.transfer_id,
+                        new BufferedDownloadSink(resp.total_chunks, resp.file_name, fallbackBlobSaver),
+                    );
+                }
+                updateTransfer(resp.transfer_id, { status: 'transferring', fileSize: resp.file_size });
+                // Reset speed state to when actual data transfer begins
+                transferSpeedState.current.set(resp.transfer_id, { startTime: Date.now(), lastCalcTime: Date.now(), lastCalcBytes: 0, lastUIUpdate: Date.now(), emaSpeed: 0 });
+                break;
+            }
+            case 'upload_response': {
+                const resp = msg as UploadResponse;
+                if (resp.accepted) {
+                    // Release the upload's chunk loop.
+                    acceptGate.current.accept(resp.transfer_id);
+                    updateTransfer(resp.transfer_id, { status: 'transferring' });
+                } else {
+                    // The host normally refuses via `transfer_error`, not
+                    // `accepted:false`; this branch is kept for protocol
+                    // completeness.
+                    acceptGate.current.reject(resp.transfer_id, resp.message || 'Upload rejected');
+                    updateTransfer(resp.transfer_id, {
+                        status: 'error',
+                        errorMessage: resp.message || 'Upload rejected',
+                    });
+                    removeTransferAfterDelay(resp.transfer_id);
+                }
+                break;
+            }
+            case 'transfer_complete': {
+                const complete = msg as TransferComplete;
+                const sink = downloadSinks.current.get(complete.transfer_id);
+                if (sink) {
+                    // Download complete — flush all queued writes then
+                    // close. A finalize failure (disk full, revoked
+                    // permission) surfaces as a transfer error.
+                    try {
+                        await sink.finalize();
+                    } catch (e) {
+                        failDownload(complete.transfer_id, e instanceof Error ? e.message : 'Save failed');
+                        break;
+                    }
+                    downloadSinks.current.delete(complete.transfer_id);
+                    downloadMetas.current.delete(complete.transfer_id);
+                }
+                updateTransfer(complete.transfer_id, {
+                    status: 'completed',
+                    progress: 100,
+                });
+                removeTransferAfterDelay(complete.transfer_id, 60000);
+                break;
+            }
+            case 'transfer_error': {
+                const error = msg as TransferError;
+                // Wake an upload still waiting for acceptance, and stop
+                // one that has already started streaming chunks.
+                acceptGate.current.reject(error.transfer_id, error.message);
+                cancelledTransfers.current.add(error.transfer_id);
+                void cleanupDownload(error.transfer_id);
+                updateTransfer(error.transfer_id, {
+                    status: 'error',
+                    errorMessage: error.message,
+                });
+                removeTransferAfterDelay(error.transfer_id);
+                break;
+            }
+        }
+    }, [updateTransfer, removeTransferAfterDelay, failDownload, cleanupDownload]);
+
     // Handle incoming DataChannel messages
     const setupDataChannelHandlers = useCallback((dc: RTCDataChannel) => {
         dc.binaryType = 'arraybuffer';
 
         dc.onmessage = (event) => {
             if (typeof event.data === 'string') {
-                // JSON control message
-                const msg: FileTransferMessage = JSON.parse(event.data);
-                handleControlMessage(msg);
+                // JSON control message. Never awaited inside the event
+                // callback; a rejecting handler must not become an
+                // unhandled promise rejection.
+                let msg: FileTransferMessage;
+                try {
+                    msg = JSON.parse(event.data);
+                } catch {
+                    return;
+                }
+                void handleControlMessage(msg).catch((e) => {
+                    console.error('File transfer control handler error:', e);
+                });
             } else {
                 // Binary data chunk
                 const parsed = parseBinaryChunk(event.data);
                 if (!parsed) return;
 
-                const state = downloadStates.current.get(parsed.transferId);
-                if (!state) return;
+                const meta = downloadMetas.current.get(parsed.transferId);
+                const sink = downloadSinks.current.get(parsed.transferId);
+                if (!meta || !sink) return;
 
-                state.chunks[parsed.chunkIndex] = parsed.chunkData;
-                state.receivedChunks++;
-                state.transferredBytes += parsed.chunkData.length;
+                // Stream/queue the chunk; a write failure (disk full,
+                // revoked permission) aborts the transfer and tells the
+                // host to stop.
+                sink.write(parsed.chunkIndex, parsed.chunkData).catch((e) => {
+                    failDownload(parsed.transferId, e instanceof Error ? e.message : 'Write failed');
+                });
 
-                const progress = Math.round((state.receivedChunks / state.totalChunks) * 100);
-                const transferredBytes = state.transferredBytes;
-
+                meta.receivedChunks++;
+                meta.transferredBytes += parsed.chunkData.length;
+                const progress = meta.totalChunks > 0
+                    ? Math.round((meta.receivedChunks / meta.totalChunks) * 100)
+                    : 100;
+                const transferredBytes = meta.transferredBytes;
 
                 // Throttle UI updates (always allow first update and last chunk)
                 const speedState = transferSpeedState.current.get(parsed.transferId);
                 const now = Date.now();
-                const isLastChunk = state.receivedChunks >= state.totalChunks;
+                const isLastChunk = meta.receivedChunks >= meta.totalChunks;
                 const isFirstUpdate = speedState && speedState.emaSpeed === 0;
                 if (isLastChunk || !speedState || isFirstUpdate || (now - speedState.lastUIUpdate) >= 300) {
                     if (speedState) speedState.lastUIUpdate = now;
-                    const { speed, remainingSeconds } = computeSpeedInfo(parsed.transferId, transferredBytes, state.fileSize);
+                    const { speed, remainingSeconds } = computeSpeedInfo(parsed.transferId, transferredBytes, meta.fileSize);
                     updateTransfer(parsed.transferId, {
                         progress,
                         transferredBytes,
@@ -269,86 +452,11 @@ export function useFileTransfer(deskId: string | undefined) {
 
         dc.onerror = (event) => {
             console.error('File transfer data channel error:', event);
+            // Wake any upload still waiting on the gate so it does not
+            // hang the UI in "connecting" forever.
+            acceptGate.current.rejectAll('Data channel error');
         };
-    }, [parseBinaryChunk, updateTransfer]);
-
-    const handleControlMessage = useCallback(async (msg: FileTransferMessage) => {
-        switch (msg.type) {
-            case 'download_response': {
-                const resp = msg as DownloadResponse;
-                // Initialize download state
-                downloadStates.current.set(resp.transfer_id, {
-                    fileName: resp.file_name,
-                    fileSize: resp.file_size,
-                    totalChunks: resp.total_chunks,
-                    receivedChunks: 0,
-                    transferredBytes: 0,
-                    chunks: new Array(resp.total_chunks),
-                });
-
-                updateTransfer(resp.transfer_id, { status: 'transferring', fileSize: resp.file_size });
-                // Reset speed state to when actual data transfer begins
-                transferSpeedState.current.set(resp.transfer_id, { startTime: Date.now(), lastCalcTime: Date.now(), lastCalcBytes: 0, lastUIUpdate: Date.now(), emaSpeed: 0 });
-                break;
-            }
-            case 'upload_response': {
-                const resp = msg as UploadResponse;
-                if (resp.accepted) {
-                    updateTransfer(resp.transfer_id, { status: 'transferring' });
-                } else {
-                    updateTransfer(resp.transfer_id, {
-                        status: 'error',
-                        errorMessage: resp.message || 'Upload rejected',
-                    });
-                    removeTransferAfterDelay(resp.transfer_id);
-                }
-                break;
-            }
-            case 'transfer_complete': {
-                const complete = msg as TransferComplete;
-                const state = downloadStates.current.get(complete.transfer_id);
-                if (state) {
-                    // Download complete — assemble and save
-                    const totalSize = state.chunks.reduce((sum, c) => sum + (c ? c.length : 0), 0);
-                    const assembled = new Uint8Array(totalSize);
-                    let offset = 0;
-                    for (const chunk of state.chunks) {
-                        if (chunk) {
-                            assembled.set(chunk, offset);
-                            offset += chunk.length;
-                        }
-                    }
-
-                    const blob = new Blob([assembled]);
-
-                    // Try File System Access API (lets user choose save location)
-                    // Falls back to default download if unsupported or user cancels
-                    const saved = await saveFileWithPicker(blob, state.fileName);
-                    if (!saved) {
-                        triggerBrowserDownload(blob, state.fileName);
-                    }
-
-                    downloadStates.current.delete(complete.transfer_id);
-                }
-                updateTransfer(complete.transfer_id, {
-                    status: 'completed',
-                    progress: 100,
-                });
-                removeTransferAfterDelay(complete.transfer_id, 60000);
-                break;
-            }
-            case 'transfer_error': {
-                const error = msg as TransferError;
-                downloadStates.current.delete(error.transfer_id);
-                updateTransfer(error.transfer_id, {
-                    status: 'error',
-                    errorMessage: error.message,
-                });
-                removeTransferAfterDelay(error.transfer_id);
-                break;
-            }
-        }
-    }, [updateTransfer, removeTransferAfterDelay]);
+    }, [parseBinaryChunk, updateTransfer, computeSpeedInfo, handleControlMessage, failDownload]);
 
     // Establish WebRTC connection via signaling, return data channel
     const ensureConnection = useCallback(async (): Promise<RTCDataChannel> => {
@@ -470,6 +578,8 @@ export function useFileTransfer(deskId: string | undefined) {
 
     // Close WebRTC and WebSocket connections
     const closeConnection = useCallback(() => {
+        // Wake every pending upload waiter before tearing down.
+        acceptGate.current.rejectAll('Connection closed');
         if (dcRef.current) {
             dcRef.current.close();
             dcRef.current = null;
@@ -498,6 +608,19 @@ export function useFileTransfer(deskId: string | undefined) {
     const downloadFile = useCallback(async (filePath: string, fileName: string) => {
         const transferId = uuidv4();
 
+        // Open the destination stream first, while the click's user
+        // activation is still valid. Streaming straight to disk keeps
+        // peak memory at ~one chunk regardless of file size.
+        let writable: WritableFileStreamLike | null = null;
+        if (canStreamToDisk()) {
+            writable = await openStreamingWritable(fileName);
+            if (!writable) {
+                // User cancelled the save dialog — abandon silently.
+                return;
+            }
+            downloadSinks.current.set(transferId, new StreamingDownloadSink(writable));
+        }
+
         // Add transfer to list
         setTransfers(prev => [...prev, {
             transferId,
@@ -522,13 +645,15 @@ export function useFileTransfer(deskId: string | undefined) {
             dc.send(JSON.stringify(request));
             updateTransfer(transferId, { status: 'transferring' });
         } catch (err) {
+            // Release the streaming writable we opened up-front.
+            void cleanupDownload(transferId);
             updateTransfer(transferId, {
                 status: 'error',
                 errorMessage: err instanceof Error ? err.message : 'Connection failed',
             });
             removeTransferAfterDelay(transferId);
         }
-    }, [ensureConnection, updateTransfer, removeTransferAfterDelay]);
+    }, [ensureConnection, updateTransfer, removeTransferAfterDelay, cleanupDownload]);
 
     // Upload a file
     const uploadFile = useCallback(async (targetDir: string, file: File) => {
@@ -565,10 +690,10 @@ export function useFileTransfer(deskId: string | undefined) {
             };
             dc.send(JSON.stringify(request));
 
-            // Wait a bit for the response, then send chunks
-            // (In practice the DC message handler will update the state)
-            // For now, proceed with sending chunks immediately after a short wait
-            await new Promise(r => setTimeout(r, 100));
+            // Wait for the host to accept (open the destination file)
+            // before pushing any bytes. Refusal, cancel, disconnect or
+            // timeout reject this and skip the chunk loop entirely.
+            await acceptGate.current.wait(transferId);
 
             const reader = file.stream().getReader();
             let chunkIndex = 0;
@@ -626,23 +751,12 @@ export function useFileTransfer(deskId: string | undefined) {
                         lastUploadUpdate = now;
                     }
 
-                    // Debug Sampling
-                    if (chunkIndex % 100 === 0) {
-                        const { speed } = computeSpeedInfo(transferId, sentBytes, file.size);
-                        console.log(`Upload transfer ${transferId}: speed=${speed}, bufferedAmount=${dc.bufferedAmount}`);
-                    }
-
                     // Robust backpressure: wait if browser send buffer is too full
                     if (dc.bufferedAmount > 2 * 1024 * 1024) {
-                        console.warn(`Upload backpressure triggered for ${transferId}: bufferedAmount=${dc.bufferedAmount}, pausing...`);
                         while (dc.bufferedAmount > 512 * 1024) {
                             await new Promise(r => setTimeout(r, 100));
                         }
-                        console.log(`Upload backpressure released for ${transferId}`);
                     }
-
-
-
                 }
 
                 // Save leftover
@@ -677,30 +791,26 @@ export function useFileTransfer(deskId: string | undefined) {
             removeTransferAfterDelay(transferId, 60000);
 
         } catch (err) {
+            acceptGate.current.clear(transferId);
             updateTransfer(transferId, {
                 status: 'error',
                 errorMessage: err instanceof Error ? err.message : 'Upload failed',
             });
             removeTransferAfterDelay(transferId);
         }
-    }, [ensureConnection, buildBinaryChunk, updateTransfer, removeTransferAfterDelay]);
+    }, [ensureConnection, buildBinaryChunk, updateTransfer, computeSpeedInfo, removeTransferAfterDelay]);
 
     // Cancel an active transfer (download or upload)
     const cancelTransfer = useCallback((transferId: string) => {
         // Send cancel message to server
-        if (dcRef.current && dcRef.current.readyState === 'open') {
-            const cancel: TransferCancel = {
-                type: 'transfer_cancel',
-                transfer_id: transferId,
-            };
-            dcRef.current.send(JSON.stringify(cancel));
-        }
+        sendControlBestEffort({ type: 'transfer_cancel', transfer_id: transferId });
 
-        // Mark as cancelled so the upload loop will stop
+        // Stop an in-flight upload loop and wake one still awaiting accept.
         cancelledTransfers.current.add(transferId);
+        acceptGate.current.reject(transferId, 'Cancelled');
 
-        // Clean up local download state
-        downloadStates.current.delete(transferId);
+        // Release any download sink / local state.
+        void cleanupDownload(transferId);
 
         // Update UI
         updateTransfer(transferId, {
@@ -708,16 +818,17 @@ export function useFileTransfer(deskId: string | undefined) {
             errorMessage: 'Cancelled',
         });
         removeTransferAfterDelay(transferId, 60000);
-    }, [updateTransfer, removeTransferAfterDelay]);
+    }, [updateTransfer, removeTransferAfterDelay, sendControlBestEffort, cleanupDownload]);
 
     // Manually remove a transfer from the list
     const removeTransfer = useCallback((transferId: string) => {
         setTransfers(prev => prev.filter(t => t.transferId !== transferId));
-        // Also clean up any associated state if necessary
-        transferSpeedState.current.delete(transferId);
-        downloadStates.current.delete(transferId);
+        // Release any open download sink / writable and wake an upload
+        // still waiting on the gate.
         cancelledTransfers.current.add(transferId);
-    }, []);
+        acceptGate.current.reject(transferId, 'Removed');
+        void cleanupDownload(transferId);
+    }, [cleanupDownload]);
 
     return {
         transfers,
