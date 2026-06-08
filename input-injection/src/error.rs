@@ -168,6 +168,22 @@ impl From<desk_capture_engine::error::CaptureError> for InputError {
 
 impl std::error::Error for InputError {}
 
+#[cfg(test)]
+mod arboard_tests {
+    use super::*;
+
+    /// An `arboard::Error` raised by the clipboard host-control paths must
+    /// convert into `InputError::ArboardError` (capturing a backtrace) so the
+    /// `?` propagation in `mac_host_control` keeps the original clipboard
+    /// failure text. As a non-custom error it falls back to `SYSTEM_ERROR`.
+    #[test]
+    fn arboard_error_maps_to_arboard_variant() {
+        let err: InputError = arboard::Error::ContentNotAvailable.into();
+        assert!(matches!(err, InputError::ArboardError(_, _)));
+        assert_eq!(err.to_error_code(), DeskErrorCode::SYSTEM_ERROR);
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;

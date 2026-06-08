@@ -18,7 +18,10 @@ log = { workspace = true }
 tokio = { workspace = true }
 rust-i18n = { workspace = true }
 
-tauri = { version = "2", features = ["tray-icon"] }
+# `macos-private-api` gates the transparent-window builder method on macOS; the
+# whiteboard overlay needs it. It is inert on other platforms but must match the
+# `app.macOSPrivateApi` flag in tauri.conf.json.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 

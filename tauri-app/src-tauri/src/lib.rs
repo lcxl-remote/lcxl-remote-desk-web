@@ -28,6 +28,16 @@ pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
 /// Windows service name registered by the install flow.
 const SERVICE_NAME: &str = "LcxlDeskService";
 
+/// Build the Tauri context. With the `macos-private-api` feature enabled,
+/// `tauri::generate_context!()` embeds the macOS Info.plist as a static with a
+/// fixed link symbol (`_EMBED_INFO_PLIST`), so expanding the macro at more than
+/// one builder call site would emit that symbol twice and fail to link. Both
+/// the service-shell and portable run paths funnel through this single
+/// expansion to keep the symbol unique.
+fn build_tauri_context() -> tauri::Context {
+    tauri::generate_context!()
+}
+
 pub fn run() -> Result<(), DeskTauriError> {
     let args = Args::parse();
 
@@ -250,7 +260,7 @@ fn run_tauri_service_shell(settings: &Settings) -> Result<(), DeskTauriError> {
 
             Ok(())
         })
-        .build(tauri::generate_context!())?;
+        .build(build_tauri_context())?;
 
     app.run(|app, event| match event {
         tauri::RunEvent::WindowEvent {
@@ -855,7 +865,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
 
             Ok(())
         })
-        .build(tauri::generate_context!())?;
+        .build(build_tauri_context())?;
 
     app.run(|app, event| {
         // Intercept window close events to hide instead of quit

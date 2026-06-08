@@ -59,24 +59,24 @@ impl HostControlHelper for MacHostControlHelper {
     }
 
     fn set_text_to_clipboard(&mut self, text: &str) -> Result<(), InputError> {
-        let mut clipboard = arboard::Clipboard::new().map_err(InputError::ArboardError)?;
-        clipboard.set_text(text).map_err(InputError::ArboardError)?;
+        let mut clipboard = arboard::Clipboard::new()?;
+        clipboard.set_text(text)?;
         Ok(())
     }
 
     fn get_text_from_clipboard(&mut self) -> Result<Option<String>, InputError> {
-        let mut clipboard = arboard::Clipboard::new().map_err(InputError::ArboardError)?;
+        let mut clipboard = arboard::Clipboard::new()?;
         match clipboard.get_text() {
             Ok(text) => Ok(Some(text)),
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
-            Err(e) => Err(InputError::ArboardError(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
     fn get_image_from_clipboard(
         &mut self,
     ) -> Result<Option<crate::model::host_control::ClipboardImage>, InputError> {
-        let mut clipboard = arboard::Clipboard::new().map_err(InputError::ArboardError)?;
+        let mut clipboard = arboard::Clipboard::new()?;
         match clipboard.get_image() {
             Ok(img) => Ok(Some(crate::model::host_control::ClipboardImage {
                 width: img.width,
@@ -84,7 +84,7 @@ impl HostControlHelper for MacHostControlHelper {
                 bytes: img.bytes,
             })),
             Err(arboard::Error::ContentNotAvailable) => Ok(None),
-            Err(e) => Err(InputError::ArboardError(e)),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -92,15 +92,13 @@ impl HostControlHelper for MacHostControlHelper {
         &mut self,
         image: &crate::model::host_control::ClipboardImage,
     ) -> Result<(), InputError> {
-        let mut clipboard = arboard::Clipboard::new().map_err(InputError::ArboardError)?;
+        let mut clipboard = arboard::Clipboard::new()?;
         let img_data = arboard::ImageData {
             width: image.width,
             height: image.height,
             bytes: image.bytes.clone(),
         };
-        clipboard
-            .set_image(img_data)
-            .map_err(InputError::ArboardError)?;
+        clipboard.set_image(img_data)?;
         Ok(())
     }
 }

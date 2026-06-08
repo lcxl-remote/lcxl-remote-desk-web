@@ -7,7 +7,8 @@
         "frontendDist": ""
     },
     "app": {
-        "windows": []
+        "windows": [],
+        "macOSPrivateApi": true
     },
     "bundle": {
         "active": true,
