@@ -80,7 +80,7 @@ export default function DeskList() {
                                     </li>
                                     <li className="flex items-center justify-between">
                                         <span className="text-muted-foreground">{t('pages.deskList.platform', 'Platform')}</span>
-                                        <span>Windows</span>
+                                        <span>{connection.version_info?.operation_system || t('pages.desk.unknown', 'Unknown')}</span>
                                     </li>
                                 </ul>
                             </div>
