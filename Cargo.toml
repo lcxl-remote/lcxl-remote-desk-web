@@ -19,6 +19,7 @@ resolver = "3"
 
 [workspace.package]
 description = "Lcxl Remote Desk Web Server"
+license = "Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 # need file lock feature 1.89.0

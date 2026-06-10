@@ -1,0 +1,97 @@
+# cargo-deny policy for the lcxl-remote-desk open-source web project.
+# Run: cargo deny check
+#
+# This config governs the standalone (open-source) build of `web`, which
+# resolves its own Cargo.lock and has a wider surface than the enterprise
+# workspace (it builds the Tauri desktop shell, not just the server crates).
+
+[graph]
+all-features = true
+
+# --- Security advisories (RUSTSEC) -------------------------------------------
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # Real vulnerability: protobuf 2.x is pulled by prometheus 0.13. The proper
+    # fix is upgrading prometheus to >=0.14 (which drops the protobuf feature);
+    # that is a breaking API change for the metrics code, tracked separately.
+    { id = "RUSTSEC-2024-0437", reason = "protobuf 2.x via prometheus 0.13; needs prometheus >=0.14 upgrade (breaking)" },
+
+    # Tauri's Linux WebView backend (webkit2gtk) pulls the unmaintained gtk-rs
+    # GTK3 bindings. No fix until upstream moves off GTK3; only affects the
+    # Linux desktop build.
+    { id = "RUSTSEC-2024-0411", reason = "gtk3 (atk) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0412", reason = "gtk3 (atk-sys) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0413", reason = "gtk3 (gdk) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0414", reason = "gtk3 (gdk-sys) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0415", reason = "gtk3 (gdkx11-sys) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0416", reason = "gtk3 (gtk) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0417", reason = "gtk3 (gtk-sys) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0418", reason = "gtk3 (gtk3-macros) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0419", reason = "gtk3 (atk) via Tauri webkit2gtk; unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0420", reason = "gtk3 (gdkwayland-sys) via Tauri webkit2gtk; unmaintained, no upgrade" },
+
+    # unic-* family via urlpattern (Tauri). Unmaintained, no upgrade available.
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range via urlpattern (Tauri); unmaintained, no upgrade" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common via urlpattern (Tauri); unmaintained, no upgrade" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property via urlpattern (Tauri); unmaintained, no upgrade" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version via urlpattern (Tauri); unmaintained, no upgrade" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident via urlpattern (Tauri); unmaintained, no upgrade" },
+
+    # Other unmaintained transitives with no safe upgrade.
+    { id = "RUSTSEC-2024-0436", reason = "paste via rav1e encoder; unmaintained, no replacement" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 via sea-orm 2.0.0-rc; resolves on sea-orm 2.0 stable" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash via Tauri (selectors/kuchikiki); unmaintained, no upgrade" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: unmaintained build-time macro; no upgrade" },
+    { id = "RUSTSEC-2026-0105", reason = "core2 via rav1e (bitstream-io/ivf); unmaintained and all versions yanked, no upgrade" },
+
+    # core2 is also flagged by the yanked check; suppress for this crate only.
+    { crate = "core2", reason = "all published versions yanked; pinned transitively by rav1e, no alternative" },
+]
+
+# --- Licenses ----------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Permissive / standard licenses present in the tree. No strong copyleft: LGPL
+# appears only as an OR alternative already satisfied by MIT/Apache-2.0, and the
+# gtk-rs / webkit2gtk *bindings* are MIT.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "NCSA",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
+    "MPL-2.0", # option-ext: file-level weak copyleft, linking-safe
+]
+# First-party web crates inherit `license = "Apache-2.0"` from the workspace.
+
+# --- Bans / duplicate versions ----------------------------------------------
+[bans]
+# The webrtc, Tauri and windows-rs trees legitimately pull several crates at
+# multiple versions; report as warnings rather than hard failures.
+multiple-versions = "warn"
+wildcards = "allow"
+
+# --- Sources -----------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# crates.io is allowed by default. The vendored encoder forks (x264, x264-rs,
+# vpx-encode, env-libvpx-sys) are pulled via git tags from github.com/lcxl.
+[sources.allow-org]
+github = ["lcxl"]

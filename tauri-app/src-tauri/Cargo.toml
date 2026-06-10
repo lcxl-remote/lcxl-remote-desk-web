@@ -3,6 +3,7 @@ name = "lcxl-remote-desk-tauri"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 lcxl-remote-desk-server = { workspace = true }

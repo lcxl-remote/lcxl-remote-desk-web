@@ -4,6 +4,7 @@ description = "Screen/audio capture and encoding engine for lcxl-remote-desk"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 desk-utils = { workspace = true }

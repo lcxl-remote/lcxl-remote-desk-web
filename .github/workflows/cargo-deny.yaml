@@ -1,0 +1,26 @@
+name: Cargo Deny
+
+# Supply-chain gate: RUSTSEC advisories, license policy, banned/duplicate
+# crates and allowed sources. Reads Cargo.lock + cargo metadata only, so it
+# does not compile the project and needs no system dependencies.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
