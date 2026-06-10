@@ -5,8 +5,8 @@ name: NPM Audit
 #   1. Production dependencies must be clean at moderate+ — these are what ship
 #      in the browser bundle.
 #   2. All dependencies (incl. dev tooling) must be clean at high+ — catches
-#      serious issues in the build chain without failing on lower-severity
-#      dev-only advisories (e.g. the codegen toolchain's transitive `ws`).
+#      serious issues in the build chain while tolerating lower-severity
+#      dev-only advisories that never reach the browser bundle.
 
 on:
   push:
