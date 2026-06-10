@@ -1,0 +1,34 @@
+name: NPM Audit
+
+# Supply-chain gate for the React frontend (vite-project). Audits the lockfile
+# only (no install needed), in two tiers:
+#   1. Production dependencies must be clean at moderate+ — these are what ship
+#      in the browser bundle.
+#   2. All dependencies (incl. dev tooling) must be clean at high+ — catches
+#      serious issues in the build chain without failing on lower-severity
+#      dev-only advisories (e.g. the codegen toolchain's transitive `ws`).
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  npm-audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vite-project
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Audit production dependencies (fail on moderate+)
+        run: npm audit --package-lock-only --omit=dev --audit-level=moderate
+      - name: Audit all dependencies (fail on high+)
+        run: npm audit --package-lock-only --audit-level=high
