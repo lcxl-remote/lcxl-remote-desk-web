@@ -133,7 +133,7 @@ config = { version = "0.15", features = ["toml"] }
 codepage = "0.1"
 encoding_rs = "0.8"
 regex = "1.11"
-prometheus = "0.13.4"
+prometheus = "0.14"
 png = "0.17"
 image = "0.25"
 

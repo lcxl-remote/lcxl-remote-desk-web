@@ -13,11 +13,6 @@ all-features = true
 version = 2
 yanked = "deny"
 ignore = [
-    # Real vulnerability: protobuf 2.x is pulled by prometheus 0.13. The proper
-    # fix is upgrading prometheus to >=0.14 (which drops the protobuf feature);
-    # that is a breaking API change for the metrics code, tracked separately.
-    { id = "RUSTSEC-2024-0437", reason = "protobuf 2.x via prometheus 0.13; needs prometheus >=0.14 upgrade (breaking)" },
-
     # Tauri's Linux WebView backend (webkit2gtk) pulls the unmaintained gtk-rs
     # GTK3 bindings. No fix until upstream moves off GTK3; only affects the
     # Linux desktop build.
