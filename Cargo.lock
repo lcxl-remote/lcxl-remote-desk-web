@@ -2497,6 +2497,7 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-foundation 0.2.2",
  "openh264",
+ "openh264-sys2",
  "opusic-c",
  "pipewire",
  "png 0.17.16",
@@ -10673,8 +10674,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpx-encode"
-version = "0.6.2"
-source = "git+https://github.com/lcxl/vpx-encode.git?tag=v0.7.0#7cf3fb99daa314c0be28f65f1ef0476f1e21e9b0"
+version = "0.8.0"
+source = "git+https://github.com/lcxl/vpx-encode.git?tag=v0.8.0#ea97f855c2063ce3624d745b5f50097960ad590c"
 dependencies = [
  "env-libvpx-sys",
  "thiserror 1.0.69",
@@ -12164,8 +12165,8 @@ dependencies = [
 
 [[package]]
 name = "x264"
-version = "0.7.1"
-source = "git+https://github.com/lcxl/x264.git?tag=v0.7.2#908fcc310011b721fef95fd762c9e7f2724a2243"
+version = "0.8.0"
+source = "git+https://github.com/lcxl/x264.git?tag=v0.8.0#d070f38674ccedeadd4903d79f21d70a4ea95584"
 dependencies = [
  "pkg-config",
  "x264-sys",

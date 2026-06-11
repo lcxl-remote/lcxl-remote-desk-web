@@ -1,7 +1,10 @@
 use std::{sync::LazyLock, time::Instant};
 
-use desk_signal_facade::model::{desk_settings::X264EncoderSettings, image_capture::DisplayInfo};
-use prometheus::{HistogramVec, register_histogram_vec};
+use desk_signal_facade::model::{
+    desk_settings::{default_video_bps, X264EncoderSettings},
+    image_capture::DisplayInfo,
+};
+use prometheus::{register_histogram_vec, HistogramVec};
 use x264::{Colorspace, Encoder, Image, Plane, Preset, Setup, Tune};
 
 use crate::{
@@ -16,6 +19,11 @@ use crate::{
 pub struct X264Encoder {
     pub encoder: Encoder,
     pub pts: i64,
+    /// VBV ceiling (kbps) the encoder was built with. x264 can only
+    /// adjust an already-enabled VBV at runtime, so `new` always
+    /// enables a loose ceiling and `set_bitrate_cap(None)` restores
+    /// this value.
+    initial_vbv_kbps: i32,
     yuv_buffer: Option<PersistentYuvBuffer>,
 }
 
@@ -39,6 +47,17 @@ impl X264Encoder {
             setup = setup.keyint(setting.gop);
         }
 
+        // Always enable VBV with the loosest sensible ceiling (the
+        // quality-0 bits-per-pixel default for this resolution/fps) so
+        // the encoder runs in constrained-quality mode: CRF drives the
+        // steady state while VBV bounds bitrate spikes. Enabling it at
+        // build time is mandatory — x264_encoder_reconfig can adjust
+        // VBV values but cannot turn VBV on later.
+        let initial_vbv_kbps =
+            ((default_video_bps(width as u64, height as u64, fps.max(1) as u64, 0) / 1000).max(1))
+                as i32;
+        setup = setup.vbv(initial_vbv_kbps, initial_vbv_kbps);
+
         let encoder = setup
             .build(Colorspace::I420, width, height)
             .map_err(|_| CaptureError::AnyhowError(anyhow::anyhow!("x264 build failed")))?;
@@ -46,6 +65,7 @@ impl X264Encoder {
         Ok(Self {
             encoder,
             pts: 0,
+            initial_vbv_kbps,
             yuv_buffer: None,
         })
     }
@@ -125,5 +145,21 @@ impl VideoEncoder for X264Encoder {
             &mut self.pts,
             self.yuv_buffer.as_ref().unwrap(),
         )
+    }
+
+    fn set_bitrate_cap(&mut self, cap_kbps: Option<u32>) -> bool {
+        // Never widen beyond the build-time ceiling: it is already the
+        // loosest sensible value for this resolution/fps.
+        let kbps = match cap_kbps {
+            Some(k) => (k as i32).clamp(1, self.initial_vbv_kbps),
+            None => self.initial_vbv_kbps,
+        };
+        match self.encoder.reconfig_vbv(kbps, kbps) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("x264 reconfig_vbv({kbps} kbps) failed: {e:?}");
+                false
+            }
+        }
     }
 }

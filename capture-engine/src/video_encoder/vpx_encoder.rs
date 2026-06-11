@@ -1,7 +1,7 @@
 use std::{sync::LazyLock, time::Instant};
 
 use desk_signal_facade::model::{desk_settings::VpxEncoderSettings, image_capture::DisplayInfo};
-use prometheus::{HistogramVec, register_histogram_vec};
+use prometheus::{register_histogram_vec, HistogramVec};
 use vpx_encode::VideoCodecId;
 
 use crate::{
@@ -34,7 +34,10 @@ impl VpxEncoder {
             width: display_info.desktop_coordinates.width() as u32,
             height: display_info.desktop_coordinates.height() as u32,
             timebase: [1, 1000],
-            bitrate: setting.bps,
+            // vpx `rc_target_bitrate` is in kilobits per second while
+            // `VpxEncoderSettings.bps` is bits per second — divide or
+            // the cap is inflated 1000x and never engages.
+            bitrate: setting.bps / 1000,
             quality: Some(setting.quality),
             codec,
         };
@@ -110,5 +113,22 @@ impl VideoEncoder for VpxEncoder {
             &self.codec,
             self.yuv_buffer.as_ref().unwrap(),
         )
+    }
+
+    fn set_bitrate_cap(&mut self, cap_kbps: Option<u32>) -> bool {
+        let result = match cap_kbps {
+            Some(kbps) => self.encoder.set_bitrate_cap_kbps(kbps.max(1)),
+            None => self.encoder.reset_bitrate_cap(),
+        };
+        match result {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!(
+                    "{} bitrate cap update ({cap_kbps:?}) failed: {e}",
+                    self.codec
+                );
+                false
+            }
+        }
     }
 }

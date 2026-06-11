@@ -197,6 +197,34 @@ pub struct PrivateScreenSettings {
     pub enabled: bool,
 }
 
+/// Derives a default video bitrate (bps) from resolution, frame rate
+/// and the 0-63 `video_quality` knob via bits-per-pixel interpolation.
+///
+/// - quality 0 (highest) → 0.20 bpp; quality 63 (lowest) → 0.02 bpp.
+/// - For 1080p @ 60 fps that spans 24.8 Mbps (quality 0) down to
+///   2.48 Mbps (quality 63).
+/// - Capped at 100 Mbps to prevent OpenH264 errors and excessive
+///   bandwidth usage.
+///
+/// Used both for the OpenH264 default target bitrate and as the
+/// initial (loosest) VBV ceiling of the x264 constrained-quality
+/// encoder.
+pub fn default_video_bps(width: u64, height: u64, fps: u64, video_quality: u32) -> u32 {
+    let pixels_per_second = width * height * fps;
+
+    // Linear interpolation for BPP
+    // bpp = max_bpp - (video_quality / 63.0) * (max_bpp - min_bpp)
+    let max_bpp = 0.20f64;
+    let min_bpp = 0.02f64;
+    let quality_ratio = (video_quality as f64 / 63.0).clamp(0.0, 1.0);
+    let bpp = max_bpp - quality_ratio * (max_bpp - min_bpp);
+
+    let bps = (pixels_per_second as f64 * bpp) as u32;
+
+    // Cap bps at 100 Mbps to prevent OpenH264 error and excessive bandwidth usage
+    bps.min(100_000_000)
+}
+
 /// Desk settings
 #[derive(
     Clone,
@@ -300,13 +328,6 @@ impl DeskSettings {
         // Use video_quality to create a default h264 encoder settings
         let mut encoder_settings = H264EncoderSettings::default();
 
-        // Calculate bps based on resolution and quality
-        // video_quality: 0 (highest) to 63 (lowest)
-        // BPP (Bits Per Pixel) range: 0.02 (lowest) to 0.20 (highest)
-        // For 1080p, 60fps:
-        // Quality 0: 1920 * 1080 * 60 * 0.20 = 24.8 Mbps
-        // Quality 63: 1920 * 1080 * 60 * 0.02 = 2.48 Mbps
-
         let width = display_info.desktop_coordinates.width() as u64;
         let height = display_info.desktop_coordinates.height() as u64;
         let fps = if self.video_fps == 0 {
@@ -314,24 +335,8 @@ impl DeskSettings {
         } else {
             self.video_fps
         } as u64;
-        let pixels_per_second = width * height * fps;
 
-        // Linear interpolation for BPP
-        // bpp = max_bpp - (video_quality / 63.0) * (max_bpp - min_bpp)
-        let max_bpp = 0.20f64;
-        let min_bpp = 0.02f64;
-        let quality_ratio = (self.video_quality as f64 / 63.0).clamp(0.0, 1.0);
-        let bpp = max_bpp - quality_ratio * (max_bpp - min_bpp);
-
-        let mut bps = (pixels_per_second as f64 * bpp) as u32;
-
-        // Cap bps at 100 Mbps to prevent OpenH264 error and excessive bandwidth usage
-        let max_bps = 100_000_000;
-        if bps > max_bps {
-            bps = max_bps;
-        }
-
-        encoder_settings.bps = bps;
+        encoder_settings.bps = default_video_bps(width, height, fps, self.video_quality);
         // Default GOP to 120 frames. WebRTC recovers from loss via PLI/FIR,
         // so we don't need a tight periodic IDR; a wider GOP spreads the
         // ~25 KB IDR cost over more frames and reduces bandwidth spikes.

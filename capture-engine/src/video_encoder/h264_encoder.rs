@@ -2,10 +2,10 @@ use std::{sync::LazyLock, time::Instant};
 
 use desk_signal_facade::model::desk_settings::H264EncoderSettings;
 use openh264::{
-    OpenH264API,
     encoder::{BitRate, IntraFramePeriod},
+    OpenH264API,
 };
-use prometheus::{HistogramVec, register_histogram_vec};
+use prometheus::{register_histogram_vec, HistogramVec};
 use yuv::YuvPlanarImageMut;
 
 use crate::{
@@ -91,6 +91,9 @@ impl openh264::formats::YUVSource for PersistentYuvView<'_> {
 
 pub struct H264Encoder {
     pub encoder: openh264::encoder::Encoder,
+    /// Target bitrate (bps) the encoder was created with; restored by
+    /// `set_bitrate_cap(None)`.
+    initial_bps: u32,
     yuv_buffer: Option<PersistentYuvBuffer>,
 }
 
@@ -107,6 +110,7 @@ impl H264Encoder {
         let encoder = openh264::encoder::Encoder::with_api_config(api, config).unwrap();
         Self {
             encoder,
+            initial_bps: setting.bps,
             yuv_buffer: None,
         }
     }
@@ -176,5 +180,40 @@ impl VideoEncoder for H264Encoder {
             return Ok(vec![]);
         };
         H264Encoder::encode_with_encoder(&mut self.encoder, self.yuv_buffer.as_ref().unwrap())
+    }
+
+    fn set_bitrate_cap(&mut self, cap_kbps: Option<u32>) -> bool {
+        // The safe openh264 wrapper exposes no runtime bitrate setter,
+        // so go through the raw API. ENCODER_OPTION_BITRATE updates the
+        // rate-control target on the fly; SPATIAL_LAYER_ALL applies it
+        // across layers (we encode a single spatial layer).
+        let bps = match cap_kbps {
+            // Never widen beyond the creation-time target. The
+            // `.max(1000)` on the ceiling keeps the clamp range valid
+            // even for a pathologically low configured bitrate.
+            Some(kbps) => kbps
+                .saturating_mul(1000)
+                .clamp(1000, self.initial_bps.max(1000)),
+            None => self.initial_bps,
+        };
+        let mut info = openh264_sys2::SBitrateInfo {
+            iLayer: openh264_sys2::SPATIAL_LAYER_ALL,
+            iBitrate: bps as std::os::raw::c_int,
+        };
+        // SAFETY: `info` is a plain C struct that outlives the call;
+        // SetOption(ENCODER_OPTION_BITRATE) reads it synchronously and
+        // does not retain the pointer.
+        let err = unsafe {
+            self.encoder.raw_api().set_option(
+                openh264_sys2::ENCODER_OPTION_BITRATE,
+                std::ptr::from_mut(&mut info).cast(),
+            )
+        };
+        if err == 0 {
+            true
+        } else {
+            log::warn!("openh264 SetOption(ENCODER_OPTION_BITRATE, {bps} bps) failed: {err}");
+            false
+        }
     }
 }

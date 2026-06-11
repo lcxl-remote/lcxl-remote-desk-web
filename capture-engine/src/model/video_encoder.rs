@@ -33,6 +33,18 @@ pub trait VideoEncoder {
     /// Request the encoder to produce a keyframe (IDR) on the next encode call.
     /// Default implementation is a no-op for encoders that don't support native keyframe forcing.
     fn request_keyframe(&mut self) {}
+
+    /// Applies (`Some(kbps)`) or clears (`None` — restore the encoder's
+    /// initial ceiling) a runtime bitrate cap, without rebuilding the
+    /// encoder. Quality-driven rate control is unaffected below the
+    /// cap; the cap only limits bitrate spikes under heavy motion.
+    ///
+    /// Returns `false` when the codec implementation does not support
+    /// runtime rate changes (or the change failed) so callers can skip
+    /// further cap updates for this encoder.
+    fn set_bitrate_cap(&mut self, _cap_kbps: Option<u32>) -> bool {
+        false
+    }
 }
 
 #[derive(EnumIter, IntoStaticStr, EnumString, Debug, Clone, Copy, Default)]

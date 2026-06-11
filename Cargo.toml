@@ -116,10 +116,15 @@ rust-i18n = "3.1"
 
 mime = "0.3"
 yuv = "0.8"
-x264 = { git = "https://github.com/lcxl/x264.git", tag = "v0.7.2" }
+x264 = { git = "https://github.com/lcxl/x264.git", tag = "v0.8.0" }
 openh264 = "0.9.3"
-rav1e = "0.8" 
-vpx-encode = { git = "https://github.com/lcxl/vpx-encode.git", tag = "v0.7.0", features = [
+# Direct dependency on the -sys crate (same version family as openh264)
+# for the runtime bitrate-cap path: the safe openh264 wrapper exposes no
+# bitrate setter, so capture-engine calls SetOption(ENCODER_OPTION_BITRATE)
+# through Encoder::raw_api().
+openh264-sys2 = "0.9.6"
+rav1e = "0.8"
+vpx-encode = { git = "https://github.com/lcxl/vpx-encode.git", tag = "v0.8.0", features = [
     "vp9",
 ] }
 opusic-c = "1.5"
