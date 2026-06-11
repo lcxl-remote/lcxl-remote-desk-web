@@ -382,6 +382,8 @@ export default {
   'pages.desk.resolutionTimeout': '更新超时未收到回复',
   'pages.desk.adaptiveQuality': '自适应画质',
   'pages.desk.adaptiveQualityDescription': '根据丢包率和 RTT 自动调整画质',
+  'pages.desk.adaptiveBitrateCap': '自适应码率上限',
+  'pages.desk.adaptiveBitrateCapDescription': '将编码码率峰值限制在实测网络容量内（不影响画质）',
   'pages.desk.enableDirtyRect': '启用脏矩形优化',
   'pages.desk.enableDirtyRectDescription': '只重编码屏幕上发生变化的区域。若动画时出现瞬时黑条，可关闭。',
   'pages.desk.remoteResolutionScale': '远程分辨率缩放',

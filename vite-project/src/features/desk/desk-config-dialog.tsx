@@ -94,6 +94,16 @@ interface DeskConfigDialogProps {
      */
     adaptiveQualityEnabled: boolean
     onAdaptiveQualityChange: (enabled: boolean) => void
+    /**
+     * Server-side adaptive bitrate-cap toggle (the REMB-driven inner
+     * loop that trims encoder bitrate spikes without touching the
+     * quality knob). Owned by the parent (persisted in localStorage
+     * there); the parent injects it into `DeskSettings.adaptive_bitrate`
+     * on connect / UpdateDeskSettings, where the daemon applies it to
+     * this connection only.
+     */
+    adaptiveBitrateEnabled: boolean
+    onAdaptiveBitrateChange: (enabled: boolean) => void
 }
 
 export function DeskConfigDialog({
@@ -104,6 +114,8 @@ export function DeskConfigDialog({
     onCancel,
     adaptiveQualityEnabled,
     onAdaptiveQualityChange,
+    adaptiveBitrateEnabled,
+    onAdaptiveBitrateChange,
 }: DeskConfigDialogProps) {
     const { t } = useTranslation()
 
@@ -829,6 +841,39 @@ export function DeskConfigDialog({
                                             {t(
                                                 'pages.desk.adaptiveQualityDescription',
                                                 'Auto-tune video quality based on packet loss and RTT'
+                                            )}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {/* Server-side adaptive bitrate cap
+                                    toggle. Also parent-owned (see the
+                                    adaptive-quality toggle above); the
+                                    parent injects the value into
+                                    DeskSettings.adaptive_bitrate so it
+                                    rides the offer / UpdateDeskSettings
+                                    and the daemon's REMB controller
+                                    caps bitrate spikes for this
+                                    connection. Distinct from the
+                                    quality loop: the cap never lowers
+                                    visual quality, it only bounds rate
+                                    bursts under motion. */}
+                                <div className="flex flex-row items-start space-x-3 p-2 rounded-md border">
+                                    <Checkbox
+                                        id="adaptive-bitrate-toggle"
+                                        checked={adaptiveBitrateEnabled}
+                                        onCheckedChange={(checked) =>
+                                            onAdaptiveBitrateChange(checked === true)
+                                        }
+                                    />
+                                    <div className="space-y-1 leading-none">
+                                        <Label htmlFor="adaptive-bitrate-toggle">
+                                            {t('pages.desk.adaptiveBitrateCap', 'Adaptive Bitrate Cap')}
+                                        </Label>
+                                        <p className="text-xs text-muted-foreground">
+                                            {t(
+                                                'pages.desk.adaptiveBitrateCapDescription',
+                                                'Cap encoder bitrate spikes to the measured network capacity (quality is unaffected)'
                                             )}
                                         </p>
                                     </div>

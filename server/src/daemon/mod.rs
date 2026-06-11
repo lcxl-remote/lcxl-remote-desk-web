@@ -1,3 +1,4 @@
+pub mod bitrate_controller;
 pub mod local_api;
 pub mod pc_manager;
 #[cfg(target_os = "windows")]

@@ -822,13 +822,19 @@ async fn handle_enable_private_screen_inbound(
     Ok(())
 }
 
-/// Batch 1: parse the inbound `UpdateDeskSettings` payload, fan out
-/// the media-relevant knobs as `UpdateMediaSettings` IPC (so the
-/// per-connection encoder pipeline retunes live), and ship the full
+/// Parses the inbound `UpdateDeskSettings` payload, fans out the
+/// media-relevant knobs as `UpdateMediaSettings` IPC (so the
+/// per-connection encoder pipeline retunes live), applies the
+/// connection-scoped adaptive-bitrate toggle, and ships the full
 /// settings to the worker as typed
-/// [`ServiceToWorker::UpdateDeskSettings`] so the worker's
-/// `handle_update_desk_settings` still applies non-media fields
-/// (`wayland_control_mode`, `private_screen` flags, ...).
+/// [`ServiceToWorker::UpdateDeskSettings`] (the worker keeps that
+/// dispatch path as a hook; it currently applies nothing from it).
+///
+/// `adaptive_bitrate` deliberately does **not** ride the global
+/// fan-out: it is a per-browser session preference (persisted in the
+/// browser, not server-side), so it only updates the state of the
+/// connection that sent the message. fps / quality / dirty_rect keep
+/// their existing fan-out-to-all semantics.
 async fn handle_update_desk_settings_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
@@ -853,6 +859,26 @@ async fn handle_update_desk_settings_inbound(
             Some(settings.enable_dirty_rect),
         )
         .await;
+
+    // Connection-scoped adaptive-bitrate toggle: lock → flip → ship
+    // the Clear (if any) → commit, all under the state lock so a
+    // stale SetCap from the RTCP task can never land after the Clear
+    // (see `daemon::bitrate_controller` for the ordering contract).
+    if let Some(conn_id) = model.from_connection_id.as_deref()
+        && let Some(pc_ctx) = ctx.pc_registry.get(conn_id).await
+    {
+        let adaptive = { Arc::clone(&pc_ctx.read().await.adaptive_bitrate) };
+        let mut state = adaptive.state.lock().await;
+        if let Some(directive) = state.set_enabled_and_decide_clear(settings.adaptive_bitrate) {
+            crate::daemon::pc_manager::send_cap_directive(
+                &ctx.worker_mgr,
+                conn_id,
+                directive,
+                &mut state,
+            )
+            .await;
+        }
+    }
 
     let from_connection_id = model
         .from_connection_id
@@ -1722,6 +1748,89 @@ mod tests {
             None,
         );
         assert!(route(&model, &ctx).await.is_ok());
+    }
+
+    /// The adaptive-bitrate toggle is connection-scoped: browser A
+    /// turning it off must clear only A's cap; B's controller keeps
+    /// its cap and stays enabled (a fan-out would let one browser's
+    /// preference disable every other session — see the handler doc).
+    #[tokio::test]
+    async fn update_desk_settings_adaptive_bitrate_scopes_to_source_connection() {
+        use crate::daemon::bitrate_controller::CapDirective;
+
+        let ctx = make_ctx();
+        let request_remote = desk_signal_facade::model::signal::RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let local_settings = crate::model::settings::Settings::default();
+        let ctx_a = ctx
+            .pc_registry
+            .create_for_request_remote("conn-a", &request_remote, &local_settings)
+            .await
+            .expect("seed conn-a");
+        let ctx_b = ctx
+            .pc_registry
+            .create_for_request_remote("conn-b", &request_remote, &local_settings)
+            .await
+            .expect("seed conn-b");
+
+        // Both connections currently run with a committed cap.
+        for c in [&ctx_a, &ctx_b] {
+            let shared = std::sync::Arc::clone(&c.read().await.adaptive_bitrate);
+            shared
+                .state
+                .lock()
+                .await
+                .commit(CapDirective::SetCap(5_000), std::time::Instant::now());
+        }
+
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        ctx.worker_mgr.install_active_for_test(ipc_tx).await;
+
+        // Browser A disables adaptive bitrate via UpdateDeskSettings.
+        let settings = desk_signal_facade::model::desk_settings::DeskSettings {
+            adaptive_bitrate: false,
+            ..desk_signal_facade::model::desk_settings::DeskSettings::default()
+        };
+        let model = SignalingModel::new(
+            "r-ab-scope",
+            SignalingType::UpdateDeskSettings,
+            Some("conn-a".to_string()),
+            None,
+            Some(serde_json::to_value(&settings).unwrap()),
+            None,
+        );
+        assert!(route(&model, &ctx).await.is_ok());
+
+        // Exactly one clear IPC, addressed to conn-a. (Fresh PCs have
+        // no cached_start_media, so the fps/quality fan-out is silent
+        // and UpdateDeskSettings forwarding to the worker is typed
+        // separately.)
+        let mut clears = Vec::new();
+        while let Ok(msg) = ipc_rx.try_recv() {
+            if let ServiceToWorker::UpdateMediaSettings(p) = msg {
+                clears.push((p.connection_id.clone(), p.bitrate_kbps));
+            }
+        }
+        assert_eq!(
+            clears,
+            vec![("conn-a".to_string(), Some(0))],
+            "only the source connection may receive the clear"
+        );
+
+        // A: disabled + cap cleared. B: untouched.
+        {
+            let shared = std::sync::Arc::clone(&ctx_a.read().await.adaptive_bitrate);
+            let state = shared.state.lock().await;
+            assert!(!state.enabled());
+            assert_eq!(state.current_cap_kbps(), None);
+        }
+        {
+            let shared = std::sync::Arc::clone(&ctx_b.read().await.adaptive_bitrate);
+            let state = shared.state.lock().await;
+            assert!(state.enabled(), "conn-b must keep adaptive bitrate on");
+            assert_eq!(state.current_cap_kbps(), Some(5_000));
+        }
     }
 
     /// Malformed `UpdateDeskSettings` payload (not a DeskSettings

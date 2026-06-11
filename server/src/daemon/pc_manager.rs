@@ -45,11 +45,15 @@ use webrtc::peer_connection::{
 };
 use webrtc::rtcp::payload_feedbacks::full_intra_request::FullIntraRequest;
 use webrtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+use webrtc::rtcp::payload_feedbacks::receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
+use crate::daemon::bitrate_controller::{
+    AdaptiveBitrateShared, AdaptiveBitrateState, CapDirective,
+};
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
@@ -399,6 +403,13 @@ pub struct PeerConnectionContext {
     /// round-trip. `None` means the offer hasn't been exchanged yet
     /// (PC up but no media negotiated) — resume is a no-op for those.
     pub cached_start_media: Arc<RwLock<Option<StartMediaPayload>>>,
+    /// Per-connection adaptive bitrate-cap state. Shared between the
+    /// RTCP feedback task (REMB decisions) and the settings router
+    /// (enable/disable edges); see `daemon::bitrate_controller` for
+    /// the locking contract. Created enabled; the first `Offer`
+    /// applies the browser's `desk_settings.adaptive_bitrate`
+    /// preference.
+    pub adaptive_bitrate: Arc<crate::daemon::bitrate_controller::AdaptiveBitrateShared>,
 }
 
 /// Daemon-wide registry of active per-browser
@@ -634,6 +645,9 @@ impl PcRegistry {
             file_transfer_writer_tx,
             media_paused: Arc::new(AtomicBool::new(false)),
             cached_start_media: Arc::new(RwLock::new(None)),
+            adaptive_bitrate: Arc::new(
+                crate::daemon::bitrate_controller::AdaptiveBitrateShared::new(true),
+            ),
         }));
 
         self.inner
@@ -1129,27 +1143,70 @@ fn install_browser_dc_message_forwarder(
 }
 
 // =====================================================================
-// RTCP reader → ForceKeyframe IPC
+// RTCP reader → ForceKeyframe / bitrate-cap IPC
 // =====================================================================
 
-/// Spawn a task that reads RTCP feedback off `rtp_sender` and translates
-/// PLI / FIR packets into `ServiceToWorker::ForceKeyframe` IPC messages
-/// addressed to `connection_id`. PLI = Picture Loss Indication (RFC
-/// 4585 §6.3.1), FIR = Full Intra Request (RFC 5104 §4.3.1.1); both
-/// are the browser asking us for a fresh IDR. The encoder is on the
-/// worker side, so we hand the request off via the worker manager
-/// and let the worker's `MediaProducer::force_keyframe` flag the next
-/// encode pass.
+/// Ships a bitrate-cap directive to the worker as
+/// `UpdateMediaSettings { bitrate_kbps: Some(_) }` and commits the
+/// controller state **only on send success** (two-phase commit — see
+/// `daemon::bitrate_controller`). Must be called while holding the
+/// connection's `AdaptiveBitrateShared::state` lock so directives
+/// reach the FIFO event pipe in decision order; the borrow on `state`
+/// enforces that structurally.
+pub(crate) async fn send_cap_directive(
+    worker_mgr: &WorkerManager,
+    connection_id: &str,
+    directive: CapDirective,
+    state: &mut AdaptiveBitrateState,
+) {
+    let payload = UpdateMediaSettingsPayload {
+        connection_id: connection_id.to_string(),
+        fps: None,
+        bitrate_kbps: Some(directive.wire_kbps()),
+        quality: None,
+        enable_dirty_rect: None,
+    };
+    match worker_mgr
+        .send_to_worker(ServiceToWorker::UpdateMediaSettings(payload))
+        .await
+    {
+        Ok(()) => {
+            log::debug!("[BitrateCap] {connection_id}: sent {directive:?}");
+            state.commit(directive, std::time::Instant::now());
+        }
+        Err(e) => {
+            // No commit: the next REMB re-decides from the unchanged
+            // state instead of being suppressed by hysteresis. A send
+            // failure means the worker pipe is down (worker swap /
+            // shutdown); a restarted worker rebuilds encoders at their
+            // initial ceiling, so a lost Clear self-heals.
+            log::warn!("[BitrateCap] {connection_id}: failed to send {directive:?}: {e}");
+        }
+    }
+}
+
+/// Spawn a task that reads RTCP feedback off `rtp_sender`:
+///
+/// - **PLI / FIR** (RFC 4585 §6.3.1 / RFC 5104 §4.3.1.1) — the browser
+///   asking for a fresh IDR — are translated into
+///   `ServiceToWorker::ForceKeyframe` IPC messages addressed to
+///   `connection_id`; the worker's `MediaProducer` flags the next
+///   encode pass.
+/// - **REMB** (receiver-estimated maximum bitrate, `goog-remb`) feeds
+///   the per-connection adaptive bitrate-cap controller; emitted
+///   directives ride `UpdateMediaSettings.bitrate_kbps`. Decision and
+///   send happen under the state lock (see `send_cap_directive`).
 ///
 /// Exits when `read_rtcp` returns `Err` — that happens on PC close /
 /// CloseControl, which is the natural lifetime of the task. A noisy
 /// transient read error logs at warn level and continues, because the
 /// rtp_sender survives single bad reads (e.g. malformed RTCP packet
 /// from a buggy proxy).
-fn spawn_rtcp_force_keyframe_task(
+fn spawn_rtcp_feedback_task(
     rtp_sender: Arc<RTCRtpSender>,
     connection_id: String,
     worker_mgr: WorkerManager,
+    adaptive_bitrate: Arc<AdaptiveBitrateShared>,
 ) {
     tokio::spawn(async move {
         log::info!("[RtcpReader] {connection_id}: starting");
@@ -1158,21 +1215,38 @@ fn spawn_rtcp_force_keyframe_task(
                 Ok((packets, _attrs)) => {
                     for pkt in packets {
                         let any = pkt.as_any();
-                        let is_force_keyframe =
-                            any.is::<PictureLossIndication>() || any.is::<FullIntraRequest>();
-                        if !is_force_keyframe {
-                            continue;
-                        }
-                        log::debug!(
-                            "[RtcpReader] {connection_id}: PLI/FIR received → ForceKeyframe IPC"
-                        );
-                        let msg = ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
-                            connection_id: connection_id.clone(),
-                        });
-                        if let Err(e) = worker_mgr.send_to_worker(msg).await {
-                            log::warn!(
-                                "[RtcpReader] {connection_id}: ForceKeyframe IPC failed: {e}"
+                        if any.is::<PictureLossIndication>() || any.is::<FullIntraRequest>() {
+                            log::debug!(
+                                "[RtcpReader] {connection_id}: PLI/FIR received → ForceKeyframe \
+                                 IPC"
                             );
+                            let msg = ServiceToWorker::ForceKeyframe(ForceKeyframePayload {
+                                connection_id: connection_id.clone(),
+                            });
+                            if let Err(e) = worker_mgr.send_to_worker(msg).await {
+                                log::warn!(
+                                    "[RtcpReader] {connection_id}: ForceKeyframe IPC failed: {e}"
+                                );
+                            }
+                        } else if let Some(remb) =
+                            any.downcast_ref::<ReceiverEstimatedMaximumBitrate>()
+                        {
+                            log::trace!(
+                                "[RtcpReader] {connection_id}: REMB estimate {:.0} bps",
+                                remb.bitrate
+                            );
+                            let mut state = adaptive_bitrate.state.lock().await;
+                            if let Some(directive) =
+                                state.decide_on_remb(std::time::Instant::now(), remb.bitrate as f64)
+                            {
+                                send_cap_directive(
+                                    &worker_mgr,
+                                    &connection_id,
+                                    directive,
+                                    &mut state,
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
@@ -1551,6 +1625,20 @@ pub async fn handle_offer(
         s.wayland_control_mode = offer.desk_settings.wayland_control_mode.clone();
     }
 
+    {
+        // Apply the browser's adaptive-bitrate preference for this
+        // connection before the RTCP reader spawns, so the first REMB
+        // decision already sees the right flag. On renegotiation a
+        // disable edge with an active cap ships the Clear right here.
+        let adaptive = Arc::clone(&ctx_guard.adaptive_bitrate);
+        let mut state = adaptive.state.lock().await;
+        if let Some(directive) =
+            state.set_enabled_and_decide_clear(offer.desk_settings.adaptive_bitrate)
+        {
+            send_cap_directive(worker_mgr, from_connection_id, directive, &mut state).await;
+        }
+    }
+
     let sdp_str = &offer.offer.sdp;
     let has_video = sdp_str.contains("m=video");
     let has_audio = sdp_str.contains("m=audio");
@@ -1589,16 +1677,16 @@ pub async fn handle_offer(
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await?;
         ctx_guard.video_track = Some(video_track);
-        // Spawn the RTCP reader. Browser sends PLI / FIR when
-        // it detects packet loss or just joined an in-progress stream;
-        // we translate either into `ServiceToWorker::ForceKeyframe`
-        // so the per-connection encoder emits an IDR on its next
-        // pass. Reader exits when the rtp_sender is closed (PC drop /
-        // CloseControl), see `spawn_rtcp_force_keyframe_task`.
-        spawn_rtcp_force_keyframe_task(
+        // Spawn the RTCP reader. PLI / FIR from the browser become
+        // ForceKeyframe IPC; REMB estimates feed the per-connection
+        // adaptive bitrate-cap controller. Reader exits when the
+        // rtp_sender is closed (PC drop / CloseControl), see
+        // `spawn_rtcp_feedback_task`.
+        spawn_rtcp_feedback_task(
             rtp_sender,
             from_connection_id.to_string(),
             worker_mgr.clone(),
+            Arc::clone(&ctx_guard.adaptive_bitrate),
         );
     }
 
@@ -5179,14 +5267,16 @@ mod tests {
 
     // ============== RTCP PLI/FIR identity ==============
 
-    /// Identifying RTCP packets via `as_any().is::<T>()` is the path
-    /// `spawn_rtcp_force_keyframe_task` uses to decide whether to
-    /// emit ForceKeyframe. Pin the identity so a webrtc-rs version
-    /// bump that changed the trait object representation is caught
-    /// here, not in production where missed PLIs become "browser
-    /// stuck on stale frame after a packet loss".
+    /// Identifying RTCP packets via `as_any().is::<T>()` /
+    /// `downcast_ref::<T>()` is the path `spawn_rtcp_feedback_task`
+    /// uses to decide between ForceKeyframe (PLI/FIR) and the
+    /// bitrate-cap controller (REMB). Pin the identities so a
+    /// webrtc-rs version bump that changed the trait object
+    /// representation is caught here, not in production where missed
+    /// PLIs become "browser stuck on stale frame after a packet loss"
+    /// and missed REMBs silently disable adaptive bitrate.
     #[test]
-    fn rtcp_pli_and_fir_are_distinguishable_via_as_any() {
+    fn rtcp_pli_fir_and_remb_are_distinguishable_via_as_any() {
         use webrtc::rtcp::packet::Packet;
 
         let pli: Box<dyn Packet + Send + Sync> = Box::new(PictureLossIndication {
@@ -5198,11 +5288,204 @@ mod tests {
             media_ssrc: 2,
             fir: vec![],
         });
+        let remb: Box<dyn Packet + Send + Sync> = Box::new(ReceiverEstimatedMaximumBitrate {
+            sender_ssrc: 1,
+            bitrate: 4_000_000.0,
+            ssrcs: vec![2],
+        });
 
         assert!(pli.as_any().is::<PictureLossIndication>());
         assert!(!pli.as_any().is::<FullIntraRequest>());
         assert!(fir.as_any().is::<FullIntraRequest>());
         assert!(!fir.as_any().is::<PictureLossIndication>());
+        let parsed = remb
+            .as_any()
+            .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
+            .expect("REMB must downcast");
+        assert_eq!(parsed.bitrate, 4_000_000.0);
+        assert!(!remb.as_any().is::<PictureLossIndication>());
+    }
+
+    // ============== adaptive bitrate-cap IPC ==============
+
+    /// Pulls the next `UpdateMediaSettings` off the test IPC stream,
+    /// asserting it carries only a bitrate directive.
+    fn expect_cap_ipc(
+        ipc_rx: &mut tokio::sync::mpsc::UnboundedReceiver<ServiceToWorker>,
+        expect_connection: &str,
+    ) -> u32 {
+        match ipc_rx.try_recv().expect("expected an IPC message") {
+            ServiceToWorker::UpdateMediaSettings(p) => {
+                assert_eq!(p.connection_id, expect_connection);
+                assert_eq!(p.fps, None);
+                assert_eq!(p.quality, None);
+                assert_eq!(p.enable_dirty_rect, None);
+                p.bitrate_kbps.expect("cap IPC must carry bitrate_kbps")
+            }
+            other => panic!("expected UpdateMediaSettings, got {other:?}"),
+        }
+    }
+
+    /// End-to-end over the daemon-side cap path: a committed cap
+    /// followed by a disable edge must emit `bitrate_kbps: Some(0)`
+    /// (the clear sentinel) for that connection, and decisions stop
+    /// afterwards.
+    #[tokio::test]
+    async fn disable_with_active_cap_emits_clear_ipc() {
+        let registry = PcRegistry::new();
+        let s = actix_web::web::Data::new(crate::model::settings::SharedSettings::from(
+            settings_with_startup(StartupMode::ServiceDaemon),
+        ));
+        let (worker_mgr, _) = WorkerManager::new(s.clone(), registry.clone());
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+
+        let shared = crate::daemon::bitrate_controller::AdaptiveBitrateShared::new(true);
+
+        // REMB indicates an 8 Mbps link → SetCap(6800) shipped + committed.
+        {
+            let mut state = shared.state.lock().await;
+            let directive = state
+                .decide_on_remb(std::time::Instant::now(), 8_000_000.0)
+                .expect("constrained REMB must produce a directive");
+            send_cap_directive(&worker_mgr, "conn-cap", directive, &mut state).await;
+            assert_eq!(state.current_cap_kbps(), Some(6_800));
+        }
+        assert_eq!(expect_cap_ipc(&mut ipc_rx, "conn-cap"), 6_800);
+
+        // Disable → Clear (wire Some(0)) + no further decisions.
+        {
+            let mut state = shared.state.lock().await;
+            let directive = state
+                .set_enabled_and_decide_clear(false)
+                .expect("disable with active cap must emit Clear");
+            send_cap_directive(&worker_mgr, "conn-cap", directive, &mut state).await;
+            assert_eq!(state.current_cap_kbps(), None);
+            assert_eq!(
+                state.decide_on_remb(std::time::Instant::now(), 2_000_000.0),
+                None,
+                "disabled state must not emit further directives"
+            );
+        }
+        assert_eq!(
+            expect_cap_ipc(&mut ipc_rx, "conn-cap"),
+            0,
+            "clear must ride the Some(0) sentinel"
+        );
+        assert!(ipc_rx.try_recv().is_err(), "no further IPC expected");
+    }
+
+    /// A failed `send_to_worker` must not commit: the controller state
+    /// keeps its previous cap so the next REMB re-decides instead of
+    /// being suppressed by hysteresis; after a fresh IPC channel is
+    /// installed the retry ships normally.
+    #[tokio::test]
+    async fn send_failure_does_not_commit_and_retry_succeeds() {
+        let registry = PcRegistry::new();
+        let s = actix_web::web::Data::new(crate::model::settings::SharedSettings::from(
+            settings_with_startup(StartupMode::ServiceDaemon),
+        ));
+        let (worker_mgr, _) = WorkerManager::new(s.clone(), registry.clone());
+        let (ipc_tx, ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+        // Drop the receiver: the next send fails. (An mpsc receiver
+        // cannot be revived — the retry below installs a new channel.)
+        drop(ipc_rx);
+
+        let shared = crate::daemon::bitrate_controller::AdaptiveBitrateShared::new(true);
+        let now = std::time::Instant::now();
+
+        {
+            let mut state = shared.state.lock().await;
+            let directive = state
+                .decide_on_remb(now, 8_000_000.0)
+                .expect("must decide a cap");
+            send_cap_directive(&worker_mgr, "conn-f", directive, &mut state).await;
+            assert_eq!(
+                state.current_cap_kbps(),
+                None,
+                "failed send must not commit"
+            );
+        }
+
+        // Fresh channel installed → identical REMB re-decides the same
+        // directive (no hysteresis suppression) and ships it.
+        let (ipc_tx2, mut ipc_rx2) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx2).await;
+        {
+            let mut state = shared.state.lock().await;
+            let directive = state
+                .decide_on_remb(now, 8_000_000.0)
+                .expect("retry must re-decide after an uncommitted failure");
+            send_cap_directive(&worker_mgr, "conn-f", directive, &mut state).await;
+            assert_eq!(state.current_cap_kbps(), Some(6_800));
+        }
+        assert_eq!(expect_cap_ipc(&mut ipc_rx2, "conn-f"), 6_800);
+    }
+
+    /// Serialisation contract: REMB decisions and the disable edge
+    /// both hold the state lock across decide → send → commit, so the
+    /// FIFO IPC stream can never show a `SetCap` after the `Clear`.
+    /// Drives many concurrent REMB tasks against one mid-flight
+    /// disable and inspects the observed wire sequence.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn no_setcap_after_clear_under_concurrency() {
+        let registry = PcRegistry::new();
+        let s = actix_web::web::Data::new(crate::model::settings::SharedSettings::from(
+            settings_with_startup(StartupMode::ServiceDaemon),
+        ));
+        let (worker_mgr, _) = WorkerManager::new(s.clone(), registry.clone());
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        worker_mgr.install_active_for_test(ipc_tx).await;
+
+        let shared = Arc::new(crate::daemon::bitrate_controller::AdaptiveBitrateShared::new(true));
+
+        let mut handles = Vec::new();
+        for i in 0..50u32 {
+            let shared = Arc::clone(&shared);
+            let worker_mgr = worker_mgr.clone();
+            handles.push(tokio::spawn(async move {
+                // Alternate between two constrained estimates so the
+                // urgent-drop path keeps emitting despite the 1 s
+                // interval limiter.
+                let remb = if i % 2 == 0 { 8_000_000.0 } else { 2_000_000.0 };
+                let mut state = shared.state.lock().await;
+                if let Some(d) = state.decide_on_remb(std::time::Instant::now(), remb) {
+                    send_cap_directive(&worker_mgr, "conn-race", d, &mut state).await;
+                }
+            }));
+        }
+        // Disable roughly mid-flight.
+        {
+            let shared = Arc::clone(&shared);
+            let worker_mgr = worker_mgr.clone();
+            handles.push(tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                let mut state = shared.state.lock().await;
+                if let Some(d) = state.set_enabled_and_decide_clear(false) {
+                    send_cap_directive(&worker_mgr, "conn-race", d, &mut state).await;
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task panicked");
+        }
+
+        let mut saw_clear = false;
+        while let Ok(msg) = ipc_rx.try_recv() {
+            if let ServiceToWorker::UpdateMediaSettings(p) = msg {
+                let kbps = p.bitrate_kbps.expect("cap IPC must carry bitrate_kbps");
+                if kbps == 0 {
+                    saw_clear = true;
+                } else {
+                    assert!(
+                        !saw_clear,
+                        "observed SetCap({kbps}) after Clear — decide/send/commit must be \
+                         serialised under the state lock"
+                    );
+                }
+            }
+        }
     }
 
     // ============== handle_require_control tests ==============

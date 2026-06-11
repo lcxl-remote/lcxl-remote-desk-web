@@ -384,6 +384,8 @@ export default {
   'pages.desk.resolutionTimeout': 'No reply within timeout',
   'pages.desk.adaptiveQuality': 'Adaptive Video Quality',
   'pages.desk.adaptiveQualityDescription': 'Auto-tune video quality based on packet loss and RTT',
+  'pages.desk.adaptiveBitrateCap': 'Adaptive Bitrate Cap',
+  'pages.desk.adaptiveBitrateCapDescription': 'Cap encoder bitrate spikes to the measured network capacity (quality is unaffected)',
   'pages.desk.enableDirtyRect': 'Enable Dirty Rect Optimisation',
   'pages.desk.enableDirtyRectDescription': 'Only re-encode changed regions of the screen. Turn off if you see transient black bars during animations.',
   'pages.desk.remoteResolutionScale': 'Remote Resolution Scale',

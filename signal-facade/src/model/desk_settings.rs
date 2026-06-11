@@ -299,6 +299,15 @@ pub struct DeskSettings {
     /// rendering artefacts (e.g. transient black bars on animation-heavy
     /// content).
     pub enable_dirty_rect: bool,
+    /// Whether the daemon's REMB-driven adaptive bitrate cap is active
+    /// for this connection. Defaults to `true`. Session-scoped state:
+    /// it takes effect per connection (initialised from the offer's
+    /// desk settings, live-toggled via `UpdateDeskSettings` for the
+    /// originating connection only) and is not persisted server-side —
+    /// the browser keeps the user's preference. Distinct from the
+    /// browser-side adaptive *quality* loop: the cap only trims
+    /// bitrate spikes, quality stays untouched.
+    pub adaptive_bitrate: bool,
 }
 
 impl DeskSettings {
@@ -406,6 +415,7 @@ impl Default for DeskSettings {
             display_name: None,
             wayland_control_mode: None,
             enable_dirty_rect: true,
+            adaptive_bitrate: true,
         }
     }
 }
@@ -534,6 +544,7 @@ mod wincode_tests {
             display_name: Some("\\\\.\\DISPLAY2".to_string()),
             wayland_control_mode: Some("portal".to_string()),
             enable_dirty_rect: false,
+            adaptive_bitrate: false,
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");

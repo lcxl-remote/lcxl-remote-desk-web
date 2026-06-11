@@ -117,6 +117,27 @@ export default function DeskSession() {
         }
     }, [adaptiveQualityEnabled]);
 
+    // Server-side adaptive bitrate-cap opt-in (REMB-driven inner loop
+    // on the daemon). Browser-owned preference, persisted like the
+    // adaptive-quality toggle above; injected into
+    // `DeskSettings.adaptive_bitrate` on connect / UpdateDeskSettings
+    // (the server treats it as session state and never persists it).
+    const [adaptiveBitrateEnabled, setAdaptiveBitrateEnabled] = useState<boolean>(() => {
+        try {
+            const raw = localStorage.getItem("lcxl-desk-adaptive-bitrate-enabled");
+            return raw === null ? true : raw === "true";
+        } catch {
+            return true;
+        }
+    });
+    useEffect(() => {
+        try {
+            localStorage.setItem("lcxl-desk-adaptive-bitrate-enabled", String(adaptiveBitrateEnabled));
+        } catch {
+            // Ignore quota / private-mode errors (see above).
+        }
+    }, [adaptiveBitrateEnabled]);
+
     // Privacy screen state
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
@@ -483,20 +504,43 @@ export default function DeskSession() {
             });
             return;
         }
-        lastSettingsRef.current = settings;
+        // Inject the parent-owned adaptive-bitrate preference so it
+        // rides the offer (new connection init) and UpdateDeskSettings
+        // (live toggle for this connection on the daemon side).
+        const settingsWithPrefs: DeskSettings = {
+            ...settings,
+            adaptive_bitrate: adaptiveBitrateEnabled,
+        };
+        lastSettingsRef.current = settingsWithPrefs;
         // Mirror to state so `useAdaptiveResolution` re-evaluates its
         // `enabled` gate on this submit even when no other tracked
         // state happens to change in the same tick (e.g. the user is
         // already connected and only flips display + adaptive toggle).
-        setActiveSettings(settings);
+        setActiveSettings(settingsWithPrefs);
         if (isRTCConnected && deskId) {
-            console.log("Updating desk settings dynamically...", settings);
-            sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, settings, deskId);
+            console.log("Updating desk settings dynamically...", settingsWithPrefs);
+            sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, settingsWithPrefs, deskId);
         } else {
-            connect(settings);
+            connect(settingsWithPrefs);
         }
         setIsConfigOpen(false);
     };
+
+    // Live-apply the adaptive-bitrate toggle while connected: the
+    // checkbox sits outside the dialog form, so a flip must reach the
+    // daemon without waiting for the next full settings submit. The
+    // daemon scopes the change to this connection.
+    useEffect(() => {
+        if (!isRTCConnected || !deskId || !lastSettingsRef.current) return;
+        if (lastSettingsRef.current.adaptive_bitrate === adaptiveBitrateEnabled) return;
+        const updated: DeskSettings = {
+            ...lastSettingsRef.current,
+            adaptive_bitrate: adaptiveBitrateEnabled,
+        };
+        lastSettingsRef.current = updated;
+        sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, updated, deskId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [adaptiveBitrateEnabled]);
 
     const handleConfigCancel = () => {
         setIsConfigOpen(false);
@@ -700,6 +744,8 @@ export default function DeskSession() {
                 onCancel={handleConfigCancel}
                 adaptiveQualityEnabled={adaptiveQualityEnabled}
                 onAdaptiveQualityChange={setAdaptiveQualityEnabled}
+                adaptiveBitrateEnabled={adaptiveBitrateEnabled}
+                onAdaptiveBitrateChange={setAdaptiveBitrateEnabled}
             />
             <div className="flex items-center justify-between border-b p-4">
                 <h2 className="text-lg font-semibold">{t('pages.desk.title', 'Remote Desk')} - {deskId}</h2>
