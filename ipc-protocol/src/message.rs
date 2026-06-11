@@ -554,7 +554,11 @@ pub struct StartMediaPayload {
     pub audio_device: Option<String>,
     /// Frames per second the encoder should target.
     pub fps: u32,
-    /// Encoder bitrate in kbps (0 = encoder default).
+    /// Encoder bitrate in kbps (0 = encoder default). Historic field:
+    /// it is *not* consumed as an initial bitrate cap — a fresh
+    /// connection always starts at the encoder's initial ceiling and
+    /// the first cap can only come from the daemon's REMB controller
+    /// via `UpdateMediaSettingsPayload.bitrate_kbps`.
     pub bitrate_kbps: u32,
     /// Encoder quality knob (codec-specific 0–100; 0 = default).
     pub quality: u32,
@@ -609,6 +613,17 @@ pub struct StopMediaPayload {
 pub struct UpdateMediaSettingsPayload {
     pub connection_id: String,
     pub fps: Option<u32>,
+    /// Runtime bitrate-cap directive with tri-state semantics —
+    /// **`Some(0)` is meaningful, do not filter it out as an invalid
+    /// value**:
+    /// - `None` — leave the current cap alone (field not part of this
+    ///   update).
+    /// - `Some(0)` — clear the cap; the encoder returns to its initial
+    ///   ceiling. Sent by the daemon when adaptive bitrate is switched
+    ///   off so a previously tightened connection recovers.
+    /// - `Some(k)` (k > 0) — cap the encoder at `k` kbps without
+    ///   rebuilding it. Sent by the daemon's REMB controller at ~1 Hz
+    ///   while adaptive bitrate is on.
     pub bitrate_kbps: Option<u32>,
     pub quality: Option<u32>,
     /// Toggle for the BGRA→YUV dirty-rect fast path in

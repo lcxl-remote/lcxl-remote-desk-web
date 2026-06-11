@@ -40,10 +40,13 @@
 //! - **`UpdateMediaSettings` live-apply** — fps / quality changes
 //!   surface through `update_settings` → per-pipeline mpsc, drained
 //!   on the next encode tick, encoder rebuilt in place without
-//!   restarting capture. `bitrate_kbps` ride the same channel but
-//!   per-codec routing is still pending (logged + ignored — see the
-//!   TODO breadcrumb in `drain_settings_updates`); the UI today only
-//!   surfaces a quality slider so this gap is invisible.
+//!   restarting capture. `bitrate_kbps` rides the same channel as a
+//!   runtime bitrate-cap directive (`Some(0)` clears, `Some(k)` caps
+//!   at k kbps) applied through `VideoEncoder::set_bitrate_cap`
+//!   *without* rebuilding the encoder — the daemon's REMB controller
+//!   emits these at ~1 Hz and a rebuild per directive would cause an
+//!   IDR storm. The active cap is replayed onto every freshly rebuilt
+//!   encoder (settings / keyframe / resolution rebuilds).
 //!
 //! ## Capture sharing across connections
 //!
@@ -608,13 +611,30 @@ fn handle_broadcast_lag(connection_id: &str, n: u64) {
     );
 }
 
-/// changes (interval can't be retuned in place).
+/// Outcome of draining the live-settings channel on one encode tick.
+struct SettingsDrainOutcome {
+    /// At least one knob that requires an encoder rebuild (fps /
+    /// quality) actually changed.
+    needs_rebuild: bool,
+    /// Latest bitrate-cap directive in the drained batch, if any:
+    /// `Some(Some(k))` caps at `k` kbps, `Some(None)` clears the cap
+    /// (wire sentinel `bitrate_kbps == Some(0)`), `None` means the
+    /// batch carried no cap directive. Applied to the encoder via
+    /// `VideoEncoder::set_bitrate_cap` — never by rebuilding, since
+    /// cap updates arrive at REMB cadence (~1 Hz) and a rebuild per
+    /// update would cause an IDR storm.
+    cap_directive: Option<Option<u32>>,
+}
+
+/// Drains every pending `UpdateMediaSettingsPayload` and folds the
+/// encoder-relevant knobs into `merged_settings`, coalescing a burst
+/// of updates into a single outcome. fps changes also retune the
+/// frame interval (the ticker can't be adjusted in place).
 ///
-/// Returns `true` when at least one knob actually changed — the caller
-/// uses this to decide whether to rebuild the encoder. We compare to
-/// the *current* `merged_settings` rather than the IPC payload
-/// directly so coalesced updates that converge to the same value as
-/// the live state are no-ops (the daemon currently fans out on every
+/// `needs_rebuild` is only set when a knob actually changed — we
+/// compare to the *current* `merged_settings` rather than the IPC
+/// payload directly so coalesced updates that converge to the same
+/// value as the live state are no-ops (the daemon fans out on every
 /// `UpdateDeskSettings`, including ones that don't move encoder-
 /// relevant fields).
 fn drain_settings_updates(
@@ -623,8 +643,9 @@ fn drain_settings_updates(
     merged_settings: &mut DeskSettings,
     frame_interval: &mut Duration,
     frame_duration_ns: &mut u64,
-) -> bool {
+) -> SettingsDrainOutcome {
     let mut changed = false;
+    let mut cap_directive: Option<Option<u32>> = None;
     while let Ok(payload) = settings_rx.try_recv() {
         if let Some(fps) = payload.fps
             && fps > 0
@@ -653,24 +674,42 @@ fn drain_settings_updates(
             // round-trip.
             merged_settings.enable_dirty_rect = enable;
         }
-        if let Some(kbps) = payload.bitrate_kbps
-            && kbps > 0
-        {
-            // Bitrate maps to the codec-specific encoder-settings
-            // struct (`H264EncoderSettings.bps`, `VpxEncoderSettings.bps`,
-            // etc.); applying it requires routing per active codec. Cut
-            // 5 keeps the wire field for forward compatibility but does
-            // not yet apply it — callers should change `quality` if
-            // they want a runtime bitrate effect today, since the
-            // factory recomputes bps from quality when the codec-
-            // specific settings are absent.
+        if let Some(kbps) = payload.bitrate_kbps {
+            // Tri-state wire semantics (see the IPC field's doc):
+            // Some(0) clears the cap, Some(k>0) caps at k kbps. Keep
+            // only the newest directive in the batch — the daemon's
+            // controller already rate-limits, and only the latest
+            // value matters.
+            cap_directive = Some(if kbps == 0 { None } else { Some(kbps) });
             debug!(
-                "[MediaProducer:{connection_id}] UpdateMediaSettings.bitrate_kbps={kbps} ignored \
-                 (per-codec mapping not yet wired)"
+                "[MediaProducer:{connection_id}] UpdateMediaSettings.bitrate_kbps={kbps} → cap \
+                 directive {:?}",
+                cap_directive
             );
         }
     }
-    changed
+    SettingsDrainOutcome {
+        needs_rebuild: changed,
+        cap_directive,
+    }
+}
+
+/// Re-applies the connection's current bitrate cap onto a freshly
+/// rebuilt encoder (rebuilds reset codec state, dropping any cap that
+/// was applied at runtime). No-op when no cap is active.
+fn replay_bitrate_cap(
+    encoder: &mut Box<dyn VideoEncoder>,
+    current_cap_kbps: Option<u32>,
+    connection_id: &str,
+) {
+    if let Some(kbps) = current_cap_kbps
+        && !encoder.set_bitrate_cap(Some(kbps))
+    {
+        debug!(
+            "[MediaProducer:{connection_id}] encoder does not support bitrate caps; {kbps} kbps \
+             cap not re-applied after rebuild"
+        );
+    }
 }
 
 /// Build a `desk_settings` clone with the per-connection overrides
@@ -1041,6 +1080,12 @@ async fn video_pipeline_loop(
     // INFO line describing the resulting NAL layout — used to triage
     // bugs like the "screen turns green after a while" failure.
     let mut rebuild_pending = true;
+    // Connection-transient bitrate cap (kbps) driven by the daemon's
+    // REMB controller via `UpdateMediaSettings.bitrate_kbps`. Not part
+    // of `merged_settings` — it is runtime state, never persisted, and
+    // must be replayed onto every freshly rebuilt encoder. `None` =
+    // encoder runs at its initial ceiling.
+    let mut current_cap_kbps: Option<u32> = None;
 
     while !stop_flag.load(Ordering::Relaxed) {
         // Wait for the next shared frame. The capture loop runs as
@@ -1089,14 +1134,14 @@ async fn video_pipeline_loop(
         // scope here — they would require resubscribing to a
         // different `CaptureKey`, and the live-settings stream
         // currently does not include them.
-        let settings_changed = drain_settings_updates(
+        let drain_outcome = drain_settings_updates(
             &connection_id,
             &mut settings_rx,
             &mut merged_settings,
             &mut frame_interval,
             &mut frame_duration_ns,
         );
-        if settings_changed {
+        if drain_outcome.needs_rebuild {
             info!(
                 "[MediaProducer:{connection_id}] Live settings changed; recreating encoder \
                  (fps={}, video_quality={}, enable_dirty_rect={})",
@@ -1118,6 +1163,26 @@ async fn video_pipeline_loop(
                 .checked_sub(frame_interval)
                 .unwrap_or_else(std::time::Instant::now);
         }
+        // Bitrate-cap directives apply *after* a potential rebuild so
+        // a batch carrying both a quality change and a cap lands on
+        // the new encoder. Without a fresh directive, a rebuild
+        // replays the connection's current cap (the new encoder
+        // starts at its initial ceiling).
+        match drain_outcome.cap_directive {
+            Some(directive) => {
+                if !encoder.set_bitrate_cap(directive) {
+                    debug!(
+                        "[MediaProducer:{connection_id}] bitrate cap directive {directive:?} not \
+                         applied (encoder unsupported or reconfig failed)"
+                    );
+                }
+                current_cap_kbps = directive;
+            }
+            None if drain_outcome.needs_rebuild => {
+                replay_bitrate_cap(&mut encoder, current_cap_kbps, &connection_id);
+            }
+            None => {}
+        }
 
         if keyframe_requested.swap(false, Ordering::Relaxed) {
             info!(
@@ -1129,6 +1194,7 @@ async fn video_pipeline_loop(
                 &display_info_for_size(&display_info, encoder_init_size),
             )
             .map_err(|e| format!("{e}"))?;
+            replay_bitrate_cap(&mut encoder, current_cap_kbps, &connection_id);
             next_pass_is_idr = true;
             rebuild_pending = true;
             last_emit_for_throttle = std::time::Instant::now()
@@ -1259,6 +1325,7 @@ async fn video_pipeline_loop(
                 &display_info_for_size(&display_info, encoder_init_size),
             )
             .map_err(|e| format!("{e}"))?;
+            replay_bitrate_cap(&mut encoder, current_cap_kbps, &connection_id);
             next_pass_is_idr = true;
             rebuild_pending = true;
             last_emit_for_throttle = std::time::Instant::now()
@@ -1999,15 +2066,16 @@ mod tests {
         let mut frame_interval = merged.get_duration_by_video_fps();
         let mut frame_duration_ns = frame_interval.as_nanos().min(u64::MAX as u128) as u64;
 
-        // No pending update → returns false, leaves state untouched.
-        let changed = drain_settings_updates(
+        // No pending update → no rebuild, no cap directive, state untouched.
+        let outcome = drain_settings_updates(
             "c1",
             &mut rx,
             &mut merged,
             &mut frame_interval,
             &mut frame_duration_ns,
         );
-        assert!(!changed);
+        assert!(!outcome.needs_rebuild);
+        assert!(outcome.cap_directive.is_none());
         assert_eq!(merged.video_fps, 30);
 
         // Apply fps=60 + quality=40 → both change, returns true, frame
@@ -2020,14 +2088,14 @@ mod tests {
             enable_dirty_rect: None,
         })
         .unwrap();
-        let changed = drain_settings_updates(
+        let outcome = drain_settings_updates(
             "c1",
             &mut rx,
             &mut merged,
             &mut frame_interval,
             &mut frame_duration_ns,
         );
-        assert!(changed);
+        assert!(outcome.needs_rebuild);
         assert_eq!(merged.video_fps, 60);
         assert_eq!(merged.video_quality, 40);
         assert_eq!(
@@ -2039,7 +2107,7 @@ mod tests {
             "frame duration must follow the new fps"
         );
 
-        // Same values again → no-op, returns false.
+        // Same values again → no-op, no rebuild.
         tx.send(UpdateMediaSettingsPayload {
             connection_id: "c1".into(),
             fps: Some(60),
@@ -2048,14 +2116,14 @@ mod tests {
             enable_dirty_rect: None,
         })
         .unwrap();
-        let changed = drain_settings_updates(
+        let outcome = drain_settings_updates(
             "c1",
             &mut rx,
             &mut merged,
             &mut frame_interval,
             &mut frame_duration_ns,
         );
-        assert!(!changed);
+        assert!(!outcome.needs_rebuild);
     }
 
     /// Regression for the dirty-rect kill-switch wiring: the browser's
@@ -2085,7 +2153,7 @@ mod tests {
             enable_dirty_rect: Some(false),
         })
         .unwrap();
-        let changed = drain_settings_updates(
+        let outcome = drain_settings_updates(
             "c1",
             &mut rx,
             &mut merged,
@@ -2093,9 +2161,9 @@ mod tests {
             &mut frame_duration_ns,
         );
         // Dirty-rect flips do not force an encoder rebuild — the
-        // encoder reads the flag per-frame. `changed` stays `false`.
+        // encoder reads the flag per-frame.
         assert!(
-            !changed,
+            !outcome.needs_rebuild,
             "enable_dirty_rect-only change must not force encoder rebuild"
         );
         assert!(
@@ -2167,11 +2235,12 @@ mod tests {
     }
 
     /// `drain_settings_updates` ignores `fps = 0` (sentinel for "use
-    /// default") and `bitrate_kbps` (per-codec mapping not yet wired).
-    /// Pinning these so a future change to the IPC schema doesn't
-    /// silently mis-apply.
+    /// default") while a `bitrate_kbps` value surfaces as a cap
+    /// directive that must NOT trigger an encoder rebuild — cap
+    /// updates arrive at REMB cadence and are applied via
+    /// `set_bitrate_cap` instead.
     #[tokio::test(flavor = "current_thread")]
-    async fn drain_settings_updates_ignores_fps_zero_and_bitrate() {
+    async fn drain_settings_updates_fps_zero_ignored_bitrate_is_cap_directive() {
         let (tx, mut rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
         let mut merged = DeskSettings {
             video_fps: 30,
@@ -2183,22 +2252,82 @@ mod tests {
 
         tx.send(UpdateMediaSettingsPayload {
             connection_id: "c1".into(),
-            fps: Some(0),              // sentinel — must NOT replace 30 with 0 fps
-            bitrate_kbps: Some(8_000), // currently unwired — must NOT change anything
+            fps: Some(0), // sentinel — must NOT replace 30 with 0 fps
+            bitrate_kbps: Some(8_000),
             quality: None,
             enable_dirty_rect: None,
         })
         .unwrap();
-        let changed = drain_settings_updates(
+        let outcome = drain_settings_updates(
             "c1",
             &mut rx,
             &mut merged,
             &mut frame_interval,
             &mut frame_duration_ns,
         );
-        assert!(!changed, "fps=0 + bitrate alone must be a no-op today");
+        assert!(
+            !outcome.needs_rebuild,
+            "fps=0 + bitrate alone must not force an encoder rebuild"
+        );
+        assert_eq!(
+            outcome.cap_directive,
+            Some(Some(8_000)),
+            "bitrate_kbps must surface as a cap directive"
+        );
         assert_eq!(merged.video_fps, 30);
         assert_eq!(merged.video_quality, 22);
+    }
+
+    /// The `Some(0)` wire sentinel translates to a clear-cap directive
+    /// (`Some(None)`), and the newest directive in a drained batch
+    /// wins. Pinning the sentinel so a future maintainer does not
+    /// "sanitise" zero away as an invalid bitrate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_settings_updates_zero_bitrate_clears_and_latest_wins() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UpdateMediaSettingsPayload>();
+        let mut merged = DeskSettings::default();
+        let mut frame_interval = merged.get_duration_by_video_fps();
+        let mut frame_duration_ns = 0u64;
+
+        let send_cap = |kbps: u32| {
+            tx.send(UpdateMediaSettingsPayload {
+                connection_id: "c1".into(),
+                fps: None,
+                bitrate_kbps: Some(kbps),
+                quality: None,
+                enable_dirty_rect: None,
+            })
+            .unwrap();
+        };
+
+        // A batch of cap directives — only the last one survives.
+        send_cap(4_000);
+        send_cap(2_000);
+        let outcome = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut frame_interval,
+            &mut frame_duration_ns,
+        );
+        assert!(!outcome.needs_rebuild);
+        assert_eq!(outcome.cap_directive, Some(Some(2_000)));
+
+        // Some(0) = clear-cap sentinel → Some(None).
+        send_cap(0);
+        let outcome = drain_settings_updates(
+            "c1",
+            &mut rx,
+            &mut merged,
+            &mut frame_interval,
+            &mut frame_duration_ns,
+        );
+        assert!(!outcome.needs_rebuild);
+        assert_eq!(
+            outcome.cap_directive,
+            Some(None),
+            "Some(0) must clear the cap, not be dropped as invalid"
+        );
     }
 
     /// `build_media_frame` stamps ts_ns from wall clock, copies through
