@@ -1,1 +1,40 @@
-{"type":"object","required":["file_info_list","total_count"],"properties":{"file_info_list":{"type":"array","items":{"type":"object","required":["name","path","size","is_dir","is_file","is_symlink","permissions","accessed","created","modified"],"properties":{"accessed":{"type":"string","format":"date-time"},"created":{"type":"string","format":"date-time"},"err_msg":{"type":["string","null"]},"is_dir":{"type":"boolean"},"is_file":{"type":"boolean"},"is_symlink":{"type":"boolean"},"modified":{"type":"string","format":"date-time"},"name":{"type":"string"},"path":{"type":"string"},"permissions":{"type":"integer","format":"int32","minimum":0},"size":{"type":"integer","format":"int64","minimum":0}},"x-readme-ref-name":"FileInfo"}},"total_count":{"type":"integer","format":"int64"}},"x-readme-ref-name":"FileListResponse"}
+{
+  "type": "object",
+  "required": ["file_info_list", "total_count"],
+  "properties": {
+    "file_info_list": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "path",
+          "size",
+          "is_dir",
+          "is_file",
+          "is_symlink",
+          "permissions",
+          "accessed",
+          "created",
+          "modified"
+        ],
+        "properties": {
+          "accessed": { "type": "string", "format": "date-time" },
+          "created": { "type": "string", "format": "date-time" },
+          "err_msg": { "type": ["string", "null"] },
+          "is_dir": { "type": "boolean" },
+          "is_file": { "type": "boolean" },
+          "is_symlink": { "type": "boolean" },
+          "modified": { "type": "string", "format": "date-time" },
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "permissions": { "type": "integer", "format": "int32", "minimum": 0 },
+          "size": { "type": "integer", "format": "int64", "minimum": 0 }
+        },
+        "x-readme-ref-name": "FileInfo"
+      }
+    },
+    "total_count": { "type": "integer", "format": "int64" }
+  },
+  "x-readme-ref-name": "FileListResponse"
+}

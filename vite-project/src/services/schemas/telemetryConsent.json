@@ -1,1 +1,6 @@
-{"type":"object","required":["consent"],"properties":{"consent":{"type":"boolean"}},"x-readme-ref-name":"TelemetryConsent"}
+{
+  "type": "object",
+  "required": ["consent"],
+  "properties": { "consent": { "type": "boolean" } },
+  "x-readme-ref-name": "TelemetryConsent"
+}

@@ -1,1 +1,6 @@
-{"type":"object","required":["transfer_id"],"properties":{"transfer_id":{"type":"string"}},"x-readme-ref-name":"TransferCancel"}
+{
+  "type": "object",
+  "required": ["transfer_id"],
+  "properties": { "transfer_id": { "type": "string" } },
+  "x-readme-ref-name": "TransferCancel"
+}

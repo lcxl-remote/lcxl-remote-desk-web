@@ -1,1 +1,9 @@
-{"type":"object","required":["transfer_id","message"],"properties":{"message":{"type":"string"},"transfer_id":{"type":"string"}},"x-readme-ref-name":"TransferError"}
+{
+  "type": "object",
+  "required": ["transfer_id", "message"],
+  "properties": {
+    "message": { "type": "string" },
+    "transfer_id": { "type": "string" }
+  },
+  "x-readme-ref-name": "TransferError"
+}

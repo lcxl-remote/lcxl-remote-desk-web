@@ -1,1 +1,20 @@
-{"type":"object","description":"Resolution Struct","required":["width","height"],"properties":{"height":{"type":"integer","format":"int32","description":"Height of the resolution in pixels","minimum":0},"width":{"type":"integer","format":"int32","description":"Width of the resolution in pixels","minimum":0}},"x-readme-ref-name":"Resolution"}
+{
+  "type": "object",
+  "description": "Resolution Struct",
+  "required": ["width", "height"],
+  "properties": {
+    "height": {
+      "type": "integer",
+      "format": "int32",
+      "description": "Height of the resolution in pixels",
+      "minimum": 0
+    },
+    "width": {
+      "type": "integer",
+      "format": "int32",
+      "description": "Width of the resolution in pixels",
+      "minimum": 0
+    }
+  },
+  "x-readme-ref-name": "Resolution"
+}

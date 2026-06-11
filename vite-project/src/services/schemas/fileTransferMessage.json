@@ -1,1 +1,183 @@
-{"oneOf":[{"allOf":[{"description":"Browser → Server: Request to download a file","type":"object","required":["transfer_id","file_path"],"properties":{"file_path":{"type":"string"},"transfer_id":{"type":"string"}},"x-readme-ref-name":"DownloadRequest"},{"type":"object","required":["type"],"properties":{"type":{"type":"string","enum":["download_request"]}}}],"description":"Browser → Server: Request to download a file"},{"allOf":[{"description":"Server → Browser: Response with file metadata","type":"object","required":["transfer_id","file_name","file_size","chunk_size","total_chunks"],"properties":{"chunk_size":{"type":"integer","minimum":0},"file_name":{"type":"string"},"file_size":{"type":"integer","format":"int64","minimum":0},"total_chunks":{"type":"integer","format":"int64","minimum":0},"transfer_id":{"type":"string"}},"x-readme-ref-name":"DownloadResponse"},{"type":"object","required":["type"],"properties":{"type":{"type":"string","enum":["download_response"]}}}],"description":"Server → Browser: Response with file metadata"},{"allOf":[{"description":"Browser → Server: Request to upload a file","type":"object","required":["transfer_id","target_dir","file_name","file_size","chunk_size","total_chunks"],"properties":{"chunk_size":{"type":"integer","minimum":0},"file_name":{"type":"string"},"file_size":{"type":"integer","format":"int64","minimum":0},"target_dir":{"type":"string"},"total_chunks":{"type":"integer","format":"int64","minimum":0},"transfer_id":{"type":"string"}},"x-readme-ref-name":"UploadRequest"},{"type":"object","required":["type"],"properties":{"type":{"type":"string","enum":["upload_request"]}}}],"description":"Browser → Server: Request to upload a file"},{"allOf":[{"description":"Server → Browser: Response confirming upload","type":"object","required":["transfer_id","accepted"],"properties":{"accepted":{"type":"boolean"},"message":{"type":["string","null"]},"transfer_id":{"type":"string"}},"x-readme-ref-name":"UploadResponse"},{"type":"object","required":["type"],"properties":{"type":{"type":"string","enum":["upload_response"]}}}],"description":"Server → Browser: Response confirming upload"},{"allOf":[{"description":"Either direction: Transfer completed","type":"object","required":["transfer_id"],"properties":{"transfer_id":{"type":"string"}},"x-readme-ref-name":"TransferComplete"},{"type":"object","required":["type"],"properties":{"type":{"type":"string","enum":["transfer_complete"]}}}],"description":"Either direction: Transfer completed"},{"allOf":[{"description":"Either direction: Transfer error","type":"object","required":["transfer_id","message"],"properties":{"message":{"type":"string"},"transfer_id":{"type":"string"}},"x-readme-ref-name":"TransferError"},{"type":"object","required":["type"],"properties":{"type":{"type":"string","enum":["transfer_error"]}}}],"description":"Either direction: Transfer error"},{"allOf":[{"description":"Either direction: Cancel an active transfer","type":"object","required":["transfer_id"],"properties":{"transfer_id":{"type":"string"}},"x-readme-ref-name":"TransferCancel"},{"type":"object","required":["type"],"properties":{"type":{"type":"string","enum":["transfer_cancel"]}}}],"description":"Either direction: Cancel an active transfer"}],"description":"File transfer message types (JSON text messages over DataChannel)","x-readme-ref-name":"FileTransferMessage"}
+{
+  "oneOf": [
+    {
+      "allOf": [
+        {
+          "description": "Browser → Server: Request to download a file",
+          "type": "object",
+          "required": ["transfer_id", "file_path"],
+          "properties": {
+            "file_path": { "type": "string" },
+            "transfer_id": { "type": "string" }
+          },
+          "x-readme-ref-name": "DownloadRequest"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["download_request"] }
+          }
+        }
+      ],
+      "description": "Browser → Server: Request to download a file"
+    },
+    {
+      "allOf": [
+        {
+          "description": "Server → Browser: Response with file metadata",
+          "type": "object",
+          "required": [
+            "transfer_id",
+            "file_name",
+            "file_size",
+            "chunk_size",
+            "total_chunks"
+          ],
+          "properties": {
+            "chunk_size": { "type": "integer", "minimum": 0 },
+            "file_name": { "type": "string" },
+            "file_size": { "type": "integer", "format": "int64", "minimum": 0 },
+            "total_chunks": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "transfer_id": { "type": "string" }
+          },
+          "x-readme-ref-name": "DownloadResponse"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["download_response"] }
+          }
+        }
+      ],
+      "description": "Server → Browser: Response with file metadata"
+    },
+    {
+      "allOf": [
+        {
+          "description": "Browser → Server: Request to upload a file",
+          "type": "object",
+          "required": [
+            "transfer_id",
+            "target_dir",
+            "file_name",
+            "file_size",
+            "chunk_size",
+            "total_chunks"
+          ],
+          "properties": {
+            "chunk_size": { "type": "integer", "minimum": 0 },
+            "file_name": { "type": "string" },
+            "file_size": { "type": "integer", "format": "int64", "minimum": 0 },
+            "target_dir": { "type": "string" },
+            "total_chunks": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "transfer_id": { "type": "string" }
+          },
+          "x-readme-ref-name": "UploadRequest"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["upload_request"] }
+          }
+        }
+      ],
+      "description": "Browser → Server: Request to upload a file"
+    },
+    {
+      "allOf": [
+        {
+          "description": "Server → Browser: Response confirming upload",
+          "type": "object",
+          "required": ["transfer_id", "accepted"],
+          "properties": {
+            "accepted": { "type": "boolean" },
+            "message": { "type": ["string", "null"] },
+            "transfer_id": { "type": "string" }
+          },
+          "x-readme-ref-name": "UploadResponse"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["upload_response"] }
+          }
+        }
+      ],
+      "description": "Server → Browser: Response confirming upload"
+    },
+    {
+      "allOf": [
+        {
+          "description": "Either direction: Transfer completed",
+          "type": "object",
+          "required": ["transfer_id"],
+          "properties": { "transfer_id": { "type": "string" } },
+          "x-readme-ref-name": "TransferComplete"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["transfer_complete"] }
+          }
+        }
+      ],
+      "description": "Either direction: Transfer completed"
+    },
+    {
+      "allOf": [
+        {
+          "description": "Either direction: Transfer error",
+          "type": "object",
+          "required": ["transfer_id", "message"],
+          "properties": {
+            "message": { "type": "string" },
+            "transfer_id": { "type": "string" }
+          },
+          "x-readme-ref-name": "TransferError"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["transfer_error"] }
+          }
+        }
+      ],
+      "description": "Either direction: Transfer error"
+    },
+    {
+      "allOf": [
+        {
+          "description": "Either direction: Cancel an active transfer",
+          "type": "object",
+          "required": ["transfer_id"],
+          "properties": { "transfer_id": { "type": "string" } },
+          "x-readme-ref-name": "TransferCancel"
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["transfer_cancel"] }
+          }
+        }
+      ],
+      "description": "Either direction: Cancel an active transfer"
+    }
+  ],
+  "description": "File transfer message types (JSON text messages over DataChannel)",
+  "x-readme-ref-name": "FileTransferMessage"
+}

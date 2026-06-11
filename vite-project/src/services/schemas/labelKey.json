@@ -1,1 +1,8 @@
-{"type":"object","properties":{"key":{"type":["string","null"]},"label":{"type":["string","null"]}},"x-readme-ref-name":"LabelKey"}
+{
+  "type": "object",
+  "properties": {
+    "key": { "type": ["string", "null"] },
+    "label": { "type": ["string", "null"] }
+  },
+  "x-readme-ref-name": "LabelKey"
+}

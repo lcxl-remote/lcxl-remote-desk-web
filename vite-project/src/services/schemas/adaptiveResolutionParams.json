@@ -1,1 +1,21 @@
-{"type":"object","description":"Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `InitSignalingData` so each browser session uses the\nhost operator's preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon's defensive rate limit and the browser does not need to know\nit.","properties":{"debounce_ms":{"type":"integer","format":"int64","description":"Trailing-edge debounce window (ms) the browser waits after a\n`resize` settles before issuing an auto ChangeDisplaySettings.","default":5000,"minimum":0},"min_delta_px":{"type":"integer","format":"int32","description":"Minimum pixel delta on either axis the browser treats as\nsignificant. Below this threshold the change is ignored.","default":16,"minimum":0}},"x-readme-ref-name":"AdaptiveResolutionParams"}
+{
+  "type": "object",
+  "description": "Browser-facing knobs that drive the adaptive-resolution hook. Server\nsources these from `Settings.virtual_display.adaptive_*` and ships\nthem through `InitSignalingData` so each browser session uses the\nhost operator's preference without round-tripping a separate REST\nquery.\n\n`adaptive_throttle_ms` is intentionally NOT included — it is the\ndaemon's defensive rate limit and the browser does not need to know\nit.",
+  "properties": {
+    "debounce_ms": {
+      "type": "integer",
+      "format": "int64",
+      "description": "Trailing-edge debounce window (ms) the browser waits after a\n`resize` settles before issuing an auto ChangeDisplaySettings.",
+      "default": 5000,
+      "minimum": 0
+    },
+    "min_delta_px": {
+      "type": "integer",
+      "format": "int32",
+      "description": "Minimum pixel delta on either axis the browser treats as\nsignificant. Below this threshold the change is ignored.",
+      "default": 16,
+      "minimum": 0
+    }
+  },
+  "x-readme-ref-name": "AdaptiveResolutionParams"
+}

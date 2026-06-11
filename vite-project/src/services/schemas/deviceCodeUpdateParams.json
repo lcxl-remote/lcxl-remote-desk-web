@@ -1,1 +1,6 @@
-{"type":"object","required":["device_code"],"properties":{"device_code":{"type":"string"}},"x-readme-ref-name":"DeviceCodeUpdateParams"}
+{
+  "type": "object",
+  "required": ["device_code"],
+  "properties": { "device_code": { "type": "string" } },
+  "x-readme-ref-name": "DeviceCodeUpdateParams"
+}

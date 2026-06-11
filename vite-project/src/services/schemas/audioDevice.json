@@ -1,1 +1,23 @@
-{"type":"object","description":"Audio Device Model","required":["id","firendly_name","data_flow","default"],"properties":{"data_flow":{"description":"Data flow of the device (render or capture)","type":"string","enum":["Render","Capture"],"x-readme-ref-name":"AudioDataFlow"},"default":{"type":"boolean","description":"Is default device for this data flow?"},"firendly_name":{"type":"string","description":"Audio device friendly name, e.g. \"Speakers (Definition Audio)\""},"id":{"type":"string","description":"Device id"}},"x-readme-ref-name":"AudioDevice"}
+{
+  "type": "object",
+  "description": "Audio Device Model",
+  "required": ["id", "firendly_name", "data_flow", "default"],
+  "properties": {
+    "data_flow": {
+      "description": "Data flow of the device (render or capture)",
+      "type": "string",
+      "enum": ["Render", "Capture"],
+      "x-readme-ref-name": "AudioDataFlow"
+    },
+    "default": {
+      "type": "boolean",
+      "description": "Is default device for this data flow?"
+    },
+    "firendly_name": {
+      "type": "string",
+      "description": "Audio device friendly name, e.g. \"Speakers (Definition Audio)\""
+    },
+    "id": { "type": "string", "description": "Device id" }
+  },
+  "x-readme-ref-name": "AudioDevice"
+}

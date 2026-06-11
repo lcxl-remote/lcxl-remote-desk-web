@@ -1,1 +1,20 @@
-{"type":"object","description":"Opus encoder settings","properties":{"application":{"type":"string","default":"Audio"},"channels":{"type":"integer","format":"int32","default":2,"minimum":0},"sample_rate":{"type":"integer","format":"int32","default":48000,"minimum":0}},"x-readme-ref-name":"OpusEncoderSettings"}
+{
+  "type": "object",
+  "description": "Opus encoder settings",
+  "properties": {
+    "application": { "type": "string", "default": "Audio" },
+    "channels": {
+      "type": "integer",
+      "format": "int32",
+      "default": 2,
+      "minimum": 0
+    },
+    "sample_rate": {
+      "type": "integer",
+      "format": "int32",
+      "default": 48000,
+      "minimum": 0
+    }
+  },
+  "x-readme-ref-name": "OpusEncoderSettings"
+}

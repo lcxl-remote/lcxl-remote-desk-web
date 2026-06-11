@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "required": [
+    "received_bytes",
+    "send_bytes",
+    "received_pkts",
+    "send_pkts",
+    "error_pkts"
+  ],
+  "properties": {
+    "error_pkts": { "type": "integer", "minimum": 0 },
+    "received_bytes": { "type": "integer", "minimum": 0 },
+    "received_pkts": { "type": "integer", "minimum": 0 },
+    "send_bytes": { "type": "integer", "minimum": 0 },
+    "send_pkts": { "type": "integer", "minimum": 0 }
+  },
+  "x-readme-ref-name": "TurnSessionStatistics"
+}

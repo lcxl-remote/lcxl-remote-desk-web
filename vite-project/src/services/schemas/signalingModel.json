@@ -1,1 +1,46 @@
-{"type":"object","description":"Signaling model","required":["request_id","signaling_type"],"properties":{"from_connection_id":{"type":["string","null"],"description":"From connection id, if None, means from signal server"},"request_id":{"type":"string","description":"Request id"},"response_state":{"oneOf":[{"type":"null"},{"description":"Signaling response state. Some means this is a response message.","type":"object","required":["error_code"],"properties":{"error_code":{"type":"integer","format":"int32","description":"error code\n\nsee alse: desk_utils::DeskErrorCode"},"message":{"type":["string","null"],"description":"error message"}},"x-readme-ref-name":"SignalingResponseState"}]},"signaling_data":{"description":"Signaling data"},"signaling_type":{"description":"Signaling type","type":"integer","format":"int32","x-readme-ref-name":"SignalingType"},"to_connection_id":{"type":["string","null"],"description":"To connection id, if None, means to signal server"}},"x-readme-ref-name":"SignalingModel"}
+{
+  "type": "object",
+  "description": "Signaling model",
+  "required": ["request_id", "signaling_type"],
+  "properties": {
+    "from_connection_id": {
+      "type": ["string", "null"],
+      "description": "From connection id, if None, means from signal server"
+    },
+    "request_id": { "type": "string", "description": "Request id" },
+    "response_state": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "description": "Signaling response state. Some means this is a response message.",
+          "type": "object",
+          "required": ["error_code"],
+          "properties": {
+            "error_code": {
+              "type": "integer",
+              "format": "int32",
+              "description": "error code\n\nsee alse: desk_utils::DeskErrorCode"
+            },
+            "message": {
+              "type": ["string", "null"],
+              "description": "error message"
+            }
+          },
+          "x-readme-ref-name": "SignalingResponseState"
+        }
+      ]
+    },
+    "signaling_data": { "description": "Signaling data" },
+    "signaling_type": {
+      "description": "Signaling type",
+      "type": "integer",
+      "format": "int32",
+      "x-readme-ref-name": "SignalingType"
+    },
+    "to_connection_id": {
+      "type": ["string", "null"],
+      "description": "To connection id, if None, means to signal server"
+    }
+  },
+  "x-readme-ref-name": "SignalingModel"
+}

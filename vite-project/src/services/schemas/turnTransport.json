@@ -1,1 +1,5 @@
-{"type":"string","enum":["tcp","udp"],"x-readme-ref-name":"TurnTransport"}
+{
+  "type": "string",
+  "enum": ["tcp", "udp"],
+  "x-readme-ref-name": "TurnTransport"
+}

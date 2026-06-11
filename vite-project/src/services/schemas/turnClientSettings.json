@@ -1,1 +1,14 @@
-{"type":"object","description":"Turn client settings\nDesk server as a turn client to connect to the turn server","required":["traversal_mode"],"properties":{"traversal_mode":{"description":"Traversal mode","type":"string","enum":["turn","stun","none"],"x-readme-ref-name":"TraversalMode"}},"x-readme-ref-name":"TurnClientSettings"}
+{
+  "type": "object",
+  "description": "Turn client settings\nDesk server as a turn client to connect to the turn server",
+  "required": ["traversal_mode"],
+  "properties": {
+    "traversal_mode": {
+      "description": "Traversal mode",
+      "type": "string",
+      "enum": ["turn", "stun", "none"],
+      "x-readme-ref-name": "TraversalMode"
+    }
+  },
+  "x-readme-ref-name": "TurnClientSettings"
+}

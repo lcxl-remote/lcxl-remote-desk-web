@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "required": ["username", "permissions", "channels", "expires"],
+  "properties": {
+    "channels": {
+      "type": "array",
+      "items": { "type": "integer", "format": "int32", "minimum": 0 }
+    },
+    "expires": { "type": "integer", "format": "int64", "minimum": 0 },
+    "permissions": {
+      "type": "array",
+      "items": { "type": "integer", "format": "int32", "minimum": 0 }
+    },
+    "port": { "type": ["integer", "null"], "format": "int32", "minimum": 0 },
+    "username": { "type": "string" }
+  },
+  "x-readme-ref-name": "TurnSession"
+}

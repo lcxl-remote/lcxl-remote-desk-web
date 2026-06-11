@@ -1,1 +1,18 @@
-{"type":"object","description":"Selected Audio Device Model","required":["audio_data_flow"],"properties":{"audio_data_flow":{"description":"Audio data flow (render or capture)","type":"string","enum":["Render","Capture"],"x-readme-ref-name":"AudioDataFlow"},"audio_device_id":{"type":["string","null"],"description":"Audio device id, None for default audio device"}},"x-readme-ref-name":"SelectedAudioDevice"}
+{
+  "type": "object",
+  "description": "Selected Audio Device Model",
+  "required": ["audio_data_flow"],
+  "properties": {
+    "audio_data_flow": {
+      "description": "Audio data flow (render or capture)",
+      "type": "string",
+      "enum": ["Render", "Capture"],
+      "x-readme-ref-name": "AudioDataFlow"
+    },
+    "audio_device_id": {
+      "type": ["string", "null"],
+      "description": "Audio device id, None for default audio device"
+    }
+  },
+  "x-readme-ref-name": "SelectedAudioDevice"
+}

@@ -1,1 +1,22 @@
-{"type":"object","description":"CPU information","required":["name","frequency","vendor_id","brand","usage"],"properties":{"brand":{"type":"string","description":"CPU brand"},"frequency":{"type":"integer","format":"int64","description":"CPU frequency in MHz","minimum":0},"name":{"type":"string","description":"CPU name"},"usage":{"type":"number","format":"float","description":"CPU usage percentage"},"vendor_id":{"type":"string","description":"CPU vendor ID"}},"x-readme-ref-name":"CpuInfo"}
+{
+  "type": "object",
+  "description": "CPU information",
+  "required": ["name", "frequency", "vendor_id", "brand", "usage"],
+  "properties": {
+    "brand": { "type": "string", "description": "CPU brand" },
+    "frequency": {
+      "type": "integer",
+      "format": "int64",
+      "description": "CPU frequency in MHz",
+      "minimum": 0
+    },
+    "name": { "type": "string", "description": "CPU name" },
+    "usage": {
+      "type": "number",
+      "format": "float",
+      "description": "CPU usage percentage"
+    },
+    "vendor_id": { "type": "string", "description": "CPU vendor ID" }
+  },
+  "x-readme-ref-name": "CpuInfo"
+}
