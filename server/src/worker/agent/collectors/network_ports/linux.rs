@@ -6,7 +6,7 @@
 
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 
-use super::{parse_proc_net_line, Protocol, RawPort};
+use super::{Protocol, RawPort, parse_proc_net_line};
 
 pub(super) fn enumerate() -> Result<Vec<RawPort>, AgentError> {
     let sources = [

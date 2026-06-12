@@ -11,4 +11,5 @@
 
 pub mod network_ports;
 pub mod process_list;
+pub mod service_status;
 pub mod system_info;
