@@ -72,8 +72,13 @@ async fn dispatch_read_context(kind: ContextKind) -> Result<OperationOutput, Age
                 ReadContextOutput::ServiceStatus(output),
             ))
         }
-        ContextKind::LogRecent(_)
-        | ContextKind::ContainerList(_)
+        ContextKind::LogRecent(params) => {
+            let output = run_blocking(move || collectors::log_recent::collect(&params)).await??;
+            Ok(OperationOutput::ReadContext(ReadContextOutput::LogRecent(
+                output,
+            )))
+        }
+        ContextKind::ContainerList(_)
         | ContextKind::ContainerInspect(_)
         | ContextKind::ContainerLogs(_)
         | ContextKind::ScreenCaptureCurrent(_) => {
@@ -114,7 +119,7 @@ mod tests {
     use super::*;
     use desk_agent_protocol::{
         ActorRef, ActorType, AgentOperation, AgentScope, AuditMeta, CallerRef, CallerType,
-        Capability, ExecInput, ExecTarget, ExecutionMode, LogRecentParams, ProtocolVersion,
+        Capability, ContainerListParams, ExecInput, ExecTarget, ExecutionMode, ProtocolVersion,
         ReadContextInput, RequestId, SystemInfoParams, TargetRef,
     };
 
@@ -175,7 +180,7 @@ mod tests {
     async fn unimplemented_read_kind_is_unsupported() {
         let agent = LocalDeviceAgent::new();
         let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
-            kind: ContextKind::LogRecent(LogRecentParams::default()),
+            kind: ContextKind::ContainerList(ContainerListParams::default()),
         }));
         let err = agent.invoke(env).await.expect_err("stub must reject");
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
