@@ -2478,6 +2478,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-agent-protocol"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "utoipa",
+ "wincode",
+]
+
+[[package]]
 name = "desk-capture-engine"
 version = "0.1.0"
 dependencies = [

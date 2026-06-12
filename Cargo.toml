@@ -13,6 +13,7 @@ members = [
     "tauri-app/src-tauri",
     "virtual-display",
     "virtual-display-driver-ops",
+    "agent-protocol",
 ]
 exclude = ["web", "third-deps"]
 resolver = "3"
@@ -41,6 +42,7 @@ desk-capture-engine = { path = "capture-engine" }
 desk-input-injection = { path = "input-injection" }
 desk-virtual-display = { path = "virtual-display" }
 desk-virtual-display-driver-ops = { path = "virtual-display-driver-ops" }
+desk-agent-protocol = { path = "agent-protocol" }
 
 clap = { version = "4.5", features = ["derive"] }
 log = "0.4"
