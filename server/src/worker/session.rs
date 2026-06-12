@@ -1,3 +1,4 @@
+use crate::worker::agent::LocalDeviceAgent;
 use crate::{
     host_control::{HostControlHub, UpstreamForwarder, upstream::spawn_upstream_ws_task},
     model::settings::{Args, Settings, SharedSettings, StartupMode},
@@ -16,17 +17,18 @@ use crate::{
     },
 };
 use actix_web::web;
+use desk_agent_protocol::{AgentOutcome, DeviceAgent};
 use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        DesktopChangedPayload, FileTransferPayload, HeartbeatPayload, ListTerminalResponsePayload,
-        ManagerFileListResponsePayload, ManagerQuerySettingsResponsePayload,
-        ManagerResponseRefPayload, ManagerSystemInfoResponsePayload,
-        PrivateScreenStateChangedPayload, ReplyFromTerminalPayload, ServiceToWorker,
-        SignalingErrorPayload, StopMediaPayload, TerminalClosedPayload, TerminalStartedPayload,
-        VirtualDisplayAttachOutcome, VirtualDisplayAttachResultPayload, WorkerInitPayload,
-        WorkerToService,
+        AgentResponsePayload, DesktopChangedPayload, FileTransferPayload, HeartbeatPayload,
+        ListTerminalResponsePayload, ManagerFileListResponsePayload,
+        ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
+        ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
+        ReplyFromTerminalPayload, ServiceToWorker, SignalingErrorPayload, StopMediaPayload,
+        TerminalClosedPayload, TerminalStartedPayload, VirtualDisplayAttachOutcome,
+        VirtualDisplayAttachResultPayload, WorkerInitPayload, WorkerToService,
     },
     transport::{read_message, write_message},
 };
@@ -1600,6 +1602,42 @@ impl WorkerSession {
                                         Arc::clone(&vd_state.exclusive_layout),
                                         writer_tx.clone(),
                                     );
+                                }
+                                ServiceToWorker::AgentRequest(payload) => {
+                                    info!(
+                                        "Worker received AgentRequest req={} conn={:?}",
+                                        payload.request_id, payload.connection_id,
+                                    );
+                                    // Run the collector off the IPC loop so a
+                                    // slow read (process enumeration, screen
+                                    // capture, docker probe, ...) never stalls
+                                    // heartbeats or other commands. The reply
+                                    // rides the same `writer_tx` every other
+                                    // worker → daemon message uses; capability-
+                                    // level errors travel inside the
+                                    // `AgentOutcome`, not the transport state.
+                                    let writer_tx = writer_tx.clone();
+                                    tokio::spawn(async move {
+                                        let agent = LocalDeviceAgent::new();
+                                        let outcome = match agent.invoke(payload.envelope).await {
+                                            Ok(output) => AgentOutcome::Ok(output),
+                                            Err(error) => AgentOutcome::Err(error),
+                                        };
+                                        if writer_tx
+                                            .send(WorkerToService::AgentResponse(
+                                                AgentResponsePayload {
+                                                    request_id: payload.request_id,
+                                                    connection_id: payload.connection_id,
+                                                    outcome,
+                                                },
+                                            ))
+                                            .is_err()
+                                        {
+                                            warn!(
+                                                "writer task closed; dropping AgentResponse"
+                                            );
+                                        }
+                                    });
                                 }
                             }
                         }

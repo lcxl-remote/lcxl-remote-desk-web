@@ -542,6 +542,24 @@ pub async fn run_signaling_proxy(
                     );
                 }
             }
+            // AI agent reply: rebuild the outbound
+            // `SignalingType::AgentResponse` model carrying the
+            // `AgentOutcome` verbatim as signaling_data and write it onto
+            // the control end's signaling WS. Capability-level errors live
+            // inside the `AgentOutcome::Err` (the response state stays a
+            // transport-level success), so the control-end UI receives the
+            // full structured `AgentError` (freeze doc §3A). Mirrors the
+            // manager-plane response rebuild.
+            WorkerToService::AgentResponse(payload) => {
+                send_manager_response(
+                    &outbound_tx,
+                    "AgentResponse",
+                    &payload.request_id,
+                    &payload.connection_id,
+                    SignalingType::AgentResponse,
+                    Some(&payload.outcome),
+                );
+            }
         }
     }
 
@@ -1153,5 +1171,67 @@ mod tests {
         };
         // No panic, no error — just a warn-and-drop side effect.
         dispatch_attach_result(payload, None).await;
+    }
+
+    // ====== AI agent response routing ======
+
+    /// The daemon rebuilds an outbound `SignalingType::AgentResponse`
+    /// model carrying the `AgentOutcome` verbatim for both the `Ok`
+    /// (output) and `Err` (capability-level error) arms. The
+    /// transport-level `response_state` is always success — the business
+    /// error lives inside the `AgentOutcome::Err` so the control end gets
+    /// the full structured `AgentError` (freeze doc §3A).
+    #[test]
+    fn agent_response_outbound_rebuild_both_arms() {
+        use desk_agent_protocol::{
+            AgentError, AgentErrorKind, AgentOutcome, ContainerListOutput, OperationOutput,
+            ReadContextOutput,
+        };
+
+        for (request_id, conn, outcome) in [
+            (
+                "req-ok",
+                Some("conn-1".to_string()),
+                AgentOutcome::Ok(OperationOutput::ReadContext(
+                    ReadContextOutput::ContainerList(ContainerListOutput {
+                        containers: vec![],
+                        truncated: false,
+                    }),
+                )),
+            ),
+            (
+                "req-err",
+                None,
+                AgentOutcome::Err(AgentError {
+                    kind: AgentErrorKind::PermissionDenied,
+                    message: "capability not granted".to_string(),
+                    retryable: false,
+                    safe_for_model: false,
+                }),
+            ),
+        ] {
+            let (tx, mut rx) = broadcast::channel::<String>(4);
+            send_manager_response(
+                &tx,
+                "AgentResponse",
+                request_id,
+                &conn,
+                SignalingType::AgentResponse,
+                Some(&outcome),
+            );
+            let text = rx.try_recv().expect("outbound AgentResponse broadcast");
+            let model: SignalingModel = serde_json::from_str(&text).unwrap();
+            assert_eq!(model.request_id, request_id);
+            assert_eq!(
+                model.signaling_type as i32,
+                SignalingType::AgentResponse as i32
+            );
+            assert_eq!(model.to_connection_id, conn);
+            // Transport state is success regardless of the business result.
+            assert_eq!(model.response_state.as_ref().unwrap().error_code, 0);
+            // The AgentOutcome round-trips out of signaling_data.
+            let decoded = model.get_data::<AgentOutcome>().expect("outcome data");
+            assert_eq!(decoded, outcome);
+        }
     }
 }

@@ -212,6 +212,16 @@ pub enum ServiceToWorker {
     /// can leave one runner in flight while a newer one already
     /// supersedes it; the op_id gate disambiguates them).
     SetVirtualDisplayExclusive(SetVirtualDisplayExclusivePayload),
+
+    // ---------- AI agent plane (event pipe) ----------
+    /// Daemon → worker: an AI capability call. The worker runs the
+    /// matching collector / executor inside the user session (where
+    /// WinSta0 / the authoritative capture frame live) and replies via
+    /// [`WorkerToService::AgentResponse`]. `request_id` correlates the
+    /// pair. The full [`desk_agent_protocol::AgentEnvelope`] is embedded
+    /// verbatim — the daemon has already stamped its trusted fields
+    /// (target / actor / scope / caller / request_id) before forwarding.
+    AgentRequest(AgentRequestPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -364,6 +374,17 @@ pub enum WorkerToService {
     /// touching state. The supervisor's `ExclusiveState`
     /// transitions are driven exclusively from this reply.
     ExclusiveResult(ExclusiveResultPayload),
+
+    // ---------- AI agent plane (event pipe) ----------
+    /// Worker → daemon reply to [`ServiceToWorker::AgentRequest`]. The
+    /// daemon rebuilds the outbound `SignalingType::AgentResponse` model
+    /// for the control end (the `outcome` is reused verbatim as the
+    /// signaling_data) and emits the audit event from the envelope +
+    /// outcome. Capability-level errors travel inside `outcome`
+    /// ([`desk_agent_protocol::AgentOutcome::Err`]), not on the
+    /// transport-level response state — so the control-end UI receives
+    /// the full structured [`desk_agent_protocol::AgentError`].
+    AgentResponse(AgentResponsePayload),
 }
 
 // ==================== Payload Types ====================
@@ -1165,6 +1186,34 @@ pub struct ExclusiveResultPayload {
     pub op_id: u64,
     pub direction: ExclusiveDirection,
     pub outcome: ExclusiveOutcome,
+}
+
+// ================= AI agent IPC payloads =================
+
+/// Payload for [`ServiceToWorker::AgentRequest`]. Embeds the full
+/// [`desk_agent_protocol::AgentEnvelope`] (already server-stamped) so the
+/// IPC layer does not re-spell any of its fields — `desk-agent-protocol`
+/// derives the same `wincode` schema this transport uses. `connection_id`
+/// is `Option` for the same reason as the manager-plane payloads: an
+/// orchestrator-initiated call may carry no originating control-end
+/// connection and is correlated by `request_id` alone.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct AgentRequestPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub envelope: desk_agent_protocol::AgentEnvelope,
+}
+
+/// Payload for [`WorkerToService::AgentResponse`]. Reuses
+/// [`desk_agent_protocol::AgentOutcome`] verbatim — the same shape the
+/// daemon then ships to the control end as `AgentResponse`
+/// signaling_data, so there is no daemon-side re-mapping. Mirrors the
+/// `VirtualDisplayModeOutcome` Applied/Failed precedent.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct AgentResponsePayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub outcome: desk_agent_protocol::AgentOutcome,
 }
 
 #[cfg(test)]
@@ -2906,5 +2955,115 @@ mod tests {
             found,
             "expected LE u64 bit pattern in encoded bytes; got {bytes:?}"
         );
+    }
+
+    /// Build a representative server-stamped `AgentEnvelope` for the
+    /// AI-plane IPC round-trip tests.
+    fn sample_agent_envelope() -> desk_agent_protocol::AgentEnvelope {
+        use desk_agent_protocol::*;
+        AgentEnvelope {
+            protocol_version: ProtocolVersion::default(),
+            request_id: RequestId("req-ai-1".to_string()),
+            parent_task_id: Some(TaskId("task-ai-1".to_string())),
+            target: TargetRef {
+                device_id: "dev-1".to_string(),
+                session_id: Some("sess-1".to_string()),
+                worker_id: None,
+            },
+            actor: ActorRef {
+                actor_type: ActorType::User,
+                actor_id: "user-1".to_string(),
+                tenant_id: None,
+            },
+            caller: CallerRef {
+                caller_type: CallerType::Human,
+                model_provider: None,
+                model_name: None,
+                adapter: None,
+            },
+            scope: AgentScope {
+                granted: vec![Capability::ProcessList],
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_id: None,
+            },
+            operation: AgentOperation {
+                risk_hint: None,
+                input: OperationInput::ReadContext(ReadContextInput {
+                    kind: ContextKind::ProcessList(ProcessListParams::default()),
+                }),
+            },
+            audit: AuditMeta {
+                approval_id: None,
+                reason: Some("diagnose".to_string()),
+            },
+        }
+    }
+
+    /// `ServiceToWorker::AgentRequest` carries the full embedded
+    /// `AgentEnvelope` across the daemon → worker wire byte-for-byte.
+    #[test]
+    fn agent_request_round_trips_wincode() {
+        let msg = ServiceToWorker::AgentRequest(AgentRequestPayload {
+            request_id: "req-ai-1".to_string(),
+            connection_id: Some("conn-1".to_string()),
+            envelope: sample_agent_envelope(),
+        });
+        match wincode_round_trip(&msg) {
+            ServiceToWorker::AgentRequest(p) => {
+                assert_eq!(p.request_id, "req-ai-1");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-1"));
+                assert_eq!(p.envelope, sample_agent_envelope());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// `WorkerToService::AgentResponse` reuses `AgentOutcome` verbatim;
+    /// both the `Ok` (output) and `Err` (capability-level error) arms
+    /// survive the worker → daemon wire.
+    #[test]
+    fn agent_response_round_trips_wincode_both_arms() {
+        use desk_agent_protocol::*;
+        let ok = WorkerToService::AgentResponse(AgentResponsePayload {
+            request_id: "req-ai-1".to_string(),
+            connection_id: Some("conn-1".to_string()),
+            outcome: AgentOutcome::Ok(OperationOutput::ReadContext(
+                ReadContextOutput::ProcessList(ProcessListOutput {
+                    processes: vec![],
+                    truncated: false,
+                }),
+            )),
+        });
+        match wincode_round_trip(&ok) {
+            WorkerToService::AgentResponse(p) => {
+                assert_eq!(p.request_id, "req-ai-1");
+                assert!(matches!(p.outcome, AgentOutcome::Ok(_)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let err = WorkerToService::AgentResponse(AgentResponsePayload {
+            request_id: "req-ai-2".to_string(),
+            connection_id: None,
+            outcome: AgentOutcome::Err(AgentError {
+                kind: AgentErrorKind::UnsupportedCapability,
+                message: "not implemented yet".to_string(),
+                retryable: false,
+                safe_for_model: true,
+            }),
+        });
+        match wincode_round_trip(&err) {
+            WorkerToService::AgentResponse(p) => {
+                assert_eq!(p.connection_id, None);
+                match p.outcome {
+                    AgentOutcome::Err(e) => {
+                        assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability)
+                    }
+                    other => panic!("unexpected outcome: {other:?}"),
+                }
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

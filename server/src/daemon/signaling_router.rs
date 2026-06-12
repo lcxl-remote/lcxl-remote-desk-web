@@ -26,12 +26,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::web;
+use desk_agent_protocol::{
+    ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
+    AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode,
+    ProtocolVersion, RequestId, TargetRef,
+};
 use desk_ipc_protocol::message::{
-    CloseTerminalPayload, EnablePrivateScreenPayload, ListTerminalRequestPayload,
-    ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload, ManagerRequestRefPayload,
-    ManagerUpdateSettingsRequestPayload, ResizeTerminalPayload, SendDataToTerminalPayload,
-    ServiceToWorker, SetVirtualDisplayModePayload, StartTerminalRequestPayload,
-    UpdateDeskSettingsPayload,
+    AgentRequestPayload, CloseTerminalPayload, EnablePrivateScreenPayload,
+    ListTerminalRequestPayload, ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload,
+    ManagerRequestRefPayload, ManagerUpdateSettingsRequestPayload, ResizeTerminalPayload,
+    SendDataToTerminalPayload, ServiceToWorker, SetVirtualDisplayModePayload,
+    StartTerminalRequestPayload, UpdateDeskSettingsPayload,
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 use desk_signal_facade::model::files::{DeleteFileRequest, FileListParams};
@@ -123,12 +128,17 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   bridging to the worker (which has no `handle_message`
         //   arm for these and would only return
         //   `UNKNOWN_SIGNALING_TYPE`).
+        // - `AgentResponse`: worker → control end only. The worker
+        //   emits it via typed `WorkerToService::AgentResponse`; the
+        //   control end never echoes it back. A stray inbound copy is a
+        //   protocol error — daemon swallows it.
         SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
         | SignalingType::ManagerSystemStatue
         | SignalingType::ReplyFromTerminal
         | SignalingType::TerminalStarted
-        | SignalingType::TerminalClosed => RouteOwnership::Daemon,
+        | SignalingType::TerminalClosed
+        | SignalingType::AgentResponse => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -168,7 +178,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::ListTerminal
         | SignalingType::ManagerQuerySettings
         | SignalingType::ManagerUpdateSettings
-        | SignalingType::ChangeDisplaySettings => RouteOwnership::Worker,
+        | SignalingType::ChangeDisplaySettings
+        // AI agent capability request: control end → daemon → worker.
+        // The daemon two-phase-parses + stamps trusted fields, then
+        // ships a typed `ServiceToWorker::AgentRequest`.
+        | SignalingType::AgentRequest => RouteOwnership::Worker,
 
         // ---- Error / Unknown ----
         // After batch 4 these are daemon-owned. `Error` is something
@@ -394,6 +408,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         | SignalingType::FetchConnections
         | SignalingType::ConnectionList
         | SignalingType::Heartbeat
+        // AgentResponse only flows worker → control end; an inbound
+        // copy is a protocol error — swallow it.
+        | SignalingType::AgentResponse
         | SignalingType::Error
         | SignalingType::Unknown => {
             log::trace!(
@@ -430,6 +447,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::ChangeDisplaySettings => {
             handle_change_display_settings_inbound(ctx, model).await
         }
+        // AI agent capability request: two-phase parse + trusted-field
+        // stamp, then ship a typed `ServiceToWorker::AgentRequest`.
+        SignalingType::AgentRequest => handle_agent_request_inbound(ctx, model).await,
     }
 }
 
@@ -1225,6 +1245,327 @@ async fn handle_list_terminal_inbound(
     Ok(())
 }
 
+// ---- AI agent plane typed-IPC dispatch ----
+//
+// Inbound `AgentRequest` from a control end carries the
+// non-authoritative `desk_agent_protocol::AgentRequestData` (operation +
+// reason). The daemon two-phase-parses the operation against its
+// supported-kind set (so an unknown *newer* kind degrades to
+// `UnsupportedCapability` instead of failing serde), derives the
+// capability from the input, authorizes it against a server-computed
+// scope, stamps every trusted field, and ships a typed
+// `ServiceToWorker::AgentRequest` to the worker. Any rejection short-
+// circuits with an outbound `AgentResponse(AgentOutcome::Err)`; the
+// route itself always returns `Ok(())` (the control-end-visible failure
+// is the outcome we already emitted).
+
+/// Outer `OperationInput` tags this build understands. A control end on
+/// a newer protocol may send a kind outside this set; the two-phase
+/// parse turns that into `UnsupportedCapability`.
+const SUPPORTED_OPERATION_KINDS: &[&str] = &["read_context", "exec"];
+
+/// Inner `ContextKind` tags (the actual P0 read capabilities) this build
+/// can collect. The unknown-kind check descends to this level because
+/// the permission point is nested — `operation.input.kind` is only the
+/// `read_context` / `exec` dispatch layer; the real capability is
+/// `operation.input.params.kind.kind` (freeze doc §2.4).
+const SUPPORTED_READ_KINDS: &[&str] = &[
+    "system_info",
+    "process_list",
+    "network_ports",
+    "service_status",
+    "log_recent",
+    "container_list",
+    "container_inspect",
+    "container_logs",
+    "screen_capture_current",
+];
+
+fn agent_error(
+    kind: AgentErrorKind,
+    message: &str,
+    retryable: bool,
+    safe_for_model: bool,
+) -> AgentError {
+    AgentError {
+        kind,
+        message: message.to_string(),
+        retryable,
+        safe_for_model,
+    }
+}
+
+/// Two-phase unknown-kind validation over the raw `AgentRequestData`
+/// JSON. Runs **before** the typed `from_value` so an unknown kind
+/// surfaces as a structured `UnsupportedCapability` rather than a serde
+/// parse error (which would arrive too late to build a graceful
+/// outcome). Descends both the outer `operation.input.kind` and — for
+/// `read_context` — the inner `operation.input.params.kind.kind`.
+fn validate_agent_request_kinds(raw: &serde_json::Value) -> Result<(), AgentError> {
+    let outer = raw
+        .get("operation")
+        .and_then(|o| o.get("input"))
+        .and_then(|i| i.get("kind"))
+        .and_then(|k| k.as_str());
+    let Some(outer) = outer else {
+        return Err(agent_error(
+            AgentErrorKind::InvalidInput,
+            "missing operation.input.kind",
+            false,
+            true,
+        ));
+    };
+    if !SUPPORTED_OPERATION_KINDS.contains(&outer) {
+        return Err(agent_error(
+            AgentErrorKind::UnsupportedCapability,
+            &format!("unsupported operation kind '{outer}'"),
+            false,
+            true,
+        ));
+    }
+    if outer == "read_context" {
+        let inner = raw
+            .get("operation")
+            .and_then(|o| o.get("input"))
+            .and_then(|i| i.get("params"))
+            .and_then(|p| p.get("kind"))
+            .and_then(|k| k.get("kind"))
+            .and_then(|k| k.as_str());
+        let Some(inner) = inner else {
+            return Err(agent_error(
+                AgentErrorKind::InvalidInput,
+                "missing operation.input.params.kind.kind",
+                false,
+                true,
+            ));
+        };
+        if !SUPPORTED_READ_KINDS.contains(&inner) {
+            return Err(agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                &format!("unsupported read kind '{inner}'"),
+                false,
+                true,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Server-computed grant for the single-machine read path. M1a has no
+/// policy engine yet (that lands in M4), so the daemon grants the full
+/// P0 read set in `ReadOnly` mode. The authorization *mechanism*
+/// ([`authorize`]) is exercised regardless, so a future policy engine
+/// only has to narrow `granted`.
+fn default_read_scope() -> AgentScope {
+    AgentScope {
+        granted: vec![
+            Capability::SystemInfo,
+            Capability::ProcessList,
+            Capability::NetworkPorts,
+            Capability::ServiceStatus,
+            Capability::LogRecent,
+            Capability::ContainerList,
+            Capability::ContainerInspect,
+            Capability::ContainerLogs,
+            Capability::ScreenCaptureCurrent,
+        ],
+        mode: ExecutionMode::ReadOnly,
+        expires_at: None,
+        policy_id: None,
+    }
+}
+
+/// Whether `capability` is covered by the granted set. Pure so the
+/// `PermissionDenied` path is unit-testable without a live router.
+fn authorize(capability: Capability, granted: &[Capability]) -> bool {
+    granted.contains(&capability)
+}
+
+/// Server-injected actor. Never sourced from the control end (which
+/// structurally cannot express it — `AgentRequestData` carries no actor
+/// field). M1a single-machine has no session identity plumbed into the
+/// router, so the local operator is represented as a `System` actor;
+/// fleet / authenticated paths will inject the real principal here.
+fn server_actor() -> ActorRef {
+    ActorRef {
+        actor_type: ActorType::System,
+        actor_id: "local-operator".to_string(),
+        tenant_id: None,
+    }
+}
+
+/// Emit an `AgentResponse(AgentOutcome::Err)` back to the control end.
+/// Business / capability-level failures ride the `signaling_data`
+/// `AgentOutcome`, not `SignalingResponseState` (freeze doc §3A), so the
+/// control-end UI receives the full structured error. Build / serialise
+/// failures are non-fatal — log + drop.
+fn emit_agent_error(ctx: &RouterContext, model: &SignalingModel, error: AgentError) {
+    let outcome = AgentOutcome::Err(error);
+    match SignalingModel::success_response(
+        &model.request_id,
+        SignalingType::AgentResponse,
+        None,
+        model.from_connection_id.clone(),
+        Some(&outcome),
+    ) {
+        Ok(reply) => match serde_json::to_string(&reply) {
+            Ok(text) => {
+                let _ = ctx.outbound_tx.send(text);
+            }
+            Err(e) => log::warn!(
+                "[router] failed to serialise AgentResponse error: {e} (request_id={})",
+                model.request_id,
+            ),
+        },
+        Err(e) => log::warn!(
+            "[router] failed to build AgentResponse error: {e} (request_id={})",
+            model.request_id,
+        ),
+    }
+}
+
+/// Assemble the authoritative [`AgentEnvelope`] from a parsed control-end
+/// operation by injecting every trusted field server-side. Pure so the
+/// trusted-field-injection invariant is unit-testable.
+fn build_agent_envelope(
+    request_id: &str,
+    operation: AgentOperation,
+    reason: Option<String>,
+    scope: AgentScope,
+) -> AgentEnvelope {
+    AgentEnvelope {
+        protocol_version: ProtocolVersion::default(),
+        // Server-owned: the control end's value (if any) is replaced.
+        request_id: RequestId(request_id.to_string()),
+        parent_task_id: None,
+        // Single-machine local target. `device_id` empty until a device
+        // registry assigns one; never self-reported by the control end.
+        target: TargetRef::default(),
+        actor: server_actor(),
+        // No model caller in M1a (no orchestrator yet); a human operator
+        // drove this directly.
+        caller: CallerRef {
+            caller_type: CallerType::Human,
+            model_provider: None,
+            model_name: None,
+            adapter: None,
+        },
+        scope,
+        operation,
+        audit: desk_agent_protocol::AuditMeta {
+            approval_id: None,
+            reason,
+        },
+    }
+}
+
+/// Route a control-end `AgentRequest`: two-phase parse → capability
+/// derivation → authorization → trusted-field stamp → typed worker IPC.
+async fn handle_agent_request_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let Some(raw) = model.get_raw_data().as_ref() else {
+        emit_agent_error(
+            ctx,
+            model,
+            agent_error(
+                AgentErrorKind::InvalidInput,
+                "missing AgentRequest body",
+                false,
+                true,
+            ),
+        );
+        return Ok(());
+    };
+
+    // Phase 1 + 2: reject unknown kinds gracefully before typed parse.
+    if let Err(e) = validate_agent_request_kinds(raw) {
+        emit_agent_error(ctx, model, e);
+        return Ok(());
+    }
+
+    // Kinds are known → typed parse is safe.
+    let request_data = match model.get_data::<AgentRequestData>() {
+        Ok(d) => d,
+        Err(e) => {
+            emit_agent_error(
+                ctx,
+                model,
+                agent_error(
+                    AgentErrorKind::InvalidInput,
+                    &format!("bad AgentRequest payload: {e}"),
+                    false,
+                    true,
+                ),
+            );
+            return Ok(());
+        }
+    };
+
+    // Capability is derived from the input (single source of truth).
+    // `exec` derives `None` — reserved until M2.
+    let Some(capability) = request_data.operation.input.capability() else {
+        emit_agent_error(
+            ctx,
+            model,
+            agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                "exec is not available until M2",
+                false,
+                true,
+            ),
+        );
+        return Ok(());
+    };
+
+    // Authorize against the server-computed scope.
+    let scope = default_read_scope();
+    if !authorize(capability, &scope.granted) {
+        emit_agent_error(
+            ctx,
+            model,
+            agent_error(
+                AgentErrorKind::PermissionDenied,
+                "capability not granted",
+                false,
+                false,
+            ),
+        );
+        return Ok(());
+    }
+
+    // Stamp trusted fields and forward to the worker.
+    let envelope = build_agent_envelope(
+        &model.request_id,
+        request_data.operation,
+        request_data.reason,
+        scope,
+    );
+    let payload = AgentRequestPayload {
+        request_id: model.request_id.clone(),
+        connection_id: model.from_connection_id.clone(),
+        envelope,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::AgentRequest(payload))
+        .await
+    {
+        emit_agent_error(
+            ctx,
+            model,
+            agent_error(
+                AgentErrorKind::TargetOffline,
+                &format!("worker unavailable: {e}"),
+                true,
+                true,
+            ),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1261,6 +1602,8 @@ mod tests {
             // Batch 4: Error / Unknown are daemon-owned now.
             SignalingType::Error,
             SignalingType::Unknown,
+            // AgentResponse only flows worker → control end.
+            SignalingType::AgentResponse,
         ] {
             assert_eq!(
                 classify(t),
@@ -1292,6 +1635,7 @@ mod tests {
             SignalingType::ManagerQuerySettings,
             SignalingType::ManagerUpdateSettings,
             SignalingType::ChangeDisplaySettings,
+            SignalingType::AgentRequest,
         ] {
             assert_eq!(
                 classify(t),
@@ -2925,5 +3269,186 @@ mod tests {
         // with a tiny timeout.
         let res = tokio::time::timeout(std::time::Duration::from_millis(50), rx.changed()).await;
         assert!(res.is_err(), "no state change must arrive");
+    }
+
+    // ---- AI agent plane: two-phase parse + authz + routing ----
+
+    fn agent_request_model(raw: serde_json::Value) -> SignalingModel {
+        SignalingModel::new(
+            "req-ai-1",
+            SignalingType::AgentRequest,
+            Some("conn-1".to_string()),
+            None,
+            Some(raw),
+            None,
+        )
+    }
+
+    fn read_outcome(rx: &mut broadcast::Receiver<String>) -> AgentOutcome {
+        read_response(rx)
+            .get_data::<AgentOutcome>()
+            .expect("AgentResponse must carry an AgentOutcome")
+    }
+
+    /// Phase 1 + 2 accept a fully-known read request.
+    #[test]
+    fn two_phase_parse_accepts_known_read_kind() {
+        let raw = serde_json::json!({
+            "operation": {
+                "risk_hint": null,
+                "input": {
+                    "kind": "read_context",
+                    "params": { "kind": { "kind": "process_list", "params": {} } }
+                }
+            },
+            "reason": null
+        });
+        assert!(validate_agent_request_kinds(&raw).is_ok());
+    }
+
+    /// An unknown *outer* kind (newer control end) degrades to
+    /// `UnsupportedCapability`, never a serde parse error.
+    #[test]
+    fn two_phase_parse_rejects_unknown_outer_kind() {
+        let raw = serde_json::json!({
+            "operation": { "input": { "kind": "telepathy", "params": {} } }
+        });
+        let err = validate_agent_request_kinds(&raw).expect_err("unknown outer kind");
+        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+    }
+
+    /// An unknown *inner* read kind is the case a phase-1-only check
+    /// would miss: it would slip through to the typed `from_value` and
+    /// hard-fail. The descent to `operation.input.params.kind.kind`
+    /// catches it as `UnsupportedCapability` (freeze doc §2.4 / codex
+    /// r-freeze-3 #1).
+    #[test]
+    fn two_phase_parse_rejects_unknown_inner_read_kind() {
+        let raw = serde_json::json!({
+            "operation": {
+                "input": {
+                    "kind": "read_context",
+                    "params": { "kind": { "kind": "quantum_state", "params": {} } }
+                }
+            }
+        });
+        let err = validate_agent_request_kinds(&raw).expect_err("unknown inner kind");
+        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+    }
+
+    /// Authorization is a pure set-membership check: the granted scope
+    /// admits its capabilities and denies everything else. This is the
+    /// `PermissionDenied` mechanism a future policy engine narrows.
+    #[test]
+    fn authorize_respects_granted_set() {
+        assert!(authorize(
+            Capability::ProcessList,
+            &default_read_scope().granted
+        ));
+        assert!(!authorize(Capability::ProcessList, &[]));
+        assert!(!authorize(
+            Capability::ScreenCaptureCurrent,
+            &[Capability::SystemInfo]
+        ));
+    }
+
+    /// Unknown read kind routed through the full handler emits an
+    /// outbound `AgentResponse(AgentOutcome::Err(UnsupportedCapability))`
+    /// and never forwards anything to the worker.
+    #[tokio::test]
+    async fn agent_request_unknown_kind_emits_unsupported_outcome() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        let raw = serde_json::json!({
+            "operation": {
+                "input": {
+                    "kind": "read_context",
+                    "params": { "kind": { "kind": "quantum_state", "params": {} } }
+                }
+            },
+            "reason": null
+        });
+        handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+            .await
+            .unwrap();
+        match read_outcome(&mut rx) {
+            AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// `exec` parses cleanly but derives no capability in M1a, so the
+    /// handler rejects it as `UnsupportedCapability` without forwarding.
+    #[tokio::test]
+    async fn agent_request_exec_is_unsupported_until_m2() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        let raw = serde_json::json!({
+            "operation": {
+                "input": {
+                    "kind": "exec",
+                    "params": {
+                        "target": { "type": "shell", "shell": "powershell" },
+                        "command": "Get-Service",
+                        "cwd": null,
+                        "timeout_ms": 1000,
+                        "max_stdout_bytes": 1024,
+                        "max_stderr_bytes": 1024
+                    }
+                }
+            },
+            "reason": null
+        });
+        handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+            .await
+            .unwrap();
+        match read_outcome(&mut rx) {
+            AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// A valid read forwards a typed `ServiceToWorker::AgentRequest` with
+    /// every trusted field stamped server-side: `request_id` from the
+    /// signaling model, the actor injected (never self-reported by the
+    /// control end), and the connection correlated.
+    #[tokio::test]
+    async fn agent_request_valid_forwards_with_server_injected_fields() {
+        use desk_agent_protocol::{
+            AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
+        };
+        let ctx = make_ctx();
+        let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
+        ctx.worker_mgr.install_active_for_test(ipc_tx).await;
+
+        let req = AgentRequestData {
+            operation: AgentOperation {
+                risk_hint: None,
+                input: OperationInput::ReadContext(ReadContextInput {
+                    kind: ContextKind::ProcessList(ProcessListParams::default()),
+                }),
+            },
+            reason: Some("diagnose cpu".to_string()),
+        };
+        let raw = serde_json::to_value(&req).unwrap();
+        handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+            .await
+            .unwrap();
+
+        match ipc_rx
+            .try_recv()
+            .expect("worker should receive AgentRequest")
+        {
+            ServiceToWorker::AgentRequest(p) => {
+                assert_eq!(p.request_id, "req-ai-1");
+                assert_eq!(p.connection_id.as_deref(), Some("conn-1"));
+                // request_id is re-stamped from the signaling model, not
+                // trusted from the (absent) control-end value.
+                assert_eq!(p.envelope.request_id.0, "req-ai-1");
+                // actor is server-injected.
+                assert_eq!(p.envelope.actor.actor_type, ActorType::System);
+                // reason flows through to the audit metadata.
+                assert_eq!(p.envelope.audit.reason.as_deref(), Some("diagnose cpu"));
+            }
+            other => panic!("unexpected IPC: {other:?}"),
+        }
     }
 }

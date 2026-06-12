@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod clipboard_dispatcher;
 pub mod desktop_monitor;
 pub mod file_transfer_dispatcher;

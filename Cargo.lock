@@ -2572,6 +2572,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "desk-agent-protocol",
  "desk-signal-facade",
  "futures",
  "log",
@@ -4801,6 +4802,7 @@ dependencies = [
  "core-audio-types",
  "core-graphics 0.23.2",
  "cpal",
+ "desk-agent-protocol",
  "desk-capture-engine",
  "desk-input-injection",
  "desk-ipc-protocol",

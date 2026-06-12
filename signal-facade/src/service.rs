@@ -85,8 +85,8 @@ mod request_remote_ice_tests {
     #[test]
     fn injects_for_recipient_via_trait_object() {
         let turn = provider(true);
-        let ice = build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60)
-            .expect("ice server");
+        let ice =
+            build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60).expect("ice server");
         // Username embeds the RECIPIENT id, proving recipient identity is used
         // (not the sender `browser-conn`), through the trait-object override.
         assert!(ice.username.ends_with(":host-1"));
@@ -655,7 +655,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::TerminalStarted
             | SignalingType::AudioPlaybackError
             | SignalingType::DesktopSwitching
-            | SignalingType::DesktopReady => {
+            | SignalingType::DesktopReady
+            // AI agent plane: AgentRequest (control end → host) and
+            // AgentResponse (host → control end) are plain browser↔host
+            // forwarded types, exactly like the manager-plane request /
+            // response pair. The signal server just relays them to the
+            // peer; the daemon does the trusted-field stamping + routing.
+            | SignalingType::AgentRequest
+            | SignalingType::AgentResponse => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
             }

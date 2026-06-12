@@ -158,6 +158,17 @@ pub enum SignalingType {
     #[wincode(tag = 501)]
     DesktopReady = 501,
 
+    /// AI agent capability request (control end / orchestrator → host).
+    /// Carries `desk_agent_protocol::AgentRequestData` as signaling_data;
+    /// the daemon stamps the trusted fields and forwards a typed
+    /// `ServiceToWorker::AgentRequest` to the worker.
+    #[wincode(tag = 600)]
+    AgentRequest = 600,
+    /// AI agent capability response (host → control end). Carries
+    /// `desk_agent_protocol::AgentOutcome` as signaling_data.
+    #[wincode(tag = 601)]
+    AgentResponse = 601,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,
@@ -738,7 +749,7 @@ pub trait TurnProvider: Send + Sync {
 
 #[cfg(test)]
 mod wincode_tests {
-    //! Wincode `SignalingType` coverage. The enum has 36 variants with
+    //! Wincode `SignalingType` coverage. The enum has 38 variants with
     //! explicit `#[repr(i32)]` discriminants, and the wincode tag is
     //! locked to `i32` via `#[wincode(tag_encoding = "i32")]` so the
     //! daemon ↔ worker wire bytes use the same number the JSON wire
@@ -774,7 +785,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 36] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 38] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -796,6 +807,8 @@ mod wincode_tests {
             (SignalingType::UpdateDeskSettings, 301),
             (SignalingType::DesktopSwitching, 500),
             (SignalingType::DesktopReady, 501),
+            (SignalingType::AgentRequest, 600),
+            (SignalingType::AgentResponse, 601),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),
