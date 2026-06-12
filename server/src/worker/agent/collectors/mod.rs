@@ -9,5 +9,6 @@
 //! file; OS-specific probes (network ports, service status, event log) split
 //! their implementation behind a platform trait as they land.
 
+pub mod network_ports;
 pub mod process_list;
 pub mod system_info;
