@@ -13,5 +13,6 @@ pub mod container;
 pub mod log_recent;
 pub mod network_ports;
 pub mod process_list;
+pub mod screen_capture;
 pub mod service_status;
 pub mod system_info;

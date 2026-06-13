@@ -7,26 +7,44 @@
 //! [`AgentEnvelope`]; the worker dispatches it here and replies via
 //! `WorkerToService::AgentResponse`.
 //!
-//! Each P0 read kind dispatches to a collector in [`collectors`]. A kind
-//! whose collector has not landed yet returns `UnsupportedCapability` so the
-//! path degrades gracefully instead of failing the transport.
+//! Each P0 read kind dispatches to a collector in [`collectors`]. A collector
+//! that cannot run on the host (no Docker, no session context, unsupported
+//! platform) returns a structured `AgentError` so the path degrades gracefully
+//! instead of failing the transport.
 
 pub mod collectors;
+
+use std::sync::Arc;
 
 use desk_agent_protocol::{
     AgentEnvelope, AgentError, AgentErrorKind, ContextKind, DeviceAgent, OperationInput,
     OperationOutput, ReadContextOutput,
 };
 
-/// User-session capability surface. Holds no state yet; collectors construct
-/// their own probes (sysinfo system, docker client, capture source, ...) per
-/// call, so there is nothing to cache here.
+use crate::model::settings::SharedSettings;
+
+/// User-session capability surface. Most collectors construct their own probes
+/// per call, so the only state is an optional handle to the live session
+/// settings — required by `screen.capture.current` to resolve the capture
+/// backend and target display. Built without settings elsewhere (tests, hosts
+/// with no session), where screen capture degrades to `UnsupportedCapability`.
 #[derive(Default)]
-pub struct LocalDeviceAgent;
+pub struct LocalDeviceAgent {
+    settings: Option<Arc<SharedSettings>>,
+}
 
 impl LocalDeviceAgent {
+    /// Build an agent without a session context. Screen capture is unavailable.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Build an agent bound to the worker session settings, enabling screen
+    /// capture.
+    pub fn with_settings(settings: Arc<SharedSettings>) -> Self {
+        Self {
+            settings: Some(settings),
+        }
     }
 }
 
@@ -34,7 +52,9 @@ impl LocalDeviceAgent {
 impl DeviceAgent for LocalDeviceAgent {
     async fn invoke(&self, envelope: AgentEnvelope) -> Result<OperationOutput, AgentError> {
         match envelope.operation.input {
-            OperationInput::ReadContext(rc) => dispatch_read_context(rc.kind).await,
+            OperationInput::ReadContext(rc) => {
+                dispatch_read_context(rc.kind, self.settings.as_ref()).await
+            }
             // `exec` is reserved until M2; the daemon already rejects it,
             // but defend in depth here too.
             OperationInput::Exec(_) => Err(unsupported("exec is not available until M2")),
@@ -42,9 +62,12 @@ impl DeviceAgent for LocalDeviceAgent {
     }
 }
 
-/// Dispatch a single read kind to its collector. Collectors land
-/// incrementally; an unimplemented kind returns `UnsupportedCapability`.
-async fn dispatch_read_context(kind: ContextKind) -> Result<OperationOutput, AgentError> {
+/// Dispatch a single read kind to its collector. `settings` is only consumed
+/// by screen capture; the other collectors are self-contained.
+async fn dispatch_read_context(
+    kind: ContextKind,
+    settings: Option<&Arc<SharedSettings>>,
+) -> Result<OperationOutput, AgentError> {
     match kind {
         ContextKind::SystemInfo(params) => {
             let output = run_blocking(move || collectors::system_info::collect(&params)).await?;
@@ -96,8 +119,17 @@ async fn dispatch_read_context(kind: ContextKind) -> Result<OperationOutput, Age
                 ReadContextOutput::ContainerLogs(output),
             ))
         }
-        ContextKind::ScreenCaptureCurrent(_) => {
-            Err(unsupported("read collector not implemented yet"))
+        ContextKind::ScreenCaptureCurrent(params) => {
+            let Some(settings) = settings else {
+                return Err(unsupported("screen capture requires a session context"));
+            };
+            let desk_settings = settings.read().await.desk.clone();
+            let output =
+                run_blocking(move || collectors::screen_capture::collect(&params, &desk_settings))
+                    .await??;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::ScreenCaptureCurrent(output),
+            ))
         }
     }
 }
@@ -189,15 +221,19 @@ mod tests {
         assert!(info.memory.total_bytes > 0);
     }
 
-    /// Kinds without a collector yet degrade to `UnsupportedCapability`
-    /// rather than panicking — the dispatch path stays exercised.
+    /// Without a session context, screen capture degrades to
+    /// `UnsupportedCapability` rather than panicking (the capture backend needs
+    /// the live desk settings, absent in a settings-less agent).
     #[tokio::test]
-    async fn unimplemented_read_kind_is_unsupported() {
+    async fn screen_capture_without_settings_is_unsupported() {
         let agent = LocalDeviceAgent::new();
         let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
             kind: ContextKind::ScreenCaptureCurrent(ScreenCaptureParams::default()),
         }));
-        let err = agent.invoke(env).await.expect_err("stub must reject");
+        let err = agent
+            .invoke(env)
+            .await
+            .expect_err("must reject without settings");
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
     }
 

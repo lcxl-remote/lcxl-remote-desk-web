@@ -1617,8 +1617,10 @@ impl WorkerSession {
                                     // level errors travel inside the
                                     // `AgentOutcome`, not the transport state.
                                     let writer_tx = writer_tx.clone();
+                                    let agent_settings = shared_settings.clone();
                                     tokio::spawn(async move {
-                                        let agent = LocalDeviceAgent::new();
+                                        let agent =
+                                            LocalDeviceAgent::with_settings(agent_settings);
                                         let outcome = match agent.invoke(payload.envelope).await {
                                             Ok(output) => AgentOutcome::Ok(output),
                                             Err(error) => AgentOutcome::Err(error),
