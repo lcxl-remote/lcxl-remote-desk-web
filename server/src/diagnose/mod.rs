@@ -12,14 +12,18 @@
 //! router replies `FEATURE_UNAVAILABLE`), so cross-process collection is a later
 //! additive step behind [`ContextCollector`].
 //!
-//! The model call is **stubbed** here; the real adapter (with prompt assembly,
-//! streaming, and token accounting) lands in a later PR. Evidence is already
-//! redacted before it reaches the model trait.
+//! The real model integration ([`model::ModelBackedDiagnoseModel`]) assembles
+//! the prompt, streams tokens, parses the response, and accounts tokens; a
+//! [`StubDiagnoseModel`] remains for the unconfigured / test paths. Evidence is
+//! always redacted before it reaches the model trait.
 
 pub mod collector;
 pub mod model;
 pub mod redaction;
 pub mod selection;
+
+#[cfg(test)]
+mod eval;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
