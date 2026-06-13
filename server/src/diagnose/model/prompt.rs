@@ -42,6 +42,62 @@ Respond with ONLY a JSON object, no prose or code fences, of the shape:
   \"missing_info\": [string]
 }";
 
+/// JSON schema describing the diagnosis output (mirrors `SYSTEM_PROMPT` and the
+/// [`desk_agent_protocol::diagnose::Diagnosis`] serde shape). Used for the
+/// `json_schema` response-format mode so a gateway that enforces it locks the
+/// shape + enums. `collected` is intentionally omitted — the orchestrator stamps
+/// the authoritative list and the parser clears any model-supplied value.
+///
+/// Every property is listed in `required` and `additionalProperties` is `false`,
+/// matching OpenAI Structured Outputs' constraints (and harmless on gateways
+/// that only need a plain schema).
+pub fn diagnosis_json_schema() -> Value {
+    let string = json!({ "type": "string" });
+    let string_array = json!({ "type": "array", "items": { "type": "string" } });
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["summary", "confidence", "findings", "commands", "next_steps", "missing_info"],
+        "properties": {
+            "summary": string,
+            "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["title", "evidence_refs", "explanation"],
+                    "properties": {
+                        "title": string,
+                        "evidence_refs": string_array,
+                        "explanation": string,
+                    },
+                },
+            },
+            "commands": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["shell", "command", "purpose", "risk", "requires_confirmation"],
+                    "properties": {
+                        "shell": string,
+                        "command": string,
+                        "purpose": string,
+                        "risk": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "critical", "blocked"],
+                        },
+                        "requires_confirmation": { "type": "boolean" },
+                    },
+                },
+            },
+            "next_steps": string_array,
+            "missing_info": string_array,
+        },
+    })
+}
+
 /// Build the chat messages for a diagnosis. `max_context_bytes` caps the
 /// serialized evidence JSON; capabilities that would overflow it are dropped and
 /// listed under `omitted_evidence` so the model knows the context was trimmed.
@@ -180,6 +236,38 @@ mod tests {
         assert_eq!(user["device_summary"]["cpu"]["logical_cores"], 8);
         assert!(user["evidence"]["system.info"].is_object());
         assert_eq!(user["screen"]["available"], false);
+    }
+
+    /// The diagnosis schema is a strict object covering the §8 output contract
+    /// (model-filled fields), with `collected` deliberately absent.
+    #[test]
+    fn diagnosis_schema_covers_output_contract() {
+        let schema = diagnosis_json_schema();
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        for f in [
+            "summary",
+            "confidence",
+            "findings",
+            "commands",
+            "next_steps",
+            "missing_info",
+        ] {
+            assert!(required.contains(&f), "schema requires {f}");
+        }
+        // The orchestrator owns `collected`; the model must not be asked for it.
+        assert!(schema["properties"].get("collected").is_none());
+        // Enums mirror the protocol (snake_case).
+        let conf = &schema["properties"]["confidence"]["enum"];
+        assert!(conf.as_array().unwrap().iter().any(|v| v == "high"));
+        let risk = &schema["properties"]["commands"]["items"]["properties"]["risk"]["enum"];
+        assert!(risk.as_array().unwrap().iter().any(|v| v == "blocked"));
     }
 
     /// Evidence beyond the budget is dropped and reported under

@@ -14,7 +14,7 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 
-use super::{ChatRequest, ChatResponse, ModelAdapter, TokenUsage};
+use super::{ChatRequest, ChatResponse, ModelAdapter, ResponseFormatSpec, TokenUsage};
 
 /// OpenAI-compatible streaming adapter.
 #[derive(Default)]
@@ -53,18 +53,30 @@ fn build_body(request: &ChatRequest) -> Value {
             None => json!({"role": m.role.as_str(), "content": m.text}),
         })
         .collect();
-    json!({
+    let mut body = json!({
         "model": request.model,
         "messages": messages,
         "stream": true,
         "stream_options": {"include_usage": true},
-        // Force JSON mode: the gateway constrains decoding so the model can only
-        // emit syntactically valid JSON (the diagnosis schema is described in the
-        // system prompt). Without this, weaker models return prose / fenced
-        // markdown and the parser degrades to a low-confidence fallback. The
-        // system prompt mentions "JSON", which OpenAI's JSON mode requires.
-        "response_format": {"type": "json_object"},
-    })
+    });
+    // Ask the gateway to constrain output format. Without any constraint weaker
+    // models return prose / fenced markdown and the parser degrades; `json_object`
+    // forces valid JSON, `json_schema` additionally locks the shape. The system
+    // prompt names the JSON contract (OpenAI's JSON mode requires the word
+    // "json"). `None` omits the field for gateways that reject it.
+    match &request.response_format {
+        ResponseFormatSpec::None => {}
+        ResponseFormatSpec::JsonObject => {
+            body["response_format"] = json!({ "type": "json_object" });
+        }
+        ResponseFormatSpec::JsonSchema { name, schema } => {
+            body["response_format"] = json!({
+                "type": "json_schema",
+                "json_schema": { "name": name, "strict": true, "schema": schema },
+            });
+        }
+    }
+    body
 }
 
 /// Join `base_url` with the chat-completions path, tolerating a trailing slash.
@@ -247,10 +259,9 @@ data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
         assert_eq!(endpoint("https://x/v1/"), "https://x/v1/chat/completions");
     }
 
-    #[test]
-    fn body_maps_text_and_vision_messages() {
+    fn req_with_format(response_format: ResponseFormatSpec) -> ChatRequest {
         use super::super::{ChatMessage, ChatRole};
-        let req = ChatRequest {
+        ChatRequest {
             base_url: "https://x/v1".into(),
             api_key: "k".into(),
             model: "m".into(),
@@ -266,12 +277,15 @@ data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
                     image_data_url: Some("data:image/jpeg;base64,AAA".into()),
                 },
             ],
-        };
-        let body = build_body(&req);
+            response_format,
+        }
+    }
+
+    #[test]
+    fn body_maps_text_and_vision_messages() {
+        let body = build_body(&req_with_format(ResponseFormatSpec::JsonObject));
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
-        // JSON mode is requested so the gateway constrains output to valid JSON.
-        assert_eq!(body["response_format"]["type"], "json_object");
         // System message: plain string content.
         assert_eq!(body["messages"][0]["content"], "sys");
         // User message: text + image parts.
@@ -281,5 +295,29 @@ data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
             body["messages"][1]["content"][1]["image_url"]["url"],
             "data:image/jpeg;base64,AAA"
         );
+    }
+
+    /// Each response-format mode serializes to the matching `response_format`
+    /// (or omits it for `None`).
+    #[test]
+    fn body_serializes_each_response_format_mode() {
+        // None: the field is omitted entirely (for gateways that reject it).
+        let body = build_body(&req_with_format(ResponseFormatSpec::None));
+        assert!(body.get("response_format").is_none());
+
+        // JsonObject: plain JSON mode.
+        let body = build_body(&req_with_format(ResponseFormatSpec::JsonObject));
+        assert_eq!(body["response_format"]["type"], "json_object");
+
+        // JsonSchema: carries the named, strict schema.
+        let schema = json!({ "type": "object", "required": ["summary"] });
+        let body = build_body(&req_with_format(ResponseFormatSpec::JsonSchema {
+            name: "diagnosis".into(),
+            schema: schema.clone(),
+        }));
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["response_format"]["json_schema"]["name"], "diagnosis");
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(body["response_format"]["json_schema"]["schema"], schema);
     }
 }

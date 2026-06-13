@@ -27,7 +27,7 @@ use desk_agent_protocol::diagnose::{Confidence, Diagnosis};
 use desk_agent_protocol::{AgentError, CallerRef, CallerType};
 
 use super::{DiagnoseModel, new_event_id, now_rfc3339};
-use crate::model::settings::SharedSettings;
+use crate::model::settings::{ResponseFormatMode, SharedSettings};
 use crate::worker::agent::eval::EvidenceSnapshot;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB,
@@ -59,6 +59,22 @@ pub struct ChatMessage {
     pub image_data_url: Option<String>,
 }
 
+/// What `response_format` the gateway is asked for. The diagnosis-specific
+/// schema (for [`ResponseFormatSpec::JsonSchema`]) is built by the model layer
+/// and carried here, so the adapter stays generic and just serializes it.
+#[derive(Debug, Clone)]
+pub enum ResponseFormatSpec {
+    /// Omit `response_format` entirely.
+    None,
+    /// `{"type":"json_object"}`.
+    JsonObject,
+    /// `{"type":"json_schema","json_schema":{name,strict:true,schema}}`.
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+    },
+}
+
 /// A chat-completion request to the model gateway.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
@@ -66,6 +82,7 @@ pub struct ChatRequest {
     pub api_key: String,
     pub model: String,
     pub messages: Vec<ChatMessage>,
+    pub response_format: ResponseFormatSpec,
 }
 
 /// Token accounting reported by the gateway.
@@ -158,6 +175,14 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
             .unwrap_or(DEFAULT_MAX_CONTEXT_BYTES);
 
         let messages = prompt::build_messages(question, evidence, max_context_bytes);
+        let response_format = match config.response_format {
+            ResponseFormatMode::None => ResponseFormatSpec::None,
+            ResponseFormatMode::JsonObject => ResponseFormatSpec::JsonObject,
+            ResponseFormatMode::JsonSchema => ResponseFormatSpec::JsonSchema {
+                name: "diagnosis".to_string(),
+                schema: prompt::diagnosis_json_schema(),
+            },
+        };
         let caller = CallerRef {
             caller_type: CallerType::AiModel,
             model_provider: config.provider.clone(),
@@ -184,6 +209,7 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
             api_key,
             model,
             messages,
+            response_format,
         };
         let response = self.adapter.stream_chat(request, on_partial).await?;
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -356,6 +382,70 @@ mod tests {
             .unwrap();
         assert_eq!(responded.input_tokens, Some(1200));
         assert_eq!(responded.output_tokens, Some(80));
+    }
+
+    /// The configured `response_format` mode flows into the chat request: the
+    /// default is `json_object`, and `json_schema` carries the diagnosis schema.
+    #[tokio::test]
+    async fn response_format_mode_flows_into_request() {
+        // Default settings → json_object.
+        let adapter = Arc::new(MockAdapter {
+            fragments: vec![],
+            content: WELL_FORMED.into(),
+            usage: TokenUsage::default(),
+            seen: Mutex::new(None),
+        });
+        let model = ModelBackedDiagnoseModel::new(
+            adapter.clone(),
+            configured_settings(),
+            Arc::new(RecordingAuditSink::default()),
+        );
+        let noop = |_: String| {};
+        model.diagnose("r", "q", &snapshot(), &noop).await.unwrap();
+        assert!(matches!(
+            adapter
+                .seen
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .response_format,
+            ResponseFormatSpec::JsonObject
+        ));
+
+        // json_schema mode → the request carries the named diagnosis schema.
+        let mut s = Settings::default();
+        s.ai_model.provider = Some("openai-compatible".into());
+        s.ai_model.model = Some("m".into());
+        s.ai_model.base_url = Some("https://api.example/v1".into());
+        s.ai_model.api_key = Some("sk".into());
+        s.ai_model.response_format = ResponseFormatMode::JsonSchema;
+        let adapter2 = Arc::new(MockAdapter {
+            fragments: vec![],
+            content: WELL_FORMED.into(),
+            usage: TokenUsage::default(),
+            seen: Mutex::new(None),
+        });
+        let model2 = ModelBackedDiagnoseModel::new(
+            adapter2.clone(),
+            Arc::new(SharedSettings::from(s)),
+            Arc::new(RecordingAuditSink::default()),
+        );
+        model2.diagnose("r", "q", &snapshot(), &noop).await.unwrap();
+        match &adapter2
+            .seen
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .response_format
+        {
+            ResponseFormatSpec::JsonSchema { name, schema } => {
+                assert_eq!(name, "diagnosis");
+                assert_eq!(schema["type"], "object");
+            }
+            other => panic!("expected json_schema, got {other:?}"),
+        }
     }
 
     /// Without configuration the model returns the not-configured diagnosis and

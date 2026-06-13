@@ -456,10 +456,13 @@ async fn context_budget_is_enforced() {
 ///
 /// Without the env vars it prints a skip notice and returns, so it is safe to
 /// invoke with `--ignored` on a machine that has no gateway configured.
+/// `LCXL_EVAL_RESPONSE_FORMAT` (optional: `none` / `json_object` / `json_schema`)
+/// selects the output-format constraint; defaults to `json_object`.
 #[actix_web::test]
 #[ignore = "hits a real model gateway; run manually for the R3 acceptance report"]
 async fn real_model_run() {
     use super::model::openai::OpenAiCompatAdapter;
+    use crate::model::settings::ResponseFormatMode;
     use std::time::Instant;
 
     let (Ok(base_url), Ok(api_key), Ok(model)) = (
@@ -472,13 +475,20 @@ async fn real_model_run() {
         );
         return;
     };
+    let response_format = match std::env::var("LCXL_EVAL_RESPONSE_FORMAT").as_deref() {
+        Ok("none") => ResponseFormatMode::None,
+        Ok("json_schema") => ResponseFormatMode::JsonSchema,
+        _ => ResponseFormatMode::JsonObject,
+    };
 
     let mut settings = Settings::default();
     settings.ai_model.provider = Some("openai-compatible".into());
     settings.ai_model.model = Some(model);
     settings.ai_model.base_url = Some(base_url);
     settings.ai_model.api_key = Some(api_key);
+    settings.ai_model.response_format = response_format;
     let settings = Arc::new(SharedSettings::from(settings));
+    println!("response_format: {response_format:?}");
 
     println!("\n=== R3 controlled real-model eval run ===");
     for case in eval_cases() {

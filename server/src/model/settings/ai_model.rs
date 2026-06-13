@@ -22,6 +22,27 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// How the model gateway is asked to constrain its output format.
+///
+/// The diagnosis parser degrades gracefully regardless of this setting, so it is
+/// purely an enforcement hint to the gateway. Pick `json_schema` only when the
+/// gateway is known to *enforce* it (some gateways silently ignore unknown
+/// `response_format` types; others reject the request).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseFormatMode {
+    /// No `response_format` is sent; the model may return prose (the parser then
+    /// degrades to a low-confidence fallback).
+    None,
+    /// Request syntactically valid JSON (`{"type":"json_object"}`). Broadly
+    /// supported; the default.
+    #[default]
+    JsonObject,
+    /// Request the diagnosis JSON schema (`{"type":"json_schema",...}`), locking
+    /// the shape + enums in addition to JSON validity.
+    JsonSchema,
+}
+
 /// Persisted AI model gateway configuration.
 ///
 /// `Debug` is implemented by hand so `api_key` is never rendered; the derived
@@ -44,6 +65,9 @@ pub struct AiModelSettings {
     pub allow_logs: bool,
     /// Upper bound on the structured evidence sent to the model, in bytes.
     pub max_context_bytes: Option<u64>,
+    /// How the gateway is asked to constrain output format. Default
+    /// `json_object`.
+    pub response_format: ResponseFormatMode,
 }
 
 impl AiModelSettings {
@@ -61,6 +85,7 @@ impl AiModelSettings {
             allow_screen: self.allow_screen,
             allow_logs: self.allow_logs,
             max_context_bytes: self.max_context_bytes,
+            response_format: self.response_format,
             api_key_set: self.api_key_set(),
         }
     }
@@ -87,6 +112,9 @@ impl AiModelSettings {
         if let Some(max_context_bytes) = update.max_context_bytes {
             self.max_context_bytes = Some(max_context_bytes);
         }
+        if let Some(response_format) = update.response_format {
+            self.response_format = response_format;
+        }
         match update.api_key {
             None => {}                                          // leave unchanged
             Some(key) if key.is_empty() => self.api_key = None, // clear
@@ -106,6 +134,7 @@ impl fmt::Debug for AiModelSettings {
             .field("allow_screen", &self.allow_screen)
             .field("allow_logs", &self.allow_logs)
             .field("max_context_bytes", &self.max_context_bytes)
+            .field("response_format", &self.response_format)
             .finish()
     }
 }
@@ -121,6 +150,7 @@ pub struct AiModelSettingsPublic {
     pub allow_screen: bool,
     pub allow_logs: bool,
     pub max_context_bytes: Option<u64>,
+    pub response_format: ResponseFormatMode,
     /// Whether a non-empty API key is configured. The key itself is never
     /// returned.
     pub api_key_set: bool,
@@ -138,6 +168,8 @@ pub struct AiModelSettingsUpdate {
     pub allow_screen: Option<bool>,
     pub allow_logs: Option<bool>,
     pub max_context_bytes: Option<u64>,
+    /// `None` leaves the stored mode unchanged.
+    pub response_format: Option<ResponseFormatMode>,
     /// Write-only. `None` = leave unchanged; `Some("")` = clear; `Some(x)` = set.
     pub api_key: Option<String>,
 }
@@ -151,6 +183,7 @@ impl fmt::Debug for AiModelSettingsUpdate {
             .field("allow_screen", &self.allow_screen)
             .field("allow_logs", &self.allow_logs)
             .field("max_context_bytes", &self.max_context_bytes)
+            .field("response_format", &self.response_format)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
@@ -169,6 +202,7 @@ mod tests {
             allow_screen: false,
             allow_logs: false,
             max_context_bytes: Some(131_072),
+            response_format: ResponseFormatMode::JsonObject,
         }
     }
 
@@ -235,12 +269,31 @@ mod tests {
             provider: Some("openai-compatible".into()),
             allow_logs: Some(true),
             max_context_bytes: Some(65_536),
+            response_format: Some(ResponseFormatMode::JsonSchema),
             ..Default::default()
         });
         assert_eq!(s.provider.as_deref(), Some("openai-compatible"));
         assert!(s.allow_logs);
         assert!(!s.allow_screen); // untouched
         assert_eq!(s.max_context_bytes, Some(65_536));
+        assert_eq!(s.response_format, ResponseFormatMode::JsonSchema);
+
+        // A None response_format leaves the mode unchanged.
+        s.apply_update(AiModelSettingsUpdate::default());
+        assert_eq!(s.response_format, ResponseFormatMode::JsonSchema);
+    }
+
+    /// The default response format is `json_object` (back-compat with configs
+    /// written before the field existed, via `#[serde(default)]`).
+    #[test]
+    fn response_format_defaults_to_json_object() {
+        assert_eq!(
+            AiModelSettings::default().response_format,
+            ResponseFormatMode::JsonObject
+        );
+        // A TOML/JSON config without the field deserializes to the default.
+        let s: AiModelSettings = serde_json::from_str("{}").expect("empty config");
+        assert_eq!(s.response_format, ResponseFormatMode::JsonObject);
     }
 
     /// Regression for the secret boundary: the legacy `/settings` payload is
