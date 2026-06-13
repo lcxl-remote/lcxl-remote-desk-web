@@ -181,6 +181,13 @@ pub enum SignalingType {
     /// the control end instead of being consumed by the one-shot callback map.
     #[wincode(tag = 603)]
     DiagnoseEvent = 603,
+    /// AI Diagnose cancellation (control end → host). Sent when the operator
+    /// hands a diagnosis off to a human ("转人工"). Carries no payload; the
+    /// message `request_id` correlates the cancelled diagnosis. Handoff has no
+    /// orchestrator state-machine branch — the daemon only records an
+    /// `ai.task.cancelled` audit so the handoff is auditable.
+    #[wincode(tag = 604)]
+    DiagnoseCancel = 604,
 
     /// Error
     #[wincode(tag = -1)]
@@ -798,7 +805,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 40] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 41] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -824,6 +831,7 @@ mod wincode_tests {
             (SignalingType::AgentResponse, 601),
             (SignalingType::Diagnose, 602),
             (SignalingType::DiagnoseEvent, 603),
+            (SignalingType::DiagnoseCancel, 604),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),

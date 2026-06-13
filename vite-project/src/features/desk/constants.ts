@@ -25,5 +25,15 @@ export const SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR = 208;
 export const SIGNALING_TYPE_CODE_DESKTOP_SWITCHING = 500;
 export const SIGNALING_TYPE_CODE_DESKTOP_READY = 501;
 
+// AI Diagnose: request (control end -> host) and streamed event frames
+// (host -> control end). The event stream is notification-style — frames
+// carry `request_id` + `seq` + `kind`, never a one-shot response.
+export const SIGNALING_TYPE_CODE_DIAGNOSE = 602;
+export const SIGNALING_TYPE_CODE_DIAGNOSE_EVENT = 603;
+// Handoff to a human ("转人工"): control end -> host. The host records an
+// `ai.task.cancelled` audit. Carries no payload; the message request_id
+// correlates the cancelled diagnosis.
+export const SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL = 604;
+
 export const SIGNALING_TYPE_CODE_ERROR = 10000000;
 export const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 10000001;

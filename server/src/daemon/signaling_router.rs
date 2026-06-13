@@ -151,7 +151,9 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // daemon-side (it owns the model call + redaction + streaming), so this
         // is handled inline against the daemon's orchestrator rather than
         // forwarded over IPC.
-        SignalingType::Diagnose => RouteOwnership::Daemon,
+        // DiagnoseCancel is the handoff notification — handled inline against
+        // the daemon's orchestrator (audit only), like `Diagnose`.
+        SignalingType::Diagnose | SignalingType::DiagnoseCancel => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -475,6 +477,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the orchestrator
         // is not injected). Streams `DiagnoseEvent` frames back to the browser.
         SignalingType::Diagnose => handle_diagnose_inbound(ctx, model).await,
+        // AI Diagnose handoff ("转人工"): a UI-side action with no orchestrator
+        // state branch. The daemon only records an `ai.task.cancelled` audit so
+        // the handoff is auditable; no `DiagnoseEvent` is streamed back.
+        SignalingType::DiagnoseCancel => handle_diagnose_cancel_inbound(ctx, model).await,
     }
 }
 
@@ -1580,6 +1586,24 @@ async fn handle_diagnose_inbound(
         to_connection_id: model.from_connection_id.clone(),
     };
     orchestrator.run(&model.request_id, request, &sink).await;
+    Ok(())
+}
+
+/// Route a control-end `DiagnoseCancel` (handoff to a human). The message
+/// `request_id` is the cancelled diagnosis's id. Gated identically to
+/// `Diagnose`; when the orchestrator is available the daemon records an
+/// `ai.task.cancelled` audit. No `DiagnoseEvent` is streamed back — the control
+/// end already closed the panel and retains the evidence locally.
+async fn handle_diagnose_cancel_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    if !ctx.settings.read().await.system.ai_agent_enabled() {
+        return Ok(());
+    }
+    if let Some(orchestrator) = ctx.diagnose_orchestrator.clone() {
+        orchestrator.audit_cancellation(&model.request_id).await;
+    }
     Ok(())
 }
 
@@ -3691,6 +3715,11 @@ mod tests {
             classify(SignalingType::DiagnoseEvent),
             RouteOwnership::Daemon
         );
+        // The handoff notification is handled inline by the daemon too.
+        assert_eq!(
+            classify(SignalingType::DiagnoseCancel),
+            RouteOwnership::Daemon
+        );
     }
 
     /// Disabled by default: a Diagnose request is gated before the orchestrator,
@@ -3800,5 +3829,70 @@ mod tests {
         let mut sorted = seqs.clone();
         sorted.sort_unstable();
         assert_eq!(seqs, sorted, "frames arrive in seq order");
+    }
+
+    fn diagnose_cancel_model() -> SignalingModel {
+        SignalingModel::new(
+            "req-diag-1",
+            SignalingType::DiagnoseCancel,
+            Some("conn-1".to_string()),
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Recording audit sink usable from the router test module.
+    #[derive(Clone, Default)]
+    struct CancelAuditSink {
+        events: Arc<std::sync::Mutex<Vec<desk_agent_protocol::audit::AuditEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl desk_agent_protocol::audit::AuditSink for CancelAuditSink {
+        async fn record(&self, event: desk_agent_protocol::audit::AuditEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    /// Handoff ("转人工") with an orchestrator present records exactly one
+    /// `ai.task.cancelled` audit correlated to the cancelled diagnosis, and
+    /// streams nothing back to the control end.
+    #[tokio::test]
+    async fn diagnose_cancel_records_audit_and_streams_nothing() {
+        use crate::diagnose::redaction::RegexRedactor;
+        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        let audit = CancelAuditSink::default();
+        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(RegexRedactor::new()),
+            Arc::new(StubDiagnoseModel),
+            Arc::new(audit.clone()),
+        )));
+
+        handle_diagnose_cancel_inbound(&ctx, &diagnose_cancel_model())
+            .await
+            .unwrap();
+
+        // No frame streamed back — handoff is UI-side.
+        assert!(rx.try_recv().is_err(), "cancel must not stream any frame");
+        let events = audit.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "ai.task.cancelled");
+        assert_eq!(events[0].request_id, "req-diag-1");
+    }
+
+    /// Handoff while the AI agent feature is disabled is a no-op: no audit, no
+    /// frame.
+    #[tokio::test]
+    async fn diagnose_cancel_disabled_is_noop() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        // ai_agent_enabled defaults to off; no orchestrator injected.
+        handle_diagnose_cancel_inbound(&ctx, &diagnose_cancel_model())
+            .await
+            .unwrap();
+        assert!(rx.try_recv().is_err());
     }
 }

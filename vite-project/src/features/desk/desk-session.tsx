@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, Stethoscope } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -18,6 +18,8 @@ import { Input } from "@/components/ui/input"
 import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
+import { useDeskDiagnose } from "./use-desk-diagnose"
+import { DiagnosePanel } from "./diagnose-panel"
 import { useDeskInput } from "./use-desk-input"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
@@ -90,6 +92,7 @@ export default function DeskSession() {
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
     const [showStats, setShowStats] = useState(false);
+    const [showDiagnose, setShowDiagnose] = useState(false);
 
     const [isControlBarHovered, setIsControlBarHovered] = useState(false);
     const [isControlBarMenuOpen, setIsControlBarMenuOpen] = useState(false);
@@ -146,6 +149,14 @@ export default function DeskSession() {
         deskId: deskId || null,
         lastMessage,
         sendMessage
+    });
+
+    // AI diagnose stream: sends `Diagnose` and aggregates `DiagnoseEvent`
+    // frames off the same signaling channel.
+    const diagnose = useDeskDiagnose({
+        deskId: deskId || null,
+        lastMessage,
+        sendMessage,
     });
 
     // The daemon keeps the WebRTC PC alive across worker
@@ -1094,6 +1105,16 @@ export default function DeskSession() {
                             </div>
                         )}
 
+                        {showDiagnose && (
+                            <DiagnosePanel
+                                state={diagnose.state}
+                                onStart={diagnose.start}
+                                onHandoff={diagnose.handoff}
+                                onReset={diagnose.reset}
+                                onClose={() => setShowDiagnose(false)}
+                            />
+                        )}
+
                         {transferStatus !== 'idle' && transferStatus !== 'error' && (
                             <div className="absolute top-16 right-4 z-[60] bg-black/80 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md border border-white/10 flex items-center gap-2 animate-in fade-in slide-in-from-top-4">
                                 <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
@@ -1254,6 +1275,21 @@ export default function DeskSession() {
                                         </TooltipTrigger>
                                         <TooltipContent>
                                             <p>{showStats ? t('pages.desk.hideStats', 'Hide Network Stats') : t('pages.desk.showStats', 'Show Network Stats')}</p>
+                                        </TooltipContent>
+                                    </Tooltip>
+
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                className={`controlButton ${showDiagnose ? "bg-white/20 text-blue-400" : ""}`}
+                                                onClick={() => setShowDiagnose(!showDiagnose)}
+                                            >
+                                                <Stethoscope />
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                            <p>{showDiagnose ? t('pages.desk.diagnose.hidePanel', 'Hide AI Diagnose') : t('pages.desk.diagnose.showPanel', 'AI Diagnose')}</p>
                                         </TooltipContent>
                                     </Tooltip>
 

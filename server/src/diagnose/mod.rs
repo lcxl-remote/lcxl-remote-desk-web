@@ -158,6 +158,20 @@ impl DiagnoseOrchestrator {
             }
         }
     }
+
+    /// Record that the operator handed a diagnosis off to a human ("转人工").
+    /// Handoff is a UI-side action with no orchestrator state-machine branch;
+    /// this only emits the `ai.task.cancelled` audit so the handoff is
+    /// auditable. `request_id` correlates the cancelled diagnosis.
+    pub async fn audit_cancellation(&self, request_id: &str) {
+        self.audit
+            .record(AuditEvent::task_cancelled(
+                new_event_id(),
+                now_rfc3339(),
+                request_id,
+            ))
+            .await;
+    }
 }
 
 /// Fresh audit event identifier.
@@ -491,5 +505,24 @@ mod tests {
         let final_diag = events.last().unwrap().final_result.as_ref().unwrap();
         assert_eq!(final_diag.confidence, Confidence::Low);
         assert!(!final_diag.missing_info.is_empty());
+    }
+
+    /// Handoff to a human records a single `ai.task.cancelled` audit correlated
+    /// to the cancelled diagnosis, and streams no diagnose frames.
+    #[tokio::test]
+    async fn audit_cancellation_records_task_cancelled() {
+        let audit = RecordingAuditSink::default();
+        let orch = DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(RegexRedactor::new()),
+            Arc::new(StubDiagnoseModel),
+            Arc::new(audit.clone()),
+        );
+        orch.audit_cancellation("req_handoff").await;
+
+        let audited = audit.events.lock().unwrap();
+        assert_eq!(audited.len(), 1);
+        assert_eq!(audited[0].event_type, "ai.task.cancelled");
+        assert_eq!(audited[0].request_id, "req_handoff");
     }
 }

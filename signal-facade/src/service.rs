@@ -663,11 +663,13 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // peer; the daemon does the trusted-field stamping + routing.
             // Diagnose (control end → host) and DiagnoseEvent (host →
             // control end, streamed) are the orchestrator-layer pair,
-            // relayed the same way.
+            // relayed the same way. DiagnoseCancel (control end → host) is
+            // the handoff notification, relayed the same way.
             | SignalingType::AgentRequest
             | SignalingType::AgentResponse
             | SignalingType::Diagnose
-            | SignalingType::DiagnoseEvent => {
+            | SignalingType::DiagnoseEvent
+            | SignalingType::DiagnoseCancel => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
             }

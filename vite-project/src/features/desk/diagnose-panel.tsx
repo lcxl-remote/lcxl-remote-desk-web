@@ -1,0 +1,382 @@
+import { useState } from "react"
+import { useTranslation } from "react-i18next"
+import { Loader2, Stethoscope, X, UserCog, AlertCircle, Terminal as TerminalIcon } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
+import type {
+    Confidence,
+    DiagnoseState,
+    DiagnoseStartOptions,
+    RiskLevel,
+} from "./use-desk-diagnose"
+
+type DiagnosePanelProps = {
+    state: DiagnoseState
+    onStart: (question: string, options: DiagnoseStartOptions) => void
+    onHandoff: () => void
+    onReset: () => void
+    onClose: () => void
+}
+
+/** Map the backend confidence to a badge colour. */
+function confidenceClass(confidence: Confidence): string {
+    switch (confidence) {
+        case "high":
+            return "bg-green-500/20 text-green-300 border-green-500/40"
+        case "medium":
+            return "bg-yellow-500/20 text-yellow-300 border-yellow-500/40"
+        default:
+            return "bg-gray-500/20 text-gray-300 border-gray-500/40"
+    }
+}
+
+/** Map a suggested-command risk level to a badge colour. */
+function riskClass(risk: RiskLevel): string {
+    switch (risk) {
+        case "low":
+            return "bg-green-500/20 text-green-300 border-green-500/40"
+        case "medium":
+            return "bg-yellow-500/20 text-yellow-300 border-yellow-500/40"
+        case "high":
+            return "bg-orange-500/20 text-orange-300 border-orange-500/40"
+        default:
+            return "bg-red-500/20 text-red-300 border-red-500/40"
+    }
+}
+
+export function DiagnosePanel({
+    state,
+    onStart,
+    onHandoff,
+    onReset,
+    onClose,
+}: DiagnosePanelProps) {
+    const { t } = useTranslation()
+    const [question, setQuestion] = useState("")
+    const [includeScreen, setIncludeScreen] = useState(false)
+
+    const presets: string[] = [
+        t("pages.desk.diagnose.presetCpu", "Why is CPU usage so high?"),
+        t("pages.desk.diagnose.presetPort", "Which process is holding the port I need?"),
+        t("pages.desk.diagnose.presetContainer", "Why does my container fail to start?"),
+    ]
+
+    const submit = (q: string) => {
+        const trimmed = q.trim()
+        if (!trimmed) return
+        onStart(trimmed, { includeScreen })
+    }
+
+    // The lifecycle status name is a backend-provided phase string; map the
+    // known ones to localized labels, falling back to the raw value.
+    const statusLabel = (phase: string | null): string => {
+        switch (phase) {
+            case "collecting":
+                return t("pages.desk.diagnose.statusCollecting", "Collecting evidence...")
+            case "redacting":
+                return t("pages.desk.diagnose.statusRedacting", "Redacting sensitive data...")
+            case "modeling":
+                return t("pages.desk.diagnose.statusModeling", "Analyzing with the model...")
+            default:
+                return phase ?? t("pages.desk.diagnose.statusRunning", "Working...")
+        }
+    }
+
+    const result = state.result
+
+    return (
+        <div className="absolute top-4 right-4 z-50 flex w-[380px] max-w-[90vw] max-h-[85vh] flex-col rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-white/15 px-4 py-3">
+                <div className="flex items-center gap-2 text-sm font-bold text-white/90">
+                    <Stethoscope className="h-4 w-4" />
+                    {t("pages.desk.diagnose.title", "AI Diagnose")}
+                </div>
+                <button
+                    onClick={onClose}
+                    className="text-gray-400 transition-colors hover:text-white"
+                    aria-label={t("pages.desk.diagnose.close", "Close")}
+                >
+                    <X className="h-4 w-4" />
+                </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-3 text-sm">
+                {/* Question form (idle) */}
+                {state.phase === "idle" && (
+                    <div className="flex flex-col gap-3">
+                        <label className="text-xs text-gray-400">
+                            {t("pages.desk.diagnose.questionLabel", "Describe the problem")}
+                        </label>
+                        <textarea
+                            value={question}
+                            onChange={(e) => setQuestion(e.target.value)}
+                            rows={3}
+                            className="w-full resize-none rounded-md border border-white/15 bg-white/5 p-2 text-sm text-white outline-none focus:border-white/40"
+                            placeholder={t(
+                                "pages.desk.diagnose.questionPlaceholder",
+                                "e.g. The app is slow and unresponsive",
+                            )}
+                        />
+
+                        <div className="flex flex-col gap-1">
+                            <span className="text-xs text-gray-400">
+                                {t("pages.desk.diagnose.presets", "Common questions")}
+                            </span>
+                            <div className="flex flex-col gap-1">
+                                {presets.map((p) => (
+                                    <button
+                                        key={p}
+                                        onClick={() => setQuestion(p)}
+                                        className="rounded-md border border-white/10 bg-white/5 px-2 py-1 text-left text-xs text-white/80 transition-colors hover:bg-white/10"
+                                    >
+                                        {p}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <label className="flex items-center gap-2 text-xs text-gray-300">
+                            <input
+                                type="checkbox"
+                                checked={includeScreen}
+                                onChange={(e) => setIncludeScreen(e.target.checked)}
+                                className="h-3.5 w-3.5"
+                            />
+                            {t("pages.desk.diagnose.includeScreen", "Include a screenshot")}
+                        </label>
+
+                        <Button
+                            size="sm"
+                            className="w-full"
+                            disabled={!question.trim()}
+                            onClick={() => submit(question)}
+                        >
+                            {t("pages.desk.diagnose.submit", "Start diagnosis")}
+                        </Button>
+                    </div>
+                )}
+
+                {/* Running: status + streaming summary */}
+                {state.phase === "running" && (
+                    <div className="flex flex-col gap-3">
+                        <div className="flex items-center gap-2 text-xs text-blue-300">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            {statusLabel(state.status)}
+                        </div>
+                        {state.partialSummary && (
+                            <p className="whitespace-pre-wrap text-sm text-white/90">
+                                {state.partialSummary}
+                            </p>
+                        )}
+                    </div>
+                )}
+
+                {/* Error */}
+                {state.phase === "error" && (
+                    <div className="flex flex-col gap-3">
+                        <div className="flex items-start gap-2 text-sm text-red-300">
+                            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                            <span>{state.error}</span>
+                        </div>
+                    </div>
+                )}
+
+                {/* Result (done) */}
+                {state.phase === "done" && (
+                    <div className="flex flex-col gap-4">
+                        {result ? (
+                            <>
+                                {/* Summary + confidence */}
+                                <section className="flex flex-col gap-2">
+                                    <div className="flex items-center justify-between">
+                                        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                                            {t("pages.desk.diagnose.summary", "Summary")}
+                                        </h3>
+                                        <Badge
+                                            variant="outline"
+                                            className={confidenceClass(result.confidence)}
+                                        >
+                                            {t(
+                                                `pages.desk.diagnose.confidence.${result.confidence}`,
+                                                result.confidence,
+                                            )}
+                                        </Badge>
+                                    </div>
+                                    <p className="whitespace-pre-wrap text-sm text-white/90">
+                                        {result.summary}
+                                    </p>
+                                </section>
+
+                                {/* Findings / evidence */}
+                                {result.findings.length > 0 && (
+                                    <section className="flex flex-col gap-2">
+                                        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                                            {t("pages.desk.diagnose.findings", "Evidence")}
+                                        </h3>
+                                        {result.findings.map((f, i) => (
+                                            <div
+                                                key={i}
+                                                className="rounded-md border border-white/10 bg-white/5 p-2"
+                                            >
+                                                <div className="text-sm font-medium text-white/90">
+                                                    {f.title}
+                                                </div>
+                                                <p className="mt-1 text-xs text-white/70">
+                                                    {f.explanation}
+                                                </p>
+                                                {f.evidence_refs.length > 0 && (
+                                                    <div className="mt-1 flex flex-wrap gap-1">
+                                                        {f.evidence_refs.map((ref) => (
+                                                            <span
+                                                                key={ref}
+                                                                className="rounded bg-white/10 px-1 py-0.5 font-mono text-[10px] text-white/60"
+                                                            >
+                                                                {ref}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </section>
+                                )}
+
+                                {/* Suggested commands */}
+                                {result.commands.length > 0 && (
+                                    <section className="flex flex-col gap-2">
+                                        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                                            {t(
+                                                "pages.desk.diagnose.commands",
+                                                "Suggested commands",
+                                            )}
+                                        </h3>
+                                        {result.commands.map((c, i) => (
+                                            <div
+                                                key={i}
+                                                className="rounded-md border border-white/10 bg-white/5 p-2"
+                                            >
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="flex items-center gap-1 text-[10px] uppercase text-white/50">
+                                                        <TerminalIcon className="h-3 w-3" />
+                                                        {c.shell}
+                                                    </span>
+                                                    <Badge
+                                                        variant="outline"
+                                                        className={riskClass(c.risk)}
+                                                    >
+                                                        {t(
+                                                            `pages.desk.diagnose.risk.${c.risk}`,
+                                                            c.risk,
+                                                        )}
+                                                    </Badge>
+                                                </div>
+                                                <pre className="mt-1 overflow-x-auto whitespace-pre-wrap break-all rounded bg-black/40 p-1.5 font-mono text-xs text-green-300">
+                                                    {c.command}
+                                                </pre>
+                                                <p className="mt-1 text-xs text-white/60">
+                                                    {c.purpose}
+                                                </p>
+                                            </div>
+                                        ))}
+                                        <p className="text-[10px] text-white/40">
+                                            {t(
+                                                "pages.desk.diagnose.suggestOnly",
+                                                "Suggestions only — nothing is executed.",
+                                            )}
+                                        </p>
+                                    </section>
+                                )}
+
+                                {/* Next steps */}
+                                {result.next_steps.length > 0 && (
+                                    <section className="flex flex-col gap-2">
+                                        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                                            {t("pages.desk.diagnose.nextSteps", "Next steps")}
+                                        </h3>
+                                        <ul className="list-disc pl-5 text-xs text-white/80">
+                                            {result.next_steps.map((s, i) => (
+                                                <li key={i}>{s}</li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {/* Missing info */}
+                                {result.missing_info.length > 0 && (
+                                    <section className="flex flex-col gap-2">
+                                        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                                            {t("pages.desk.diagnose.missingInfo", "Missing info")}
+                                        </h3>
+                                        <ul className="list-disc pl-5 text-xs text-white/60">
+                                            {result.missing_info.map((s, i) => (
+                                                <li key={i}>{s}</li>
+                                            ))}
+                                        </ul>
+                                    </section>
+                                )}
+
+                                {/* Data collected */}
+                                {result.collected.length > 0 && (
+                                    <section className="flex flex-col gap-2">
+                                        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                                            {t("pages.desk.diagnose.collected", "Data collected")}
+                                        </h3>
+                                        <div className="flex flex-wrap gap-1">
+                                            {result.collected.map((cap) => (
+                                                <span
+                                                    key={cap}
+                                                    className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-[10px] text-white/60"
+                                                >
+                                                    {cap}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </section>
+                                )}
+                            </>
+                        ) : (
+                            // Handed off mid-stream with whatever was gathered.
+                            <div className="flex flex-col gap-2">
+                                {state.partialSummary ? (
+                                    <p className="whitespace-pre-wrap text-sm text-white/90">
+                                        {state.partialSummary}
+                                    </p>
+                                ) : (
+                                    <p className="text-sm text-white/60">
+                                        {t(
+                                            "pages.desk.diagnose.handedOff",
+                                            "Handed off to a human operator.",
+                                        )}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+
+            {/* Footer actions */}
+            <div className="flex items-center gap-2 border-t border-white/15 px-4 py-3">
+                {(state.phase === "running" || state.phase === "done") && (
+                    <Button
+                        size="sm"
+                        variant="secondary"
+                        className="flex-1"
+                        onClick={onHandoff}
+                    >
+                        <UserCog className="mr-1 h-3.5 w-3.5" />
+                        {t("pages.desk.diagnose.handoff", "Hand off to human")}
+                    </Button>
+                )}
+                {(state.phase === "done" || state.phase === "error") && (
+                    <Button size="sm" variant="ghost" className="flex-1" onClick={onReset}>
+                        {t("pages.desk.diagnose.newDiagnosis", "New diagnosis")}
+                    </Button>
+                )}
+            </div>
+        </div>
+    )
+}
+
+export default DiagnosePanel
