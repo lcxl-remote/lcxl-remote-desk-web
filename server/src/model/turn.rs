@@ -73,7 +73,10 @@ impl turn::auth::AuthHandler for TurnAuthHandler {
                 secret, username, realm, now_secs,
             ) {
                 Some(key) => {
-                    log::info!("auth_handle REST credential success for username={}", username);
+                    log::info!(
+                        "auth_handle REST credential success for username={}",
+                        username
+                    );
                     Ok(key)
                 }
                 None => {
