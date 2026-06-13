@@ -1581,11 +1581,25 @@ async fn handle_diagnose_inbound(
         }
     };
 
-    let sink = OutboundDiagnoseSink {
-        outbound_tx: ctx.outbound_tx.clone(),
-        to_connection_id: model.from_connection_id.clone(),
-    };
-    orchestrator.run(&model.request_id, request, &sink).await;
+    // Run the diagnosis on a detached task so this inbound handler returns
+    // immediately. The proxy's WS select loop awaits the inbound handler in one
+    // arm and writes outbound frames in another; if we awaited `run` here, the
+    // outbound arm would not be polled until the (long) model call finished, so
+    // every status / partial / final frame would buffer and flush in a burst at
+    // the end — defeating streaming and the first-token metric. Spawning lets the
+    // loop forward each frame as the orchestrator emits it. The task is `!Send`
+    // (the model uses awc), so it runs on actix's single-threaded runtime via
+    // `rt::spawn` (`spawn_local`) — the same arbiter the proxy loop runs on.
+    let outbound_tx = ctx.outbound_tx.clone();
+    let to_connection_id = model.from_connection_id.clone();
+    let request_id = model.request_id.clone();
+    actix_web::rt::spawn(async move {
+        let sink = OutboundDiagnoseSink {
+            outbound_tx,
+            to_connection_id,
+        };
+        orchestrator.run(&request_id, request, &sink).await;
+    });
     Ok(())
 }
 
@@ -3771,7 +3785,12 @@ mod tests {
     /// streams a sequence of frames ending in exactly one `Final`, and **every**
     /// frame is notification-style (`response_state = None`) so the control end
     /// is not collapsed to a single response by the signaling one-shot callback.
-    #[tokio::test]
+    ///
+    /// `handle_diagnose_inbound` runs the orchestrator on a detached
+    /// `rt::spawn` task (so the proxy loop can forward frames as they stream),
+    /// hence `#[actix_web::test]` for the local-task runtime and a yield loop to
+    /// let the spawned task emit before draining.
+    #[actix_web::test]
     async fn diagnose_with_orchestrator_streams_notification_frames() {
         use crate::diagnose::redaction::RegexRedactor;
         use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
@@ -3794,13 +3813,22 @@ mod tests {
             .await
             .unwrap();
 
+        // The run is detached: yield to the runtime so the spawned task emits its
+        // frames, draining until the terminal frame arrives (bounded so a stuck
+        // task fails the test rather than hanging it).
         let mut frames = Vec::new();
-        while let Ok(text) = rx.try_recv() {
-            let m: SignalingModel = serde_json::from_str(&text).expect("valid JSON frame");
-            let ev = m
-                .get_data::<DiagnoseEvent>()
-                .expect("DiagnoseEvent payload");
-            frames.push((m, ev));
+        for _ in 0..1000 {
+            while let Ok(text) = rx.try_recv() {
+                let m: SignalingModel = serde_json::from_str(&text).expect("valid JSON frame");
+                let ev = m
+                    .get_data::<DiagnoseEvent>()
+                    .expect("DiagnoseEvent payload");
+                frames.push((m, ev));
+            }
+            if frames.last().map(|(_, e)| e.is_terminal()).unwrap_or(false) {
+                break;
+            }
+            tokio::task::yield_now().await;
         }
 
         // A multi-frame stream arrived (status + partials + final).

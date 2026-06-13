@@ -992,6 +992,68 @@ mod tests {
         }
     }
 
+    /// Regression: the AI model settings endpoint
+    /// (`/api/desk/settings/ai-model` GET/POST) must be registered by
+    /// `configure_api_routes` at its real mounted path — the unit tests in
+    /// `controller::settings` mount the bare service at `/settings/ai-model`,
+    /// so only this smoke test proves the `/api` → `/desk` → `/settings` scope
+    /// nesting (and thus the daemon's 8082 surface) actually exposes it.
+    #[actix_web::test]
+    async fn configure_api_routes_registers_ai_model_settings_endpoint() {
+        use crate::model::settings::Settings;
+        use actix_web::test;
+        use desk_signal::model::SharedConnectionMap;
+
+        let settings = Arc::new(crate::model::settings::SharedSettings::from(
+            Settings::default(),
+        ));
+        let route_config = ApiRouteConfig {
+            settings: web::Data::from(settings),
+            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
+            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
+            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
+            tauri_is_admin: None,
+        };
+
+        let secret_key = Key::generate();
+        let app = test::init_service(
+            App::new()
+                .wrap(
+                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
+                        .cookie_secure(false)
+                        .build(),
+                )
+                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
+        )
+        .await;
+
+        let probes = [
+            ("GET", "/api/desk/settings/ai-model"),
+            ("POST", "/api/desk/settings/ai-model"),
+        ];
+        for (method, uri) in probes {
+            let req = match method {
+                "GET" => test::TestRequest::get().uri(uri).to_request(),
+                "POST" => test::TestRequest::post().uri(uri).to_request(),
+                _ => unreachable!(),
+            };
+            match test::try_call_service(&app, req).await {
+                Ok(resp) => assert_ne!(
+                    resp.status(),
+                    actix_web::http::StatusCode::NOT_FOUND,
+                    "{method} {uri} returned 404 — the AI model settings route must \
+                     be registered by configure_api_routes at the /api/desk/settings \
+                     scope so the daemon's 8082 port exposes it",
+                ),
+                Err(_) => {
+                    // A middleware-level rejection (401 from
+                    // `reject_anonymous_users`) means the route matched — the
+                    // success criterion, same as the sibling smoke tests.
+                }
+            }
+        }
+    }
+
     /// Regression: the five device-code admin endpoints
     /// (`/api/desk/device_codes` CRUD + `/api/desk/device_codes/batch_delete`)
     /// must be registered by `configure_api_routes` so the daemon's 8082
