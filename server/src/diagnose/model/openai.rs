@@ -58,6 +58,12 @@ fn build_body(request: &ChatRequest) -> Value {
         "messages": messages,
         "stream": true,
         "stream_options": {"include_usage": true},
+        // Force JSON mode: the gateway constrains decoding so the model can only
+        // emit syntactically valid JSON (the diagnosis schema is described in the
+        // system prompt). Without this, weaker models return prose / fenced
+        // markdown and the parser degrades to a low-confidence fallback. The
+        // system prompt mentions "JSON", which OpenAI's JSON mode requires.
+        "response_format": {"type": "json_object"},
     })
 }
 
@@ -264,6 +270,8 @@ data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
         let body = build_body(&req);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
+        // JSON mode is requested so the gateway constrains output to valid JSON.
+        assert_eq!(body["response_format"]["type"], "json_object");
         // System message: plain string content.
         assert_eq!(body["messages"][0]["content"], "sys");
         // User message: text + image parts.
