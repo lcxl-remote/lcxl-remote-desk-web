@@ -1465,6 +1465,24 @@ async fn handle_agent_request_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
+    // Single on/off gate. The AI read collectors expose host data beyond the
+    // remote view, so the feature is disabled by default; a control end that
+    // sends `AgentRequest` while it is off gets a structured
+    // `UnsupportedCapability` rather than any collection.
+    if !ctx.settings.read().await.system.ai_agent_enabled() {
+        emit_agent_error(
+            ctx,
+            model,
+            agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                "AI agent capabilities are disabled",
+                false,
+                true,
+            ),
+        );
+        return Ok(());
+    }
+
     let Some(raw) = model.get_raw_data().as_ref() else {
         emit_agent_error(
             ctx,
@@ -3357,6 +3375,7 @@ mod tests {
     #[tokio::test]
     async fn agent_request_unknown_kind_emits_unsupported_outcome() {
         let (ctx, mut rx) = make_ctx_with_rx();
+        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -3380,6 +3399,7 @@ mod tests {
     #[tokio::test]
     async fn agent_request_exec_is_unsupported_until_m2() {
         let (ctx, mut rx) = make_ctx_with_rx();
+        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -3415,6 +3435,7 @@ mod tests {
             AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
         };
         let ctx = make_ctx();
+        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
         let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
         ctx.worker_mgr.install_active_for_test(ipc_tx).await;
 
@@ -3448,6 +3469,39 @@ mod tests {
                 assert_eq!(p.envelope.audit.reason.as_deref(), Some("diagnose cpu"));
             }
             other => panic!("unexpected IPC: {other:?}"),
+        }
+    }
+
+    /// With the feature off (the default), a valid read is gated before any
+    /// parsing / collection: the handler emits
+    /// `AgentResponse(AgentOutcome::Err(UnsupportedCapability))` and forwards
+    /// nothing.
+    #[tokio::test]
+    async fn agent_request_disabled_by_default_emits_unsupported() {
+        use desk_agent_protocol::{
+            AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
+        };
+        let (ctx, mut rx) = make_ctx_with_rx();
+        // ai_agent_enabled defaults to None / false; do not enable it.
+        let req = AgentRequestData {
+            operation: AgentOperation {
+                risk_hint: None,
+                input: OperationInput::ReadContext(ReadContextInput {
+                    kind: ContextKind::ProcessList(ProcessListParams::default()),
+                }),
+            },
+            reason: None,
+        };
+        let raw = serde_json::to_value(&req).unwrap();
+        handle_agent_request_inbound(&ctx, &agent_request_model(raw))
+            .await
+            .unwrap();
+        match read_outcome(&mut rx) {
+            AgentOutcome::Err(e) => {
+                assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability);
+                assert!(e.message.contains("disabled"));
+            }
+            other => panic!("unexpected outcome: {other:?}"),
         }
     }
 }
