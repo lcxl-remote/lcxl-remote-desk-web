@@ -17,6 +17,7 @@
 //! redacted before it reaches the model trait.
 
 pub mod collector;
+pub mod model;
 pub mod redaction;
 pub mod selection;
 
@@ -52,10 +53,16 @@ pub trait ContextCollector: Send + Sync {
 /// Produces a diagnosis from the question + already-redacted evidence. Streaming
 /// is surfaced through `on_partial` (each call becomes a `Partial` frame). The
 /// real model adapter replaces [`StubDiagnoseModel`] in a later PR.
-#[async_trait]
+///
+/// `?Send`: the OpenAI adapter uses `awc`, whose client/futures are `!Send`
+/// (actix runs single-threaded per worker). The diagnose path is driven inline
+/// on the signaling proxy's actix runtime, so a non-`Send` future is fine; the
+/// trait object stays `Send + Sync` (only the returned future is `!Send`).
+#[async_trait(?Send)]
 pub trait DiagnoseModel: Send + Sync {
     async fn diagnose(
         &self,
+        request_id: &str,
         question: &str,
         evidence: &EvidenceSnapshot,
         on_partial: &(dyn Fn(String) + Send + Sync),
@@ -134,7 +141,7 @@ impl DiagnoseOrchestrator {
 
         match self
             .model
-            .diagnose(&request.question, &snapshot, &on_partial)
+            .diagnose(request_id, &request.question, &snapshot, &on_partial)
             .await
         {
             Ok(mut diagnosis) => {
@@ -182,10 +189,11 @@ impl ContextCollector for NoopContextCollector {
 #[derive(Default)]
 pub struct StubDiagnoseModel;
 
-#[async_trait]
+#[async_trait(?Send)]
 impl DiagnoseModel for StubDiagnoseModel {
     async fn diagnose(
         &self,
+        _request_id: &str,
         _question: &str,
         _evidence: &EvidenceSnapshot,
         on_partial: &(dyn Fn(String) + Send + Sync),
@@ -207,10 +215,11 @@ impl DiagnoseModel for StubDiagnoseModel {
 pub struct FailingDiagnoseModel;
 
 #[cfg(test)]
-#[async_trait]
+#[async_trait(?Send)]
 impl DiagnoseModel for FailingDiagnoseModel {
     async fn diagnose(
         &self,
+        _request_id: &str,
         _question: &str,
         _evidence: &EvidenceSnapshot,
         _on_partial: &(dyn Fn(String) + Send + Sync),
@@ -291,10 +300,11 @@ mod tests {
         fragments: Vec<String>,
     }
 
-    #[async_trait]
+    #[async_trait(?Send)]
     impl DiagnoseModel for StreamingModel {
         async fn diagnose(
             &self,
+            _request_id: &str,
             _question: &str,
             _evidence: &EvidenceSnapshot,
             on_partial: &(dyn Fn(String) + Send + Sync),

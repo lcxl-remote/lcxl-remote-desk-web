@@ -2,9 +2,11 @@ use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouterContext};
 use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
+use crate::diagnose::DiagnoseOrchestrator;
 use crate::diagnose::collector::AgentContextCollector;
+use crate::diagnose::model::ModelBackedDiagnoseModel;
+use crate::diagnose::model::openai::OpenAiCompatAdapter;
 use crate::diagnose::redaction::RegexRedactor;
-use crate::diagnose::{DiagnoseOrchestrator, StubDiagnoseModel};
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use crate::worker::agent::LocalDeviceAgent;
@@ -43,9 +45,10 @@ pub async fn run_signaling_proxy(
     // The diagnose orchestrator runs daemon-side wherever an in-process worker
     // can collect locally (Default / DeskServer). ServiceDaemon leaves it
     // `None`, so `Diagnose` replies feature-unavailable until the cross-process
-    // collection path lands. Evidence is gathered through the in-process agent
-    // and scrubbed by the regex redactor; the model is a stub until the adapter
-    // PR.
+    // collection path lands. Evidence is gathered through the in-process agent,
+    // scrubbed by the regex redactor, then sent to the configured model via the
+    // OpenAI-compatible adapter (which degrades to a not-configured diagnosis
+    // when no model is set).
     let diagnose_orchestrator = match settings.read().await.args.startup_mode {
         StartupMode::ServiceDaemon => None,
         _ => {
@@ -58,10 +61,15 @@ pub async fn run_signaling_proxy(
                 agent,
                 settings.clone().into_inner(),
             ));
+            let model = Arc::new(ModelBackedDiagnoseModel::new(
+                Arc::new(OpenAiCompatAdapter::new()),
+                settings.clone().into_inner(),
+                audit.clone(),
+            ));
             Some(Arc::new(DiagnoseOrchestrator::new(
                 collector,
                 Arc::new(RegexRedactor::new()),
-                Arc::new(StubDiagnoseModel),
+                model,
                 audit,
             )))
         }
