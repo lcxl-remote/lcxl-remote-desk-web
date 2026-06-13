@@ -1620,7 +1620,10 @@ impl WorkerSession {
                                     let agent_settings = shared_settings.clone();
                                     tokio::spawn(async move {
                                         let agent =
-                                            LocalDeviceAgent::with_settings(agent_settings);
+                                            LocalDeviceAgent::with_settings(agent_settings)
+                                                .with_audit(std::sync::Arc::new(
+                                                    crate::worker::agent::audit_sink::LogAuditSink,
+                                                ));
                                         let outcome = match agent.invoke(payload.envelope).await {
                                             Ok(output) => AgentOutcome::Ok(output),
                                             Err(error) => AgentOutcome::Err(error),

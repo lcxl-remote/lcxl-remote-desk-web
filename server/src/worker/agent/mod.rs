@@ -12,10 +12,13 @@
 //! platform) returns a structured `AgentError` so the path degrades gracefully
 //! instead of failing the transport.
 
+pub mod audit_sink;
 pub mod collectors;
 
 use std::sync::Arc;
+use std::time::Instant;
 
+use desk_agent_protocol::audit::{AuditEvent, AuditSink, NoopAuditSink};
 use desk_agent_protocol::{
     AgentEnvelope, AgentError, AgentErrorKind, ContextKind, DeviceAgent, OperationInput,
     OperationOutput, ReadContextOutput,
@@ -24,13 +27,24 @@ use desk_agent_protocol::{
 use crate::model::settings::SharedSettings;
 
 /// User-session capability surface. Most collectors construct their own probes
-/// per call, so the only state is an optional handle to the live session
-/// settings — required by `screen.capture.current` to resolve the capture
-/// backend and target display. Built without settings elsewhere (tests, hosts
-/// with no session), where screen capture degrades to `UnsupportedCapability`.
-#[derive(Default)]
+/// per call, so the state is an optional handle to the live session settings —
+/// required by `screen.capture.current` to resolve the capture backend and
+/// target display — plus the audit sink that every call's lifecycle is emitted
+/// to. Built without settings elsewhere (tests, hosts with no session), where
+/// screen capture degrades to `UnsupportedCapability`; built without an audit
+/// sink (defaults to no-op) where auditing is not wired.
 pub struct LocalDeviceAgent {
     settings: Option<Arc<SharedSettings>>,
+    audit: Arc<dyn AuditSink>,
+}
+
+impl Default for LocalDeviceAgent {
+    fn default() -> Self {
+        Self {
+            settings: None,
+            audit: Arc::new(NoopAuditSink),
+        }
+    }
 }
 
 impl LocalDeviceAgent {
@@ -44,22 +58,92 @@ impl LocalDeviceAgent {
     pub fn with_settings(settings: Arc<SharedSettings>) -> Self {
         Self {
             settings: Some(settings),
+            audit: Arc::new(NoopAuditSink),
         }
+    }
+
+    /// Attach the audit sink that the call lifecycle is recorded to.
+    pub fn with_audit(mut self, audit: Arc<dyn AuditSink>) -> Self {
+        self.audit = audit;
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl DeviceAgent for LocalDeviceAgent {
     async fn invoke(&self, envelope: AgentEnvelope) -> Result<OperationOutput, AgentError> {
-        match envelope.operation.input {
+        // Emit the full audit lifecycle around the call. The worker is the one
+        // point that holds both the server-stamped envelope and the outcome, so
+        // task.created / context.collected / task.completed|failed are all
+        // recorded here with no cross-process correlation.
+        let started = Instant::now();
+        self.audit
+            .record(AuditEvent::task_created(
+                new_event_id(),
+                now_rfc3339(),
+                &envelope,
+            ))
+            .await;
+
+        // `exec` is reserved until M2; the daemon already rejects it, but
+        // defend in depth here too. The input is cloned so the envelope stays
+        // available for the post-dispatch audit events.
+        let result = match envelope.operation.input.clone() {
             OperationInput::ReadContext(rc) => {
                 dispatch_read_context(rc.kind, self.settings.as_ref()).await
             }
-            // `exec` is reserved until M2; the daemon already rejects it,
-            // but defend in depth here too.
             OperationInput::Exec(_) => Err(unsupported("exec is not available until M2")),
+        };
+
+        let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        match &result {
+            Ok(output) => {
+                // `context.collected` is a read concept; only read outputs emit
+                // it (exec, when it lands, will not).
+                if matches!(output, OperationOutput::ReadContext(_)) {
+                    self.audit
+                        .record(AuditEvent::context_collected(
+                            new_event_id(),
+                            now_rfc3339(),
+                            &envelope,
+                            output,
+                            duration_ms,
+                        ))
+                        .await;
+                }
+                self.audit
+                    .record(AuditEvent::task_completed(
+                        new_event_id(),
+                        now_rfc3339(),
+                        &envelope,
+                        duration_ms,
+                    ))
+                    .await;
+            }
+            Err(error) => {
+                self.audit
+                    .record(AuditEvent::task_failed(
+                        new_event_id(),
+                        now_rfc3339(),
+                        &envelope,
+                        error,
+                        duration_ms,
+                    ))
+                    .await;
+            }
         }
+        result
     }
+}
+
+/// Fresh audit event identifier.
+fn new_event_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Current time as an RFC3339 string (the audit event timestamp format).
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 /// Dispatch a single read kind to its collector. `settings` is only consumed
@@ -254,5 +338,82 @@ mod tests {
         }));
         let err = agent.invoke(env).await.expect_err("exec must reject");
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+    }
+
+    /// Records every event for assertions in audit-lifecycle tests.
+    #[derive(Clone, Default)]
+    struct RecordingAuditSink {
+        events: Arc<std::sync::Mutex<Vec<AuditEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuditSink for RecordingAuditSink {
+        async fn record(&self, event: AuditEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    impl RecordingAuditSink {
+        fn event_types(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|e| e.event_type.clone())
+                .collect()
+        }
+    }
+
+    /// A successful read emits the full lifecycle: task.created →
+    /// context.collected (with the derived capability) → task.completed.
+    #[tokio::test]
+    async fn audit_lifecycle_on_success() {
+        let sink = RecordingAuditSink::default();
+        let agent = LocalDeviceAgent::new().with_audit(Arc::new(sink.clone()));
+        let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::SystemInfo(SystemInfoParams::default()),
+        }));
+        agent.invoke(env).await.expect("system.info must succeed");
+
+        assert_eq!(
+            sink.event_types(),
+            vec![
+                "ai.task.created".to_string(),
+                "ai.context.collected".to_string(),
+                "ai.task.completed".to_string(),
+            ],
+        );
+        let events = sink.events.lock().unwrap();
+        let collected = &events[1];
+        assert_eq!(collected.capability.as_deref(), Some("system.info"));
+        assert_eq!(collected.result, "ok");
+        assert!(collected.duration_ms.is_some());
+        assert_eq!(collected.request_id, "req-1");
+    }
+
+    /// A failed read (screen capture without a session context) emits
+    /// task.created → task.failed and no context.collected.
+    #[tokio::test]
+    async fn audit_lifecycle_on_failure() {
+        let sink = RecordingAuditSink::default();
+        let agent = LocalDeviceAgent::new().with_audit(Arc::new(sink.clone()));
+        let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
+            kind: ContextKind::ScreenCaptureCurrent(ScreenCaptureParams::default()),
+        }));
+        agent
+            .invoke(env)
+            .await
+            .expect_err("must fail without settings");
+
+        assert_eq!(
+            sink.event_types(),
+            vec!["ai.task.created".to_string(), "ai.task.failed".to_string()],
+        );
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events[1].result, "error");
+        assert_eq!(
+            events[1].output_summary.as_deref(),
+            Some("UnsupportedCapability"),
+        );
     }
 }
