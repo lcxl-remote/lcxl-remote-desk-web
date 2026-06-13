@@ -2,11 +2,16 @@ use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouterContext};
 use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
-use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
+use crate::diagnose::collector::AgentContextCollector;
+use crate::diagnose::redaction::RegexRedactor;
+use crate::diagnose::{DiagnoseOrchestrator, StubDiagnoseModel};
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
+use crate::worker::agent::LocalDeviceAgent;
+use crate::worker::agent::audit_sink::LogAuditSink;
 use actix_web::web;
 use awc::{Client, Connector};
+use desk_agent_protocol::audit::AuditSink;
 use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
 };
@@ -38,13 +43,28 @@ pub async fn run_signaling_proxy(
     // The diagnose orchestrator runs daemon-side wherever an in-process worker
     // can collect locally (Default / DeskServer). ServiceDaemon leaves it
     // `None`, so `Diagnose` replies feature-unavailable until the cross-process
-    // collection path lands. The model is a stub until the adapter PR.
+    // collection path lands. Evidence is gathered through the in-process agent
+    // and scrubbed by the regex redactor; the model is a stub until the adapter
+    // PR.
     let diagnose_orchestrator = match settings.read().await.args.startup_mode {
         StartupMode::ServiceDaemon => None,
-        _ => Some(Arc::new(DiagnoseOrchestrator::new(
-            Arc::new(NoopContextCollector),
-            Arc::new(StubDiagnoseModel),
-        ))),
+        _ => {
+            let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
+            let agent = Arc::new(
+                LocalDeviceAgent::with_settings(settings.clone().into_inner())
+                    .with_audit(audit.clone()),
+            );
+            let collector = Arc::new(AgentContextCollector::new(
+                agent,
+                settings.clone().into_inner(),
+            ));
+            Some(Arc::new(DiagnoseOrchestrator::new(
+                collector,
+                Arc::new(RegexRedactor::new()),
+                Arc::new(StubDiagnoseModel),
+                audit,
+            )))
+        }
     };
 
     // The daemon constructs `pc_registry` once in `daemon::mod` and shares

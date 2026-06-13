@@ -3744,12 +3744,16 @@ mod tests {
     /// is not collapsed to a single response by the signaling one-shot callback.
     #[tokio::test]
     async fn diagnose_with_orchestrator_streams_notification_frames() {
+        use crate::diagnose::redaction::RegexRedactor;
         use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
+        use desk_agent_protocol::audit::NoopAuditSink;
         let (mut ctx, mut rx) = make_ctx_with_rx();
         ctx.settings.write().await.system.ai_agent_enabled = Some(true);
         ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
             Arc::new(NoopContextCollector),
+            Arc::new(RegexRedactor::new()),
             Arc::new(StubDiagnoseModel),
+            Arc::new(NoopAuditSink),
         )));
         let raw = serde_json::to_value(DiagnoseRequestData {
             question: "why is cpu high?".into(),
