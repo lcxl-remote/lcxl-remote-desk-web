@@ -19,13 +19,23 @@ use desk_capture_engine::model::image_capture::{
 };
 use desk_signal_facade::model::desk_settings::DeskSettings;
 
+/// Maximum encoded image size returned to the daemon. The daemon ↔ worker
+/// event pipe frames at 16 MiB (`desk_ipc_protocol` transport); a frame over
+/// that limit fails to send and tears down the event writer, breaking all
+/// subsequent worker replies. So an oversized capture is reported as
+/// `OutputLimitExceeded` rather than shipped — the cap sits well under the
+/// frame limit to leave room for the rest of the response envelope. A
+/// downscaling / re-quality path that keeps a usable image can replace the
+/// hard error later.
+const MAX_IMAGE_BYTES: usize = 12 * 1024 * 1024;
+
 /// Capture one frame of the current display and return it as PNG.
 pub fn collect(
     params: &ScreenCaptureParams,
     desk_settings: &DeskSettings,
 ) -> Result<ScreenCaptureOutput, AgentError> {
-    // M1a captures the configured / current output; a per-display override is
-    // not wired yet.
+    // The configured / current output is captured; a per-display override is
+    // not wired.
     let _ = &params.display;
 
     let mut capture = create_image_capture(desk_settings).map_err(capture_err)?;
@@ -39,15 +49,32 @@ pub fn collect(
     let width = frame.get_width();
     let height = frame.get_height();
     let png = encode_png(frame.as_ref())?;
+    enforce_size_limit(png.len(), MAX_IMAGE_BYTES)?;
 
     Ok(ScreenCaptureOutput {
         format: ImageFormat::Png,
         width,
         height,
         image: png,
-        // No downscaling / size-limiting in M1a; the frame is returned whole.
+        // The frame is returned whole; if it had exceeded the limit the call
+        // would have errored above rather than shipping a partial image.
         truncated: false,
     })
+}
+
+/// Reject an encoded image that would overflow the IPC frame. A truncated image
+/// is corrupt and useless, so the limit is a hard `OutputLimitExceeded` rather
+/// than a `truncated` flag.
+fn enforce_size_limit(len: usize, max: usize) -> Result<(), AgentError> {
+    if len > max {
+        return Err(AgentError {
+            kind: AgentErrorKind::OutputLimitExceeded,
+            message: format!("captured image is {len} bytes, over the {max} byte transport limit"),
+            retryable: false,
+            safe_for_model: true,
+        });
+    }
+    Ok(())
 }
 
 fn capture_err(err: CaptureError) -> AgentError {
@@ -200,6 +227,16 @@ mod tests {
         };
         let err = encode_png(&frame).expect_err("must reject");
         assert_eq!(err.kind, AgentErrorKind::Internal);
+    }
+
+    #[test]
+    fn size_limit_rejects_oversized_image() {
+        // Under / at the limit pass; over the limit is OutputLimitExceeded.
+        assert!(enforce_size_limit(100, 128).is_ok());
+        assert!(enforce_size_limit(128, 128).is_ok());
+        let err = enforce_size_limit(129, 128).expect_err("must reject");
+        assert_eq!(err.kind, AgentErrorKind::OutputLimitExceeded);
+        assert!(!err.retryable);
     }
 
     #[test]

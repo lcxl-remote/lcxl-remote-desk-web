@@ -84,6 +84,21 @@ fn state_string(state: Option<ContainerSummaryStateEnum>) -> String {
     state.map(|s| s.to_string()).unwrap_or_default()
 }
 
+/// Truncate `s` to at most `max` bytes without splitting a UTF-8 character.
+/// `String::truncate` panics if the index is not on a char boundary, and
+/// inspect JSON can contain non-ASCII (names, labels, mount paths), so back off
+/// to the nearest boundary at or below `max`.
+fn truncate_on_char_boundary(s: &mut String, max: usize) {
+    if s.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+}
+
 pub async fn list(_params: &ContainerListParams) -> Result<ContainerListOutput, AgentError> {
     let docker = connect().await?;
     let options = ListContainersOptionsBuilder::new().all(true).build();
@@ -124,17 +139,17 @@ pub async fn inspect(
         retryable: false,
         safe_for_model: true,
     })?;
-    // Truncate by bytes if the document is oversized; the result is evidence
+    // Truncate by size if the document is oversized; the result is evidence
     // text, not required to stay valid JSON when truncated.
     let truncated = details_json.len() > MAX_INSPECT_BYTES;
     if truncated {
-        details_json.truncate(MAX_INSPECT_BYTES);
+        truncate_on_char_boundary(&mut details_json, MAX_INSPECT_BYTES);
     }
 
     Ok(ContainerInspectOutput {
         container_id: params.container_id.clone(),
         details_json,
-        // Redaction pipeline lands in M1b.
+        // No scrubbing pass yet, so no redaction markers are reported.
         redactions: Vec::new(),
         truncated,
     })
@@ -195,6 +210,30 @@ mod tests {
         );
         assert_eq!(clean_name(Some(vec![])), "");
         assert_eq!(clean_name(None), "");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_never_splits_a_char() {
+        // "é" is 2 bytes (0xC3 0xA9). A byte limit landing inside it must back
+        // off to the boundary before it rather than panic.
+        let mut s = "aaé".to_string(); // bytes: a a C3 A9  (len 4)
+        truncate_on_char_boundary(&mut s, 3); // 3 splits 'é'
+        assert_eq!(s, "aa");
+
+        // Limit on a boundary keeps the whole char.
+        let mut s2 = "aaé".to_string();
+        truncate_on_char_boundary(&mut s2, 4);
+        assert_eq!(s2, "aaé");
+
+        // Under the limit is a no-op.
+        let mut s3 = "abc".to_string();
+        truncate_on_char_boundary(&mut s3, 100);
+        assert_eq!(s3, "abc");
+
+        // A multi-byte string truncated to a non-boundary stays valid UTF-8.
+        let mut s4 = "日本語".to_string(); // 9 bytes, 3-byte chars
+        truncate_on_char_boundary(&mut s4, 4); // mid second char
+        assert_eq!(s4, "日");
     }
 
     #[test]
