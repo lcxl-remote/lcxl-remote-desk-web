@@ -29,6 +29,7 @@ use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
 pub mod audit;
+pub mod diagnose;
 
 // ============================ Envelope ============================
 

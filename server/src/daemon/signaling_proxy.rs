@@ -2,6 +2,7 @@ use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouterContext};
 use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
+use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use actix_web::web;
@@ -34,6 +35,18 @@ pub async fn run_signaling_proxy(
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
 
+    // The diagnose orchestrator runs daemon-side wherever an in-process worker
+    // can collect locally (Default / DeskServer). ServiceDaemon leaves it
+    // `None`, so `Diagnose` replies feature-unavailable until the cross-process
+    // collection path lands. The model is a stub until the adapter PR.
+    let diagnose_orchestrator = match settings.read().await.args.startup_mode {
+        StartupMode::ServiceDaemon => None,
+        _ => Some(Arc::new(DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(StubDiagnoseModel),
+        ))),
+    };
+
     // The daemon constructs `pc_registry` once in `daemon::mod` and shares
     // it with both `WorkerManager` (for the media-pipe receiver) and the
     // signaling proxy (for inbound SDP/ICE handlers). Using a single
@@ -51,6 +64,7 @@ pub async fn run_signaling_proxy(
         // with FEATURE_UNAVAILABLE for every inbound
         // ChangeDisplaySettings.
         virtual_display: virtual_display.clone(),
+        diagnose_orchestrator: diagnose_orchestrator.clone(),
     };
 
     let local_handle = {
@@ -910,6 +924,7 @@ mod tests {
             host_control_hub: Arc::new(HostControlHub::new_local()),
             worker_mgr,
             virtual_display: None,
+            diagnose_orchestrator: None,
         };
         (ctx, outbound_tx)
     }

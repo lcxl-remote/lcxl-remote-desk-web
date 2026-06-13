@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{AgentEnvelope, AgentError, Capability, ExecutionMode, OperationOutput};
+use crate::{AgentEnvelope, AgentError, CallerRef, Capability, ExecutionMode, OperationOutput};
 
 /// The fixed set of audit event types currently emitted. Stored on the wire /
 /// in the audit row as the dotted string form (free-text column), so adding a
@@ -53,6 +53,16 @@ pub enum AuditEventType {
     TaskCompleted,
     /// The call failed (collector error, unsupported capability, ...).
     TaskFailed,
+    /// A model request was issued by the diagnose orchestrator.
+    ModelRequested,
+    /// A model response was received.
+    ModelResponded,
+    /// The redactor failed and the orchestrator refused to send to the model
+    /// (fail-closed).
+    RedactionFailed,
+    /// A diagnose task was cancelled (e.g. the operator handed off to manual
+    /// remote control).
+    TaskCancelled,
 }
 
 impl AuditEventType {
@@ -63,6 +73,10 @@ impl AuditEventType {
             AuditEventType::ContextCollected => "ai.context.collected",
             AuditEventType::TaskCompleted => "ai.task.completed",
             AuditEventType::TaskFailed => "ai.task.failed",
+            AuditEventType::ModelRequested => "ai.model.requested",
+            AuditEventType::ModelResponded => "ai.model.responded",
+            AuditEventType::RedactionFailed => "ai.redaction.failed",
+            AuditEventType::TaskCancelled => "ai.task.cancelled",
         }
     }
 }
@@ -234,6 +248,115 @@ impl AuditEvent {
         event.result = "error".to_string();
         event.output_summary = Some(format!("{:?}", error.kind));
         event.duration_ms = Some(duration_ms);
+        event
+    }
+
+    /// Base for orchestrator **task-level** events (model / redaction / cancel).
+    /// These are correlated by `request_id` rather than a per-capability
+    /// [`AgentEnvelope`], so the subject fields the envelope would supply
+    /// (actor / device / tenant) default empty here; M4 enriches them when the
+    /// policy engine carries identity through the orchestrator.
+    fn task_scoped(
+        event_id: String,
+        created_at: String,
+        event_type: AuditEventType,
+        request_id: &str,
+    ) -> Self {
+        AuditEvent {
+            event_id,
+            created_at,
+            request_id: request_id.to_string(),
+            event_type: event_type.as_str().to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// `ai.model.requested` — the orchestrator is about to call the model.
+    /// `input_summary` is content-free (e.g. evidence item count / size); the
+    /// prompt itself is never stored.
+    pub fn model_requested(
+        event_id: String,
+        created_at: String,
+        request_id: &str,
+        caller: &CallerRef,
+        input_summary: String,
+        input_tokens: Option<i64>,
+    ) -> Self {
+        let mut event = Self::task_scoped(
+            event_id,
+            created_at,
+            AuditEventType::ModelRequested,
+            request_id,
+        );
+        event.model_provider = caller.model_provider.clone();
+        event.model_name = caller.model_name.clone();
+        event.adapter = caller.adapter.clone();
+        event.result = "requested".to_string();
+        event.input_summary = Some(input_summary);
+        event.input_tokens = input_tokens;
+        event
+    }
+
+    /// `ai.model.responded` — the model returned. Carries token accounting and a
+    /// content-free output summary (e.g. finding / command counts).
+    #[allow(clippy::too_many_arguments)]
+    pub fn model_responded(
+        event_id: String,
+        created_at: String,
+        request_id: &str,
+        caller: &CallerRef,
+        output_summary: String,
+        input_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+        duration_ms: i64,
+    ) -> Self {
+        let mut event = Self::task_scoped(
+            event_id,
+            created_at,
+            AuditEventType::ModelResponded,
+            request_id,
+        );
+        event.model_provider = caller.model_provider.clone();
+        event.model_name = caller.model_name.clone();
+        event.adapter = caller.adapter.clone();
+        event.result = "ok".to_string();
+        event.output_summary = Some(output_summary);
+        event.input_tokens = input_tokens;
+        event.output_tokens = output_tokens;
+        event.duration_ms = Some(duration_ms);
+        event
+    }
+
+    /// `ai.redaction.failed` — the redactor failed; the orchestrator refused to
+    /// send to the model (fail-closed). `reason` is a short, content-free
+    /// description, never the unredacted data.
+    pub fn redaction_failed(
+        event_id: String,
+        created_at: String,
+        request_id: &str,
+        reason: &str,
+    ) -> Self {
+        let mut event = Self::task_scoped(
+            event_id,
+            created_at,
+            AuditEventType::RedactionFailed,
+            request_id,
+        );
+        event.result = "error".to_string();
+        event.output_summary = Some(reason.to_string());
+        event
+    }
+
+    /// `ai.task.cancelled` — the diagnose task was cancelled (e.g. operator
+    /// handoff to manual remote control).
+    pub fn task_cancelled(event_id: String, created_at: String, request_id: &str) -> Self {
+        let mut event = Self::task_scoped(
+            event_id,
+            created_at,
+            AuditEventType::TaskCancelled,
+            request_id,
+        );
+        event.result = "cancelled".to_string();
         event
     }
 }
@@ -439,6 +562,82 @@ mod tests {
         assert_eq!(e.duration_ms, None);
         // Input summary names the capability but carries no data.
         assert_eq!(e.input_summary.as_deref(), Some("process.list"));
+    }
+
+    fn model_caller() -> CallerRef {
+        CallerRef {
+            caller_type: CallerType::AiModel,
+            model_provider: Some("openai-compatible".into()),
+            model_name: Some("example-model".into()),
+            adapter: Some("lcxl-openai".into()),
+        }
+    }
+
+    #[test]
+    fn model_requested_records_caller_and_input_tokens() {
+        let e = AuditEvent::model_requested(
+            "evt_m1".into(),
+            "2026-06-13T10:00:00Z".into(),
+            "req_42",
+            &model_caller(),
+            "evidence: 5 items, 75000 bytes".into(),
+            Some(1234),
+        );
+        assert_eq!(e.event_type, "ai.model.requested");
+        assert_eq!(e.request_id, "req_42");
+        assert_eq!(e.result, "requested");
+        assert_eq!(e.model_provider.as_deref(), Some("openai-compatible"));
+        assert_eq!(e.model_name.as_deref(), Some("example-model"));
+        assert_eq!(e.adapter.as_deref(), Some("lcxl-openai"));
+        assert_eq!(e.input_tokens, Some(1234));
+        assert_eq!(
+            e.input_summary.as_deref(),
+            Some("evidence: 5 items, 75000 bytes")
+        );
+    }
+
+    #[test]
+    fn model_responded_records_tokens_and_duration() {
+        let e = AuditEvent::model_responded(
+            "evt_m2".into(),
+            "2026-06-13T10:00:05Z".into(),
+            "req_42",
+            &model_caller(),
+            "diagnosis: 2 findings, 1 command".into(),
+            Some(1234),
+            Some(567),
+            4200,
+        );
+        assert_eq!(e.event_type, "ai.model.responded");
+        assert_eq!(e.result, "ok");
+        assert_eq!(e.input_tokens, Some(1234));
+        assert_eq!(e.output_tokens, Some(567));
+        assert_eq!(e.duration_ms, Some(4200));
+        assert_eq!(
+            e.output_summary.as_deref(),
+            Some("diagnosis: 2 findings, 1 command")
+        );
+    }
+
+    #[test]
+    fn redaction_failed_is_an_error_with_reason() {
+        let e = AuditEvent::redaction_failed(
+            "evt_r".into(),
+            "2026-06-13T10:00:00Z".into(),
+            "req_42",
+            "redactor panicked",
+        );
+        assert_eq!(e.event_type, "ai.redaction.failed");
+        assert_eq!(e.result, "error");
+        assert_eq!(e.output_summary.as_deref(), Some("redactor panicked"));
+    }
+
+    #[test]
+    fn task_cancelled_records_request_id() {
+        let e = AuditEvent::task_cancelled("evt_c".into(), "2026-06-13T10:00:00Z".into(), "req_42");
+        assert_eq!(e.event_type, "ai.task.cancelled");
+        assert_eq!(e.result, "cancelled");
+        assert_eq!(e.request_id, "req_42");
     }
 
     #[test]

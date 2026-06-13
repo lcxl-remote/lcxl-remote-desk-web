@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::web;
+use desk_agent_protocol::diagnose::{DiagnoseEvent, DiagnoseRequestData};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode,
@@ -54,6 +55,7 @@ use tokio::sync::broadcast;
 use crate::daemon::pc_manager::{self, PcRegistry};
 use crate::daemon::virtual_display::{EnsureAttachedOutcome, VirtualDisplaySupervisor};
 use crate::daemon::worker_manager::WorkerManager;
+use crate::diagnose::{DiagnoseEventSink, DiagnoseOrchestrator};
 
 /// Bound on how long the `RequestRemote` branch waits for the IDD to
 /// finish bring-up before falling through to a capabilities-without-IDD
@@ -132,13 +134,24 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         //   emits it via typed `WorkerToService::AgentResponse`; the
         //   control end never echoes it back. A stray inbound copy is a
         //   protocol error — daemon swallows it.
+        // - `DiagnoseEvent`: host → control end only (streamed). The
+        //   daemon orchestrator emits it; the control end never echoes
+        //   it back. A stray inbound copy is a protocol error — swallow.
         SignalingType::PrivateScreenStateChanged
         | SignalingType::AudioPlaybackError
         | SignalingType::ManagerSystemStatue
         | SignalingType::ReplyFromTerminal
         | SignalingType::TerminalStarted
         | SignalingType::TerminalClosed
-        | SignalingType::AgentResponse => RouteOwnership::Daemon,
+        | SignalingType::AgentResponse
+        | SignalingType::DiagnoseEvent => RouteOwnership::Daemon,
+
+        // AI Diagnose request: control end → daemon. Unlike `AgentRequest`
+        // (worker-bound raw capability call), the diagnose orchestrator runs
+        // daemon-side (it owns the model call + redaction + streaming), so this
+        // is handled inline against the daemon's orchestrator rather than
+        // forwarded over IPC.
+        SignalingType::Diagnose => RouteOwnership::Daemon,
 
         // Daemon-emitted notifications. Browsers don't send these
         // back at us, but if they did the daemon should swallow them
@@ -249,6 +262,11 @@ pub struct RouterContext {
     /// `ChangeDisplaySettings` route always replies with
     /// `FEATURE_UNAVAILABLE` outside service mode.
     pub virtual_display: Option<Arc<VirtualDisplaySupervisor>>,
+    /// `Some(...)` in modes with an in-process worker (Default / DeskServer),
+    /// where the daemon-side diagnose orchestrator collects locally. `None` in
+    /// ServiceDaemon mode (cross-process collection is a later additive step),
+    /// so the `Diagnose` route replies with a feature-unavailable error there.
+    pub diagnose_orchestrator: Option<Arc<DiagnoseOrchestrator>>,
 }
 
 /// Route a signaling message.
@@ -411,6 +429,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // AgentResponse only flows worker → control end; an inbound
         // copy is a protocol error — swallow it.
         | SignalingType::AgentResponse
+        // DiagnoseEvent only flows host → control end (streamed); an
+        // inbound copy is a protocol error — swallow it.
+        | SignalingType::DiagnoseEvent
         | SignalingType::Error
         | SignalingType::Unknown => {
             log::trace!(
@@ -450,6 +471,10 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // AI agent capability request: two-phase parse + trusted-field
         // stamp, then ship a typed `ServiceToWorker::AgentRequest`.
         SignalingType::AgentRequest => handle_agent_request_inbound(ctx, model).await,
+        // AI Diagnose: run the daemon-side orchestrator (Default / DeskServer)
+        // or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the orchestrator
+        // is not injected). Streams `DiagnoseEvent` frames back to the browser.
+        SignalingType::Diagnose => handle_diagnose_inbound(ctx, model).await,
     }
 }
 
@@ -1424,6 +1449,140 @@ fn emit_agent_error(ctx: &RouterContext, model: &SignalingModel, error: AgentErr
     }
 }
 
+/// Send one `DiagnoseEvent` to the control end as a **notification-style**
+/// signaling frame. `response_state = None` is essential: a `Some(_)` value
+/// marks the frame as the one-shot response to the originating `Diagnose`
+/// request, which the signaling callback map consumes and removes — collapsing
+/// the stream after the first frame. With `None`, every frame is delivered as an
+/// event. Build / serialise failures are non-fatal — log + drop.
+fn send_diagnose_frame(
+    outbound_tx: &broadcast::Sender<String>,
+    to_connection_id: Option<String>,
+    event: DiagnoseEvent,
+) {
+    let request_id = event.request_id.clone();
+    let data = match serde_json::to_value(&event) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[router] failed to serialise DiagnoseEvent: {e} (request_id={request_id})");
+            return;
+        }
+    };
+    let frame = SignalingModel::new(
+        &request_id,
+        SignalingType::DiagnoseEvent,
+        None,
+        to_connection_id,
+        Some(data),
+        // Notification, not a one-shot response — see the doc comment.
+        None,
+    );
+    match serde_json::to_string(&frame) {
+        Ok(text) => {
+            let _ = outbound_tx.send(text);
+        }
+        Err(e) => log::warn!(
+            "[router] failed to serialise DiagnoseEvent frame: {e} (request_id={request_id})"
+        ),
+    }
+}
+
+/// Emit a single (typically terminal) `DiagnoseEvent` for a request, before the
+/// orchestrator runs (disabled gate / unsupported mode / bad payload).
+fn emit_diagnose_event(ctx: &RouterContext, model: &SignalingModel, event: DiagnoseEvent) {
+    send_diagnose_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
+}
+
+/// Streams a diagnosis to the control end over the connection's outbound
+/// channel. Created per `Diagnose` request and handed to the orchestrator.
+struct OutboundDiagnoseSink {
+    outbound_tx: broadcast::Sender<String>,
+    to_connection_id: Option<String>,
+}
+
+impl DiagnoseEventSink for OutboundDiagnoseSink {
+    fn emit(&self, event: DiagnoseEvent) {
+        send_diagnose_frame(&self.outbound_tx, self.to_connection_id.clone(), event);
+    }
+}
+
+/// Route a control-end `Diagnose`: feature gate → mode gate → parse → run the
+/// daemon-side orchestrator, streaming `DiagnoseEvent` frames back. All failures
+/// surface as a terminal `DiagnoseEvent::error` (never `SignalingResponseState`,
+/// so the control end keeps treating frames as a stream).
+async fn handle_diagnose_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    // Single on/off gate, shared with `AgentRequest`.
+    if !ctx.settings.read().await.system.ai_agent_enabled() {
+        emit_diagnose_event(
+            ctx,
+            model,
+            DiagnoseEvent::error(
+                &model.request_id,
+                0,
+                agent_error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "AI agent capabilities are disabled",
+                    false,
+                    true,
+                ),
+            ),
+        );
+        return Ok(());
+    }
+
+    // The orchestrator is only injected where an in-process worker can collect
+    // (Default / DeskServer). ServiceDaemon leaves it `None`: diagnose over the
+    // cross-process collection path is a later additive step.
+    let Some(orchestrator) = ctx.diagnose_orchestrator.clone() else {
+        emit_diagnose_event(
+            ctx,
+            model,
+            DiagnoseEvent::error(
+                &model.request_id,
+                0,
+                agent_error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "AI diagnosis is not available in this mode",
+                    false,
+                    true,
+                ),
+            ),
+        );
+        return Ok(());
+    };
+
+    let request = match model.get_data::<DiagnoseRequestData>() {
+        Ok(d) => d,
+        Err(e) => {
+            emit_diagnose_event(
+                ctx,
+                model,
+                DiagnoseEvent::error(
+                    &model.request_id,
+                    0,
+                    agent_error(
+                        AgentErrorKind::InvalidInput,
+                        &format!("bad Diagnose payload: {e}"),
+                        false,
+                        true,
+                    ),
+                ),
+            );
+            return Ok(());
+        }
+    };
+
+    let sink = OutboundDiagnoseSink {
+        outbound_tx: ctx.outbound_tx.clone(),
+        to_connection_id: model.from_connection_id.clone(),
+    };
+    orchestrator.run(&model.request_id, request, &sink).await;
+    Ok(())
+}
+
 /// Assemble the authoritative [`AgentEnvelope`] from a parsed control-end
 /// operation by injecting every trusted field server-side. Pure so the
 /// trusted-field-injection invariant is unit-testable.
@@ -1678,6 +1837,7 @@ mod tests {
             host_control_hub: Arc::new(HostControlHub::new_local()),
             worker_mgr,
             virtual_display: None,
+            diagnose_orchestrator: None,
         }
     }
 
@@ -3503,5 +3663,138 @@ mod tests {
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
+    }
+
+    // ---- Diagnose routing ----
+
+    use desk_agent_protocol::diagnose::DiagnoseEventKind;
+
+    fn diagnose_model(raw: serde_json::Value) -> SignalingModel {
+        SignalingModel::new(
+            "req-diag-1",
+            SignalingType::Diagnose,
+            Some("conn-1".to_string()),
+            None,
+            Some(raw),
+            None,
+        )
+    }
+
+    /// classify: both halves of the diagnose pair are daemon-owned. `Diagnose`
+    /// is handled inline by the orchestrator (not worker-bound like
+    /// `AgentRequest`); `DiagnoseEvent` is host → control-end only, so a stray
+    /// inbound copy is swallowed.
+    #[test]
+    fn classify_diagnose_pair_is_daemon_owned() {
+        assert_eq!(classify(SignalingType::Diagnose), RouteOwnership::Daemon);
+        assert_eq!(
+            classify(SignalingType::DiagnoseEvent),
+            RouteOwnership::Daemon
+        );
+    }
+
+    /// Disabled by default: a Diagnose request is gated before the orchestrator,
+    /// emitting a single terminal `DiagnoseEvent::error` (notification-style).
+    #[tokio::test]
+    async fn diagnose_disabled_by_default_emits_error() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        let raw = serde_json::to_value(DiagnoseRequestData {
+            question: "why?".into(),
+            include_screen: false,
+            context_kinds: vec![],
+        })
+        .unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+        let frame = read_response(&mut rx);
+        assert!(matches!(frame.signaling_type, SignalingType::DiagnoseEvent));
+        // Notification, not a one-shot response.
+        assert!(frame.response_state.is_none());
+        let event = frame.get_data::<DiagnoseEvent>().expect("DiagnoseEvent");
+        assert_eq!(event.kind, DiagnoseEventKind::Error);
+        let err = event.error.unwrap();
+        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+        assert!(err.message.contains("disabled"));
+    }
+
+    /// Enabled but no orchestrator injected (ServiceDaemon-like): the diagnose
+    /// route reports the feature unavailable in this mode.
+    #[tokio::test]
+    async fn diagnose_without_orchestrator_emits_unavailable() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        // make_ctx leaves diagnose_orchestrator = None (ServiceDaemon-like).
+        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+        let event = read_response(&mut rx)
+            .get_data::<DiagnoseEvent>()
+            .expect("DiagnoseEvent");
+        assert_eq!(event.kind, DiagnoseEventKind::Error);
+        let err = event.error.unwrap();
+        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+        assert!(err.message.contains("not available in this mode"));
+    }
+
+    /// Enabled + orchestrator present (Default / DeskServer-like): the diagnosis
+    /// streams a sequence of frames ending in exactly one `Final`, and **every**
+    /// frame is notification-style (`response_state = None`) so the control end
+    /// is not collapsed to a single response by the signaling one-shot callback.
+    #[tokio::test]
+    async fn diagnose_with_orchestrator_streams_notification_frames() {
+        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(StubDiagnoseModel),
+        )));
+        let raw = serde_json::to_value(DiagnoseRequestData {
+            question: "why is cpu high?".into(),
+            include_screen: false,
+            context_kinds: vec![],
+        })
+        .unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+
+        let mut frames = Vec::new();
+        while let Ok(text) = rx.try_recv() {
+            let m: SignalingModel = serde_json::from_str(&text).expect("valid JSON frame");
+            let ev = m
+                .get_data::<DiagnoseEvent>()
+                .expect("DiagnoseEvent payload");
+            frames.push((m, ev));
+        }
+
+        // A multi-frame stream arrived (status + partials + final).
+        assert!(
+            frames.len() >= 3,
+            "expected a streamed sequence, got {}",
+            frames.len()
+        );
+        // Exactly one terminal frame, and it is the last, and it is Final.
+        assert_eq!(
+            frames.iter().filter(|(_, e)| e.is_terminal()).count(),
+            1,
+            "exactly one terminal frame"
+        );
+        assert_eq!(frames.last().unwrap().1.kind, DiagnoseEventKind::Final);
+        // Every frame is a notification-style DiagnoseEvent.
+        for (m, _) in &frames {
+            assert!(matches!(m.signaling_type, SignalingType::DiagnoseEvent));
+            assert!(
+                m.response_state.is_none(),
+                "diagnose frames must not be one-shot responses"
+            );
+        }
+        // seq is monotonic on the wire.
+        let seqs: Vec<_> = frames.iter().map(|(_, e)| e.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(seqs, sorted, "frames arrive in seq order");
     }
 }

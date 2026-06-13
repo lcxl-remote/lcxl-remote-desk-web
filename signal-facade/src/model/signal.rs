@@ -169,6 +169,19 @@ pub enum SignalingType {
     #[wincode(tag = 601)]
     AgentResponse = 601,
 
+    /// AI Diagnose request (control end → host). Carries
+    /// `desk_agent_protocol::diagnose::DiagnoseRequestData` as signaling_data;
+    /// the daemon runs the diagnose orchestrator (Default / DeskServer) or
+    /// replies `FEATURE_UNAVAILABLE` (ServiceDaemon).
+    #[wincode(tag = 602)]
+    Diagnose = 602,
+    /// AI Diagnose streamed event (host → control end). Carries
+    /// `desk_agent_protocol::diagnose::DiagnoseEvent` as signaling_data.
+    /// Notification-style (`response_state = None`) so multiple frames reach
+    /// the control end instead of being consumed by the one-shot callback map.
+    #[wincode(tag = 603)]
+    DiagnoseEvent = 603,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,
@@ -785,7 +798,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 38] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 40] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -809,6 +822,8 @@ mod wincode_tests {
             (SignalingType::DesktopReady, 501),
             (SignalingType::AgentRequest, 600),
             (SignalingType::AgentResponse, 601),
+            (SignalingType::Diagnose, 602),
+            (SignalingType::DiagnoseEvent, 603),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),
