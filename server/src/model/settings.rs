@@ -13,12 +13,14 @@ use uuid::Uuid;
 
 use crate::error::DeskError;
 
+mod ai_model;
 mod log_config;
 mod system;
 mod turn_client;
 mod user;
 mod virtual_display;
 
+pub use ai_model::*;
 pub use log_config::*;
 pub use system::*;
 pub use turn_client::*;
@@ -50,6 +52,11 @@ pub struct Settings {
     /// Virtual display (Windows IDD) settings
     #[serde(default)]
     pub virtual_display: VirtualDisplaySettings,
+    /// AI model gateway settings. Top-level (not under `system`) so the model
+    /// `api_key` never reaches the legacy `/settings` response or
+    /// `RemoteSystemSettings`.
+    #[serde(default)]
+    pub ai_model: AiModelSettings,
 
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]
@@ -137,11 +144,10 @@ impl Settings {
             fs::create_dir_all(parent_path)?;
         }
 
-        debug!(
-            "Saving config to: {}, content: {}",
-            config_file_path.display(),
-            toml_str
-        );
+        // Only the path is logged: the serialized TOML carries secrets
+        // (api_key, signaling/manager tokens, session key) and would bypass the
+        // per-field `Debug` redaction if printed in full.
+        debug!("Saving config to: {}", config_file_path.display());
         if let Some(ref locale) = self.system.locale {
             rust_i18n::set_locale(locale);
             info!("Locale set to: {}", locale);

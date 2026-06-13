@@ -8,7 +8,10 @@ use utoipa::ToSchema;
 use std::sync::Arc;
 
 use crate::host_control::{ApprovalResponse, HostControlHub};
-use crate::model::settings::{LogSettings, SharedSettings, SystemSettings, TurnClientSettings};
+use crate::model::settings::{
+    AiModelSettingsPublic, AiModelSettingsUpdate, LogSettings, SharedSettings, SystemSettings,
+    TurnClientSettings,
+};
 use crate::service::auto_start::update_auto_start_status;
 use desk_signal_facade::model::security_settings::SecuritySettings;
 use desk_turn::model::TurnSettings;
@@ -69,6 +72,45 @@ pub async fn update_settings(
     // save new settings to file
     settings.save()?;
     info!("Update system settings successfully, {:?}", settings.system);
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    tag = "AiModel",
+    summary = "Query AI model settings",
+    responses(
+        (status = 200, description = "Query AI model settings successfully", body=RestResponse<AiModelSettingsPublic>),
+    ),
+)]
+#[get("/settings/ai-model")]
+pub async fn query_ai_model_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let settings = settings.read().await;
+    // Masked view only: the api_key is never returned, only `api_key_set`.
+    let public = settings.ai_model.public_view();
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(public)))
+}
+
+#[utoipa::path(
+    tag = "AiModel",
+    summary = "Update AI model settings",
+    request_body(content = AiModelSettingsUpdate),
+    responses(
+        (status = 200, description = "Update AI model settings successfully"),
+    ),
+)]
+#[post("/settings/ai-model")]
+pub async fn update_ai_model_settings(
+    request_json: web::Json<AiModelSettingsUpdate>,
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let params = request_json.into_inner();
+    let mut settings = settings.write().await;
+    settings.ai_model.apply_update(params);
+    settings.save()?;
+    // No content logged: the body carries the write-only api_key.
+    info!("Update AI model settings successfully");
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -384,7 +426,80 @@ mod tests {
     use super::*;
     use crate::host_control::HostControlHub;
     use crate::model::security_approval::SecurityPermissionType;
+    use crate::model::settings::Settings;
     use actix_web::{App, test};
+
+    fn settings_with_model_key(key: &str) -> Settings {
+        let mut s = Settings::default();
+        s.ai_model.provider = Some("openai-compatible".to_string());
+        s.ai_model.api_key = Some(key.to_string());
+        s
+    }
+
+    /// `GET /settings/ai-model` returns the masked view: `api_key_set` is true
+    /// but the key value never appears in the response body.
+    #[actix_web::test]
+    async fn query_ai_model_settings_masks_the_key() {
+        let shared = web::Data::new(SharedSettings::from(settings_with_model_key("sk-leak-me")));
+        let app = test::init_service(
+            App::new()
+                .app_data(shared.clone())
+                .service(query_ai_model_settings),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/settings/ai-model")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(body["data"]["api_key_set"].as_bool(), Some(true));
+        // The masked view must not carry the secret nor an api_key field.
+        let raw = body.to_string();
+        assert!(
+            !raw.contains("sk-leak-me"),
+            "response leaked the key: {raw}"
+        );
+        assert!(
+            body["data"].get("api_key").is_none(),
+            "masked view must not carry an api_key field"
+        );
+    }
+
+    /// `POST /settings/ai-model` applies the update and persists it. The
+    /// write-only api_key is stored.
+    #[actix_web::test]
+    async fn update_ai_model_settings_applies_update() {
+        let mut settings = Settings::default();
+        let tmp = std::env::temp_dir().join(format!("lrd-pr0-{}.toml", uuid::Uuid::new_v4()));
+        settings.args.config_file_path = tmp.to_string_lossy().into_owned();
+        let shared = web::Data::new(SharedSettings::from(settings));
+
+        let app = test::init_service(
+            App::new()
+                .app_data(shared.clone())
+                .service(update_ai_model_settings),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/settings/ai-model")
+            .set_json(AiModelSettingsUpdate {
+                provider: Some("openai-compatible".to_string()),
+                api_key: Some("sk-new-key".to_string()),
+                allow_logs: Some(true),
+                ..Default::default()
+            })
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), 200);
+
+        let stored = shared.read().await;
+        assert_eq!(stored.ai_model.api_key.as_deref(), Some("sk-new-key"));
+        assert!(stored.ai_model.allow_logs);
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     fn hub_data(hub: Option<HostControlHub>) -> web::Data<Option<Arc<HostControlHub>>> {
         web::Data::new(hub.map(Arc::new))

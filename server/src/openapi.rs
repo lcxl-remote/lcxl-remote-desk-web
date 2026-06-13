@@ -85,6 +85,8 @@ pub struct ExtraSchemas;
     crate::controller::virtual_display::update_virtual_display_settings,
     crate::controller::settings::query_settings,
     crate::controller::settings::update_settings,
+    crate::controller::settings::query_ai_model_settings,
+    crate::controller::settings::update_ai_model_settings,
     crate::controller::settings::query_turn_settings,
     crate::controller::settings::update_turn_settings,
     crate::controller::settings::query_log_settings,

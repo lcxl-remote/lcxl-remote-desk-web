@@ -74,6 +74,23 @@ mod wincode_tests {
         assert_eq!(back.manager_api_token.as_deref(), Some("mtok"));
     }
 
+    /// Regression guard for the AI model secret boundary: `RemoteSystemSettings`
+    /// (the subset pushed to the browser / remote signaling) must never carry
+    /// the model gateway config — above all the `api_key`. The model settings
+    /// live as a separate top-level field on the desk server's `Settings`, not
+    /// in `SystemSettings`, so they are excluded by construction; this test
+    /// fails loudly if a future field addition reintroduces them.
+    #[test]
+    fn remote_system_settings_excludes_model_config() {
+        let json = serde_json::to_string(&RemoteSystemSettings::default()).expect("serialize");
+        for forbidden in ["api_key", "ai_model", "base_url", "model_provider"] {
+            assert!(
+                !json.contains(forbidden),
+                "RemoteSystemSettings must not carry `{forbidden}`: {json}"
+            );
+        }
+    }
+
     /// `RemoteSystemSettings` defaults every field. Verify the
     /// `Default::default()` instance survives a wincode round-trip
     /// — this is the "all-None / all-zero" extreme that exercises
