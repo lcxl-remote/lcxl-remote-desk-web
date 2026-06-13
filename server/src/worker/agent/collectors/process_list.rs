@@ -85,12 +85,19 @@ mod tests {
     }
 
     #[test]
-    fn collect_returns_processes_with_pids() {
-        // The test process itself is always present, so the table is non-empty
-        // and every entry carries a non-zero pid.
-        let out = collect(&params(0, ProcessSort::CpuDesc, false));
+    fn collect_returns_processes_including_self() {
+        // The current process is always present, proving real enumeration. A
+        // high limit returns the full table so a CPU-sorted top-100 cap can't
+        // truncate us out. We assert self-presence rather than "every pid > 0":
+        // pid 0 is legitimate on Windows (the System Idle Process), so the
+        // latter is a false invariant.
+        let out = collect(&params(100_000, ProcessSort::Pid, false));
         assert!(!out.processes.is_empty());
-        assert!(out.processes.iter().all(|p| p.pid > 0));
+        let self_pid = std::process::id();
+        assert!(
+            out.processes.iter().any(|p| p.pid == self_pid),
+            "the current process (pid {self_pid}) must appear in the snapshot"
+        );
     }
 
     #[test]
