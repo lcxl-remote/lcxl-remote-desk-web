@@ -1,3 +1,6 @@
+export type { QueryAiModelSettingsQueryKey } from "./aiModelController/useQueryAiModelSettings.ts";
+export type { QueryAiModelSettingsSuspenseQueryKey } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
+export type { UpdateAiModelSettingsMutationKey } from "./aiModelController/useUpdateAiModelSettings.ts";
 export type { ChangePasswordMutationKey } from "./authController/useChangePassword.ts";
 export type { GetCaptchaMutationKey } from "./authController/useGetCaptcha.ts";
 export type { LoginAccountMutationKey } from "./authController/useLoginAccount.ts";
@@ -68,6 +71,15 @@ export type { QueryVirtualDisplaySettingsQueryKey } from "./virtualDisplayContro
 export type { QueryVirtualDisplaySettingsSuspenseQueryKey } from "./virtualDisplayController/useQueryVirtualDisplaySettingsSuspense.ts";
 export type { UninstallDriverMutationKey } from "./virtualDisplayController/useUninstallDriver.ts";
 export type { UpdateVirtualDisplaySettingsMutationKey } from "./virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
+export { queryAiModelSettingsQueryKey } from "./aiModelController/useQueryAiModelSettings.ts";
+export { queryAiModelSettingsQueryOptions } from "./aiModelController/useQueryAiModelSettings.ts";
+export { useQueryAiModelSettings } from "./aiModelController/useQueryAiModelSettings.ts";
+export { queryAiModelSettingsSuspenseQueryKey } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { queryAiModelSettingsSuspenseQueryOptions } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { useQueryAiModelSettingsSuspense } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { updateAiModelSettingsMutationKey } from "./aiModelController/useUpdateAiModelSettings.ts";
+export { updateAiModelSettingsMutationOptions } from "./aiModelController/useUpdateAiModelSettings.ts";
+export { useUpdateAiModelSettings } from "./aiModelController/useUpdateAiModelSettings.ts";
 export { changePasswordMutationKey } from "./authController/useChangePassword.ts";
 export { changePasswordMutationOptions } from "./authController/useChangePassword.ts";
 export { useChangePassword } from "./authController/useChangePassword.ts";

@@ -22,6 +22,7 @@ import { DeviceCodeList } from '@/features/settings/device-code-list';
 import { SettingsLayout } from '@/features/settings/settings-layout';
 import { SettingsOverview } from '@/features/settings/settings-overview';
 import { VirtualDisplaySettings } from '@/features/settings/virtual-display-settings';
+import { AiModelSettings } from '@/features/settings/ai-model-settings';
 
 export const router = createBrowserRouter([
     {
@@ -115,6 +116,10 @@ export const router = createBrowserRouter([
                     {
                         path: 'virtual-display',
                         element: <VirtualDisplaySettings />,
+                    },
+                    {
+                        path: 'ai-model',
+                        element: <AiModelSettings />,
                     },
                 ]
             },

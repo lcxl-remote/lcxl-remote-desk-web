@@ -23,6 +23,98 @@ export type AdaptiveResolutionParams = {
   min_delta_px?: number;
 };
 
+export const responseFormatModeEnum = {
+  none: "none",
+  json_object: "json_object",
+  json_schema: "json_schema",
+} as const;
+
+export type ResponseFormatModeEnumKey =
+  (typeof responseFormatModeEnum)[keyof typeof responseFormatModeEnum];
+
+/**
+ * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).
+ */
+export type ResponseFormatMode = ResponseFormatModeEnumKey;
+
+/**
+ * @description Masked public view returned by `GET /api/desk/settings/ai-model`.\n\nCarries no secret: only whether a key is configured (`api_key_set`).
+ */
+export type AiModelSettingsPublic = {
+  /**
+   * @type boolean
+   */
+  allow_logs: boolean;
+  /**
+   * @type boolean
+   */
+  allow_screen: boolean;
+  /**
+   * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
+   * @type boolean
+   */
+  api_key_set: boolean;
+  /**
+   * @type string,null
+   */
+  base_url?: string | null;
+  /**
+   * @minLength 0
+   * @type integer,null, int64
+   */
+  max_context_bytes?: number | null;
+  /**
+   * @type string,null
+   */
+  model?: string | null;
+  /**
+   * @type string,null
+   */
+  provider?: string | null;
+  /**
+   * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).
+   * @type string
+   */
+  response_format: ResponseFormatMode;
+};
+
+/**
+ * @description Update body for `POST /api/desk/settings/ai-model`.\n\nEvery field is optional: `None` leaves the stored value unchanged. `api_key`\nis write-only with three-way semantics (see [`AiModelSettings::apply_update`]).
+ */
+export type AiModelSettingsUpdate = {
+  /**
+   * @type boolean,null
+   */
+  allow_logs?: boolean | null;
+  /**
+   * @type boolean,null
+   */
+  allow_screen?: boolean | null;
+  /**
+   * @description Write-only. `None` = leave unchanged; `Some(\"\")` = clear; `Some(x)` = set.
+   * @type string,null
+   */
+  api_key?: string | null;
+  /**
+   * @type string,null
+   */
+  base_url?: string | null;
+  /**
+   * @minLength 0
+   * @type integer,null, int64
+   */
+  max_context_bytes?: number | null;
+  /**
+   * @type string,null
+   */
+  model?: string | null;
+  /**
+   * @type string,null
+   */
+  provider?: string | null;
+  response_format?: null | ResponseFormatMode;
+};
+
 export type ApprovalAckParams = {
   /**
    * @type string
@@ -1487,6 +1579,62 @@ export type RequestRemoteModel = {
   ice_servers?: LcxlRTCIceServer[];
 };
 
+export type RestResponseAiModelSettingsPublic = {
+  /**
+   * @type integer, int32
+   */
+  code: number;
+  /**
+   * @description Masked public view returned by `GET /api/desk/settings/ai-model`.\n\nCarries no secret: only whether a key is configured (`api_key_set`).
+   * @type object | undefined
+   */
+  data?: {
+    /**
+     * @type boolean
+     */
+    allow_logs: boolean;
+    /**
+     * @type boolean
+     */
+    allow_screen: boolean;
+    /**
+     * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
+     * @type boolean
+     */
+    api_key_set: boolean;
+    /**
+     * @type string,null
+     */
+    base_url?: string | null;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+     */
+    max_context_bytes?: number | null;
+    /**
+     * @type string,null
+     */
+    model?: string | null;
+    /**
+     * @type string,null
+     */
+    provider?: string | null;
+    /**
+     * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).
+     * @type string
+     */
+    response_format: ResponseFormatMode;
+  };
+  /**
+   * @type string,null
+   */
+  message?: string | null;
+  /**
+   * @type boolean
+   */
+  success: boolean;
+};
+
 export type RestResponseBackendInfo = {
   /**
    * @type integer, int32
@@ -1839,6 +1987,11 @@ export type RestResponseSystemSettings = {
    * @type object | undefined
    */
   data?: {
+    /**
+     * @description Whether AI agent capability requests (`AgentRequest`) are served.\n`None` / `false` = disabled. Off by default: the read collectors expose\nhost data (processes, network ports, services, logs, containers) that\ngoes beyond what a remote viewer already sees, so the feature stays dark\nuntil an operator opts in. A policy engine will narrow this per\ncapability later; until then this is the single on/off gate.
+     * @type boolean,null
+     */
+    ai_agent_enabled?: boolean | null;
     /**
      * @description Auto start the application on system login
      * @type boolean,null
@@ -2482,6 +2635,11 @@ export type SystemInfo = {
  * @description System settings for the application. This struct is used to load and save settings from a configuration file.
  */
 export type SystemSettings = {
+  /**
+   * @description Whether AI agent capability requests (`AgentRequest`) are served.\n`None` / `false` = disabled. Off by default: the read collectors expose\nhost data (processes, network ports, services, logs, containers) that\ngoes beyond what a remote viewer already sees, so the feature stays dark\nuntil an operator opts in. A policy engine will narrow this per\ncapability later; until then this is the single on/off gate.
+   * @type boolean,null
+   */
+  ai_agent_enabled?: boolean | null;
   /**
    * @description Auto start the application on system login
    * @type boolean,null
@@ -3317,6 +3475,33 @@ export type UpdateSettingsMutationResponse = UpdateSettings200;
 export type UpdateSettingsMutation = {
   Response: UpdateSettings200;
   Request: UpdateSettingsMutationRequest;
+  Errors: any;
+};
+
+/**
+ * @description Query AI model settings successfully
+ */
+export type QueryAiModelSettings200 = RestResponseAiModelSettingsPublic;
+
+export type QueryAiModelSettingsQueryResponse = QueryAiModelSettings200;
+
+export type QueryAiModelSettingsQuery = {
+  Response: QueryAiModelSettings200;
+  Errors: any;
+};
+
+/**
+ * @description Update AI model settings successfully
+ */
+export type UpdateAiModelSettings200 = any;
+
+export type UpdateAiModelSettingsMutationRequest = AiModelSettingsUpdate;
+
+export type UpdateAiModelSettingsMutationResponse = UpdateAiModelSettings200;
+
+export type UpdateAiModelSettingsMutation = {
+  Response: UpdateAiModelSettings200;
+  Request: UpdateAiModelSettingsMutationRequest;
   Errors: any;
 };
 

@@ -43,6 +43,9 @@ import type {
   QuerySettingsQueryResponse,
   UpdateSettingsMutationRequest,
   UpdateSettingsMutationResponse,
+  QueryAiModelSettingsQueryResponse,
+  UpdateAiModelSettingsMutationRequest,
+  UpdateAiModelSettingsMutationResponse,
   QueryLogSettingsQueryResponse,
   UpdateLogSettingsMutationRequest,
   UpdateLogSettingsMutationResponse,
@@ -618,6 +621,64 @@ export async function updateSettings(
   >({
     method: "POST",
     url: getUpdateSettingsUrl().url.toString(),
+    data: requestData,
+    ...requestConfig,
+  });
+  return res.data;
+}
+
+function getQueryAiModelSettingsUrl() {
+  const res = { method: "GET", url: `/api/desk/settings/ai-model` as const };
+  return res;
+}
+
+/**
+ * @summary Query AI model settings
+ * {@link /api/desk/settings/ai-model}
+ */
+export async function queryAiModelSettings(
+  config: Partial<RequestConfig> & { client?: Client } = {},
+) {
+  const { client: request = fetch, ...requestConfig } = config;
+
+  const res = await request<
+    QueryAiModelSettingsQueryResponse,
+    ResponseErrorConfig<Error>,
+    unknown
+  >({
+    method: "GET",
+    url: getQueryAiModelSettingsUrl().url.toString(),
+    ...requestConfig,
+  });
+  return res.data;
+}
+
+function getUpdateAiModelSettingsUrl() {
+  const res = { method: "POST", url: `/api/desk/settings/ai-model` as const };
+  return res;
+}
+
+/**
+ * @summary Update AI model settings
+ * {@link /api/desk/settings/ai-model}
+ */
+export async function updateAiModelSettings(
+  data: UpdateAiModelSettingsMutationRequest,
+  config: Partial<RequestConfig<UpdateAiModelSettingsMutationRequest>> & {
+    client?: Client;
+  } = {},
+) {
+  const { client: request = fetch, ...requestConfig } = config;
+
+  const requestData = data;
+
+  const res = await request<
+    UpdateAiModelSettingsMutationResponse,
+    ResponseErrorConfig<Error>,
+    UpdateAiModelSettingsMutationRequest
+  >({
+    method: "POST",
+    url: getUpdateAiModelSettingsUrl().url.toString(),
     data: requestData,
     ...requestConfig,
   });

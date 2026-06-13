@@ -1,3 +1,6 @@
+export type { QueryAiModelSettingsQueryKey } from "./hooks/aiModelController/useQueryAiModelSettings.ts";
+export type { QueryAiModelSettingsSuspenseQueryKey } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
+export type { UpdateAiModelSettingsMutationKey } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
 export type { ChangePasswordMutationKey } from "./hooks/authController/useChangePassword.ts";
 export type { GetCaptchaMutationKey } from "./hooks/authController/useGetCaptcha.ts";
 export type { LoginAccountMutationKey } from "./hooks/authController/useLoginAccount.ts";
@@ -74,6 +77,8 @@ export type {
   AckSecurityApprovalMutationRequest,
   AckSecurityApprovalMutationResponse,
   AdaptiveResolutionParams,
+  AiModelSettingsPublic,
+  AiModelSettingsUpdate,
   ApprovalAckParams,
   AudioDataFlow,
   AudioDataFlowEnumKey,
@@ -229,6 +234,9 @@ export type {
   OpusEncoderSettings,
   PasswordParams,
   PrivateScreenSettings,
+  QueryAiModelSettings200,
+  QueryAiModelSettingsQuery,
+  QueryAiModelSettingsQueryResponse,
   QueryBackendInfo200,
   QueryBackendInfoQuery,
   QueryBackendInfoQueryResponse,
@@ -269,6 +277,9 @@ export type {
   RemoteDeskTypeEnumEnumKey,
   RequestRemoteModel,
   Resolution,
+  ResponseFormatMode,
+  ResponseFormatModeEnumKey,
+  RestResponseAiModelSettingsPublic,
   RestResponseBackendInfo,
   RestResponseLogSettings,
   RestResponseSecuritySettings,
@@ -323,6 +334,10 @@ export type {
   UninstallService503,
   UninstallServiceMutation,
   UninstallServiceMutationResponse,
+  UpdateAiModelSettings200,
+  UpdateAiModelSettingsMutation,
+  UpdateAiModelSettingsMutationRequest,
+  UpdateAiModelSettingsMutationResponse,
   UpdateDeviceCode200,
   UpdateDeviceCodeMutation,
   UpdateDeviceCodeMutationRequest,
@@ -392,6 +407,7 @@ export {
   logoutAccount,
   openSignalingHandle,
   openTerminalSession,
+  queryAiModelSettings,
   queryBackendInfo,
   queryDriverStatus,
   queryLogSettings,
@@ -407,6 +423,7 @@ export {
   submitSecurityApproval,
   uninstallDriver,
   uninstallService,
+  updateAiModelSettings,
   updateDeviceCode,
   updateLogSettings,
   updateSecuritySettings,
@@ -416,6 +433,15 @@ export {
   updateTurnSettings,
   updateVirtualDisplaySettings,
 } from "./clients.ts";
+export { queryAiModelSettingsQueryKey } from "./hooks/aiModelController/useQueryAiModelSettings.ts";
+export { queryAiModelSettingsQueryOptions } from "./hooks/aiModelController/useQueryAiModelSettings.ts";
+export { useQueryAiModelSettings } from "./hooks/aiModelController/useQueryAiModelSettings.ts";
+export { queryAiModelSettingsSuspenseQueryKey } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { queryAiModelSettingsSuspenseQueryOptions } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { useQueryAiModelSettingsSuspense } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { updateAiModelSettingsMutationKey } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
+export { updateAiModelSettingsMutationOptions } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
+export { useUpdateAiModelSettings } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
 export { changePasswordMutationKey } from "./hooks/authController/useChangePassword.ts";
 export { changePasswordMutationOptions } from "./hooks/authController/useChangePassword.ts";
 export { useChangePassword } from "./hooks/authController/useChangePassword.ts";
@@ -636,6 +662,7 @@ export { fileTransferMessageTypeEnum6 } from "./types.ts";
 export { fileTransferMessageTypeEnum7 } from "./types.ts";
 export { operationSystemEnumEnum } from "./types.ts";
 export { remoteDeskTypeEnumEnum } from "./types.ts";
+export { responseFormatModeEnum } from "./types.ts";
 export { startupModeEnum } from "./types.ts";
 export { traversalModeEnum } from "./types.ts";
 export { turnTransportEnum } from "./types.ts";
