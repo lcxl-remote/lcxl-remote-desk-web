@@ -45,6 +45,7 @@ utoipa-rapidoc = { workspace = true }
 utoipa-scalar = { workspace = true }
 
 chrono = { workspace = true }
+bollard = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

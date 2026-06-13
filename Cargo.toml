@@ -117,6 +117,13 @@ rand = { version = "0.9", features = ["std"] }
 rust-i18n = "3.1"
 
 mime = "0.3"
+# Docker Engine API client for the container.* read collectors. Only the
+# local transport is needed: `http` + `pipe` cover the Windows named pipe and
+# Unix socket (this is bollard's lean default set — no TLS is pulled in).
+bollard = { version = "0.19", default-features = false, features = [
+    "http",
+    "pipe",
+] }
 yuv = "0.8"
 x264 = { git = "https://github.com/lcxl/x264.git", tag = "v0.8.0" }
 openh264 = "0.9.3"

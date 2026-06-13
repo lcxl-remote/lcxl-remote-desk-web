@@ -78,10 +78,25 @@ async fn dispatch_read_context(kind: ContextKind) -> Result<OperationOutput, Age
                 output,
             )))
         }
-        ContextKind::ContainerList(_)
-        | ContextKind::ContainerInspect(_)
-        | ContextKind::ContainerLogs(_)
-        | ContextKind::ScreenCaptureCurrent(_) => {
+        ContextKind::ContainerList(params) => {
+            let output = collectors::container::list(&params).await?;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::ContainerList(output),
+            ))
+        }
+        ContextKind::ContainerInspect(params) => {
+            let output = collectors::container::inspect(&params).await?;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::ContainerInspect(output),
+            ))
+        }
+        ContextKind::ContainerLogs(params) => {
+            let output = collectors::container::logs(&params).await?;
+            Ok(OperationOutput::ReadContext(
+                ReadContextOutput::ContainerLogs(output),
+            ))
+        }
+        ContextKind::ScreenCaptureCurrent(_) => {
             Err(unsupported("read collector not implemented yet"))
         }
     }
@@ -119,8 +134,8 @@ mod tests {
     use super::*;
     use desk_agent_protocol::{
         ActorRef, ActorType, AgentOperation, AgentScope, AuditMeta, CallerRef, CallerType,
-        Capability, ContainerListParams, ExecInput, ExecTarget, ExecutionMode, ProtocolVersion,
-        ReadContextInput, RequestId, SystemInfoParams, TargetRef,
+        Capability, ExecInput, ExecTarget, ExecutionMode, ProtocolVersion, ReadContextInput,
+        RequestId, ScreenCaptureParams, SystemInfoParams, TargetRef,
     };
 
     fn envelope_for(input: OperationInput) -> AgentEnvelope {
@@ -180,7 +195,7 @@ mod tests {
     async fn unimplemented_read_kind_is_unsupported() {
         let agent = LocalDeviceAgent::new();
         let env = envelope_for(OperationInput::ReadContext(ReadContextInput {
-            kind: ContextKind::ContainerList(ContainerListParams::default()),
+            kind: ContextKind::ScreenCaptureCurrent(ScreenCaptureParams::default()),
         }));
         let err = agent.invoke(env).await.expect_err("stub must reject");
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
