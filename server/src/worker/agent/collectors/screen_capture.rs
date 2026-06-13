@@ -2,7 +2,7 @@
 //!
 //! Captures on the worker side (where the authoritative desktop frame lives,
 //! per the frozen design) via the capture-engine factory, then encodes the
-//! frame to PNG. The per-`display` override is not wired in M1a — the
+//! frame to PNG. The per-`display` override is not wired yet — the
 //! configured / current output is captured. A capture failure surfaces as an
 //! error rather than silently degrading, since a capture request implies a
 //! desktop is present.

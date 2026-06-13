@@ -1,6 +1,6 @@
 //! Single-machine audit sink.
 //!
-//! M1a keeps audit events in the local log rather than a database: each event
+//! Audit events are currently kept in the local log rather than a database: each event
 //! is written as one structured `log` line. The database-backed sink (mapping
 //! every [`AuditEvent`] onto an `ai_audit_event` row) lands in M2 and reuses the
 //! same [`AuditSink`] contract, so the emitter (the worker's

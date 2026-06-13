@@ -2,7 +2,7 @@
 //!
 //! Talks to the local Docker daemon (Windows named pipe / Unix socket) with
 //! bollard. Docker is optional: when the daemon is absent or unreachable the
-//! collectors degrade silently to `UnsupportedCapability` (per the roadmap),
+//! collectors degrade silently to `UnsupportedCapability`,
 //! never failing the transport. A missing container id maps to `InvalidInput`.
 //!
 //! These collectors are async (bollard is async-native), so the dispatch awaits

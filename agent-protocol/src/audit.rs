@@ -6,13 +6,12 @@
 //! mapping from an [`AgentEnvelope`] + outcome, and the [`AuditSink`] contract
 //! that consumes them.
 //!
-//! The event fields mirror the `ai_audit_event` Sea-ORM entity (the M0 schema
-//! spike) **minus** the database primary key, so a persistence sink can map an
-//! [`AuditEvent`] onto a row one-to-one. M1a keeps a single-machine form (the
-//! server logs events); the database-backed sink lands in M2. Because this
-//! crate is whitelisted as a cross-boundary dependency, both the device-side
-//! emitter (worker) and the future parent-repo persistence sink share this one
-//! definition.
+//! The event fields mirror the `ai_audit_event` Sea-ORM entity **minus** the
+//! database primary key, so a persistence sink can map an [`AuditEvent`] onto a
+//! row one-to-one. The current form is single-machine (the server logs events);
+//! the database-backed sink lands in M2. Because this crate is whitelisted as a
+//! cross-boundary dependency, both the device-side emitter (worker) and the
+//! future parent-repo persistence sink share this one definition.
 //!
 //! Two invariants the builders enforce:
 //! - **Summaries only.** `input_summary` / `output_summary` carry counts and
@@ -27,10 +26,10 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{AgentEnvelope, AgentError, Capability, ExecutionMode, OperationOutput};
 
-/// The fixed set of audit event types the M1a skeleton emits. Stored on the
-/// wire / in the audit row as the dotted string form (free-text column), so
-/// adding a type later (e.g. `ai.capability.denied` with the M4 policy engine)
-/// is additive.
+/// The fixed set of audit event types currently emitted. Stored on the wire /
+/// in the audit row as the dotted string form (free-text column), so adding a
+/// type later (e.g. `ai.capability.denied` with the M4 policy engine) is
+/// additive.
 #[derive(
     Debug,
     Clone,
@@ -103,7 +102,7 @@ pub struct AuditEvent {
     /// `created` | `ok` | `error`.
     pub result: String,
 
-    // ---- model accounting (no model in M1a; reserved) ----
+    // ---- model accounting (no model yet; reserved) ----
     pub model_provider: Option<String>,
     pub model_name: Option<String>,
     pub adapter: Option<String>,
@@ -143,8 +142,8 @@ impl AuditEvent {
             session_id: envelope.target.session_id.clone(),
             event_type: event_type.as_str().to_string(),
             capability: None,
-            // Risk is the server-classified final value; M1a has no classifier
-            // yet (lands with exec / policy in M2/M4), so it stays unset.
+            // Risk is the server-classified final value; there is no classifier
+            // yet (it lands with exec / policy in M2/M4), so it stays unset.
             risk: None,
             mode: Some(envelope.scope.mode.as_str().to_string()),
             result: String::new(),
@@ -287,7 +286,7 @@ pub fn summarize_output(output: &OperationOutput) -> String {
     }
 }
 
-/// Count the redaction markers carried by an output. M1a collectors emit no
+/// Count the redaction markers carried by an output. Collectors emit no
 /// redactions yet (scrubbing lands in M1b), so this is `0` in practice, but the
 /// count is wired so the audit trail reflects scrubbing the moment it lands.
 pub fn count_redactions(output: &OperationOutput) -> i32 {
@@ -343,8 +342,8 @@ impl ExecutionMode {
     }
 }
 
-/// Consumer of audit events. M1a wires a logging sink (single-machine form);
-/// M2 adds a database-backed sink that maps each [`AuditEvent`] to an
+/// Consumer of audit events. A logging sink is wired today (single-machine
+/// form); M2 adds a database-backed sink that maps each [`AuditEvent`] to an
 /// `ai_audit_event` row. Object-safe so the emitter can hold
 /// `Arc<dyn AuditSink>` and tests can substitute a recording mock — mirroring
 /// the [`crate::DeviceAgent`] rationale.

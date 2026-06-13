@@ -35,7 +35,7 @@ pub fn collect(params: &ProcessListParams) -> ProcessListOutput {
                 .user_id()
                 .and_then(|uid| users.get_user_by_id(uid))
                 .map(|u| u.name().to_string());
-            // M1a never emits raw command lines: they require the redaction
+            // Raw command lines are never emitted: they require the redaction
             // pipeline that lands in M1b. When the caller asks for them and a
             // command line exists, flag it redacted so the model knows the
             // data was withheld rather than absent.
@@ -131,8 +131,8 @@ mod tests {
     #[test]
     fn command_line_is_redacted_when_requested() {
         // With command lines requested, at least one real process (e.g. the
-        // test runner) has a non-empty cmd and must be flagged redacted; M1a
-        // never emits the raw line itself.
+        // test runner) has a non-empty cmd and must be flagged redacted; the
+        // raw line itself is never emitted.
         let out = collect(&params(0, ProcessSort::CpuDesc, true));
         assert!(out.processes.iter().any(|p| p.command_line_redacted));
 

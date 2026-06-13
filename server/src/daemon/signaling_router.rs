@@ -1268,7 +1268,7 @@ const SUPPORTED_OPERATION_KINDS: &[&str] = &["read_context", "exec"];
 /// can collect. The unknown-kind check descends to this level because
 /// the permission point is nested — `operation.input.kind` is only the
 /// `read_context` / `exec` dispatch layer; the real capability is
-/// `operation.input.params.kind.kind` (freeze doc §2.4).
+/// `operation.input.params.kind.kind`.
 const SUPPORTED_READ_KINDS: &[&str] = &[
     "system_info",
     "process_list",
@@ -1351,7 +1351,7 @@ fn validate_agent_request_kinds(raw: &serde_json::Value) -> Result<(), AgentErro
     Ok(())
 }
 
-/// Server-computed grant for the single-machine read path. M1a has no
+/// Server-computed grant for the single-machine read path. There is no
 /// policy engine yet (that lands in M4), so the daemon grants the full
 /// P0 read set in `ReadOnly` mode. The authorization *mechanism*
 /// ([`authorize`]) is exercised regardless, so a future policy engine
@@ -1383,7 +1383,7 @@ fn authorize(capability: Capability, granted: &[Capability]) -> bool {
 
 /// Server-injected actor. Never sourced from the control end (which
 /// structurally cannot express it — `AgentRequestData` carries no actor
-/// field). M1a single-machine has no session identity plumbed into the
+/// field). The single-machine path has no session identity plumbed into the
 /// router, so the local operator is represented as a `System` actor;
 /// fleet / authenticated paths will inject the real principal here.
 fn server_actor() -> ActorRef {
@@ -1396,7 +1396,7 @@ fn server_actor() -> ActorRef {
 
 /// Emit an `AgentResponse(AgentOutcome::Err)` back to the control end.
 /// Business / capability-level failures ride the `signaling_data`
-/// `AgentOutcome`, not `SignalingResponseState` (freeze doc §3A), so the
+/// `AgentOutcome`, not `SignalingResponseState`, so the
 /// control-end UI receives the full structured error. Build / serialise
 /// failures are non-fatal — log + drop.
 fn emit_agent_error(ctx: &RouterContext, model: &SignalingModel, error: AgentError) {
@@ -1442,7 +1442,7 @@ fn build_agent_envelope(
         // registry assigns one; never self-reported by the control end.
         target: TargetRef::default(),
         actor: server_actor(),
-        // No model caller in M1a (no orchestrator yet); a human operator
+        // No model caller yet (no orchestrator); a human operator
         // drove this directly.
         caller: CallerRef {
             caller_type: CallerType::Human,
@@ -3320,8 +3320,7 @@ mod tests {
     /// An unknown *inner* read kind is the case a phase-1-only check
     /// would miss: it would slip through to the typed `from_value` and
     /// hard-fail. The descent to `operation.input.params.kind.kind`
-    /// catches it as `UnsupportedCapability` (freeze doc §2.4 / codex
-    /// r-freeze-3 #1).
+    /// catches it as `UnsupportedCapability`.
     #[test]
     fn two_phase_parse_rejects_unknown_inner_read_kind() {
         let raw = serde_json::json!({
@@ -3376,7 +3375,7 @@ mod tests {
         }
     }
 
-    /// `exec` parses cleanly but derives no capability in M1a, so the
+    /// `exec` parses cleanly but derives no capability, so the
     /// handler rejects it as `UnsupportedCapability` without forwarding.
     #[tokio::test]
     async fn agent_request_exec_is_unsupported_until_m2() {

@@ -1,6 +1,6 @@
 //! Offline eval foundation for the AI read path.
 //!
-//! M1a has no model yet, so to make M1b's diagnosis quality measurable without
+//! There is no model yet, so to make M1b's diagnosis quality measurable without
 //! a live machine we freeze **evidence snapshots**: the structured output a set
 //! of read collectors would produce for a given situation, serialized to JSON
 //! and replayable offline. M1b's model / prompt eval runs against these fixed
@@ -9,7 +9,7 @@
 //!
 //! A snapshot is a list of [`EvidenceEntry`] — one per capability — each
 //! carrying the [`AgentOutcome`] verbatim, a `redactions` placeholder (empty in
-//! M1a; scrubbing lands in M1b), and the serialized size used for context-budget
+//! now; scrubbing lands in M1b), and the serialized size used for context-budget
 //! calibration. Three acceptance scenarios (high CPU, an occupied port, a
 //! failed container) are recorded as committed JSON fixtures and replayed by the
 //! tests below.
@@ -34,7 +34,7 @@ pub struct EvidenceEntry {
     /// what the daemon would have shipped.
     pub outcome: AgentOutcome,
     /// Names of fields that would be scrubbed before this evidence is shown to a
-    /// model. Empty in M1a — the placeholder reserves the shape so M1b's
+    /// model. Empty now — the placeholder reserves the shape so M1b's
     /// redaction pass populates it without a snapshot format change.
     #[serde(default)]
     pub redactions: Vec<String>,
@@ -58,7 +58,7 @@ pub struct EvidenceSnapshot {
 
 impl EvidenceSnapshot {
     /// Build a snapshot from a set of `(capability, outcome)` pairs, computing
-    /// each entry's serialized size. Redactions start empty (M1a).
+    /// each entry's serialized size. Redactions start empty.
     pub fn record(
         scenario: impl Into<String>,
         description: impl Into<String>,
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(snap.total_size_bytes(), expected_total);
     }
 
-    /// The redactions placeholder exists and is empty in M1a.
+    /// The redactions placeholder exists and is empty.
     #[test]
     fn redactions_placeholder_is_empty() {
         for snap in all_scenarios() {

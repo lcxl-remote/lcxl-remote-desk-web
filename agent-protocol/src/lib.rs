@@ -5,8 +5,8 @@
 //! with no platform implementation. It is consumed by the signaling facade,
 //! the IPC layer (daemon ↔ worker), and the server-side orchestrator.
 //!
-//! Design invariants (frozen — see
-//! `plans/roadmap/2026-06-12_m0-protocol-skeleton-freeze.md`):
+//! Design invariants (frozen — a change here is breaking and must be
+//! re-reviewed):
 //!
 //! - The protocol is **device-facing and client-agnostic**: it describes what
 //!   can be done to a device, not which control end (browser / android / iOS /
@@ -333,8 +333,8 @@ impl OperationInput {
     /// authz (always returning `ShellExecConfirmed` would reject a user who
     /// only holds `shell.exec.readonly` before the server could classify the
     /// command). So `Exec` returns `None`; M2 introduces
-    /// `required_capability(classification)` and freezes the exec mapping
-    /// then. Through M1a only reads exist, so `None` is never observed.
+    /// `required_capability(classification)` and freezes the exec mapping then.
+    /// Only reads exist today, so `None` is never observed.
     pub fn capability(&self) -> Option<Capability> {
         match self {
             OperationInput::ReadContext(rc) => Some(match &rc.kind {
@@ -388,7 +388,7 @@ pub enum ReadContextOutput {
     ScreenCaptureCurrent(ScreenCaptureOutput),
 }
 
-// -------- read params (fields additive; impl fills in M1a) --------
+// -------- read params (fields are additive) --------
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
@@ -787,8 +787,8 @@ pub enum AgentOutcome {
 // ============================ Trait ============================
 
 /// Device-side capability surface. One async dispatch over [`AgentEnvelope`].
-/// Implemented by DeskServer / SessionWorker in M1a (read_context) and M2
-/// (exec).
+/// Implemented by DeskServer / SessionWorker for read_context; exec lands in
+/// M2.
 ///
 /// `#[async_trait]` (boxed future) is used deliberately instead of RPITIT: the
 /// server-side orchestrator/router needs `Arc<dyn DeviceAgent>` (a registry of

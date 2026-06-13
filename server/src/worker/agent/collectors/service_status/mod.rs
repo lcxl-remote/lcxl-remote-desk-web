@@ -7,7 +7,7 @@
 //!   `EnumServicesStatusExW` (state only — per-service config is skipped for
 //!   bulk enumeration, so `start_type` is `None`).
 //! - Other platforms return `UnsupportedPlatform` (systemd integration is
-//!   deferred; the roadmap allows Linux to follow with partial coverage).
+//!   deferred; Linux can follow with partial coverage).
 
 use desk_agent_protocol::{AgentError, ServiceStatusOutput, ServiceStatusParams};
 
@@ -41,7 +41,7 @@ pub fn collect(params: &ServiceStatusParams) -> Result<ServiceStatusOutput, Agen
         let _ = params;
         Err(AgentError {
             kind: desk_agent_protocol::AgentErrorKind::UnsupportedPlatform,
-            message: "service.status is only implemented on Windows in M1a".to_string(),
+            message: "service.status is only implemented on Windows".to_string(),
             retryable: false,
             safe_for_model: true,
         })

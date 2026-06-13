@@ -548,7 +548,7 @@ pub async fn run_signaling_proxy(
             // the control end's signaling WS. Capability-level errors live
             // inside the `AgentOutcome::Err` (the response state stays a
             // transport-level success), so the control-end UI receives the
-            // full structured `AgentError` (freeze doc §3A). Mirrors the
+            // full structured `AgentError`. Mirrors the
             // manager-plane response rebuild.
             WorkerToService::AgentResponse(payload) => {
                 send_manager_response(
@@ -1180,7 +1180,7 @@ mod tests {
     /// (output) and `Err` (capability-level error) arms. The
     /// transport-level `response_state` is always success — the business
     /// error lives inside the `AgentOutcome::Err` so the control end gets
-    /// the full structured `AgentError` (freeze doc §3A).
+    /// the full structured `AgentError`.
     #[test]
     fn agent_response_outbound_rebuild_both_arms() {
         use desk_agent_protocol::{

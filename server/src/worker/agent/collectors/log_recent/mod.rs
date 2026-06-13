@@ -5,7 +5,7 @@
 //! existing pattern of shelling structured queries to PowerShell (driver ops).
 //! The severity / source / since / limit filters map onto a `Get-WinEvent`
 //! `FilterHashtable`. Other platforms return `UnsupportedPlatform` (journald
-//! integration is deferred; the roadmap puts Windows first).
+//! integration is deferred; Windows comes first).
 
 use desk_agent_protocol::{
     AgentError, AgentErrorKind, LogEvent, LogRecentOutput, LogRecentParams, LogSeverity,
@@ -37,7 +37,7 @@ pub fn collect(params: &LogRecentParams) -> Result<LogRecentOutput, AgentError> 
         let _ = (params, limit);
         Err(AgentError {
             kind: AgentErrorKind::UnsupportedPlatform,
-            message: "log.recent is only implemented on Windows in M1a".to_string(),
+            message: "log.recent is only implemented on Windows".to_string(),
             retryable: false,
             safe_for_model: true,
         })
