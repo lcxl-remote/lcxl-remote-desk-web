@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
+pub mod audit;
+
 // ============================ Envelope ============================
 
 /// Single envelope for every AI capability call. Structurally identical
