@@ -91,10 +91,36 @@ impl ModelAdapter for OpenAiCompatAdapter {
         request: ChatRequest,
         on_delta: &(dyn Fn(String) + Send + Sync),
     ) -> Result<ChatResponse, AgentError> {
-        let client = awc::Client::default();
+        // Build a TLS-capable client. `awc::Client::default()` has no TLS
+        // connector, so it fails instantly on `https://` gateways (hosted
+        // providers); a rustls connector handles both http and https. The crypto
+        // provider install is idempotent — production daemon/worker already
+        // install one, but the diagnose path may also run in contexts that did
+        // not.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut root_store = rustls::RootCertStore::empty();
+        // `CertificateResult` may carry partial errors; use whatever loaded.
+        for cert in rustls_native_certs::load_native_certs().certs {
+            let _ = root_store.add(cert);
+        }
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(std::sync::Arc::new(root_store))
+            .with_no_client_auth();
+        let client = awc::Client::builder()
+            .connector(
+                awc::Connector::new()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .rustls_0_23(std::sync::Arc::new(tls)),
+            )
+            .finish();
         let body = build_body(&request);
         let mut response = client
             .post(endpoint(&request.base_url))
+            // awc's per-request default is 5s, which large / hosted models can
+            // exceed before the first response bytes arrive. Allow generous
+            // headroom for slow first-token latency (streaming body chunks that
+            // follow are not bound by this).
+            .timeout(std::time::Duration::from_secs(180))
             .insert_header(("Authorization", format!("Bearer {}", request.api_key)))
             .insert_header(("Content-Type", "application/json"))
             .send_json(&body)

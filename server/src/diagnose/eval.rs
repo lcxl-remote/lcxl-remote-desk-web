@@ -565,7 +565,13 @@ async fn real_model_run() {
                     println!("    [{:?}] {}: {}", c.risk, c.shell, c.command);
                 }
             }
-            None => println!("  no final diagnosis (check error frame)"),
+            None => {
+                let err = frames.iter().rev().find_map(|e| e.error.clone());
+                match err {
+                    Some(e) => println!("  error: [{:?}] {}", e.kind, e.message),
+                    None => println!("  no final diagnosis and no error frame"),
+                }
+            }
         }
     }
     println!("=== end run — record these in the R3 acceptance report ===\n");
