@@ -1,0 +1,74 @@
+{
+  "scenario": "high_cpu",
+  "description": "A single process (ffmpeg.exe) is consuming the CPU; system load is ~99%.",
+  "recorded_at": "2026-06-12T00:00:00+00:00",
+  "contexts": [
+    {
+      "capability": "system.info",
+      "outcome": {
+        "status": "Ok",
+        "data": {
+          "ReadContext": {
+            "SystemInfo": {
+              "hostname": "build-agent-01",
+              "os": "Windows",
+              "os_version": "11",
+              "arch": "x86_64",
+              "uptime_seconds": 864000,
+              "cpu": {
+                "usage_percent": 98.7,
+                "logical_cores": 8
+              },
+              "memory": {
+                "total_bytes": 17179869184,
+                "used_bytes": 9000000000
+              },
+              "disks": [
+                {
+                  "mount": "C:",
+                  "total_bytes": 512000000000,
+                  "free_bytes": 120000000000
+                }
+              ]
+            }
+          }
+        }
+      },
+      "redactions": [],
+      "size_bytes": 342
+    },
+    {
+      "capability": "process.list",
+      "outcome": {
+        "status": "Ok",
+        "data": {
+          "ReadContext": {
+            "ProcessList": {
+              "processes": [
+                {
+                  "pid": 7321,
+                  "name": "ffmpeg.exe",
+                  "cpu_percent": 760.0,
+                  "memory_bytes": 1500000000,
+                  "user": "BUILD\\ci",
+                  "command_line_redacted": false
+                },
+                {
+                  "pid": 1044,
+                  "name": "System",
+                  "cpu_percent": 12.0,
+                  "memory_bytes": 200000000,
+                  "user": null,
+                  "command_line_redacted": false
+                }
+              ],
+              "truncated": false
+            }
+          }
+        }
+      },
+      "redactions": [],
+      "size_bytes": 331
+    }
+  ]
+}

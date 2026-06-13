@@ -1,0 +1,63 @@
+{
+  "scenario": "port_occupied",
+  "description": "Port 8080 is already held by a stale process (old-api.exe, pid 5120), so the new service cannot bind.",
+  "recorded_at": "2026-06-12T00:00:00+00:00",
+  "contexts": [
+    {
+      "capability": "network.ports",
+      "outcome": {
+        "status": "Ok",
+        "data": {
+          "ReadContext": {
+            "NetworkPorts": {
+              "ports": [
+                {
+                  "protocol": "tcp",
+                  "local_address": "0.0.0.0",
+                  "local_port": 8080,
+                  "pid": 5120,
+                  "process_name": "old-api.exe"
+                },
+                {
+                  "protocol": "tcp",
+                  "local_address": "127.0.0.1",
+                  "local_port": 5432,
+                  "pid": 2210,
+                  "process_name": "postgres.exe"
+                }
+              ],
+              "truncated": false
+            }
+          }
+        }
+      },
+      "redactions": [],
+      "size_bytes": 294
+    },
+    {
+      "capability": "process.list",
+      "outcome": {
+        "status": "Ok",
+        "data": {
+          "ReadContext": {
+            "ProcessList": {
+              "processes": [
+                {
+                  "pid": 5120,
+                  "name": "old-api.exe",
+                  "cpu_percent": 0.3,
+                  "memory_bytes": 80000000,
+                  "user": "SVC\\app",
+                  "command_line_redacted": false
+                }
+              ],
+              "truncated": false
+            }
+          }
+        }
+      },
+      "redactions": [],
+      "size_bytes": 212
+    }
+  ]
+}

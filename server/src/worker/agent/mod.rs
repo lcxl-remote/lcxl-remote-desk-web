@@ -14,6 +14,7 @@
 
 pub mod audit_sink;
 pub mod collectors;
+pub mod eval;
 
 use std::sync::Arc;
 use std::time::Instant;

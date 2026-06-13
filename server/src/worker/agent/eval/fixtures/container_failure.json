@@ -1,0 +1,64 @@
+{
+  "scenario": "container_failure",
+  "description": "Container payments-api exited (code 1) failing to reach its database; logs captured, and a stale container id inspect returns an error.",
+  "recorded_at": "2026-06-12T00:00:00+00:00",
+  "contexts": [
+    {
+      "capability": "container.list",
+      "outcome": {
+        "status": "Ok",
+        "data": {
+          "ReadContext": {
+            "ContainerList": {
+              "containers": [
+                {
+                  "id": "9f3c1a2b4d5e",
+                  "name": "payments-api",
+                  "image": "registry.local/payments:1.4.2",
+                  "state": "exited"
+                }
+              ],
+              "truncated": false
+            }
+          }
+        }
+      },
+      "redactions": [],
+      "size_bytes": 192
+    },
+    {
+      "capability": "container.logs",
+      "outcome": {
+        "status": "Ok",
+        "data": {
+          "ReadContext": {
+            "ContainerLogs": {
+              "lines": [
+                "2026-06-12T00:00:01Z FATAL could not connect to database: connection refused",
+                "2026-06-12T00:00:01Z exiting with code 1"
+              ],
+              "redactions": [],
+              "truncated": false
+            }
+          }
+        }
+      },
+      "redactions": [],
+      "size_bytes": 224
+    },
+    {
+      "capability": "container.inspect",
+      "outcome": {
+        "status": "Err",
+        "data": {
+          "kind": "invalid_input",
+          "message": "no such container: payments-api-old",
+          "retryable": false,
+          "safe_for_model": true
+        }
+      },
+      "redactions": [],
+      "size_bytes": 136
+    }
+  ]
+}
