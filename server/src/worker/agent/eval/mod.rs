@@ -25,6 +25,15 @@ use desk_agent_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Schema version of the [`EvidenceSnapshot`] structure. Bump when the snapshot
+/// shape changes so eval regressions and the audit trail can attribute a result
+/// to the evidence schema that produced it.
+pub const EVIDENCE_SCHEMA_VERSION: &str = "evidence-v1";
+
+fn default_evidence_schema_version() -> String {
+    EVIDENCE_SCHEMA_VERSION.to_string()
+}
+
 /// One captured read context within a snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceEntry {
@@ -53,6 +62,11 @@ pub struct EvidenceSnapshot {
     /// RFC3339 capture time. Fixed in committed fixtures so replay is
     /// deterministic.
     pub recorded_at: String,
+    /// Schema version of this snapshot, defaulting to the current
+    /// [`EVIDENCE_SCHEMA_VERSION`] for snapshots recorded before the field
+    /// existed (`#[serde(default)]` keeps older fixtures replayable).
+    #[serde(default = "default_evidence_schema_version")]
+    pub schema_version: String,
     pub contexts: Vec<EvidenceEntry>,
 }
 
@@ -81,6 +95,7 @@ impl EvidenceSnapshot {
             scenario: scenario.into(),
             description: description.into(),
             recorded_at: recorded_at.into(),
+            schema_version: EVIDENCE_SCHEMA_VERSION.to_string(),
             contexts,
         }
     }
@@ -305,6 +320,34 @@ mod tests {
             let loaded = EvidenceSnapshot::from_json(json).expect("fixture must parse");
             assert_eq!(loaded, expected, "fixture drifted from its builder");
         }
+    }
+
+    /// Every committed fixture declares the current evidence schema version,
+    /// both in the raw JSON (so a drift is visible rather than masked by the
+    /// serde default) and after parsing.
+    #[test]
+    fn fixtures_declare_current_schema_version() {
+        for json in [
+            FIXTURE_HIGH_CPU,
+            FIXTURE_PORT_OCCUPIED,
+            FIXTURE_CONTAINER_FAILURE,
+        ] {
+            assert!(
+                json.contains("\"schema_version\""),
+                "fixture must explicitly carry schema_version, not rely on the default"
+            );
+            let loaded = EvidenceSnapshot::from_json(json).expect("fixture must parse");
+            assert_eq!(loaded.schema_version, EVIDENCE_SCHEMA_VERSION);
+        }
+    }
+
+    /// A snapshot recorded before `schema_version` existed (JSON without the
+    /// field) still parses, defaulting to the current version.
+    #[test]
+    fn snapshot_without_schema_version_defaults() {
+        let json = r#"{"scenario":"x","description":"d","recorded_at":"t","contexts":[]}"#;
+        let loaded = EvidenceSnapshot::from_json(json).expect("legacy snapshot must parse");
+        assert_eq!(loaded.schema_version, EVIDENCE_SCHEMA_VERSION);
     }
 
     /// The container-failure snapshot carries a mixed Ok/Err set and survives a

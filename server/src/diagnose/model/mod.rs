@@ -299,14 +299,21 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
         };
 
         // `ai.model.requested` — input token count is not known until the
-        // gateway reports usage, so it is left unset here.
+        // gateway reports usage, so it is left unset here. The prompt and
+        // evidence-schema versions are stamped into the summary so a recorded
+        // diagnosis is attributable to the contract that produced it.
         self.audit
             .record(AuditEvent::model_requested(
                 new_event_id(),
                 now_rfc3339(),
                 request_id,
                 &caller,
-                format!("evidence: {} contexts", evidence.contexts.len()),
+                format!(
+                    "evidence: {} contexts prompt={} evidence_schema={}",
+                    evidence.contexts.len(),
+                    prompt::PROMPT_VERSION,
+                    evidence.schema_version,
+                ),
                 None,
             ))
             .await;
@@ -491,6 +498,26 @@ mod tests {
             .unwrap();
         assert_eq!(responded.input_tokens, Some(1200));
         assert_eq!(responded.output_tokens, Some(80));
+        // The responded summary records the structured/degraded parse outcome.
+        let responded_summary = responded.output_summary.as_deref().unwrap_or_default();
+        assert!(
+            responded_summary.contains("parse=structured"),
+            "responded summary should record the parse outcome: {responded_summary:?}"
+        );
+        // The requested summary stamps the prompt + evidence-schema versions.
+        let requested = events
+            .iter()
+            .find(|e| e.event_type == AuditEventType::ModelRequested.as_str())
+            .unwrap();
+        let requested_summary = requested.input_summary.as_deref().unwrap_or_default();
+        assert!(
+            requested_summary.contains(&format!("prompt={}", prompt::PROMPT_VERSION)),
+            "requested summary should stamp the prompt version: {requested_summary:?}"
+        );
+        assert!(
+            requested_summary.contains("evidence_schema="),
+            "requested summary should stamp the evidence schema version: {requested_summary:?}"
+        );
     }
 
     /// The configured `response_format` mode flows into the chat request: the

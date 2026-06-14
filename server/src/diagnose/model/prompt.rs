@@ -18,6 +18,11 @@ use super::screenshot;
 use super::{ChatMessage, ChatRole};
 use crate::worker::agent::eval::EvidenceSnapshot;
 
+/// Semantic version of the system prompt / output contract. Bump whenever
+/// [`SYSTEM_PROMPT`] or the requested output shape changes, so eval regressions
+/// and the audit trail can attribute a diagnosis to the prompt that produced it.
+pub const PROMPT_VERSION: &str = "diagnose-v1";
+
 /// The system prompt: output contract + injection defence + suggest-only stance.
 pub const SYSTEM_PROMPT: &str = "\
 You are a remote-device troubleshooting assistant. You are given a user question \

@@ -2,6 +2,7 @@
   "scenario": "port_occupied",
   "description": "Port 8080 is already held by a stale process (old-api.exe, pid 5120), so the new service cannot bind.",
   "recorded_at": "2026-06-12T00:00:00+00:00",
+  "schema_version": "evidence-v1",
   "contexts": [
     {
       "capability": "network.ports",

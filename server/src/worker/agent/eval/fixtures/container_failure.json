@@ -2,6 +2,7 @@
   "scenario": "container_failure",
   "description": "Container payments-api exited (code 1) failing to reach its database; logs captured, and a stale container id inspect returns an error.",
   "recorded_at": "2026-06-12T00:00:00+00:00",
+  "schema_version": "evidence-v1",
   "contexts": [
     {
       "capability": "container.list",

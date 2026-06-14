@@ -2,6 +2,7 @@
   "scenario": "high_cpu",
   "description": "A single process (ffmpeg.exe) is consuming the CPU; system load is ~99%.",
   "recorded_at": "2026-06-12T00:00:00+00:00",
+  "schema_version": "evidence-v1",
   "contexts": [
     {
       "capability": "system.info",
