@@ -100,6 +100,7 @@ pub async fn run_signaling_proxy(
         // Single-machine confirmed-execution audit uses the structured log sink
         // (the audit carrier when there is no manager DB).
         audit: Arc::new(LogAuditSink),
+        diagnose_tasks: Default::default(),
     };
 
     let local_handle = {
@@ -1023,6 +1024,7 @@ mod tests {
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             audit: Arc::new(LogAuditSink),
+            diagnose_tasks: Default::default(),
         };
         (ctx, outbound_tx)
     }

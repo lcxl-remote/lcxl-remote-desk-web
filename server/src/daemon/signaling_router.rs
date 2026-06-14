@@ -299,6 +299,13 @@ pub struct RouterContext {
     /// structured log sink; a DB-backed sink can be substituted without touching
     /// the emission sites.
     pub audit: Arc<dyn AuditSink>,
+    /// In-flight diagnose orchestrator tasks keyed by `request_id`. A
+    /// `DiagnoseCancel` (the control end starting over or handing off) aborts the
+    /// matching run so a slow model call stops instead of streaming into a closed
+    /// connection. Entries remove themselves on natural completion.
+    pub diagnose_tasks: Arc<
+        std::sync::Mutex<std::collections::HashMap<String, actix_web::rt::task::JoinHandle<()>>>,
+    >,
 }
 
 /// Fresh audit event id.
@@ -1660,13 +1667,24 @@ async fn handle_diagnose_inbound(
     let outbound_tx = ctx.outbound_tx.clone();
     let to_connection_id = model.from_connection_id.clone();
     let request_id = model.request_id.clone();
-    actix_web::rt::spawn(async move {
+    let tasks = ctx.diagnose_tasks.clone();
+    let handle = actix_web::rt::spawn(async move {
         let sink = OutboundDiagnoseSink {
             outbound_tx,
             to_connection_id,
         };
         orchestrator.run(&request_id, request, &sink).await;
+        // Drop our own registry entry on natural completion so a later cancel is
+        // a harmless no-op.
+        tasks
+            .lock()
+            .expect("diagnose tasks lock")
+            .remove(&request_id);
     });
+    ctx.diagnose_tasks
+        .lock()
+        .expect("diagnose tasks lock")
+        .insert(model.request_id.clone(), handle);
     Ok(())
 }
 
@@ -1681,6 +1699,16 @@ async fn handle_diagnose_cancel_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
+    // Abort the in-flight run if it is still tracked, so a slow model call stops
+    // instead of streaming into a closed / superseded connection.
+    if let Some(handle) = ctx
+        .diagnose_tasks
+        .lock()
+        .expect("diagnose tasks lock")
+        .remove(&model.request_id)
+    {
+        handle.abort();
+    }
     if let Some(orchestrator) = ctx.diagnose_orchestrator.clone() {
         orchestrator.audit_cancellation(&model.request_id).await;
     }
@@ -2466,6 +2494,7 @@ mod tests {
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
+            diagnose_tasks: Default::default(),
         }
     }
 
@@ -4512,6 +4541,32 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "ai.task.cancelled");
         assert_eq!(events[0].request_id, "req-diag-1");
+    }
+
+    /// A cancel aborts the in-flight orchestrator task (start-over / handoff) so
+    /// a slow model call does not keep running, and clears the registry entry.
+    #[actix_web::test]
+    async fn diagnose_cancel_aborts_inflight_task() {
+        let ctx = make_ctx();
+        // Register a never-completing task under the cancel model's request_id,
+        // standing in for an orchestrator run blocked on a slow model.
+        let handle = actix_web::rt::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        ctx.diagnose_tasks
+            .lock()
+            .unwrap()
+            .insert("req-diag-1".to_string(), handle);
+
+        handle_diagnose_cancel_inbound(&ctx, &diagnose_cancel_model())
+            .await
+            .unwrap();
+
+        // The entry is removed (and the task aborted) by the cancel.
+        assert!(
+            ctx.diagnose_tasks.lock().unwrap().is_empty(),
+            "cancel must abort and drop the in-flight task"
+        );
     }
 
     /// Handoff with no orchestrator injected (ServiceDaemon-like) is a no-op: no
