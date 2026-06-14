@@ -1278,14 +1278,28 @@ export default function DeskSession() {
                                         </TooltipContent>
                                     </Tooltip>
 
+                                    {/* Rainbow gradient definition for the AI Diagnose icon,
+                                        referenced by `stroke="url(#ai-rainbow-gradient)"`. */}
+                                    <svg width="0" height="0" className="absolute h-0 w-0" aria-hidden="true">
+                                        <defs>
+                                            <linearGradient id="ai-rainbow-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                                                <stop offset="0%" stopColor="#6366f1" />
+                                                <stop offset="25%" stopColor="#a855f7" />
+                                                <stop offset="50%" stopColor="#ec4899" />
+                                                <stop offset="75%" stopColor="#f59e0b" />
+                                                <stop offset="100%" stopColor="#10b981" />
+                                            </linearGradient>
+                                        </defs>
+                                    </svg>
+
                                     <Tooltip>
                                         <TooltipTrigger asChild>
                                             <Button
                                                 variant="ghost"
-                                                className={`controlButton ${showDiagnose ? "bg-white/20 text-blue-400" : ""}`}
+                                                className={`controlButton ${showDiagnose ? "bg-white/20" : ""}`}
                                                 onClick={() => setShowDiagnose(!showDiagnose)}
                                             >
-                                                <Stethoscope />
+                                                <Stethoscope style={{ stroke: "url(#ai-rainbow-gradient)" }} />
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>

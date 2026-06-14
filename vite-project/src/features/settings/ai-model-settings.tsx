@@ -160,6 +160,9 @@ export function AiModelSettings() {
                                             <FormControl>
                                                 <Input placeholder="openai-compatible" {...field} />
                                             </FormControl>
+                                            <FormDescription>
+                                                {t("pages.aiModel.settings.provider.description", "Label for auditing only — does not affect behavior. The connection is decided by model, base URL, and API key. Keep \"openai-compatible\" if unsure.")}
+                                            </FormDescription>
                                             <FormMessage />
                                         </FormItem>
                                     )}

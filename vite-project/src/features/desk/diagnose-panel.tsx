@@ -3,11 +3,12 @@ import { useTranslation } from "react-i18next"
 import { Loader2, Stethoscope, X, UserCog, AlertCircle, Terminal as TerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import type {
-    Confidence,
-    DiagnoseState,
-    DiagnoseStartOptions,
-    RiskLevel,
+import {
+    extractStreamingSummary,
+    type Confidence,
+    type DiagnoseState,
+    type DiagnoseStartOptions,
+    type RiskLevel,
 } from "./use-desk-diagnose"
 
 type DiagnosePanelProps = {
@@ -51,7 +52,7 @@ export function DiagnosePanel({
     onReset,
     onClose,
 }: DiagnosePanelProps) {
-    const { t } = useTranslation()
+    const { t, i18n } = useTranslation()
     const [question, setQuestion] = useState("")
     const [includeScreen, setIncludeScreen] = useState(false)
 
@@ -64,7 +65,8 @@ export function DiagnosePanel({
     const submit = (q: string) => {
         const trimmed = q.trim()
         if (!trimmed) return
-        onStart(trimmed, { includeScreen })
+        // Pass the current UI language so the AI answers in it.
+        onStart(trimmed, { includeScreen, locale: i18n.language })
     }
 
     // The lifecycle status name is a backend-provided phase string; map the
@@ -83,13 +85,16 @@ export function DiagnosePanel({
     }
 
     const result = state.result
+    // Show flowing summary text while streaming instead of the raw JSON the
+    // model emits under a constrained `response_format`.
+    const streamingSummary = extractStreamingSummary(state.partialSummary)
 
     return (
         <div className="absolute top-4 right-4 z-50 flex w-[380px] max-w-[90vw] max-h-[85vh] flex-col rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text">
             {/* Header */}
             <div className="flex items-center justify-between border-b border-white/15 px-4 py-3">
                 <div className="flex items-center gap-2 text-sm font-bold text-white/90">
-                    <Stethoscope className="h-4 w-4" />
+                    <Stethoscope className="h-4 w-4" style={{ stroke: "url(#ai-rainbow-gradient)" }} />
                     {t("pages.desk.diagnose.title", "AI Diagnose")}
                 </div>
                 <button
@@ -164,9 +169,9 @@ export function DiagnosePanel({
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             {statusLabel(state.status)}
                         </div>
-                        {state.partialSummary && (
+                        {streamingSummary && (
                             <p className="whitespace-pre-wrap text-sm text-white/90">
-                                {state.partialSummary}
+                                {streamingSummary}
                             </p>
                         )}
                     </div>
@@ -338,9 +343,9 @@ export function DiagnosePanel({
                         ) : (
                             // Handed off mid-stream with whatever was gathered.
                             <div className="flex flex-col gap-2">
-                                {state.partialSummary ? (
+                                {streamingSummary ? (
                                     <p className="whitespace-pre-wrap text-sm text-white/90">
-                                        {state.partialSummary}
+                                        {streamingSummary}
                                     </p>
                                 ) : (
                                     <p className="text-sm text-white/60">

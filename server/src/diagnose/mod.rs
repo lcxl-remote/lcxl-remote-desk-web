@@ -55,8 +55,9 @@ pub trait ContextCollector: Send + Sync {
 }
 
 /// Produces a diagnosis from the question + already-redacted evidence. Streaming
-/// is surfaced through `on_partial` (each call becomes a `Partial` frame). The
-/// real model adapter replaces [`StubDiagnoseModel`] in a later PR.
+/// is surfaced through `on_partial` (each call becomes a `Partial` frame).
+/// `locale` is the BCP-47 tag of the control-end UI so the answer matches the
+/// user's language (`None` = model default).
 ///
 /// `?Send`: the OpenAI adapter uses `awc`, whose client/futures are `!Send`
 /// (actix runs single-threaded per worker). The diagnose path is driven inline
@@ -69,6 +70,7 @@ pub trait DiagnoseModel: Send + Sync {
         request_id: &str,
         question: &str,
         evidence: &EvidenceSnapshot,
+        locale: Option<&str>,
         on_partial: &(dyn Fn(String) + Send + Sync),
     ) -> Result<Diagnosis, AgentError>;
 }
@@ -145,7 +147,13 @@ impl DiagnoseOrchestrator {
 
         match self
             .model
-            .diagnose(request_id, &request.question, &snapshot, &on_partial)
+            .diagnose(
+                request_id,
+                &request.question,
+                &snapshot,
+                request.locale.as_deref(),
+                &on_partial,
+            )
             .await
         {
             Ok(mut diagnosis) => {
@@ -214,6 +222,7 @@ impl DiagnoseModel for StubDiagnoseModel {
         _request_id: &str,
         _question: &str,
         _evidence: &EvidenceSnapshot,
+        _locale: Option<&str>,
         on_partial: &(dyn Fn(String) + Send + Sync),
     ) -> Result<Diagnosis, AgentError> {
         on_partial("AI diagnosis is not configured yet. ".to_string());
@@ -240,6 +249,7 @@ impl DiagnoseModel for FailingDiagnoseModel {
         _request_id: &str,
         _question: &str,
         _evidence: &EvidenceSnapshot,
+        _locale: Option<&str>,
         _on_partial: &(dyn Fn(String) + Send + Sync),
     ) -> Result<Diagnosis, AgentError> {
         Err(AgentError {
@@ -325,6 +335,7 @@ mod tests {
             _request_id: &str,
             _question: &str,
             _evidence: &EvidenceSnapshot,
+            _locale: Option<&str>,
             on_partial: &(dyn Fn(String) + Send + Sync),
         ) -> Result<Diagnosis, AgentError> {
             for f in &self.fragments {
@@ -386,6 +397,7 @@ mod tests {
             question: "why?".to_string(),
             include_screen: false,
             context_kinds: vec![],
+            locale: None,
         }
     }
 

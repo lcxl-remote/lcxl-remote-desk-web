@@ -37,6 +37,12 @@ pub struct DiagnoseRequestData {
     /// the server's default read set.
     #[serde(default)]
     pub context_kinds: Vec<String>,
+    /// BCP-47 locale tag of the control-end UI (e.g. `zh-CN`, `en-US`) so the
+    /// model answers in the user's language. `None`/empty leaves the model's
+    /// default (English). Only steers natural-language text; the JSON shape and
+    /// enum values stay in English.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// Confidence the model assigns to a diagnosis.
@@ -263,6 +269,7 @@ mod tests {
             question: "Why is the container failing?".into(),
             include_screen: true,
             context_kinds: vec!["container.list".into(), "container.logs".into()],
+            locale: Some("zh-CN".into()),
         };
         let json = serde_json::to_string(&req).expect("json encode");
         let back: DiagnoseRequestData = serde_json::from_str(&json).expect("json decode");

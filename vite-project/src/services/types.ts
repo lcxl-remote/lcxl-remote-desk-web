@@ -1988,11 +1988,6 @@ export type RestResponseSystemSettings = {
    */
   data?: {
     /**
-     * @description Whether AI agent capability requests (`AgentRequest`) are served.\n`None` / `false` = disabled. Off by default: the read collectors expose\nhost data (processes, network ports, services, logs, containers) that\ngoes beyond what a remote viewer already sees, so the feature stays dark\nuntil an operator opts in. A policy engine will narrow this per\ncapability later; until then this is the single on/off gate.
-     * @type boolean,null
-     */
-    ai_agent_enabled?: boolean | null;
-    /**
      * @description Auto start the application on system login
      * @type boolean,null
      */
@@ -2635,11 +2630,6 @@ export type SystemInfo = {
  * @description System settings for the application. This struct is used to load and save settings from a configuration file.
  */
 export type SystemSettings = {
-  /**
-   * @description Whether AI agent capability requests (`AgentRequest`) are served.\n`None` / `false` = disabled. Off by default: the read collectors expose\nhost data (processes, network ports, services, logs, containers) that\ngoes beyond what a remote viewer already sees, so the feature stays dark\nuntil an operator opts in. A policy engine will narrow this per\ncapability later; until then this is the single on/off gate.
-   * @type boolean,null
-   */
-  ai_agent_enabled?: boolean | null;
   /**
    * @description Auto start the application on system login
    * @type boolean,null

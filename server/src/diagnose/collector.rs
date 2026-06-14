@@ -142,6 +142,7 @@ mod tests {
             question: "why is the host slow?".into(),
             include_screen: false,
             context_kinds: kinds.iter().map(|s| s.to_string()).collect(),
+            locale: None,
         }
     }
 

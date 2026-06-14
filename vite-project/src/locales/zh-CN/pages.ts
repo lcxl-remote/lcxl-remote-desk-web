@@ -582,6 +582,7 @@ export default {
   'pages.aiModel.settings.gateway': '模型网关',
   'pages.aiModel.settings.gateway.description': '兼容 OpenAI 的 chat-completions 端点。',
   'pages.aiModel.settings.provider': '提供方',
+  'pages.aiModel.settings.provider.description': '仅作审计标识，不影响行为。实际连接由模型、Base URL 和 API 密钥决定。不确定时保持 “openai-compatible” 即可。',
   'pages.aiModel.settings.model': '模型',
   'pages.aiModel.settings.baseUrl': 'Base URL',
   'pages.aiModel.settings.apiKey': 'API 密钥',

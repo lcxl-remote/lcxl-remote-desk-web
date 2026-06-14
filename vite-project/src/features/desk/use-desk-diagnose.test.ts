@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useDeskDiagnose } from './use-desk-diagnose';
+import { useDeskDiagnose, extractStreamingSummary } from './use-desk-diagnose';
 import type { DiagnoseEvent } from './use-desk-diagnose';
 import type { SignalingMessage } from './use-desk-signaling';
 import {
@@ -24,6 +24,39 @@ function frame(event: DiagnoseEvent): SignalingMessage {
         signaling_data: event,
     };
 }
+
+describe('extractStreamingSummary', () => {
+    it('returns empty before the summary field appears in the JSON', () => {
+        expect(extractStreamingSummary('')).toBe('');
+        expect(extractStreamingSummary('{"conf')).toBe('');
+        expect(extractStreamingSummary('{"confidence":"high"')).toBe('');
+    });
+
+    it('streams the partial summary value as the JSON grows', () => {
+        expect(extractStreamingSummary('{"summary":"The CPU')).toBe('The CPU');
+        expect(extractStreamingSummary('{"summary":"The CPU is high')).toBe('The CPU is high');
+    });
+
+    it('stops at the closing quote and ignores later fields', () => {
+        expect(
+            extractStreamingSummary('{"summary":"done","confidence":"high"}'),
+        ).toBe('done');
+    });
+
+    it('decodes escape sequences and tolerates a truncated trailing escape', () => {
+        expect(extractStreamingSummary('{"summary":"line1\\nline2"}')).toBe('line1\nline2');
+        expect(extractStreamingSummary('{"summary":"a \\"quote\\""}')).toBe('a "quote"');
+        // Truncated mid-escape at the stream end: emit what is decodable so far.
+        expect(extractStreamingSummary('{"summary":"tab\\')).toBe('tab');
+        expect(extractStreamingSummary('{"summary":"u\\u00')).toBe('u');
+    });
+
+    it('passes through free-text (non-JSON) streams unchanged', () => {
+        expect(extractStreamingSummary('The disk is full because')).toBe(
+            'The disk is full because',
+        );
+    });
+});
 
 describe('useDeskDiagnose', () => {
     it('start sends a Diagnose request and enters the running phase', () => {

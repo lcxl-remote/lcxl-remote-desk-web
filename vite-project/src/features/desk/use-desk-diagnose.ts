@@ -60,7 +60,64 @@ export type DiagnoseEvent = {
 export type DiagnoseStartOptions = {
     includeScreen?: boolean;
     contextKinds?: string[];
+    /** BCP-47 tag of the current UI language, so the AI answers in it. */
+    locale?: string;
 };
+
+/**
+ * Extract a human-readable streaming summary from a partially-received model
+ * response so the panel can show flowing text instead of a growing raw JSON
+ * string while the structured output is still being produced.
+ *
+ * When the model is constrained to JSON (`response_format` = json_object /
+ * json_schema), the streamed deltas form an incomplete JSON document. This reads
+ * the value of the `"summary"` string field as it grows — tolerant of the
+ * document being truncated mid-string and of a trailing incomplete escape — and
+ * returns it decoded. If the stream is not JSON (free-text mode) the raw text is
+ * returned as-is; if the `summary` field has not appeared yet, an empty string
+ * is returned so the caller can fall back to a "working" indicator.
+ */
+export function extractStreamingSummary(raw: string): string {
+    if (!raw) return '';
+    // Free-text mode: not a JSON object, show the prose directly.
+    if (!raw.trimStart().startsWith('{')) return raw;
+
+    const key = raw.match(/"summary"\s*:\s*"/);
+    if (!key || key.index === undefined) return '';
+
+    let out = '';
+    for (let i = key.index + key[0].length; i < raw.length; i++) {
+        const ch = raw[i];
+        if (ch === '"') break; // closing quote of the summary value
+        if (ch !== '\\') {
+            out += ch;
+            continue;
+        }
+        // Escape sequence; bail out if it is truncated at the end of the stream.
+        const next = raw[i + 1];
+        if (next === undefined) break;
+        switch (next) {
+            case 'n': out += '\n'; break;
+            case 't': out += '\t'; break;
+            case 'r': out += '\r'; break;
+            case 'b': out += '\b'; break;
+            case 'f': out += '\f'; break;
+            case '"': out += '"'; break;
+            case '\\': out += '\\'; break;
+            case '/': out += '/'; break;
+            case 'u': {
+                const hex = raw.slice(i + 2, i + 6);
+                if (hex.length < 4) return out; // incomplete \uXXXX at stream end
+                out += String.fromCharCode(parseInt(hex, 16));
+                i += 4;
+                break;
+            }
+            default: out += next;
+        }
+        i += 1; // consume the escaped character
+    }
+    return out;
+}
 
 // `idle` before a run, `running` while frames stream, `done` on a terminal
 // `final` (or after a handoff that keeps the gathered result), `error` on a
@@ -120,6 +177,7 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
                 question,
                 include_screen: options?.includeScreen ?? false,
                 context_kinds: options?.contextKinds ?? [],
+                locale: options?.locale,
             };
             const requestId = sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE, data, deskId);
             activeRequestRef.current = requestId;

@@ -1520,8 +1520,10 @@ async fn handle_diagnose_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    // Single on/off gate, shared with `AgentRequest`.
-    if !ctx.settings.read().await.system.ai_agent_enabled() {
+    // Gate on the model gateway being configured: configuring the model, base
+    // URL, and API key in AI model settings is the operator opt-in. Until then
+    // the read collectors stay dark and the control end is told to configure.
+    if !ctx.settings.read().await.ai_model.is_configured() {
         emit_diagnose_event(
             ctx,
             model,
@@ -1530,7 +1532,8 @@ async fn handle_diagnose_inbound(
                 0,
                 agent_error(
                     AgentErrorKind::UnsupportedCapability,
-                    "AI agent capabilities are disabled",
+                    "AI model gateway is not configured; set the model, base URL, \
+                     and API key in AI model settings",
                     false,
                     true,
                 ),
@@ -1604,17 +1607,16 @@ async fn handle_diagnose_inbound(
 }
 
 /// Route a control-end `DiagnoseCancel` (handoff to a human). The message
-/// `request_id` is the cancelled diagnosis's id. Gated identically to
-/// `Diagnose`; when the orchestrator is available the daemon records an
-/// `ai.task.cancelled` audit. No `DiagnoseEvent` is streamed back — the control
-/// end already closed the panel and retains the evidence locally.
+/// `request_id` is the cancelled diagnosis's id. A cancel can only follow a
+/// diagnosis that already started (which required a configured gateway), so it
+/// needs no separate gate: when the orchestrator is available the daemon records
+/// an `ai.task.cancelled` audit, otherwise it is a no-op. No `DiagnoseEvent` is
+/// streamed back — the control end already closed the panel and retains the
+/// evidence locally.
 async fn handle_diagnose_cancel_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    if !ctx.settings.read().await.system.ai_agent_enabled() {
-        return Ok(());
-    }
     if let Some(orchestrator) = ctx.diagnose_orchestrator.clone() {
         orchestrator.audit_cancellation(&model.request_id).await;
     }
@@ -1662,17 +1664,18 @@ async fn handle_agent_request_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    // Single on/off gate. The AI read collectors expose host data beyond the
-    // remote view, so the feature is disabled by default; a control end that
-    // sends `AgentRequest` while it is off gets a structured
+    // The AI read collectors expose host data beyond the remote view, so they
+    // stay dark until the model gateway is configured (the operator opt-in). A
+    // control end that sends `AgentRequest` before that gets a structured
     // `UnsupportedCapability` rather than any collection.
-    if !ctx.settings.read().await.system.ai_agent_enabled() {
+    if !ctx.settings.read().await.ai_model.is_configured() {
         emit_agent_error(
             ctx,
             model,
             agent_error(
                 AgentErrorKind::UnsupportedCapability,
-                "AI agent capabilities are disabled",
+                "AI model gateway is not configured; set the model, base URL, \
+                 and API key in AI model settings",
                 false,
                 true,
             ),
@@ -1932,6 +1935,15 @@ mod tests {
     fn read_response(rx: &mut broadcast::Receiver<String>) -> SignalingModel {
         let text = rx.try_recv().expect("expected outbound error response");
         serde_json::from_str::<SignalingModel>(&text).expect("response not valid JSON")
+    }
+
+    /// Configure the model gateway so the AI agent / diagnose routes pass their
+    /// "is the gateway configured" gate (the operator opt-in).
+    async fn configure_ai_model(ctx: &RouterContext) {
+        let mut s = ctx.settings.write().await;
+        s.ai_model.model = Some("test-model".to_string());
+        s.ai_model.base_url = Some("http://localhost:1/v1".to_string());
+        s.ai_model.api_key = Some("test-key".to_string());
     }
 
     fn make_change_display_settings_model(
@@ -3573,7 +3585,7 @@ mod tests {
     #[tokio::test]
     async fn agent_request_unknown_kind_emits_unsupported_outcome() {
         let (ctx, mut rx) = make_ctx_with_rx();
-        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        configure_ai_model(&ctx).await;
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -3597,7 +3609,7 @@ mod tests {
     #[tokio::test]
     async fn agent_request_exec_is_unsupported_until_m2() {
         let (ctx, mut rx) = make_ctx_with_rx();
-        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        configure_ai_model(&ctx).await;
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -3633,7 +3645,7 @@ mod tests {
             AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
         };
         let ctx = make_ctx();
-        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        configure_ai_model(&ctx).await;
         let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
         ctx.worker_mgr.install_active_for_test(ipc_tx).await;
 
@@ -3670,17 +3682,17 @@ mod tests {
         }
     }
 
-    /// With the feature off (the default), a valid read is gated before any
-    /// parsing / collection: the handler emits
+    /// With the model gateway unconfigured (the default), a valid read is gated
+    /// before any parsing / collection: the handler emits
     /// `AgentResponse(AgentOutcome::Err(UnsupportedCapability))` and forwards
     /// nothing.
     #[tokio::test]
-    async fn agent_request_disabled_by_default_emits_unsupported() {
+    async fn agent_request_unconfigured_emits_unsupported() {
         use desk_agent_protocol::{
             AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
         };
         let (ctx, mut rx) = make_ctx_with_rx();
-        // ai_agent_enabled defaults to None / false; do not enable it.
+        // ai_model defaults to unconfigured; do not configure it.
         let req = AgentRequestData {
             operation: AgentOperation {
                 risk_hint: None,
@@ -3697,7 +3709,7 @@ mod tests {
         match read_outcome(&mut rx) {
             AgentOutcome::Err(e) => {
                 assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability);
-                assert!(e.message.contains("disabled"));
+                assert!(e.message.contains("not configured"));
             }
             other => panic!("unexpected outcome: {other:?}"),
         }
@@ -3736,15 +3748,17 @@ mod tests {
         );
     }
 
-    /// Disabled by default: a Diagnose request is gated before the orchestrator,
-    /// emitting a single terminal `DiagnoseEvent::error` (notification-style).
+    /// Unconfigured by default: a Diagnose request is gated before the
+    /// orchestrator, emitting a single terminal `DiagnoseEvent::error`
+    /// (notification-style) that tells the control end to configure the gateway.
     #[tokio::test]
-    async fn diagnose_disabled_by_default_emits_error() {
+    async fn diagnose_unconfigured_emits_error() {
         let (ctx, mut rx) = make_ctx_with_rx();
         let raw = serde_json::to_value(DiagnoseRequestData {
             question: "why?".into(),
             include_screen: false,
             context_kinds: vec![],
+            locale: None,
         })
         .unwrap();
         handle_diagnose_inbound(&ctx, &diagnose_model(raw))
@@ -3758,15 +3772,15 @@ mod tests {
         assert_eq!(event.kind, DiagnoseEventKind::Error);
         let err = event.error.unwrap();
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
-        assert!(err.message.contains("disabled"));
+        assert!(err.message.contains("not configured"));
     }
 
-    /// Enabled but no orchestrator injected (ServiceDaemon-like): the diagnose
+    /// Configured but no orchestrator injected (ServiceDaemon-like): the diagnose
     /// route reports the feature unavailable in this mode.
     #[tokio::test]
     async fn diagnose_without_orchestrator_emits_unavailable() {
         let (ctx, mut rx) = make_ctx_with_rx();
-        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        configure_ai_model(&ctx).await;
         // make_ctx leaves diagnose_orchestrator = None (ServiceDaemon-like).
         let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
         handle_diagnose_inbound(&ctx, &diagnose_model(raw))
@@ -3781,8 +3795,8 @@ mod tests {
         assert!(err.message.contains("not available in this mode"));
     }
 
-    /// Enabled + orchestrator present (Default / DeskServer-like): the diagnosis
-    /// streams a sequence of frames ending in exactly one `Final`, and **every**
+    /// Configured + orchestrator present (Default / DeskServer-like): the
+    /// diagnosis streams a sequence of frames ending in exactly one `Final`, and **every**
     /// frame is notification-style (`response_state = None`) so the control end
     /// is not collapsed to a single response by the signaling one-shot callback.
     ///
@@ -3796,7 +3810,7 @@ mod tests {
         use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
         use desk_agent_protocol::audit::NoopAuditSink;
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        configure_ai_model(&ctx).await;
         ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
             Arc::new(NoopContextCollector),
             Arc::new(RegexRedactor::new()),
@@ -3807,6 +3821,7 @@ mod tests {
             question: "why is cpu high?".into(),
             include_screen: false,
             context_kinds: vec![],
+            locale: None,
         })
         .unwrap();
         handle_diagnose_inbound(&ctx, &diagnose_model(raw))
@@ -3891,7 +3906,7 @@ mod tests {
         use crate::diagnose::redaction::RegexRedactor;
         use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        ctx.settings.write().await.system.ai_agent_enabled = Some(true);
+        // Cancel does not gate on gateway config; only the orchestrator matters.
         let audit = CancelAuditSink::default();
         ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
             Arc::new(NoopContextCollector),
@@ -3912,12 +3927,12 @@ mod tests {
         assert_eq!(events[0].request_id, "req-diag-1");
     }
 
-    /// Handoff while the AI agent feature is disabled is a no-op: no audit, no
-    /// frame.
+    /// Handoff with no orchestrator injected (ServiceDaemon-like) is a no-op: no
+    /// audit, no frame.
     #[tokio::test]
-    async fn diagnose_cancel_disabled_is_noop() {
+    async fn diagnose_cancel_without_orchestrator_is_noop() {
         let (ctx, mut rx) = make_ctx_with_rx();
-        // ai_agent_enabled defaults to off; no orchestrator injected.
+        // No orchestrator injected; cancel has nothing to audit.
         handle_diagnose_cancel_inbound(&ctx, &diagnose_cancel_model())
             .await
             .unwrap();

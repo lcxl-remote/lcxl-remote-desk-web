@@ -158,6 +158,7 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
         request_id: &str,
         question: &str,
         evidence: &EvidenceSnapshot,
+        locale: Option<&str>,
         on_partial: &(dyn Fn(String) + Send + Sync),
     ) -> Result<Diagnosis, AgentError> {
         let config = { self.settings.read().await.ai_model.clone() };
@@ -174,7 +175,7 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
             .map(|b| b as usize)
             .unwrap_or(DEFAULT_MAX_CONTEXT_BYTES);
 
-        let messages = prompt::build_messages(question, evidence, max_context_bytes);
+        let messages = prompt::build_messages(question, evidence, max_context_bytes, locale);
         let response_format = match config.response_format {
             ResponseFormatMode::None => ResponseFormatSpec::None,
             ResponseFormatMode::JsonObject => ResponseFormatSpec::JsonObject,
@@ -358,7 +359,7 @@ mod tests {
         let p = partials.clone();
         let on_partial = move |s: String| p.lock().unwrap().push(s);
         let diag = model
-            .diagnose("req_1", "why cpu high?", &snapshot(), &on_partial)
+            .diagnose("req_1", "why cpu high?", &snapshot(), None, &on_partial)
             .await
             .expect("diagnose ok");
 
@@ -401,7 +402,10 @@ mod tests {
             Arc::new(RecordingAuditSink::default()),
         );
         let noop = |_: String| {};
-        model.diagnose("r", "q", &snapshot(), &noop).await.unwrap();
+        model
+            .diagnose("r", "q", &snapshot(), None, &noop)
+            .await
+            .unwrap();
         assert!(matches!(
             adapter
                 .seen
@@ -431,7 +435,10 @@ mod tests {
             Arc::new(SharedSettings::from(s)),
             Arc::new(RecordingAuditSink::default()),
         );
-        model2.diagnose("r", "q", &snapshot(), &noop).await.unwrap();
+        model2
+            .diagnose("r", "q", &snapshot(), None, &noop)
+            .await
+            .unwrap();
         match &adapter2
             .seen
             .lock()
@@ -466,7 +473,7 @@ mod tests {
         );
         let noop = |_: String| {};
         let diag = model
-            .diagnose("req_2", "q", &snapshot(), &noop)
+            .diagnose("req_2", "q", &snapshot(), None, &noop)
             .await
             .expect("ok");
         assert_eq!(diag.confidence, Confidence::Low);
@@ -485,7 +492,7 @@ mod tests {
         );
         let noop = |_: String| {};
         let err = model
-            .diagnose("req_3", "q", &snapshot(), &noop)
+            .diagnose("req_3", "q", &snapshot(), None, &noop)
             .await
             .expect_err("must error");
         assert_eq!(
@@ -513,7 +520,7 @@ mod tests {
         );
         let noop = |_: String| {};
         let diag = model
-            .diagnose("req_4", "q", &snapshot(), &noop)
+            .diagnose("req_4", "q", &snapshot(), None, &noop)
             .await
             .unwrap();
         assert_eq!(diag.confidence, Confidence::Low);

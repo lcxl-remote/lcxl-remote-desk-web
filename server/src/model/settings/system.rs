@@ -149,14 +149,6 @@ pub struct SystemSettings {
     /// Not surfaced in the settings UI yet — edit the config file
     /// directly or rely on the default.
     pub webrtc_ice_failed_timeout_secs: Option<u64>,
-
-    /// Whether AI agent capability requests (`AgentRequest`) are served.
-    /// `None` / `false` = disabled. Off by default: the read collectors expose
-    /// host data (processes, network ports, services, logs, containers) that
-    /// goes beyond what a remote viewer already sees, so the feature stays dark
-    /// until an operator opts in. A policy engine will narrow this per
-    /// capability later; until then this is the single on/off gate.
-    pub ai_agent_enabled: Option<bool>,
 }
 
 impl SystemSettings {
@@ -186,12 +178,6 @@ impl SystemSettings {
         self.client_id = Some(new_id.clone());
         new_id
     }
-
-    /// Whether AI agent capability requests should be served. Defaults to
-    /// disabled when unset.
-    pub fn ai_agent_enabled(&self) -> bool {
-        self.ai_agent_enabled.unwrap_or(false)
-    }
 }
 
 impl Default for SystemSettings {
@@ -216,7 +202,6 @@ impl Default for SystemSettings {
             worker_heartbeat_timeout_secs: None,
             webrtc_ice_disconnected_timeout_secs: None,
             webrtc_ice_failed_timeout_secs: None,
-            ai_agent_enabled: None,
         }
     }
 }

@@ -3,10 +3,12 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { DiagnosePanel } from "./diagnose-panel";
 import type { DiagnoseState } from "./use-desk-diagnose";
 
-// i18n: t() echoes the fallback the component always provides.
+// i18n: t() echoes the fallback the component always provides; i18n.language is
+// the tag forwarded to onStart so the AI answers in the UI language.
 vi.mock("react-i18next", () => ({
     useTranslation: () => ({
         t: (_key: string, fallback?: string) => fallback ?? _key,
+        i18n: { language: "en-US" },
     }),
 }));
 
@@ -44,7 +46,10 @@ describe("DiagnosePanel", () => {
         );
         fireEvent.change(textarea, { target: { value: "why slow?" } });
         fireEvent.click(screen.getByText("Start diagnosis"));
-        expect(onStart).toHaveBeenCalledWith("why slow?", { includeScreen: false });
+        expect(onStart).toHaveBeenCalledWith("why slow?", {
+            includeScreen: false,
+            locale: "en-US",
+        });
     });
 
     it("idle: a preset fills the question box", () => {

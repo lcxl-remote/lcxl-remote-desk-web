@@ -584,6 +584,7 @@ export default {
   'pages.aiModel.settings.gateway': 'Model Gateway',
   'pages.aiModel.settings.gateway.description': 'OpenAI-compatible chat-completions endpoint.',
   'pages.aiModel.settings.provider': 'Provider',
+  'pages.aiModel.settings.provider.description': 'Label for auditing only — does not affect behavior. The connection is decided by model, base URL, and API key. Keep "openai-compatible" if unsure.',
   'pages.aiModel.settings.model': 'Model',
   'pages.aiModel.settings.baseUrl': 'Base URL',
   'pages.aiModel.settings.apiKey': 'API Key',

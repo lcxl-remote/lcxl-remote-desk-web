@@ -76,6 +76,16 @@ impl AiModelSettings {
         self.api_key.as_deref().is_some_and(|k| !k.is_empty())
     }
 
+    /// Whether the gateway has the minimum fields needed to attempt a call:
+    /// `model`, `base_url`, and `api_key` all present and non-empty. Mirrors the
+    /// precondition the model layer enforces before dialing the gateway, and
+    /// gates the AI agent / diagnosis signaling routes (configuring the gateway
+    /// is the operator opt-in).
+    pub fn is_configured(&self) -> bool {
+        let nonempty = |o: &Option<String>| o.as_deref().is_some_and(|v| !v.is_empty());
+        nonempty(&self.model) && nonempty(&self.base_url) && self.api_key_set()
+    }
+
     /// Project the masked public view returned by the query endpoint.
     pub fn public_view(&self) -> AiModelSettingsPublic {
         AiModelSettingsPublic {
@@ -281,6 +291,29 @@ mod tests {
         // A None response_format leaves the mode unchanged.
         s.apply_update(AiModelSettingsUpdate::default());
         assert_eq!(s.response_format, ResponseFormatMode::JsonSchema);
+    }
+
+    /// `is_configured` requires model, base URL, and a non-empty key together;
+    /// any one missing or blank reports unconfigured.
+    #[test]
+    fn is_configured_requires_model_base_url_and_key() {
+        assert!(configured().is_configured());
+
+        // Default (all None) is unconfigured.
+        assert!(!AiModelSettings::default().is_configured());
+
+        // Each field missing in turn fails the check.
+        let mut s = configured();
+        s.model = None;
+        assert!(!s.is_configured());
+
+        let mut s = configured();
+        s.base_url = Some(String::new());
+        assert!(!s.is_configured());
+
+        let mut s = configured();
+        s.api_key = None;
+        assert!(!s.is_configured());
     }
 
     /// The default response format is `json_object` (back-compat with configs

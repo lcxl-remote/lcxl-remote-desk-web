@@ -204,6 +204,7 @@ async fn run_eval(
         question: question.to_string(),
         include_screen: false,
         context_kinds: vec![],
+        locale: None,
     };
     orch.run("eval-req", request, &sink).await;
 
@@ -533,6 +534,7 @@ async fn real_model_run() {
             question: case.question.to_string(),
             include_screen: false,
             context_kinds: vec![],
+            locale: None,
         };
         orch.run("real-eval", request, &sink).await;
         let total_ms = started.elapsed().as_millis();
