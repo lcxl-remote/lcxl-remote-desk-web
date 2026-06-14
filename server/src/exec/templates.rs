@@ -28,6 +28,18 @@ pub enum SlotKind {
 }
 
 impl SlotKind {
+    /// Angle-bracket placeholder name used when advertising a template's form to
+    /// the model (e.g. `Get-Service -Name <service>`).
+    fn placeholder(self) -> &'static str {
+        match self {
+            SlotKind::ServiceName => "service",
+            SlotKind::ProcessName => "process",
+            SlotKind::Pid => "pid",
+            SlotKind::ContainerId => "container",
+            SlotKind::Port => "port",
+        }
+    }
+
     fn validate(self, value: &str) -> bool {
         if value.is_empty() || value.starts_with('-') {
             return false;
@@ -274,6 +286,57 @@ pub fn templates() -> Vec<Template> {
     ]
 }
 
+/// One executable command form advertised to the diagnose model so it can
+/// suggest commands the user can actually run (after explicit approval).
+pub struct CommandForm {
+    /// The canonical form with `<placeholder>` slots, e.g.
+    /// `Get-Service -Name <service>`.
+    pub form: String,
+    /// Human-readable description of what the command does.
+    pub impact: &'static str,
+    /// Whether running it changes state (a High-risk template).
+    pub mutating: bool,
+}
+
+/// Render a template's token pattern into a human-readable form (literals kept,
+/// slots shown as `<placeholder>`).
+fn pattern_form(pattern: &[Matcher]) -> String {
+    pattern
+        .iter()
+        .map(|m| match m {
+            Matcher::Lit(s) => (*s).to_string(),
+            Matcher::Slot(kind) => format!("<{}>", kind.placeholder()),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The executable command catalog as advertised to the model, filtered to what
+/// the active execution scope permits: read-only forms are always included;
+/// `include_mutating` adds the state-changing (High) forms. Deduplicated by
+/// rendered form so the named/positional variants of one cmdlet collapse.
+pub fn command_forms(include_mutating: bool) -> Vec<CommandForm> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<CommandForm> = Vec::new();
+    for t in templates() {
+        let mutating = t.effect == ExecEffect::Mutating;
+        if mutating && !include_mutating {
+            continue;
+        }
+        let form = pattern_form(t.pattern);
+        if seen.contains(&form) {
+            continue;
+        }
+        seen.push(form.clone());
+        out.push(CommandForm {
+            form,
+            impact: t.impact,
+            mutating,
+        });
+    }
+    out
+}
+
 /// A successful template match: the matched template and the bound slot values
 /// (in pattern order).
 pub struct TemplateMatch<'a> {
@@ -395,6 +458,27 @@ mod tests {
         assert!(!SlotKind::ServiceName.validate("-Name"));
         assert!(!SlotKind::ContainerId.validate("a.b")); // '.' not allowed in ids
         assert!(SlotKind::ContainerId.validate("a-b_c"));
+    }
+
+    #[test]
+    fn command_forms_render_and_filter_by_mutating() {
+        // Read-only only: no mutating verbs, slots rendered as placeholders.
+        let ro = command_forms(false);
+        assert!(ro.iter().all(|c| !c.mutating));
+        assert!(ro.iter().any(|c| c.form == "Get-Service -Name <service>"));
+        assert!(ro.iter().any(|c| c.form == "docker logs <container>"));
+        assert!(!ro.iter().any(|c| c.form.starts_with("Restart-Service")));
+
+        // Including mutating adds the state-changing forms.
+        let all = command_forms(true);
+        assert!(
+            all.iter()
+                .any(|c| c.mutating && c.form == "Restart-Service -Name <service>")
+        );
+        assert!(all.iter().any(|c| c.form == "Stop-Process -Id <pid>"));
+        // A roundtrip of a rendered form (placeholder filled) matches its template.
+        let table = templates();
+        assert!(match_template(&table, &toks("Get-Service -Name Spooler")).is_some());
     }
 
     #[test]

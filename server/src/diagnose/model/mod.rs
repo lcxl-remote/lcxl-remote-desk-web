@@ -175,7 +175,34 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
             .map(|b| b as usize)
             .unwrap_or(DEFAULT_MAX_CONTEXT_BYTES);
 
-        let messages = prompt::build_messages(question, evidence, max_context_bytes, locale);
+        // Advertise the executable command catalog matching the configured
+        // execution mode so the model prefers runnable forms. suggest_only →
+        // nothing executable; read_only → read-only forms; confirm_each_action →
+        // read-only + state-changing forms. (session_approved / automated are not
+        // selectable, so they never reach here.)
+        use desk_agent_protocol::ExecutionMode;
+        let executable_commands: Vec<String> = match config.execution_mode {
+            ExecutionMode::SuggestOnly => Vec::new(),
+            mode => crate::exec::command_forms(matches!(mode, ExecutionMode::ConfirmEachAction))
+                .into_iter()
+                .map(|c| {
+                    format!(
+                        "`{}` — {}{}",
+                        c.form,
+                        c.impact,
+                        if c.mutating { " (changes state)" } else { "" }
+                    )
+                })
+                .collect(),
+        };
+
+        let messages = prompt::build_messages(
+            question,
+            evidence,
+            max_context_bytes,
+            locale,
+            &executable_commands,
+        );
         let response_format = match config.response_format {
             ResponseFormatMode::None => ResponseFormatSpec::None,
             ResponseFormatMode::JsonObject => ResponseFormatSpec::JsonObject,

@@ -25,6 +25,8 @@ mod tokenize;
 use desk_agent_protocol::exec::{CommandClassification, ExecDecision, ExecPlanDraft};
 use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
+pub use templates::{CommandForm, command_forms};
+
 /// Hard caps the daemon enforces on control-end-supplied limits before they
 /// reach the worker.
 const MAX_TIMEOUT_MS: u32 = 60_000;
