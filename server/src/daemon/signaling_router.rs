@@ -1679,6 +1679,36 @@ async fn handle_diagnose_inbound(
         }
     };
 
+    // Reject a duplicate in-flight `request_id`. One diagnosis owns its
+    // request_id until it completes or is cancelled. A second `Diagnose` for an
+    // id already running would overwrite the tracked handle (dropping a
+    // `JoinHandle` does not abort the task), and the first task's self-removal
+    // could then delete the second's registration — corrupting cancel and
+    // interleaving two streams on the same id. The runtime is single-threaded,
+    // so this check and the insert below are not interleaved by another handler.
+    if ctx
+        .diagnose_tasks
+        .lock()
+        .expect("diagnose tasks lock")
+        .contains_key(&model.request_id)
+    {
+        emit_diagnose_event(
+            ctx,
+            model,
+            DiagnoseEvent::error(
+                &model.request_id,
+                0,
+                agent_error(
+                    AgentErrorKind::InvalidInput,
+                    "a diagnosis with this request_id is already in progress",
+                    false,
+                    true,
+                ),
+            ),
+        );
+        return Ok(());
+    }
+
     // Run the diagnosis on a detached task so this inbound handler returns
     // immediately. The proxy's WS select loop awaits the inbound handler in one
     // arm and writes outbound frames in another; if we awaited `run` here, the
@@ -4505,6 +4535,48 @@ mod tests {
             ctx.diagnose_tasks.lock().unwrap().is_empty(),
             "completed diagnosis must not leave a stale task handle"
         );
+    }
+
+    /// A second `Diagnose` for a `request_id` that is already in flight is
+    /// rejected with `InvalidInput`, and the original tracked task is left intact
+    /// (not overwritten), so a later cancel still targets the right run.
+    #[actix_web::test]
+    async fn diagnose_duplicate_request_id_is_rejected() {
+        use crate::diagnose::redaction::RegexRedactor;
+        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
+        use desk_agent_protocol::audit::NoopAuditSink;
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        configure_ai_model(&ctx).await;
+        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(RegexRedactor::new()),
+            Arc::new(StubDiagnoseModel),
+            Arc::new(NoopAuditSink),
+        )));
+
+        // Pre-register an in-flight task under the model's request_id so the next
+        // Diagnose for the same id sees a live entry.
+        let pending = actix_web::rt::spawn(async { std::future::pending::<()>().await });
+        let request_id = diagnose_model(serde_json::Value::Null).request_id.clone();
+        ctx.diagnose_tasks
+            .lock()
+            .unwrap()
+            .insert(request_id.clone(), pending);
+
+        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+
+        let event = read_response(&mut rx)
+            .get_data::<DiagnoseEvent>()
+            .expect("DiagnoseEvent");
+        assert_eq!(event.kind, DiagnoseEventKind::Error);
+        assert_eq!(event.error.unwrap().kind, AgentErrorKind::InvalidInput);
+        // The original entry is intact (the duplicate did not overwrite it).
+        let tasks = ctx.diagnose_tasks.lock().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks.get(&request_id).is_some_and(|h| !h.is_finished()));
     }
 
     /// Configured + orchestrator present (Default / DeskServer-like): the
