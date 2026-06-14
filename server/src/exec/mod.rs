@@ -16,6 +16,8 @@
 //! Only step 3 yields an executable classification, and even then execution
 //! requires an explicit user approval downstream — there is no automatic path.
 
+#[cfg(test)]
+mod acceptance;
 mod blocklist;
 mod templates;
 mod tokenize;

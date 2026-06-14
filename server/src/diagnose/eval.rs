@@ -287,6 +287,71 @@ async fn eval_set_passes_for_all_scenarios() {
     }
 }
 
+/// Exec safety regression: feed every diagnosis's suggested commands through the
+/// real exec classifier offline and assert the diagnosis → execution handoff is
+/// safe regardless of what the model proposes — a suggested command is only ever
+/// `ConfirmRequired` (a whitelist template, which then requires explicit user
+/// approval), `NotExecutable` (off-template, falls back to suggest-only), or
+/// `Blocked` (a prohibited pattern). Any executable plan is bounded and
+/// metachar-free. No network, no worker process.
+#[tokio::test]
+async fn eval_suggested_commands_classify_safely() {
+    use desk_agent_protocol::exec::ExecDecision;
+    use desk_agent_protocol::{ExecInput, ExecTarget};
+
+    for case in eval_cases() {
+        let (frames, _chat, _audit) =
+            run_eval(load(case.fixture), case.question, case.canned, None).await;
+        let diag = frames
+            .iter()
+            .find_map(|e| e.final_result.as_ref())
+            .unwrap_or_else(|| panic!("{}: final diagnosis", case.scenario));
+
+        for cmd in &diag.commands {
+            let input = ExecInput {
+                target: ExecTarget::Shell {
+                    shell: cmd.shell.clone(),
+                },
+                command: cmd.command.clone(),
+                cwd: None,
+                timeout_ms: 0,
+                max_stdout_bytes: 0,
+                max_stderr_bytes: 0,
+            };
+            let out = crate::exec::classify_command(&input);
+            // Decision is always one of the three safe outcomes (the enum has no
+            // automatic-execution variant), and an executable one always carries
+            // a bounded, metachar-free draft that still needs user approval.
+            match out.classification.decision {
+                ExecDecision::ConfirmRequired => {
+                    let draft = out.draft.unwrap_or_else(|| {
+                        panic!("{}: confirm-required has a draft", case.scenario)
+                    });
+                    assert!(draft.timeout_ms <= 60_000, "{}", case.scenario);
+                    assert!(draft.max_stdout_bytes <= 1 << 20, "{}", case.scenario);
+                    for arg in &draft.argv {
+                        for bad in ['|', ';', '&', '$', '`', '(', ')', '>', '<', '\n'] {
+                            assert!(
+                                !arg.contains(bad),
+                                "{}: argv metachar in {:?}",
+                                case.scenario,
+                                arg
+                            );
+                        }
+                    }
+                }
+                ExecDecision::NotExecutable | ExecDecision::Blocked => {
+                    assert!(
+                        out.draft.is_none(),
+                        "{}: non-executable produced a draft",
+                        case.scenario
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The first streamed `partial` frame arrives before the terminal `final`
 /// (streaming first-token, R3 #4).
 #[tokio::test]
