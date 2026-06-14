@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-`lcxl-remote-desk` 开源 WebRTC 远程桌面解决方案。后端使用 Rust (Actix-Web)，前端使用 React + TypeScript (Vite)。`server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`) 以及会话工作进程模式 (`session-worker`)。
+`lcxl-remote-desk` 是一个 **AI 原生（AI-Native）** 的开源 WebRTC 远程桌面解决方案。后端使用 Rust (Actix-Web)，前端使用 React + TypeScript (Vite)。除了浏览器远程控制，它还内置了一个**只读的设备诊断 AI Agent**（模型无关：OpenAI 兼容 / Anthropic），并能以一个**只读 MCP 服务**把设备的只读能力开放给外部 AI 助手。`server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`)、会话工作进程模式 (`session-worker`)，以及只读 MCP stdio 模式 (`mcp-stdio`)。
 
 ## 构建与运行
 
@@ -44,14 +44,19 @@ Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI 规范: `http://localh
 
 | 模块 | 角色 |
 |---|---|
-| `server/` | Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式） |
+| `server/` | Desk server: REST API (Actix-Web), WebRTC, 设置, 文件/终端管理（支持 ServiceDaemon 和 SessionWorker 模式）；AI 诊断编排器在 `server/src/diagnose/`（采集 → 脱敏 → 模型 → 渲染），模型适配在 `server/src/diagnose/model/`（`openai.rs` / `anthropic.rs`） |
 | `signal/` | 信令服务器 + TURN (核心文件: `signal/src/service.rs`) |
-| `vite-project/` | React 19 + TanStack Query 前端 — 包含管理 UI 和 Web 控制端客户端 |
+| `vite-project/` | React 19 + TanStack Query 前端 — 包含管理 UI 和 Web 控制端客户端（含 AI 设置页与诊断面板 `features/desk/diagnose-panel.tsx`） |
 | `tauri-app/` | Tauri 壳程序，用于在被控机本地渲染防窥屏/白板功能 |
+| `agent-protocol/` | 设备能力协议（`desk-agent-protocol`）：AI 调用的 wire 类型 + `DeviceAgent` trait + 审计 / 诊断 / exec 协议。纯协议、无平台实现；**服务端是所有受信字段的唯一可信源** |
+| `mcp-server/` | 只读 MCP 服务（`desk-mcp-server`）：基于官方 `rmcp` SDK + stdio，暴露只读工具静态白名单（无 exec/write/control 工具）。具体读 agent 与诊断编排器由 `server` 注入 |
 | `signal-facade/` | 共享的信令协议模型 (供 `signal` 和 `manager` 使用) |
 | `capture-engine/`| 屏幕/音频捕获与编码逻辑 |
 | `input-injection/`| 鼠标/键盘输入注入与剪贴板控制 |
 | `ipc-protocol/` | 用于 Service ↔ Worker 之间通信的 IPC 消息定义 |
+| `virtual-display/` | 虚拟显示器（IddCx）用户态抽象（`desk-virtual-display`，trait + Windows IDD impl + 其他平台 stub） |
+| `virtual-display-driver-ops/` | 虚拟显示驱动安装/卸载操作封装（`desk-virtual-display-driver-ops`，pnputil 等） |
+| `server-user/` | 服务端用户/账户模型 |
 | `utils/` | 通用工具类 |
 | `turn/` | TURN 服务器 (与信令服务器捆绑) |
 | `server-version/` | API 版本常量 |
@@ -78,6 +83,18 @@ Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI 规范: `http://localh
 | Desk Server → Remote Signaling | WebSocket URL 中传递 `?token=<settings.system.signaling_token>` |
 | Desk Server → Manager | WebSocket URL 中传递 `?token=<settings.system.manager_api_token>` |
 | Browser → Signaling / Manager | **不带 token 参数。**仅使用 Actix-Session Cookie。路由提取器必须使用 `Option<web::Query<VersionInfo>>`；并将 manager 信令路由排除在全局 Session 中间件之外。 |
+
+## AI Native / Agent 架构
+
+本项目把 AI 当作与浏览器并列的一等控制端。涉及 AI / Agent 代码时遵循以下不变量（**安全相关，破坏即回归**）：
+
+- **服务端是唯一可信源**：`request_id` / `target` / `actor` / `scope` / `caller` / 最终 `risk` / `approval_id` 全部由服务端注入与校验，控制端永远无法自报——浏览器侧请求体 `AgentRequestData` 在结构上就不含这些字段（见 `agent-protocol/src/lib.rs`）。
+- **能力协议面向设备、与控制端无关**：`agent-protocol` 是纯协议 crate（wire 类型 + `DeviceAgent` trait），描述「对设备能做什么」，不关心调用来自浏览器 / android / MCP。读操作的权限点由输入**派生**（`OperationInput::capability()`），杜绝能力、采集分发、审计三者漂移。
+- **默认只给建议**：`ExecutionMode` 默认 `SuggestOnly`（模型只能建议命令、不能执行）；更高风险动作需服务端中介的显式确认。
+- **脱敏 fail-closed**：诊断编排器（`server/src/diagnose/mod.rs`）按 **采集 → 脱敏 → 模型 → 渲染** 运行；脱敏失败会在调用模型**之前**中止。证据在到达模型 trait 之前一定已脱敏。
+- **API Key 是服务端密钥**：AI 模型 api_key 绝不回传浏览器、不进任何 `/settings` 公开 DTO、不写日志。审计只记录无内容的摘要（计数 / 大小 / token 用量 / provider / adapter），绝不留存原始输出、截图或 prompt。
+- **模型无关**：`server/src/diagnose/model/` 用 adapter 隔离 wire 协议（`openai.rs` = OpenAI 兼容、`anthropic.rs` = Anthropic Messages），按调用解析 provider。新增供应商 = 新增一个 adapter，不改编排器。
+- **MCP 只读**：`mcp-server` 工具集是**静态白名单**，刻意不存在 exec / write / control 工具（「未定义即不可达」）；`lcxl_diagnose` 的 provider 签名不带截图选项，MCP 客户端在结构上无法抓屏。`mcp-stdio` 模式下 stdin/stdout 承载 MCP JSON-RPC，**绝不能向 stdout 打日志**。
 
 ## 前端规则
 

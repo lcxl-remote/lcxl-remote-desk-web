@@ -1,8 +1,8 @@
-# LCXL Remote Desk Web —— Efficient WebRTC-based Remote Desktop
+# LCXL Remote Desk Web —— AI-Native WebRTC Remote Desktop
 
 [English](README.md) | [中文](README_CN.md)
 
-LCXL Remote Desk Web is a modern remote desktop solution leveraging WebRTC technology. It allows users to gain high-performance access and control of remote computers through just a web browser, eliminating the need for any plugins or dedicated client software for management. The backend is written in Rust, and the frontend is built with React + Vite + Tailwind CSS.
+LCXL Remote Desk Web is an **AI-native**, WebRTC-based remote desktop solution. On top of high-performance browser-only remote control, it builds in an **AI agent that can read a device's live state and diagnose problems** — and exposes those same read capabilities to external AI assistants through a read-only [MCP](https://modelcontextprotocol.io/) server. The AI layer is **model-agnostic** (works with OpenAI-compatible and Anthropic APIs) and **security-first** (the server is the single source of truth, the model can only *suggest* by default, evidence is redacted fail-closed, and every call is audited). The backend is written in Rust, and the frontend is built with React + Vite + Tailwind CSS.
 
 > [!WARNING]
 > **Disclaimer**: This project is currently in the **early development stage**. The codebase may be unstable, contain unfixed bugs, or have incomplete features.
@@ -12,6 +12,9 @@ LCXL Remote Desk Web is a modern remote desktop solution leveraging WebRTC techn
 
 ## ✨ Key Features
 
+- 🤖 **AI-Native Diagnosis**: Ask a question in plain language and the built-in AI agent collects **read-only** evidence from the device (system info, processes, listening ports, services, recent logs, containers, current screenshot), redacts secrets, and streams back a structured diagnosis with findings and *suggested* commands. Model-agnostic across **OpenAI-compatible** and **Anthropic** APIs.
+- 🔌 **Read-Only MCP Server**: Run with `--startup-mode mcp-stdio` to expose the device's read capabilities (system info / process list / network ports / recent logs / one-shot diagnose) to a local AI assistant over the Model Context Protocol. The tool set is a static whitelist — **no exec / write / control tool exists**.
+- 🛡️ **Security-First Agent Protocol**: A device-facing capability protocol where the **server is the source of truth** for every trusted field (target / scope / risk / approval). The default execution mode is *suggest-only*; higher-risk actions require explicit confirmation. Evidence redaction is **fail-closed**, API keys stay server-side, and every AI call is **audited** (content-free summaries only).
 - 🖥️ **High-Performance Desktop Connection**: Based on WebRTC video streams, supporting AV1 (rav1e) / H.264 (x264 / OpenH264) / VP8 / VP9 software & hardware encoding, with Opus audio, for ultra-low latency.
 - ⌨️ **Full-Featured Terminal**: Built-in remote terminal powered by xterm.js, supporting full shell interaction.
 - 📂 **File Management System**: Supports file uploads, downloads, deletions, and a **Recycle Bin** mechanism to prevent accidental loss.
@@ -81,7 +84,8 @@ The project is fine-tuned via `conf/config.toml`. Key parameters:
 
 - **System**: listen address, port, log level, etc.
 - **Desktop / Encoding**: frame rate, video encoder (X264 / VP8 / VP9 / H264 / AV1), cursor visibility, etc. — applied per session when a connection is initiated.
-- **Mode Switching**: Use `--startup-mode` (short `-s`) to toggle between `default`, `signaling`, `desk-server`, `service-daemon`, and `session-worker` modes; the config file defaults to `conf/config.toml` (set via `-c` / `--config-file-path`).
+- **AI Model**: Configure the AI provider, base URL, model name, and API key on the management console's AI settings page. The API key is a **server-side secret** and is never returned to the browser or written to logs. Both OpenAI-compatible and Anthropic gateways are supported, switchable at runtime.
+- **Mode Switching**: Use `--startup-mode` (short `-s`) to toggle between `default`, `signaling`, `desk-server`, `service-daemon`, `session-worker`, and `mcp-stdio` modes; the config file defaults to `conf/config.toml` (set via `-c` / `--config-file-path`).
 
 > 📚 For more details, refer to the [Development Guide (DEVELOPMENT.md)](DEVELOPMENT.md).
 
@@ -98,6 +102,31 @@ graph LR
 ```
 
 The browser and the remote desk service exchange connection information through the signaling service, then use STUN/TURN for NAT traversal to establish a direct P2P connection whenever possible, falling back to relay when necessary. The signaling and TURN servers are integrated into `server` by default, and direct P2P connections are prioritized in public or local network environments.
+
+---
+
+## 🤖 AI Native
+
+Remote control is only half the story — the device's *state* should be just as accessible to an AI as the screen is to a human. LCXL Remote Desk treats AI as a first-class control end alongside the browser.
+
+**AI Diagnose (in the web client).** During a session, ask a question (e.g. *"why is this machine slow?"*). The server-side orchestrator runs a fixed pipeline: **collect → redact → model → render**.
+
+```mermaid
+graph LR
+    user[User question] --> orch[Server Orchestrator]
+    orch -->|read-only| evidence[Device Evidence]
+    evidence -->|fail-closed redaction| model[AI Model]
+    model -->|stream| diag[Structured Diagnosis<br/>findings + suggested commands]
+    orch -.audit.-> audit[(Audit Trail)]
+```
+
+- **Read-only evidence collectors**: system info, process list, listening ports, service status, recent logs, container list / inspect / logs, and current screenshot.
+- **Model-agnostic**: an adapter layer isolates the wire protocol, so the same orchestrator drives OpenAI-compatible and Anthropic gateways; the provider is switchable per call.
+- **Suggest-only by default**: the model proposes commands but does not run them; execution requires an explicit, server-mediated confirmation.
+
+**MCP server (for external AI assistants).** Running with `--startup-mode mcp-stdio` turns the device into a Model Context Protocol server over stdio, exposing a **static whitelist of read-only tools**: `lcxl_system_info`, `lcxl_process_list`, `lcxl_network_ports`, `lcxl_recent_logs` (policy-gated), and `lcxl_diagnose` (gated on model configuration). There is deliberately no exec / write / control tool, and `lcxl_diagnose` carries no screenshot option — an MCP client structurally cannot capture the screen.
+
+**Security model.** The capability protocol is device-facing and client-agnostic: the server injects and validates every trusted field (target, actor, scope, risk, approval) — a control end can never self-report them. Evidence redaction is fail-closed (a redactor failure aborts before the model is called), API keys never leave the server, and the audit trail records content-free summaries (counts / sizes / token usage), never raw output or prompts.
 
 ---
 
@@ -119,6 +148,9 @@ From a user's perspective, the project comes in three forms:
 - [x] Cross-platform support (Linux/Windows/MacOS)
 - [x] Remote terminal and file management
 - [x] Privacy Screen and Whiteboard features
+- [x] AI-native diagnosis (model-agnostic: OpenAI-compatible / Anthropic)
+- [x] Read-only MCP server for external AI assistants
+- [ ] AI command execution with confirmation & guardrails
 - [ ] Mobile interface optimization
 - [ ] RBAC (Role-Based Access Control) system
 - [ ] Session recording support
