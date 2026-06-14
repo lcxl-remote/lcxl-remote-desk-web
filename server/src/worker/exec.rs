@@ -9,19 +9,33 @@
 //! Guard rails (security model §9):
 //! - no stdin (`Stdio::null`) — non-interactive;
 //! - argv executed directly (no `cmd /c` / `bash -c` wrapping);
-//! - `timeout_ms` hard cap, killed on expiry (`kill_on_drop`);
-//! - stdout / stderr captured and truncated to `max_*_bytes`.
+//! - `timeout_ms` hard cap, killed on expiry;
+//! - stdout / stderr read streaming and retained only up to `max_*_bytes` (the
+//!   excess is drained, so the cap bounds worker memory, not just the payload);
+//! - output scrubbed by the redactor before leaving the worker (fail-closed),
+//!   so raw secrets never cross the IPC boundary.
 
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use desk_agent_protocol::exec::ExecPlan;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome, ExecOutput, OperationOutput};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
+use crate::diagnose::redaction::{Redactor, RegexRedactor};
+
 /// Execute a sealed plan and return the outcome. Execution failures (spawn
-/// error, timeout) surface as [`AgentOutcome::Err`]; a process that ran (any
-/// exit code) surfaces as [`AgentOutcome::Ok`] with the captured output.
+/// error, timeout, fail-closed redaction) surface as [`AgentOutcome::Err`]; a
+/// process that ran (any exit code) surfaces as [`AgentOutcome::Ok`] with the
+/// scrubbed, capped output.
+///
+/// stdout/stderr are read **streaming** with a hard per-stream cap so a runaway
+/// command cannot balloon worker memory (only `max_*_bytes` are ever retained;
+/// the rest is drained so the process still completes), and the captured text is
+/// scrubbed by the redactor before it leaves the worker — raw secrets never
+/// cross the IPC boundary. Redaction is fail-closed: if the redactor errors, no
+/// output is returned.
 pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
     let mut cmd = Command::new(&plan.program);
     cmd.args(&plan.argv)
@@ -34,7 +48,7 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
     }
 
     let started = Instant::now();
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             return AgentOutcome::Err(err(
@@ -44,50 +58,108 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
         }
     };
 
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let out_cap = plan.max_stdout_bytes as usize;
+    let err_cap = plan.max_stderr_bytes as usize;
+
     let timeout = Duration::from_millis(plan.timeout_ms as u64);
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(e)) => {
+    // Drive both pipe readers and the process wait together so a process that
+    // fills one pipe while we read the other cannot deadlock. The whole thing is
+    // bounded by the timeout; on expiry the child is killed.
+    let run = async {
+        let read_out = read_capped(&mut stdout_pipe, out_cap);
+        let read_err = read_capped(&mut stderr_pipe, err_cap);
+        let ((out_bytes, out_trunc), (err_bytes, err_trunc)) = tokio::join!(read_out, read_err);
+        let status = child.wait().await;
+        (out_bytes, out_trunc, err_bytes, err_trunc, status)
+    };
+
+    let (out_bytes, stdout_truncated, err_bytes, stderr_truncated, status) =
+        match tokio::time::timeout(timeout, run).await {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = child.start_kill();
+                return AgentOutcome::Err(err(
+                    AgentErrorKind::Timeout,
+                    format!("command timed out after {} ms", plan.timeout_ms),
+                ));
+            }
+        };
+
+    let status = match status {
+        Ok(status) => status,
+        Err(e) => {
             return AgentOutcome::Err(err(
                 AgentErrorKind::Internal,
                 format!("command failed: {e}"),
             ));
         }
-        Err(_) => {
-            // The `wait_with_output` future was dropped on timeout; `kill_on_drop`
-            // terminates the child.
-            return AgentOutcome::Err(err(
-                AgentErrorKind::Timeout,
-                format!("command timed out after {} ms", plan.timeout_ms),
-            ));
-        }
     };
 
     let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
-    let (stdout, stdout_truncated) = truncate(output.stdout, plan.max_stdout_bytes as usize);
-    let (stderr, stderr_truncated) = truncate(output.stderr, plan.max_stderr_bytes as usize);
+
+    // Scrub before the output leaves the worker (fail-closed).
+    let redactor = RegexRedactor::new();
+    let stdout = match redactor.redact(&String::from_utf8_lossy(&out_bytes)) {
+        Ok(r) => r,
+        Err(_) => return AgentOutcome::Err(redaction_failed()),
+    };
+    let stderr = match redactor.redact(&String::from_utf8_lossy(&err_bytes)) {
+        Ok(r) => r,
+        Err(_) => return AgentOutcome::Err(redaction_failed()),
+    };
+    let mut redactions = stdout.kinds;
+    redactions.extend(stderr.kinds);
 
     AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
         // `None` (terminated by a signal on Unix) maps to -1.
-        exit_code: output.status.code().unwrap_or(-1),
-        stdout,
-        stderr,
+        exit_code: status.code().unwrap_or(-1),
+        stdout: stdout.text,
+        stderr: stderr.text,
         stdout_truncated,
         stderr_truncated,
         duration_ms,
-        // Output scrubbing is applied at the daemon's outbound boundary.
-        redactions: Vec::new(),
+        redactions,
     }))
 }
 
-/// Truncate captured bytes to `max` and decode lossily. Cutting mid-codepoint is
-/// safe — `from_utf8_lossy` replaces the partial tail rather than panicking.
-fn truncate(mut bytes: Vec<u8>, max: usize) -> (String, bool) {
-    let truncated = bytes.len() > max;
-    if truncated {
-        bytes.truncate(max);
+/// Read a pipe streaming, retaining at most `cap` bytes (the rest is drained so
+/// the process does not block on a full pipe). Returns the retained bytes and
+/// whether anything beyond the cap was seen. Reading a `None` pipe yields empty.
+async fn read_capped<R: AsyncRead + Unpin>(reader: &mut Option<R>, cap: usize) -> (Vec<u8>, bool) {
+    let Some(reader) = reader.as_mut() else {
+        return (Vec::new(), false);
+    };
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                if buf.len() < cap {
+                    let take = (cap - buf.len()).min(n);
+                    buf.extend_from_slice(&chunk[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    // Past the cap: drain and discard so the child keeps running.
+                    truncated = true;
+                }
+            }
+            Err(_) => break,
+        }
     }
-    (String::from_utf8_lossy(&bytes).into_owned(), truncated)
+    (buf, truncated)
+}
+
+fn redaction_failed() -> AgentError {
+    err(
+        AgentErrorKind::RedactionFailed,
+        "command output withheld: redaction failed".to_string(),
+    )
 }
 
 fn err(kind: AgentErrorKind, message: String) -> AgentError {
@@ -162,6 +234,39 @@ mod tests {
         let out = exec_output(execute_plan(&plan("echo abcdefghijklmnop", 10_000, 8)).await);
         assert!(out.stdout_truncated);
         assert!(out.stdout.len() <= 8);
+    }
+
+    #[tokio::test]
+    async fn redacts_secrets_in_output() {
+        // An AWS access key id in stdout must be scrubbed before it leaves the
+        // worker, and counted in `redactions`.
+        let out =
+            exec_output(execute_plan(&plan("echo AKIAIOSFODNN7EXAMPLE", 10_000, 65_536)).await);
+        assert!(
+            !out.stdout.contains("AKIAIOSFODNN7EXAMPLE"),
+            "raw secret leaked: {:?}",
+            out.stdout
+        );
+        assert!(
+            out.stdout.contains("<redacted"),
+            "no redaction marker: {:?}",
+            out.stdout
+        );
+        assert!(!out.redactions.is_empty(), "redaction not counted");
+    }
+
+    #[tokio::test]
+    async fn caps_retained_output_to_limit() {
+        // Far more than the cap is emitted; only `max_stdout_bytes` are retained
+        // (the rest is drained), bounding worker memory regardless of volume.
+        let big = "x".repeat(5000);
+        let out = exec_output(execute_plan(&plan(&format!("echo {big}"), 10_000, 256)).await);
+        assert!(out.stdout_truncated);
+        assert!(
+            out.stdout.len() <= 256,
+            "retained {} bytes",
+            out.stdout.len()
+        );
     }
 
     #[tokio::test]

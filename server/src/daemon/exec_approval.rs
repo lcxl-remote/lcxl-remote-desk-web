@@ -39,6 +39,16 @@ pub struct ConsumedApproval {
     pub connection_id: Option<String>,
 }
 
+/// Result of attempting to consume a pending approval.
+pub enum TakeOutcome {
+    /// Consumed and removed; ready to seal/execute or audit a rejection.
+    Consumed(ConsumedApproval),
+    /// Unknown, already consumed, or expired.
+    NotFound,
+    /// Exists but belongs to a different connection — left in place.
+    Forbidden,
+}
+
 /// In-memory map of `exec_request_id` → pending approval. Cheap, brief locks
 /// (no `.await` is held across the mutex).
 #[derive(Default)]
@@ -74,16 +84,29 @@ impl PendingApprovalStore {
         ExecRequestId(id)
     }
 
-    /// Look up and **remove** a pending approval (consume-once). Returns `None`
-    /// if it is unknown, already consumed, or expired. Removing on every take —
+    /// Look up and **remove** a pending approval (consume-once), bound to the
+    /// connection that requested the preview. Removing on every successful take —
     /// approve *or* expired — closes replay and concurrent double-approve.
-    pub fn take(&self, id: &ExecRequestId) -> Option<ConsumedApproval> {
+    ///
+    /// `connection_id` is the resolving control end's connection; it must match
+    /// the one that created the pending. On a **mismatch the entry is left in
+    /// place** ([`TakeOutcome::Forbidden`]) so a control end that learned a
+    /// stray `exec_request_id` can neither act on nor evict another connection's
+    /// pending command.
+    pub fn take(&self, id: &ExecRequestId, connection_id: Option<&str>) -> TakeOutcome {
         let mut map = self.inner.lock().expect("pending approvals lock");
-        let pending = map.remove(&id.0)?;
-        if pending.created_at.elapsed() > TTL {
-            return None;
+        let Some(pending) = map.get(&id.0) else {
+            return TakeOutcome::NotFound;
+        };
+        if pending.connection_id.as_deref() != connection_id {
+            return TakeOutcome::Forbidden;
         }
-        Some(ConsumedApproval {
+        // Connection matches — consume it.
+        let pending = map.remove(&id.0).expect("present");
+        if pending.created_at.elapsed() > TTL {
+            return TakeOutcome::NotFound;
+        }
+        TakeOutcome::Consumed(ConsumedApproval {
             draft: pending.draft,
             classification: pending.classification,
             connection_id: pending.connection_id,
@@ -140,25 +163,55 @@ mod tests {
         }
     }
 
+    fn is_consumed(o: TakeOutcome) -> Option<ConsumedApproval> {
+        match o {
+            TakeOutcome::Consumed(c) => Some(c),
+            _ => None,
+        }
+    }
+
     #[test]
     fn insert_then_take_returns_the_draft_once() {
         let store = PendingApprovalStore::new();
         let id = store.insert(draft(), classification(), Some("conn1".into()));
         assert_eq!(store.len(), 1);
 
-        let consumed = store.take(&id).expect("first take");
+        let consumed = is_consumed(store.take(&id, Some("conn1"))).expect("first take");
         assert_eq!(consumed.draft.template_id, "docker_restart");
         assert_eq!(consumed.connection_id.as_deref(), Some("conn1"));
         assert_eq!(store.len(), 0);
 
         // Second take (replay / concurrent double-approve) finds nothing.
-        assert!(store.take(&id).is_none());
+        assert!(matches!(
+            store.take(&id, Some("conn1")),
+            TakeOutcome::NotFound
+        ));
     }
 
     #[test]
-    fn unknown_id_is_none() {
+    fn unknown_id_is_not_found() {
         let store = PendingApprovalStore::new();
-        assert!(store.take(&ExecRequestId("nope".into())).is_none());
+        assert!(matches!(
+            store.take(&ExecRequestId("nope".into()), Some("conn1")),
+            TakeOutcome::NotFound
+        ));
+    }
+
+    #[test]
+    fn take_from_other_connection_is_forbidden_and_keeps_pending() {
+        let store = PendingApprovalStore::new();
+        let id = store.insert(draft(), classification(), Some("owner".into()));
+
+        // A different connection cannot consume — and the pending is preserved.
+        assert!(matches!(
+            store.take(&id, Some("attacker")),
+            TakeOutcome::Forbidden
+        ));
+        assert_eq!(store.len(), 1, "forbidden take must not evict the pending");
+
+        // The owning connection still can.
+        assert!(is_consumed(store.take(&id, Some("owner"))).is_some());
+        assert_eq!(store.len(), 0);
     }
 
     #[test]

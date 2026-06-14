@@ -2043,38 +2043,66 @@ async fn handle_resolve_exec_inbound(
         }
     };
 
+    use crate::daemon::exec_approval::TakeOutcome;
     use desk_agent_protocol::exec::ApprovalDecision;
+    // Approve / reject are bound to the connection that requested the preview.
+    let outcome = ctx
+        .exec_approvals
+        .take(&data.exec_request_id, to.as_deref());
     match data.decision {
         ApprovalDecision::Reject => {
-            // Consume the pending (if any) so it cannot be approved later. The
-            // control end already updated its UI; no result frame is sent.
-            let _ = ctx.exec_approvals.take(&data.exec_request_id);
-            ctx.audit
-                .record(AuditEvent::approval_denied(
-                    new_audit_event_id(),
-                    audit_now(),
-                    &data.exec_request_id.0,
-                ))
-                .await;
+            match outcome {
+                TakeOutcome::Consumed(_) => {
+                    // Consumed so it cannot be approved later; the control end
+                    // already updated its UI, so no result frame is sent.
+                    ctx.audit
+                        .record(AuditEvent::approval_denied(
+                            new_audit_event_id(),
+                            audit_now(),
+                            &data.exec_request_id.0,
+                        ))
+                        .await;
+                }
+                TakeOutcome::Forbidden => {
+                    log::warn!(
+                        "[router] ResolveExec(Reject) from a non-owning connection, ignored \
+                         (exec_request_id={})",
+                        data.exec_request_id.0
+                    );
+                }
+                TakeOutcome::NotFound => {}
+            }
             Ok(())
         }
         ApprovalDecision::Approve => {
-            let Some(consumed) = ctx.exec_approvals.take(&data.exec_request_id) else {
-                send_exec_result(
-                    &ctx.outbound_tx,
-                    &request_id,
-                    to,
-                    ExecResultPayload {
-                        exec_request_id: data.exec_request_id,
-                        outcome: AgentOutcome::Err(agent_error(
-                            AgentErrorKind::InvalidInput,
-                            "approval expired or already used",
-                            false,
-                            true,
-                        )),
-                    },
-                );
-                return Ok(());
+            let consumed = match outcome {
+                TakeOutcome::Consumed(c) => c,
+                // Unknown/expired and cross-connection both return the same
+                // generic error (do not leak whether the id exists).
+                other => {
+                    if matches!(other, TakeOutcome::Forbidden) {
+                        log::warn!(
+                            "[router] ResolveExec(Approve) from a non-owning connection, denied \
+                             (exec_request_id={})",
+                            data.exec_request_id.0
+                        );
+                    }
+                    send_exec_result(
+                        &ctx.outbound_tx,
+                        &request_id,
+                        to,
+                        ExecResultPayload {
+                            exec_request_id: data.exec_request_id,
+                            outcome: AgentOutcome::Err(agent_error(
+                                AgentErrorKind::InvalidInput,
+                                "approval expired or already used",
+                                false,
+                                true,
+                            )),
+                        },
+                    );
+                    return Ok(());
+                }
             };
 
             let capability =
@@ -4796,6 +4824,53 @@ mod tests {
                 .event_types()
                 .contains(&"ai.approval.denied".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_exec_from_other_connection_is_denied_and_keeps_pending() {
+        let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let exec_request_id = read_preview(&mut rx).exec_request_id.unwrap();
+        assert_eq!(ctx.exec_approvals.len(), 1);
+
+        // A ResolveExec from a *different* connection must not consume or run it.
+        let foreign = SignalingModel::new(
+            "r2",
+            SignalingType::ResolveExec,
+            Some("conn-attacker".to_string()),
+            None,
+            Some(
+                serde_json::to_value(ResolveExecData {
+                    exec_request_id: exec_request_id.clone(),
+                    decision: ApprovalDecision::Approve,
+                })
+                .unwrap(),
+            ),
+            None,
+        );
+        handle_resolve_exec_inbound(&ctx, &foreign).await.unwrap();
+        // The owning connection's pending is preserved (not evicted by the
+        // foreign attempt), and the attacker got the generic error result.
+        assert_eq!(
+            ctx.exec_approvals.len(),
+            1,
+            "foreign approve must not evict"
+        );
+        let res = read_response(&mut rx)
+            .get_data::<ExecResultPayload>()
+            .expect("ExecResult");
+        assert!(matches!(res.outcome, AgentOutcome::Err(_)));
+
+        // The owning connection can still approve.
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model("r3", exec_request_id, ApprovalDecision::Approve),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.exec_approvals.len(), 0);
     }
 
     #[tokio::test]
