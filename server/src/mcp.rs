@@ -122,11 +122,11 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
         // in the evidence envelope and audit trail (concurrent runs do not share
         // one id).
         let request_id = mcp_request_id();
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (mut tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
             let _permit = permit;
             let system = actix_web::rt::System::new();
-            let result = system.block_on(async move {
+            system.block_on(async move {
                 let sink = CapturingSink::default();
                 let request = DiagnoseRequestData {
                     question,
@@ -135,10 +135,21 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
                     context_kinds: Vec::new(),
                     locale,
                 };
-                orchestrator.run(&request_id, request, &sink).await;
-                sink.into_result()
+                let run = orchestrator.run(&request_id, request, &sink);
+                tokio::pin!(run);
+                // Cancel the in-flight diagnosis if the caller goes away: when the
+                // MCP client disconnects / cancels, the outer future (and the
+                // receiver) is dropped, so `tx.closed()` resolves. Dropping the
+                // `run` future then aborts the model call at its next await point,
+                // releasing the permit promptly instead of finishing wasted work.
+                let outcome = tokio::select! {
+                    _ = &mut run => Some(sink.take_result()),
+                    _ = tx.closed() => None,
+                };
+                if let Some(result) = outcome {
+                    let _ = tx.send(result);
+                }
             });
-            let _ = tx.send(result);
         });
         rx.await.unwrap_or_else(|_| {
             Err(AgentError {
@@ -210,15 +221,22 @@ struct CapturingSink {
 }
 
 impl CapturingSink {
-    fn into_result(self) -> Result<Diagnosis, AgentError> {
-        self.result.into_inner().unwrap().unwrap_or_else(|| {
-            Err(AgentError {
-                kind: AgentErrorKind::Internal,
-                message: "diagnosis produced no final result".to_string(),
-                retryable: false,
-                safe_for_model: true,
+    /// Take the captured terminal result. Borrows `&self` (not consuming) so it
+    /// can be called while the orchestrator run future — which borrows the sink —
+    /// is still pinned in the `select!` scope.
+    fn take_result(&self) -> Result<Diagnosis, AgentError> {
+        self.result
+            .lock()
+            .expect("capturing sink lock")
+            .take()
+            .unwrap_or_else(|| {
+                Err(AgentError {
+                    kind: AgentErrorKind::Internal,
+                    message: "diagnosis produced no final result".to_string(),
+                    retryable: false,
+                    safe_for_model: true,
+                })
             })
-        })
     }
 }
 
@@ -379,6 +397,86 @@ mod tests {
             "each diagnosis must use a distinct request_id"
         );
         assert!(ids.iter().all(|id| id.starts_with("mcp-")));
+    }
+
+    /// When the caller drops the diagnose future (the MCP client disconnected /
+    /// cancelled), the in-flight model call is aborted rather than running to
+    /// completion — the worker observes the dropped receiver and drops the run
+    /// future, which cancels the model at its next await point.
+    #[tokio::test]
+    async fn mcp_diagnosis_is_cancelled_when_caller_drops() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DropGuard(Arc<AtomicBool>);
+        impl Drop for DropGuard {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        struct BlockingModel {
+            started: Arc<AtomicBool>,
+            cancelled: Arc<AtomicBool>,
+        }
+        #[async_trait(?Send)]
+        impl DiagnoseModel for BlockingModel {
+            async fn diagnose(
+                &self,
+                _request_id: &str,
+                _question: &str,
+                _evidence: &EvidenceSnapshot,
+                _locale: Option<&str>,
+                _on_partial: &(dyn Fn(String) + Send + Sync),
+            ) -> Result<Diagnosis, AgentError> {
+                self.started.store(true, Ordering::SeqCst);
+                // Set when this future is dropped (i.e. cancelled).
+                let _guard = DropGuard(self.cancelled.clone());
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+
+        let started = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let orchestrator = Arc::new(DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(RegexRedactor::new()),
+            Arc::new(BlockingModel {
+                started: started.clone(),
+                cancelled: cancelled.clone(),
+            }),
+            Arc::new(NoopAuditSink),
+        ));
+        let provider = Arc::new(ServerDiagnoseProvider::new(orchestrator));
+
+        let p = provider.clone();
+        let task = tokio::spawn(async move {
+            let _ = p.diagnose("q".into(), None).await;
+        });
+
+        // Wait until the model call has started on its worker thread.
+        for _ in 0..2000 {
+            if started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            started.load(Ordering::SeqCst),
+            "model call should have started"
+        );
+
+        // Caller goes away → diagnose future dropped → receiver dropped → cancel.
+        task.abort();
+        for _ in 0..2000 {
+            if cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "dropping the caller must cancel the in-flight diagnosis"
+        );
     }
 
     /// `ConfigPolicy` reflects the persisted config on each query, so an operator
@@ -590,7 +688,7 @@ mod tests {
                 ..Default::default()
             },
         ));
-        let result = sink.into_result().expect("final diagnosis captured");
+        let result = sink.take_result().expect("final diagnosis captured");
         assert_eq!(result.summary, "done");
     }
 
@@ -608,7 +706,7 @@ mod tests {
                 safe_for_model: true,
             },
         ));
-        let err = sink.into_result().expect_err("error frame yields Err");
+        let err = sink.take_result().expect_err("error frame yields Err");
         assert_eq!(err.kind, AgentErrorKind::TransportError);
     }
 }
