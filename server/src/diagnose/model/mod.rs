@@ -13,6 +13,7 @@
 //! orchestration (prompt → stream → parse → audit) is verified without a
 //! network.
 
+pub mod anthropic;
 pub mod openai;
 pub mod parser;
 pub mod prompt;
@@ -129,6 +130,7 @@ pub trait ModelAdapter: Send + Sync {
 pub fn build_adapter(provider: Option<&str>) -> Arc<dyn ModelAdapter> {
     let norm = provider.map(|p| p.trim().to_ascii_lowercase());
     match norm.as_deref() {
+        Some("anthropic") => Arc::new(anthropic::AnthropicAdapter::new()),
         Some("") | Some("openai-compatible") | None => Arc::new(openai::OpenAiCompatAdapter::new()),
         Some(other) => {
             log::warn!("unknown AI provider {other:?}; using openai-compatible adapter");
@@ -633,24 +635,33 @@ mod tests {
         assert!(!diag.missing_info.is_empty());
     }
 
-    /// `build_adapter` resolves the known and fallback providers. Only the
-    /// OpenAI-compatible wire exists here, so every input maps to it; the table
-    /// still pins normalization (case / whitespace) and the unknown-provider
-    /// fallback so they cannot silently regress.
+    /// `build_adapter` resolves each provider to the matching wire. Anthropic and
+    /// OpenAI-compatible map to their adapters; normalization (case / surrounding
+    /// whitespace) is applied before matching; an unknown non-empty provider and
+    /// the empty / absent cases fall back to OpenAI-compatible.
     #[test]
     fn build_adapter_resolves_providers() {
-        for provider in [
+        let openai_cases = [
             None,
             Some(""),
             Some("openai-compatible"),
             Some("  OpenAI-Compatible  "),
-            Some("totally-unknown"),
-        ] {
-            let adapter = build_adapter(provider);
+            Some("totally-unknown"), // unknown → fallback
+        ];
+        for provider in openai_cases {
             assert_eq!(
-                adapter.name(),
+                build_adapter(provider).name(),
                 "lcxl-openai-compat",
                 "provider {provider:?} should resolve to the OpenAI-compatible adapter"
+            );
+        }
+
+        let anthropic_cases = [Some("anthropic"), Some("Anthropic"), Some("  ANTHROPIC  ")];
+        for provider in anthropic_cases {
+            assert_eq!(
+                build_adapter(provider).name(),
+                "lcxl-anthropic",
+                "provider {provider:?} should resolve to the Anthropic adapter"
             );
         }
     }
