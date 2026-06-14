@@ -1121,6 +1121,7 @@ export default function DeskSession() {
                                 onHandoff={diagnose.handoff}
                                 onReset={diagnose.reset}
                                 onClose={() => setShowDiagnose(false)}
+                                isConnected={isConnected}
                                 exec={exec}
                             />
                         )}

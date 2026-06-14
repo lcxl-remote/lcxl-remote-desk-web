@@ -333,6 +333,7 @@ export default {
   'pages.desk.diagnose.handoff': 'Hand off to human',
   'pages.desk.diagnose.handedOff': 'Handed off to a human operator.',
   'pages.desk.diagnose.newDiagnosis': 'New diagnosis',
+  'pages.desk.diagnose.connectionLost': 'Connection lost — results may not arrive. Start a new diagnosis.',
   'pages.desk.diagnose.confidence.high': 'High confidence',
   'pages.desk.diagnose.confidence.medium': 'Medium confidence',
   'pages.desk.diagnose.confidence.low': 'Low confidence',

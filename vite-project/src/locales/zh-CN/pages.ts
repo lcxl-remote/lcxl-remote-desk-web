@@ -331,6 +331,7 @@ export default {
   'pages.desk.diagnose.handoff': '转人工',
   'pages.desk.diagnose.handedOff': '已转交人工处理。',
   'pages.desk.diagnose.newDiagnosis': '新建诊断',
+  'pages.desk.diagnose.connectionLost': '连接已中断，结果可能无法返回，请重新发起诊断。',
   'pages.desk.diagnose.confidence.high': '高置信',
   'pages.desk.diagnose.confidence.medium': '中等置信',
   'pages.desk.diagnose.confidence.low': '低置信',

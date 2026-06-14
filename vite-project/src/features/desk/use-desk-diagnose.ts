@@ -199,12 +199,19 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
         setState((prev) => ({ ...prev, phase: 'done' }));
     }, [deskId, sendMessage]);
 
-    // Full reset back to the question form.
+    // Full reset back to the question form. If a run is still in flight (the
+    // user is starting over from `running`, e.g. a slow model or a dropped
+    // connection left the panel spinning), notify the host so it can audit the
+    // abandonment — mirroring 转人工 — before we stop tracking the request.
     const reset = useCallback(() => {
+        const requestId = activeRequestRef.current;
+        if (deskId && requestId) {
+            sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL, null, deskId, requestId);
+        }
         activeRequestRef.current = null;
         lastSeqRef.current = -1;
         setState(INITIAL_STATE);
-    }, []);
+    }, [deskId, sendMessage]);
 
     useEffect(() => {
         if (!lastMessage) return;

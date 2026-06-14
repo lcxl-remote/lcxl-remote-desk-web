@@ -184,4 +184,29 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.phase).toBe('idle');
         expect(result.current.state.requestId).toBeNull();
     });
+
+    it('reset while a run is in flight cancels it on the host', () => {
+        const { result } = renderHook(() =>
+            useDeskDiagnose({ deskId: 'desk-1', lastMessage: null, sendMessage }),
+        );
+        act(() => result.current.start('why?', {}));
+        sendMessage.mockClear();
+        act(() => result.current.reset());
+        // The in-flight request is cancelled (audited) before we drop tracking.
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
+            null,
+            'desk-1',
+            'req-1',
+        );
+        expect(result.current.state.phase).toBe('idle');
+    });
+
+    it('reset from idle does not send a cancel (no in-flight request)', () => {
+        const { result } = renderHook(() =>
+            useDeskDiagnose({ deskId: 'desk-1', lastMessage: null, sendMessage }),
+        );
+        act(() => result.current.reset());
+        expect(sendMessage).not.toHaveBeenCalled();
+    });
 });

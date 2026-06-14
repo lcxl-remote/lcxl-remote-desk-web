@@ -27,6 +27,9 @@ type DiagnosePanelProps = {
     onHandoff: () => void
     onReset: () => void
     onClose: () => void
+    /** Live signaling connection state; a drop while running is surfaced so the
+     * user can start over instead of staring at a stuck spinner. */
+    isConnected?: boolean
     /** Confirmed-execution controls; omitted in suggest-only contexts. */
     exec?: ExecControls
 }
@@ -212,6 +215,7 @@ export function DiagnosePanel({
     onHandoff,
     onReset,
     onClose,
+    isConnected = true,
     exec,
 }: DiagnosePanelProps) {
     const { t, i18n } = useTranslation()
@@ -335,6 +339,15 @@ export function DiagnosePanel({
                             <p className="whitespace-pre-wrap text-sm text-white/90">
                                 {streamingSummary}
                             </p>
+                        )}
+                        {!isConnected && (
+                            <div className="flex items-start gap-2 text-xs text-amber-300">
+                                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                {t(
+                                    "pages.desk.diagnose.connectionLost",
+                                    "Connection lost — results may not arrive. Start a new diagnosis.",
+                                )}
+                            </div>
                         )}
                     </div>
                 )}
@@ -548,7 +561,7 @@ export function DiagnosePanel({
                         {t("pages.desk.diagnose.handoff", "Hand off to human")}
                     </Button>
                 )}
-                {(state.phase === "done" || state.phase === "error") && (
+                {state.phase !== "idle" && (
                     <Button size="sm" variant="ghost" className="flex-1" onClick={onReset}>
                         {t("pages.desk.diagnose.newDiagnosis", "New diagnosis")}
                     </Button>

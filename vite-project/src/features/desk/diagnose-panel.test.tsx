@@ -68,6 +68,26 @@ describe("DiagnosePanel", () => {
         expect(screen.getByText("thinking...")).toBeInTheDocument();
     });
 
+    it("running: New diagnosis is available so the user can start over without refreshing", () => {
+        const { onReset } = renderPanel({ phase: "running", status: "modeling" });
+        fireEvent.click(screen.getByText("New diagnosis"));
+        expect(onReset).toHaveBeenCalled();
+    });
+
+    it("running + disconnected: surfaces a connection-lost hint", () => {
+        render(
+            <DiagnosePanel
+                state={{ ...baseState, phase: "running" }}
+                onStart={vi.fn()}
+                onHandoff={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                isConnected={false}
+            />,
+        );
+        expect(screen.getByText(/Connection lost/)).toBeInTheDocument();
+    });
+
     it("done: renders the result sections and handoff calls onHandoff", () => {
         const { onHandoff } = renderPanel({
             phase: "done",
