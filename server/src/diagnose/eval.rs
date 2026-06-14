@@ -510,24 +510,39 @@ async fn context_budget_is_enforced() {
 
 /// Controlled real-model eval run. `#[ignore]` so CI never reaches the network.
 ///
-/// Run manually against a real gateway to record the value-bearing R3 metrics
-/// (first-token latency, total latency, token usage, suggested-command count):
+/// Run manually against a real gateway, once per provider, to record the
+/// value-bearing metrics (first-token latency, total latency, token usage,
+/// suggested-command count) and — for the M3 model-agnostic acceptance — the
+/// per-provider `structured / degraded / transport_error` parse-outcome counts.
 ///
 /// ```text
+/// # OpenAI-compatible
+/// LCXL_EVAL_PROVIDER=openai-compatible \
 /// LCXL_EVAL_BASE_URL=https://api.openai.com/v1 \
 /// LCXL_EVAL_API_KEY=sk-... \
 /// LCXL_EVAL_MODEL=gpt-4o-mini \
 /// cargo test -p lcxl-remote-desk-server --lib diagnose::eval::real_model_run -- --ignored --nocapture
+///
+/// # Anthropic (second protocol — the real model-agnostic test)
+/// LCXL_EVAL_PROVIDER=anthropic \
+/// LCXL_EVAL_BASE_URL=https://api.anthropic.com \
+/// LCXL_EVAL_API_KEY=sk-ant-... \
+/// LCXL_EVAL_MODEL=claude-... \
+/// cargo test -p lcxl-remote-desk-server --lib diagnose::eval::real_model_run -- --ignored --nocapture
 /// ```
 ///
-/// Without the env vars it prints a skip notice and returns, so it is safe to
-/// invoke with `--ignored` on a machine that has no gateway configured.
+/// The adapter is resolved from `LCXL_EVAL_PROVIDER` through the production
+/// [`ProviderAdapterSelector`], so this exercises the same per-call resolution
+/// path as the live diagnose flow. Without the env vars it prints a skip notice
+/// and returns, so it is safe to invoke with `--ignored` on a machine that has
+/// no gateway configured. `LCXL_EVAL_PROVIDER` defaults to `openai-compatible`;
 /// `LCXL_EVAL_RESPONSE_FORMAT` (optional: `none` / `json_object` / `json_schema`)
-/// selects the output-format constraint; defaults to `json_object`.
+/// selects the output-format constraint and defaults to `json_object` (it has no
+/// effect on the Anthropic adapter, which has no response_format).
 #[actix_web::test]
-#[ignore = "hits a real model gateway; run manually for the R3 acceptance report"]
+#[ignore = "hits a real model gateway; run manually for the acceptance report"]
 async fn real_model_run() {
-    use super::model::openai::OpenAiCompatAdapter;
+    use super::model::ProviderAdapterSelector;
     use crate::model::settings::ResponseFormatMode;
     use std::time::Instant;
 
@@ -541,6 +556,8 @@ async fn real_model_run() {
         );
         return;
     };
+    let provider =
+        std::env::var("LCXL_EVAL_PROVIDER").unwrap_or_else(|_| "openai-compatible".to_string());
     let response_format = match std::env::var("LCXL_EVAL_RESPONSE_FORMAT").as_deref() {
         Ok("none") => ResponseFormatMode::None,
         Ok("json_schema") => ResponseFormatMode::JsonSchema,
@@ -548,19 +565,26 @@ async fn real_model_run() {
     };
 
     let mut settings = Settings::default();
-    settings.ai_model.provider = Some("openai-compatible".into());
+    settings.ai_model.provider = Some(provider.clone());
     settings.ai_model.model = Some(model);
     settings.ai_model.base_url = Some(base_url);
     settings.ai_model.api_key = Some(api_key);
     settings.ai_model.response_format = response_format;
     let settings = Arc::new(SharedSettings::from(settings));
-    println!("response_format: {response_format:?}");
+    println!("provider: {provider}  response_format: {response_format:?}");
 
-    println!("\n=== R3 controlled real-model eval run ===");
+    // Per-provider parse-outcome tally (M3 model-agnostic acceptance metric).
+    let mut structured = 0u32;
+    let mut degraded = 0u32;
+    let mut transport_error = 0u32;
+
+    println!("\n=== controlled real-model eval run ===");
     for case in eval_cases() {
         let audit = RecordingAuditSink::default();
-        let model = ModelBackedDiagnoseModel::with_adapter(
-            Arc::new(OpenAiCompatAdapter::new()),
+        // Resolve the adapter from the configured provider via the production
+        // selector — the same path the live diagnose flow takes.
+        let model = ModelBackedDiagnoseModel::new(
+            Arc::new(ProviderAdapterSelector),
             settings.clone(),
             Arc::new(audit.clone()),
         );
@@ -611,9 +635,31 @@ async fn real_model_run() {
             .iter()
             .find(|e| e.event_type == AuditEventType::ModelResponded.as_str());
 
+        // Classify the parse outcome for the model-agnostic tally. The model
+        // layer stamps `parse=structured|degraded` into the responded audit
+        // summary; a missing responded event means the call never returned a
+        // response (transport error).
+        let parse_kind = responded
+            .and_then(|r| r.output_summary.as_deref())
+            .and_then(|s| {
+                if s.contains("parse=structured") {
+                    Some("structured")
+                } else if s.contains("parse=degraded") {
+                    Some("degraded")
+                } else {
+                    None
+                }
+            });
+        match parse_kind {
+            Some("structured") => structured += 1,
+            Some("degraded") => degraded += 1,
+            _ => transport_error += 1,
+        }
+
         println!("scenario: {}", case.scenario);
         println!("  first_token_ms: {:?}", first_token.lock().unwrap());
         println!("  total_ms: {total_ms}");
+        println!("  parse: {}", parse_kind.unwrap_or("transport_error"));
         if let Some(r) = responded {
             println!(
                 "  tokens: in={:?} out={:?}",
@@ -641,5 +687,15 @@ async fn real_model_run() {
             }
         }
     }
-    println!("=== end run — record these in the R3 acceptance report ===\n");
+    let total = structured + degraded + transport_error;
+    println!("\n--- provider {provider} parse-outcome tally ({total} scenarios) ---");
+    println!("  structured:      {structured}");
+    println!("  degraded:        {degraded}");
+    println!("  transport_error: {transport_error}");
+    println!(
+        "M3 acceptance: a provider passes the wire/adapter check when transport_error == 0; \
+         structured vs degraded records the structured-output quality (degraded is allowed but \
+         must be reported — see plan §7 / §11)."
+    );
+    println!("=== end run — record these in the acceptance report ===\n");
 }
