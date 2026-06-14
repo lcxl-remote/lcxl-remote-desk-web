@@ -88,6 +88,10 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
         locale: Option<String>,
     ) -> Result<Diagnosis, AgentError> {
         let orchestrator = self.orchestrator.clone();
+        // A fresh id per call so each MCP diagnosis is its own correlation chain
+        // in the evidence envelope and audit trail (concurrent runs do not share
+        // one id).
+        let request_id = mcp_request_id();
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
             let system = actix_web::rt::System::new();
@@ -100,7 +104,7 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
                     context_kinds: Vec::new(),
                     locale,
                 };
-                orchestrator.run("mcp-diagnose", request, &sink).await;
+                orchestrator.run(&request_id, request, &sink).await;
                 sink.into_result()
             });
             let _ = tx.send(result);
@@ -145,6 +149,12 @@ impl DiagnoseEventSink for CapturingSink {
     }
 }
 
+/// A unique correlation id for one MCP diagnosis, prefixed so audit / logs show
+/// the request originated from the MCP path.
+fn mcp_request_id() -> String {
+    format!("mcp-{}", uuid::Uuid::new_v4())
+}
+
 /// Assemble a read-only, server-stamped envelope for one MCP read tool call.
 fn build_read_envelope(cap: Capability, input: OperationInput) -> AgentEnvelope {
     AgentEnvelope {
@@ -181,7 +191,7 @@ fn build_read_envelope(cap: Capability, input: OperationInput) -> AgentEnvelope 
 }
 
 /// Build the [`McpServer`] from the configured single-machine diagnose stack.
-/// `allow_logs` / `diagnose_configured` snapshot the current policy (this is a
+/// `allow_logs` / `diagnose_availability` snapshot the current policy (this is a
 /// freshly spawned per-session process, so a startup snapshot is sufficient).
 async fn build_mcp_server(settings: Arc<SharedSettings>) -> McpServer {
     let (allow_logs, availability) = {
@@ -246,6 +256,62 @@ pub fn run_mcp_stdio(args: Args) -> Result<(), DeskError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnose::redaction::RegexRedactor;
+    use crate::diagnose::{DiagnoseModel, NoopContextCollector};
+    use crate::worker::agent::eval::EvidenceSnapshot;
+    use desk_agent_protocol::audit::NoopAuditSink;
+    use desk_agent_protocol::diagnose::Diagnosis;
+
+    /// `mcp_request_id` is unique per call and carries the `mcp-` prefix.
+    #[test]
+    fn mcp_request_id_is_unique_and_prefixed() {
+        let a = mcp_request_id();
+        let b = mcp_request_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("mcp-") && b.starts_with("mcp-"));
+    }
+
+    /// Each MCP diagnosis carries a distinct correlation id into the orchestrator
+    /// (so audit / evidence chains never collide across concurrent runs).
+    #[tokio::test]
+    async fn each_mcp_diagnosis_gets_a_unique_request_id() {
+        struct RecordingModel {
+            ids: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait(?Send)]
+        impl DiagnoseModel for RecordingModel {
+            async fn diagnose(
+                &self,
+                request_id: &str,
+                _question: &str,
+                _evidence: &EvidenceSnapshot,
+                _locale: Option<&str>,
+                _on_partial: &(dyn Fn(String) + Send + Sync),
+            ) -> Result<Diagnosis, AgentError> {
+                self.ids.lock().unwrap().push(request_id.to_string());
+                Ok(Diagnosis::default())
+            }
+        }
+
+        let ids = Arc::new(Mutex::new(Vec::new()));
+        let orchestrator = Arc::new(DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(RegexRedactor::new()),
+            Arc::new(RecordingModel { ids: ids.clone() }),
+            Arc::new(NoopAuditSink),
+        ));
+        let provider = ServerDiagnoseProvider { orchestrator };
+        provider.diagnose("q1".into(), None).await.unwrap();
+        provider.diagnose("q2".into(), None).await.unwrap();
+
+        let ids = ids.lock().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(
+            ids[0], ids[1],
+            "each diagnosis must use a distinct request_id"
+        );
+        assert!(ids.iter().all(|id| id.starts_with("mcp-")));
+    }
 
     /// A read through the provider hits the real in-process agent: `system.info`
     /// succeeds on every CI host and returns a system-info read output.
