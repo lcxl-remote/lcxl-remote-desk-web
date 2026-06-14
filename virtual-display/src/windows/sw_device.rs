@@ -363,7 +363,7 @@ pub fn find_display_name(instance_id: &str) -> Result<String, VirtualDisplayErro
     // promotion to the point where the monitor is *actually* on the
     // desktop.
     let attached = enum_attached_display_names()?;
-    if attached.iter().any(|n| n == &candidate) {
+    if pick_attached_match(&candidate, &attached) {
         Ok(candidate)
     } else {
         Err(VirtualDisplayError::DeviceCreate(format!(
