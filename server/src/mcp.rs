@@ -151,32 +151,45 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
     }
 }
 
-/// Live MCP policy backed by the persisted config file. Re-reads the config on
-/// each query (side-effect-free) so an operator's permission change takes effect
-/// on the next tool call — the in-process settings are a startup snapshot, so the
-/// file is the cross-process source of truth. Fail-closed: an unreadable config
-/// denies logs and treats diagnosis as not configured.
+/// Live MCP policy that keeps the whole MCP diagnose stack on one fresh settings
+/// source. On each gated call it re-reads the persisted config file and writes it
+/// back into the shared `SharedSettings`, so the gate decision *and* the evidence
+/// collector (`allow_logs` / `allow_screen`) *and* the model dial (provider /
+/// base URL / key / gateway_mode) — all of which read this same `Arc` — see the
+/// operator's latest config without a restart. The in-process settings are a
+/// startup snapshot otherwise, and the file is the cross-process source of truth
+/// the desk server writes to. Fail-closed: an unreadable config denies logs and
+/// treats diagnosis as not configured (and leaves the existing settings intact).
 struct ConfigPolicy {
     args: Args,
+    settings: Arc<SharedSettings>,
+}
+
+impl ConfigPolicy {
+    /// Re-read the config file and publish it into the shared settings. Returns
+    /// the freshly loaded settings, or `None` if the config could not be read
+    /// (in which case the shared settings are left unchanged).
+    async fn refresh(&self) -> Option<Settings> {
+        let args = self.args.clone();
+        let loaded = tokio::task::spawn_blocking(move || Settings::load_readonly(&args).ok())
+            .await
+            .ok()
+            .flatten()?;
+        *self.settings.write().await = loaded.clone();
+        Some(loaded)
+    }
 }
 
 #[async_trait]
 impl McpPolicy for ConfigPolicy {
     async fn allow_logs(&self) -> bool {
-        let args = self.args.clone();
-        tokio::task::spawn_blocking(move || {
-            Settings::load_readonly(&args)
-                .map(|s| s.ai_model.allow_logs)
-                .unwrap_or(false)
-        })
-        .await
-        .unwrap_or(false)
+        // Fail closed: deny logs if the config cannot be read.
+        self.refresh().await.is_some_and(|s| s.ai_model.allow_logs)
     }
 
     async fn diagnose_availability(&self) -> DiagnoseAvailability {
-        let args = self.args.clone();
-        tokio::task::spawn_blocking(move || match Settings::load_readonly(&args) {
-            Ok(s) => {
+        match self.refresh().await {
+            Some(s) => {
                 if s.ai_model.gateway_mode == GatewayMode::ManagerProxy {
                     DiagnoseAvailability::ManagerProxyUnavailable
                 } else if s.ai_model.is_configured() {
@@ -185,10 +198,8 @@ impl McpPolicy for ConfigPolicy {
                     DiagnoseAvailability::NotConfigured
                 }
             }
-            Err(_) => DiagnoseAvailability::NotConfigured,
-        })
-        .await
-        .unwrap_or(DiagnoseAvailability::NotConfigured)
+            None => DiagnoseAvailability::NotConfigured,
+        }
     }
 }
 
@@ -286,7 +297,7 @@ async fn build_mcp_server(args: Args, settings: Arc<SharedSettings>) -> McpServe
     McpServer::new(
         Arc::new(ServerReadProvider { agent }),
         Arc::new(ServerDiagnoseProvider::new(orchestrator)),
-        Arc::new(ConfigPolicy { args }),
+        Arc::new(ConfigPolicy { args, settings }),
     )
 }
 
@@ -314,7 +325,7 @@ pub fn run_mcp_stdio(args: Args) -> Result<(), DeskError> {
 mod tests {
     use super::*;
     use crate::diagnose::redaction::RegexRedactor;
-    use crate::diagnose::{DiagnoseModel, NoopContextCollector};
+    use crate::diagnose::{ContextCollector, DiagnoseModel, NoopContextCollector};
     use crate::worker::agent::eval::EvidenceSnapshot;
     use desk_agent_protocol::audit::NoopAuditSink;
     use desk_agent_protocol::diagnose::Diagnosis;
@@ -383,7 +394,10 @@ mod tests {
             config_file_path: base.to_string_lossy().to_string(),
             ..Default::default()
         };
-        let policy = ConfigPolicy { args };
+        let policy = ConfigPolicy {
+            args,
+            settings: Arc::new(SharedSettings::from(Settings::default())),
+        };
 
         std::fs::write(&toml_path, "[ai_model]\nallow_logs = false\n").unwrap();
         assert!(!policy.allow_logs().await, "false in config → denied");
@@ -409,7 +423,10 @@ mod tests {
             config_file_path: base.to_string_lossy().to_string(),
             ..Default::default()
         };
-        let policy = ConfigPolicy { args };
+        let policy = ConfigPolicy {
+            args,
+            settings: Arc::new(SharedSettings::from(Settings::default())),
+        };
 
         // No credentials → not configured.
         std::fs::write(&toml_path, "[ai_model]\n").unwrap();
@@ -435,6 +452,100 @@ mod tests {
             policy.diagnose_availability().await,
             DiagnoseAvailability::Available
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// End-to-end: with a startup snapshot of `allow_logs = true`, an operator
+    /// revoking it in the config file means the next MCP diagnosis (which runs the
+    /// gate first) collects no `log.recent` evidence — the gate's refresh
+    /// republishes the live policy into the shared settings the collector reads,
+    /// closing the indirect-log-leak path.
+    #[tokio::test]
+    async fn mcp_diagnose_collection_respects_live_allow_logs() {
+        // Startup snapshot: logs allowed.
+        let mut startup = Settings::default();
+        startup.ai_model.allow_logs = true;
+        let shared = Arc::new(SharedSettings::from(startup));
+
+        // Operator revokes logs in the persisted config.
+        let dir = std::env::temp_dir().join(format!("mcp-live-logs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("config");
+        std::fs::write(dir.join("config.toml"), "[ai_model]\nallow_logs = false\n").unwrap();
+        let args = Args {
+            config_file_path: base.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let policy = ConfigPolicy {
+            args,
+            settings: shared.clone(),
+        };
+
+        // The diagnose gate runs first and refreshes the shared settings.
+        let _ = policy.diagnose_availability().await;
+        assert!(
+            !shared.read().await.ai_model.allow_logs,
+            "gate must publish the live allow_logs=false into shared settings"
+        );
+
+        // The collector reads the same shared settings → excludes log.recent even
+        // though it was in the default set and the startup snapshot allowed it.
+        let collector =
+            AgentContextCollector::new(Arc::new(LocalDeviceAgent::new()), shared.clone());
+        let request = DiagnoseRequestData {
+            question: "why is the host slow?".into(),
+            include_screen: false,
+            context_kinds: Vec::new(),
+            locale: None,
+        };
+        let snapshot = collector.collect("mcp-live", &request).await;
+        assert!(
+            !snapshot
+                .contexts
+                .iter()
+                .any(|c| c.capability == "log.recent"),
+            "live allow_logs=false must keep log.recent out of MCP evidence"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The gate's refresh republishes the *whole* model config into the shared
+    /// settings the model dials from, so a changed provider / base URL / key takes
+    /// effect on the next diagnosis (no gate-vs-dial split-brain).
+    #[tokio::test]
+    async fn config_policy_refresh_republishes_model_config() {
+        let mut startup = Settings::default();
+        startup.ai_model.model = Some("old-model".into());
+        startup.ai_model.base_url = Some("http://old/v1".into());
+        let shared = Arc::new(SharedSettings::from(startup));
+
+        let dir = std::env::temp_dir().join(format!("mcp-live-model-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("config");
+        std::fs::write(
+            dir.join("config.toml"),
+            "[ai_model]\nprovider = \"anthropic\"\nmodel = \"new-model\"\nbase_url = \"https://api.anthropic.com\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        let args = Args {
+            config_file_path: base.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let policy = ConfigPolicy {
+            args,
+            settings: shared.clone(),
+        };
+
+        assert_eq!(
+            policy.diagnose_availability().await,
+            DiagnoseAvailability::Available
+        );
+        let ai = shared.read().await.ai_model.clone();
+        assert_eq!(ai.model.as_deref(), Some("new-model"));
+        assert_eq!(ai.base_url.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(ai.provider.as_deref(), Some("anthropic"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
