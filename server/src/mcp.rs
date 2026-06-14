@@ -27,7 +27,7 @@ use desk_agent_protocol::{
     RequestId, TargetRef,
 };
 use desk_mcp_server::{
-    DiagnoseAvailability, DiagnoseProvider, McpServer, ReadContextProvider, serve_stdio,
+    DiagnoseAvailability, DiagnoseProvider, McpPolicy, McpServer, ReadContextProvider, serve_stdio,
 };
 
 use crate::diagnose::collector::AgentContextCollector;
@@ -72,12 +72,27 @@ impl ReadContextProvider for ServerReadProvider {
     }
 }
 
+/// Max diagnoses running at once. Each runs on its own OS thread (a full,
+/// possibly slow model call), so cap concurrency to bound thread / resource use
+/// under a client that pipelines tool calls.
+const MAX_CONCURRENT_DIAGNOSES: usize = 4;
+
 /// Diagnose provider: runs one non-streaming diagnosis. `include_screen` is
 /// forced `false` — the MCP path never captures the screen. Each run executes on
 /// a dedicated thread with its own actix `System` so the `!Send` model adapters
-/// stay off the MCP runtime.
+/// stay off the MCP runtime. A semaphore bounds concurrent runs.
 struct ServerDiagnoseProvider {
     orchestrator: Arc<DiagnoseOrchestrator>,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl ServerDiagnoseProvider {
+    fn new(orchestrator: Arc<DiagnoseOrchestrator>) -> Self {
+        Self {
+            orchestrator,
+            permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DIAGNOSES)),
+        }
+    }
 }
 
 #[async_trait]
@@ -87,6 +102,21 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
         question: String,
         locale: Option<String>,
     ) -> Result<Diagnosis, AgentError> {
+        // Bound concurrency. If the caller's future is dropped while waiting for a
+        // permit, no thread is ever spawned — cancelling a not-yet-started run.
+        // The permit is moved into the worker thread and released when it (and the
+        // model call) finishes, so at most `MAX_CONCURRENT_DIAGNOSES` threads run.
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| AgentError {
+                kind: AgentErrorKind::Internal,
+                message: "diagnose concurrency gate closed".to_string(),
+                retryable: false,
+                safe_for_model: true,
+            })?;
         let orchestrator = self.orchestrator.clone();
         // A fresh id per call so each MCP diagnosis is its own correlation chain
         // in the evidence envelope and audit trail (concurrent runs do not share
@@ -94,6 +124,7 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
         let request_id = mcp_request_id();
         let (tx, rx) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
+            let _permit = permit;
             let system = actix_web::rt::System::new();
             let result = system.block_on(async move {
                 let sink = CapturingSink::default();
@@ -117,6 +148,47 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
                 safe_for_model: true,
             })
         })
+    }
+}
+
+/// Live MCP policy backed by the persisted config file. Re-reads the config on
+/// each query (side-effect-free) so an operator's permission change takes effect
+/// on the next tool call — the in-process settings are a startup snapshot, so the
+/// file is the cross-process source of truth. Fail-closed: an unreadable config
+/// denies logs and treats diagnosis as not configured.
+struct ConfigPolicy {
+    args: Args,
+}
+
+#[async_trait]
+impl McpPolicy for ConfigPolicy {
+    async fn allow_logs(&self) -> bool {
+        let args = self.args.clone();
+        tokio::task::spawn_blocking(move || {
+            Settings::load_readonly(&args)
+                .map(|s| s.ai_model.allow_logs)
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    async fn diagnose_availability(&self) -> DiagnoseAvailability {
+        let args = self.args.clone();
+        tokio::task::spawn_blocking(move || match Settings::load_readonly(&args) {
+            Ok(s) => {
+                if s.ai_model.gateway_mode == GatewayMode::ManagerProxy {
+                    DiagnoseAvailability::ManagerProxyUnavailable
+                } else if s.ai_model.is_configured() {
+                    DiagnoseAvailability::Available
+                } else {
+                    DiagnoseAvailability::NotConfigured
+                }
+            }
+            Err(_) => DiagnoseAvailability::NotConfigured,
+        })
+        .await
+        .unwrap_or(DiagnoseAvailability::NotConfigured)
     }
 }
 
@@ -191,24 +263,10 @@ fn build_read_envelope(cap: Capability, input: OperationInput) -> AgentEnvelope 
 }
 
 /// Build the [`McpServer`] from the configured single-machine diagnose stack.
-/// `allow_logs` / `diagnose_availability` snapshot the current policy (this is a
-/// freshly spawned per-session process, so a startup snapshot is sufficient).
-async fn build_mcp_server(settings: Arc<SharedSettings>) -> McpServer {
-    let (allow_logs, availability) = {
-        let s = settings.read().await;
-        // Mirror the diagnose gate precedence: manager-proxy wins over the
-        // not-configured check so the MCP path reports the same reason as the
-        // model / router layers even without direct credentials.
-        let availability = if s.ai_model.gateway_mode == GatewayMode::ManagerProxy {
-            DiagnoseAvailability::ManagerProxyUnavailable
-        } else if s.ai_model.is_configured() {
-            DiagnoseAvailability::Available
-        } else {
-            DiagnoseAvailability::NotConfigured
-        };
-        (s.ai_model.allow_logs, availability)
-    };
-
+/// `settings` is the startup snapshot used to construct the agent / model; the
+/// policy gate ([`ConfigPolicy`]) instead re-reads the persisted config per call
+/// so a permission change takes effect without restarting the MCP process.
+async fn build_mcp_server(args: Args, settings: Arc<SharedSettings>) -> McpServer {
     let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
     let agent =
         Arc::new(LocalDeviceAgent::with_settings(settings.clone()).with_audit(audit.clone()));
@@ -227,9 +285,8 @@ async fn build_mcp_server(settings: Arc<SharedSettings>) -> McpServer {
 
     McpServer::new(
         Arc::new(ServerReadProvider { agent }),
-        Arc::new(ServerDiagnoseProvider { orchestrator }),
-        allow_logs,
-        availability,
+        Arc::new(ServerDiagnoseProvider::new(orchestrator)),
+        Arc::new(ConfigPolicy { args }),
     )
 }
 
@@ -245,7 +302,7 @@ pub fn run_mcp_stdio(args: Args) -> Result<(), DeskError> {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let shared = Arc::new(SharedSettings::from(settings));
         let _guard = telemetry::init_telemetry(shared.clone(), &StartupMode::McpStdio).await?;
-        let server = build_mcp_server(shared).await;
+        let server = build_mcp_server(shared.read().await.args.clone(), shared.clone()).await;
         serve_stdio(server).await.map_err(|e| {
             DeskError::from(std::io::Error::other(format!("mcp stdio server: {e}")))
         })?;
@@ -300,7 +357,7 @@ mod tests {
             Arc::new(RecordingModel { ids: ids.clone() }),
             Arc::new(NoopAuditSink),
         ));
-        let provider = ServerDiagnoseProvider { orchestrator };
+        let provider = ServerDiagnoseProvider::new(orchestrator);
         provider.diagnose("q1".into(), None).await.unwrap();
         provider.diagnose("q2".into(), None).await.unwrap();
 
@@ -311,6 +368,75 @@ mod tests {
             "each diagnosis must use a distinct request_id"
         );
         assert!(ids.iter().all(|id| id.starts_with("mcp-")));
+    }
+
+    /// `ConfigPolicy` reflects the persisted config on each query, so an operator
+    /// flipping `allow_logs` in the config file takes effect without restarting
+    /// the MCP process. Also fail-closed when the config is unreadable.
+    #[tokio::test]
+    async fn config_policy_reflects_persisted_allow_logs_live() {
+        let dir = std::env::temp_dir().join(format!("mcp-policy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("config");
+        let toml_path = dir.join("config.toml");
+        let args = Args {
+            config_file_path: base.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let policy = ConfigPolicy { args };
+
+        std::fs::write(&toml_path, "[ai_model]\nallow_logs = false\n").unwrap();
+        assert!(!policy.allow_logs().await, "false in config → denied");
+
+        std::fs::write(&toml_path, "[ai_model]\nallow_logs = true\n").unwrap();
+        assert!(
+            policy.allow_logs().await,
+            "live re-read picks up the change"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `ConfigPolicy::diagnose_availability` mirrors the gate precedence from the
+    /// persisted config: manager_proxy wins over configuration completeness.
+    #[tokio::test]
+    async fn config_policy_diagnose_availability_precedence() {
+        let dir = std::env::temp_dir().join(format!("mcp-policy-av-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = dir.join("config");
+        let toml_path = dir.join("config.toml");
+        let args = Args {
+            config_file_path: base.to_string_lossy().to_string(),
+            ..Default::default()
+        };
+        let policy = ConfigPolicy { args };
+
+        // No credentials → not configured.
+        std::fs::write(&toml_path, "[ai_model]\n").unwrap();
+        assert_eq!(
+            policy.diagnose_availability().await,
+            DiagnoseAvailability::NotConfigured
+        );
+
+        // Manager proxy selected (still no credentials) → proxy wins.
+        std::fs::write(&toml_path, "[ai_model]\ngateway_mode = \"manager_proxy\"\n").unwrap();
+        assert_eq!(
+            policy.diagnose_availability().await,
+            DiagnoseAvailability::ManagerProxyUnavailable
+        );
+
+        // Direct + fully configured → available.
+        std::fs::write(
+            &toml_path,
+            "[ai_model]\nmodel = \"m\"\nbase_url = \"http://x/v1\"\napi_key = \"k\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            policy.diagnose_availability().await,
+            DiagnoseAvailability::Available
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A read through the provider hits the real in-process agent: `system.info`

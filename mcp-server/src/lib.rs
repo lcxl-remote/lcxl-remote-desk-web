@@ -83,9 +83,9 @@ pub const TOOL_WHITELIST: &[&str] = &[
 ];
 
 /// Whether `lcxl_diagnose` can run, mirroring the diagnose gate's precedence so
-/// the MCP path reports the same reason as the signaling / model layers. The
-/// server computes this once (manager-proxy is checked before configuration, so
-/// it wins even without direct credentials).
+/// the MCP path reports the same reason as the signaling / model layers
+/// (manager-proxy is checked before configuration, so it wins even without
+/// direct credentials).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnoseAvailability {
     /// Diagnosis can run.
@@ -96,29 +96,35 @@ pub enum DiagnoseAvailability {
     ManagerProxyUnavailable,
 }
 
+/// Live policy gate, queried on **every** tool call so a permission change takes
+/// effect on the next call rather than only on a server restart. The server-side
+/// implementation reads the authoritative (persisted) policy each time.
+#[async_trait]
+pub trait McpPolicy: Send + Sync {
+    /// Whether log reads (`lcxl_recent_logs`) are permitted right now.
+    async fn allow_logs(&self) -> bool;
+    /// Whether / why `lcxl_diagnose` may run right now.
+    async fn diagnose_availability(&self) -> DiagnoseAvailability;
+}
+
 /// The read-only MCP server handler.
 #[derive(Clone)]
 pub struct McpServer {
     reader: Arc<dyn ReadContextProvider>,
     diagnose: Arc<dyn DiagnoseProvider>,
-    /// Whether log reads (`lcxl_recent_logs`) are permitted by server policy.
-    allow_logs: bool,
-    /// Whether / why `lcxl_diagnose` may run.
-    diagnose_availability: DiagnoseAvailability,
+    policy: Arc<dyn McpPolicy>,
 }
 
 impl McpServer {
     pub fn new(
         reader: Arc<dyn ReadContextProvider>,
         diagnose: Arc<dyn DiagnoseProvider>,
-        allow_logs: bool,
-        diagnose_availability: DiagnoseAvailability,
+        policy: Arc<dyn McpPolicy>,
     ) -> Self {
         Self {
             reader,
             diagnose,
-            allow_logs,
-            diagnose_availability,
+            policy,
         }
     }
 
@@ -225,7 +231,7 @@ impl McpServer {
                 .await
             }
             TOOL_RECENT_LOGS => {
-                if !self.allow_logs {
+                if !self.policy.allow_logs().await {
                     return Ok(error_result(
                         "log access is disabled by server policy (allow_logs=false)",
                     ));
@@ -245,7 +251,7 @@ impl McpServer {
                 .await
             }
             TOOL_DIAGNOSE => {
-                match self.diagnose_availability {
+                match self.policy.diagnose_availability().await {
                     // Manager-proxy precedence matches the model / router layers:
                     // report "proxy not available" even when direct credentials
                     // are absent, not the misleading "not configured".
@@ -433,13 +439,32 @@ mod tests {
         }
     }
 
+    /// Fixed policy for tests that do not exercise liveness.
+    struct StaticPolicy {
+        allow_logs: bool,
+        availability: DiagnoseAvailability,
+    }
+    #[async_trait]
+    impl McpPolicy for StaticPolicy {
+        async fn allow_logs(&self) -> bool {
+            self.allow_logs
+        }
+        async fn diagnose_availability(&self) -> DiagnoseAvailability {
+            self.availability
+        }
+    }
+
     fn server(
         allow_logs: bool,
         availability: DiagnoseAvailability,
     ) -> (McpServer, Arc<RecordingReader>, Arc<RecordingDiagnose>) {
         let reader = Arc::new(RecordingReader::default());
         let diagnose = Arc::new(RecordingDiagnose::default());
-        let server = McpServer::new(reader.clone(), diagnose.clone(), allow_logs, availability);
+        let policy = Arc::new(StaticPolicy {
+            allow_logs,
+            availability,
+        });
+        let server = McpServer::new(reader.clone(), diagnose.clone(), policy);
         (server, reader, diagnose)
     }
 
@@ -513,6 +538,51 @@ mod tests {
             reader.calls.lock().unwrap().is_empty(),
             "reader must not be called"
         );
+    }
+
+    /// The log gate is evaluated **live on every call**: revoking `allow_logs`
+    /// between calls denies the next `lcxl_recent_logs` without restarting.
+    #[tokio::test]
+    async fn recent_logs_gate_is_evaluated_live_per_call() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct MutablePolicy {
+            allow_logs: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl McpPolicy for MutablePolicy {
+            async fn allow_logs(&self) -> bool {
+                self.allow_logs.load(Ordering::SeqCst)
+            }
+            async fn diagnose_availability(&self) -> DiagnoseAvailability {
+                DiagnoseAvailability::Available
+            }
+        }
+
+        let flag = Arc::new(AtomicBool::new(true));
+        let reader = Arc::new(RecordingReader::default());
+        let server = McpServer::new(
+            reader.clone(),
+            Arc::new(RecordingDiagnose::default()),
+            Arc::new(MutablePolicy {
+                allow_logs: flag.clone(),
+            }),
+        );
+
+        // Allowed at first.
+        let r = server
+            .dispatch_tool(TOOL_RECENT_LOGS, Map::new())
+            .await
+            .unwrap();
+        assert!(!is_error(&r));
+
+        // Operator revokes log access; the next call is denied (live re-check).
+        flag.store(false, Ordering::SeqCst);
+        let r = server
+            .dispatch_tool(TOOL_RECENT_LOGS, Map::new())
+            .await
+            .unwrap();
+        assert!(is_error(&r));
     }
 
     /// `lcxl_recent_logs` reaches the reader when log access is permitted.

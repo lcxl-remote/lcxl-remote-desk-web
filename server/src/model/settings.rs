@@ -123,6 +123,20 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Load settings from the config file **without** the token-generation /
+    /// save side effects of [`Settings::new`]. Used where a fresh read of the
+    /// persisted policy is needed (e.g. the MCP server re-checking live
+    /// permission on each tool call) and writing back is undesirable.
+    pub fn load_readonly(args: &Args) -> Result<Self, DeskError> {
+        let config = Config::builder()
+            .add_source(File::with_name(args.config_file_path.as_str()).required(false))
+            .add_source(Environment::with_prefix("LRD"))
+            .build()?;
+        let mut settings = config.try_deserialize::<Settings>()?;
+        settings.args = args.clone();
+        Ok(settings)
+    }
+
     pub fn save(&self) -> Result<(), DeskError> {
         let mut config_file_path = PathBuf::from(self.args.config_file_path.as_str());
         config_file_path.set_extension("toml");
