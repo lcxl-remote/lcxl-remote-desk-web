@@ -63,6 +63,24 @@ pub enum AuditEventType {
     /// A diagnose task was cancelled (e.g. the operator handed off to manual
     /// remote control).
     TaskCancelled,
+
+    // ---- confirmed-execution lifecycle ----
+    /// A command execution was requested and classified (preview produced).
+    CapabilityRequested,
+    /// The required exec capability was granted against the active scope.
+    CapabilityAllowed,
+    /// The required exec capability was denied (blocked / off-template / scope).
+    CapabilityDenied,
+    /// A pending approval was created for a previewed execution.
+    ApprovalRequested,
+    /// The user approved a previewed execution (an `approval_id` was minted).
+    ApprovalGranted,
+    /// The user rejected a previewed execution.
+    ApprovalDenied,
+    /// An approved command was dispatched to the worker for execution.
+    CommandExecuted,
+    /// An executed command finished (result returned).
+    CommandCompleted,
 }
 
 impl AuditEventType {
@@ -77,6 +95,14 @@ impl AuditEventType {
             AuditEventType::ModelResponded => "ai.model.responded",
             AuditEventType::RedactionFailed => "ai.redaction.failed",
             AuditEventType::TaskCancelled => "ai.task.cancelled",
+            AuditEventType::CapabilityRequested => "ai.capability.requested",
+            AuditEventType::CapabilityAllowed => "ai.capability.allowed",
+            AuditEventType::CapabilityDenied => "ai.capability.denied",
+            AuditEventType::ApprovalRequested => "ai.approval.requested",
+            AuditEventType::ApprovalGranted => "ai.approval.granted",
+            AuditEventType::ApprovalDenied => "ai.approval.denied",
+            AuditEventType::CommandExecuted => "ai.command.executed",
+            AuditEventType::CommandCompleted => "ai.command.completed",
         }
     }
 }
@@ -359,6 +385,22 @@ impl AuditEvent {
         event.result = "cancelled".to_string();
         event
     }
+}
+
+/// Manager-bound audit report payload.
+///
+/// web/server has no database; it reports each [`AuditEvent`] to the parent
+/// manager over the existing manager WebSocket, where it is persisted to the
+/// `ai_audit_event` table. This thin wrapper is the payload of that report
+/// (the signaling variant carrying it is added in a later step). It exists as a
+/// distinct type so the manager-facing wire can evolve (e.g. a batch or
+/// schema-version field) without touching the [`AuditEvent`] shape that the
+/// device-side emitter and the persistence mapping both share.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct AiAuditEventPayload {
+    pub event: AuditEvent,
 }
 
 /// Short, content-free description of what was requested (the capability /
@@ -785,6 +827,49 @@ mod tests {
         let bytes = wincode::config::serialize(&event, config).expect("encode");
         let back: AuditEvent = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(event, back);
+    }
+
+    #[test]
+    fn exec_lifecycle_event_types_have_dotted_names() {
+        let cases = [
+            (
+                AuditEventType::CapabilityRequested,
+                "ai.capability.requested",
+            ),
+            (AuditEventType::CapabilityAllowed, "ai.capability.allowed"),
+            (AuditEventType::CapabilityDenied, "ai.capability.denied"),
+            (AuditEventType::ApprovalRequested, "ai.approval.requested"),
+            (AuditEventType::ApprovalGranted, "ai.approval.granted"),
+            (AuditEventType::ApprovalDenied, "ai.approval.denied"),
+            (AuditEventType::CommandExecuted, "ai.command.executed"),
+            (AuditEventType::CommandCompleted, "ai.command.completed"),
+        ];
+        for (ty, dotted) in cases {
+            assert_eq!(ty.as_str(), dotted);
+            // snake_case serde form round-trips.
+            let json = serde_json::to_string(&ty).unwrap();
+            let back: AuditEventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, ty);
+        }
+    }
+
+    #[test]
+    fn ai_audit_event_payload_round_trips() {
+        use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
+        let config: Configuration<true, PREALLOCATION_SIZE_LIMIT_DISABLED> = Configuration::new();
+        let env = envelope(process_list_input());
+        let payload = AiAuditEventPayload {
+            event: AuditEvent::task_created("evt".into(), "ts".into(), &env),
+        };
+
+        let json = serde_json::to_string(&payload).expect("json encode");
+        let back: AiAuditEventPayload = serde_json::from_str(&json).expect("json decode");
+        assert_eq!(payload, back);
+
+        let bytes = wincode::config::serialize(&payload, config).expect("wincode encode");
+        let back2: AiAuditEventPayload =
+            wincode::config::deserialize(&bytes, config).expect("wincode decode");
+        assert_eq!(payload, back2);
     }
 
     #[test]

@@ -19,8 +19,20 @@
 
 use std::fmt;
 
+use desk_agent_protocol::ExecutionMode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+/// Whether an [`ExecutionMode`] is one of the three the M2 confirm-execute flow
+/// supports. `SessionApproved` / `Automated` are frozen in the protocol enum but
+/// not selectable yet (they need the M4 policy engine); persisting them is
+/// rejected so the stored mode stays in the usable set.
+fn is_m2_selectable(mode: ExecutionMode) -> bool {
+    matches!(
+        mode,
+        ExecutionMode::SuggestOnly | ExecutionMode::ReadOnly | ExecutionMode::ConfirmEachAction
+    )
+}
 
 /// How the model gateway is asked to constrain its output format.
 ///
@@ -68,6 +80,12 @@ pub struct AiModelSettings {
     /// How the gateway is asked to constrain output format. Default
     /// `json_object`.
     pub response_format: ResponseFormatMode,
+    /// How far the AI may go in acting on the device. Default `suggest_only`
+    /// (the AI only proposes commands). `read_only` / `confirm_each_action`
+    /// permit confirmed execution of whitelist templates; every real execution
+    /// still requires an explicit per-command user approval. `session_approved`
+    /// / `automated` are not selectable yet (M4).
+    pub execution_mode: ExecutionMode,
 }
 
 impl AiModelSettings {
@@ -96,6 +114,7 @@ impl AiModelSettings {
             allow_logs: self.allow_logs,
             max_context_bytes: self.max_context_bytes,
             response_format: self.response_format,
+            execution_mode: self.execution_mode,
             api_key_set: self.api_key_set(),
         }
     }
@@ -125,6 +144,13 @@ impl AiModelSettings {
         if let Some(response_format) = update.response_format {
             self.response_format = response_format;
         }
+        // Reject the not-yet-selectable modes so the persisted value stays in
+        // the M2-usable set; a `None` leaves the stored mode unchanged.
+        if let Some(execution_mode) = update.execution_mode
+            && is_m2_selectable(execution_mode)
+        {
+            self.execution_mode = execution_mode;
+        }
         match update.api_key {
             None => {}                                          // leave unchanged
             Some(key) if key.is_empty() => self.api_key = None, // clear
@@ -145,6 +171,7 @@ impl fmt::Debug for AiModelSettings {
             .field("allow_logs", &self.allow_logs)
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
+            .field("execution_mode", &self.execution_mode)
             .finish()
     }
 }
@@ -161,6 +188,7 @@ pub struct AiModelSettingsPublic {
     pub allow_logs: bool,
     pub max_context_bytes: Option<u64>,
     pub response_format: ResponseFormatMode,
+    pub execution_mode: ExecutionMode,
     /// Whether a non-empty API key is configured. The key itself is never
     /// returned.
     pub api_key_set: bool,
@@ -180,6 +208,9 @@ pub struct AiModelSettingsUpdate {
     pub max_context_bytes: Option<u64>,
     /// `None` leaves the stored mode unchanged.
     pub response_format: Option<ResponseFormatMode>,
+    /// `None` leaves the stored mode unchanged. A not-yet-selectable mode
+    /// (`session_approved` / `automated`) is ignored.
+    pub execution_mode: Option<ExecutionMode>,
     /// Write-only. `None` = leave unchanged; `Some("")` = clear; `Some(x)` = set.
     pub api_key: Option<String>,
 }
@@ -194,6 +225,7 @@ impl fmt::Debug for AiModelSettingsUpdate {
             .field("allow_logs", &self.allow_logs)
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
+            .field("execution_mode", &self.execution_mode)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
@@ -213,6 +245,7 @@ mod tests {
             allow_logs: false,
             max_context_bytes: Some(131_072),
             response_format: ResponseFormatMode::JsonObject,
+            execution_mode: ExecutionMode::SuggestOnly,
         }
     }
 
@@ -327,6 +360,75 @@ mod tests {
         // A TOML/JSON config without the field deserializes to the default.
         let s: AiModelSettings = serde_json::from_str("{}").expect("empty config");
         assert_eq!(s.response_format, ResponseFormatMode::JsonObject);
+    }
+
+    /// Default execution mode is `suggest_only`, and a config written before the
+    /// field existed deserializes to it (back-compat via the struct's
+    /// `#[serde(default)]`).
+    #[test]
+    fn execution_mode_defaults_to_suggest_only() {
+        assert_eq!(
+            AiModelSettings::default().execution_mode,
+            ExecutionMode::SuggestOnly
+        );
+        let s: AiModelSettings = serde_json::from_str("{}").expect("empty config");
+        assert_eq!(s.execution_mode, ExecutionMode::SuggestOnly);
+    }
+
+    /// Update accepts the three M2-selectable modes and ignores the
+    /// not-yet-selectable ones, so the persisted value never leaves the usable
+    /// set.
+    #[test]
+    fn update_execution_mode_rejects_non_selectable() {
+        let mut s = configured();
+        assert_eq!(s.execution_mode, ExecutionMode::SuggestOnly);
+
+        for mode in [
+            ExecutionMode::ReadOnly,
+            ExecutionMode::ConfirmEachAction,
+            ExecutionMode::SuggestOnly,
+        ] {
+            s.apply_update(AiModelSettingsUpdate {
+                execution_mode: Some(mode),
+                ..Default::default()
+            });
+            assert_eq!(s.execution_mode, mode);
+        }
+
+        // Set a known good value, then a not-selectable mode is ignored.
+        s.apply_update(AiModelSettingsUpdate {
+            execution_mode: Some(ExecutionMode::ConfirmEachAction),
+            ..Default::default()
+        });
+        for mode in [ExecutionMode::SessionApproved, ExecutionMode::Automated] {
+            s.apply_update(AiModelSettingsUpdate {
+                execution_mode: Some(mode),
+                ..Default::default()
+            });
+            assert_eq!(
+                s.execution_mode,
+                ExecutionMode::ConfirmEachAction,
+                "not-selectable mode {mode:?} must not be persisted"
+            );
+        }
+
+        // None leaves the stored mode unchanged.
+        s.apply_update(AiModelSettingsUpdate::default());
+        assert_eq!(s.execution_mode, ExecutionMode::ConfirmEachAction);
+    }
+
+    /// The public view carries the execution mode (it is not a secret).
+    #[test]
+    fn public_view_reports_execution_mode() {
+        let mut s = configured();
+        s.apply_update(AiModelSettingsUpdate {
+            execution_mode: Some(ExecutionMode::ConfirmEachAction),
+            ..Default::default()
+        });
+        assert_eq!(
+            s.public_view().execution_mode,
+            ExecutionMode::ConfirmEachAction
+        );
     }
 
     /// Regression for the secret boundary: the legacy `/settings` payload is

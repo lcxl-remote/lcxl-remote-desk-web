@@ -30,6 +30,9 @@ use wincode::{SchemaRead, SchemaWrite};
 
 pub mod audit;
 pub mod diagnose;
+pub mod exec;
+
+use crate::exec::{CommandClassification, ExecDecision, ExecEffect};
 
 // ============================ Envelope ============================
 
@@ -205,6 +208,7 @@ pub struct AgentScope {
     PartialEq,
     Eq,
     Hash,
+    Default,
     Serialize,
     Deserialize,
     SchemaWrite,
@@ -213,6 +217,8 @@ pub struct AgentScope {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
+    /// No execution at all — the AI may only suggest commands. The safe default.
+    #[default]
     SuggestOnly,
     ReadOnly,
     ConfirmEachAction,
@@ -350,6 +356,30 @@ impl OperationInput {
                 ContextKind::ScreenCaptureCurrent(_) => Capability::ScreenCaptureCurrent,
             }),
             OperationInput::Exec(_) => None,
+        }
+    }
+
+    /// Frozen exec capability mapping (the M2 gap [`OperationInput::capability`]
+    /// deliberately left open). The `shell.exec.readonly` vs
+    /// `shell.exec.confirmed` split is **not** derivable from the wire input —
+    /// it is the output of server-side risk classification — so it is resolved
+    /// here from a [`CommandClassification`] instead.
+    ///
+    /// This is an **associated function**, not a `self` method: the classified
+    /// effect, not the raw `ExecInput`, decides the capability. It is called
+    /// **only inside the daemon confirm flow** (never fed back into the raw
+    /// read-only [`OperationInput::capability`] gate). Returns `None` when the
+    /// command is not executable through the AI path (blocked / off-template),
+    /// which carries no executable capability.
+    pub fn required_capability(classification: &CommandClassification) -> Option<Capability> {
+        match (classification.decision, classification.effect) {
+            (ExecDecision::ConfirmRequired, Some(ExecEffect::ReadOnly)) => {
+                Some(Capability::ShellExecReadonly)
+            }
+            (ExecDecision::ConfirmRequired, Some(ExecEffect::Mutating)) => {
+                Some(Capability::ShellExecConfirmed)
+            }
+            _ => None,
         }
     }
 }
