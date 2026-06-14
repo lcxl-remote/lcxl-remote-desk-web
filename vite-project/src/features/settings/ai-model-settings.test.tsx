@@ -85,6 +85,27 @@ describe("AiModelSettings", () => {
         expect(lastPayload().api_key).toBe("")
     })
 
+    it("hydrates the anthropic provider, shows its base-URL hint, and saves it", async () => {
+        h.publicData = { ...h.publicData, provider: "anthropic" }
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        // The provider-specific base URL hint warns against appending /v1.
+        expect(screen.getByText(/Host root only/i)).toBeInTheDocument()
+
+        fireEvent.click(screen.getByText("Save Settings"))
+        await waitFor(() => expect(h.mutateAsync).toHaveBeenCalled())
+        expect(lastPayload().provider).toBe("anthropic")
+    })
+
+    it("normalizes an unknown stored provider to openai-compatible", async () => {
+        h.publicData = { ...h.publicData, provider: "some-legacy-value" }
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        fireEvent.click(screen.getByText("Save Settings"))
+        await waitFor(() => expect(h.mutateAsync).toHaveBeenCalled())
+        expect(lastPayload().provider).toBe("openai-compatible")
+    })
+
     it("hides the clear toggle when no key is configured", async () => {
         h.publicData = { ...h.publicData, api_key_set: false, response_format: "json_object" }
         render(<AiModelSettings />)

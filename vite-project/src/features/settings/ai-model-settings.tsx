@@ -19,8 +19,12 @@ import { useToast } from "@/hooks/use-toast"
 
 const RESPONSE_FORMATS = ["none", "json_object", "json_schema"] as const
 
+// Providers the backend maps to a wire adapter. "openai-compatible" covers
+// OpenAI and any OpenAI-compatible gateway; "anthropic" uses the Messages API.
+const PROVIDERS = ["openai-compatible", "anthropic"] as const
+
 const aiModelSettingsSchema = z.object({
-    provider: z.string(),
+    provider: z.enum(PROVIDERS),
     model: z.string(),
     base_url: z.string(),
     api_key: z.string(),
@@ -46,7 +50,7 @@ export function AiModelSettings() {
     const form = useForm<AiModelSettingsFormValues>({
         resolver: zodResolver(aiModelSettingsSchema),
         defaultValues: {
-            provider: "",
+            provider: "openai-compatible",
             model: "",
             base_url: "",
             api_key: "",
@@ -67,8 +71,11 @@ export function AiModelSettings() {
             const rf = RESPONSE_FORMATS.includes(data.response_format as (typeof RESPONSE_FORMATS)[number])
                 ? (data.response_format as (typeof RESPONSE_FORMATS)[number])
                 : "json_object"
+            // Normalize any stored value to a known provider; unknown / legacy
+            // values map to openai-compatible (the backend's fallback adapter).
+            const provider = data.provider === "anthropic" ? "anthropic" : "openai-compatible"
             form.reset({
-                provider: data.provider ?? "",
+                provider,
                 model: data.model ?? "",
                 base_url: data.base_url ?? "",
                 api_key: "",
@@ -157,11 +164,23 @@ export function AiModelSettings() {
                                     render={({ field }) => (
                                         <FormItem>
                                             <FormLabel>{t("pages.aiModel.settings.provider", "Provider")}</FormLabel>
-                                            <FormControl>
-                                                <Input placeholder="openai-compatible" {...field} />
-                                            </FormControl>
+                                            <Select
+                                                key={field.value || "provider-empty"}
+                                                onValueChange={field.onChange}
+                                                defaultValue={field.value}
+                                            >
+                                                <FormControl>
+                                                    <SelectTrigger>
+                                                        <SelectValue />
+                                                    </SelectTrigger>
+                                                </FormControl>
+                                                <SelectContent>
+                                                    <SelectItem value="openai-compatible">{t("pages.aiModel.settings.provider.openaiCompatible", "OpenAI-compatible")}</SelectItem>
+                                                    <SelectItem value="anthropic">{t("pages.aiModel.settings.provider.anthropic", "Anthropic")}</SelectItem>
+                                                </SelectContent>
+                                            </Select>
                                             <FormDescription>
-                                                {t("pages.aiModel.settings.provider.description", "Label for auditing only — does not affect behavior. The connection is decided by model, base URL, and API key. Keep \"openai-compatible\" if unsure.")}
+                                                {t("pages.aiModel.settings.provider.description", "Selects the wire protocol (adapter). OpenAI-compatible uses /chat/completions; Anthropic uses the Messages API.")}
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
@@ -185,15 +204,26 @@ export function AiModelSettings() {
                             <FormField
                                 control={form.control}
                                 name="base_url"
-                                render={({ field }) => (
-                                    <FormItem>
-                                        <FormLabel>{t("pages.aiModel.settings.baseUrl", "Base URL")}</FormLabel>
-                                        <FormControl>
-                                            <Input placeholder="https://api.openai.com/v1" {...field} />
-                                        </FormControl>
-                                        <FormMessage />
-                                    </FormItem>
-                                )}
+                                render={({ field }) => {
+                                    const isAnthropic = form.watch("provider") === "anthropic"
+                                    return (
+                                        <FormItem>
+                                            <FormLabel>{t("pages.aiModel.settings.baseUrl", "Base URL")}</FormLabel>
+                                            <FormControl>
+                                                <Input
+                                                    placeholder={isAnthropic ? "https://api.anthropic.com" : "https://api.openai.com/v1"}
+                                                    {...field}
+                                                />
+                                            </FormControl>
+                                            <FormDescription>
+                                                {isAnthropic
+                                                    ? t("pages.aiModel.settings.baseUrl.anthropic", "Host root only (e.g. https://api.anthropic.com); the /v1/messages path is appended automatically.")
+                                                    : t("pages.aiModel.settings.baseUrl.openai", "Include the version path (e.g. https://api.openai.com/v1); /chat/completions is appended automatically.")}
+                                            </FormDescription>
+                                            <FormMessage />
+                                        </FormItem>
+                                    )
+                                }}
                             />
 
                             <FormField

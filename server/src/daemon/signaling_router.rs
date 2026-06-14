@@ -72,7 +72,7 @@ use crate::diagnose::{DiagnoseEventSink, DiagnoseOrchestrator};
 const VIRTUAL_DISPLAY_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
-use crate::model::settings::SharedSettings;
+use crate::model::settings::{GatewayMode, SharedSettings};
 
 /// Whether a given `SignalingType` is owned by the daemon (handled
 /// inline against the PC registry) or by the worker (forwarded over
@@ -1591,10 +1591,34 @@ async fn handle_diagnose_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
+    let ai_model = ctx.settings.read().await.ai_model.clone();
+
+    // Manager-proxied gateway is a reserved placeholder. Refuse it before the
+    // not-configured gate so selecting `manager_proxy` always reports "proxy not
+    // available" rather than the misleading "gateway not configured" when no
+    // direct credentials are set (the proxy would supply them).
+    if ai_model.gateway_mode == GatewayMode::ManagerProxy {
+        emit_diagnose_event(
+            ctx,
+            model,
+            DiagnoseEvent::error(
+                &model.request_id,
+                0,
+                agent_error(
+                    AgentErrorKind::UnsupportedCapability,
+                    "manager-proxied model gateway is not available yet",
+                    false,
+                    true,
+                ),
+            ),
+        );
+        return Ok(());
+    }
+
     // Gate on the model gateway being configured: configuring the model, base
     // URL, and API key in AI model settings is the operator opt-in. Until then
     // the read collectors stay dark and the control end is told to configure.
-    if !ctx.settings.read().await.ai_model.is_configured() {
+    if !ai_model.is_configured() {
         emit_diagnose_event(
             ctx,
             model,
@@ -1681,10 +1705,17 @@ async fn handle_diagnose_inbound(
             .expect("diagnose tasks lock")
             .remove(&request_id);
     });
-    ctx.diagnose_tasks
-        .lock()
-        .expect("diagnose tasks lock")
-        .insert(model.request_id.clone(), handle);
+    // Register the handle so a later `DiagnoseCancel` can abort it. The current
+    // runtime is single-threaded (`spawn_local`) and there is no `.await` between
+    // the spawn above and here, so the task cannot have run yet — but guard
+    // against it anyway: if the task already finished (its self-removal then ran
+    // as a no-op before this point), skip registration so no stale handle leaks.
+    if !handle.is_finished() {
+        ctx.diagnose_tasks
+            .lock()
+            .expect("diagnose tasks lock")
+            .insert(model.request_id.clone(), handle);
+    }
     Ok(())
 }
 
@@ -4409,6 +4440,71 @@ mod tests {
         let err = event.error.unwrap();
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
         assert!(err.message.contains("not available in this mode"));
+    }
+
+    /// `gateway_mode = manager_proxy` is refused with the proxy message *before*
+    /// the not-configured gate, so it does not depend on direct credentials being
+    /// set (the proxy would supply them).
+    #[tokio::test]
+    async fn diagnose_manager_proxy_emits_unsupported_before_config_gate() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        {
+            // Manager-proxy selected, but no model / base_url / api_key set.
+            let mut s = ctx.settings.write().await;
+            s.ai_model.gateway_mode = GatewayMode::ManagerProxy;
+        }
+        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+        let event = read_response(&mut rx)
+            .get_data::<DiagnoseEvent>()
+            .expect("DiagnoseEvent");
+        assert_eq!(event.kind, DiagnoseEventKind::Error);
+        let err = event.error.unwrap();
+        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+        assert!(
+            err.message.contains("manager-proxied"),
+            "expected the proxy message, got: {}",
+            err.message
+        );
+    }
+
+    /// A diagnosis that completes naturally must leave no entry in the task
+    /// registry — the detached task removes itself, and registration is skipped
+    /// if it already finished, so no stale handle leaks.
+    #[actix_web::test]
+    async fn diagnose_immediate_completion_leaves_no_stale_task() {
+        use crate::diagnose::redaction::RegexRedactor;
+        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
+        use desk_agent_protocol::audit::NoopAuditSink;
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        configure_ai_model(&ctx).await;
+        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
+            Arc::new(NoopContextCollector),
+            Arc::new(RegexRedactor::new()),
+            Arc::new(StubDiagnoseModel),
+            Arc::new(NoopAuditSink),
+        )));
+        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+
+        // Let the detached task run to completion (it emits a terminal frame and
+        // then removes its own registry entry).
+        for _ in 0..1000 {
+            let drained = std::iter::from_fn(|| rx.try_recv().ok()).count();
+            let _ = drained;
+            if ctx.diagnose_tasks.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            ctx.diagnose_tasks.lock().unwrap().is_empty(),
+            "completed diagnosis must not leave a stale task handle"
+        );
     }
 
     /// Configured + orchestrator present (Default / DeskServer-like): the

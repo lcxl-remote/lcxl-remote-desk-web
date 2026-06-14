@@ -224,19 +224,14 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
         on_partial: &(dyn Fn(String) + Send + Sync),
     ) -> Result<Diagnosis, AgentError> {
         let config = { self.settings.read().await.ai_model.clone() };
-        let (Some(model), Some(base_url), Some(api_key)) =
-            (config.model, config.base_url, config.api_key)
-        else {
-            return Ok(not_configured());
-        };
-        if api_key.is_empty() || base_url.is_empty() || model.is_empty() {
-            return Ok(not_configured());
-        }
 
         // Manager-proxied gateway is a reserved placeholder: the field and API
-        // exist, but the proxy is not implemented. Refuse before resolving the
-        // adapter (so no wire call is attempted) — the orchestrator turns this
-        // into a `DiagnoseEvent::error`.
+        // exist, but the proxy is not implemented. Refuse it first — before the
+        // not-configured gate and before resolving any adapter — so selecting
+        // `manager_proxy` always reports "proxy not available" rather than the
+        // misleading "gateway not configured" when no direct credentials are set
+        // (the proxy would supply them). The orchestrator turns this into a
+        // `DiagnoseEvent::error`.
         if config.gateway_mode == GatewayMode::ManagerProxy {
             return Err(AgentError {
                 kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
@@ -244,6 +239,15 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
                 retryable: false,
                 safe_for_model: true,
             });
+        }
+
+        let (Some(model), Some(base_url), Some(api_key)) =
+            (config.model, config.base_url, config.api_key)
+        else {
+            return Ok(not_configured());
+        };
+        if api_key.is_empty() || base_url.is_empty() || model.is_empty() {
+            return Ok(not_configured());
         }
 
         let max_context_bytes = config
@@ -783,6 +787,36 @@ mod tests {
         assert!(
             audit.events.lock().unwrap().is_empty(),
             "no audit on refusal"
+        );
+    }
+
+    /// `manager_proxy` is refused even when no direct credentials are set: the
+    /// proxy mode does not require local model/base_url/api_key, so the user must
+    /// get "proxy not available", not the "gateway not configured" fallback.
+    #[tokio::test]
+    async fn manager_proxy_refused_takes_precedence_over_not_configured() {
+        let mut s = Settings::default();
+        // Deliberately no model / base_url / api_key.
+        s.ai_model.gateway_mode = crate::model::settings::GatewayMode::ManagerProxy;
+
+        let model = ModelBackedDiagnoseModel::with_adapter(
+            Arc::new(MockAdapter {
+                fragments: vec![],
+                content: WELL_FORMED.into(),
+                usage: TokenUsage::default(),
+                seen: Mutex::new(None),
+            }),
+            Arc::new(SharedSettings::from(s)),
+            Arc::new(RecordingAuditSink::default()),
+        );
+        let noop = |_: String| {};
+        let err = model
+            .diagnose("req_mp2", "q", &snapshot(), None, &noop)
+            .await
+            .expect_err("manager_proxy must be refused even without credentials");
+        assert_eq!(
+            err.kind,
+            desk_agent_protocol::AgentErrorKind::UnsupportedCapability
         );
     }
 }
