@@ -222,6 +222,14 @@ pub enum ServiceToWorker {
     /// verbatim — the daemon has already stamped its trusted fields
     /// (target / actor / scope / caller / request_id) before forwarding.
     AgentRequest(AgentRequestPayload),
+
+    /// Daemon → worker: a sealed, user-approved execution plan. The worker
+    /// executes `plan.program` + `plan.argv` **verbatim** (no shell re-parse,
+    /// no elevation, no stdin) inside the user session and replies via
+    /// [`WorkerToService::ExecResult`]. Unlike [`AgentRequest`], exec never
+    /// rides the capability envelope — only this dedicated variant carries an
+    /// executable plan, so a read-only `AgentRequest` can never become one.
+    ExecPlan(ExecPlanPayload),
 }
 
 /// Messages sent from Worker process to Service Core (daemon) over the
@@ -385,6 +393,14 @@ pub enum WorkerToService {
     /// transport-level response state — so the control-end UI receives
     /// the full structured [`desk_agent_protocol::AgentError`].
     AgentResponse(AgentResponsePayload),
+
+    /// Worker → daemon reply to [`ServiceToWorker::ExecPlan`]. The daemon
+    /// rebuilds the outbound `SignalingType::ExecResult` model for the control
+    /// end (the embedded [`desk_agent_protocol::exec::ExecResultPayload`] is
+    /// reused verbatim) and routes it back to `connection_id`. Execution
+    /// failures (timeout, spawn error) travel inside the payload's
+    /// `AgentOutcome::Err`, not the transport.
+    ExecResult(ExecResultIpcPayload),
 }
 
 // ==================== Payload Types ====================
@@ -1214,6 +1230,29 @@ pub struct AgentResponsePayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub outcome: desk_agent_protocol::AgentOutcome,
+}
+
+/// Payload for [`ServiceToWorker::ExecPlan`]. Carries the sealed
+/// [`desk_agent_protocol::exec::ExecPlan`] plus the signaling correlation
+/// (`request_id`) and originating control-end `connection_id`, which the worker
+/// echoes back in [`ExecResultIpcPayload`] so the daemon can route the outbound
+/// `ExecResult` without keeping its own in-flight map.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ExecPlanPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub plan: desk_agent_protocol::exec::ExecPlan,
+}
+
+/// Payload for [`WorkerToService::ExecResult`]. Embeds the
+/// [`desk_agent_protocol::exec::ExecResultPayload`] (tagged with
+/// `exec_request_id`) the daemon ships to the control end verbatim, plus the
+/// echoed `request_id` / `connection_id` for routing.
+#[derive(Debug, Clone, Serialize, Deserialize, SchemaWrite, SchemaRead)]
+pub struct ExecResultIpcPayload {
+    pub request_id: String,
+    pub connection_id: Option<String>,
+    pub result: desk_agent_protocol::exec::ExecResultPayload,
 }
 
 #[cfg(test)]
@@ -2394,6 +2433,16 @@ mod tests {
             }),
             ServiceToWorker::DetachVirtualDisplay,
             ServiceToWorker::RefreshCapabilities,
+            ServiceToWorker::AgentRequest(AgentRequestPayload {
+                request_id: "r-ai".to_string(),
+                connection_id: Some("c".to_string()),
+                envelope: sample_agent_envelope(),
+            }),
+            ServiceToWorker::ExecPlan(ExecPlanPayload {
+                request_id: "r-exec".to_string(),
+                connection_id: Some("c".to_string()),
+                plan: sample_exec_plan(),
+            }),
         ];
         for case in &cases {
             let decoded = wincode_round_trip(case);
@@ -2511,6 +2560,31 @@ mod tests {
             WorkerToService::VirtualDisplayAttachResult(VirtualDisplayAttachResultPayload {
                 instance_id: "SWD\\LcxlVirtualDisplay\\LcxlVirtualDisplay".to_string(),
                 outcome: VirtualDisplayAttachOutcome::Attached("\\\\.\\DISPLAY4".to_string()),
+            }),
+            WorkerToService::AgentResponse(AgentResponsePayload {
+                request_id: "r-ai".to_string(),
+                connection_id: Some("c".to_string()),
+                outcome: desk_agent_protocol::AgentOutcome::Err(desk_agent_protocol::AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::Internal,
+                    message: "x".to_string(),
+                    retryable: false,
+                    safe_for_model: true,
+                }),
+            }),
+            WorkerToService::ExecResult(ExecResultIpcPayload {
+                request_id: "r-exec".to_string(),
+                connection_id: Some("c".to_string()),
+                result: desk_agent_protocol::exec::ExecResultPayload {
+                    exec_request_id: desk_agent_protocol::exec::ExecRequestId("e1".to_string()),
+                    outcome: desk_agent_protocol::AgentOutcome::Err(
+                        desk_agent_protocol::AgentError {
+                            kind: desk_agent_protocol::AgentErrorKind::Timeout,
+                            message: "x".to_string(),
+                            retryable: false,
+                            safe_for_model: true,
+                        },
+                    ),
+                },
             }),
         ];
         for case in &cases {
@@ -2997,6 +3071,74 @@ mod tests {
                 approval_id: None,
                 reason: Some("diagnose".to_string()),
             },
+        }
+    }
+
+    fn sample_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
+        use desk_agent_protocol::RiskLevel;
+        use desk_agent_protocol::exec::{ApprovalId, ExecPlan, ExecRequestId, ExecShellKind};
+        ExecPlan {
+            exec_request_id: ExecRequestId("exec-1".to_string()),
+            program: "docker".to_string(),
+            argv: vec!["restart".to_string(), "web1".to_string()],
+            cwd: None,
+            shell: ExecShellKind::Native,
+            risk: RiskLevel::High,
+            template_id: "docker_restart".to_string(),
+            approval_id: ApprovalId("appr-1".to_string()),
+            fingerprint: "fp".to_string(),
+            timeout_ms: 30_000,
+            max_stdout_bytes: 65_536,
+            max_stderr_bytes: 65_536,
+        }
+    }
+
+    /// `ServiceToWorker::ExecPlan` carries the full sealed plan across the
+    /// daemon → worker wire, and `WorkerToService::ExecResult` carries the
+    /// `exec_request_id`-tagged result back.
+    #[test]
+    fn exec_plan_and_result_round_trip_wincode() {
+        let plan_msg = ServiceToWorker::ExecPlan(ExecPlanPayload {
+            request_id: "r-exec".to_string(),
+            connection_id: Some("conn-1".to_string()),
+            plan: sample_exec_plan(),
+        });
+        match wincode_round_trip(&plan_msg) {
+            ServiceToWorker::ExecPlan(p) => {
+                assert_eq!(p.request_id, "r-exec");
+                assert_eq!(p.plan, sample_exec_plan());
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let result_msg = WorkerToService::ExecResult(ExecResultIpcPayload {
+            request_id: "r-exec".to_string(),
+            connection_id: Some("conn-1".to_string()),
+            result: desk_agent_protocol::exec::ExecResultPayload {
+                exec_request_id: desk_agent_protocol::exec::ExecRequestId("exec-1".to_string()),
+                outcome: desk_agent_protocol::AgentOutcome::Ok(
+                    desk_agent_protocol::OperationOutput::Exec(desk_agent_protocol::ExecOutput {
+                        exit_code: 0,
+                        stdout: "ok".to_string(),
+                        stderr: String::new(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                        duration_ms: 5,
+                        redactions: vec![],
+                    }),
+                ),
+            },
+        });
+        match wincode_round_trip(&result_msg) {
+            WorkerToService::ExecResult(p) => {
+                assert_eq!(p.request_id, "r-exec");
+                assert_eq!(p.result.exec_request_id.0, "exec-1");
+                assert!(matches!(
+                    p.result.outcome,
+                    desk_agent_protocol::AgentOutcome::Ok(_)
+                ));
+            }
+            other => panic!("unexpected: {other:?}"),
         }
     }
 

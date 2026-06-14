@@ -22,8 +22,8 @@ use desk_input_injection::display_watcher;
 use desk_ipc_protocol::{
     dual_transport::{EventReceiver, EventSender, MediaSender, framed},
     message::{
-        AgentResponsePayload, DesktopChangedPayload, FileTransferPayload, HeartbeatPayload,
-        ListTerminalResponsePayload, ManagerFileListResponsePayload,
+        AgentResponsePayload, DesktopChangedPayload, ExecResultIpcPayload, FileTransferPayload,
+        HeartbeatPayload, ListTerminalResponsePayload, ManagerFileListResponsePayload,
         ManagerQuerySettingsResponsePayload, ManagerResponseRefPayload,
         ManagerSystemInfoResponsePayload, PrivateScreenStateChangedPayload,
         ReplyFromTerminalPayload, ServiceToWorker, SignalingErrorPayload, StopMediaPayload,
@@ -1641,6 +1641,40 @@ impl WorkerSession {
                                             warn!(
                                                 "writer task closed; dropping AgentResponse"
                                             );
+                                        }
+                                    });
+                                }
+                                ServiceToWorker::ExecPlan(payload) => {
+                                    info!(
+                                        "Worker received ExecPlan req={} template={} conn={:?}",
+                                        payload.request_id,
+                                        payload.plan.template_id,
+                                        payload.connection_id,
+                                    );
+                                    // Execute off the IPC loop so a slow command
+                                    // (up to its timeout) never stalls heartbeats
+                                    // or other commands. The result rides the same
+                                    // `writer_tx`; execution failures travel inside
+                                    // the `AgentOutcome`, not the transport.
+                                    let writer_tx = writer_tx.clone();
+                                    tokio::spawn(async move {
+                                        let outcome =
+                                            crate::worker::exec::execute_plan(&payload.plan).await;
+                                        let result = desk_agent_protocol::exec::ExecResultPayload {
+                                            exec_request_id: payload.plan.exec_request_id,
+                                            outcome,
+                                        };
+                                        if writer_tx
+                                            .send(WorkerToService::ExecResult(
+                                                ExecResultIpcPayload {
+                                                    request_id: payload.request_id,
+                                                    connection_id: payload.connection_id,
+                                                    result,
+                                                },
+                                            ))
+                                            .is_err()
+                                        {
+                                            warn!("writer task closed; dropping ExecResult");
                                         }
                                     });
                                 }

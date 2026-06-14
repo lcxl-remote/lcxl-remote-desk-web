@@ -36,7 +36,7 @@ use desk_agent_protocol::{
     ProtocolVersion, RequestId, TargetRef,
 };
 use desk_ipc_protocol::message::{
-    AgentRequestPayload, CloseTerminalPayload, EnablePrivateScreenPayload,
+    AgentRequestPayload, CloseTerminalPayload, EnablePrivateScreenPayload, ExecPlanPayload,
     ListTerminalRequestPayload, ManagerFileDeleteRequestPayload, ManagerFileListRequestPayload,
     ManagerRequestRefPayload, ManagerUpdateSettingsRequestPayload, ResizeTerminalPayload,
     SendDataToTerminalPayload, ServiceToWorker, SetVirtualDisplayModePayload,
@@ -2023,32 +2023,44 @@ async fn handle_resolve_exec_inbound(
     }
 }
 
-/// Dispatch a sealed [`ExecPlan`] to the worker for execution.
-///
-/// The worker-side executor and the `ServiceToWorker::ExecPlan` /
-/// `WorkerToService::ExecResult` IPC land in a later step; until then this
-/// reports the plan as not-yet-executable so the control end gets a definite
-/// result rather than hanging.
+/// Dispatch a sealed [`ExecPlan`] to the worker for execution. The worker runs
+/// the argv verbatim and replies with `WorkerToService::ExecResult`, which the
+/// signaling proxy turns into the outbound `ExecResult(609)` frame. The
+/// `request_id` / `connection_id` are echoed through so the proxy can route that
+/// frame back. If the worker is unreachable, synthesize an error result here so
+/// the control end still gets a definite answer.
 async fn dispatch_exec_plan(
     ctx: &RouterContext,
     request_id: &str,
     to_connection_id: Option<String>,
     plan: desk_agent_protocol::exec::ExecPlan,
 ) {
-    send_exec_result(
-        &ctx.outbound_tx,
-        request_id,
-        to_connection_id,
-        ExecResultPayload {
-            exec_request_id: plan.exec_request_id,
-            outcome: AgentOutcome::Err(agent_error(
-                AgentErrorKind::UnsupportedCapability,
-                "execution pipeline is not yet available",
-                false,
-                true,
-            )),
-        },
-    );
+    let exec_request_id = plan.exec_request_id.clone();
+    let payload = ExecPlanPayload {
+        request_id: request_id.to_string(),
+        connection_id: to_connection_id.clone(),
+        plan,
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ExecPlan(payload))
+        .await
+    {
+        send_exec_result(
+            &ctx.outbound_tx,
+            request_id,
+            to_connection_id,
+            ExecResultPayload {
+                exec_request_id,
+                outcome: AgentOutcome::Err(agent_error(
+                    AgentErrorKind::TargetOffline,
+                    &format!("worker unavailable: {e}"),
+                    true,
+                    true,
+                )),
+            },
+        );
+    }
 }
 
 /// Assemble the authoritative [`AgentEnvelope`] from a parsed control-end

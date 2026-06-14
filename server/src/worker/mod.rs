@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod clipboard_dispatcher;
 pub mod desktop_monitor;
+pub mod exec;
 pub mod file_transfer_dispatcher;
 pub mod input_dispatcher;
 pub mod media_producer;

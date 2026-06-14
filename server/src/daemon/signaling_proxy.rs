@@ -606,6 +606,38 @@ pub async fn run_signaling_proxy(
                     Some(&payload.outcome),
                 );
             }
+            // AI exec result: rebuild the outbound `SignalingType::ExecResult`
+            // as a notification-style frame (`response_state = None`) carrying
+            // the `ExecResultPayload` verbatim, correlated to the suggested
+            // command by `exec_request_id`. Execution failures live inside the
+            // payload's `AgentOutcome::Err`, not the transport.
+            WorkerToService::ExecResult(payload) => match serde_json::to_value(&payload.result) {
+                Ok(value) => {
+                    let frame = SignalingModel::new(
+                        &payload.request_id,
+                        SignalingType::ExecResult,
+                        None,
+                        payload.connection_id.clone(),
+                        Some(value),
+                        None,
+                    );
+                    match serde_json::to_string(&frame) {
+                        Ok(text) => {
+                            let _ = outbound_tx.send(text);
+                        }
+                        Err(e) => warn!(
+                            "[SignalingProxy] Failed to serialise ExecResult frame for \
+                                 {:?}: {e} (request_id={})",
+                            payload.connection_id, payload.request_id,
+                        ),
+                    }
+                }
+                Err(e) => warn!(
+                    "[SignalingProxy] Failed to serialise ExecResultPayload for {:?}: {e} \
+                         (request_id={})",
+                    payload.connection_id, payload.request_id,
+                ),
+            },
         }
     }
 
