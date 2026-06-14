@@ -186,6 +186,7 @@ pub async fn init_telemetry(
             let port: u16 = match startup_mode {
                 StartupMode::ServiceDaemon => 6670,
                 StartupMode::SessionWorker => 6671,
+                StartupMode::McpStdio => 6672,
                 _ => 6669,
             };
             let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -307,6 +308,7 @@ pub fn log_file_name_for(startup_mode: &StartupMode) -> &'static str {
     match startup_mode {
         StartupMode::ServiceDaemon => "desk-daemon.log",
         StartupMode::SessionWorker => "desk-worker.log",
+        StartupMode::McpStdio => "desk-mcp.log",
         _ => "desk-server.log",
     }
 }
@@ -319,7 +321,7 @@ pub fn log_file_name_for(startup_mode: &StartupMode) -> &'static str {
 pub fn is_headless_startup_mode(startup_mode: &StartupMode) -> bool {
     matches!(
         startup_mode,
-        StartupMode::ServiceDaemon | StartupMode::SessionWorker
+        StartupMode::ServiceDaemon | StartupMode::SessionWorker | StartupMode::McpStdio
     )
 }
 
@@ -564,6 +566,7 @@ mod tests {
             log_file_name_for(&StartupMode::Signaling),
             "desk-server.log"
         );
+        assert_eq!(log_file_name_for(&StartupMode::McpStdio), "desk-mcp.log");
     }
 
     /// Regression guard for the tokio-console "empty task list" bug.
@@ -676,9 +679,11 @@ mod tests {
     /// → every subsequent `log::*!` call deadlocks). Lock the
     /// classification down with an explicit per-mode test.
     #[test]
-    fn headless_modes_are_only_service_daemon_and_session_worker() {
+    fn headless_modes_exclude_interactive_console_modes() {
         assert!(is_headless_startup_mode(&StartupMode::ServiceDaemon));
         assert!(is_headless_startup_mode(&StartupMode::SessionWorker));
+        // stdio carries the MCP protocol, so it must be headless (no stdout log).
+        assert!(is_headless_startup_mode(&StartupMode::McpStdio));
         assert!(!is_headless_startup_mode(&StartupMode::Default));
         assert!(!is_headless_startup_mode(&StartupMode::DeskServer));
         assert!(!is_headless_startup_mode(&StartupMode::Signaling));

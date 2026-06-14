@@ -101,5 +101,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        StartupMode::McpStdio => {
+            // stdout carries the MCP protocol — never print to it here.
+            if let Err(e) = lcxl_remote_desk_server::mcp::run_mcp_stdio(args) {
+                eprintln!("McpStdio failed: {e}");
+                std::process::exit(1);
+            }
+        }
     }
 }

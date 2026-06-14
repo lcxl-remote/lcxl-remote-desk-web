@@ -14,6 +14,7 @@ members = [
     "virtual-display",
     "virtual-display-driver-ops",
     "agent-protocol",
+    "mcp-server",
 ]
 exclude = ["web", "third-deps"]
 resolver = "3"
@@ -43,6 +44,7 @@ desk-input-injection = { path = "input-injection" }
 desk-virtual-display = { path = "virtual-display" }
 desk-virtual-display-driver-ops = { path = "virtual-display-driver-ops" }
 desk-agent-protocol = { path = "agent-protocol" }
+desk-mcp-server = { path = "mcp-server" }
 
 clap = { version = "4.5", features = ["derive"] }
 log = "0.4"

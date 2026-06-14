@@ -4,6 +4,7 @@ pub mod diagnose;
 pub mod error;
 pub mod exec;
 pub mod host_control;
+pub mod mcp;
 pub mod model;
 pub mod openapi;
 pub mod service;
