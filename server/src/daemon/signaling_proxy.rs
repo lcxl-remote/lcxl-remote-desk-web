@@ -97,6 +97,9 @@ pub async fn run_signaling_proxy(
         // execute (Default / DeskServer), gated like the diagnose orchestrator.
         exec_supported: diagnose_orchestrator.is_some(),
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+        // Single-machine confirmed-execution audit uses the structured log sink
+        // (the audit carrier when there is no manager DB).
+        audit: Arc::new(LogAuditSink),
     };
 
     let local_handle = {
@@ -611,33 +614,61 @@ pub async fn run_signaling_proxy(
             // the `ExecResultPayload` verbatim, correlated to the suggested
             // command by `exec_request_id`. Execution failures live inside the
             // payload's `AgentOutcome::Err`, not the transport.
-            WorkerToService::ExecResult(payload) => match serde_json::to_value(&payload.result) {
-                Ok(value) => {
-                    let frame = SignalingModel::new(
-                        &payload.request_id,
-                        SignalingType::ExecResult,
-                        None,
-                        payload.connection_id.clone(),
-                        Some(value),
-                        None,
-                    );
-                    match serde_json::to_string(&frame) {
-                        Ok(text) => {
-                            let _ = outbound_tx.send(text);
-                        }
-                        Err(e) => warn!(
-                            "[SignalingProxy] Failed to serialise ExecResult frame for \
-                                 {:?}: {e} (request_id={})",
-                            payload.connection_id, payload.request_id,
+            WorkerToService::ExecResult(payload) => {
+                // Audit the completion (single-machine log sink). The summary is
+                // content-free (exit code / error kind only), never stdout.
+                {
+                    use desk_agent_protocol::AgentOutcome;
+                    let (success, summary, redactions) = match &payload.result.outcome {
+                        AgentOutcome::Ok(desk_agent_protocol::OperationOutput::Exec(o)) => (
+                            o.exit_code == 0,
+                            format!("exit {}", o.exit_code),
+                            o.redactions.len() as i32,
                         ),
-                    }
+                        AgentOutcome::Ok(_) => (true, "ok".to_string(), 0),
+                        AgentOutcome::Err(e) => (false, format!("{:?}", e.kind), 0),
+                    };
+                    router_ctx
+                        .audit
+                        .record(desk_agent_protocol::audit::AuditEvent::command_completed(
+                            uuid::Uuid::new_v4().to_string(),
+                            chrono::Utc::now().to_rfc3339(),
+                            &payload.result.exec_request_id.0,
+                            success,
+                            summary,
+                            redactions,
+                            0,
+                        ))
+                        .await;
                 }
-                Err(e) => warn!(
-                    "[SignalingProxy] Failed to serialise ExecResultPayload for {:?}: {e} \
+                match serde_json::to_value(&payload.result) {
+                    Ok(value) => {
+                        let frame = SignalingModel::new(
+                            &payload.request_id,
+                            SignalingType::ExecResult,
+                            None,
+                            payload.connection_id.clone(),
+                            Some(value),
+                            None,
+                        );
+                        match serde_json::to_string(&frame) {
+                            Ok(text) => {
+                                let _ = outbound_tx.send(text);
+                            }
+                            Err(e) => warn!(
+                                "[SignalingProxy] Failed to serialise ExecResult frame for \
+                                 {:?}: {e} (request_id={})",
+                                payload.connection_id, payload.request_id,
+                            ),
+                        }
+                    }
+                    Err(e) => warn!(
+                        "[SignalingProxy] Failed to serialise ExecResultPayload for {:?}: {e} \
                          (request_id={})",
-                    payload.connection_id, payload.request_id,
-                ),
-            },
+                        payload.connection_id, payload.request_id,
+                    ),
+                }
+            }
         }
     }
 
@@ -991,6 +1022,7 @@ mod tests {
             diagnose_orchestrator: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+            audit: Arc::new(LogAuditSink),
         };
         (ctx, outbound_tx)
     }

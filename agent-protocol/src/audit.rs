@@ -385,6 +385,170 @@ impl AuditEvent {
         event.result = "cancelled".to_string();
         event
     }
+
+    /// Base for confirmed-execution events. These are correlated by the stable
+    /// server-minted `exec_request_id` (which threads the whole confirm →
+    /// approve → execute → complete lifecycle), stored in the `request_id`
+    /// column so a replay filters one execution by a single key. Subject fields
+    /// (actor / device / tenant) default empty on the single-machine path, like
+    /// the orchestrator task-scoped events.
+    fn exec_scoped(
+        event_id: String,
+        created_at: String,
+        event_type: AuditEventType,
+        exec_request_id: &str,
+    ) -> Self {
+        AuditEvent {
+            event_id,
+            created_at,
+            request_id: exec_request_id.to_string(),
+            event_type: event_type.as_str().to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// `ai.capability.requested` — an exec command was classified and a preview
+    /// produced. `summary` is content-free (the impact description / template).
+    pub fn capability_requested(
+        event_id: String,
+        created_at: String,
+        exec_request_id: &str,
+        capability: Option<&str>,
+        risk: &str,
+        summary: String,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            created_at,
+            AuditEventType::CapabilityRequested,
+            exec_request_id,
+        );
+        event.capability = capability.map(str::to_string);
+        event.risk = Some(risk.to_string());
+        event.result = "requested".to_string();
+        event.output_summary = Some(summary);
+        event
+    }
+
+    /// `ai.capability.denied` — an exec command was blocked, off-template, or
+    /// not permitted by the active mode. `reason` is content-free.
+    pub fn capability_denied(
+        event_id: String,
+        created_at: String,
+        exec_request_id: &str,
+        risk: &str,
+        reason: String,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            created_at,
+            AuditEventType::CapabilityDenied,
+            exec_request_id,
+        );
+        event.risk = Some(risk.to_string());
+        event.result = "denied".to_string();
+        event.output_summary = Some(reason);
+        event
+    }
+
+    /// `ai.capability.allowed` — the required exec capability was granted
+    /// against the active scope (the user approved).
+    pub fn capability_allowed(
+        event_id: String,
+        created_at: String,
+        exec_request_id: &str,
+        capability: Option<&str>,
+        risk: &str,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            created_at,
+            AuditEventType::CapabilityAllowed,
+            exec_request_id,
+        );
+        event.capability = capability.map(str::to_string);
+        event.risk = Some(risk.to_string());
+        event.result = "allowed".to_string();
+        event
+    }
+
+    /// `ai.approval.granted` — the user approved a previewed execution; the
+    /// server minted `approval_id`.
+    pub fn approval_granted(
+        event_id: String,
+        created_at: String,
+        exec_request_id: &str,
+        approval_id: &str,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            created_at,
+            AuditEventType::ApprovalGranted,
+            exec_request_id,
+        );
+        event.approval_id = Some(approval_id.to_string());
+        event.result = "granted".to_string();
+        event
+    }
+
+    /// `ai.approval.denied` — the user rejected a previewed execution.
+    pub fn approval_denied(event_id: String, created_at: String, exec_request_id: &str) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            created_at,
+            AuditEventType::ApprovalDenied,
+            exec_request_id,
+        );
+        event.result = "denied".to_string();
+        event
+    }
+
+    /// `ai.command.executed` — an approved command was dispatched to the worker.
+    pub fn command_executed(
+        event_id: String,
+        created_at: String,
+        exec_request_id: &str,
+        approval_id: &str,
+        capability: Option<&str>,
+        risk: &str,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            created_at,
+            AuditEventType::CommandExecuted,
+            exec_request_id,
+        );
+        event.approval_id = Some(approval_id.to_string());
+        event.capability = capability.map(str::to_string);
+        event.risk = Some(risk.to_string());
+        event.result = "executed".to_string();
+        event
+    }
+
+    /// `ai.command.completed` — an executed command finished. `summary` carries
+    /// only counts / exit code (never stdout); `redaction_count` and
+    /// `duration_ms` mirror the read-collection events.
+    pub fn command_completed(
+        event_id: String,
+        created_at: String,
+        exec_request_id: &str,
+        success: bool,
+        summary: String,
+        redaction_count: i32,
+        duration_ms: i64,
+    ) -> Self {
+        let mut event = Self::exec_scoped(
+            event_id,
+            created_at,
+            AuditEventType::CommandCompleted,
+            exec_request_id,
+        );
+        event.result = if success { "ok" } else { "error" }.to_string();
+        event.output_summary = Some(summary);
+        event.redaction_count = Some(redaction_count);
+        event.duration_ms = Some(duration_ms);
+        event
+    }
 }
 
 /// Manager-bound audit report payload.
@@ -850,6 +1014,82 @@ mod tests {
             let json = serde_json::to_string(&ty).unwrap();
             let back: AuditEventType = serde_json::from_str(&json).unwrap();
             assert_eq!(back, ty);
+        }
+    }
+
+    #[test]
+    fn exec_lifecycle_builders_set_type_result_and_correlation() {
+        let xr = "exec_42";
+        let requested = AuditEvent::capability_requested(
+            "e1".into(),
+            "ts".into(),
+            xr,
+            Some("shell.exec.readonly"),
+            "low",
+            "Read the status of a Windows service".into(),
+        );
+        assert_eq!(requested.event_type, "ai.capability.requested");
+        assert_eq!(requested.request_id, xr);
+        assert_eq!(requested.result, "requested");
+        assert_eq!(requested.capability.as_deref(), Some("shell.exec.readonly"));
+        assert_eq!(requested.risk.as_deref(), Some("low"));
+
+        let denied = AuditEvent::capability_denied(
+            "e2".into(),
+            "ts".into(),
+            xr,
+            "blocked",
+            "blocklist".into(),
+        );
+        assert_eq!(denied.event_type, "ai.capability.denied");
+        assert_eq!(denied.result, "denied");
+
+        let granted = AuditEvent::approval_granted("e3".into(), "ts".into(), xr, "appr_1");
+        assert_eq!(granted.event_type, "ai.approval.granted");
+        assert_eq!(granted.approval_id.as_deref(), Some("appr_1"));
+
+        let rejected = AuditEvent::approval_denied("e4".into(), "ts".into(), xr);
+        assert_eq!(rejected.event_type, "ai.approval.denied");
+        assert_eq!(rejected.result, "denied");
+
+        let allowed = AuditEvent::capability_allowed(
+            "e5".into(),
+            "ts".into(),
+            xr,
+            Some("shell.exec.confirmed"),
+            "high",
+        );
+        assert_eq!(allowed.event_type, "ai.capability.allowed");
+        assert_eq!(allowed.result, "allowed");
+
+        let executed = AuditEvent::command_executed(
+            "e6".into(),
+            "ts".into(),
+            xr,
+            "appr_1",
+            Some("shell.exec.confirmed"),
+            "high",
+        );
+        assert_eq!(executed.event_type, "ai.command.executed");
+        assert_eq!(executed.approval_id.as_deref(), Some("appr_1"));
+
+        let completed = AuditEvent::command_completed(
+            "e7".into(),
+            "ts".into(),
+            xr,
+            true,
+            "exit 0".into(),
+            0,
+            12,
+        );
+        assert_eq!(completed.event_type, "ai.command.completed");
+        assert_eq!(completed.result, "ok");
+        assert_eq!(completed.duration_ms, Some(12));
+        // The whole lifecycle shares one correlation key.
+        for e in [
+            requested, denied, granted, rejected, allowed, executed, completed,
+        ] {
+            assert_eq!(e.request_id, xr);
         }
     }
 
