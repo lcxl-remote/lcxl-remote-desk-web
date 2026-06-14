@@ -142,6 +142,13 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
                 // receiver) is dropped, so `tx.closed()` resolves. Dropping the
                 // `run` future then aborts the model call at its next await point,
                 // releasing the permit promptly instead of finishing wasted work.
+                //
+                // Boundary: the collect phase runs blocking probes via
+                // `spawn_blocking` (read collectors are syscalls). Once such a
+                // probe has started it cannot be interrupted by dropping `run`, so
+                // a cancellation during collection lets the current local probes
+                // finish (they are bounded and fast); only the async model dial is
+                // truly cut short. See the M3 plan's deferred-hardening notes.
                 let outcome = tokio::select! {
                     _ = &mut run => Some(sink.take_result()),
                     _ = tx.closed() => None,
