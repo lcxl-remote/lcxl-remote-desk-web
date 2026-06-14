@@ -669,7 +669,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::AgentResponse
             | SignalingType::Diagnose
             | SignalingType::DiagnoseEvent
-            | SignalingType::DiagnoseCancel => {
+            | SignalingType::DiagnoseCancel
+            // AI confirmed-execution plane: ConfirmExec / ResolveExec (control
+            // end → host) and ExecPreview / ExecResult (host → control end) are
+            // plain browser↔host forwarded types, relayed exactly like the
+            // AgentRequest/Response and Diagnose pairs; the daemon does the
+            // classification, approval state machine, and trusted-field work.
+            | SignalingType::ConfirmExec
+            | SignalingType::ExecPreview
+            | SignalingType::ResolveExec
+            | SignalingType::ExecResult => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
             }

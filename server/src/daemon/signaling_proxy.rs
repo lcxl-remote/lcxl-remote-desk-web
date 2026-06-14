@@ -93,6 +93,10 @@ pub async fn run_signaling_proxy(
         // ChangeDisplaySettings.
         virtual_display: virtual_display.clone(),
         diagnose_orchestrator: diagnose_orchestrator.clone(),
+        // Confirmed execution is available wherever an in-process worker can
+        // execute (Default / DeskServer), gated like the diagnose orchestrator.
+        exec_supported: diagnose_orchestrator.is_some(),
+        exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
     };
 
     let local_handle = {
@@ -953,6 +957,8 @@ mod tests {
             worker_mgr,
             virtual_display: None,
             diagnose_orchestrator: None,
+            exec_supported: false,
+            exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
         };
         (ctx, outbound_tx)
     }

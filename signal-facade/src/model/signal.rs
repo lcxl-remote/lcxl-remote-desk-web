@@ -189,6 +189,27 @@ pub enum SignalingType {
     #[wincode(tag = 604)]
     DiagnoseCancel = 604,
 
+    /// AI confirmed-execution: classify/preview request (control end → host).
+    /// Carries `desk_agent_protocol::exec::ConfirmExecData` as signaling_data;
+    /// the daemon classifies the command and replies with `ExecPreview`.
+    #[wincode(tag = 605)]
+    ConfirmExec = 605,
+    /// AI confirmed-execution: preview result (host → control end). Carries
+    /// `desk_agent_protocol::exec::ExecPreview`. Notification-style
+    /// (`response_state = None`); daemon-owned, never accepted inbound.
+    #[wincode(tag = 606)]
+    ExecPreview = 606,
+    /// AI confirmed-execution: approve / reject a previewed execution
+    /// (control end → host). Carries `desk_agent_protocol::exec::ResolveExecData`.
+    #[wincode(tag = 607)]
+    ResolveExec = 607,
+    /// AI confirmed-execution: execution result (host → control end). Carries
+    /// `desk_agent_protocol::exec::ExecResultPayload` (tagged with
+    /// `exec_request_id` for row backfill). Notification-style
+    /// (`response_state = None`); daemon-owned, never accepted inbound.
+    #[wincode(tag = 609)]
+    ExecResult = 609,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,
@@ -805,7 +826,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 41] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 45] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -832,6 +853,10 @@ mod wincode_tests {
             (SignalingType::Diagnose, 602),
             (SignalingType::DiagnoseEvent, 603),
             (SignalingType::DiagnoseCancel, 604),
+            (SignalingType::ConfirmExec, 605),
+            (SignalingType::ExecPreview, 606),
+            (SignalingType::ResolveExec, 607),
+            (SignalingType::ExecResult, 609),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),
