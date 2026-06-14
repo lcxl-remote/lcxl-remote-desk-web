@@ -82,6 +82,20 @@ pub const TOOL_WHITELIST: &[&str] = &[
     TOOL_DIAGNOSE,
 ];
 
+/// Whether `lcxl_diagnose` can run, mirroring the diagnose gate's precedence so
+/// the MCP path reports the same reason as the signaling / model layers. The
+/// server computes this once (manager-proxy is checked before configuration, so
+/// it wins even without direct credentials).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnoseAvailability {
+    /// Diagnosis can run.
+    Available,
+    /// The model gateway is not configured (no model / base URL / API key).
+    NotConfigured,
+    /// A manager-proxied gateway is selected but not implemented yet.
+    ManagerProxyUnavailable,
+}
+
 /// The read-only MCP server handler.
 #[derive(Clone)]
 pub struct McpServer {
@@ -89,8 +103,8 @@ pub struct McpServer {
     diagnose: Arc<dyn DiagnoseProvider>,
     /// Whether log reads (`lcxl_recent_logs`) are permitted by server policy.
     allow_logs: bool,
-    /// Whether the model gateway is configured (gates `lcxl_diagnose`).
-    diagnose_configured: bool,
+    /// Whether / why `lcxl_diagnose` may run.
+    diagnose_availability: DiagnoseAvailability,
 }
 
 impl McpServer {
@@ -98,13 +112,13 @@ impl McpServer {
         reader: Arc<dyn ReadContextProvider>,
         diagnose: Arc<dyn DiagnoseProvider>,
         allow_logs: bool,
-        diagnose_configured: bool,
+        diagnose_availability: DiagnoseAvailability,
     ) -> Self {
         Self {
             reader,
             diagnose,
             allow_logs,
-            diagnose_configured,
+            diagnose_availability,
         }
     }
 
@@ -231,10 +245,21 @@ impl McpServer {
                 .await
             }
             TOOL_DIAGNOSE => {
-                if !self.diagnose_configured {
-                    return Ok(error_result(
-                        "the AI model gateway is not configured; diagnosis is unavailable",
-                    ));
+                match self.diagnose_availability {
+                    // Manager-proxy precedence matches the model / router layers:
+                    // report "proxy not available" even when direct credentials
+                    // are absent, not the misleading "not configured".
+                    DiagnoseAvailability::ManagerProxyUnavailable => {
+                        return Ok(error_result(
+                            "manager-proxied model gateway is not available yet",
+                        ));
+                    }
+                    DiagnoseAvailability::NotConfigured => {
+                        return Ok(error_result(
+                            "the AI model gateway is not configured; diagnosis is unavailable",
+                        ));
+                    }
+                    DiagnoseAvailability::Available => {}
                 }
                 let a: DiagnoseArgs = parse_args(args)?;
                 Ok(match self.diagnose.diagnose(a.question, a.locale).await {
@@ -410,16 +435,11 @@ mod tests {
 
     fn server(
         allow_logs: bool,
-        diagnose_configured: bool,
+        availability: DiagnoseAvailability,
     ) -> (McpServer, Arc<RecordingReader>, Arc<RecordingDiagnose>) {
         let reader = Arc::new(RecordingReader::default());
         let diagnose = Arc::new(RecordingDiagnose::default());
-        let server = McpServer::new(
-            reader.clone(),
-            diagnose.clone(),
-            allow_logs,
-            diagnose_configured,
-        );
+        let server = McpServer::new(reader.clone(), diagnose.clone(), allow_logs, availability);
         (server, reader, diagnose)
     }
 
@@ -455,7 +475,7 @@ mod tests {
     /// An unknown / non-whitelist tool is rejected without touching the providers.
     #[tokio::test]
     async fn unknown_tool_is_rejected_without_touching_providers() {
-        let (server, reader, diagnose) = server(true, true);
+        let (server, reader, diagnose) = server(true, DiagnoseAvailability::Available);
         let err = server
             .dispatch_tool("lcxl_exec", Map::new())
             .await
@@ -468,7 +488,7 @@ mod tests {
     /// A read tool dispatches to the reader with the right capability.
     #[tokio::test]
     async fn system_info_dispatches_to_reader() {
-        let (server, reader, _) = server(true, true);
+        let (server, reader, _) = server(true, DiagnoseAvailability::Available);
         let result = server
             .dispatch_tool(TOOL_SYSTEM_INFO, Map::new())
             .await
@@ -483,7 +503,7 @@ mod tests {
     /// is disabled by policy.
     #[tokio::test]
     async fn recent_logs_denied_when_logs_disabled() {
-        let (server, reader, _) = server(false, true);
+        let (server, reader, _) = server(false, DiagnoseAvailability::Available);
         let result = server
             .dispatch_tool(TOOL_RECENT_LOGS, Map::new())
             .await
@@ -498,7 +518,7 @@ mod tests {
     /// `lcxl_recent_logs` reaches the reader when log access is permitted.
     #[tokio::test]
     async fn recent_logs_allowed_when_enabled() {
-        let (server, reader, _) = server(true, true);
+        let (server, reader, _) = server(true, DiagnoseAvailability::Available);
         let result = server
             .dispatch_tool(TOOL_RECENT_LOGS, Map::new())
             .await
@@ -514,11 +534,32 @@ mod tests {
     /// model gateway is not configured.
     #[tokio::test]
     async fn diagnose_denied_when_not_configured() {
-        let (server, _, diagnose) = server(true, false);
+        let (server, _, diagnose) = server(true, DiagnoseAvailability::NotConfigured);
         let mut args = Map::new();
         args.insert("question".into(), json!("why is the cpu high?"));
         let result = server.dispatch_tool(TOOL_DIAGNOSE, args).await.unwrap();
         assert!(is_error(&result));
+        assert!(
+            diagnose.calls.lock().unwrap().is_empty(),
+            "diagnose must not run"
+        );
+    }
+
+    /// With `manager_proxy` selected, `lcxl_diagnose` is refused with the proxy
+    /// message (not "not configured") and never reaches the provider — matching
+    /// the model / router precedence even without direct credentials.
+    #[tokio::test]
+    async fn diagnose_manager_proxy_takes_precedence_over_not_configured() {
+        let (server, _, diagnose) = server(true, DiagnoseAvailability::ManagerProxyUnavailable);
+        let mut args = Map::new();
+        args.insert("question".into(), json!("why is the cpu high?"));
+        let result = server.dispatch_tool(TOOL_DIAGNOSE, args).await.unwrap();
+        assert!(is_error(&result));
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(
+            json.contains("manager-proxied"),
+            "expected the proxy message, got: {json}"
+        );
         assert!(
             diagnose.calls.lock().unwrap().is_empty(),
             "diagnose must not run"
@@ -530,7 +571,7 @@ mod tests {
     /// request a screen capture through this path.
     #[tokio::test]
     async fn diagnose_runs_when_configured() {
-        let (server, _, diagnose) = server(true, true);
+        let (server, _, diagnose) = server(true, DiagnoseAvailability::Available);
         let mut args = Map::new();
         args.insert("question".into(), json!("why is the cpu high?"));
         args.insert("locale".into(), json!("zh-CN"));
@@ -546,7 +587,7 @@ mod tests {
     /// error and never reaches the provider.
     #[tokio::test]
     async fn diagnose_requires_question() {
-        let (server, _, diagnose) = server(true, true);
+        let (server, _, diagnose) = server(true, DiagnoseAvailability::Available);
         let err = server.dispatch_tool(TOOL_DIAGNOSE, Map::new()).await;
         assert!(err.is_err(), "missing question must be invalid params");
         assert!(diagnose.calls.lock().unwrap().is_empty());

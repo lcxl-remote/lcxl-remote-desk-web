@@ -26,14 +26,16 @@ use desk_agent_protocol::{
     OperationInput, OperationOutput, ProtocolVersion, ReadContextInput, ReadContextOutput,
     RequestId, TargetRef,
 };
-use desk_mcp_server::{DiagnoseProvider, McpServer, ReadContextProvider, serve_stdio};
+use desk_mcp_server::{
+    DiagnoseAvailability, DiagnoseProvider, McpServer, ReadContextProvider, serve_stdio,
+};
 
 use crate::diagnose::collector::AgentContextCollector;
 use crate::diagnose::model::{ModelBackedDiagnoseModel, ProviderAdapterSelector};
 use crate::diagnose::redaction::RegexRedactor;
 use crate::diagnose::{DiagnoseEventSink, DiagnoseOrchestrator};
 use crate::error::DeskError;
-use crate::model::settings::{Args, Settings, SharedSettings, StartupMode};
+use crate::model::settings::{Args, GatewayMode, Settings, SharedSettings, StartupMode};
 use crate::telemetry;
 use crate::worker::agent::LocalDeviceAgent;
 use crate::worker::agent::audit_sink::LogAuditSink;
@@ -182,9 +184,19 @@ fn build_read_envelope(cap: Capability, input: OperationInput) -> AgentEnvelope 
 /// `allow_logs` / `diagnose_configured` snapshot the current policy (this is a
 /// freshly spawned per-session process, so a startup snapshot is sufficient).
 async fn build_mcp_server(settings: Arc<SharedSettings>) -> McpServer {
-    let (allow_logs, diagnose_configured) = {
+    let (allow_logs, availability) = {
         let s = settings.read().await;
-        (s.ai_model.allow_logs, s.ai_model.is_configured())
+        // Mirror the diagnose gate precedence: manager-proxy wins over the
+        // not-configured check so the MCP path reports the same reason as the
+        // model / router layers even without direct credentials.
+        let availability = if s.ai_model.gateway_mode == GatewayMode::ManagerProxy {
+            DiagnoseAvailability::ManagerProxyUnavailable
+        } else if s.ai_model.is_configured() {
+            DiagnoseAvailability::Available
+        } else {
+            DiagnoseAvailability::NotConfigured
+        };
+        (s.ai_model.allow_logs, availability)
     };
 
     let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
@@ -207,7 +219,7 @@ async fn build_mcp_server(settings: Arc<SharedSettings>) -> McpServer {
         Arc::new(ServerReadProvider { agent }),
         Arc::new(ServerDiagnoseProvider { orchestrator }),
         allow_logs,
-        diagnose_configured,
+        availability,
     )
 }
 

@@ -71,9 +71,13 @@ export function AiModelSettings() {
             const rf = RESPONSE_FORMATS.includes(data.response_format as (typeof RESPONSE_FORMATS)[number])
                 ? (data.response_format as (typeof RESPONSE_FORMATS)[number])
                 : "json_object"
-            // Normalize any stored value to a known provider; unknown / legacy
-            // values map to openai-compatible (the backend's fallback adapter).
-            const provider = data.provider === "anthropic" ? "anthropic" : "openai-compatible"
+            // Normalize like the backend (trim + lowercase) before matching, so a
+            // stored "Anthropic" / " anthropic " is recognized rather than being
+            // silently switched to openai-compatible. Unknown / legacy values map
+            // to openai-compatible (the backend's fallback adapter).
+            const provider = (data.provider ?? "").trim().toLowerCase() === "anthropic"
+                ? "anthropic"
+                : "openai-compatible"
             form.reset({
                 provider,
                 model: data.model ?? "",

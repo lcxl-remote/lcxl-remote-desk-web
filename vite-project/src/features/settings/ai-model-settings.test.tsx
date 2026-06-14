@@ -97,6 +97,18 @@ describe("AiModelSettings", () => {
         expect(lastPayload().provider).toBe("anthropic")
     })
 
+    it("recognizes a mixed-case / padded anthropic provider on hydration", async () => {
+        h.publicData = { ...h.publicData, provider: "  Anthropic  " }
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+        // Normalized to anthropic — its base-URL hint is shown, not silently
+        // switched to openai-compatible.
+        expect(screen.getByText(/Host root only/i)).toBeInTheDocument()
+        fireEvent.click(screen.getByText("Save Settings"))
+        await waitFor(() => expect(h.mutateAsync).toHaveBeenCalled())
+        expect(lastPayload().provider).toBe("anthropic")
+    })
+
     it("normalizes an unknown stored provider to openai-compatible", async () => {
         h.publicData = { ...h.publicData, provider: "some-legacy-value" }
         render(<AiModelSettings />)
