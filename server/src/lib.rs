@@ -2,6 +2,7 @@ pub mod controller;
 pub mod daemon;
 pub mod diagnose;
 pub mod error;
+pub mod exec;
 pub mod host_control;
 pub mod model;
 pub mod openapi;

