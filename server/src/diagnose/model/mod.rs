@@ -27,7 +27,7 @@ use desk_agent_protocol::diagnose::{Confidence, Diagnosis};
 use desk_agent_protocol::{AgentError, CallerRef, CallerType};
 
 use super::{DiagnoseModel, new_event_id, now_rfc3339};
-use crate::model::settings::{ResponseFormatMode, SharedSettings};
+use crate::model::settings::{GatewayMode, ResponseFormatMode, SharedSettings};
 use crate::worker::agent::eval::EvidenceSnapshot;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB,
@@ -117,24 +117,84 @@ pub trait ModelAdapter: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// Resolve the [`ModelAdapter`] for a configured provider. The match is by
+/// provider identifier; unknown / empty / absent providers fall back to the
+/// OpenAI-compatible wire (the broadest compatibility).
+///
+/// The identifier is normalized (trimmed + lowercased) before matching so
+/// `"Anthropic"`, `" anthropic "` and `"ANTHROPIC"` all resolve the same. An
+/// unknown non-empty provider falls back but logs a warning, so a typo paired
+/// with a mismatched base URL / auth header is visible rather than silently
+/// dialing the wrong protocol.
+pub fn build_adapter(provider: Option<&str>) -> Arc<dyn ModelAdapter> {
+    let norm = provider.map(|p| p.trim().to_ascii_lowercase());
+    match norm.as_deref() {
+        Some("") | Some("openai-compatible") | None => Arc::new(openai::OpenAiCompatAdapter::new()),
+        Some(other) => {
+            log::warn!("unknown AI provider {other:?}; using openai-compatible adapter");
+            Arc::new(openai::OpenAiCompatAdapter::new())
+        }
+    }
+}
+
+/// Resolves the adapter for a provider at call time, so a runtime provider
+/// change takes effect on the next diagnosis. Production wraps [`build_adapter`];
+/// tests inject a selector that returns a fixed mock.
+pub trait AdapterSelector: Send + Sync {
+    fn select(&self, provider: Option<&str>) -> Arc<dyn ModelAdapter>;
+}
+
+/// Production selector: resolves via [`build_adapter`] on every call.
+pub struct ProviderAdapterSelector;
+
+impl AdapterSelector for ProviderAdapterSelector {
+    fn select(&self, provider: Option<&str>) -> Arc<dyn ModelAdapter> {
+        build_adapter(provider)
+    }
+}
+
+/// A selector that always returns the same adapter regardless of provider.
+/// Used by tests (and any caller that has already chosen an adapter) to keep
+/// the per-call resolution path while pinning the wire implementation.
+pub struct FixedAdapterSelector(pub Arc<dyn ModelAdapter>);
+
+impl AdapterSelector for FixedAdapterSelector {
+    fn select(&self, _provider: Option<&str>) -> Arc<dyn ModelAdapter> {
+        self.0.clone()
+    }
+}
+
 /// The real diagnose model: prompt assembly + adapter call + parse + audit.
 pub struct ModelBackedDiagnoseModel {
-    adapter: Arc<dyn ModelAdapter>,
+    selector: Arc<dyn AdapterSelector>,
     settings: Arc<SharedSettings>,
     audit: Arc<dyn AuditSink>,
 }
 
 impl ModelBackedDiagnoseModel {
+    /// Construct with an [`AdapterSelector`] (production = [`ProviderAdapterSelector`]),
+    /// so the adapter is resolved per diagnosis from the current provider setting.
     pub fn new(
-        adapter: Arc<dyn ModelAdapter>,
+        selector: Arc<dyn AdapterSelector>,
         settings: Arc<SharedSettings>,
         audit: Arc<dyn AuditSink>,
     ) -> Self {
         Self {
-            adapter,
+            selector,
             settings,
             audit,
         }
+    }
+
+    /// Construct with a fixed adapter, pinning the wire implementation while
+    /// still going through the per-call resolution path. Convenience for callers
+    /// and tests that already hold a concrete adapter.
+    pub fn with_adapter(
+        adapter: Arc<dyn ModelAdapter>,
+        settings: Arc<SharedSettings>,
+        audit: Arc<dyn AuditSink>,
+    ) -> Self {
+        Self::new(Arc::new(FixedAdapterSelector(adapter)), settings, audit)
     }
 }
 
@@ -170,6 +230,20 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
         if api_key.is_empty() || base_url.is_empty() || model.is_empty() {
             return Ok(not_configured());
         }
+
+        // Manager-proxied gateway is a reserved placeholder: the field and API
+        // exist, but the proxy is not implemented. Refuse before resolving the
+        // adapter (so no wire call is attempted) — the orchestrator turns this
+        // into a `DiagnoseEvent::error`.
+        if config.gateway_mode == GatewayMode::ManagerProxy {
+            return Err(AgentError {
+                kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
+                message: "manager-proxied model gateway is not available yet".to_string(),
+                retryable: false,
+                safe_for_model: true,
+            });
+        }
+
         let max_context_bytes = config
             .max_context_bytes
             .map(|b| b as usize)
@@ -211,11 +285,15 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
                 schema: prompt::diagnosis_json_schema(),
             },
         };
+        // Resolve the adapter from the current provider on every diagnosis, so a
+        // runtime provider change takes effect immediately and the audit records
+        // the concrete adapter actually used.
+        let adapter = self.selector.select(config.provider.as_deref());
         let caller = CallerRef {
             caller_type: CallerType::AiModel,
             model_provider: config.provider.clone(),
             model_name: Some(model.clone()),
-            adapter: Some(self.adapter.name().to_string()),
+            adapter: Some(adapter.name().to_string()),
         };
 
         // `ai.model.requested` — input token count is not known until the
@@ -239,10 +317,10 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
             messages,
             response_format,
         };
-        let response = self.adapter.stream_chat(request, on_partial).await?;
+        let response = adapter.stream_chat(request, on_partial).await?;
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-        let diagnosis = parser::parse_diagnosis(&response.content);
+        let (diagnosis, parse_outcome) = parser::parse_diagnosis(&response.content);
         self.audit
             .record(AuditEvent::model_responded(
                 new_event_id(),
@@ -250,9 +328,10 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
                 request_id,
                 &caller,
                 format!(
-                    "diagnosis: {} findings, {} commands",
+                    "diagnosis: {} findings, {} commands parse={}",
                     diagnosis.findings.len(),
-                    diagnosis.commands.len()
+                    diagnosis.commands.len(),
+                    parse_outcome.as_str()
                 ),
                 response.usage.input_tokens,
                 response.usage.output_tokens,
@@ -376,7 +455,7 @@ mod tests {
             seen: Mutex::new(None),
         });
         let audit = RecordingAuditSink::default();
-        let model = ModelBackedDiagnoseModel::new(
+        let model = ModelBackedDiagnoseModel::with_adapter(
             adapter.clone(),
             configured_settings(),
             Arc::new(audit.clone()),
@@ -423,7 +502,7 @@ mod tests {
             usage: TokenUsage::default(),
             seen: Mutex::new(None),
         });
-        let model = ModelBackedDiagnoseModel::new(
+        let model = ModelBackedDiagnoseModel::with_adapter(
             adapter.clone(),
             configured_settings(),
             Arc::new(RecordingAuditSink::default()),
@@ -457,7 +536,7 @@ mod tests {
             usage: TokenUsage::default(),
             seen: Mutex::new(None),
         });
-        let model2 = ModelBackedDiagnoseModel::new(
+        let model2 = ModelBackedDiagnoseModel::with_adapter(
             adapter2.clone(),
             Arc::new(SharedSettings::from(s)),
             Arc::new(RecordingAuditSink::default()),
@@ -493,7 +572,7 @@ mod tests {
             seen: Mutex::new(None),
         });
         let audit = RecordingAuditSink::default();
-        let model = ModelBackedDiagnoseModel::new(
+        let model = ModelBackedDiagnoseModel::with_adapter(
             adapter.clone(),
             Arc::new(SharedSettings::from(Settings::default())),
             Arc::new(audit.clone()),
@@ -512,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn adapter_error_propagates() {
         let audit = RecordingAuditSink::default();
-        let model = ModelBackedDiagnoseModel::new(
+        let model = ModelBackedDiagnoseModel::with_adapter(
             Arc::new(FailingAdapter),
             configured_settings(),
             Arc::new(audit.clone()),
@@ -540,7 +619,7 @@ mod tests {
             usage: TokenUsage::default(),
             seen: Mutex::new(None),
         });
-        let model = ModelBackedDiagnoseModel::new(
+        let model = ModelBackedDiagnoseModel::with_adapter(
             adapter,
             configured_settings(),
             Arc::new(RecordingAuditSink::default()),
@@ -552,5 +631,120 @@ mod tests {
             .unwrap();
         assert_eq!(diag.confidence, Confidence::Low);
         assert!(!diag.missing_info.is_empty());
+    }
+
+    /// `build_adapter` resolves the known and fallback providers. Only the
+    /// OpenAI-compatible wire exists here, so every input maps to it; the table
+    /// still pins normalization (case / whitespace) and the unknown-provider
+    /// fallback so they cannot silently regress.
+    #[test]
+    fn build_adapter_resolves_providers() {
+        for provider in [
+            None,
+            Some(""),
+            Some("openai-compatible"),
+            Some("  OpenAI-Compatible  "),
+            Some("totally-unknown"),
+        ] {
+            let adapter = build_adapter(provider);
+            assert_eq!(
+                adapter.name(),
+                "lcxl-openai-compat",
+                "provider {provider:?} should resolve to the OpenAI-compatible adapter"
+            );
+        }
+    }
+
+    /// A selector that records how many times it was asked to resolve an adapter,
+    /// so tests can assert the model resolves per call (or not at all).
+    struct CountingSelector {
+        inner: Arc<dyn ModelAdapter>,
+        calls: Arc<Mutex<usize>>,
+    }
+    impl AdapterSelector for CountingSelector {
+        fn select(&self, _provider: Option<&str>) -> Arc<dyn ModelAdapter> {
+            *self.calls.lock().unwrap() += 1;
+            self.inner.clone()
+        }
+    }
+
+    /// The adapter is resolved through the selector on each diagnosis (per-call
+    /// resolution), so a runtime provider change takes effect immediately.
+    #[tokio::test]
+    async fn selector_resolves_adapter_per_diagnose() {
+        let adapter = Arc::new(MockAdapter {
+            fragments: vec![],
+            content: WELL_FORMED.into(),
+            usage: TokenUsage::default(),
+            seen: Mutex::new(None),
+        });
+        let calls = Arc::new(Mutex::new(0usize));
+        let selector = Arc::new(CountingSelector {
+            inner: adapter,
+            calls: calls.clone(),
+        });
+        let model = ModelBackedDiagnoseModel::new(
+            selector,
+            configured_settings(),
+            Arc::new(RecordingAuditSink::default()),
+        );
+        let noop = |_: String| {};
+        model
+            .diagnose("r1", "q", &snapshot(), None, &noop)
+            .await
+            .unwrap();
+        model
+            .diagnose("r2", "q", &snapshot(), None, &noop)
+            .await
+            .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            2,
+            "adapter must be resolved per diagnose"
+        );
+    }
+
+    /// `gateway_mode = manager_proxy` refuses with `UnsupportedCapability` before
+    /// touching the selector / adapter, and records no audit (no wire call).
+    #[tokio::test]
+    async fn manager_proxy_gateway_is_refused_without_dialing() {
+        let mut s = Settings::default();
+        s.ai_model.provider = Some("openai-compatible".into());
+        s.ai_model.model = Some("m".into());
+        s.ai_model.base_url = Some("https://api.example/v1".into());
+        s.ai_model.api_key = Some("sk".into());
+        s.ai_model.gateway_mode = crate::model::settings::GatewayMode::ManagerProxy;
+
+        let calls = Arc::new(Mutex::new(0usize));
+        let selector = Arc::new(CountingSelector {
+            inner: Arc::new(MockAdapter {
+                fragments: vec![],
+                content: WELL_FORMED.into(),
+                usage: TokenUsage::default(),
+                seen: Mutex::new(None),
+            }),
+            calls: calls.clone(),
+        });
+        let audit = RecordingAuditSink::default();
+        let model = ModelBackedDiagnoseModel::new(
+            selector,
+            Arc::new(SharedSettings::from(s)),
+            Arc::new(audit.clone()),
+        );
+        let noop = |_: String| {};
+        let err = model
+            .diagnose("req_mp", "q", &snapshot(), None, &noop)
+            .await
+            .expect_err("manager_proxy must be refused");
+        assert_eq!(
+            err.kind,
+            desk_agent_protocol::AgentErrorKind::UnsupportedCapability
+        );
+        // Neither the selector nor the audit trail was touched: no dial happened.
+        assert_eq!(*calls.lock().unwrap(), 0, "selector must not be resolved");
+        assert!(
+            audit.events.lock().unwrap().is_empty(),
+            "no audit on refusal"
+        );
     }
 }

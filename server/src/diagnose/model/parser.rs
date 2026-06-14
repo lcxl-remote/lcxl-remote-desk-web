@@ -10,18 +10,44 @@
 
 use desk_agent_protocol::diagnose::{Confidence, Diagnosis};
 
+/// Whether [`parse_diagnosis`] obtained a structured result or had to degrade.
+///
+/// The function always returns a usable [`Diagnosis`], so "produced a diagnosis"
+/// is vacuously true and cannot serve as a quality signal. This outcome makes the
+/// distinction observable: it is stamped into the `ai.model.responded` audit
+/// (`parse=structured|degraded`) and counted by the offline eval harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseOutcome {
+    /// The response carried a well-formed JSON object matching the schema.
+    Structured,
+    /// The response was not parseable JSON; the raw text was kept as a
+    /// low-confidence summary.
+    Degraded,
+}
+
+impl ParseOutcome {
+    /// Stable lowercase identifier used in audit summaries and eval counters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ParseOutcome::Structured => "structured",
+            ParseOutcome::Degraded => "degraded",
+        }
+    }
+}
+
 /// Parse model output into a [`Diagnosis`], degrading on malformed JSON. The
 /// returned `collected` list is always empty here — the orchestrator stamps the
-/// authoritative value.
-pub fn parse_diagnosis(content: &str) -> Diagnosis {
+/// authoritative value. The [`ParseOutcome`] reports whether the structured path
+/// or the degraded fallback was taken.
+pub fn parse_diagnosis(content: &str) -> (Diagnosis, ParseOutcome) {
     match extract_json_object(content).and_then(|json| serde_json::from_str::<Diagnosis>(json).ok())
     {
         Some(mut diagnosis) => {
             // The model does not own `collected`; the orchestrator overwrites it.
             diagnosis.collected.clear();
-            diagnosis
+            (diagnosis, ParseOutcome::Structured)
         }
-        None => degraded(content),
+        None => (degraded(content), ParseOutcome::Degraded),
     }
 }
 
@@ -108,7 +134,8 @@ mod tests {
     /// A schema-conformant response maps directly to the DTOs.
     #[test]
     fn parses_well_formed_json() {
-        let d = parse_diagnosis(WELL_FORMED);
+        let (d, outcome) = parse_diagnosis(WELL_FORMED);
+        assert_eq!(outcome, ParseOutcome::Structured);
         assert_eq!(d.confidence, Confidence::High);
         assert_eq!(d.summary, "Port 8080 is held by old-api.exe.");
         assert_eq!(d.findings.len(), 1);
@@ -122,7 +149,8 @@ mod tests {
     #[test]
     fn parses_json_in_code_fence_with_prose() {
         let wrapped = format!("Here is my analysis:\n```json\n{WELL_FORMED}\n```\nHope it helps!");
-        let d = parse_diagnosis(&wrapped);
+        let (d, outcome) = parse_diagnosis(&wrapped);
+        assert_eq!(outcome, ParseOutcome::Structured);
         assert_eq!(d.confidence, Confidence::High);
         assert_eq!(d.commands.len(), 1);
     }
@@ -131,7 +159,8 @@ mod tests {
     #[test]
     fn handles_braces_inside_strings() {
         let json = r#"prefix {"summary": "use {placeholder} here", "confidence": "medium"} suffix"#;
-        let d = parse_diagnosis(json);
+        let (d, outcome) = parse_diagnosis(json);
+        assert_eq!(outcome, ParseOutcome::Structured);
         assert_eq!(d.confidence, Confidence::Medium);
         assert_eq!(d.summary, "use {placeholder} here");
     }
@@ -139,7 +168,8 @@ mod tests {
     /// Non-JSON output degrades to a low-confidence summary of the raw text.
     #[test]
     fn degrades_on_non_json() {
-        let d = parse_diagnosis("I think the CPU is just busy, no JSON here.");
+        let (d, outcome) = parse_diagnosis("I think the CPU is just busy, no JSON here.");
+        assert_eq!(outcome, ParseOutcome::Degraded);
         assert_eq!(d.confidence, Confidence::Low);
         assert!(d.summary.contains("CPU is just busy"));
         assert!(!d.missing_info.is_empty());
@@ -148,7 +178,8 @@ mod tests {
     /// Malformed JSON (right shape, wrong syntax) also degrades.
     #[test]
     fn degrades_on_malformed_json() {
-        let d = parse_diagnosis(r#"{"summary": "x", "confidence": }"#);
+        let (d, outcome) = parse_diagnosis(r#"{"summary": "x", "confidence": }"#);
+        assert_eq!(outcome, ParseOutcome::Degraded);
         assert_eq!(d.confidence, Confidence::Low);
         assert!(!d.missing_info.is_empty());
     }
@@ -158,7 +189,8 @@ mod tests {
     fn clears_model_supplied_collected() {
         let with_collected =
             r#"{"summary": "x", "confidence": "low", "collected": ["forged.cap"]}"#;
-        let d = parse_diagnosis(with_collected);
+        let (d, outcome) = parse_diagnosis(with_collected);
+        assert_eq!(outcome, ParseOutcome::Structured);
         assert!(d.collected.is_empty());
     }
 }

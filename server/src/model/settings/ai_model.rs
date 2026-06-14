@@ -55,6 +55,23 @@ pub enum ResponseFormatMode {
     JsonSchema,
 }
 
+/// Where the model call is dialed from.
+///
+/// `ManagerProxy` is a reserved placeholder: the field and API exist so the
+/// configuration shape is stable, but the proxy is not implemented yet — the
+/// diagnose path refuses with `UnsupportedCapability` when it is selected. The
+/// real manager-proxied gateway is a later enterprise feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayMode {
+    /// The server dials the model gateway directly. Default.
+    #[default]
+    Direct,
+    /// Reserved: route the model call through the manager proxy. Not implemented
+    /// yet; selecting it makes diagnosis refuse.
+    ManagerProxy,
+}
+
 /// Persisted AI model gateway configuration.
 ///
 /// `Debug` is implemented by hand so `api_key` is never rendered; the derived
@@ -86,6 +103,9 @@ pub struct AiModelSettings {
     /// still requires an explicit per-command user approval. `session_approved`
     /// / `automated` are not selectable yet (M4).
     pub execution_mode: ExecutionMode,
+    /// Where the model call is dialed from. Default `direct`. `manager_proxy`
+    /// is a reserved placeholder that is refused at runtime (see [`GatewayMode`]).
+    pub gateway_mode: GatewayMode,
 }
 
 impl AiModelSettings {
@@ -115,6 +135,7 @@ impl AiModelSettings {
             max_context_bytes: self.max_context_bytes,
             response_format: self.response_format,
             execution_mode: self.execution_mode,
+            gateway_mode: self.gateway_mode,
             api_key_set: self.api_key_set(),
         }
     }
@@ -151,6 +172,9 @@ impl AiModelSettings {
         {
             self.execution_mode = execution_mode;
         }
+        if let Some(gateway_mode) = update.gateway_mode {
+            self.gateway_mode = gateway_mode;
+        }
         match update.api_key {
             None => {}                                          // leave unchanged
             Some(key) if key.is_empty() => self.api_key = None, // clear
@@ -172,6 +196,7 @@ impl fmt::Debug for AiModelSettings {
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
             .field("execution_mode", &self.execution_mode)
+            .field("gateway_mode", &self.gateway_mode)
             .finish()
     }
 }
@@ -189,6 +214,7 @@ pub struct AiModelSettingsPublic {
     pub max_context_bytes: Option<u64>,
     pub response_format: ResponseFormatMode,
     pub execution_mode: ExecutionMode,
+    pub gateway_mode: GatewayMode,
     /// Whether a non-empty API key is configured. The key itself is never
     /// returned.
     pub api_key_set: bool,
@@ -211,6 +237,8 @@ pub struct AiModelSettingsUpdate {
     /// `None` leaves the stored mode unchanged. A not-yet-selectable mode
     /// (`session_approved` / `automated`) is ignored.
     pub execution_mode: Option<ExecutionMode>,
+    /// `None` leaves the stored gateway mode unchanged.
+    pub gateway_mode: Option<GatewayMode>,
     /// Write-only. `None` = leave unchanged; `Some("")` = clear; `Some(x)` = set.
     pub api_key: Option<String>,
 }
@@ -226,6 +254,7 @@ impl fmt::Debug for AiModelSettingsUpdate {
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
             .field("execution_mode", &self.execution_mode)
+            .field("gateway_mode", &self.gateway_mode)
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .finish()
     }
@@ -246,6 +275,7 @@ mod tests {
             max_context_bytes: Some(131_072),
             response_format: ResponseFormatMode::JsonObject,
             execution_mode: ExecutionMode::SuggestOnly,
+            gateway_mode: GatewayMode::Direct,
         }
     }
 
@@ -428,6 +458,55 @@ mod tests {
         assert_eq!(
             s.public_view().execution_mode,
             ExecutionMode::ConfirmEachAction
+        );
+    }
+
+    /// Default gateway mode is `direct`, and a config written before the field
+    /// existed deserializes to it (back-compat via the struct's `#[serde(default)]`).
+    #[test]
+    fn gateway_mode_defaults_to_direct() {
+        assert_eq!(AiModelSettings::default().gateway_mode, GatewayMode::Direct);
+        let s: AiModelSettings = serde_json::from_str("{}").expect("empty config");
+        assert_eq!(s.gateway_mode, GatewayMode::Direct);
+    }
+
+    /// Update sets the gateway mode with `Some` and leaves it with `None`, and
+    /// the public view carries it (it is not a secret).
+    #[test]
+    fn update_and_public_view_gateway_mode() {
+        let mut s = configured();
+        assert_eq!(s.gateway_mode, GatewayMode::Direct);
+
+        s.apply_update(AiModelSettingsUpdate {
+            gateway_mode: Some(GatewayMode::ManagerProxy),
+            ..Default::default()
+        });
+        assert_eq!(s.gateway_mode, GatewayMode::ManagerProxy);
+        assert_eq!(s.public_view().gateway_mode, GatewayMode::ManagerProxy);
+
+        // None leaves the stored mode unchanged.
+        s.apply_update(AiModelSettingsUpdate::default());
+        assert_eq!(s.gateway_mode, GatewayMode::ManagerProxy);
+    }
+
+    /// Adding `gateway_mode` must not widen the secret boundary: the public view
+    /// of a manager-proxy config still never carries the key.
+    #[test]
+    fn public_view_with_gateway_mode_still_masks_key() {
+        let mut s = configured();
+        s.gateway_mode = GatewayMode::ManagerProxy;
+        let json = serde_json::to_string(&s.public_view()).expect("serialize public");
+        assert!(
+            json.contains("manager_proxy"),
+            "gateway_mode missing: {json}"
+        );
+        assert!(
+            !json.contains("sk-secret-value"),
+            "public view leaked key: {json}"
+        );
+        assert!(
+            !json.contains("api_key\""),
+            "public view carries api_key: {json}"
         );
     }
 

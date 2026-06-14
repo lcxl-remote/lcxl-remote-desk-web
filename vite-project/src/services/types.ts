@@ -23,6 +23,32 @@ export type AdaptiveResolutionParams = {
   min_delta_px?: number;
 };
 
+export const executionModeEnum = {
+  suggest_only: "suggest_only",
+  read_only: "read_only",
+  confirm_each_action: "confirm_each_action",
+  session_approved: "session_approved",
+  automated: "automated",
+} as const;
+
+export type ExecutionModeEnumKey =
+  (typeof executionModeEnum)[keyof typeof executionModeEnum];
+
+export type ExecutionMode = ExecutionModeEnumKey;
+
+export const gatewayModeEnum = {
+  direct: "direct",
+  manager_proxy: "manager_proxy",
+} as const;
+
+export type GatewayModeEnumKey =
+  (typeof gatewayModeEnum)[keyof typeof gatewayModeEnum];
+
+/**
+ * @description Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.
+ */
+export type GatewayMode = GatewayModeEnumKey;
+
 export const responseFormatModeEnum = {
   none: "none",
   json_object: "json_object",
@@ -58,6 +84,15 @@ export type AiModelSettingsPublic = {
    * @type string,null
    */
   base_url?: string | null;
+  /**
+   * @type string
+   */
+  execution_mode: ExecutionMode;
+  /**
+   * @description Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.
+   * @type string
+   */
+  gateway_mode: GatewayMode;
   /**
    * @minLength 0
    * @type integer,null, int64
@@ -99,6 +134,8 @@ export type AiModelSettingsUpdate = {
    * @type string,null
    */
   base_url?: string | null;
+  execution_mode?: null | ExecutionMode;
+  gateway_mode?: null | GatewayMode;
   /**
    * @minLength 0
    * @type integer,null, int64
@@ -1606,6 +1643,15 @@ export type RestResponseAiModelSettingsPublic = {
      * @type string,null
      */
     base_url?: string | null;
+    /**
+     * @type string
+     */
+    execution_mode: ExecutionMode;
+    /**
+     * @description Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.
+     * @type string
+     */
+    gateway_mode: GatewayMode;
     /**
      * @minLength 0
      * @type integer,null, int64

@@ -9,6 +9,34 @@
       "description": "Write-only. `None` = leave unchanged; `Some(\"\")` = clear; `Some(x)` = set."
     },
     "base_url": { "type": ["string", "null"] },
+    "execution_mode": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "enum": [
+            "suggest_only",
+            "read_only",
+            "confirm_each_action",
+            "session_approved",
+            "automated"
+          ],
+          "x-readme-ref-name": "ExecutionMode",
+          "description": "`None` leaves the stored mode unchanged. A not-yet-selectable mode\n(`session_approved` / `automated`) is ignored."
+        }
+      ]
+    },
+    "gateway_mode": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "description": "`None` leaves the stored gateway mode unchanged.",
+          "enum": ["direct", "manager_proxy"],
+          "x-readme-ref-name": "GatewayMode"
+        }
+      ]
+    },
     "max_context_bytes": {
       "type": ["integer", "null"],
       "format": "int64",

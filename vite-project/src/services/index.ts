@@ -127,6 +127,8 @@ export type {
   DisplayRect,
   DownloadRequest,
   DownloadResponse,
+  ExecutionMode,
+  ExecutionModeEnumKey,
   FakeCaptcha,
   FakeCaptchaParams,
   FileInfo,
@@ -139,6 +141,8 @@ export type {
   FileTransferMessageTypeEnum6Key,
   FileTransferMessageTypeEnum7Key,
   FileTransferMessageTypeEnumKey,
+  GatewayMode,
+  GatewayModeEnumKey,
   Geographic,
   GetCaptcha200,
   GetCaptcha400,
@@ -653,6 +657,7 @@ export { updateVirtualDisplaySettingsMutationKey } from "./hooks/virtualDisplayC
 export { updateVirtualDisplaySettingsMutationOptions } from "./hooks/virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
 export { useUpdateVirtualDisplaySettings } from "./hooks/virtualDisplayController/useUpdateVirtualDisplaySettings.ts";
 export { audioDataFlowEnum } from "./types.ts";
+export { executionModeEnum } from "./types.ts";
 export { fileTransferMessageTypeEnum } from "./types.ts";
 export { fileTransferMessageTypeEnum2 } from "./types.ts";
 export { fileTransferMessageTypeEnum3 } from "./types.ts";
@@ -660,6 +665,7 @@ export { fileTransferMessageTypeEnum4 } from "./types.ts";
 export { fileTransferMessageTypeEnum5 } from "./types.ts";
 export { fileTransferMessageTypeEnum6 } from "./types.ts";
 export { fileTransferMessageTypeEnum7 } from "./types.ts";
+export { gatewayModeEnum } from "./types.ts";
 export { operationSystemEnumEnum } from "./types.ts";
 export { remoteDeskTypeEnumEnum } from "./types.ts";
 export { responseFormatModeEnum } from "./types.ts";

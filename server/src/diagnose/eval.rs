@@ -188,7 +188,7 @@ async fn run_eval(
 ) -> (Vec<DiagnoseEvent>, ChatRequest, Vec<AuditEvent>) {
     let adapter = ReplayAdapter::new(canned);
     let audit = RecordingAuditSink::default();
-    let model = ModelBackedDiagnoseModel::new(
+    let model = ModelBackedDiagnoseModel::with_adapter(
         adapter.clone(),
         configured_settings(max_context_bytes),
         Arc::new(audit.clone()),
@@ -559,7 +559,7 @@ async fn real_model_run() {
     println!("\n=== R3 controlled real-model eval run ===");
     for case in eval_cases() {
         let audit = RecordingAuditSink::default();
-        let model = ModelBackedDiagnoseModel::new(
+        let model = ModelBackedDiagnoseModel::with_adapter(
             Arc::new(OpenAiCompatAdapter::new()),
             settings.clone(),
             Arc::new(audit.clone()),

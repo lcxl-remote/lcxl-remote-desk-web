@@ -4,8 +4,7 @@ use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
 use crate::diagnose::DiagnoseOrchestrator;
 use crate::diagnose::collector::AgentContextCollector;
-use crate::diagnose::model::ModelBackedDiagnoseModel;
-use crate::diagnose::model::openai::OpenAiCompatAdapter;
+use crate::diagnose::model::{ModelBackedDiagnoseModel, ProviderAdapterSelector};
 use crate::diagnose::redaction::RegexRedactor;
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
@@ -61,8 +60,10 @@ pub async fn run_signaling_proxy(
                 agent,
                 settings.clone().into_inner(),
             ));
+            // Resolve the adapter per diagnosis from the configured provider, so
+            // a runtime provider change takes effect on the next request.
             let model = Arc::new(ModelBackedDiagnoseModel::new(
-                Arc::new(OpenAiCompatAdapter::new()),
+                Arc::new(ProviderAdapterSelector),
                 settings.clone().into_inner(),
                 audit.clone(),
             ));
