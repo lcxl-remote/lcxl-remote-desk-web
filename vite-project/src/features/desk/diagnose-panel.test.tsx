@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { DiagnosePanel } from "./diagnose-panel";
 import type { DiagnoseState } from "./use-desk-diagnose";
+import type { ExecEntry } from "./use-desk-exec";
 
 // i18n: t() echoes the fallback the component always provides; i18n.language is
 // the tag forwarded to onStart so the AI answers in the UI language.
@@ -104,6 +105,124 @@ describe("DiagnosePanel", () => {
     it("error: shows the failure message", () => {
         renderPanel({ phase: "error", error: "evidence redaction failed" });
         expect(screen.getByText("evidence redaction failed")).toBeInTheDocument();
+    });
+
+    const doneWithCommand: Partial<DiagnoseState> = {
+        phase: "done",
+        result: {
+            summary: "s",
+            confidence: "high",
+            findings: [],
+            commands: [
+                {
+                    shell: "powershell",
+                    command: "Get-Service -Name Spooler",
+                    purpose: "check",
+                    risk: "low",
+                    requires_confirmation: true,
+                },
+            ],
+            next_steps: [],
+            missing_info: [],
+            collected: [],
+        },
+    };
+
+    function renderWithExec(entries: Record<number, ExecEntry>) {
+        const exec = {
+            entries,
+            requestPreview: vi.fn(),
+            approve: vi.fn(),
+            reject: vi.fn(),
+            dismiss: vi.fn(),
+        };
+        render(
+            <DiagnosePanel
+                state={{ ...baseState, ...doneWithCommand }}
+                onStart={vi.fn()}
+                onHandoff={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                exec={exec}
+            />,
+        );
+        return exec;
+    }
+
+    it("exec: Execute requests a preview for the command", () => {
+        const exec = renderWithExec({});
+        fireEvent.click(screen.getByText("Execute"));
+        expect(exec.requestPreview).toHaveBeenCalledWith(
+            0,
+            expect.objectContaining({ command: "Get-Service -Name Spooler" }),
+        );
+    });
+
+    it("exec: an awaiting preview shows confirm with Approve / Reject", () => {
+        const exec = renderWithExec({
+            0: {
+                phase: "awaiting",
+                preview: {
+                    exec_request_id: "exec-1",
+                    shell: "powershell",
+                    command: "Get-Service -Name Spooler",
+                    cwd: null,
+                    timeout_ms: 30000,
+                    risk: "low",
+                    impact: "Read the status of a Windows service",
+                    policy_note: "matched template get_service_named",
+                    requires_confirmation: true,
+                    executable: true,
+                    blocked_reason: null,
+                },
+                execRequestId: "exec-1",
+                output: null,
+                error: null,
+            },
+        });
+        expect(screen.getByText("Read the status of a Windows service")).toBeInTheDocument();
+        fireEvent.click(screen.getByText("Approve & run"));
+        expect(exec.approve).toHaveBeenCalledWith(0);
+        fireEvent.click(screen.getByText("Reject"));
+        expect(exec.reject).toHaveBeenCalledWith(0);
+    });
+
+    it("exec: a done result shows the exit code and stdout", () => {
+        renderWithExec({
+            0: {
+                phase: "done",
+                preview: null,
+                execRequestId: "exec-1",
+                output: {
+                    exit_code: 0,
+                    stdout: "Running",
+                    stderr: "",
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    duration_ms: 12,
+                    redactions: [],
+                },
+                error: null,
+            },
+        });
+        expect(screen.getByText("Running")).toBeInTheDocument();
+        expect(screen.getByText(/Exit\s*0/)).toBeInTheDocument();
+    });
+
+    it("exec: a blocked preview shows the reason and no Approve", () => {
+        renderWithExec({
+            0: {
+                phase: "error",
+                preview: null,
+                execRequestId: null,
+                output: null,
+                error: "Blocked: matches a prohibited pattern (download-and-execute)",
+            },
+        });
+        expect(
+            screen.getByText("Blocked: matches a prohibited pattern (download-and-execute)"),
+        ).toBeInTheDocument();
+        expect(screen.queryByText("Approve & run")).not.toBeInTheDocument();
     });
 
     it("close button calls onClose", () => {

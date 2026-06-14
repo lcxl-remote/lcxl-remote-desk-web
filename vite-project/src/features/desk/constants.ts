@@ -35,5 +35,14 @@ export const SIGNALING_TYPE_CODE_DIAGNOSE_EVENT = 603;
 // correlates the cancelled diagnosis.
 export const SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL = 604;
 
+// AI confirmed execution: ConfirmExec / ResolveExec (control end -> host) and
+// ExecPreview / ExecResult (host -> control end, notification-style). The host
+// classifies the command, requires explicit approval, and runs only whitelist
+// templates.
+export const SIGNALING_TYPE_CODE_CONFIRM_EXEC = 605;
+export const SIGNALING_TYPE_CODE_EXEC_PREVIEW = 606;
+export const SIGNALING_TYPE_CODE_RESOLVE_EXEC = 607;
+export const SIGNALING_TYPE_CODE_EXEC_RESULT = 609;
+
 export const SIGNALING_TYPE_CODE_ERROR = 10000000;
 export const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 10000001;

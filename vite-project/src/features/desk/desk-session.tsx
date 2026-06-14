@@ -20,6 +20,7 @@ import { useDeskSignaling } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskDiagnose } from "./use-desk-diagnose"
 import { DiagnosePanel } from "./diagnose-panel"
+import { useDeskExec } from "./use-desk-exec"
 import { useDeskInput } from "./use-desk-input"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
@@ -154,6 +155,14 @@ export default function DeskSession() {
     // AI diagnose stream: sends `Diagnose` and aggregates `DiagnoseEvent`
     // frames off the same signaling channel.
     const diagnose = useDeskDiagnose({
+        deskId: deskId || null,
+        lastMessage,
+        sendMessage,
+    });
+
+    // Confirmed execution of a suggested command: ConfirmExec -> ExecPreview ->
+    // ResolveExec -> ExecResult, keyed by command row.
+    const exec = useDeskExec({
         deskId: deskId || null,
         lastMessage,
         sendMessage,
@@ -1112,6 +1121,7 @@ export default function DeskSession() {
                                 onHandoff={diagnose.handoff}
                                 onReset={diagnose.reset}
                                 onClose={() => setShowDiagnose(false)}
+                                exec={exec}
                             />
                         )}
 

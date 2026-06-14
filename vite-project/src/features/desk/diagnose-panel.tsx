@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
-import { Loader2, Stethoscope, X, UserCog, AlertCircle, Terminal as TerminalIcon } from "lucide-react"
+import { Loader2, Stethoscope, X, UserCog, AlertCircle, Play, Check, Ban, Terminal as TerminalIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -9,7 +9,17 @@ import {
     type DiagnoseState,
     type DiagnoseStartOptions,
     type RiskLevel,
+    type SuggestedCommand,
 } from "./use-desk-diagnose"
+import type { ExecEntry } from "./use-desk-exec"
+
+type ExecControls = {
+    entries: Record<number, ExecEntry>
+    requestPreview: (rowIndex: number, command: SuggestedCommand) => void
+    approve: (rowIndex: number) => void
+    reject: (rowIndex: number) => void
+    dismiss: (rowIndex: number) => void
+}
 
 type DiagnosePanelProps = {
     state: DiagnoseState
@@ -17,6 +27,8 @@ type DiagnosePanelProps = {
     onHandoff: () => void
     onReset: () => void
     onClose: () => void
+    /** Confirmed-execution controls; omitted in suggest-only contexts. */
+    exec?: ExecControls
 }
 
 /** Map the backend confidence to a badge colour. */
@@ -45,12 +57,162 @@ function riskClass(risk: RiskLevel): string {
     }
 }
 
+/**
+ * Per-command execution controls (security model §7): Execute -> a confirmation
+ * preview showing the server's classification (impact / policy / timeout) ->
+ * explicit Approve or Reject -> result. Nothing runs without an explicit
+ * Approve; a non-executable preview (blocked / off-template / mode) is shown but
+ * not runnable.
+ */
+function ExecRow({
+    index,
+    command,
+    exec,
+}: {
+    index: number
+    command: SuggestedCommand
+    exec: ExecControls
+}) {
+    const { t } = useTranslation()
+    const entry = exec.entries[index]
+
+    if (!entry) {
+        return (
+            <Button
+                size="sm"
+                variant="secondary"
+                className="mt-2 h-7 w-full text-xs"
+                onClick={() => exec.requestPreview(index, command)}
+            >
+                <Play className="mr-1 h-3 w-3" />
+                {t("pages.desk.diagnose.exec.execute", "Execute")}
+            </Button>
+        )
+    }
+
+    if (entry.phase === "previewing") {
+        return (
+            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("pages.desk.diagnose.exec.classifying", "Checking command...")}
+            </div>
+        )
+    }
+
+    if (entry.phase === "awaiting" && entry.preview) {
+        const p = entry.preview
+        return (
+            <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+                <div className="text-xs font-semibold text-amber-200">
+                    {t("pages.desk.diagnose.exec.confirmTitle", "Confirm execution")}
+                </div>
+                <div className="text-xs text-white/80">{p.impact}</div>
+                {p.policy_note && (
+                    <div className="text-[10px] text-white/50">{p.policy_note}</div>
+                )}
+                <div className="text-[10px] text-white/50">
+                    {t("pages.desk.diagnose.exec.timeout", "Timeout")}: {Math.round(p.timeout_ms / 1000)}s
+                </div>
+                <div className="mt-1 flex gap-2">
+                    <Button
+                        size="sm"
+                        className="h-7 flex-1 bg-red-600 text-xs hover:bg-red-700"
+                        onClick={() => exec.approve(index)}
+                    >
+                        <Check className="mr-1 h-3 w-3" />
+                        {t("pages.desk.diagnose.exec.approve", "Approve & run")}
+                    </Button>
+                    <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 flex-1 text-xs"
+                        onClick={() => exec.reject(index)}
+                    >
+                        <Ban className="mr-1 h-3 w-3" />
+                        {t("pages.desk.diagnose.exec.reject", "Reject")}
+                    </Button>
+                </div>
+            </div>
+        )
+    }
+
+    if (entry.phase === "running") {
+        return (
+            <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                {t("pages.desk.diagnose.exec.running", "Running...")}
+            </div>
+        )
+    }
+
+    if (entry.phase === "done" && entry.output) {
+        const o = entry.output
+        const ok = o.exit_code === 0
+        return (
+            <div className="mt-2 flex flex-col gap-1 rounded-md border border-white/10 bg-black/40 p-2">
+                <div className="flex items-center justify-between">
+                    <Badge
+                        variant="outline"
+                        className={
+                            ok
+                                ? "bg-green-500/20 text-green-300 border-green-500/40"
+                                : "bg-red-500/20 text-red-300 border-red-500/40"
+                        }
+                    >
+                        {t("pages.desk.diagnose.exec.exit", "Exit")} {o.exit_code}
+                    </Badge>
+                    <span className="text-[10px] text-white/40">{o.duration_ms}ms</span>
+                </div>
+                {o.stdout && (
+                    <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-white/80">
+                        {o.stdout}
+                        {o.stdout_truncated && " …"}
+                    </pre>
+                )}
+                {o.stderr && (
+                    <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-all font-mono text-[10px] text-red-300/80">
+                        {o.stderr}
+                        {o.stderr_truncated && " …"}
+                    </pre>
+                )}
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-6 self-end text-[10px]"
+                    onClick={() => exec.dismiss(index)}
+                >
+                    {t("pages.desk.diagnose.exec.dismiss", "Dismiss")}
+                </Button>
+            </div>
+        )
+    }
+
+    // error (blocked / off-template / execution failure)
+    return (
+        <div className="mt-2 flex flex-col gap-1 rounded-md border border-red-500/30 bg-red-500/10 p-2">
+            <div className="flex items-start gap-1 text-xs text-red-300">
+                <Ban className="mt-0.5 h-3 w-3 shrink-0" />
+                <span>{entry.error ?? t("pages.desk.diagnose.exec.notExecutable", "Not executable")}</span>
+            </div>
+            <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 self-end text-[10px]"
+                onClick={() => exec.dismiss(index)}
+            >
+                {t("pages.desk.diagnose.exec.dismiss", "Dismiss")}
+            </Button>
+        </div>
+    )
+}
+
 export function DiagnosePanel({
     state,
     onStart,
     onHandoff,
     onReset,
     onClose,
+    exec,
 }: DiagnosePanelProps) {
     const { t, i18n } = useTranslation()
     const [question, setQuestion] = useState("")
@@ -282,13 +444,25 @@ export function DiagnosePanel({
                                                 <p className="mt-1 text-xs text-white/60">
                                                     {c.purpose}
                                                 </p>
+                                                {exec && (
+                                                    <ExecRow
+                                                        index={i}
+                                                        command={c}
+                                                        exec={exec}
+                                                    />
+                                                )}
                                             </div>
                                         ))}
                                         <p className="text-[10px] text-white/40">
-                                            {t(
-                                                "pages.desk.diagnose.suggestOnly",
-                                                "Suggestions only — nothing is executed.",
-                                            )}
+                                            {exec
+                                                ? t(
+                                                      "pages.desk.diagnose.execNote",
+                                                      "Only whitelisted commands can run, and only after you approve each one.",
+                                                  )
+                                                : t(
+                                                      "pages.desk.diagnose.suggestOnly",
+                                                      "Suggestions only — nothing is executed.",
+                                                  )}
                                         </p>
                                     </section>
                                 )}
