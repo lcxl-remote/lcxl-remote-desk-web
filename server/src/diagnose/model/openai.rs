@@ -156,7 +156,7 @@ pub(crate) struct SseAccumulator {
 }
 
 impl SseAccumulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pending: Vec::new(),
             content: String::new(),
@@ -167,7 +167,7 @@ impl SseAccumulator {
     /// Feed a chunk of bytes, emitting any newly completed content deltas via
     /// `on_delta`. Lines are split on `\n` (ASCII), so multi-byte UTF-8 content
     /// within a line is never split — a line is only decoded once complete.
-    fn push_bytes(&mut self, chunk: &[u8], on_delta: &(dyn Fn(String) + Send + Sync)) {
+    pub(crate) fn push_bytes(&mut self, chunk: &[u8], on_delta: &(dyn Fn(String) + Send + Sync)) {
         self.pending.extend_from_slice(chunk);
         while let Some(idx) = self.pending.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=idx).collect();
@@ -199,7 +199,7 @@ impl SseAccumulator {
         }
     }
 
-    fn finish(self) -> ChatResponse {
+    pub(crate) fn finish(self) -> ChatResponse {
         ChatResponse {
             content: self.content,
             usage: self.usage,

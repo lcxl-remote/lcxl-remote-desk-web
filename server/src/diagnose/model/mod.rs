@@ -14,6 +14,7 @@
 //! network.
 
 pub mod anthropic;
+pub mod manager_proxy;
 pub mod openai;
 pub mod parser;
 pub mod prompt;
@@ -225,31 +226,6 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
     ) -> Result<Diagnosis, AgentError> {
         let config = { self.settings.read().await.ai_model.clone() };
 
-        // Manager-proxied gateway is a reserved placeholder: the field and API
-        // exist, but the proxy is not implemented. Refuse it first — before the
-        // not-configured gate and before resolving any adapter — so selecting
-        // `manager_proxy` always reports "proxy not available" rather than the
-        // misleading "gateway not configured" when no direct credentials are set
-        // (the proxy would supply them). The orchestrator turns this into a
-        // `DiagnoseEvent::error`.
-        if config.gateway_mode == GatewayMode::ManagerProxy {
-            return Err(AgentError {
-                kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
-                message: "manager-proxied model gateway is not available yet".to_string(),
-                retryable: false,
-                safe_for_model: true,
-            });
-        }
-
-        let (Some(model), Some(base_url), Some(api_key)) =
-            (config.model, config.base_url, config.api_key)
-        else {
-            return Ok(not_configured());
-        };
-        if api_key.is_empty() || base_url.is_empty() || model.is_empty() {
-            return Ok(not_configured());
-        }
-
         let max_context_bytes = config
             .max_context_bytes
             .map(|b| b as usize)
@@ -291,46 +267,117 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
                 schema: prompt::diagnosis_json_schema(),
             },
         };
-        // Resolve the adapter from the current provider on every diagnosis, so a
-        // runtime provider change takes effect immediately and the audit records
-        // the concrete adapter actually used.
-        let adapter = self.selector.select(config.provider.as_deref());
-        let caller = CallerRef {
-            caller_type: CallerType::AiModel,
-            model_provider: config.provider.clone(),
-            model_name: Some(model.clone()),
-            adapter: Some(adapter.name().to_string()),
-        };
 
-        // `ai.model.requested` — input token count is not known until the
-        // gateway reports usage, so it is left unset here. The prompt and
-        // evidence-schema versions are stamped into the summary so a recorded
-        // diagnosis is attributable to the contract that produced it.
-        self.audit
-            .record(AuditEvent::model_requested(
-                new_event_id(),
-                now_rfc3339(),
-                request_id,
-                &caller,
-                format!(
-                    "evidence: {} contexts prompt={} evidence_schema={}",
-                    evidence.contexts.len(),
-                    prompt::PROMPT_VERSION,
-                    evidence.schema_version,
-                ),
-                None,
-            ))
-            .await;
+        // The prompt and evidence-schema versions are stamped into the request
+        // summary so a recorded diagnosis is attributable to the contract that
+        // produced it. (Input token count is unknown until usage is reported.)
+        let request_summary = format!(
+            "evidence: {} contexts prompt={} evidence_schema={}",
+            evidence.contexts.len(),
+            prompt::PROMPT_VERSION,
+            evidence.schema_version,
+        );
 
         let started = Instant::now();
-        let request = ChatRequest {
-            base_url,
-            api_key,
-            model,
-            messages,
-            response_format,
+        // Dial the gateway: the manager proxy (credentials stay on the manager)
+        // or a direct provider connection. Both stream deltas through
+        // `on_partial` and yield the accumulated response + usage.
+        let (caller, response) = if config.gateway_mode == GatewayMode::ManagerProxy {
+            let (manager_url, manager_token) = {
+                let s = self.settings.read().await;
+                (
+                    s.system.manager_url.clone(),
+                    s.system.manager_api_token.clone(),
+                )
+            };
+            let (Some(manager_url), Some(manager_token)) = (manager_url, manager_token) else {
+                return Err(AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
+                    message:
+                        "manager-proxied model gateway requires a configured manager URL and token"
+                            .to_string(),
+                    retryable: false,
+                    safe_for_model: true,
+                });
+            };
+            if manager_url.is_empty() || manager_token.is_empty() {
+                return Err(AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
+                    message:
+                        "manager-proxied model gateway requires a configured manager URL and token"
+                            .to_string(),
+                    retryable: false,
+                    safe_for_model: true,
+                });
+            }
+            // Provider / model are manager-side; the desk server only records that
+            // it dialed through the proxy.
+            let caller = CallerRef {
+                caller_type: CallerType::AiModel,
+                model_provider: Some("manager-proxy".to_string()),
+                model_name: None,
+                adapter: Some("manager-proxy".to_string()),
+            };
+            self.audit
+                .record(AuditEvent::model_requested(
+                    new_event_id(),
+                    now_rfc3339(),
+                    request_id,
+                    &caller,
+                    request_summary,
+                    None,
+                ))
+                .await;
+            let response = manager_proxy::stream_proxy_chat(
+                &manager_url,
+                &manager_token,
+                &messages,
+                &response_format,
+                on_partial,
+            )
+            .await?;
+            (caller, response)
+        } else {
+            let (Some(model), Some(base_url), Some(api_key)) = (
+                config.model.clone(),
+                config.base_url.clone(),
+                config.api_key.clone(),
+            ) else {
+                return Ok(not_configured());
+            };
+            if api_key.is_empty() || base_url.is_empty() || model.is_empty() {
+                return Ok(not_configured());
+            }
+            // Resolve the adapter from the current provider on every diagnosis, so
+            // a runtime provider change takes effect immediately and the audit
+            // records the concrete adapter actually used.
+            let adapter = self.selector.select(config.provider.as_deref());
+            let caller = CallerRef {
+                caller_type: CallerType::AiModel,
+                model_provider: config.provider.clone(),
+                model_name: Some(model.clone()),
+                adapter: Some(adapter.name().to_string()),
+            };
+            self.audit
+                .record(AuditEvent::model_requested(
+                    new_event_id(),
+                    now_rfc3339(),
+                    request_id,
+                    &caller,
+                    request_summary,
+                    None,
+                ))
+                .await;
+            let request = ChatRequest {
+                base_url,
+                api_key,
+                model,
+                messages,
+                response_format,
+            };
+            let response = adapter.stream_chat(request, on_partial).await?;
+            (caller, response)
         };
-        let response = adapter.stream_chat(request, on_partial).await?;
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
         let (diagnosis, parse_outcome) = parser::parse_diagnosis(&response.content);
@@ -746,8 +793,9 @@ mod tests {
         );
     }
 
-    /// `gateway_mode = manager_proxy` refuses with `UnsupportedCapability` before
-    /// touching the selector / adapter, and records no audit (no wire call).
+    /// `gateway_mode = manager_proxy` with no manager URL/token configured
+    /// refuses with `UnsupportedCapability` before touching the selector/adapter,
+    /// and records no audit (no wire call).
     #[tokio::test]
     async fn manager_proxy_gateway_is_refused_without_dialing() {
         let mut s = Settings::default();
@@ -790,9 +838,10 @@ mod tests {
         );
     }
 
-    /// `manager_proxy` is refused even when no direct credentials are set: the
-    /// proxy mode does not require local model/base_url/api_key, so the user must
-    /// get "proxy not available", not the "gateway not configured" fallback.
+    /// `manager_proxy` (without a manager URL) is refused even when no direct
+    /// credentials are set: the proxy mode does not require local
+    /// model/base_url/api_key, so the user gets "proxy requires a manager URL",
+    /// not the "gateway not configured" fallback.
     #[tokio::test]
     async fn manager_proxy_refused_takes_precedence_over_not_configured() {
         let mut s = Settings::default();
@@ -817,6 +866,50 @@ mod tests {
         assert_eq!(
             err.kind,
             desk_agent_protocol::AgentErrorKind::UnsupportedCapability
+        );
+    }
+
+    /// With `manager_proxy` and a manager URL + token configured, the model layer
+    /// dials the proxy (rather than refusing). Pointed at an unreachable port the
+    /// dial fails with a `TransportError`, proving the proxy path was taken — the
+    /// direct selector/adapter is never touched.
+    #[tokio::test]
+    async fn manager_proxy_dials_when_manager_configured() {
+        let mut s = Settings::default();
+        s.ai_model.gateway_mode = crate::model::settings::GatewayMode::ManagerProxy;
+        // Unreachable port so the dial fails fast.
+        s.system.manager_url = Some("ws://127.0.0.1:1/api/desk/signaling".into());
+        s.system.manager_api_token = Some("tok".into());
+
+        let calls = Arc::new(Mutex::new(0usize));
+        let selector = Arc::new(CountingSelector {
+            inner: Arc::new(MockAdapter {
+                fragments: vec![],
+                content: WELL_FORMED.into(),
+                usage: TokenUsage::default(),
+                seen: Mutex::new(None),
+            }),
+            calls: calls.clone(),
+        });
+        let model = ModelBackedDiagnoseModel::new(
+            selector,
+            Arc::new(SharedSettings::from(s)),
+            Arc::new(RecordingAuditSink::default()),
+        );
+        let noop = |_: String| {};
+        let err = model
+            .diagnose("req_mp3", "q", &snapshot(), None, &noop)
+            .await
+            .expect_err("dial to an unreachable manager must fail");
+        assert_eq!(
+            err.kind,
+            desk_agent_protocol::AgentErrorKind::TransportError,
+            "proxy mode must dial, not refuse, when the manager is configured"
+        );
+        assert_eq!(
+            *calls.lock().unwrap(),
+            0,
+            "proxy path must not resolve the direct adapter selector"
         );
     }
 }

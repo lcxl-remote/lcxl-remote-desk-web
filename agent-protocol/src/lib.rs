@@ -33,6 +33,7 @@ pub mod authz;
 pub mod command_template;
 pub mod diagnose;
 pub mod exec;
+pub mod model_proxy;
 
 use crate::exec::{CommandClassification, ExecDecision, ExecEffect};
 
