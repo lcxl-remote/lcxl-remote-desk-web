@@ -116,6 +116,7 @@ pub async fn run_signaling_proxy(
         // execute (Default / DeskServer), gated like the diagnose orchestrator.
         exec_supported: diagnose_orchestrator.is_some(),
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+        session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
         // Audit sink: in fleet mode (a manager is configured) report events to
         // the manager for DB persistence; otherwise keep the local log sink.
         audit: audit_sink.clone(),
@@ -1198,6 +1199,9 @@ mod tests {
             diagnose_orchestrator: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+            session_approvals: Arc::new(
+                crate::daemon::session_approval::SessionApprovalStore::new(),
+            ),
             audit: Arc::new(LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,

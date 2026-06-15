@@ -300,6 +300,12 @@ pub struct RouterContext {
     /// `exec_request_id`. Always present (in-memory state); the startup-mode and
     /// execution-mode gates decide whether it is ever populated.
     pub exec_approvals: Arc<crate::daemon::exec_approval::PendingApprovalStore>,
+    /// Session-scoped approvals for `ExecutionMode::SessionApproved`, keyed by
+    /// the control-end connection. Once a template is confirmed in this mode it
+    /// is granted for the rest of that connection's session; releasing control
+    /// or the connection ending revokes it. Always present (in-memory state);
+    /// only populated when the active mode is `SessionApproved`.
+    pub session_approvals: Arc<crate::daemon::session_approval::SessionApprovalStore>,
     /// Audit sink for the confirmed-execution lifecycle. Single-machine uses a
     /// structured log sink; a DB-backed sink can be substituted without touching
     /// the emission sites.
@@ -328,6 +334,18 @@ fn new_audit_event_id() -> String {
 /// RFC3339 timestamp for an audit event.
 fn audit_now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Revoke every session-scoped exec approval held by the connection that sent
+/// `model`. Called when the connection releases control (`CloseControl`) or ends
+/// (`ConnectionRemoved`); a no-op when the connection had no grants.
+fn revoke_session_approvals(ctx: &RouterContext, model: &SignalingModel) {
+    if let Some(conn) = model.from_connection_id.as_deref() {
+        let revoked = ctx.session_approvals.revoke_connection(conn);
+        if revoked > 0 {
+            log::debug!("[router] revoked {revoked} session exec approval(s) for {conn}");
+        }
+    }
 }
 
 /// snake_case risk label for the audit `risk` column.
@@ -445,6 +463,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             Ok(())
         }
         SignalingType::CloseControl => {
+            // Releasing control revokes any session-scoped exec approvals the
+            // connection accrued in SessionApproved mode.
+            revoke_session_approvals(ctx, model);
             pc_manager::handle_close_control(
                 &ctx.pc_registry,
                 &ctx.worker_mgr,
@@ -455,6 +476,8 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
             Ok(())
         }
         SignalingType::ConnectionRemoved => {
+            // The connection ending revokes its session-scoped exec approvals.
+            revoke_session_approvals(ctx, model);
             pc_manager::handle_connection_removed(
                 &ctx.pc_registry,
                 &ctx.worker_mgr,
@@ -2112,11 +2135,13 @@ async fn handle_confirm_exec_inbound(
         (ExecDecision::ConfirmRequired, Some(ExecEffect::Mutating), ExecutionMode::ReadOnly) => {
             Some("read-only mode does not permit state-changing commands".to_string())
         }
-        (
-            ExecDecision::ConfirmRequired,
-            _,
-            ExecutionMode::SessionApproved | ExecutionMode::Automated,
-        ) => Some("execution mode not available".to_string()),
+        // SessionApproved executes like ConfirmEachAction, except the first
+        // confirmation of a given template grants it for the rest of the
+        // session (handled below). Automated (run without any confirmation)
+        // is not implemented.
+        (ExecDecision::ConfirmRequired, _, ExecutionMode::Automated) => {
+            Some("execution mode not available".to_string())
+        }
         (ExecDecision::ConfirmRequired, _, _) => None, // executable
     };
 
@@ -2128,10 +2153,73 @@ async fn handle_confirm_exec_inbound(
     {
         let capability = OperationInput::required_capability(&classification).map(|c| c.as_str());
         let risk = classification.risk;
+
+        // SessionApproved grant eligibility: the active mode is SessionApproved,
+        // the command matched a template (intersect with the whitelist — only
+        // an already-executable template is ever granted), and the request came
+        // over a connection we can key the grant to.
+        let session_template = (execution_mode == ExecutionMode::SessionApproved)
+            .then(|| classification.matched_template.clone())
+            .flatten();
+        let connection_id = model.from_connection_id.clone();
+
+        // Already granted this session → auto-execute without re-prompting.
+        if let (Some(template_id), Some(conn)) = (session_template.as_ref(), connection_id.as_ref())
+            && ctx.session_approvals.is_granted(conn, template_id)
+        {
+            let exec_request_id = crate::daemon::exec_approval::mint_exec_request_id();
+            let (approval_id, plan) =
+                crate::daemon::exec_approval::seal_plan(exec_request_id.clone(), draft);
+            // No new approval prompt; the prior session grant authorizes it.
+            ctx.audit
+                .record(AuditEvent::capability_allowed(
+                    new_audit_event_id(),
+                    audit_now(),
+                    &exec_request_id.0,
+                    capability,
+                    risk_str(risk),
+                ))
+                .await;
+            ctx.audit
+                .record(AuditEvent::command_executed(
+                    new_audit_event_id(),
+                    audit_now(),
+                    &exec_request_id.0,
+                    &approval_id.0,
+                    capability,
+                    risk_str(risk),
+                ))
+                .await;
+            // Informational preview (no confirmation) so the control end can
+            // show what ran; the result follows as an `ExecResult`.
+            let preview = ExecPreview {
+                exec_request_id: Some(exec_request_id),
+                shell,
+                command,
+                cwd,
+                timeout_ms: limits.timeout_ms,
+                risk: classification.risk,
+                impact: classification.impact,
+                policy_note: classification
+                    .matched_template
+                    .map(|t| format!("session-approved template {t}")),
+                requires_confirmation: false,
+                executable: true,
+                blocked_reason: None,
+            };
+            send_exec_preview(&ctx.outbound_tx, &request_id, to.clone(), preview);
+            dispatch_exec_plan(ctx, &request_id, to, plan).await;
+            return Ok(());
+        }
+
+        // Not yet granted (or not session-approved mode) → park and prompt.
+        // `session_template` (when present) is carried so that approving this
+        // preview grants the template for the rest of the session.
         let exec_request_id = ctx.exec_approvals.insert(
             draft,
             classification.clone(),
-            model.from_connection_id.clone(),
+            connection_id,
+            session_template,
         );
         ctx.audit
             .record(AuditEvent::capability_requested(
@@ -2309,6 +2397,16 @@ async fn handle_resolve_exec_inbound(
                     risk,
                 ))
                 .await;
+            // In SessionApproved mode, approving the first preview of a
+            // template grants it for the rest of this connection's session, so
+            // subsequent matching commands skip confirmation. The grant is
+            // keyed to the connection that requested the preview.
+            if let (Some(template_id), Some(conn)) = (
+                consumed.session_grant_template.as_ref(),
+                consumed.connection_id.as_ref(),
+            ) {
+                ctx.session_approvals.grant(conn, template_id);
+            }
             let result_to = consumed.connection_id.or(to);
             dispatch_exec_plan(ctx, &request_id, result_to, plan).await;
             Ok(())
@@ -2639,6 +2737,9 @@ mod tests {
             diagnose_orchestrator: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+            session_approvals: Arc::new(
+                crate::daemon::session_approval::SessionApprovalStore::new(),
+            ),
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
@@ -4889,6 +4990,13 @@ mod tests {
         )
     }
 
+    /// A bare signaling model carrying only a `from_connection_id` (used for the
+    /// `CloseControl` / `ConnectionRemoved` revocation paths, whose payload is
+    /// intentionally empty).
+    fn connection_lifecycle_model(t: SignalingType, connection_id: &str) -> SignalingModel {
+        SignalingModel::new("rc", t, Some(connection_id.to_string()), None, None, None)
+    }
+
     /// A ctx where confirmed execution is fully enabled (supported mode +
     /// configured gateway + the given execution mode).
     async fn exec_enabled_ctx(mode: ExecutionMode) -> (RouterContext, broadcast::Receiver<String>) {
@@ -5061,6 +5169,178 @@ mod tests {
             .unwrap();
         let preview = read_preview(&mut rx);
         assert!(!preview.executable, "must not be executable above max_risk");
+    }
+
+    /// SessionApproved: the first confirmation of a template prompts and parks a
+    /// pending; after approval the same template (same connection) auto-executes
+    /// without prompting or parking.
+    #[tokio::test]
+    async fn session_approved_first_confirm_prompts_then_auto_executes() {
+        let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::SessionApproved).await;
+
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let first = read_preview(&mut rx);
+        assert!(first.executable);
+        assert!(first.requires_confirmation, "first confirm must prompt");
+        assert_eq!(ctx.exec_approvals.len(), 1);
+        let exec_request_id = first.exec_request_id.unwrap();
+
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model("r2", exec_request_id, ApprovalDecision::Approve),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.session_approvals.granted_count("conn-1"), 1);
+        let _ = read_response(&mut rx); // ExecResult (worker unavailable in test)
+
+        // Repeat: auto-executes — no prompt, nothing parked.
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r3", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let second = read_preview(&mut rx);
+        assert!(second.executable);
+        assert!(
+            !second.requires_confirmation,
+            "session-approved repeat must not prompt"
+        );
+        assert_eq!(
+            ctx.exec_approvals.len(),
+            0,
+            "auto-exec must not park a pending"
+        );
+    }
+
+    /// A session grant is scoped to its template: a *different* executable
+    /// template still requires confirmation (intersection with the whitelist).
+    #[tokio::test]
+    async fn session_approval_is_per_template() {
+        let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::SessionApproved).await;
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let id = read_preview(&mut rx).exec_request_id.unwrap();
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model("r2", id, ApprovalDecision::Approve),
+        )
+        .await
+        .unwrap();
+        let _ = read_response(&mut rx);
+
+        handle_confirm_exec_inbound(
+            &ctx,
+            &confirm_exec_model("r3", "Restart-Service -Name Spooler"),
+        )
+        .await
+        .unwrap();
+        let other = read_preview(&mut rx);
+        assert!(
+            other.requires_confirmation,
+            "a different template must still prompt"
+        );
+        assert_eq!(ctx.exec_approvals.len(), 1);
+    }
+
+    /// Releasing control (`CloseControl`) revokes the connection's session
+    /// grants; a subsequent confirm prompts again.
+    #[tokio::test]
+    async fn session_approval_revoked_on_close_control() {
+        let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::SessionApproved).await;
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let id = read_preview(&mut rx).exec_request_id.unwrap();
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model("r2", id, ApprovalDecision::Approve),
+        )
+        .await
+        .unwrap();
+        let _ = read_response(&mut rx);
+        assert_eq!(ctx.session_approvals.granted_count("conn-1"), 1);
+
+        route(
+            &connection_lifecycle_model(SignalingType::CloseControl, "conn-1"),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.session_approvals.granted_count("conn-1"), 0);
+
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r3", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        assert!(
+            read_preview(&mut rx).requires_confirmation,
+            "after revocation the template must prompt again"
+        );
+    }
+
+    /// The connection ending (`ConnectionRemoved`) revokes its session grants.
+    #[tokio::test]
+    async fn session_approval_revoked_on_connection_removed() {
+        let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::SessionApproved).await;
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let id = read_preview(&mut rx).exec_request_id.unwrap();
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model("r2", id, ApprovalDecision::Approve),
+        )
+        .await
+        .unwrap();
+        let _ = read_response(&mut rx);
+        assert_eq!(ctx.session_approvals.granted_count("conn-1"), 1);
+
+        route(
+            &connection_lifecycle_model(SignalingType::ConnectionRemoved, "conn-1"),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.session_approvals.granted_count("conn-1"), 0);
+    }
+
+    /// The auto-execute path emits `capability.allowed` + `command.executed`
+    /// (the prior grant authorizes it) and does not re-request approval.
+    #[tokio::test]
+    async fn session_approved_auto_exec_emits_allowed_and_executed_audit() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::SessionApproved).await;
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let id = read_preview(&mut rx).exec_request_id.unwrap();
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model("r2", id, ApprovalDecision::Approve),
+        )
+        .await
+        .unwrap();
+        let _ = read_response(&mut rx);
+
+        let recording = RecordingAuditSink::default();
+        ctx.audit = Arc::new(recording.clone());
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r3", "Get-Service -Name Spooler"))
+            .await
+            .unwrap();
+        let _ = read_preview(&mut rx);
+        let types = recording.event_types();
+        assert!(
+            types.contains(&"ai.capability.allowed".to_string()),
+            "{types:?}"
+        );
+        assert!(
+            types.contains(&"ai.command.executed".to_string()),
+            "{types:?}"
+        );
+        assert!(
+            !types.contains(&"ai.capability.requested".to_string()),
+            "auto-exec must not re-request approval: {types:?}"
+        );
     }
 
     #[test]

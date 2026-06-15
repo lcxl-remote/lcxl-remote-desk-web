@@ -25,11 +25,16 @@ pub const TTL: Duration = Duration::from_secs(120);
 /// One parked, executable preview awaiting the user's decision.
 struct PendingApproval {
     draft: ExecPlanDraft,
-    #[allow(dead_code)] // recorded for the PR4 audit wiring
     classification: CommandClassification,
     created_at: Instant,
     /// The control-end connection that requested it (where the result is sent).
     connection_id: Option<String>,
+    /// `Some(template_id)` when the active mode is `SessionApproved` and the
+    /// command matched a template: approving this preview grants that template
+    /// for the rest of the connection's session (subsequent matching commands
+    /// skip confirmation). `None` for one-shot confirmation (e.g.
+    /// `ConfirmEachAction`), which never widens beyond the single command.
+    session_grant_template: Option<String>,
 }
 
 /// Outcome of consuming a pending approval.
@@ -37,6 +42,8 @@ pub struct ConsumedApproval {
     pub draft: ExecPlanDraft,
     pub classification: CommandClassification,
     pub connection_id: Option<String>,
+    /// See [`PendingApproval::session_grant_template`].
+    pub session_grant_template: Option<String>,
 }
 
 /// Result of attempting to consume a pending approval.
@@ -68,20 +75,22 @@ impl PendingApprovalStore {
         draft: ExecPlanDraft,
         classification: CommandClassification,
         connection_id: Option<String>,
+        session_grant_template: Option<String>,
     ) -> ExecRequestId {
-        let id = format!("exec_{}", uuid::Uuid::new_v4().simple());
+        let id = mint_exec_request_id();
         let mut map = self.inner.lock().expect("pending approvals lock");
         evict_expired(&mut map);
         map.insert(
-            id.clone(),
+            id.0.clone(),
             PendingApproval {
                 draft,
                 classification,
                 created_at: Instant::now(),
                 connection_id,
+                session_grant_template,
             },
         );
-        ExecRequestId(id)
+        id
     }
 
     /// Look up and **remove** a pending approval (consume-once), bound to the
@@ -110,6 +119,7 @@ impl PendingApprovalStore {
             draft: pending.draft,
             classification: pending.classification,
             connection_id: pending.connection_id,
+            session_grant_template: pending.session_grant_template,
         })
     }
 
@@ -117,6 +127,13 @@ impl PendingApprovalStore {
     pub fn len(&self) -> usize {
         self.inner.lock().expect("pending approvals lock").len()
     }
+}
+
+/// Mint a fresh `exec_request_id`. Used both when parking a pending approval
+/// and on the session-approved auto-execute path, which seals a plan directly
+/// without ever parking it.
+pub fn mint_exec_request_id() -> ExecRequestId {
+    ExecRequestId(format!("exec_{}", uuid::Uuid::new_v4().simple()))
 }
 
 /// Seal a consumed draft into an approved [`ExecPlan`], minting the
@@ -173,7 +190,7 @@ mod tests {
     #[test]
     fn insert_then_take_returns_the_draft_once() {
         let store = PendingApprovalStore::new();
-        let id = store.insert(draft(), classification(), Some("conn1".into()));
+        let id = store.insert(draft(), classification(), Some("conn1".into()), None);
         assert_eq!(store.len(), 1);
 
         let consumed = is_consumed(store.take(&id, Some("conn1"))).expect("first take");
@@ -189,6 +206,22 @@ mod tests {
     }
 
     #[test]
+    fn session_grant_template_round_trips_through_take() {
+        let store = PendingApprovalStore::new();
+        let id = store.insert(
+            draft(),
+            classification(),
+            Some("conn1".into()),
+            Some("docker_restart".into()),
+        );
+        let consumed = is_consumed(store.take(&id, Some("conn1"))).expect("take");
+        assert_eq!(
+            consumed.session_grant_template.as_deref(),
+            Some("docker_restart")
+        );
+    }
+
+    #[test]
     fn unknown_id_is_not_found() {
         let store = PendingApprovalStore::new();
         assert!(matches!(
@@ -200,7 +233,7 @@ mod tests {
     #[test]
     fn take_from_other_connection_is_forbidden_and_keeps_pending() {
         let store = PendingApprovalStore::new();
-        let id = store.insert(draft(), classification(), Some("owner".into()));
+        let id = store.insert(draft(), classification(), Some("owner".into()), None);
 
         // A different connection cannot consume — and the pending is preserved.
         assert!(matches!(
@@ -229,8 +262,8 @@ mod tests {
     #[test]
     fn minted_ids_are_unique() {
         let store = PendingApprovalStore::new();
-        let a = store.insert(draft(), classification(), None);
-        let b = store.insert(draft(), classification(), None);
+        let a = store.insert(draft(), classification(), None, None);
+        let b = store.insert(draft(), classification(), None, None);
         assert_ne!(a, b);
     }
 }
