@@ -209,6 +209,14 @@ pub enum SignalingType {
     /// (`response_state = None`); daemon-owned, never accepted inbound.
     #[wincode(tag = 609)]
     ExecResult = 609,
+    /// AI audit event (host → manager only). Carries
+    /// `desk_agent_protocol::audit::AiAuditEventPayload`. Reported by a desk
+    /// server to its manager for persistence into `ai_audit_event`; consumed by
+    /// the manager's audit observer, never relayed to a browser (it must not
+    /// re-enter the control-end broadcast lane). Notification-style
+    /// (`response_state = None`).
+    #[wincode(tag = 608)]
+    AiAuditEvent = 608,
 
     /// Error
     #[wincode(tag = -1)]
@@ -826,7 +834,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 45] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 46] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -857,6 +865,7 @@ mod wincode_tests {
             (SignalingType::ExecPreview, 606),
             (SignalingType::ResolveExec, 607),
             (SignalingType::ExecResult, 609),
+            (SignalingType::AiAuditEvent, 608),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),

@@ -9,7 +9,7 @@ use crate::diagnose::redaction::RegexRedactor;
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
 use crate::worker::agent::LocalDeviceAgent;
-use crate::worker::agent::audit_sink::LogAuditSink;
+use crate::worker::agent::audit_sink::{LogAuditSink, RemoteAuditSink};
 use actix_web::web;
 use awc::{Client, Connector};
 use desk_agent_protocol::audit::AuditSink;
@@ -77,6 +77,23 @@ pub async fn run_signaling_proxy(
         }
     };
 
+    // Choose the audit sink once: report to the manager (DB persistence) when a
+    // manager is configured, otherwise log locally. `RemoteAuditSink` still logs
+    // too, so a fleet host keeps a local trail.
+    let manager_configured = {
+        let s = settings.read().await;
+        s.system
+            .manager_url
+            .as_ref()
+            .map(|u| !u.is_empty())
+            .unwrap_or(false)
+    };
+    let audit_sink: Arc<dyn AuditSink> = if manager_configured {
+        Arc::new(RemoteAuditSink::new(outbound_tx.clone()))
+    } else {
+        Arc::new(LogAuditSink)
+    };
+
     // The daemon constructs `pc_registry` once in `daemon::mod` and shares
     // it with both `WorkerManager` (for the media-pipe receiver) and the
     // signaling proxy (for inbound SDP/ICE handlers). Using a single
@@ -99,9 +116,9 @@ pub async fn run_signaling_proxy(
         // execute (Default / DeskServer), gated like the diagnose orchestrator.
         exec_supported: diagnose_orchestrator.is_some(),
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
-        // Single-machine confirmed-execution audit uses the structured log sink
-        // (the audit carrier when there is no manager DB).
-        audit: Arc::new(LogAuditSink),
+        // Audit sink: in fleet mode (a manager is configured) report events to
+        // the manager for DB persistence; otherwise keep the local log sink.
+        audit: audit_sink.clone(),
         diagnose_tasks: Default::default(),
         // Per-call manager authorization is injected by the inbound dispatcher;
         // the shared base context carries none.

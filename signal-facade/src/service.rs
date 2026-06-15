@@ -174,6 +174,22 @@ pub trait ControlFrameAuthorizer: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>>;
 }
 
+// ====== AuditObserver trait ======
+
+/// Consumes inbound `AiAuditEvent` frames for persistence. The manager
+/// implements this to write the audit row (after re-deriving the trusted
+/// subject from the reporting connection's `AuthContext` and applying the
+/// retention-level filter); the signal server leaves it unset, so audit frames
+/// are simply ignored there. `source` is the reporting connection (a
+/// token-authenticated desk server).
+pub trait AuditObserver: Send + Sync {
+    fn on_audit_event<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -255,6 +271,10 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// the manager (which wraps the frames with an authorization decision);
     /// `None` in the signal server, where the frames relay unwrapped.
     pub control_authorizer: Option<Arc<dyn ControlFrameAuthorizer>>,
+    /// Audit persistence observer for inbound `AiAuditEvent` frames. `Some` only
+    /// in the manager (which persists them); `None` elsewhere, where they are
+    /// ignored.
+    pub audit_observer: Option<Arc<dyn AuditObserver>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -413,6 +433,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             user,
             turn,
             control_authorizer: None,
+            audit_observer: None,
         })
     }
 
@@ -420,6 +441,13 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// server never calls this, leaving AI frames relayed unwrapped.
     pub fn with_control_authorizer(mut self, authorizer: Arc<dyn ControlFrameAuthorizer>) -> Self {
         self.control_authorizer = Some(authorizer);
+        self
+    }
+
+    /// Attach an audit observer (the manager persistence sink). The signal
+    /// server never calls this, so inbound audit frames are ignored there.
+    pub fn with_audit_observer(mut self, observer: Arc<dyn AuditObserver>) -> Self {
+        self.audit_observer = Some(observer);
         self
     }
 
@@ -712,6 +740,18 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::ExecResult => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
+            }
+
+            // AI audit event (host → manager only). Consumed by the manager's
+            // audit observer for persistence; never relayed to a peer (it must
+            // not re-enter the control-end broadcast lane). Ignored where no
+            // observer is attached (the signal server).
+            SignalingType::AiAuditEvent => {
+                if let Some(observer) = self.audit_observer.clone() {
+                    observer
+                        .on_audit_event(&self.connection_state, &signaling_model)
+                        .await;
+                }
             }
 
             // AI control-end → host request frames. In the manager these pass

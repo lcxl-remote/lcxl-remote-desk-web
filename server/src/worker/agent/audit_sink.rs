@@ -9,11 +9,48 @@
 //! Only content-free fields are logged (the builders already guarantee
 //! summaries carry counts / sizes, never raw data).
 
-use desk_agent_protocol::audit::{AuditEvent, AuditSink};
+use desk_agent_protocol::audit::{AiAuditEventPayload, AuditEvent, AuditSink};
+use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+use tokio::sync::broadcast;
 
 /// Logs each audit event at info level. The fixed field set keeps the line
 /// greppable; the raw artifact never appears (see module docs).
 pub struct LogAuditSink;
+
+/// Fleet-mode audit sink: logs locally **and** reports each event to the
+/// manager as an `AiAuditEvent(608)` signaling frame over the outbound lane,
+/// where the manager observer persists it into `ai_audit_event`. The manager is
+/// the only consumer — the signal server drops the frame and the daemon swallows
+/// any echo, so it never re-enters a browser-facing lane (security model §6 /
+/// D6). Used when a manager is configured; single-machine keeps [`LogAuditSink`].
+pub struct RemoteAuditSink {
+    outbound_tx: broadcast::Sender<String>,
+}
+
+impl RemoteAuditSink {
+    pub fn new(outbound_tx: broadcast::Sender<String>) -> Self {
+        Self { outbound_tx }
+    }
+}
+
+#[async_trait::async_trait]
+impl AuditSink for RemoteAuditSink {
+    async fn record(&self, event: AuditEvent) {
+        // Keep the local greppable line too, so a fleet host's log still shows
+        // its audit trail even if the manager link is momentarily down.
+        log::info!("{}", format_audit_line(&event));
+        let payload = AiAuditEventPayload { event };
+        match SignalingModel::new_request(SignalingType::AiAuditEvent, None, Some(&payload)) {
+            Ok(model) => match serde_json::to_string(&model) {
+                Ok(text) => {
+                    let _ = self.outbound_tx.send(text);
+                }
+                Err(e) => log::warn!("[ai-audit] failed to serialize AiAuditEvent: {e}"),
+            },
+            Err(e) => log::warn!("[ai-audit] failed to build AiAuditEvent model: {e}"),
+        }
+    }
+}
 
 /// Render one audit event as a fixed, greppable log line. The model accounting
 /// (provider / model / adapter / token usage) is included so the trail shows

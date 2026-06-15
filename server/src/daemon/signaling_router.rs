@@ -176,6 +176,11 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // rather than relay to the worker (which has no PC to act on).
         SignalingType::DesktopSwitching | SignalingType::DesktopReady => RouteOwnership::Daemon,
 
+        // AI audit event is emitted by this daemon toward the manager; it is
+        // never received inbound here. Classify as daemon-owned so a stray
+        // inbound frame is swallowed rather than forwarded to the worker.
+        SignalingType::AiAuditEvent => RouteOwnership::Daemon,
+
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
         // its own per-connection encoder set.
@@ -559,6 +564,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // dispatch the sealed plan. The execution itself + outbound
         // `ExecResult` land with the worker executor in a later step.
         SignalingType::ResolveExec => handle_resolve_exec_inbound(ctx, model).await,
+        // AI audit events are emitted by this daemon toward the manager; a stray
+        // inbound frame is swallowed (the daemon never persists audit itself).
+        SignalingType::AiAuditEvent => Ok(()),
     }
 }
 
