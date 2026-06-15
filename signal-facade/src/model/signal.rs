@@ -743,7 +743,7 @@ pub struct OfferModel {
 }
 
 /// Remote Desk Type Enum
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 #[schema(rename_all = "kebab-case")]
 pub enum RemoteDeskTypeEnum {

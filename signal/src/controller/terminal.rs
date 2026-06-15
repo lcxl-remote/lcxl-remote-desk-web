@@ -89,6 +89,9 @@ pub async fn open_terminal_session(
         ip,
         turn_provider,
         None,
+        desk_signal_facade::model::auth_context::AuthContext::anonymous(
+            RemoteDeskTypeEnum::Browser,
+        ),
         desk_server_version::SERVER_API_VERSION,
     )
     .await?;

@@ -51,6 +51,10 @@ pub struct ConnectionState {
     pub request_callback_map: Arc<RwLock<HashMap<String, oneshot::Sender<SignalingModel>>>>,
     /// Device code assigned to this connection (if it's a Server type connection)
     pub device_code: Option<String>,
+    /// Server-resolved authentication identity for this connection. Filled from
+    /// validated token/session state at connection setup; never from
+    /// client-supplied fields. Used by fleet authorization and audit attribution.
+    pub auth_context: crate::model::auth_context::AuthContext,
 }
 
 /// Shared connection map: connection_id -> ConnectionState

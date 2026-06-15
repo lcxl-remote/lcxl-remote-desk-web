@@ -1,4 +1,5 @@
 pub mod audio_capture;
+pub mod auth_context;
 pub mod connection;
 pub mod desk_settings;
 pub mod files;

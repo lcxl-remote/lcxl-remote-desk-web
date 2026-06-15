@@ -339,6 +339,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
         ip: Option<String>,
         turn: Option<Arc<dyn TurnProvider>>,
         device_code: Option<String>,
+        auth_context: crate::model::auth_context::AuthContext,
         server_api_version: i32,
     ) -> Result<Self, DeskSignalFacadeError> {
         log::info!(
@@ -365,6 +366,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             terminal_connection_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             request_callback_map: Arc::new(RwLock::new(std::collections::HashMap::new())),
             device_code,
+            auth_context,
         };
 
         connection_map

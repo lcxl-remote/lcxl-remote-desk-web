@@ -85,6 +85,12 @@ pub async fn handle_signaling(
         None
     };
 
+    // Signal server is not the fleet policy decision point; it carries an
+    // anonymous auth context tagged only with the connection's reported type.
+    let auth_context = desk_signal_facade::model::auth_context::AuthContext::anonymous(
+        client_version_info.remote_desk_type,
+    );
+
     let mut handler = SignalingHandler::init(
         connection_id,
         client_version_info,
@@ -94,6 +100,7 @@ pub async fn handle_signaling(
         ip,
         turn.map(|v| std::sync::Arc::new(v) as std::sync::Arc<dyn TurnProvider>),
         device_code,
+        auth_context,
         desk_server_version::SERVER_API_VERSION,
     )
     .await?;
