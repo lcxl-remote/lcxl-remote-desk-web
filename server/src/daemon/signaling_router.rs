@@ -306,6 +306,13 @@ pub struct RouterContext {
     pub diagnose_tasks: Arc<
         std::sync::Mutex<std::collections::HashMap<String, actix_web::rt::task::JoinHandle<()>>>,
     >,
+    /// Manager-injected authorization for the current inbound AI frame, set per
+    /// call by the proxy when a validated `AuthorizedControlPayload` arrives on
+    /// the Manager link. `None` on the local / remote-signaling links, where the
+    /// AI handlers fall back to local-config gating (no fleet PDP). Threaded
+    /// through the context (rather than the handler signatures) so the existing
+    /// `route()` / handler call sites stay untouched.
+    pub inbound_authz: Option<desk_agent_protocol::authz::AuthorizationBlock>,
 }
 
 /// Fresh audit event id.
@@ -1637,6 +1644,33 @@ async fn handle_diagnose_inbound(
         return Ok(());
     }
 
+    // Fleet PDP gate (manager link): diagnosis requires the orchestrator grant
+    // `ai.diagnose` plus at least one granted evidence capability, decided
+    // before any model call (and before the orchestrator-availability check) so
+    // an unauthorized request never incurs model cost or a success audit.
+    // Without a manager authorization (single-machine / remote-signaling) the
+    // local gates apply.
+    if let Some(authz) = &ctx.inbound_authz {
+        let has_diagnose = authz.orchestrator_grants.iter().any(|g| g == "ai.diagnose");
+        if !has_diagnose || authz.scope.granted.is_empty() {
+            emit_diagnose_event(
+                ctx,
+                model,
+                DiagnoseEvent::error(
+                    &model.request_id,
+                    0,
+                    agent_error(
+                        AgentErrorKind::PermissionDenied,
+                        "AI diagnosis is not permitted by policy",
+                        false,
+                        false,
+                    ),
+                ),
+            );
+            return Ok(());
+        }
+    }
+
     // The orchestrator is only injected where an in-process worker can collect
     // (Default / DeskServer). ServiceDaemon leaves it `None`: diagnose over the
     // cross-process collection path is a later additive step.
@@ -1985,11 +2019,48 @@ async fn handle_confirm_exec_inbound(
             );
             return Ok(());
         }
-        s.ai_model.execution_mode
+        // On the manager link the policy decision's execution mode replaces the
+        // local config mode (fleet PDP); otherwise the local mode applies.
+        match &ctx.inbound_authz {
+            Some(authz) => authz.scope.mode,
+            None => s.ai_model.execution_mode,
+        }
     };
 
     let outcome = crate::exec::classify_command(&exec_input);
     let classification = outcome.classification;
+
+    // Fleet PDP risk ceiling (manager link): refuse a command whose classified
+    // risk exceeds the policy's `max_risk`, regardless of execution mode.
+    if let Some(authz) = &ctx.inbound_authz
+        && classification.risk > authz.max_risk
+    {
+        ctx.audit
+            .record(AuditEvent::capability_denied(
+                new_audit_event_id(),
+                audit_now(),
+                &request_id,
+                risk_str(classification.risk),
+                classification.impact.clone(),
+            ))
+            .await;
+        send_exec_preview(
+            &ctx.outbound_tx,
+            &request_id,
+            to,
+            non_executable_preview(
+                shell,
+                command,
+                cwd,
+                limits.timeout_ms,
+                classification.risk,
+                "command exceeds the policy risk ceiling".to_string(),
+                Some("blocked by policy max_risk".to_string()),
+                None,
+            ),
+        );
+        return Ok(());
+    }
 
     // Decide executability from the classification + the active execution mode.
     let mode_note = match (
@@ -2410,8 +2481,14 @@ async fn handle_agent_request_inbound(
         return Ok(());
     };
 
-    // Authorize against the server-computed scope.
-    let scope = default_read_scope();
+    // Authorize against the server-computed scope. On the manager link the
+    // injected policy decision replaces the local default read scope (fleet
+    // PDP); without it (single-machine / remote-signaling) the local read scope
+    // applies.
+    let scope = match &ctx.inbound_authz {
+        Some(authz) => authz.scope.clone(),
+        None => default_read_scope(),
+    };
     if !authorize(capability, &scope.granted) {
         emit_agent_error(
             ctx,
@@ -2556,6 +2633,7 @@ mod tests {
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
+            inbound_authz: None,
         }
     }
 
@@ -4817,6 +4895,164 @@ mod tests {
         read_response(rx)
             .get_data::<ExecPreview>()
             .expect("ExecPreview payload")
+    }
+
+    // ====== Fleet policy injection (manager-link authorization) ======
+
+    use desk_agent_protocol::authz::{
+        AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthzActor, AuthzDevice,
+    };
+
+    /// Build an injected authorization block with the given granted scope,
+    /// orchestrator grants, mode, and max risk. Mirrors what the manager PDP
+    /// produces; the binding fields are not re-validated here (the proxy gate
+    /// already validated before injecting into the context).
+    fn authz_block(
+        granted: Vec<Capability>,
+        orchestrator_grants: Vec<&str>,
+        mode: ExecutionMode,
+        max_risk: desk_agent_protocol::RiskLevel,
+    ) -> AuthorizationBlock {
+        AuthorizationBlock {
+            version: AUTHORIZATION_BLOCK_VERSION,
+            scope: AgentScope {
+                granted,
+                mode,
+                expires_at: None,
+                policy_id: Some("test-policy".to_string()),
+            },
+            orchestrator_grants: orchestrator_grants.into_iter().map(String::from).collect(),
+            max_risk,
+            actor: AuthzActor { user_id: Some(1) },
+            device: AuthzDevice { device_id: Some(2) },
+            request_id: "req".to_string(),
+            session_id: None,
+            expires_at: None,
+            issuer: "manager".to_string(),
+            audience: "device".to_string(),
+            signature: None,
+        }
+    }
+
+    fn process_list_request() -> serde_json::Value {
+        serde_json::json!({
+            "operation": {
+                "risk_hint": null,
+                "input": {
+                    "kind": "read_context",
+                    "params": { "kind": { "kind": "process_list", "params": {} } }
+                }
+            },
+            "reason": null
+        })
+    }
+
+    /// With a manager authorization granting the requested capability, the
+    /// AgentRequest passes authorization (it proceeds to the worker, which is
+    /// absent in tests → `TargetOffline`, not `PermissionDenied`).
+    #[tokio::test]
+    async fn injected_scope_authorizes_granted_capability() {
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        configure_ai_model(&ctx).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ProcessList],
+            vec![],
+            ExecutionMode::ReadOnly,
+            desk_agent_protocol::RiskLevel::Low,
+        ));
+        handle_agent_request_inbound(&ctx, &agent_request_model(process_list_request()))
+            .await
+            .unwrap();
+        match read_outcome(&mut rx) {
+            AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::TargetOffline),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// With an empty injected scope the same request is denied — the manager
+    /// decision (not the local default read scope) governs.
+    #[tokio::test]
+    async fn injected_empty_scope_denies_capability() {
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        configure_ai_model(&ctx).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![],
+            vec![],
+            ExecutionMode::ReadOnly,
+            desk_agent_protocol::RiskLevel::Low,
+        ));
+        handle_agent_request_inbound(&ctx, &agent_request_model(process_list_request()))
+            .await
+            .unwrap();
+        match read_outcome(&mut rx) {
+            AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::PermissionDenied),
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+
+    /// Diagnose without the `ai.diagnose` orchestrator grant is refused before
+    /// any model call (and before the orchestrator-availability check).
+    #[tokio::test]
+    async fn diagnose_denied_without_ai_diagnose_grant() {
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        configure_ai_model(&ctx).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ProcessList],
+            vec![], // no ai.diagnose
+            ExecutionMode::ReadOnly,
+            desk_agent_protocol::RiskLevel::Low,
+        ));
+        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+        let event = read_response(&mut rx)
+            .get_data::<DiagnoseEvent>()
+            .expect("DiagnoseEvent");
+        assert_eq!(event.kind, DiagnoseEventKind::Error);
+        assert_eq!(event.error.unwrap().kind, AgentErrorKind::PermissionDenied);
+    }
+
+    /// Diagnose with `ai.diagnose` but zero granted evidence capabilities is
+    /// also refused (an empty-evidence model call is pointless).
+    #[tokio::test]
+    async fn diagnose_denied_with_ai_diagnose_but_no_evidence() {
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        configure_ai_model(&ctx).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![], // no evidence capability
+            vec!["ai.diagnose"],
+            ExecutionMode::ReadOnly,
+            desk_agent_protocol::RiskLevel::Low,
+        ));
+        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+        let event = read_response(&mut rx)
+            .get_data::<DiagnoseEvent>()
+            .expect("DiagnoseEvent");
+        assert_eq!(event.error.unwrap().kind, AgentErrorKind::PermissionDenied);
+    }
+
+    /// ConfirmExec for a command classified above the policy `max_risk` is
+    /// refused with a non-executable preview, regardless of execution mode.
+    #[tokio::test]
+    async fn confirm_exec_blocked_above_policy_max_risk() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        // A safe-template command classifies at some risk; cap max_risk at Low
+        // so any ConfirmRequired command above Low is refused by the ceiling.
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::Low,
+        ));
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Remove-Item C:\\x"))
+            .await
+            .unwrap();
+        let preview = read_preview(&mut rx);
+        assert!(!preview.executable, "must not be executable above max_risk");
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::worker::agent::audit_sink::LogAuditSink;
 use actix_web::web;
 use awc::{Client, Connector};
 use desk_agent_protocol::audit::AuditSink;
-use desk_agent_protocol::authz::AuthorizedControlPayload;
+use desk_agent_protocol::authz::{AuthorizationBlock, AuthorizedControlPayload};
 use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
 };
@@ -103,6 +103,9 @@ pub async fn run_signaling_proxy(
         // (the audit carrier when there is no manager DB).
         audit: Arc::new(LogAuditSink),
         diagnose_tasks: Default::default(),
+        // Per-call manager authorization is injected by the inbound dispatcher;
+        // the shared base context carries none.
+        inbound_authz: None,
     };
 
     let local_handle = {
@@ -1006,8 +1009,10 @@ pub enum InboundSignalingSource {
 
 /// Outcome of the source-gated authorization check for one inbound frame.
 enum AuthzGateOutcome {
-    /// Forward this (possibly unwrapped) model to the router.
-    Pass(SignalingModel),
+    /// Forward this (possibly unwrapped) model to the router, carrying the
+    /// validated authorization block when the frame arrived wrapped from the
+    /// manager link.
+    Pass(SignalingModel, Option<AuthorizationBlock>),
     /// Drop the frame; the string explains why (for logging).
     Drop(String),
 }
@@ -1040,7 +1045,7 @@ fn gate_authz_frame(
     now_rfc3339: &str,
 ) -> AuthzGateOutcome {
     if !is_ai_control_frame(model.signaling_type) {
-        return AuthzGateOutcome::Pass(model);
+        return AuthzGateOutcome::Pass(model, None);
     }
 
     let has_wrapper = model
@@ -1054,7 +1059,7 @@ fn gate_authz_frame(
         // Bare payload: local / remote-signaling go through local gating. The
         // Manager link tolerates bare frames until manager-side wrapping is in
         // place; enforcement of "Manager must wrap" lands with policy injection.
-        return AuthzGateOutcome::Pass(model);
+        return AuthzGateOutcome::Pass(model, None);
     }
 
     if source != InboundSignalingSource::Manager {
@@ -1079,9 +1084,9 @@ fn gate_authz_frame(
         return AuthzGateOutcome::Drop(format!("authz wrapper rejected: {e:?}"));
     }
 
-    // Validated: forward the inner payload as a bare frame. The enforcement
-    // stage threads `wrapper.authz` (scope / max_risk / orchestrator grants)
-    // into the handlers.
+    // Validated: forward the inner payload as a bare frame plus the validated
+    // authorization block, which the router threads into the AI handlers
+    // (scope / max_risk / orchestrator grants) to enforce the decision.
     let unwrapped = SignalingModel::new(
         &model.request_id,
         model.signaling_type,
@@ -1090,7 +1095,7 @@ fn gate_authz_frame(
         Some(wrapper.inner),
         model.response_state.clone(),
     );
-    AuthzGateOutcome::Pass(unwrapped)
+    AuthzGateOutcome::Pass(unwrapped, Some(wrapper.authz))
 }
 
 /// Inbound-text dispatcher pulled out of `maintain_proxy_connection`
@@ -1121,15 +1126,30 @@ async fn handle_inbound_signaling_text(
         s.system.get_client_id().unwrap_or_default()
     };
     let now = chrono::Utc::now().to_rfc3339();
-    let parsed = match gate_authz_frame(parsed, source, &expected_audience, &now) {
-        AuthzGateOutcome::Pass(m) => m,
+    let (parsed, authz) = match gate_authz_frame(parsed, source, &expected_audience, &now) {
+        AuthzGateOutcome::Pass(m, authz) => (m, authz),
         AuthzGateOutcome::Drop(reason) => {
             warn!("[Proxy] Dropping AI frame: {reason}");
             return;
         }
     };
 
-    if let Err(e) = signaling_router::route(&parsed, router_ctx).await {
+    // A validated manager authorization rides into the handlers via a per-call
+    // clone of the router context (cheap: the context is Arc-backed). This keeps
+    // `route()` and the AI handler signatures untouched.
+    let effective_ctx;
+    let ctx_ref = match authz {
+        Some(block) => {
+            effective_ctx = RouterContext {
+                inbound_authz: Some(block),
+                ..router_ctx.clone()
+            };
+            &effective_ctx
+        }
+        None => router_ctx,
+    };
+
+    if let Err(e) = signaling_router::route(&parsed, ctx_ref).await {
         warn!(
             "[Proxy] router handler failed for {:?}: {e}; dropping unrouted message",
             parsed.signaling_type,
@@ -1163,6 +1183,7 @@ mod tests {
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             audit: Arc::new(LogAuditSink),
             diagnose_tasks: Default::default(),
+            inbound_authz: None,
         };
         (ctx, outbound_tx)
     }
@@ -1318,7 +1339,7 @@ mod tests {
         );
         assert!(matches!(
             gate_authz_frame(model, InboundSignalingSource::Manager, "dev", NOW),
-            AuthzGateOutcome::Pass(_)
+            AuthzGateOutcome::Pass(_, _)
         ));
     }
 
@@ -1327,7 +1348,7 @@ mod tests {
         let model = bare_diagnose_model("r1");
         assert!(matches!(
             gate_authz_frame(model, InboundSignalingSource::Local, "dev", NOW),
-            AuthzGateOutcome::Pass(_)
+            AuthzGateOutcome::Pass(_, _)
         ));
     }
 
@@ -1352,7 +1373,7 @@ mod tests {
     fn valid_wrapper_from_manager_is_unwrapped_to_inner() {
         let model = wrapped_diagnose_model("r1", "dev-1");
         match gate_authz_frame(model, InboundSignalingSource::Manager, "dev-1", NOW) {
-            AuthzGateOutcome::Pass(m) => {
+            AuthzGateOutcome::Pass(m, _) => {
                 // The forwarded model carries the bare inner payload (no authz).
                 let obj = m.get_raw_data().as_ref().unwrap().as_object().unwrap();
                 assert!(!obj.contains_key("authz"));
