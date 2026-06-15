@@ -144,6 +144,36 @@ pub trait NodeTokenValidator: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
 }
 
+// ====== ControlFrameAuthorizer trait ======
+
+/// Outcome of authorizing a control-end AI frame before it is relayed to the
+/// host.
+pub enum ControlFrameOutcome {
+    /// Relay this (possibly wrapped) model to the peer.
+    Forward(SignalingModel),
+    /// Reject the frame; an error response is returned to the sender.
+    Reject {
+        code: DeskErrorCode,
+        message: String,
+    },
+}
+
+/// Authorizes (and optionally wraps) the control-end AI frames
+/// (`AgentRequest` / `Diagnose` / `ConfirmExec`) during relay. The manager
+/// implements this as the fleet policy decision point: it resolves the actor
+/// (the sending `actor` connection) and the target host (looked up in
+/// `connection_map`), evaluates the policy matrix, and wraps the frame in an
+/// `AuthorizedControlPayload`. The signal server leaves this unset (no fleet
+/// PDP), so frames relay unwrapped.
+pub trait ControlFrameAuthorizer: Send + Sync {
+    fn authorize<'a>(
+        &'a self,
+        actor: &'a ConnectionState,
+        connection_map: &'a SharedConnectionMap,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlFrameOutcome> + Send + 'a>>;
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -221,6 +251,10 @@ pub struct SignalingHandler<U: SignalingUser> {
     pub connection_map: web::Data<SharedConnectionMap>,
     pub user: U,
     pub turn: Option<Arc<dyn TurnProvider>>,
+    /// Fleet policy decision point for the control-end AI frames. `Some` only in
+    /// the manager (which wraps the frames with an authorization decision);
+    /// `None` in the signal server, where the frames relay unwrapped.
+    pub control_authorizer: Option<Arc<dyn ControlFrameAuthorizer>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -378,7 +412,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
             connection_map,
             user,
             turn,
+            control_authorizer: None,
         })
+    }
+
+    /// Attach a fleet control-frame authorizer (the manager PDP). The signal
+    /// server never calls this, leaving AI frames relayed unwrapped.
+    pub fn with_control_authorizer(mut self, authorizer: Arc<dyn ControlFrameAuthorizer>) -> Self {
+        self.control_authorizer = Some(authorizer);
+        self
     }
 
     /// Forward a signaling message to target peer
@@ -658,31 +700,41 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::AudioPlaybackError
             | SignalingType::DesktopSwitching
             | SignalingType::DesktopReady
-            // AI agent plane: AgentRequest (control end → host) and
-            // AgentResponse (host → control end) are plain browser↔host
-            // forwarded types, exactly like the manager-plane request /
-            // response pair. The signal server just relays them to the
-            // peer; the daemon does the trusted-field stamping + routing.
-            // Diagnose (control end → host) and DiagnoseEvent (host →
-            // control end, streamed) are the orchestrator-layer pair,
-            // relayed the same way. DiagnoseCancel (control end → host) is
-            // the handoff notification, relayed the same way.
-            | SignalingType::AgentRequest
+            // AI host → control-end responses and the handoff notification are
+            // plain relayed types (no authorization injection on the reply
+            // path). ResolveExec rides the prior approval, not a fresh policy
+            // decision, so it relays plainly too.
             | SignalingType::AgentResponse
-            | SignalingType::Diagnose
             | SignalingType::DiagnoseEvent
             | SignalingType::DiagnoseCancel
-            // AI confirmed-execution plane: ConfirmExec / ResolveExec (control
-            // end → host) and ExecPreview / ExecResult (host → control end) are
-            // plain browser↔host forwarded types, relayed exactly like the
-            // AgentRequest/Response and Diagnose pairs; the daemon does the
-            // classification, approval state machine, and trusted-field work.
-            | SignalingType::ConfirmExec
             | SignalingType::ExecPreview
             | SignalingType::ResolveExec
             | SignalingType::ExecResult => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
+            }
+
+            // AI control-end → host request frames. In the manager these pass
+            // through the fleet policy decision point, which authorizes and
+            // wraps them in an `AuthorizedControlPayload`; in the signal server
+            // (no authorizer) they relay unwrapped, exactly like before.
+            SignalingType::AgentRequest
+            | SignalingType::Diagnose
+            | SignalingType::ConfirmExec => {
+                let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
+                    match authorizer
+                        .authorize(&self.connection_state, &self.connection_map, &signaling_model)
+                        .await
+                    {
+                        ControlFrameOutcome::Forward(m) => m,
+                        ControlFrameOutcome::Reject { code, message } => {
+                            return DeskSignalFacadeError::custom_error(code, &message);
+                        }
+                    }
+                } else {
+                    signaling_model
+                };
+                self.forward_to_peer(&to_forward, false).await?;
             }
 
             SignalingType::Error => {
