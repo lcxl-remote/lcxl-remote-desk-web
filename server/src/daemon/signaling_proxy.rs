@@ -13,6 +13,7 @@ use crate::worker::agent::audit_sink::LogAuditSink;
 use actix_web::web;
 use awc::{Client, Connector};
 use desk_agent_protocol::audit::AuditSink;
+use desk_agent_protocol::authz::AuthorizedControlPayload;
 use desk_ipc_protocol::message::{
     ERROR_CODE_MEDIA_TRANSPORT_STUCK, VirtualDisplayModeOutcome, WorkerToService,
 };
@@ -152,6 +153,7 @@ pub async fn run_signaling_proxy(
                     local_url,
                     local_token,
                     rx,
+                    InboundSignalingSource::Local,
                 )
                 .await;
 
@@ -179,9 +181,15 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
-                    let _ =
-                        maintain_proxy_connection(settings.clone(), &router_ctx, url, token, rx)
-                            .await;
+                    let _ = maintain_proxy_connection(
+                        settings.clone(),
+                        &router_ctx,
+                        url,
+                        token,
+                        rx,
+                        InboundSignalingSource::RemoteSignaling,
+                    )
+                    .await;
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -208,9 +216,15 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
-                    let _ =
-                        maintain_proxy_connection(settings.clone(), &router_ctx, url, token, rx)
-                            .await;
+                    let _ = maintain_proxy_connection(
+                        settings.clone(),
+                        &router_ctx,
+                        url,
+                        token,
+                        rx,
+                        InboundSignalingSource::Manager,
+                    )
+                    .await;
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -851,6 +865,7 @@ async fn maintain_proxy_connection(
     signaling_url: String,
     auth_token: String,
     mut outbound_rx: broadcast::Receiver<String>,
+    source: InboundSignalingSource,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let display_name = {
         let s = settings.read().await;
@@ -925,7 +940,7 @@ async fn maintain_proxy_connection(
                                         continue;
                                     }
                                 };
-                                handle_inbound_signaling_text(text_str, router_ctx).await;
+                                handle_inbound_signaling_text(text_str, router_ctx, source).await;
                             }
                             awc::ws::Frame::Ping(data) => {
                                 let _ = sink.send(awc::ws::Message::Pong(data)).await;
@@ -972,22 +987,144 @@ async fn maintain_proxy_connection(
     Ok(())
 }
 
+/// Which upstream link an inbound signaling frame arrived on. This is the
+/// daemon-side notion of "where did this frame come from", distinct from the
+/// manager-side `AuthContext` ("how did this connection authenticate"). Only the
+/// `Manager` link is a trusted policy-decision upstream that may inject an
+/// [`AuthorizedControlPayload`]; the local and remote-signaling links carry bare
+/// payloads gated by local config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundSignalingSource {
+    /// The in-process / loopback signaling link (single-machine and the
+    /// service-daemon's own API). No fleet PDP.
+    Local,
+    /// A remote signaling server link. No fleet PDP.
+    RemoteSignaling,
+    /// The manager link — the only trusted authorization-injecting upstream.
+    Manager,
+}
+
+/// Outcome of the source-gated authorization check for one inbound frame.
+enum AuthzGateOutcome {
+    /// Forward this (possibly unwrapped) model to the router.
+    Pass(SignalingModel),
+    /// Drop the frame; the string explains why (for logging).
+    Drop(String),
+}
+
+/// True for the control-end AI frames that may carry an authorization wrapper.
+fn is_ai_control_frame(t: SignalingType) -> bool {
+    matches!(
+        t,
+        SignalingType::AgentRequest | SignalingType::Diagnose | SignalingType::ConfirmExec
+    )
+}
+
+/// Source-gate an inbound AI frame against the authorization wrapper rules
+/// (security model D11/D20):
+///
+/// - Non-AI frames pass through untouched.
+/// - A wrapper (`AuthorizedControlPayload`) is only legitimate from the
+///   `Manager` link; on any other source it is dropped (a non-manager upstream
+///   must never inject authorization).
+/// - On the `Manager` link a wrapper is validated against the frame
+///   (`request_id`), this daemon's audience, and expiry; on success the inner
+///   payload is unwrapped and forwarded. The carried decision is consumed by the
+///   enforcement step (the policy-injection stage); here the mechanism only
+///   validates and unwraps.
+/// - A bare payload passes through to local-config gating.
+fn gate_authz_frame(
+    model: SignalingModel,
+    source: InboundSignalingSource,
+    expected_audience: &str,
+    now_rfc3339: &str,
+) -> AuthzGateOutcome {
+    if !is_ai_control_frame(model.signaling_type) {
+        return AuthzGateOutcome::Pass(model);
+    }
+
+    let has_wrapper = model
+        .get_raw_data()
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .map(|o| o.contains_key("authz") && o.contains_key("inner"))
+        .unwrap_or(false);
+
+    if !has_wrapper {
+        // Bare payload: local / remote-signaling go through local gating. The
+        // Manager link tolerates bare frames until manager-side wrapping is in
+        // place; enforcement of "Manager must wrap" lands with policy injection.
+        return AuthzGateOutcome::Pass(model);
+    }
+
+    if source != InboundSignalingSource::Manager {
+        return AuthzGateOutcome::Drop(format!(
+            "AI frame carried an authz wrapper from non-Manager source {source:?}"
+        ));
+    }
+
+    let raw = match model.get_raw_data().clone() {
+        Some(v) => v,
+        None => return AuthzGateOutcome::Drop("wrapper frame had no data".to_string()),
+    };
+    let wrapper: AuthorizedControlPayload<serde_json::Value> = match serde_json::from_value(raw) {
+        Ok(w) => w,
+        Err(e) => return AuthzGateOutcome::Drop(format!("malformed authz wrapper: {e}")),
+    };
+
+    if let Err(e) = wrapper
+        .authz
+        .validate(&model.request_id, expected_audience, now_rfc3339)
+    {
+        return AuthzGateOutcome::Drop(format!("authz wrapper rejected: {e:?}"));
+    }
+
+    // Validated: forward the inner payload as a bare frame. The enforcement
+    // stage threads `wrapper.authz` (scope / max_risk / orchestrator grants)
+    // into the handlers.
+    let unwrapped = SignalingModel::new(
+        &model.request_id,
+        model.signaling_type,
+        model.from_connection_id.clone(),
+        model.to_connection_id.clone(),
+        Some(wrapper.inner),
+        model.response_state.clone(),
+    );
+    AuthzGateOutcome::Pass(unwrapped)
+}
+
 /// Inbound-text dispatcher pulled out of `maintain_proxy_connection`
 /// so the parse / route sequence is reusable for tests and the
 /// per-frame logic stays out of the WS select loop.
 ///
-/// Parses the inbound text once and hands the model to
+/// Parses the inbound text once, applies source-gated authorization wrapper
+/// handling ([`gate_authz_frame`]), and hands the model to
 /// [`signaling_router::route`]. The router exhaustively dispatches:
 /// PC / SDP / ICE types are handled inline, worker-bound types ride
 /// dedicated `ServiceToWorker::*` typed IPC variants, and
-/// daemon-emitted notifications are trace-logged + dropped. After
-/// batch 4 of the typed-IPC migration there is no fallback path —
-/// the previous opaque `SignalingMessage` bridge has been removed.
-async fn handle_inbound_signaling_text(text_str: String, router_ctx: &RouterContext) {
+/// daemon-emitted notifications are trace-logged + dropped.
+async fn handle_inbound_signaling_text(
+    text_str: String,
+    router_ctx: &RouterContext,
+    source: InboundSignalingSource,
+) {
     let parsed = match serde_json::from_str::<SignalingModel>(&text_str) {
         Ok(m) => m,
         Err(e) => {
             warn!("[Proxy] Dropping malformed signaling text: {e}");
+            return;
+        }
+    };
+
+    let expected_audience = {
+        let s = router_ctx.settings.read().await;
+        s.system.get_client_id().unwrap_or_default()
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let parsed = match gate_authz_frame(parsed, source, &expected_audience, &now) {
+        AuthzGateOutcome::Pass(m) => m,
+        AuthzGateOutcome::Drop(reason) => {
+            warn!("[Proxy] Dropping AI frame: {reason}");
             return;
         }
     };
@@ -1048,7 +1185,7 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-        handle_inbound_signaling_text(text, &router_ctx).await;
+        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local).await;
     }
 
     /// Malformed JSON arriving on the WS is dropped with a warning
@@ -1056,7 +1193,12 @@ mod tests {
     #[tokio::test]
     async fn drops_malformed_json() {
         let (router_ctx, _out_tx) = make_router_ctx();
-        handle_inbound_signaling_text("{ this is not valid json".to_string(), &router_ctx).await;
+        handle_inbound_signaling_text(
+            "{ this is not valid json".to_string(),
+            &router_ctx,
+            InboundSignalingSource::Local,
+        )
+        .await;
     }
 
     /// Daemon-owned RequestRemote without `from_connection_id` does
@@ -1075,7 +1217,7 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-        handle_inbound_signaling_text(text, &router_ctx).await;
+        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local).await;
     }
 
     /// Worker-bound signaling with `from_connection_id` reaches the
@@ -1096,7 +1238,185 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-        handle_inbound_signaling_text(text, &router_ctx).await;
+        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local).await;
+    }
+
+    // ====== Source-gated authorization wrapper ======
+
+    use desk_agent_protocol::authz::{
+        AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthzActor, AuthzDevice,
+    };
+    use desk_agent_protocol::diagnose::DiagnoseRequestData;
+    use desk_agent_protocol::{AgentScope, ExecutionMode, RiskLevel};
+
+    fn block(request_id: &str, audience: &str) -> AuthorizationBlock {
+        AuthorizationBlock {
+            version: AUTHORIZATION_BLOCK_VERSION,
+            scope: AgentScope {
+                granted: Vec::new(),
+                mode: ExecutionMode::ReadOnly,
+                expires_at: None,
+                policy_id: None,
+            },
+            orchestrator_grants: vec!["ai.diagnose".to_string()],
+            max_risk: RiskLevel::Low,
+            actor: AuthzActor { user_id: Some(1) },
+            device: AuthzDevice { device_id: Some(2) },
+            request_id: request_id.to_string(),
+            session_id: None,
+            expires_at: Some("2999-01-01T00:00:00Z".to_string()),
+            issuer: "manager".to_string(),
+            audience: audience.to_string(),
+            signature: None,
+        }
+    }
+
+    fn wrapped_diagnose_model(request_id: &str, audience: &str) -> SignalingModel {
+        let wrapper = AuthorizedControlPayload {
+            inner: DiagnoseRequestData {
+                question: "why slow?".to_string(),
+                ..Default::default()
+            },
+            authz: block(request_id, audience),
+        };
+        SignalingModel::new(
+            request_id,
+            SignalingType::Diagnose,
+            Some("browser-conn".to_string()),
+            Some("server-conn".to_string()),
+            Some(serde_json::to_value(&wrapper).unwrap()),
+            None,
+        )
+    }
+
+    fn bare_diagnose_model(request_id: &str) -> SignalingModel {
+        let inner = DiagnoseRequestData {
+            question: "why slow?".to_string(),
+            ..Default::default()
+        };
+        SignalingModel::new(
+            request_id,
+            SignalingType::Diagnose,
+            Some("browser-conn".to_string()),
+            Some("server-conn".to_string()),
+            Some(serde_json::to_value(&inner).unwrap()),
+            None,
+        )
+    }
+
+    const NOW: &str = "2026-06-14T00:00:00Z";
+
+    #[test]
+    fn non_ai_frame_passes_through_any_source() {
+        let model = SignalingModel::new(
+            "r",
+            SignalingType::Offer,
+            Some("c".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(
+            gate_authz_frame(model, InboundSignalingSource::Manager, "dev", NOW),
+            AuthzGateOutcome::Pass(_)
+        ));
+    }
+
+    #[test]
+    fn bare_ai_frame_passes_through_local() {
+        let model = bare_diagnose_model("r1");
+        assert!(matches!(
+            gate_authz_frame(model, InboundSignalingSource::Local, "dev", NOW),
+            AuthzGateOutcome::Pass(_)
+        ));
+    }
+
+    #[test]
+    fn wrapper_from_non_manager_source_is_dropped() {
+        for source in [
+            InboundSignalingSource::Local,
+            InboundSignalingSource::RemoteSignaling,
+        ] {
+            let model = wrapped_diagnose_model("r1", "dev-1");
+            assert!(
+                matches!(
+                    gate_authz_frame(model, source, "dev-1", NOW),
+                    AuthzGateOutcome::Drop(_)
+                ),
+                "wrapper from {source:?} must be dropped"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_wrapper_from_manager_is_unwrapped_to_inner() {
+        let model = wrapped_diagnose_model("r1", "dev-1");
+        match gate_authz_frame(model, InboundSignalingSource::Manager, "dev-1", NOW) {
+            AuthzGateOutcome::Pass(m) => {
+                // The forwarded model carries the bare inner payload (no authz).
+                let obj = m.get_raw_data().as_ref().unwrap().as_object().unwrap();
+                assert!(!obj.contains_key("authz"));
+                assert!(obj.contains_key("question"));
+            }
+            AuthzGateOutcome::Drop(reason) => panic!("expected unwrap, dropped: {reason}"),
+        }
+    }
+
+    #[test]
+    fn manager_wrapper_with_wrong_audience_is_dropped() {
+        let model = wrapped_diagnose_model("r1", "dev-1");
+        assert!(matches!(
+            gate_authz_frame(model, InboundSignalingSource::Manager, "other-device", NOW),
+            AuthzGateOutcome::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn manager_wrapper_expired_is_dropped() {
+        let mut wrapper = AuthorizedControlPayload {
+            inner: DiagnoseRequestData {
+                question: "q".to_string(),
+                ..Default::default()
+            },
+            authz: block("r1", "dev-1"),
+        };
+        wrapper.authz.expires_at = Some("2020-01-01T00:00:00Z".to_string());
+        let model = SignalingModel::new(
+            "r1",
+            SignalingType::Diagnose,
+            Some("browser-conn".to_string()),
+            Some("server-conn".to_string()),
+            Some(serde_json::to_value(&wrapper).unwrap()),
+            None,
+        );
+        assert!(matches!(
+            gate_authz_frame(model, InboundSignalingSource::Manager, "dev-1", NOW),
+            AuthzGateOutcome::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn manager_wrapper_request_id_mismatch_is_dropped() {
+        // Frame request_id differs from the authz block's request_id.
+        let wrapper = AuthorizedControlPayload {
+            inner: DiagnoseRequestData {
+                question: "q".to_string(),
+                ..Default::default()
+            },
+            authz: block("inner-req", "dev-1"),
+        };
+        let model = SignalingModel::new(
+            "frame-req",
+            SignalingType::Diagnose,
+            Some("browser-conn".to_string()),
+            Some("server-conn".to_string()),
+            Some(serde_json::to_value(&wrapper).unwrap()),
+            None,
+        );
+        assert!(matches!(
+            gate_authz_frame(model, InboundSignalingSource::Manager, "dev-1", NOW),
+            AuthzGateOutcome::Drop(_)
+        ));
     }
 
     // ====== Virtual display response routing ======
