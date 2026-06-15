@@ -181,6 +181,10 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // inbound frame is swallowed rather than forwarded to the worker.
         SignalingType::AiAuditEvent => RouteOwnership::Daemon,
 
+        // Command-template sync is applied to the daemon's own cache (the exec
+        // classifier reads it); never forwarded to the worker.
+        SignalingType::CommandTemplateSync => RouteOwnership::Daemon,
+
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
         // its own per-connection encoder set.
@@ -306,6 +310,11 @@ pub struct RouterContext {
     /// or the connection ending revokes it. Always present (in-memory state);
     /// only populated when the active mode is `SessionApproved`.
     pub session_approvals: Arc<crate::daemon::session_approval::SessionApprovalStore>,
+    /// Operator command templates synced from the manager (fleet only). The
+    /// exec classifier unions these with the built-in baseline; empty on
+    /// single-machine / remote-signaling links. Replaced wholesale on each
+    /// `CommandTemplateSync` from the manager.
+    pub command_templates: Arc<crate::daemon::command_templates::CommandTemplateCache>,
     /// Audit sink for the confirmed-execution lifecycle. Single-machine uses a
     /// structured log sink; a DB-backed sink can be substituted without touching
     /// the emission sites.
@@ -590,7 +599,41 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // AI audit events are emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never persists audit itself).
         SignalingType::AiAuditEvent => Ok(()),
+        // Command-template sync from the manager. The source gate
+        // (`handle_inbound_signaling_text`) has already dropped any non-Manager
+        // origin before reaching here; this only applies the validated set.
+        SignalingType::CommandTemplateSync => handle_command_template_sync_inbound(ctx, model),
     }
+}
+
+/// Apply an inbound `CommandTemplateSync` from the manager: parse the payload,
+/// reject an unknown wire version, and replace the operator-template cache
+/// (entries are shape-validated, fail-closed, inside `replace`). The exec
+/// classifier picks up the new set on the next `ConfirmExec`.
+fn handle_command_template_sync_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_agent_protocol::command_template::{
+        COMMAND_TEMPLATE_SYNC_VERSION, CommandTemplateSyncPayload,
+    };
+    let payload = match model.get_data::<CommandTemplateSyncPayload>() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("[router] bad CommandTemplateSync payload: {e}");
+            return Ok(());
+        }
+    };
+    if payload.version != COMMAND_TEMPLATE_SYNC_VERSION {
+        log::warn!(
+            "[router] ignoring CommandTemplateSync with unsupported version {}",
+            payload.version
+        );
+        return Ok(());
+    }
+    let accepted = ctx.command_templates.replace(payload.templates);
+    log::info!("[router] applied operator command-template sync: {accepted} template(s)");
+    Ok(())
 }
 
 /// Computes whether the daemon currently wants the worker in
@@ -2058,7 +2101,10 @@ async fn handle_confirm_exec_inbound(
         }
     };
 
-    let outcome = crate::exec::classify_command(&exec_input);
+    // Classify against the built-in baseline unioned with the operator
+    // templates synced from the manager (empty on single-machine links).
+    let operator_templates = ctx.command_templates.snapshot();
+    let outcome = crate::exec::classify_command_with(&exec_input, &operator_templates);
     let classification = outcome.classification;
 
     // Fleet PDP risk ceiling (manager link): refuse a command whose classified
@@ -2739,6 +2785,9 @@ mod tests {
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             session_approvals: Arc::new(
                 crate::daemon::session_approval::SessionApprovalStore::new(),
+            ),
+            command_templates: Arc::new(
+                crate::daemon::command_templates::CommandTemplateCache::new(),
             ),
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
@@ -5169,6 +5218,91 @@ mod tests {
             .unwrap();
         let preview = read_preview(&mut rx);
         assert!(!preview.executable, "must not be executable above max_risk");
+    }
+
+    fn command_template_sync_model(
+        templates: Vec<desk_agent_protocol::command_template::SyncedCommandTemplate>,
+    ) -> SignalingModel {
+        use desk_agent_protocol::command_template::{
+            COMMAND_TEMPLATE_SYNC_VERSION, CommandTemplateSyncPayload,
+        };
+        let payload = CommandTemplateSyncPayload {
+            version: COMMAND_TEMPLATE_SYNC_VERSION,
+            templates,
+        };
+        SignalingModel::new(
+            "rs",
+            SignalingType::CommandTemplateSync,
+            None,
+            None,
+            Some(serde_json::to_value(payload).unwrap()),
+            None,
+        )
+    }
+
+    /// A manager-synced operator template makes an off-built-in command
+    /// executable; the classifier picks up the new set on the next `ConfirmExec`.
+    #[tokio::test]
+    async fn synced_operator_template_becomes_executable_via_confirm_exec() {
+        use desk_agent_protocol::command_template::SyncedCommandTemplate;
+        use desk_agent_protocol::exec::ExecEffect;
+        let (ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+
+        // Before sync: an off-built-in command is not executable.
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Disk"))
+            .await
+            .unwrap();
+        assert!(!read_preview(&mut rx).executable);
+
+        route(
+            &command_template_sync_model(vec![SyncedCommandTemplate {
+                template_id: "get_disk".into(),
+                argv: vec!["Get-Disk".into()],
+                effect: ExecEffect::ReadOnly,
+            }]),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ctx.command_templates.len(), 1);
+
+        // After sync: the same command is executable.
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r2", "Get-Disk"))
+            .await
+            .unwrap();
+        let preview = read_preview(&mut rx);
+        assert!(preview.executable);
+        assert!(preview.requires_confirmation);
+    }
+
+    /// An operator template is still bound by the policy `max_risk` ceiling: a
+    /// mutating (High) operator template is refused when the policy caps risk at
+    /// Low — operator templates cannot escalate past the policy matrix.
+    #[tokio::test]
+    async fn synced_operator_template_still_bound_by_policy_max_risk() {
+        use desk_agent_protocol::command_template::SyncedCommandTemplate;
+        use desk_agent_protocol::exec::ExecEffect;
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::Low,
+        ));
+        ctx.command_templates.replace(vec![SyncedCommandTemplate {
+            template_id: "net_stop".into(),
+            argv: vec!["net".into(), "stop".into(), "spooler".into()],
+            effect: ExecEffect::Mutating,
+        }]);
+
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "net stop spooler"))
+            .await
+            .unwrap();
+        let preview = read_preview(&mut rx);
+        assert!(
+            !preview.executable,
+            "a mutating operator template must still be capped by policy max_risk"
+        );
     }
 
     /// SessionApproved: the first confirmation of a template prompts and parks a

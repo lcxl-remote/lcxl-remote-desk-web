@@ -777,6 +777,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 self.forward_to_peer(&to_forward, false).await?;
             }
 
+            SignalingType::CommandTemplateSync => {
+                // Manager → daemon only, originated server-side and written
+                // directly to the desk-server's session. A client sending it
+                // inbound to the signaling server is a protocol error; swallow
+                // it so a control end cannot forge a template sync.
+                log::warn!(
+                    "Received command-template sync from client {}, ignoring",
+                    self.connection_state.model.connection_id
+                );
+            }
             SignalingType::Error => {
                 log::warn!("Received error from client: {:?}", signaling_model);
             }

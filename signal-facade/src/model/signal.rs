@@ -217,6 +217,16 @@ pub enum SignalingType {
     /// (`response_state = None`).
     #[wincode(tag = 608)]
     AiAuditEvent = 608,
+    /// Command-template sync (manager → desk-server daemon only). Carries
+    /// `desk_agent_protocol::command_template::CommandTemplateSyncPayload`: the
+    /// full enabled operator template set. The manager pushes it on link
+    /// establishment and on any template change; the daemon replaces its cache
+    /// and unions the templates with its built-in baseline at classify time.
+    /// Accepted only from the trusted manager link (the inbound source gate
+    /// drops it from any other source). Notification-style
+    /// (`response_state = None`).
+    #[wincode(tag = 610)]
+    CommandTemplateSync = 610,
 
     /// Error
     #[wincode(tag = -1)]
@@ -834,7 +844,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 46] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 47] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -866,6 +876,7 @@ mod wincode_tests {
             (SignalingType::ResolveExec, 607),
             (SignalingType::ExecResult, 609),
             (SignalingType::AiAuditEvent, 608),
+            (SignalingType::CommandTemplateSync, 610),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),

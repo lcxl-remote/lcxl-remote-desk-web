@@ -1,4 +1,5 @@
 pub mod bitrate_controller;
+pub mod command_templates;
 pub mod exec_approval;
 pub mod local_api;
 pub mod pc_manager;

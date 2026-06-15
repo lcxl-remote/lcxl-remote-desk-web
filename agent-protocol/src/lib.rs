@@ -30,6 +30,7 @@ use wincode::{SchemaRead, SchemaWrite};
 
 pub mod audit;
 pub mod authz;
+pub mod command_template;
 pub mod diagnose;
 pub mod exec;
 

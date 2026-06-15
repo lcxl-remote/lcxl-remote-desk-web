@@ -117,6 +117,7 @@ pub async fn run_signaling_proxy(
         exec_supported: diagnose_orchestrator.is_some(),
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
         session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
+        command_templates: Arc::new(crate::daemon::command_templates::CommandTemplateCache::new()),
         // Audit sink: in fleet mode (a manager is configured) report events to
         // the manager for DB persistence; otherwise keep the local log sink.
         audit: audit_sink.clone(),
@@ -1139,6 +1140,16 @@ async fn handle_inbound_signaling_text(
         }
     };
 
+    // Source gate (D20): `CommandTemplateSync` is trusted manager→daemon
+    // plumbing. Accept it only from the Manager link; a Local / remote-signaling
+    // origin (no trusted PDP) must never inject operator templates.
+    if matches!(parsed.signaling_type, SignalingType::CommandTemplateSync)
+        && source != InboundSignalingSource::Manager
+    {
+        warn!("[Proxy] Dropping CommandTemplateSync from non-Manager source {source:?}");
+        return;
+    }
+
     let expected_audience = {
         let s = router_ctx.settings.read().await;
         s.system.get_client_id().unwrap_or_default()
@@ -1201,6 +1212,9 @@ mod tests {
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             session_approvals: Arc::new(
                 crate::daemon::session_approval::SessionApprovalStore::new(),
+            ),
+            command_templates: Arc::new(
+                crate::daemon::command_templates::CommandTemplateCache::new(),
             ),
             audit: Arc::new(LogAuditSink),
             diagnose_tasks: Default::default(),
@@ -1281,6 +1295,65 @@ mod tests {
         );
         let text = serde_json::to_string(&model).unwrap();
         handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local).await;
+    }
+
+    fn command_template_sync_text() -> String {
+        use desk_agent_protocol::command_template::{
+            COMMAND_TEMPLATE_SYNC_VERSION, CommandTemplateSyncPayload, SyncedCommandTemplate,
+        };
+        use desk_agent_protocol::exec::ExecEffect;
+        let payload = CommandTemplateSyncPayload {
+            version: COMMAND_TEMPLATE_SYNC_VERSION,
+            templates: vec![SyncedCommandTemplate {
+                template_id: "get_disk".into(),
+                argv: vec!["Get-Disk".into()],
+                effect: ExecEffect::ReadOnly,
+            }],
+        };
+        let model = SignalingModel::new(
+            "rs",
+            SignalingType::CommandTemplateSync,
+            None,
+            None,
+            Some(serde_json::to_value(payload).unwrap()),
+            None,
+        );
+        serde_json::to_string(&model).unwrap()
+    }
+
+    /// A `CommandTemplateSync` from a non-Manager source is dropped by the source
+    /// gate (the operator-template cache stays empty); from the Manager link it
+    /// is applied. This is the forged-sync rejection guarantee.
+    #[tokio::test]
+    async fn command_template_sync_is_accepted_only_from_manager_source() {
+        let (router_ctx, _out_tx) = make_router_ctx();
+
+        // Local source: dropped.
+        handle_inbound_signaling_text(
+            command_template_sync_text(),
+            &router_ctx,
+            InboundSignalingSource::Local,
+        )
+        .await;
+        assert_eq!(router_ctx.command_templates.len(), 0);
+
+        // Remote-signaling source: dropped (must not be mistaken for Manager).
+        handle_inbound_signaling_text(
+            command_template_sync_text(),
+            &router_ctx,
+            InboundSignalingSource::RemoteSignaling,
+        )
+        .await;
+        assert_eq!(router_ctx.command_templates.len(), 0);
+
+        // Manager source: applied.
+        handle_inbound_signaling_text(
+            command_template_sync_text(),
+            &router_ctx,
+            InboundSignalingSource::Manager,
+        )
+        .await;
+        assert_eq!(router_ctx.command_templates.len(), 1);
     }
 
     // ====== Source-gated authorization wrapper ======
