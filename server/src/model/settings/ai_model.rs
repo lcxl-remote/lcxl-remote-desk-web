@@ -56,19 +56,17 @@ pub enum ResponseFormatMode {
 }
 
 /// Where the model call is dialed from.
-///
-/// `ManagerProxy` is a reserved placeholder: the field and API exist so the
-/// configuration shape is stable, but the proxy is not implemented yet — the
-/// diagnose path refuses with `UnsupportedCapability` when it is selected. The
-/// real manager-proxied gateway is a later enterprise feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayMode {
-    /// The server dials the model gateway directly. Default.
+    /// The server dials the model gateway directly using the locally configured
+    /// model, base URL, and API key. Default.
     #[default]
     Direct,
-    /// Reserved: route the model call through the manager proxy. Not implemented
-    /// yet; selecting it makes diagnosis refuse.
+    /// Route the model call through the manager proxy: the server sends only the
+    /// prompt (authenticated with its `manager_api_token`) and the manager
+    /// injects the provider credentials and relays the response. Requires the
+    /// manager URL and token to be configured; no local provider key is needed.
     ManagerProxy,
 }
 
