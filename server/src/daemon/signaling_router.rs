@@ -27,7 +27,10 @@ use std::time::Duration;
 
 use actix_web::web;
 use desk_agent_protocol::audit::{AuditEvent, AuditSink};
-use desk_agent_protocol::diagnose::{DiagnoseEvent, DiagnoseRequestData};
+use desk_agent_protocol::diagnose::{
+    COLLECT_CHUNK_PAYLOAD_LIMIT, CollectRequest, CollectResponse, CollectResponseError,
+    DiagnoseEvent, DiagnoseRequestData,
+};
 use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPreview, ExecResultPayload, ResolveExecData,
 };
@@ -626,19 +629,90 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
 /// daemon's read-only collectors over the policy-gated capability set, refits
 /// any screenshot into a model-ready data URL, redacts text evidence, and
 /// streams the resulting [`EvidenceSnapshot`](desk_agent_protocol::evidence::EvidenceSnapshot)
-/// back to the manager as a chunked `CollectResponse`.
+/// back to the manager as a chunked `CollectResponse`. Always replies (a chunk
+/// stream or an error frame) so the manager's pending entry never hangs.
 async fn handle_collect_request_inbound(
-    _ctx: &RouterContext,
+    ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    // The collector execution + chunked response is wired with the edge-side
-    // collect path. Until then a request is acknowledged by being dropped (no
-    // central orchestrator issues one yet).
-    log::debug!(
-        "[router] remote-collect request {} received; collector path not active",
-        model.request_id
-    );
+    let request: CollectRequest = match model.get_data::<CollectRequest>() {
+        Ok(r) => r,
+        Err(e) => {
+            // No request_id to correlate; log and drop (the manager times out).
+            log::warn!("[router] dropping malformed CollectRequest: {e}");
+            return Ok(());
+        }
+    };
+    let request_id = request.request_id.clone();
+
+    // The collector is only injected where an in-process worker can collect
+    // (Default / DeskServer). Without it the edge cannot serve a remote
+    // collection — report a wholesale error.
+    let Some(orchestrator) = ctx.diagnose_orchestrator.clone() else {
+        send_collect_error(
+            &ctx.outbound_tx,
+            &request_id,
+            "evidence collector is not available on this host",
+        );
+        return Ok(());
+    };
+
+    match orchestrator
+        .collect_for_remote(&request_id, &request.request)
+        .await
+    {
+        Ok(snapshot) => {
+            match desk_diagnose_core::chunk::chunk_snapshot(
+                &request_id,
+                &snapshot,
+                COLLECT_CHUNK_PAYLOAD_LIMIT,
+            ) {
+                Ok(chunks) => {
+                    for chunk in chunks {
+                        send_collect_response(&ctx.outbound_tx, &CollectResponse::Chunk(chunk));
+                    }
+                }
+                Err(e) => {
+                    send_collect_error(
+                        &ctx.outbound_tx,
+                        &request_id,
+                        &format!("failed to encode evidence snapshot: {e}"),
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            send_collect_error(&ctx.outbound_tx, &request_id, &e.message);
+        }
+    }
     Ok(())
+}
+
+/// Serialize and emit a [`CollectResponse`] frame toward the manager over the
+/// outbound lane. Mirrors the audit-event emit path: a server-initiated
+/// `new_request` (its signaling `request_id` is unused — correlation rides the
+/// payload's `request_id`), consumed only by the manager's collect observer.
+fn send_collect_response(outbound_tx: &broadcast::Sender<String>, response: &CollectResponse) {
+    match SignalingModel::new_request(SignalingType::CollectResponse, None, Some(response)) {
+        Ok(model) => match serde_json::to_string(&model) {
+            Ok(text) => {
+                let _ = outbound_tx.send(text);
+            }
+            Err(e) => log::warn!("[collect] failed to serialize CollectResponse: {e}"),
+        },
+        Err(e) => log::warn!("[collect] failed to build CollectResponse model: {e}"),
+    }
+}
+
+/// Emit a wholesale [`CollectResponse::Error`] for `request_id`.
+fn send_collect_error(outbound_tx: &broadcast::Sender<String>, request_id: &str, reason: &str) {
+    send_collect_response(
+        outbound_tx,
+        &CollectResponse::Error(CollectResponseError {
+            request_id: request_id.to_string(),
+            reason: reason.to_string(),
+        }),
+    );
 }
 
 /// Apply an inbound `CommandTemplateSync` from the manager: parse the payload,
@@ -4777,6 +4851,125 @@ mod tests {
         assert_eq!(
             classify(SignalingType::DiagnoseCancel),
             RouteOwnership::Daemon
+        );
+    }
+
+    /// classify: the remote-collect pair is daemon-owned. The request drives the
+    /// daemon's collectors; the response is daemon-emitted toward the manager and
+    /// a stray inbound copy is swallowed.
+    #[test]
+    fn classify_collect_pair_is_daemon_owned() {
+        assert_eq!(
+            classify(SignalingType::CollectRequest),
+            RouteOwnership::Daemon
+        );
+        assert_eq!(
+            classify(SignalingType::CollectResponse),
+            RouteOwnership::Daemon
+        );
+    }
+
+    fn collect_request_model(request: CollectRequest) -> SignalingModel {
+        let raw = serde_json::to_value(&request).unwrap();
+        SignalingModel::new(
+            "sig-collect-1",
+            SignalingType::CollectRequest,
+            Some("manager".to_string()),
+            None,
+            Some(raw),
+            None,
+        )
+    }
+
+    fn collect_request(request_id: &str) -> CollectRequest {
+        CollectRequest {
+            request_id: request_id.to_string(),
+            request: DiagnoseRequestData {
+                question: "why is the host slow?".into(),
+                include_screen: false,
+                context_kinds: vec![],
+                locale: None,
+            },
+        }
+    }
+
+    /// Drain every queued `CollectResponse` frame off the outbound lane.
+    fn drain_collect_responses(rx: &mut broadcast::Receiver<String>) -> Vec<CollectResponse> {
+        let mut out = Vec::new();
+        while let Ok(text) = rx.try_recv() {
+            let model: SignalingModel = serde_json::from_str(&text).expect("valid signaling json");
+            assert!(matches!(
+                model.signaling_type,
+                SignalingType::CollectResponse
+            ));
+            out.push(
+                model
+                    .get_data::<CollectResponse>()
+                    .expect("CollectResponse"),
+            );
+        }
+        out
+    }
+
+    fn test_orchestrator(ctx: &RouterContext) -> Arc<DiagnoseOrchestrator> {
+        let collector = Arc::new(crate::diagnose::collector::AgentContextCollector::new(
+            Arc::new(crate::worker::agent::LocalDeviceAgent::new()),
+            ctx.settings.clone().into_inner(),
+        ));
+        Arc::new(DiagnoseOrchestrator::new(
+            collector,
+            Arc::new(crate::diagnose::redaction::RegexRedactor::new()),
+            Arc::new(crate::diagnose::StubDiagnoseModel),
+            Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
+        ))
+    }
+
+    /// With no in-process collector, a remote-collect request replies with a
+    /// wholesale error correlated to the request_id (never hangs the manager).
+    #[tokio::test]
+    async fn collect_request_without_orchestrator_replies_error() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        handle_collect_request_inbound(&ctx, &collect_request_model(collect_request("rc-1")))
+            .await
+            .unwrap();
+        let responses = drain_collect_responses(&mut rx);
+        assert_eq!(responses.len(), 1);
+        match &responses[0] {
+            CollectResponse::Error(e) => assert_eq!(e.request_id, "rc-1"),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+    }
+
+    /// A remote-collect request runs the in-process collectors and streams the
+    /// evidence back as chunks that reassemble into a snapshot carrying the
+    /// default read set (system.info is collected on every CI host).
+    #[tokio::test]
+    async fn collect_request_streams_reassemblable_snapshot() {
+        let mut ctx = make_ctx_with_rx().0;
+        ctx.diagnose_orchestrator = Some(test_orchestrator(&ctx));
+        // Subscribe after installing the orchestrator so the receiver is fresh.
+        let mut rx = ctx.outbound_tx.subscribe();
+
+        handle_collect_request_inbound(&ctx, &collect_request_model(collect_request("rc-2")))
+            .await
+            .unwrap();
+
+        let responses = drain_collect_responses(&mut rx);
+        assert!(!responses.is_empty(), "expected at least one chunk");
+        let mut reassembler = desk_diagnose_core::chunk::SnapshotReassembler::new();
+        for resp in &responses {
+            match resp {
+                CollectResponse::Chunk(c) => reassembler.push(c).expect("chunk accepted"),
+                CollectResponse::Error(e) => panic!("unexpected error: {}", e.reason),
+            }
+        }
+        let snapshot = reassembler.finish().expect("snapshot reassembles");
+        assert!(
+            snapshot
+                .contexts
+                .iter()
+                .any(|c| c.capability == "system.info"),
+            "snapshot should carry the default read set"
         );
     }
 

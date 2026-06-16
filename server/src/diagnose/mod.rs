@@ -171,6 +171,32 @@ impl DiagnoseOrchestrator {
         }
     }
 
+    /// Collect and redact evidence for a **remote** orchestrator (the central
+    /// brain). Runs only the collect + fail-closed redact phases of [`run`]; the
+    /// model call, audit, and rendering happen centrally on the manager. Raw
+    /// screenshot bytes are stripped after the refit so only the small model-ready
+    /// data URL travels off the host. A redaction failure returns an error (the
+    /// manager then aborts without calling the model — fail-closed end to end);
+    /// no audit is recorded here, since the central brain owns the audit trail for
+    /// the remote path.
+    pub async fn collect_for_remote(
+        &self,
+        request_id: &str,
+        request: &DiagnoseRequestData,
+    ) -> Result<EvidenceSnapshot, AgentError> {
+        let mut snapshot = self.collector.collect(request_id, request).await;
+        if let Err(error) = redact_snapshot(self.redactor.as_ref(), &mut snapshot) {
+            return Err(AgentError {
+                kind: AgentErrorKind::RedactionFailed,
+                message: format!("evidence redaction failed: {}", error.reason),
+                retryable: false,
+                safe_for_model: true,
+            });
+        }
+        crate::diagnose::model::screenshot::strip_raw_screenshots(&mut snapshot);
+        Ok(snapshot)
+    }
+
     /// Record that the operator handed a diagnosis off to a human ("转人工").
     /// Handoff is a UI-side action with no orchestrator state-machine branch;
     /// this only emits the `ai.task.cancelled` audit so the handoff is
@@ -501,6 +527,50 @@ mod tests {
         assert_eq!(audited.len(), 1);
         assert_eq!(audited[0].event_type, "ai.redaction.failed");
         assert_eq!(audited[0].request_id, "req_x");
+    }
+
+    /// `collect_for_remote` returns the redacted snapshot for the central brain:
+    /// the secret in the log evidence is scrubbed, and no model / audit runs here
+    /// (the manager owns those for the remote path).
+    #[tokio::test]
+    async fn collect_for_remote_returns_redacted_snapshot() {
+        let audit = RecordingAuditSink::default();
+        let orch = DiagnoseOrchestrator::new(
+            Arc::new(OkLogCollector),
+            Arc::new(RegexRedactor::new()),
+            Arc::new(StubDiagnoseModel),
+            Arc::new(audit.clone()),
+        );
+        let snapshot = orch
+            .collect_for_remote("req_rc", &request())
+            .await
+            .expect("collection succeeds");
+        // The redaction pass ran: the token in the log message is scrubbed.
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(
+            !json.contains("token=abc"),
+            "secret must be redacted: {json}"
+        );
+        assert!(snapshot.contexts.iter().any(|c| !c.redactions.is_empty()));
+        // No audit is recorded on the edge for the remote path.
+        assert!(audit.events.lock().unwrap().is_empty());
+    }
+
+    /// `collect_for_remote` is fail-closed: a redactor failure returns an error
+    /// (so the manager never calls the model) and records no edge audit.
+    #[tokio::test]
+    async fn collect_for_remote_fails_closed_on_redactor_failure() {
+        let orch = DiagnoseOrchestrator::new(
+            Arc::new(OkLogCollector),
+            Arc::new(FailingRedactor),
+            Arc::new(StubDiagnoseModel),
+            Arc::new(NoopAuditSink),
+        );
+        let err = orch
+            .collect_for_remote("req_rc_fail", &request())
+            .await
+            .expect_err("redaction failure must surface as an error");
+        assert_eq!(err.kind, AgentErrorKind::RedactionFailed);
     }
 
     /// The wired stub returns a low-confidence "not configured" diagnosis and

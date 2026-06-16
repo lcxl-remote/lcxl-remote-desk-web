@@ -103,6 +103,22 @@ pub fn refit_snapshot_screenshots(snapshot: &mut EvidenceSnapshot) {
     }
 }
 
+/// Drop the raw screenshot bytes from every screen entry, in place, keeping the
+/// model-ready `image_data_url`. Called before shipping a snapshot off-machine
+/// (the remote-collect response): the full-resolution capture (up to 12 MiB) must
+/// never travel, only the refit data URL the central brain attaches as a vision
+/// image. Run [`refit_snapshot_screenshots`] first so the data URL exists.
+pub fn strip_raw_screenshots(snapshot: &mut EvidenceSnapshot) {
+    for entry in &mut snapshot.contexts {
+        if let AgentOutcome::Ok(OperationOutput::ReadContext(
+            ReadContextOutput::ScreenCaptureCurrent(shot),
+        )) = &mut entry.outcome
+        {
+            shot.image = Vec::new();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +225,40 @@ mod tests {
             .as_ref()
             .expect("refit produced a data URL");
         assert!(url.starts_with("data:image/jpeg;base64,"));
+    }
+
+    /// Stripping raw bytes empties the screen capture while preserving the refit
+    /// data URL, so the off-machine snapshot carries only the small image.
+    #[test]
+    fn strip_clears_raw_bytes_keeps_data_url() {
+        use desk_agent_protocol::{Capability, ImageFormat as ProtoFmt, ScreenCaptureOutput};
+        let png = noisy_png(64, 64);
+        let shot = AgentOutcome::Ok(OperationOutput::ReadContext(
+            ReadContextOutput::ScreenCaptureCurrent(ScreenCaptureOutput {
+                format: ProtoFmt::Png,
+                width: 64,
+                height: 64,
+                image: png,
+                truncated: false,
+            }),
+        ));
+        let mut snap = EvidenceSnapshot::record(
+            "live",
+            "q",
+            "2026-06-16T00:00:00Z",
+            vec![(Capability::ScreenCaptureCurrent, shot)],
+        );
+        refit_snapshot_screenshots(&mut snap);
+        strip_raw_screenshots(&mut snap);
+        assert!(snap.contexts[0].image_data_url.is_some());
+        if let AgentOutcome::Ok(OperationOutput::ReadContext(
+            ReadContextOutput::ScreenCaptureCurrent(shot),
+        )) = &snap.contexts[0].outcome
+        {
+            assert!(shot.image.is_empty(), "raw bytes must be stripped");
+        } else {
+            panic!("expected a screen capture outcome");
+        }
     }
 
     /// A screenshot entry that fails to decode is left without a data URL rather
