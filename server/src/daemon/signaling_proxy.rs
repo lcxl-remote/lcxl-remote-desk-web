@@ -1155,13 +1155,19 @@ async fn handle_inbound_signaling_text(
         }
     };
 
-    // Source gate (D20): `CommandTemplateSync` is trusted manager→daemon
-    // plumbing. Accept it only from the Manager link; a Local / remote-signaling
-    // origin (no trusted PDP) must never inject operator templates.
-    if matches!(parsed.signaling_type, SignalingType::CommandTemplateSync)
-        && source != InboundSignalingSource::Manager
+    // Source gate: `CommandTemplateSync` and `CollectRequest` are trusted
+    // manager→daemon plumbing. Accept them only from the Manager link; a Local /
+    // remote-signaling origin (no trusted PDP) must never inject operator
+    // templates or drive an evidence collection.
+    if matches!(
+        parsed.signaling_type,
+        SignalingType::CommandTemplateSync | SignalingType::CollectRequest
+    ) && source != InboundSignalingSource::Manager
     {
-        warn!("[Proxy] Dropping CommandTemplateSync from non-Manager source {source:?}");
+        warn!(
+            "[Proxy] Dropping {:?} from non-Manager source {source:?}",
+            parsed.signaling_type
+        );
         return;
     }
 

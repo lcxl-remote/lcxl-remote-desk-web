@@ -185,6 +185,14 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // classifier reads it); never forwarded to the worker.
         SignalingType::CommandTemplateSync => RouteOwnership::Daemon,
 
+        // Remote-collect request: manager → daemon. In the thin-edge model the
+        // daemon runs its read-only collectors on behalf of the central
+        // orchestrator and streams a chunked CollectResponse back; handled inline
+        // against the daemon's collector, never forwarded to the worker.
+        // CollectResponse is daemon-emitted toward the manager and never received
+        // inbound here, so a stray inbound copy is swallowed daemon-side.
+        SignalingType::CollectRequest | SignalingType::CollectResponse => RouteOwnership::Daemon,
+
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
         // its own per-connection encoder set.
@@ -603,7 +611,34 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // (`handle_inbound_signaling_text`) has already dropped any non-Manager
         // origin before reaching here; this only applies the validated set.
         SignalingType::CommandTemplateSync => handle_command_template_sync_inbound(ctx, model),
+        // Remote-collect request from the manager: run the daemon-side read-only
+        // collectors and stream a chunked CollectResponse back. The source gate
+        // (`handle_inbound_signaling_text`) has already dropped any non-Manager
+        // origin before reaching here.
+        SignalingType::CollectRequest => handle_collect_request_inbound(ctx, model).await,
+        // CollectResponse is emitted by this daemon toward the manager; a stray
+        // inbound frame is swallowed (the daemon never consumes its own stream).
+        SignalingType::CollectResponse => Ok(()),
     }
+}
+
+/// Handle an inbound remote-collect request from the manager. Runs the
+/// daemon's read-only collectors over the policy-gated capability set, refits
+/// any screenshot into a model-ready data URL, redacts text evidence, and
+/// streams the resulting [`EvidenceSnapshot`](desk_agent_protocol::evidence::EvidenceSnapshot)
+/// back to the manager as a chunked `CollectResponse`.
+async fn handle_collect_request_inbound(
+    _ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    // The collector execution + chunked response is wired with the edge-side
+    // collect path. Until then a request is acknowledged by being dropped (no
+    // central orchestrator issues one yet).
+    log::debug!(
+        "[router] remote-collect request {} received; collector path not active",
+        model.request_id
+    );
+    Ok(())
 }
 
 /// Apply an inbound `CommandTemplateSync` from the manager: parse the payload,

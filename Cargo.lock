@@ -2619,6 +2619,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk-diagnose-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "desk-agent-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "desk-input-injection"
 version = "0.1.0"
 dependencies = [
@@ -4928,6 +4939,7 @@ dependencies = [
  "cpal",
  "desk-agent-protocol",
  "desk-capture-engine",
+ "desk-diagnose-core",
  "desk-input-injection",
  "desk-ipc-protocol",
  "desk-mcp-server",

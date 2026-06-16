@@ -32,50 +32,12 @@ use super::{DiagnoseModel, new_event_id, now_rfc3339};
 use crate::model::settings::{GatewayMode, ResponseFormatMode, SharedSettings};
 use crate::worker::agent::eval::EvidenceSnapshot;
 
-/// Default model context budget when `max_context_bytes` is unset (128 KB,
-/// security model §7).
-pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 131_072;
-
-/// Role of a chat message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
-    System,
-    User,
-}
-
-impl ChatRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-        }
-    }
-}
-
-/// One chat message. `image_data_url`, when set, is attached as a vision image
-/// alongside the text (OpenAI multi-part content).
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub text: String,
-    pub image_data_url: Option<String>,
-}
-
-/// What `response_format` the gateway is asked for. The diagnosis-specific
-/// schema (for [`ResponseFormatSpec::JsonSchema`]) is built by the model layer
-/// and carried here, so the adapter stays generic and just serializes it.
-#[derive(Debug, Clone)]
-pub enum ResponseFormatSpec {
-    /// Omit `response_format` entirely.
-    None,
-    /// `{"type":"json_object"}`.
-    JsonObject,
-    /// `{"type":"json_schema","json_schema":{name,strict:true,schema}}`.
-    JsonSchema {
-        name: String,
-        schema: serde_json::Value,
-    },
-}
+/// Default model context budget when `max_context_bytes` is unset (128 KB). The
+/// neutral chat-message types and prompt budget now live in the shared
+/// `desk-diagnose-core` crate; re-exported so existing `super::{ChatMessage,
+/// ChatRole, ResponseFormatSpec}` paths in the adapters keep resolving.
+pub use desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES;
+pub use desk_diagnose_core::prompt::{ChatMessage, ChatRole, ResponseFormatSpec};
 
 /// A chat-completion request to the model gateway.
 #[derive(Debug, Clone)]

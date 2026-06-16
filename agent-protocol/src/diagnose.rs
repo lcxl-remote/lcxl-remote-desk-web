@@ -45,6 +45,103 @@ pub struct DiagnoseRequestData {
     pub locale: Option<String>,
 }
 
+// ===================== Remote-collect RPC (A ↔ B) =====================
+//
+// In the thin-edge model the orchestrator runs centrally (A). To gather
+// evidence it asks the edge (B) to run its read-only collectors over the
+// already-established B→A signaling socket: A pushes a `CollectRequest`, B
+// replies with a chunked `CollectResponse` carrying the serialized
+// `EvidenceSnapshot`. These ride dedicated `SignalingType` variants; A is the
+// only party permitted to issue a request and the only party permitted to
+// consume a response (enforced at the signaling layer).
+
+/// Upper bound on the base64 `payload_b64` slice in a single
+/// [`CollectResponseChunk`]. The signaling transport caps a frame at
+/// `MAX_MESSAGE_SIZE` (16 MiB); base64 inflates bytes by ~4/3, so the raw slice
+/// per chunk must stay below `MAX_MESSAGE_SIZE * 3/4` with headroom for the
+/// surrounding JSON envelope. 1 MiB of base64 text per chunk leaves ample
+/// margin while keeping the chunk count small for typical snapshots.
+pub const COLLECT_CHUNK_PAYLOAD_LIMIT: usize = 1024 * 1024;
+
+/// A→B: ask the edge to collect read-only evidence for a diagnosis.
+///
+/// Only the central manager may issue this; the signaling layer drops a
+/// `CollectRequest` arriving from any other source. The edge re-runs its local
+/// `select_capabilities` gate against its own policy before collecting, so the
+/// edge keeps final say over what evidence may leave the machine.
+///
+/// v1 reuses [`DiagnoseRequestData`] and therefore only drives the
+/// parameter-free capabilities the generic selection path can build
+/// (`system.info` / `process.list` / `network.ports` / `service.status` /
+/// `log.recent` / `container.list` / `screen.capture.current`).
+/// `container.inspect` / `container.logs` need a caller-supplied container id
+/// and are **not** in v1; a future revision extends this with an explicit
+/// read-context list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectRequest {
+    /// Correlates the response chunks back to this request.
+    pub request_id: String,
+    /// The collection intent (question + `context_kinds` + `include_screen` +
+    /// `locale`). Authoritative fields (actor / device) stay on A.
+    pub request: DiagnoseRequestData,
+}
+
+/// One chunk of a B→A evidence response.
+///
+/// The edge serializes the whole [`crate::evidence::EvidenceSnapshot`] **once**
+/// to JSON bytes, slices those bytes on byte boundaries (so multi-byte UTF-8 is
+/// never split), and base64-encodes each slice into `payload_b64`. A reassembles
+/// by ordering on `seq`, concatenating the decoded bytes, verifying `total_len`
+/// and the final `sha256`, then deserializing the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectResponseChunk {
+    /// Correlates back to the originating [`CollectRequest`].
+    pub request_id: String,
+    /// Zero-based, monotonic chunk index.
+    pub seq: u32,
+    /// Whether this is the final chunk.
+    pub last: bool,
+    /// Total length, in bytes, of the full (pre-base64) JSON byte stream.
+    pub total_len: u64,
+    /// Base64 of this chunk's byte slice.
+    pub payload_b64: String,
+    /// Hex SHA-256 of the full byte stream. Set only on the final chunk
+    /// (`last = true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// B→A: the collection failed wholesale (gate denied, redaction failed, a fatal
+/// collector error). Distinct from a per-capability error, which rides inside
+/// the snapshot as an [`crate::AgentOutcome::Err`] entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectResponseError {
+    /// Correlates back to the originating [`CollectRequest`].
+    pub request_id: String,
+    /// Model-safe reason describing why collection failed.
+    pub reason: String,
+}
+
+/// B→A response frame for a [`CollectRequest`]: either a chunk of the evidence
+/// snapshot or a wholesale failure. Carried by one `SignalingType` variant so
+/// the manager has a single consume path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CollectResponse {
+    Chunk(CollectResponseChunk),
+    Error(CollectResponseError),
+}
+
+impl CollectResponse {
+    /// The `request_id` this response correlates to, regardless of variant.
+    pub fn request_id(&self) -> &str {
+        match self {
+            CollectResponse::Chunk(c) => &c.request_id,
+            CollectResponse::Error(e) => &e.request_id,
+        }
+    }
+}
+
 /// Confidence the model assigns to a diagnosis.
 #[derive(
     Debug,
@@ -344,5 +441,52 @@ mod tests {
         let _ = DiagnoseRequestData::schema();
         let _ = DiagnoseEvent::schema();
         let _ = Diagnosis::schema();
+    }
+
+    #[test]
+    fn collect_request_round_trips() {
+        let req = CollectRequest {
+            request_id: "req_1".into(),
+            request: DiagnoseRequestData {
+                question: "why slow?".into(),
+                include_screen: true,
+                context_kinds: vec!["system.info".into()],
+                locale: Some("zh-CN".into()),
+            },
+        };
+        let json = serde_json::to_string(&req).expect("encode");
+        let back: CollectRequest = serde_json::from_str(&json).expect("decode");
+        assert_eq!(req, back);
+    }
+
+    #[test]
+    fn collect_response_chunk_omits_sha_when_absent() {
+        let chunk = CollectResponseChunk {
+            request_id: "req_1".into(),
+            seq: 0,
+            last: false,
+            total_len: 10,
+            payload_b64: "AAAA".into(),
+            sha256: None,
+        };
+        let json = serde_json::to_string(&chunk).expect("encode");
+        assert!(!json.contains("sha256"));
+        let resp = CollectResponse::Chunk(chunk);
+        let json = serde_json::to_string(&resp).expect("encode");
+        let back: CollectResponse = serde_json::from_str(&json).expect("decode");
+        assert_eq!(resp, back);
+        assert_eq!(resp.request_id(), "req_1");
+    }
+
+    #[test]
+    fn collect_response_error_round_trips_and_correlates() {
+        let resp = CollectResponse::Error(CollectResponseError {
+            request_id: "req_2".into(),
+            reason: "redaction failed".into(),
+        });
+        let json = serde_json::to_string(&resp).expect("encode");
+        let back: CollectResponse = serde_json::from_str(&json).expect("decode");
+        assert_eq!(resp, back);
+        assert_eq!(resp.request_id(), "req_2");
     }
 }

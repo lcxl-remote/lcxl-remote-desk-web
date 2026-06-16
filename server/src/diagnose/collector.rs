@@ -71,7 +71,13 @@ impl ContextCollector for AgentContextCollector {
             entries.push((cap, outcome));
         }
 
-        EvidenceSnapshot::record("live", request.question.clone(), now_rfc3339(), entries)
+        let mut snapshot =
+            EvidenceSnapshot::record("live", request.question.clone(), now_rfc3339(), entries);
+        // Turn any raw screen capture into a model-ready data URL so the prompt
+        // layer (which never decodes raw image bytes) can attach it as a vision
+        // image.
+        super::model::screenshot::refit_snapshot_screenshots(&mut snapshot);
+        snapshot
     }
 }
 

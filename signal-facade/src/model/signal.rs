@@ -227,6 +227,22 @@ pub enum SignalingType {
     /// (`response_state = None`).
     #[wincode(tag = 610)]
     CommandTemplateSync = 610,
+    /// Remote-collect request (manager → desk-server daemon only). Carries
+    /// `desk_agent_protocol::diagnose::CollectRequest`. In the thin-edge model
+    /// the diagnose orchestrator runs centrally; the manager pushes this over the
+    /// established desk-server link to ask the edge to run its read-only
+    /// collectors. Accepted only from the trusted manager link (the inbound
+    /// source gate drops it from any other source). Notification-style
+    /// (`response_state = None`).
+    #[wincode(tag = 611)]
+    CollectRequest = 611,
+    /// Remote-collect response (desk-server daemon → manager only). Carries
+    /// `desk_agent_protocol::diagnose::CollectResponse` (a chunk of the evidence
+    /// snapshot or a wholesale error). Consumed by the manager's orchestrator
+    /// pending store, never relayed to a browser or another peer. Notification-
+    /// style (`response_state = None`).
+    #[wincode(tag = 612)]
+    CollectResponse = 612,
 
     /// Error
     #[wincode(tag = -1)]
@@ -844,7 +860,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 47] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 49] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -877,6 +893,8 @@ mod wincode_tests {
             (SignalingType::ExecResult, 609),
             (SignalingType::AiAuditEvent, 608),
             (SignalingType::CommandTemplateSync, 610),
+            (SignalingType::CollectRequest, 611),
+            (SignalingType::CollectResponse, 612),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),

@@ -32,6 +32,7 @@ pub mod audit;
 pub mod authz;
 pub mod command_template;
 pub mod diagnose;
+pub mod evidence;
 pub mod exec;
 pub mod model_proxy;
 

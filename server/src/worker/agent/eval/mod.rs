@@ -23,98 +23,12 @@ use desk_agent_protocol::{
     CpuInfo, DiskInfo, MemoryInfo, OperationOutput, PortEntry, ProcessEntry, ProcessListOutput,
     ReadContextOutput, SystemInfoOutput,
 };
-use serde::{Deserialize, Serialize};
 
-/// Schema version of the [`EvidenceSnapshot`] structure. Bump when the snapshot
-/// shape changes so eval regressions and the audit trail can attribute a result
-/// to the evidence schema that produced it.
-pub const EVIDENCE_SCHEMA_VERSION: &str = "evidence-v1";
-
-fn default_evidence_schema_version() -> String {
-    EVIDENCE_SCHEMA_VERSION.to_string()
-}
-
-/// One captured read context within a snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EvidenceEntry {
-    /// Dotted capability name (e.g. `process.list`).
-    pub capability: String,
-    /// The collector outcome, captured verbatim so replay is byte-identical to
-    /// what the daemon would have shipped.
-    pub outcome: AgentOutcome,
-    /// Names of fields that would be scrubbed before this evidence is shown to a
-    /// model. Empty now — the placeholder reserves the shape so M1b's
-    /// redaction pass populates it without a snapshot format change.
-    #[serde(default)]
-    pub redactions: Vec<String>,
-    /// Serialized JSON size of `outcome`, in bytes — the per-capability context
-    /// budget input for M1b.
-    pub size_bytes: usize,
-}
-
-/// A replayable bundle of evidence for one diagnosis scenario.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EvidenceSnapshot {
-    /// Stable scenario key (e.g. `high_cpu`).
-    pub scenario: String,
-    /// Human-readable description of the fault the snapshot represents.
-    pub description: String,
-    /// RFC3339 capture time. Fixed in committed fixtures so replay is
-    /// deterministic.
-    pub recorded_at: String,
-    /// Schema version of this snapshot, defaulting to the current
-    /// [`EVIDENCE_SCHEMA_VERSION`] for snapshots recorded before the field
-    /// existed (`#[serde(default)]` keeps older fixtures replayable).
-    #[serde(default = "default_evidence_schema_version")]
-    pub schema_version: String,
-    pub contexts: Vec<EvidenceEntry>,
-}
-
-impl EvidenceSnapshot {
-    /// Build a snapshot from a set of `(capability, outcome)` pairs, computing
-    /// each entry's serialized size. Redactions start empty.
-    pub fn record(
-        scenario: impl Into<String>,
-        description: impl Into<String>,
-        recorded_at: impl Into<String>,
-        entries: Vec<(Capability, AgentOutcome)>,
-    ) -> Self {
-        let contexts = entries
-            .into_iter()
-            .map(|(cap, outcome)| {
-                let size_bytes = serde_json::to_vec(&outcome).map(|v| v.len()).unwrap_or(0);
-                EvidenceEntry {
-                    capability: cap.as_str().to_string(),
-                    outcome,
-                    redactions: Vec::new(),
-                    size_bytes,
-                }
-            })
-            .collect();
-        EvidenceSnapshot {
-            scenario: scenario.into(),
-            description: description.into(),
-            recorded_at: recorded_at.into(),
-            schema_version: EVIDENCE_SCHEMA_VERSION.to_string(),
-            contexts,
-        }
-    }
-
-    /// Parse a snapshot from its JSON form (offline replay entry point).
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
-    }
-
-    /// Serialize to pretty JSON for committing as a fixture.
-    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
-    }
-
-    /// Total serialized evidence size across all contexts, in bytes.
-    pub fn total_size_bytes(&self) -> usize {
-        self.contexts.iter().map(|c| c.size_bytes).sum()
-    }
-}
+// The evidence snapshot DTO now lives in `desk-agent-protocol` so both the edge
+// (which produces it) and the central orchestrator (which consumes it) share one
+// definition. The scenario builders and committed fixtures stay here as the
+// server's offline eval foundation.
+pub use desk_agent_protocol::evidence::{EVIDENCE_SCHEMA_VERSION, EvidenceEntry, EvidenceSnapshot};
 
 // ----------------------- scenario builders -----------------------
 //

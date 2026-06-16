@@ -190,6 +190,22 @@ pub trait AuditObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== CollectObserver trait ======
+
+/// Consumes inbound `CollectResponse` frames (chunks of an evidence snapshot, or
+/// a wholesale error) from a desk-server daemon. The manager implements this to
+/// route the chunk into its orchestrator's pending store, keyed by `request_id`
+/// and validated against the connection that the matching `CollectRequest` was
+/// pushed to; the signal server leaves it unset, so the frames are ignored there.
+/// `source` is the reporting connection (a token-authenticated desk server).
+pub trait CollectObserver: Send + Sync {
+    fn on_collect_response<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -275,6 +291,10 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// in the manager (which persists them); `None` elsewhere, where they are
     /// ignored.
     pub audit_observer: Option<Arc<dyn AuditObserver>>,
+    /// Remote-collect response consumer for inbound `CollectResponse` frames.
+    /// `Some` only in the manager (which feeds them into its orchestrator's
+    /// pending store); `None` elsewhere, where they are ignored.
+    pub collect_observer: Option<Arc<dyn CollectObserver>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -434,6 +454,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             turn,
             control_authorizer: None,
             audit_observer: None,
+            collect_observer: None,
         })
     }
 
@@ -448,6 +469,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// server never calls this, so inbound audit frames are ignored there.
     pub fn with_audit_observer(mut self, observer: Arc<dyn AuditObserver>) -> Self {
         self.audit_observer = Some(observer);
+        self
+    }
+
+    /// Attach a remote-collect response consumer (the manager orchestrator's
+    /// pending store). The signal server never calls this, so inbound
+    /// `CollectResponse` frames are ignored there.
+    pub fn with_collect_observer(mut self, observer: Arc<dyn CollectObserver>) -> Self {
+        self.collect_observer = Some(observer);
         self
     }
 
@@ -786,6 +815,27 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     "Received command-template sync from client {}, ignoring",
                     self.connection_state.model.connection_id
                 );
+            }
+            SignalingType::CollectRequest => {
+                // Manager → daemon only, originated server-side and written
+                // directly to the desk-server's session. A client sending it
+                // inbound to the signaling server is a protocol error; swallow it
+                // so a control end cannot forge an evidence-collection request.
+                log::warn!(
+                    "Received remote-collect request from client {}, ignoring",
+                    self.connection_state.model.connection_id
+                );
+            }
+            SignalingType::CollectResponse => {
+                // Desk-server daemon → manager only. Consumed by the manager
+                // orchestrator's pending store; never relayed to a peer (it must
+                // not re-enter the control-end broadcast lane). Ignored where no
+                // orchestrator consumer is attached (the signal server).
+                if let Some(observer) = self.collect_observer.clone() {
+                    observer
+                        .on_collect_response(&self.connection_state, &signaling_model)
+                        .await;
+                }
             }
             SignalingType::Error => {
                 log::warn!("Received error from client: {:?}", signaling_model);
