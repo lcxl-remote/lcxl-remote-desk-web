@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::error::DeskError;
 
 mod ai_model;
+mod collection_policy;
 mod log_config;
 mod system;
 mod turn_client;
@@ -21,6 +22,7 @@ mod user;
 mod virtual_display;
 
 pub use ai_model::*;
+pub use collection_policy::*;
 pub use log_config::*;
 pub use system::*;
 pub use turn_client::*;
@@ -57,6 +59,13 @@ pub struct Settings {
     /// `RemoteSystemSettings`.
     #[serde(default)]
     pub ai_model: AiModelSettings,
+
+    /// Edge-side gate on what evidence may leave this host for an AI model
+    /// (`allow_logs` / `allow_screen`). Separate from `ai_model` so a thin edge
+    /// keeps the gate without holding model credentials; applied locally on every
+    /// collection. Default fail-closed (both `false`).
+    #[serde(default)]
+    pub collection_policy: CollectionPolicySettings,
 
     /// Command line arguments, come from clap and do not load from or save to config file
     #[serde(skip)]

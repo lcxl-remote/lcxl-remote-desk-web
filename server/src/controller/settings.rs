@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::host_control::{ApprovalResponse, HostControlHub};
 use crate::model::settings::{
-    AiModelSettingsPublic, AiModelSettingsUpdate, LogSettings, SharedSettings, SystemSettings,
+    AiModelSettingsPublic, AiModelSettingsUpdate, CollectionPolicySettings,
+    CollectionPolicySettingsUpdate, LogSettings, SharedSettings, SystemSettings,
     TurnClientSettings,
 };
 use crate::service::auto_start::update_auto_start_status;
@@ -111,6 +112,46 @@ pub async fn update_ai_model_settings(
     settings.save()?;
     // No content logged: the body carries the write-only api_key.
     info!("Update AI model settings successfully");
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[utoipa::path(
+    tag = "AiModel",
+    summary = "Query the edge collection policy",
+    responses(
+        (status = 200, description = "Query collection policy successfully", body=RestResponse<CollectionPolicySettings>),
+    ),
+)]
+#[get("/settings/collection-policy")]
+pub async fn query_collection_policy_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let settings = settings.read().await;
+    let public = settings.collection_policy.public_view();
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(public)))
+}
+
+#[utoipa::path(
+    tag = "AiModel",
+    summary = "Update the edge collection policy",
+    request_body(content = CollectionPolicySettingsUpdate),
+    responses(
+        (status = 200, description = "Update collection policy successfully"),
+    ),
+)]
+#[post("/settings/collection-policy")]
+pub async fn update_collection_policy_settings(
+    request_json: web::Json<CollectionPolicySettingsUpdate>,
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    let params = request_json.into_inner();
+    let mut settings = settings.write().await;
+    settings.collection_policy.apply_update(params);
+    settings.save()?;
+    info!(
+        "Update collection policy successfully: {:?}",
+        settings.collection_policy
+    );
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -488,7 +529,6 @@ mod tests {
             .set_json(AiModelSettingsUpdate {
                 provider: Some("openai-compatible".to_string()),
                 api_key: Some("sk-new-key".to_string()),
-                allow_logs: Some(true),
                 ..Default::default()
             })
             .to_request();
@@ -497,7 +537,10 @@ mod tests {
 
         let stored = shared.read().await;
         assert_eq!(stored.ai_model.api_key.as_deref(), Some("sk-new-key"));
-        assert!(stored.ai_model.allow_logs);
+        assert_eq!(
+            stored.ai_model.provider.as_deref(),
+            Some("openai-compatible")
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 

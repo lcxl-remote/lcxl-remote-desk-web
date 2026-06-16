@@ -50,8 +50,8 @@ impl ContextCollector for AgentContextCollector {
         let policy = {
             let settings = self.settings.read().await;
             CollectionPolicy {
-                allow_logs: settings.ai_model.allow_logs,
-                allow_screen: settings.ai_model.allow_screen,
+                allow_logs: settings.collection_policy.allow_logs,
+                allow_screen: settings.collection_policy.allow_screen,
             }
         };
 
@@ -138,8 +138,8 @@ mod tests {
 
     fn settings_with_logs(allow_logs: bool) -> Arc<SharedSettings> {
         let mut settings = Settings::default();
-        settings.ai_model.allow_logs = allow_logs;
-        settings.ai_model.allow_screen = false;
+        settings.collection_policy.allow_logs = allow_logs;
+        settings.collection_policy.allow_screen = false;
         Arc::new(SharedSettings::from(settings))
     }
 

@@ -202,7 +202,9 @@ impl ConfigPolicy {
 impl McpPolicy for ConfigPolicy {
     async fn allow_logs(&self) -> bool {
         // Fail closed: deny logs if the config cannot be read.
-        self.refresh().await.is_some_and(|s| s.ai_model.allow_logs)
+        self.refresh()
+            .await
+            .is_some_and(|s| s.collection_policy.allow_logs)
     }
 
     async fn diagnose_availability(&self) -> DiagnoseAvailability {
@@ -504,10 +506,10 @@ mod tests {
             settings: Arc::new(SharedSettings::from(Settings::default())),
         };
 
-        std::fs::write(&toml_path, "[ai_model]\nallow_logs = false\n").unwrap();
+        std::fs::write(&toml_path, "[collection_policy]\nallow_logs = false\n").unwrap();
         assert!(!policy.allow_logs().await, "false in config → denied");
 
-        std::fs::write(&toml_path, "[ai_model]\nallow_logs = true\n").unwrap();
+        std::fs::write(&toml_path, "[collection_policy]\nallow_logs = true\n").unwrap();
         assert!(
             policy.allow_logs().await,
             "live re-read picks up the change"
@@ -570,14 +572,18 @@ mod tests {
     async fn mcp_diagnose_collection_respects_live_allow_logs() {
         // Startup snapshot: logs allowed.
         let mut startup = Settings::default();
-        startup.ai_model.allow_logs = true;
+        startup.collection_policy.allow_logs = true;
         let shared = Arc::new(SharedSettings::from(startup));
 
         // Operator revokes logs in the persisted config.
         let dir = std::env::temp_dir().join(format!("mcp-live-logs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let base = dir.join("config");
-        std::fs::write(dir.join("config.toml"), "[ai_model]\nallow_logs = false\n").unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "[collection_policy]\nallow_logs = false\n",
+        )
+        .unwrap();
         let args = Args {
             config_file_path: base.to_string_lossy().to_string(),
             ..Default::default()
@@ -590,7 +596,7 @@ mod tests {
         // The diagnose gate runs first and refreshes the shared settings.
         let _ = policy.diagnose_availability().await;
         assert!(
-            !shared.read().await.ai_model.allow_logs,
+            !shared.read().await.collection_policy.allow_logs,
             "gate must publish the live allow_logs=false into shared settings"
         );
 

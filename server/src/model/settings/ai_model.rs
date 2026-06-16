@@ -86,10 +86,6 @@ pub struct AiModelSettings {
     /// Server-side secret. Never serialized into a public / remote view; its
     /// `Debug` is redacted and it must be stripped from full-config logs.
     pub api_key: Option<String>,
-    /// Whether screenshots may be sent to the model. Default `false`.
-    pub allow_screen: bool,
-    /// Whether logs may be sent to the model. Default `false`.
-    pub allow_logs: bool,
     /// Upper bound on the structured evidence sent to the model, in bytes.
     pub max_context_bytes: Option<u64>,
     /// How the gateway is asked to constrain output format. Default
@@ -131,8 +127,6 @@ impl AiModelSettings {
             provider: self.provider.clone(),
             model: self.model.clone(),
             base_url: self.base_url.clone(),
-            allow_screen: self.allow_screen,
-            allow_logs: self.allow_logs,
             max_context_bytes: self.max_context_bytes,
             response_format: self.response_format,
             execution_mode: self.execution_mode,
@@ -153,12 +147,6 @@ impl AiModelSettings {
         }
         if let Some(base_url) = update.base_url {
             self.base_url = Some(base_url);
-        }
-        if let Some(allow_screen) = update.allow_screen {
-            self.allow_screen = allow_screen;
-        }
-        if let Some(allow_logs) = update.allow_logs {
-            self.allow_logs = allow_logs;
         }
         if let Some(max_context_bytes) = update.max_context_bytes {
             self.max_context_bytes = Some(max_context_bytes);
@@ -192,8 +180,6 @@ impl fmt::Debug for AiModelSettings {
             .field("base_url", &self.base_url)
             // Redact: report presence, never the value.
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
-            .field("allow_screen", &self.allow_screen)
-            .field("allow_logs", &self.allow_logs)
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
             .field("execution_mode", &self.execution_mode)
@@ -210,8 +196,6 @@ pub struct AiModelSettingsPublic {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub allow_screen: bool,
-    pub allow_logs: bool,
     pub max_context_bytes: Option<u64>,
     pub response_format: ResponseFormatMode,
     pub execution_mode: ExecutionMode,
@@ -230,8 +214,6 @@ pub struct AiModelSettingsUpdate {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub allow_screen: Option<bool>,
-    pub allow_logs: Option<bool>,
     pub max_context_bytes: Option<u64>,
     /// `None` leaves the stored mode unchanged.
     pub response_format: Option<ResponseFormatMode>,
@@ -250,8 +232,6 @@ impl fmt::Debug for AiModelSettingsUpdate {
             .field("provider", &self.provider)
             .field("model", &self.model)
             .field("base_url", &self.base_url)
-            .field("allow_screen", &self.allow_screen)
-            .field("allow_logs", &self.allow_logs)
             .field("max_context_bytes", &self.max_context_bytes)
             .field("response_format", &self.response_format)
             .field("execution_mode", &self.execution_mode)
@@ -271,8 +251,6 @@ mod tests {
             model: Some("example-model".into()),
             base_url: Some("https://api.example/v1".into()),
             api_key: Some("sk-secret-value".into()),
-            allow_screen: false,
-            allow_logs: false,
             max_context_bytes: Some(131_072),
             response_format: ResponseFormatMode::JsonObject,
             execution_mode: ExecutionMode::SuggestOnly,
@@ -341,14 +319,11 @@ mod tests {
         let mut s = AiModelSettings::default();
         s.apply_update(AiModelSettingsUpdate {
             provider: Some("openai-compatible".into()),
-            allow_logs: Some(true),
             max_context_bytes: Some(65_536),
             response_format: Some(ResponseFormatMode::JsonSchema),
             ..Default::default()
         });
         assert_eq!(s.provider.as_deref(), Some("openai-compatible"));
-        assert!(s.allow_logs);
-        assert!(!s.allow_screen); // untouched
         assert_eq!(s.max_context_bytes, Some(65_536));
         assert_eq!(s.response_format, ResponseFormatMode::JsonSchema);
 
