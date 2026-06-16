@@ -1,6 +1,9 @@
 export type { QueryAiModelSettingsQueryKey } from "./hooks/aiModelController/useQueryAiModelSettings.ts";
 export type { QueryAiModelSettingsSuspenseQueryKey } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
+export type { QueryCollectionPolicySettingsQueryKey } from "./hooks/aiModelController/useQueryCollectionPolicySettings.ts";
+export type { QueryCollectionPolicySettingsSuspenseQueryKey } from "./hooks/aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
 export type { UpdateAiModelSettingsMutationKey } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
+export type { UpdateCollectionPolicySettingsMutationKey } from "./hooks/aiModelController/useUpdateCollectionPolicySettings.ts";
 export type { ChangePasswordMutationKey } from "./hooks/authController/useChangePassword.ts";
 export type { GetCaptchaMutationKey } from "./hooks/authController/useGetCaptcha.ts";
 export type { LoginAccountMutationKey } from "./hooks/authController/useLoginAccount.ts";
@@ -94,6 +97,8 @@ export type {
   ChangePasswordMutation,
   ChangePasswordMutationRequest,
   ChangePasswordMutationResponse,
+  CollectionPolicySettings,
+  CollectionPolicySettingsUpdate,
   ConnectionList,
   ConnectionModel,
   CpuInfo,
@@ -244,6 +249,9 @@ export type {
   QueryBackendInfo200,
   QueryBackendInfoQuery,
   QueryBackendInfoQueryResponse,
+  QueryCollectionPolicySettings200,
+  QueryCollectionPolicySettingsQuery,
+  QueryCollectionPolicySettingsQueryResponse,
   QueryDriverStatus200,
   QueryDriverStatusQuery,
   QueryDriverStatusQueryResponse,
@@ -285,6 +293,7 @@ export type {
   ResponseFormatModeEnumKey,
   RestResponseAiModelSettingsPublic,
   RestResponseBackendInfo,
+  RestResponseCollectionPolicySettings,
   RestResponseLogSettings,
   RestResponseSecuritySettings,
   RestResponseServerInfo,
@@ -342,6 +351,10 @@ export type {
   UpdateAiModelSettingsMutation,
   UpdateAiModelSettingsMutationRequest,
   UpdateAiModelSettingsMutationResponse,
+  UpdateCollectionPolicySettings200,
+  UpdateCollectionPolicySettingsMutation,
+  UpdateCollectionPolicySettingsMutationRequest,
+  UpdateCollectionPolicySettingsMutationResponse,
   UpdateDeviceCode200,
   UpdateDeviceCodeMutation,
   UpdateDeviceCodeMutationRequest,
@@ -413,6 +426,7 @@ export {
   openTerminalSession,
   queryAiModelSettings,
   queryBackendInfo,
+  queryCollectionPolicySettings,
   queryDriverStatus,
   queryLogSettings,
   querySecuritySettings,
@@ -428,6 +442,7 @@ export {
   uninstallDriver,
   uninstallService,
   updateAiModelSettings,
+  updateCollectionPolicySettings,
   updateDeviceCode,
   updateLogSettings,
   updateSecuritySettings,
@@ -443,9 +458,18 @@ export { useQueryAiModelSettings } from "./hooks/aiModelController/useQueryAiMod
 export { queryAiModelSettingsSuspenseQueryKey } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
 export { queryAiModelSettingsSuspenseQueryOptions } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
 export { useQueryAiModelSettingsSuspense } from "./hooks/aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { queryCollectionPolicySettingsQueryKey } from "./hooks/aiModelController/useQueryCollectionPolicySettings.ts";
+export { queryCollectionPolicySettingsQueryOptions } from "./hooks/aiModelController/useQueryCollectionPolicySettings.ts";
+export { useQueryCollectionPolicySettings } from "./hooks/aiModelController/useQueryCollectionPolicySettings.ts";
+export { queryCollectionPolicySettingsSuspenseQueryKey } from "./hooks/aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
+export { queryCollectionPolicySettingsSuspenseQueryOptions } from "./hooks/aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
+export { useQueryCollectionPolicySettingsSuspense } from "./hooks/aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
 export { updateAiModelSettingsMutationKey } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
 export { updateAiModelSettingsMutationOptions } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
 export { useUpdateAiModelSettings } from "./hooks/aiModelController/useUpdateAiModelSettings.ts";
+export { updateCollectionPolicySettingsMutationKey } from "./hooks/aiModelController/useUpdateCollectionPolicySettings.ts";
+export { updateCollectionPolicySettingsMutationOptions } from "./hooks/aiModelController/useUpdateCollectionPolicySettings.ts";
+export { useUpdateCollectionPolicySettings } from "./hooks/aiModelController/useUpdateCollectionPolicySettings.ts";
 export { changePasswordMutationKey } from "./hooks/authController/useChangePassword.ts";
 export { changePasswordMutationOptions } from "./hooks/authController/useChangePassword.ts";
 export { useChangePassword } from "./hooks/authController/useChangePassword.ts";

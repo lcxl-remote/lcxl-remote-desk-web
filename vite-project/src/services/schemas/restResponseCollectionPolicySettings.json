@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "required": ["success", "code"],
+  "properties": {
+    "code": { "type": "integer", "format": "int32" },
+    "data": {
+      "type": "object",
+      "description": "Persisted edge collection policy. Mirrors the runtime\n[`desk_diagnose_core::selection::CollectionPolicy`] gate, read live at\ncollection time.",
+      "properties": {
+        "allow_logs": {
+          "type": "boolean",
+          "description": "Whether logs (`log.recent`, `container.logs`, raw `container.inspect`) may\nbe collected and sent to a model. Default `false`.",
+          "default": false
+        },
+        "allow_screen": {
+          "type": "boolean",
+          "description": "Whether a screenshot may be collected and sent to a model. Default\n`false`. A screenshot additionally requires the per-request\n`include_screen` flag.",
+          "default": false
+        }
+      }
+    },
+    "message": { "type": ["string", "null"] },
+    "success": { "type": "boolean" }
+  },
+  "x-readme-ref-name": "RestResponse_CollectionPolicySettings"
+}

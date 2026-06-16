@@ -2,16 +2,12 @@
   "type": "object",
   "description": "Masked public view returned by `GET /api/desk/settings/ai-model`.\n\nCarries no secret: only whether a key is configured (`api_key_set`).",
   "required": [
-    "allow_screen",
-    "allow_logs",
     "response_format",
     "execution_mode",
     "gateway_mode",
     "api_key_set"
   ],
   "properties": {
-    "allow_logs": { "type": "boolean" },
-    "allow_screen": { "type": "boolean" },
     "api_key_set": {
       "type": "boolean",
       "description": "Whether a non-empty API key is configured. The key itself is never\nreturned."
@@ -30,7 +26,7 @@
     },
     "gateway_mode": {
       "type": "string",
-      "description": "Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.",
+      "description": "Where the model call is dialed from.",
       "enum": ["direct", "manager_proxy"],
       "x-readme-ref-name": "GatewayMode"
     },

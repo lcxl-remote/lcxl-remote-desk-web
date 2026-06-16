@@ -58,7 +58,8 @@
         "signaling",
         "desk-server",
         "service-daemon",
-        "session-worker"
+        "session-worker",
+        "mcp-stdio"
       ],
       "x-readme-ref-name": "StartupMode"
     },

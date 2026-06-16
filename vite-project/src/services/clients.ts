@@ -46,6 +46,9 @@ import type {
   QueryAiModelSettingsQueryResponse,
   UpdateAiModelSettingsMutationRequest,
   UpdateAiModelSettingsMutationResponse,
+  QueryCollectionPolicySettingsQueryResponse,
+  UpdateCollectionPolicySettingsMutationRequest,
+  UpdateCollectionPolicySettingsMutationResponse,
   QueryLogSettingsQueryResponse,
   UpdateLogSettingsMutationRequest,
   UpdateLogSettingsMutationResponse,
@@ -679,6 +682,70 @@ export async function updateAiModelSettings(
   >({
     method: "POST",
     url: getUpdateAiModelSettingsUrl().url.toString(),
+    data: requestData,
+    ...requestConfig,
+  });
+  return res.data;
+}
+
+function getQueryCollectionPolicySettingsUrl() {
+  const res = {
+    method: "GET",
+    url: `/api/desk/settings/collection-policy` as const,
+  };
+  return res;
+}
+
+/**
+ * @summary Query the edge collection policy
+ * {@link /api/desk/settings/collection-policy}
+ */
+export async function queryCollectionPolicySettings(
+  config: Partial<RequestConfig> & { client?: Client } = {},
+) {
+  const { client: request = fetch, ...requestConfig } = config;
+
+  const res = await request<
+    QueryCollectionPolicySettingsQueryResponse,
+    ResponseErrorConfig<Error>,
+    unknown
+  >({
+    method: "GET",
+    url: getQueryCollectionPolicySettingsUrl().url.toString(),
+    ...requestConfig,
+  });
+  return res.data;
+}
+
+function getUpdateCollectionPolicySettingsUrl() {
+  const res = {
+    method: "POST",
+    url: `/api/desk/settings/collection-policy` as const,
+  };
+  return res;
+}
+
+/**
+ * @summary Update the edge collection policy
+ * {@link /api/desk/settings/collection-policy}
+ */
+export async function updateCollectionPolicySettings(
+  data: UpdateCollectionPolicySettingsMutationRequest,
+  config: Partial<
+    RequestConfig<UpdateCollectionPolicySettingsMutationRequest>
+  > & { client?: Client } = {},
+) {
+  const { client: request = fetch, ...requestConfig } = config;
+
+  const requestData = data;
+
+  const res = await request<
+    UpdateCollectionPolicySettingsMutationResponse,
+    ResponseErrorConfig<Error>,
+    UpdateCollectionPolicySettingsMutationRequest
+  >({
+    method: "POST",
+    url: getUpdateCollectionPolicySettingsUrl().url.toString(),
     data: requestData,
     ...requestConfig,
   });

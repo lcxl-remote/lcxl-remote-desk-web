@@ -45,7 +45,7 @@ export type GatewayModeEnumKey =
   (typeof gatewayModeEnum)[keyof typeof gatewayModeEnum];
 
 /**
- * @description Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.
+ * @description Where the model call is dialed from.
  */
 export type GatewayMode = GatewayModeEnumKey;
 
@@ -68,14 +68,6 @@ export type ResponseFormatMode = ResponseFormatModeEnumKey;
  */
 export type AiModelSettingsPublic = {
   /**
-   * @type boolean
-   */
-  allow_logs: boolean;
-  /**
-   * @type boolean
-   */
-  allow_screen: boolean;
-  /**
    * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
    * @type boolean
    */
@@ -89,7 +81,7 @@ export type AiModelSettingsPublic = {
    */
   execution_mode: ExecutionMode;
   /**
-   * @description Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.
+   * @description Where the model call is dialed from.
    * @type string
    */
   gateway_mode: GatewayMode;
@@ -117,14 +109,6 @@ export type AiModelSettingsPublic = {
  * @description Update body for `POST /api/desk/settings/ai-model`.\n\nEvery field is optional: `None` leaves the stored value unchanged. `api_key`\nis write-only with three-way semantics (see [`AiModelSettings::apply_update`]).
  */
 export type AiModelSettingsUpdate = {
-  /**
-   * @type boolean,null
-   */
-  allow_logs?: boolean | null;
-  /**
-   * @type boolean,null
-   */
-  allow_screen?: boolean | null;
   /**
    * @description Write-only. `None` = leave unchanged; `Some(\"\")` = clear; `Some(x)` = set.
    * @type string,null
@@ -272,6 +256,38 @@ export type BackendInfo = {
    * @type boolean
    */
   x11_env: boolean;
+};
+
+/**
+ * @description Persisted edge collection policy. Mirrors the runtime\n[`desk_diagnose_core::selection::CollectionPolicy`] gate, read live at\ncollection time.
+ */
+export type CollectionPolicySettings = {
+  /**
+   * @description Whether logs (`log.recent`, `container.logs`, raw `container.inspect`) may\nbe collected and sent to a model. Default `false`.
+   * @default false
+   * @type boolean | undefined
+   */
+  allow_logs?: boolean;
+  /**
+   * @description Whether a screenshot may be collected and sent to a model. Default\n`false`. A screenshot additionally requires the per-request\n`include_screen` flag.
+   * @default false
+   * @type boolean | undefined
+   */
+  allow_screen?: boolean;
+};
+
+/**
+ * @description Update body for `POST /api/desk/settings/collection-policy`. Every field is\noptional: `None` leaves the stored value unchanged.
+ */
+export type CollectionPolicySettingsUpdate = {
+  /**
+   * @type boolean,null
+   */
+  allow_logs?: boolean | null;
+  /**
+   * @type boolean,null
+   */
+  allow_screen?: boolean | null;
 };
 
 export const operationSystemEnumEnum = {
@@ -1627,14 +1643,6 @@ export type RestResponseAiModelSettingsPublic = {
    */
   data?: {
     /**
-     * @type boolean
-     */
-    allow_logs: boolean;
-    /**
-     * @type boolean
-     */
-    allow_screen: boolean;
-    /**
      * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
      * @type boolean
      */
@@ -1648,7 +1656,7 @@ export type RestResponseAiModelSettingsPublic = {
      */
     execution_mode: ExecutionMode;
     /**
-     * @description Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.
+     * @description Where the model call is dialed from.
      * @type string
      */
     gateway_mode: GatewayMode;
@@ -1741,6 +1749,39 @@ export type RestResponseBackendInfo = {
      * @type boolean
      */
     x11_env: boolean;
+  };
+  /**
+   * @type string,null
+   */
+  message?: string | null;
+  /**
+   * @type boolean
+   */
+  success: boolean;
+};
+
+export type RestResponseCollectionPolicySettings = {
+  /**
+   * @type integer, int32
+   */
+  code: number;
+  /**
+   * @description Persisted edge collection policy. Mirrors the runtime\n[`desk_diagnose_core::selection::CollectionPolicy`] gate, read live at\ncollection time.
+   * @type object | undefined
+   */
+  data?: {
+    /**
+     * @description Whether logs (`log.recent`, `container.logs`, raw `container.inspect`) may\nbe collected and sent to a model. Default `false`.
+     * @default false
+     * @type boolean | undefined
+     */
+    allow_logs?: boolean;
+    /**
+     * @description Whether a screenshot may be collected and sent to a model. Default\n`false`. A screenshot additionally requires the per-request\n`include_screen` flag.
+     * @default false
+     * @type boolean | undefined
+     */
+    allow_screen?: boolean;
   };
   /**
    * @type string,null
@@ -1936,6 +1977,7 @@ export const startupModeEnum = {
   "desk-server": "desk-server",
   "service-daemon": "service-daemon",
   "session-worker": "session-worker",
+  "mcp-stdio": "mcp-stdio",
 } as const;
 
 export type StartupModeEnumKey =
@@ -3538,6 +3580,37 @@ export type UpdateAiModelSettingsMutationResponse = UpdateAiModelSettings200;
 export type UpdateAiModelSettingsMutation = {
   Response: UpdateAiModelSettings200;
   Request: UpdateAiModelSettingsMutationRequest;
+  Errors: any;
+};
+
+/**
+ * @description Query collection policy successfully
+ */
+export type QueryCollectionPolicySettings200 =
+  RestResponseCollectionPolicySettings;
+
+export type QueryCollectionPolicySettingsQueryResponse =
+  QueryCollectionPolicySettings200;
+
+export type QueryCollectionPolicySettingsQuery = {
+  Response: QueryCollectionPolicySettings200;
+  Errors: any;
+};
+
+/**
+ * @description Update collection policy successfully
+ */
+export type UpdateCollectionPolicySettings200 = any;
+
+export type UpdateCollectionPolicySettingsMutationRequest =
+  CollectionPolicySettingsUpdate;
+
+export type UpdateCollectionPolicySettingsMutationResponse =
+  UpdateCollectionPolicySettings200;
+
+export type UpdateCollectionPolicySettingsMutation = {
+  Response: UpdateCollectionPolicySettings200;
+  Request: UpdateCollectionPolicySettingsMutationRequest;
   Errors: any;
 };
 

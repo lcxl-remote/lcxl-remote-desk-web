@@ -7,7 +7,9 @@ import { Loader2, Save } from "lucide-react"
 
 import { useQueryAiModelSettings } from "@/services/hooks/aiModelController/useQueryAiModelSettings"
 import { useUpdateAiModelSettings } from "@/services/hooks/aiModelController/useUpdateAiModelSettings"
-import type { AiModelSettingsUpdate } from "@/services/types"
+import { useQueryCollectionPolicySettings } from "@/services/hooks/aiModelController/useQueryCollectionPolicySettings"
+import { useUpdateCollectionPolicySettings } from "@/services/hooks/aiModelController/useUpdateCollectionPolicySettings"
+import type { AiModelSettingsUpdate, CollectionPolicySettingsUpdate } from "@/services/types"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -29,13 +31,18 @@ const aiModelSettingsSchema = z.object({
     base_url: z.string(),
     api_key: z.string(),
     clear_api_key: z.boolean(),
-    allow_screen: z.boolean(),
-    allow_logs: z.boolean(),
     max_context_bytes: z.number().min(0),
     response_format: z.enum(RESPONSE_FORMATS),
 })
 
 type AiModelSettingsFormValues = z.infer<typeof aiModelSettingsSchema>
+
+const collectionPolicySchema = z.object({
+    allow_screen: z.boolean(),
+    allow_logs: z.boolean(),
+})
+
+type CollectionPolicyFormValues = z.infer<typeof collectionPolicySchema>
 
 export function AiModelSettings() {
     const { t } = useTranslation()
@@ -55,8 +62,6 @@ export function AiModelSettings() {
             base_url: "",
             api_key: "",
             clear_api_key: false,
-            allow_screen: false,
-            allow_logs: false,
             max_context_bytes: 0,
             response_format: "json_object",
         },
@@ -84,8 +89,6 @@ export function AiModelSettings() {
                 base_url: data.base_url ?? "",
                 api_key: "",
                 clear_api_key: false,
-                allow_screen: data.allow_screen ?? false,
-                allow_logs: data.allow_logs ?? false,
                 max_context_bytes: data.max_context_bytes ?? 0,
                 response_format: rf,
             })
@@ -106,8 +109,6 @@ export function AiModelSettings() {
             provider: values.provider,
             model: values.model,
             base_url: values.base_url,
-            allow_screen: values.allow_screen,
-            allow_logs: values.allow_logs,
             // 0 means "use the default budget" — leave the stored value unchanged.
             max_context_bytes: values.max_context_bytes > 0 ? values.max_context_bytes : undefined,
             response_format: values.response_format,
@@ -134,6 +135,47 @@ export function AiModelSettings() {
         }
     }
 
+    // Collection policy: a separate edge-side gate (allow_logs / allow_screen),
+    // independent of the model gateway. The host always applies it locally.
+    const { data: policyResponse, isLoading: isPolicyLoading } = useQueryCollectionPolicySettings()
+    const { mutateAsync: updatePolicy, isPending: isPolicyUpdating } = useUpdateCollectionPolicySettings()
+
+    const policyForm = useForm<CollectionPolicyFormValues>({
+        resolver: zodResolver(collectionPolicySchema),
+        defaultValues: { allow_screen: false, allow_logs: false },
+    })
+
+    const didHydratePolicyRef = useRef(false)
+    useEffect(() => {
+        if (policyResponse?.data && !isPolicyLoading && !didHydratePolicyRef.current) {
+            didHydratePolicyRef.current = true
+            policyForm.reset({
+                allow_screen: policyResponse.data.allow_screen ?? false,
+                allow_logs: policyResponse.data.allow_logs ?? false,
+            })
+        }
+    }, [policyResponse?.data, isPolicyLoading, policyForm])
+
+    const onSubmitPolicy = async (values: CollectionPolicyFormValues) => {
+        const payload: CollectionPolicySettingsUpdate = {
+            allow_screen: values.allow_screen,
+            allow_logs: values.allow_logs,
+        }
+        try {
+            await updatePolicy({ data: payload })
+            toast({
+                title: t("pages.system.settings.success", "Success"),
+                description: t("pages.collectionPolicy.updateSucceedMessage", "Collection policy updated successfully"),
+            })
+        } catch {
+            toast({
+                variant: "destructive",
+                title: t("pages.system.settings.error", "Error"),
+                description: t("pages.collectionPolicy.updateFailedMessage", "Failed to update collection policy"),
+            })
+        }
+    }
+
     if (isLoading) {
         return (
             <div className="flex h-full items-center justify-center">
@@ -148,6 +190,9 @@ export function AiModelSettings() {
                 <h1 className="text-3xl font-bold tracking-tight">{t("pages.aiModel.settings.title", "AI Model")}</h1>
                 <p className="text-muted-foreground">
                     {t("pages.aiModel.settings.description", "Configure the AI model gateway used for diagnosis.")}
+                </p>
+                <p className="mt-2 text-sm text-amber-600 dark:text-amber-500">
+                    {t("pages.aiModel.settings.tlsHint", "When this host connects to a manager, strongly prefer wss:// behind a TLS reverse proxy so evidence in transit cannot be read by other applications on the network.")}
                 </p>
             </div>
 
@@ -331,47 +376,64 @@ export function AiModelSettings() {
                                 />
                             </div>
 
-                            <div className="space-y-4 rounded-md border p-4">
-                                <h3 className="text-sm font-medium">{t("pages.aiModel.settings.evidence", "Evidence sent to the model")}</h3>
-                                <FormField
-                                    control={form.control}
-                                    name="allow_logs"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
-                                            <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.aiModel.settings.allowLogs", "Allow logs")}</FormLabel>
-                                                <FormDescription>
-                                                    {t("pages.aiModel.settings.allowLogs.description", "Include recent logs / container logs in the evidence (redacted).")}
-                                                </FormDescription>
-                                            </div>
-                                            <FormControl>
-                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
-                                            </FormControl>
-                                        </FormItem>
-                                    )}
-                                />
-                                <FormField
-                                    control={form.control}
-                                    name="allow_screen"
-                                    render={({ field }) => (
-                                        <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
-                                            <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.aiModel.settings.allowScreen", "Allow screenshot")}</FormLabel>
-                                                <FormDescription>
-                                                    {t("pages.aiModel.settings.allowScreen.description", "Allow attaching a screenshot when the user opts in.")}
-                                                </FormDescription>
-                                            </div>
-                                            <FormControl>
-                                                <Switch checked={field.value} onCheckedChange={field.onChange} />
-                                            </FormControl>
-                                        </FormItem>
-                                    )}
-                                />
-                            </div>
-
                             <div className="flex justify-end">
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                    {t("pages.system.settings.save", "Save Settings")}
+                                </Button>
+                            </div>
+                        </form>
+                    </Form>
+                </CardContent>
+            </Card>
+
+            <Card className="mt-6">
+                <CardHeader>
+                    <CardTitle>{t("pages.collectionPolicy.title", "Evidence Collection Policy")}</CardTitle>
+                    <CardDescription>
+                        {t("pages.collectionPolicy.description", "Controls what evidence may leave this host for an AI model. Applied locally on every collection, regardless of who requests it — this host has the final say.")}
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <Form {...policyForm}>
+                        <form onSubmit={policyForm.handleSubmit(onSubmitPolicy)} className="space-y-4">
+                            <FormField
+                                control={policyForm.control}
+                                name="allow_logs"
+                                render={({ field }) => (
+                                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                                        <div className="space-y-0.5">
+                                            <FormLabel>{t("pages.collectionPolicy.allowLogs", "Allow logs")}</FormLabel>
+                                            <FormDescription>
+                                                {t("pages.collectionPolicy.allowLogs.description", "Include recent logs / container logs in the evidence (redacted).")}
+                                            </FormDescription>
+                                        </div>
+                                        <FormControl>
+                                            <Switch checked={field.value} onCheckedChange={field.onChange} />
+                                        </FormControl>
+                                    </FormItem>
+                                )}
+                            />
+                            <FormField
+                                control={policyForm.control}
+                                name="allow_screen"
+                                render={({ field }) => (
+                                    <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
+                                        <div className="space-y-0.5">
+                                            <FormLabel>{t("pages.collectionPolicy.allowScreen", "Allow screenshot")}</FormLabel>
+                                            <FormDescription>
+                                                {t("pages.collectionPolicy.allowScreen.description", "Allow attaching a screenshot when the user opts in.")}
+                                            </FormDescription>
+                                        </div>
+                                        <FormControl>
+                                            <Switch checked={field.value} onCheckedChange={field.onChange} />
+                                        </FormControl>
+                                    </FormItem>
+                                )}
+                            />
+                            <div className="flex justify-end">
+                                <Button type="submit" disabled={isPolicyUpdating}>
+                                    {isPolicyUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save", "Save Settings")}
                                 </Button>
                             </div>

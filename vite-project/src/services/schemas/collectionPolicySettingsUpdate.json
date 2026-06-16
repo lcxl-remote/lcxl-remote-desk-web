@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "description": "Update body for `POST /api/desk/settings/collection-policy`. Every field is\noptional: `None` leaves the stored value unchanged.",
+  "properties": {
+    "allow_logs": { "type": ["boolean", "null"] },
+    "allow_screen": { "type": ["boolean", "null"] }
+  },
+  "x-readme-ref-name": "CollectionPolicySettingsUpdate"
+}

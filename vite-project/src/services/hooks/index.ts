@@ -1,6 +1,9 @@
 export type { QueryAiModelSettingsQueryKey } from "./aiModelController/useQueryAiModelSettings.ts";
 export type { QueryAiModelSettingsSuspenseQueryKey } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
+export type { QueryCollectionPolicySettingsQueryKey } from "./aiModelController/useQueryCollectionPolicySettings.ts";
+export type { QueryCollectionPolicySettingsSuspenseQueryKey } from "./aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
 export type { UpdateAiModelSettingsMutationKey } from "./aiModelController/useUpdateAiModelSettings.ts";
+export type { UpdateCollectionPolicySettingsMutationKey } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
 export type { ChangePasswordMutationKey } from "./authController/useChangePassword.ts";
 export type { GetCaptchaMutationKey } from "./authController/useGetCaptcha.ts";
 export type { LoginAccountMutationKey } from "./authController/useLoginAccount.ts";
@@ -77,9 +80,18 @@ export { useQueryAiModelSettings } from "./aiModelController/useQueryAiModelSett
 export { queryAiModelSettingsSuspenseQueryKey } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
 export { queryAiModelSettingsSuspenseQueryOptions } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
 export { useQueryAiModelSettingsSuspense } from "./aiModelController/useQueryAiModelSettingsSuspense.ts";
+export { queryCollectionPolicySettingsQueryKey } from "./aiModelController/useQueryCollectionPolicySettings.ts";
+export { queryCollectionPolicySettingsQueryOptions } from "./aiModelController/useQueryCollectionPolicySettings.ts";
+export { useQueryCollectionPolicySettings } from "./aiModelController/useQueryCollectionPolicySettings.ts";
+export { queryCollectionPolicySettingsSuspenseQueryKey } from "./aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
+export { queryCollectionPolicySettingsSuspenseQueryOptions } from "./aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
+export { useQueryCollectionPolicySettingsSuspense } from "./aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
 export { updateAiModelSettingsMutationKey } from "./aiModelController/useUpdateAiModelSettings.ts";
 export { updateAiModelSettingsMutationOptions } from "./aiModelController/useUpdateAiModelSettings.ts";
 export { useUpdateAiModelSettings } from "./aiModelController/useUpdateAiModelSettings.ts";
+export { updateCollectionPolicySettingsMutationKey } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
+export { updateCollectionPolicySettingsMutationOptions } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
+export { useUpdateCollectionPolicySettings } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
 export { changePasswordMutationKey } from "./authController/useChangePassword.ts";
 export { changePasswordMutationOptions } from "./authController/useChangePassword.ts";
 export { useChangePassword } from "./authController/useChangePassword.ts";

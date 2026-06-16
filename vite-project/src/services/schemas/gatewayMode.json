@@ -1,6 +1,6 @@
 {
   "type": "string",
-  "description": "Where the model call is dialed from.\n\n`ManagerProxy` is a reserved placeholder: the field and API exist so the\nconfiguration shape is stable, but the proxy is not implemented yet — the\ndiagnose path refuses with `UnsupportedCapability` when it is selected. The\nreal manager-proxied gateway is a later enterprise feature.",
+  "description": "Where the model call is dialed from.",
   "enum": ["direct", "manager_proxy"],
   "x-readme-ref-name": "GatewayMode"
 }
