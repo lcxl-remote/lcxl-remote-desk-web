@@ -1075,9 +1075,18 @@ fn gate_authz_frame(
         .unwrap_or(false);
 
     if !has_wrapper {
-        // Bare payload: local / remote-signaling go through local gating. The
-        // Manager link tolerates bare frames until manager-side wrapping is in
-        // place; enforcement of "Manager must wrap" lands with policy injection.
+        // The Manager link always wraps AI control frames (its PDP authorizes
+        // and wraps every one), so a bare AI control frame from the Manager
+        // source is illegitimate — forged or a relay fault — and is dropped
+        // rather than falling through to the local default scope, which would
+        // bypass the fleet policy. Local / remote-signaling links have no PDP
+        // and pass bare frames through to local-config gating.
+        if source == InboundSignalingSource::Manager {
+            return AuthzGateOutcome::Drop(
+                "bare AI control frame from Manager source (authorization wrapper required)"
+                    .to_string(),
+            );
+        }
         return AuthzGateOutcome::Pass(model, None);
     }
 
@@ -1442,6 +1451,29 @@ mod tests {
         let model = bare_diagnose_model("r1");
         assert!(matches!(
             gate_authz_frame(model, InboundSignalingSource::Local, "dev", NOW),
+            AuthzGateOutcome::Pass(_, _)
+        ));
+    }
+
+    #[test]
+    fn bare_ai_frame_from_manager_is_dropped() {
+        // The manager always wraps AI control frames, so a bare one on the
+        // Manager link is illegitimate and must be dropped rather than falling
+        // through to the local default scope (which would bypass fleet policy).
+        let model = bare_diagnose_model("r1");
+        assert!(matches!(
+            gate_authz_frame(model, InboundSignalingSource::Manager, "dev", NOW),
+            AuthzGateOutcome::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn bare_ai_frame_passes_through_remote_signaling() {
+        // Remote-signaling links have no PDP; bare frames still pass to local
+        // gating (no regression for non-manager fleets).
+        let model = bare_diagnose_model("r1");
+        assert!(matches!(
+            gate_authz_frame(model, InboundSignalingSource::RemoteSignaling, "dev", NOW),
             AuthzGateOutcome::Pass(_, _)
         ));
     }

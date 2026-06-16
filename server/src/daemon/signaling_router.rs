@@ -1674,32 +1674,39 @@ async fn handle_diagnose_inbound(
 ) -> Result<(), RouterError> {
     let ai_model = ctx.settings.read().await.ai_model.clone();
 
-    // Manager-proxied gateway is a reserved placeholder. Refuse it before the
-    // not-configured gate so selecting `manager_proxy` always reports "proxy not
-    // available" rather than the misleading "gateway not configured" when no
-    // direct credentials are set (the proxy would supply them).
+    // Gateway readiness gate (the operator opt-in). The manager proxy holds the
+    // provider credentials, so it is "configured" once the manager URL + token
+    // are set (the orchestrator dials the proxy with them); a direct gateway
+    // instead needs the local model / base URL / API key. Until ready the read
+    // collectors stay dark and the control end is told to configure.
     if ai_model.gateway_mode == GatewayMode::ManagerProxy {
-        emit_diagnose_event(
-            ctx,
-            model,
-            DiagnoseEvent::error(
-                &model.request_id,
-                0,
-                agent_error(
-                    AgentErrorKind::UnsupportedCapability,
-                    "manager-proxied model gateway is not available yet",
-                    false,
-                    true,
+        let (manager_url, manager_token) = {
+            let s = ctx.settings.read().await;
+            (
+                s.system.manager_url.clone(),
+                s.system.manager_api_token.clone(),
+            )
+        };
+        let proxy_ready = manager_url.as_deref().is_some_and(|u| !u.is_empty())
+            && manager_token.as_deref().is_some_and(|t| !t.is_empty());
+        if !proxy_ready {
+            emit_diagnose_event(
+                ctx,
+                model,
+                DiagnoseEvent::error(
+                    &model.request_id,
+                    0,
+                    agent_error(
+                        AgentErrorKind::UnsupportedCapability,
+                        "manager-proxied model gateway requires a configured manager URL and token",
+                        false,
+                        true,
+                    ),
                 ),
-            ),
-        );
-        return Ok(());
-    }
-
-    // Gate on the model gateway being configured: configuring the model, base
-    // URL, and API key in AI model settings is the operator opt-in. Until then
-    // the read collectors stay dark and the control end is told to configure.
-    if !ai_model.is_configured() {
+            );
+            return Ok(());
+        }
+    } else if !ai_model.is_configured() {
         emit_diagnose_event(
             ctx,
             model,
@@ -2133,6 +2140,45 @@ async fn handle_confirm_exec_inbound(
                 classification.risk,
                 "command exceeds the policy risk ceiling".to_string(),
                 Some("blocked by policy max_risk".to_string()),
+                None,
+            ),
+        );
+        return Ok(());
+    }
+
+    // Fleet PDP capability gate (manager link): the command's required exec
+    // capability — the `shell.exec.readonly` vs `shell.exec.confirmed` split
+    // decided by the server-side classification — must be in the policy-granted
+    // scope. This mirrors the AgentRequest read path: a policy that grants only
+    // `shell.exec.readonly` must not run a mutating command even when the mode
+    // and `max_risk` would otherwise allow it. Without a manager authorization
+    // (single-machine / remote-signaling) the local mode / template gating is
+    // the authority, so the check is skipped.
+    if let Some(authz) = &ctx.inbound_authz
+        && let Some(required) = OperationInput::required_capability(&classification)
+        && !authorize(required, &authz.scope.granted)
+    {
+        ctx.audit
+            .record(AuditEvent::capability_denied(
+                new_audit_event_id(),
+                audit_now(),
+                &request_id,
+                risk_str(classification.risk),
+                classification.impact.clone(),
+            ))
+            .await;
+        send_exec_preview(
+            &ctx.outbound_tx,
+            &request_id,
+            to,
+            non_executable_preview(
+                shell,
+                command,
+                cwd,
+                limits.timeout_ms,
+                classification.risk,
+                "command requires a capability the policy does not grant".to_string(),
+                Some("blocked by policy scope".to_string()),
                 None,
             ),
         );
@@ -4708,14 +4754,14 @@ mod tests {
         assert!(err.message.contains("not available in this mode"));
     }
 
-    /// `gateway_mode = manager_proxy` is refused with the proxy message *before*
-    /// the not-configured gate, so it does not depend on direct credentials being
-    /// set (the proxy would supply them).
+    /// `gateway_mode = manager_proxy` without a manager URL / token is refused by
+    /// the readiness gate with the proxy-specific message (it does not require
+    /// the direct provider credentials, which the proxy would supply).
     #[tokio::test]
-    async fn diagnose_manager_proxy_emits_unsupported_before_config_gate() {
+    async fn diagnose_manager_proxy_without_manager_config_emits_error() {
         let (ctx, mut rx) = make_ctx_with_rx();
         {
-            // Manager-proxy selected, but no model / base_url / api_key set.
+            // Manager-proxy selected, but no manager URL / token set.
             let mut s = ctx.settings.write().await;
             s.ai_model.gateway_mode = GatewayMode::ManagerProxy;
         }
@@ -4730,8 +4776,39 @@ mod tests {
         let err = event.error.unwrap();
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
         assert!(
-            err.message.contains("manager-proxied"),
-            "expected the proxy message, got: {}",
+            err.message.contains("manager URL and token"),
+            "expected the proxy-config message, got: {}",
+            err.message
+        );
+    }
+
+    /// `gateway_mode = manager_proxy` with the manager URL + token configured
+    /// passes the readiness gate (no longer the old "not available yet"
+    /// placeholder). With no orchestrator injected it then reports the
+    /// mode-unavailable error — proving the request reaches the orchestrator
+    /// step instead of being hard-rejected up front.
+    #[tokio::test]
+    async fn diagnose_manager_proxy_configured_passes_readiness_gate() {
+        let (ctx, mut rx) = make_ctx_with_rx();
+        {
+            let mut s = ctx.settings.write().await;
+            s.ai_model.gateway_mode = GatewayMode::ManagerProxy;
+            s.system.manager_url = Some("ws://manager.example/api/desk/signaling".to_string());
+            s.system.manager_api_token = Some("tok".to_string());
+        }
+        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
+        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
+            .await
+            .unwrap();
+        let event = read_response(&mut rx)
+            .get_data::<DiagnoseEvent>()
+            .expect("DiagnoseEvent");
+        assert_eq!(event.kind, DiagnoseEventKind::Error);
+        let err = event.error.unwrap();
+        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+        assert!(
+            err.message.contains("not available in this mode"),
+            "expected to pass the readiness gate and hit the orchestrator gate, got: {}",
             err.message
         );
     }
@@ -5303,6 +5380,70 @@ mod tests {
             !preview.executable,
             "a mutating operator template must still be capped by policy max_risk"
         );
+    }
+
+    /// A policy that grants only `shell.exec.readonly` must not run a mutating
+    /// command even when the execution mode (ConfirmEachAction) and `max_risk`
+    /// (High) would otherwise allow it: the required `shell.exec.confirmed`
+    /// capability is not in the granted scope, so the daemon denies it.
+    #[tokio::test]
+    async fn confirm_exec_denied_when_required_capability_not_granted() {
+        use desk_agent_protocol::command_template::SyncedCommandTemplate;
+        use desk_agent_protocol::exec::ExecEffect;
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        // Grant only the read-only exec capability, with a risk ceiling high
+        // enough that the mutating command is not blocked by max_risk.
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecReadonly],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        ctx.command_templates.replace(vec![SyncedCommandTemplate {
+            template_id: "net_stop".into(),
+            argv: vec!["net".into(), "stop".into(), "spooler".into()],
+            effect: ExecEffect::Mutating,
+        }]);
+
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "net stop spooler"))
+            .await
+            .unwrap();
+        let preview = read_preview(&mut rx);
+        assert!(
+            !preview.executable,
+            "a readonly-only grant must not run a mutating (confirmed) command"
+        );
+    }
+
+    /// The companion to the deny case: granting `shell.exec.confirmed` lets the
+    /// same mutating command through (executable, parked for confirmation), so
+    /// the capability gate is specific to the missing capability.
+    #[tokio::test]
+    async fn confirm_exec_allowed_when_required_capability_granted() {
+        use desk_agent_protocol::command_template::SyncedCommandTemplate;
+        use desk_agent_protocol::exec::ExecEffect;
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        ctx.command_templates.replace(vec![SyncedCommandTemplate {
+            template_id: "net_stop".into(),
+            argv: vec!["net".into(), "stop".into(), "spooler".into()],
+            effect: ExecEffect::Mutating,
+        }]);
+
+        handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "net stop spooler"))
+            .await
+            .unwrap();
+        let preview = read_preview(&mut rx);
+        assert!(
+            preview.executable,
+            "a confirmed grant must allow the mutating command"
+        );
+        assert!(preview.requires_confirmation);
     }
 
     /// SessionApproved: the first confirmation of a template prompts and parks a
