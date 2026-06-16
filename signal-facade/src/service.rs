@@ -156,6 +156,12 @@ pub enum ControlFrameOutcome {
         code: DeskErrorCode,
         message: String,
     },
+    /// The authorizer fully handled the frame; do **not** relay it to the peer.
+    /// The manager uses this for `Diagnose` in the thin-edge model: instead of
+    /// forwarding the question to the host, it runs the orchestration centrally
+    /// (asking the host only for read-only evidence). The signal server never
+    /// returns this (it has no authorizer), so its relay behaviour is unchanged.
+    Handled,
 }
 
 /// Authorizes (and optionally wraps) the control-end AI frames
@@ -799,6 +805,9 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         ControlFrameOutcome::Reject { code, message } => {
                             return DeskSignalFacadeError::custom_error(code, &message);
                         }
+                        // The authorizer ran the frame itself (manager-side
+                        // orchestration); nothing is relayed to the host.
+                        ControlFrameOutcome::Handled => return Ok(()),
                     }
                 } else {
                     signaling_model
