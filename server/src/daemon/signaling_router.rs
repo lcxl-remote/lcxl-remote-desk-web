@@ -2418,15 +2418,21 @@ async fn handle_resolve_exec_inbound(
     match data.decision {
         ApprovalDecision::Reject => {
             match outcome {
-                TakeOutcome::Consumed(_) => {
+                TakeOutcome::Consumed(consumed) => {
                     // Consumed so it cannot be approved later; the control end
-                    // already updated its UI, so no result frame is sent.
+                    // already updated its UI, so no result frame is sent. Carry
+                    // the source ConfirmExec frame id (stored at park time) so the
+                    // rejection is attributed to the real operator on a manager
+                    // link, not the reporting host's token owner.
                     ctx.audit
-                        .record(AuditEvent::approval_denied(
-                            new_audit_event_id(),
-                            audit_now(),
-                            &data.exec_request_id.0,
-                        ))
+                        .record(
+                            AuditEvent::approval_denied(
+                                new_audit_event_id(),
+                                audit_now(),
+                                &data.exec_request_id.0,
+                            )
+                            .with_task_id(consumed.source_request_id.as_deref()),
+                        )
                         .await;
                 }
                 TakeOutcome::Forbidden => {
@@ -5941,6 +5947,51 @@ mod tests {
                 .event_types()
                 .contains(&"ai.approval.denied".to_string())
         );
+    }
+
+    /// On a manager link a rejected approval carries the source ConfirmExec frame
+    /// id in `task_id` (stored at park time), so the manager attributes the
+    /// rejection to the real operator rather than the reporting host's token
+    /// owner — `approval_denied` is a persisted key event.
+    #[tokio::test]
+    async fn reject_carries_source_request_id_on_manager_link() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![
+                Capability::ShellExecReadonly,
+                Capability::ShellExecConfirmed,
+            ],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let recording = RecordingAuditSink::default();
+        ctx.audit = Arc::new(recording.clone());
+
+        handle_confirm_exec_inbound(
+            &ctx,
+            &confirm_exec_model("frame-1", "Get-Service -Name Spooler"),
+        )
+        .await
+        .unwrap();
+        let exec_request_id = read_preview(&mut rx).exec_request_id.unwrap();
+        // ResolveExec frame id is unrelated; the ledger key must come from the
+        // parked pending (the original ConfirmExec frame id).
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model("frame-2", exec_request_id.clone(), ApprovalDecision::Reject),
+        )
+        .await
+        .unwrap();
+
+        let events = recording.events.lock().unwrap();
+        let denied = events
+            .iter()
+            .find(|e| e.event_type == "ai.approval.denied")
+            .expect("approval_denied recorded");
+        assert_eq!(denied.task_id.as_deref(), Some("frame-1"));
+        // Correlation request_id stays the minted exec id, not the frame.
+        assert_eq!(denied.request_id, exec_request_id.0);
     }
 
     #[tokio::test]
