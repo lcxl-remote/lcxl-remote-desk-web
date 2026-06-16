@@ -2246,6 +2246,14 @@ async fn handle_confirm_exec_inbound(
         let capability = OperationInput::required_capability(&classification).map(|c| c.as_str());
         let risk = classification.risk;
 
+        // On a manager link the ConfirmExec frame request_id is the PDP's
+        // authorization-ledger key; carry it through the whole exec lifecycle so
+        // every audit event (here and on the later ResolveExec / worker-result
+        // paths) can be attributed to the real operator. Single-machine /
+        // remote-signaling links have no ledger, so this stays None and the
+        // audit `task_id` is unchanged.
+        let audit_source = ctx.inbound_authz.as_ref().map(|_| request_id.clone());
+
         // SessionApproved grant eligibility: the active mode is SessionApproved,
         // the command matched a template (intersect with the whitelist — only
         // an already-executable template is ever granted), and the request came
@@ -2264,23 +2272,29 @@ async fn handle_confirm_exec_inbound(
                 crate::daemon::exec_approval::seal_plan(exec_request_id.clone(), draft);
             // No new approval prompt; the prior session grant authorizes it.
             ctx.audit
-                .record(AuditEvent::capability_allowed(
-                    new_audit_event_id(),
-                    audit_now(),
-                    &exec_request_id.0,
-                    capability,
-                    risk_str(risk),
-                ))
+                .record(
+                    AuditEvent::capability_allowed(
+                        new_audit_event_id(),
+                        audit_now(),
+                        &exec_request_id.0,
+                        capability,
+                        risk_str(risk),
+                    )
+                    .with_task_id(audit_source.as_deref()),
+                )
                 .await;
             ctx.audit
-                .record(AuditEvent::command_executed(
-                    new_audit_event_id(),
-                    audit_now(),
-                    &exec_request_id.0,
-                    &approval_id.0,
-                    capability,
-                    risk_str(risk),
-                ))
+                .record(
+                    AuditEvent::command_executed(
+                        new_audit_event_id(),
+                        audit_now(),
+                        &exec_request_id.0,
+                        &approval_id.0,
+                        capability,
+                        risk_str(risk),
+                    )
+                    .with_task_id(audit_source.as_deref()),
+                )
                 .await;
             // Informational preview (no confirmation) so the control end can
             // show what ran; the result follows as an `ExecResult`.
@@ -2300,7 +2314,7 @@ async fn handle_confirm_exec_inbound(
                 blocked_reason: None,
             };
             send_exec_preview(&ctx.outbound_tx, &request_id, to.clone(), preview);
-            dispatch_exec_plan(ctx, &request_id, to, plan).await;
+            dispatch_exec_plan(ctx, &request_id, to, plan, audit_source).await;
             return Ok(());
         }
 
@@ -2312,16 +2326,20 @@ async fn handle_confirm_exec_inbound(
             classification.clone(),
             connection_id,
             session_template,
+            audit_source.clone(),
         );
         ctx.audit
-            .record(AuditEvent::capability_requested(
-                new_audit_event_id(),
-                audit_now(),
-                &exec_request_id.0,
-                capability,
-                risk_str(risk),
-                classification.impact.clone(),
-            ))
+            .record(
+                AuditEvent::capability_requested(
+                    new_audit_event_id(),
+                    audit_now(),
+                    &exec_request_id.0,
+                    capability,
+                    risk_str(risk),
+                    classification.impact.clone(),
+                )
+                .with_task_id(audit_source.as_deref()),
+            )
             .await;
         let preview = ExecPreview {
             exec_request_id: Some(exec_request_id),
@@ -2461,33 +2479,45 @@ async fn handle_resolve_exec_inbound(
                 consumed.draft,
             );
             // Approval granted → capability allowed → command dispatched.
+            // ResolveExec is not PDP-wrapped, so the operator ledger key comes
+            // from the source ConfirmExec frame request_id stored at park time.
             let xr = data.exec_request_id.0.clone();
+            let audit_source = consumed.source_request_id.clone();
             ctx.audit
-                .record(AuditEvent::approval_granted(
-                    new_audit_event_id(),
-                    audit_now(),
-                    &xr,
-                    &approval_id.0,
-                ))
+                .record(
+                    AuditEvent::approval_granted(
+                        new_audit_event_id(),
+                        audit_now(),
+                        &xr,
+                        &approval_id.0,
+                    )
+                    .with_task_id(audit_source.as_deref()),
+                )
                 .await;
             ctx.audit
-                .record(AuditEvent::capability_allowed(
-                    new_audit_event_id(),
-                    audit_now(),
-                    &xr,
-                    capability,
-                    risk,
-                ))
+                .record(
+                    AuditEvent::capability_allowed(
+                        new_audit_event_id(),
+                        audit_now(),
+                        &xr,
+                        capability,
+                        risk,
+                    )
+                    .with_task_id(audit_source.as_deref()),
+                )
                 .await;
             ctx.audit
-                .record(AuditEvent::command_executed(
-                    new_audit_event_id(),
-                    audit_now(),
-                    &xr,
-                    &approval_id.0,
-                    capability,
-                    risk,
-                ))
+                .record(
+                    AuditEvent::command_executed(
+                        new_audit_event_id(),
+                        audit_now(),
+                        &xr,
+                        &approval_id.0,
+                        capability,
+                        risk,
+                    )
+                    .with_task_id(audit_source.as_deref()),
+                )
                 .await;
             // In SessionApproved mode, approving the first preview of a
             // template grants it for the rest of this connection's session, so
@@ -2500,7 +2530,7 @@ async fn handle_resolve_exec_inbound(
                 ctx.session_approvals.grant(conn, template_id);
             }
             let result_to = consumed.connection_id.or(to);
-            dispatch_exec_plan(ctx, &request_id, result_to, plan).await;
+            dispatch_exec_plan(ctx, &request_id, result_to, plan, audit_source).await;
             Ok(())
         }
     }
@@ -2517,12 +2547,14 @@ async fn dispatch_exec_plan(
     request_id: &str,
     to_connection_id: Option<String>,
     plan: desk_agent_protocol::exec::ExecPlan,
+    audit_source_request_id: Option<String>,
 ) {
     let exec_request_id = plan.exec_request_id.clone();
     let payload = ExecPlanPayload {
         request_id: request_id.to_string(),
         connection_id: to_connection_id.clone(),
         plan,
+        audit_source_request_id,
     };
     if let Err(e) = ctx
         .worker_mgr
@@ -5810,6 +5842,69 @@ mod tests {
         );
         // Every exec event correlates by the same exec_request_id.
         for e in recording.events.lock().unwrap().iter() {
+            assert_eq!(e.request_id, exec_request_id.0);
+        }
+        // No manager link → no ledger → exec audit task_id stays unset.
+        for e in recording.events.lock().unwrap().iter() {
+            assert_eq!(
+                e.task_id, None,
+                "single-machine exec events carry no task_id"
+            );
+        }
+    }
+
+    /// On a manager link every exec lifecycle audit event carries
+    /// `task_id = source ConfirmExec frame request_id` (the PDP ledger key), so
+    /// the manager observer can attribute the whole confirm → approve → execute
+    /// chain to the real operator — even though the events are keyed by the
+    /// server-minted `exec_request_id` the manager never sees.
+    #[tokio::test]
+    async fn exec_audit_events_carry_source_request_id_on_manager_link() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![
+                Capability::ShellExecReadonly,
+                Capability::ShellExecConfirmed,
+            ],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let recording = RecordingAuditSink::default();
+        ctx.audit = Arc::new(recording.clone());
+
+        // ConfirmExec frame request_id "frame-1" is the ledger key.
+        handle_confirm_exec_inbound(
+            &ctx,
+            &confirm_exec_model("frame-1", "Get-Service -Name Spooler"),
+        )
+        .await
+        .unwrap();
+        let exec_request_id = read_preview(&mut rx).exec_request_id.unwrap();
+
+        // ResolveExec frame request_id is unrelated; the source key must still
+        // come from the parked pending (the original ConfirmExec frame id).
+        handle_resolve_exec_inbound(
+            &ctx,
+            &resolve_exec_model(
+                "frame-2",
+                exec_request_id.clone(),
+                ApprovalDecision::Approve,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let events = recording.events.lock().unwrap();
+        assert!(!events.is_empty());
+        for e in events.iter() {
+            assert_eq!(
+                e.task_id.as_deref(),
+                Some("frame-1"),
+                "{} must carry the source ConfirmExec frame id",
+                e.event_type
+            );
+            // The correlation request_id stays the minted exec id, not the frame.
             assert_eq!(e.request_id, exec_request_id.0);
         }
     }

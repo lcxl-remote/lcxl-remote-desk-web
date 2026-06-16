@@ -1242,6 +1242,11 @@ pub struct ExecPlanPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub plan: desk_agent_protocol::exec::ExecPlan,
+    /// Originating ConfirmExec frame `request_id` (the manager's authorization
+    /// ledger key). The worker echoes it back in [`ExecResultIpcPayload`] so the
+    /// `command_completed` audit event can be attributed to the real operator.
+    /// `None` on the single-machine / non-manager path.
+    pub audit_source_request_id: Option<String>,
 }
 
 /// Payload for [`WorkerToService::ExecResult`]. Embeds the
@@ -1253,6 +1258,11 @@ pub struct ExecResultIpcPayload {
     pub request_id: String,
     pub connection_id: Option<String>,
     pub result: desk_agent_protocol::exec::ExecResultPayload,
+    /// Echoed `audit_source_request_id` from the [`ExecPlanPayload`] so the
+    /// daemon can attribute the `command_completed` audit event to the
+    /// originating ConfirmExec frame (the manager's ledger key). `None` on the
+    /// single-machine / non-manager path.
+    pub audit_source_request_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -2442,6 +2452,7 @@ mod tests {
                 request_id: "r-exec".to_string(),
                 connection_id: Some("c".to_string()),
                 plan: sample_exec_plan(),
+                audit_source_request_id: Some("frame-req".to_string()),
             }),
         ];
         for case in &cases {
@@ -2585,6 +2596,7 @@ mod tests {
                         },
                     ),
                 },
+                audit_source_request_id: Some("frame-req".to_string()),
             }),
         ];
         for case in &cases {
@@ -3102,11 +3114,13 @@ mod tests {
             request_id: "r-exec".to_string(),
             connection_id: Some("conn-1".to_string()),
             plan: sample_exec_plan(),
+            audit_source_request_id: Some("frame-req-9".to_string()),
         });
         match wincode_round_trip(&plan_msg) {
             ServiceToWorker::ExecPlan(p) => {
                 assert_eq!(p.request_id, "r-exec");
                 assert_eq!(p.plan, sample_exec_plan());
+                assert_eq!(p.audit_source_request_id.as_deref(), Some("frame-req-9"));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -3128,11 +3142,13 @@ mod tests {
                     }),
                 ),
             },
+            audit_source_request_id: Some("frame-req-9".to_string()),
         });
         match wincode_round_trip(&result_msg) {
             WorkerToService::ExecResult(p) => {
                 assert_eq!(p.request_id, "r-exec");
                 assert_eq!(p.result.exec_request_id.0, "exec-1");
+                assert_eq!(p.audit_source_request_id.as_deref(), Some("frame-req-9"));
                 assert!(matches!(
                     p.result.outcome,
                     desk_agent_protocol::AgentOutcome::Ok(_)

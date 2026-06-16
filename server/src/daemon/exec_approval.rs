@@ -35,6 +35,11 @@ struct PendingApproval {
     /// skip confirmation). `None` for one-shot confirmation (e.g.
     /// `ConfirmEachAction`), which never widens beyond the single command.
     session_grant_template: Option<String>,
+    /// Originating ConfirmExec frame `request_id` — the manager's authorization
+    /// ledger key. Threaded through `ResolveExec` and the worker round-trip so
+    /// every exec lifecycle audit event can be attributed to the real operator.
+    /// `None` on the single-machine / non-manager path.
+    source_request_id: Option<String>,
 }
 
 /// Outcome of consuming a pending approval.
@@ -44,6 +49,8 @@ pub struct ConsumedApproval {
     pub connection_id: Option<String>,
     /// See [`PendingApproval::session_grant_template`].
     pub session_grant_template: Option<String>,
+    /// See [`PendingApproval::source_request_id`].
+    pub source_request_id: Option<String>,
 }
 
 /// Result of attempting to consume a pending approval.
@@ -76,6 +83,7 @@ impl PendingApprovalStore {
         classification: CommandClassification,
         connection_id: Option<String>,
         session_grant_template: Option<String>,
+        source_request_id: Option<String>,
     ) -> ExecRequestId {
         let id = mint_exec_request_id();
         let mut map = self.inner.lock().expect("pending approvals lock");
@@ -88,6 +96,7 @@ impl PendingApprovalStore {
                 created_at: Instant::now(),
                 connection_id,
                 session_grant_template,
+                source_request_id,
             },
         );
         id
@@ -120,6 +129,7 @@ impl PendingApprovalStore {
             classification: pending.classification,
             connection_id: pending.connection_id,
             session_grant_template: pending.session_grant_template,
+            source_request_id: pending.source_request_id,
         })
     }
 
@@ -190,12 +200,20 @@ mod tests {
     #[test]
     fn insert_then_take_returns_the_draft_once() {
         let store = PendingApprovalStore::new();
-        let id = store.insert(draft(), classification(), Some("conn1".into()), None);
+        let id = store.insert(
+            draft(),
+            classification(),
+            Some("conn1".into()),
+            None,
+            Some("frame_req_1".into()),
+        );
         assert_eq!(store.len(), 1);
 
         let consumed = is_consumed(store.take(&id, Some("conn1"))).expect("first take");
         assert_eq!(consumed.draft.template_id, "docker_restart");
         assert_eq!(consumed.connection_id.as_deref(), Some("conn1"));
+        // The source frame request_id (ledger key) survives the round-trip.
+        assert_eq!(consumed.source_request_id.as_deref(), Some("frame_req_1"));
         assert_eq!(store.len(), 0);
 
         // Second take (replay / concurrent double-approve) finds nothing.
@@ -213,6 +231,7 @@ mod tests {
             classification(),
             Some("conn1".into()),
             Some("docker_restart".into()),
+            None,
         );
         let consumed = is_consumed(store.take(&id, Some("conn1"))).expect("take");
         assert_eq!(
@@ -233,7 +252,7 @@ mod tests {
     #[test]
     fn take_from_other_connection_is_forbidden_and_keeps_pending() {
         let store = PendingApprovalStore::new();
-        let id = store.insert(draft(), classification(), Some("owner".into()), None);
+        let id = store.insert(draft(), classification(), Some("owner".into()), None, None);
 
         // A different connection cannot consume — and the pending is preserved.
         assert!(matches!(
@@ -262,8 +281,8 @@ mod tests {
     #[test]
     fn minted_ids_are_unique() {
         let store = PendingApprovalStore::new();
-        let a = store.insert(draft(), classification(), None, None);
-        let b = store.insert(draft(), classification(), None, None);
+        let a = store.insert(draft(), classification(), None, None, None);
+        let b = store.insert(draft(), classification(), None, None, None);
         assert_ne!(a, b);
     }
 }

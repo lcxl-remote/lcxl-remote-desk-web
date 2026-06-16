@@ -668,15 +668,21 @@ pub async fn run_signaling_proxy(
                     };
                     router_ctx
                         .audit
-                        .record(desk_agent_protocol::audit::AuditEvent::command_completed(
-                            uuid::Uuid::new_v4().to_string(),
-                            chrono::Utc::now().to_rfc3339(),
-                            &payload.result.exec_request_id.0,
-                            success,
-                            summary,
-                            redactions,
-                            0,
-                        ))
+                        .record(
+                            desk_agent_protocol::audit::AuditEvent::command_completed(
+                                uuid::Uuid::new_v4().to_string(),
+                                chrono::Utc::now().to_rfc3339(),
+                                &payload.result.exec_request_id.0,
+                                success,
+                                summary,
+                                redactions,
+                                0,
+                            )
+                            // The worker echoed back the originating ConfirmExec
+                            // frame request_id (the manager's ledger key) so this
+                            // completion is attributed to the real operator.
+                            .with_task_id(payload.audit_source_request_id.as_deref()),
+                        )
                         .await;
                 }
                 match serde_json::to_value(&payload.result) {

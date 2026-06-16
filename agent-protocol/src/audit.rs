@@ -549,6 +549,20 @@ impl AuditEvent {
         event.duration_ms = Some(duration_ms);
         event
     }
+
+    /// Attach the audit correlation key — the source frame `request_id` that the
+    /// PDP wrapped and recorded in its authorization ledger — so the real
+    /// operator (and its decision policy) can be looked up at persist time.
+    ///
+    /// Exec lifecycle events are correlated by a server-minted `exec_request_id`
+    /// that the manager never sees, so they carry the originating ConfirmExec
+    /// frame's `request_id` here in `task_id` to bridge back to the ledger.
+    /// Orchestrator / model events are already keyed by the frame `request_id`
+    /// and leave this `None`.
+    pub fn with_task_id(mut self, task_id: Option<&str>) -> Self {
+        self.task_id = task_id.map(str::to_string);
+        self
+    }
 }
 
 /// Manager-bound audit report payload.
@@ -1091,6 +1105,68 @@ mod tests {
         ] {
             assert_eq!(e.request_id, xr);
         }
+    }
+
+    #[test]
+    fn with_task_id_attaches_source_request_id_for_every_exec_event() {
+        let xr = "exec_42";
+        let src = "frame_req_7";
+        // Each exec lifecycle builder threads the source frame request_id into
+        // task_id so the manager can bridge the minted exec id back to its
+        // authorization ledger.
+        let events = [
+            AuditEvent::capability_requested(
+                "e1".into(),
+                "ts".into(),
+                xr,
+                Some("shell.exec.confirmed"),
+                "high",
+                "preview".into(),
+            )
+            .with_task_id(Some(src)),
+            AuditEvent::capability_allowed(
+                "e2".into(),
+                "ts".into(),
+                xr,
+                Some("shell.exec.confirmed"),
+                "high",
+            )
+            .with_task_id(Some(src)),
+            AuditEvent::approval_granted("e3".into(), "ts".into(), xr, "appr_1")
+                .with_task_id(Some(src)),
+            AuditEvent::approval_denied("e4".into(), "ts".into(), xr).with_task_id(Some(src)),
+            AuditEvent::command_executed(
+                "e5".into(),
+                "ts".into(),
+                xr,
+                "appr_1",
+                Some("shell.exec.confirmed"),
+                "high",
+            )
+            .with_task_id(Some(src)),
+            AuditEvent::command_completed(
+                "e6".into(),
+                "ts".into(),
+                xr,
+                true,
+                "exit 0".into(),
+                0,
+                1,
+            )
+            .with_task_id(Some(src)),
+        ];
+        for e in events {
+            assert_eq!(e.request_id, xr, "exec id stays the correlation request_id");
+            assert_eq!(
+                e.task_id.as_deref(),
+                Some(src),
+                "source frame id rides in task_id"
+            );
+        }
+
+        // None is a no-op: the field stays unset (single-machine / non-manager).
+        let plain = AuditEvent::approval_denied("e".into(), "ts".into(), xr).with_task_id(None);
+        assert_eq!(plain.task_id, None);
     }
 
     #[test]

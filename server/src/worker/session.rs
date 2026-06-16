@@ -1670,6 +1670,11 @@ impl WorkerSession {
                                                     request_id: payload.request_id,
                                                     connection_id: payload.connection_id,
                                                     result,
+                                                    // Echo the ledger key back so
+                                                    // the daemon can attribute the
+                                                    // completion to the operator.
+                                                    audit_source_request_id: payload
+                                                        .audit_source_request_id,
                                                 },
                                             ))
                                             .is_err()
