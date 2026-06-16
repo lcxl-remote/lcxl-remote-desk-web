@@ -282,12 +282,20 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
         // Dial the gateway: the manager proxy (credentials stay on the manager)
         // or a direct provider connection. Both stream deltas through
         // `on_partial` and yield the accumulated response + usage.
+        // In ManagerProxy mode the AI call uses the manager's own provider
+        // config, so the manager owns the model-accounting audit (provider /
+        // model / token are authoritative there). The desk server must not also
+        // record `model_requested` / `model_responded` here — that would be a
+        // duplicate, non-authoritative row (provider="manager-proxy") and would
+        // double-count tokens. The Direct path keeps recording locally.
+        let record_model_audit = config.gateway_mode != GatewayMode::ManagerProxy;
         let (caller, response) = if config.gateway_mode == GatewayMode::ManagerProxy {
-            let (manager_url, manager_token) = {
+            let (manager_url, manager_token, client_id) = {
                 let s = self.settings.read().await;
                 (
                     s.system.manager_url.clone(),
                     s.system.manager_api_token.clone(),
+                    s.system.get_client_id().ok(),
                 )
             };
             let (Some(manager_url), Some(manager_token)) = (manager_url, manager_token) else {
@@ -310,29 +318,21 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
                     safe_for_model: true,
                 });
             }
-            // Provider / model are manager-side; the desk server only records that
-            // it dialed through the proxy.
+            // Provider / model are manager-side and recorded there; the desk
+            // server keeps a caller marker only to satisfy the shared tuple.
             let caller = CallerRef {
                 caller_type: CallerType::AiModel,
                 model_provider: Some("manager-proxy".to_string()),
                 model_name: None,
                 adapter: Some("manager-proxy".to_string()),
             };
-            self.audit
-                .record(AuditEvent::model_requested(
-                    new_event_id(),
-                    now_rfc3339(),
-                    request_id,
-                    &caller,
-                    request_summary,
-                    None,
-                ))
-                .await;
             let response = manager_proxy::stream_proxy_chat(
                 &manager_url,
                 &manager_token,
                 &messages,
                 &response_format,
+                Some(request_id.to_string()),
+                client_id,
                 on_partial,
             )
             .await?;
@@ -381,23 +381,27 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
         let (diagnosis, parse_outcome) = parser::parse_diagnosis(&response.content);
-        self.audit
-            .record(AuditEvent::model_responded(
-                new_event_id(),
-                now_rfc3339(),
-                request_id,
-                &caller,
-                format!(
-                    "diagnosis: {} findings, {} commands parse={}",
-                    diagnosis.findings.len(),
-                    diagnosis.commands.len(),
-                    parse_outcome.as_str()
-                ),
-                response.usage.input_tokens,
-                response.usage.output_tokens,
-                duration_ms,
-            ))
-            .await;
+        // Skip the local model-accounting audit under ManagerProxy (the manager
+        // records the authoritative row); always record on the Direct path.
+        if record_model_audit {
+            self.audit
+                .record(AuditEvent::model_responded(
+                    new_event_id(),
+                    now_rfc3339(),
+                    request_id,
+                    &caller,
+                    format!(
+                        "diagnosis: {} findings, {} commands parse={}",
+                        diagnosis.findings.len(),
+                        diagnosis.commands.len(),
+                        parse_outcome.as_str()
+                    ),
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                    duration_ms,
+                ))
+                .await;
+        }
 
         Ok(diagnosis)
     }
@@ -910,6 +914,92 @@ mod tests {
             *calls.lock().unwrap(),
             0,
             "proxy path must not resolve the direct adapter selector"
+        );
+    }
+
+    /// In ManagerProxy mode the desk server must not record any model audit
+    /// events: the manager owns the authoritative model-accounting row (with the
+    /// real provider/model/token), so a local `model_requested` / `responded`
+    /// here would be a duplicate, non-authoritative row that double-counts
+    /// tokens. Even when the proxy dial fails, the local audit trail stays empty.
+    #[tokio::test]
+    async fn manager_proxy_records_no_local_model_audit() {
+        let mut s = Settings::default();
+        s.ai_model.gateway_mode = crate::model::settings::GatewayMode::ManagerProxy;
+        s.system.manager_url = Some("ws://127.0.0.1:1/api/desk/signaling".into());
+        s.system.manager_api_token = Some("tok".into());
+
+        let audit = RecordingAuditSink::default();
+        let model = ModelBackedDiagnoseModel::with_adapter(
+            Arc::new(MockAdapter {
+                fragments: vec![],
+                content: WELL_FORMED.into(),
+                usage: TokenUsage::default(),
+                seen: Mutex::new(None),
+            }),
+            Arc::new(SharedSettings::from(s)),
+            Arc::new(audit.clone()),
+        );
+        let noop = |_: String| {};
+        let _ = model
+            .diagnose("req_mp4", "q", &snapshot(), None, &noop)
+            .await;
+        // No model_requested / model_responded recorded by the desk server.
+        assert!(
+            audit.events.lock().unwrap().is_empty(),
+            "desk server must not record model audit in ManagerProxy mode: {:?}",
+            audit
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|e| e.event_type.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The Direct path still records the local model lifecycle (the desk server
+    /// owns the provider config there), so the ManagerProxy suppression is
+    /// specific to the proxy mode.
+    #[tokio::test]
+    async fn direct_mode_still_records_model_audit() {
+        let mut s = Settings::default();
+        s.ai_model.provider = Some("openai-compatible".into());
+        s.ai_model.model = Some("m".into());
+        s.ai_model.base_url = Some("https://api.example/v1".into());
+        s.ai_model.api_key = Some("sk".into());
+        // Default gateway mode is Direct.
+
+        let audit = RecordingAuditSink::default();
+        let model = ModelBackedDiagnoseModel::with_adapter(
+            Arc::new(MockAdapter {
+                fragments: vec![],
+                content: WELL_FORMED.into(),
+                usage: TokenUsage::default(),
+                seen: Mutex::new(None),
+            }),
+            Arc::new(SharedSettings::from(s)),
+            Arc::new(audit.clone()),
+        );
+        let noop = |_: String| {};
+        model
+            .diagnose("req_direct", "q", &snapshot(), None, &noop)
+            .await
+            .expect("direct diagnose succeeds");
+        let recorded: Vec<String> = audit
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.event_type.clone())
+            .collect();
+        assert!(
+            recorded.contains(&"ai.model.requested".to_string()),
+            "direct mode records model_requested: {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&"ai.model.responded".to_string()),
+            "direct mode records model_responded: {recorded:?}"
         );
     }
 }

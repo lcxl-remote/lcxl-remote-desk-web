@@ -54,6 +54,20 @@ pub struct ProxyChatRequest {
     pub messages: Vec<ProxyChatMessage>,
     #[serde(default)]
     pub response_format: ProxyResponseFormat,
+    /// The originating diagnose frame `request_id` — the manager's authorization
+    /// ledger key. The manager records the model-accounting audit (which it owns
+    /// in this gateway mode) under this key so it can be attributed to the real
+    /// operator. `None` on legacy callers; the manager then attributes to the
+    /// token owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_request_id: Option<String>,
+    /// The desk server's stable device identity (same source as the signaling
+    /// `VersionInfo.client_id`). The manager resolves it to a trusted device id
+    /// and only applies the operator attribution when it matches the ledger's
+    /// recorded device. `None` disables device-matched attribution (falls back
+    /// to the token owner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -92,9 +106,21 @@ mod tests {
                 },
             ],
             response_format: ProxyResponseFormat::JsonObject,
+            source_request_id: Some("req-1".into()),
+            client_id: Some("client-abc".into()),
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: ProxyChatRequest = serde_json::from_str(&s).unwrap();
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn request_accepts_legacy_payload_without_attribution_fields() {
+        // Older desk servers omit source_request_id / client_id; they default to
+        // None so the manager attributes to the token owner.
+        let json = r#"{"messages":[],"response_format":{"mode":"none"}}"#;
+        let req: ProxyChatRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.source_request_id, None);
+        assert_eq!(req.client_id, None);
     }
 }

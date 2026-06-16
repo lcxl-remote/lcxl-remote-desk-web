@@ -100,11 +100,14 @@ fn build_client() -> awc::Client {
 
 /// Relay a chat completion through the manager proxy and parse the streamed SSE
 /// response, emitting content deltas via `on_delta`.
+#[allow(clippy::too_many_arguments)]
 pub async fn stream_proxy_chat(
     manager_url: &str,
     manager_api_token: &str,
     messages: &[ChatMessage],
     response_format: &ResponseFormatSpec,
+    source_request_id: Option<String>,
+    client_id: Option<String>,
     on_delta: &(dyn Fn(String) + Send + Sync),
 ) -> Result<ChatResponse, AgentError> {
     let url = proxy_url(manager_url).ok_or_else(|| AgentError {
@@ -113,9 +116,14 @@ pub async fn stream_proxy_chat(
         retryable: false,
         safe_for_model: true,
     })?;
+    // The manager owns the model-accounting audit in this gateway mode; carry the
+    // diagnose frame id (ledger key) + device identity so it can attribute that
+    // audit to the real operator.
     let request = ProxyChatRequest {
         messages: to_proxy_messages(messages),
         response_format: to_proxy_format(response_format),
+        source_request_id,
+        client_id,
     };
 
     let client = build_client();
