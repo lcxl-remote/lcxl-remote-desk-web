@@ -99,10 +99,13 @@ pub struct AiModelSettings {
     /// (the AI only proposes commands). `read_only` / `confirm_each_action`
     /// permit confirmed execution of whitelist templates; every real execution
     /// still requires an explicit per-command user approval. `session_approved`
-    /// / `automated` are not selectable yet (M4).
+    /// additionally lets the first approval of a template stand for the rest of
+    /// the connection's session. `automated` (run without any confirmation) is
+    /// not implemented and is refused.
     pub execution_mode: ExecutionMode,
-    /// Where the model call is dialed from. Default `direct`. `manager_proxy`
-    /// is a reserved placeholder that is refused at runtime (see [`GatewayMode`]).
+    /// Where the model call is dialed from. Default `direct` (dial the gateway
+    /// locally). `manager_proxy` routes the call through the manager, which
+    /// injects the provider credentials (see [`GatewayMode`]).
     pub gateway_mode: GatewayMode,
 }
 
