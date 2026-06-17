@@ -137,7 +137,7 @@ mod tests {
                 granted: Vec::new(),
                 mode: ExecutionMode::ReadOnly,
                 expires_at: None,
-                policy_id: Some("p1".to_string()),
+                policy_name: Some("p1".to_string()),
             },
             orchestrator_grants: vec!["ai.diagnose".to_string()],
             max_risk: RiskLevel::Medium,

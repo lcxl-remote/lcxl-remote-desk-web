@@ -1392,7 +1392,7 @@ mod tests {
                 granted: Vec::new(),
                 mode: ExecutionMode::ReadOnly,
                 expires_at: None,
-                policy_id: None,
+                policy_name: None,
             },
             orchestrator_grants: vec!["ai.diagnose".to_string()],
             max_risk: RiskLevel::Low,

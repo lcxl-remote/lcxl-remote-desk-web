@@ -3071,7 +3071,7 @@ mod tests {
                 granted: vec![Capability::ProcessList],
                 mode: ExecutionMode::ReadOnly,
                 expires_at: None,
-                policy_id: None,
+                policy_name: None,
             },
             operation: AgentOperation {
                 risk_hint: None,

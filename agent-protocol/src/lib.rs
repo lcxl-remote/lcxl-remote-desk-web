@@ -178,8 +178,8 @@ pub enum CallerType {
     McpClient,
 }
 
-/// Audit metadata that travels with the call. `policy_id` is intentionally
-/// **not** here — its single source of truth is [`AgentScope::policy_id`].
+/// Audit metadata that travels with the call. `policy_name` is intentionally
+/// **not** here — its single source of truth is [`AgentScope::policy_name`].
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
 )]
@@ -202,7 +202,7 @@ pub struct AgentScope {
     /// RFC3339 timestamp; kept as `String` so this crate stays free of a
     /// `chrono` dependency.
     pub expires_at: Option<String>,
-    pub policy_id: Option<String>,
+    pub policy_name: Option<String>,
 }
 
 #[derive(
@@ -875,7 +875,7 @@ mod tests {
                 granted: vec![Capability::ProcessList, Capability::SystemInfo],
                 mode: ExecutionMode::ReadOnly,
                 expires_at: Some("2026-06-12T18:00:00Z".into()),
-                policy_id: Some("policy_default".into()),
+                policy_name: Some("policy_default".into()),
             },
             operation: AgentOperation {
                 risk_hint: Some(RiskLevel::Low),

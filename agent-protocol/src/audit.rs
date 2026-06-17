@@ -123,7 +123,7 @@ pub struct AuditEvent {
     // ---- correlation ----
     pub request_id: String,
     pub task_id: Option<String>,
-    pub policy_id: Option<String>,
+    pub policy_name: Option<String>,
     pub approval_id: Option<String>,
 
     // ---- subject (all server-authoritative, read from the envelope) ----
@@ -174,7 +174,7 @@ impl AuditEvent {
             created_at,
             request_id: envelope.request_id.0.clone(),
             task_id: envelope.parent_task_id.as_ref().map(|t| t.0.clone()),
-            policy_id: envelope.scope.policy_id.clone(),
+            policy_name: envelope.scope.policy_name.clone(),
             approval_id: envelope.audit.approval_id.clone(),
             tenant_id: envelope.actor.tenant_id.clone(),
             actor_id: envelope.actor.actor_id.clone(),
@@ -759,7 +759,7 @@ mod tests {
                 granted: vec![Capability::ProcessList],
                 mode: ExecutionMode::ReadOnly,
                 expires_at: None,
-                policy_id: Some("policy_x".into()),
+                policy_name: Some("policy_x".into()),
             },
             operation: AgentOperation {
                 risk_hint: Some(RiskLevel::Low),
@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(e.event_type, "ai.task.created");
         assert_eq!(e.request_id, "req_42");
         assert_eq!(e.task_id.as_deref(), Some("task_7"));
-        assert_eq!(e.policy_id.as_deref(), Some("policy_x"));
+        assert_eq!(e.policy_name.as_deref(), Some("policy_x"));
         assert_eq!(e.approval_id.as_deref(), Some("appr_1"));
         assert_eq!(e.tenant_id.as_deref(), Some("tenant_1"));
         assert_eq!(e.actor_id, "local-operator");

@@ -112,7 +112,7 @@ fn build_collect_envelope(
             granted: vec![cap],
             mode: ExecutionMode::ReadOnly,
             expires_at: None,
-            policy_id: None,
+            policy_name: None,
         },
         operation: AgentOperation {
             risk_hint: None,

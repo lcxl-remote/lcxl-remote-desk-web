@@ -1674,7 +1674,7 @@ fn default_read_scope() -> AgentScope {
         ],
         mode: ExecutionMode::ReadOnly,
         expires_at: None,
-        policy_id: None,
+        policy_name: None,
     }
 }
 
@@ -5438,7 +5438,7 @@ mod tests {
                 granted,
                 mode,
                 expires_at: None,
-                policy_id: Some("test-policy".to_string()),
+                policy_name: Some("test-policy".to_string()),
             },
             orchestrator_grants: orchestrator_grants.into_iter().map(String::from).collect(),
             max_risk,
