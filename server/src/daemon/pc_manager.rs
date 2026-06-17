@@ -3775,11 +3775,7 @@ mod tests {
             .await
             .expect("init reply must be broadcast");
         let reply: SignalingModel = serde_json::from_str(&text).expect("Init JSON must round-trip");
-        assert!(
-            matches!(reply.signaling_type, SignalingType::Init),
-            "got {:?}",
-            reply.signaling_type
-        );
+        assert_eq!(reply.signaling_type, SignalingType::Init);
         let init: InitSignalingData = reply
             .get_data::<InitSignalingData>()
             .expect("Init payload present");
@@ -3950,7 +3946,7 @@ mod tests {
                 Ok(Ok(text)) => {
                     let m: SignalingModel = serde_json::from_str(&text)
                         .expect("outbound text must be a SignalingModel");
-                    if !matches!(m.signaling_type, SignalingType::Canid) {
+                    if m.signaling_type != SignalingType::Canid {
                         continue;
                     }
                     assert_eq!(
@@ -4025,7 +4021,7 @@ mod tests {
         // Drain the Init reply.
         let init_text = outbound_rx.recv().await.expect("init reply");
         let init_reply: SignalingModel = serde_json::from_str(&init_text).unwrap();
-        assert!(matches!(init_reply.signaling_type, SignalingType::Init));
+        assert_eq!(init_reply.signaling_type, SignalingType::Init);
 
         // Now trigger gathering on the PC the registry holds. This is
         // what the Offer handler does in production; we do it directly
@@ -4045,7 +4041,7 @@ mod tests {
             match timeout(deadline, outbound_rx.recv()).await {
                 Ok(Ok(text)) => {
                     let m: SignalingModel = serde_json::from_str(&text).unwrap();
-                    if matches!(m.signaling_type, SignalingType::Canid) {
+                    if m.signaling_type == SignalingType::Canid {
                         assert_eq!(m.to_connection_id.as_deref(), Some("conn-init-ice"));
                         got_canid = true;
                         break;
@@ -5552,8 +5548,9 @@ mod tests {
 
         let text = outbound_rx.recv().await.expect("AcceptControl reply");
         let reply: SignalingModel = serde_json::from_str(&text).expect("decode reply");
-        assert!(
-            matches!(reply.signaling_type, SignalingType::AcceptControl),
+        assert_eq!(
+            reply.signaling_type,
+            SignalingType::AcceptControl,
             "expected AcceptControl, got {:?}",
             reply.signaling_type,
         );
@@ -5591,8 +5588,9 @@ mod tests {
 
         let text = outbound_rx.recv().await.expect("DenyControl reply");
         let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
-        assert!(
-            matches!(reply.signaling_type, SignalingType::DenyControl),
+        assert_eq!(
+            reply.signaling_type,
+            SignalingType::DenyControl,
             "expected DenyControl, got {:?}",
             reply.signaling_type,
         );
@@ -5641,8 +5639,9 @@ mod tests {
 
         let text = outbound_rx.recv().await.expect("CloseControl reply");
         let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
-        assert!(
-            matches!(reply.signaling_type, SignalingType::CloseControl),
+        assert_eq!(
+            reply.signaling_type,
+            SignalingType::CloseControl,
             "expected CloseControl, got {:?}",
             reply.signaling_type,
         );
@@ -5697,7 +5696,7 @@ mod tests {
 
         let text = outbound_rx.recv().await.expect("AcceptControl reply");
         let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
-        assert!(matches!(reply.signaling_type, SignalingType::AcceptControl));
+        assert_eq!(reply.signaling_type, SignalingType::AcceptControl);
     }
 
     /// RequireControl for an unknown `connection_id` returns an error

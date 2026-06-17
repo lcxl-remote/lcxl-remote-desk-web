@@ -123,6 +123,7 @@ graph LR
 - **只读证据采集器**：系统信息、进程列表、监听端口、服务状态、近期日志、容器列表 / inspect / 日志，以及当前截图。
 - **模型无关**：适配层隔离了 wire 协议，同一套编排器即可驱动 OpenAI 兼容与 Anthropic 网关，供应商可按调用切换。
 - **默认只给建议**：模型仅提议命令而不执行；执行需经服务端中介的显式确认。
+- **可独立或中心化运行**：诊断逻辑（能力选择 / prompt 拼装 / 响应解析 / 证据分片）抽取在共享 crate `desk-diagnose-core` 中。desk-server 既可在进程内就地运行完整编排器（如上图），也可只提供脱敏后的**只读证据**（`CollectRequest` / `CollectResponse` 信令），把编排与模型调用交由外部「中心大脑」完成——以此支撑「瘦被控端 + 中心大脑」的车队部署，让 API Key 等凭据集中驻留在中心而不下发到每台被控端。
 
 **MCP 服务（面向外部 AI 助手）。** 以 `--startup-mode mcp-stdio` 启动后，设备即成为基于 stdio 的 Model Context Protocol 服务，暴露一组**只读工具静态白名单**：`lcxl_system_info`、`lcxl_process_list`、`lcxl_network_ports`、`lcxl_recent_logs`（受策略门控）、`lcxl_diagnose`（受模型配置门控）。刻意不提供任何执行 / 写入 / 控制工具，且 `lcxl_diagnose` 不带截图选项——MCP 客户端在结构上就无法抓屏。
 

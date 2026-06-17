@@ -30,6 +30,8 @@ use crate::{
     Clone,
     Debug,
     Display,
+    PartialEq,
+    Eq,
     FromRepr,
     ToSchema_repr,
     Serialize_repr,

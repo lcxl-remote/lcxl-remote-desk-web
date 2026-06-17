@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{AgentError, RiskLevel};
+use crate::{AgentError, AgentErrorKind, RiskLevel};
 
 /// Control end → server: start a diagnosis. Carries only non-authoritative
 /// intent; the server owns target/actor/scope just as it does for
@@ -118,6 +118,12 @@ pub struct CollectResponseChunk {
 pub struct CollectResponseError {
     /// Correlates back to the originating [`CollectRequest`].
     pub request_id: String,
+    /// Structured failure class, so the central orchestrator can persist the
+    /// right audit event (a fail-closed `RedactionFailed` is a distinct security
+    /// event from a generic collection error) without parsing `reason`. Named
+    /// `error_kind` to avoid colliding with the [`CollectResponse`] enum's `kind`
+    /// discriminant tag.
+    pub error_kind: AgentErrorKind,
     /// Model-safe reason describing why collection failed.
     pub reason: String,
 }
@@ -482,11 +488,16 @@ mod tests {
     fn collect_response_error_round_trips_and_correlates() {
         let resp = CollectResponse::Error(CollectResponseError {
             request_id: "req_2".into(),
+            error_kind: AgentErrorKind::RedactionFailed,
             reason: "redaction failed".into(),
         });
         let json = serde_json::to_string(&resp).expect("encode");
         let back: CollectResponse = serde_json::from_str(&json).expect("decode");
         assert_eq!(resp, back);
         assert_eq!(resp.request_id(), "req_2");
+        match back {
+            CollectResponse::Error(e) => assert_eq!(e.error_kind, AgentErrorKind::RedactionFailed),
+            _ => panic!("expected error variant"),
+        }
     }
 }

@@ -763,13 +763,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::AudioPlaybackError
             | SignalingType::DesktopSwitching
             | SignalingType::DesktopReady
-            // AI host → control-end responses and the handoff notification are
-            // plain relayed types (no authorization injection on the reply
-            // path). ResolveExec rides the prior approval, not a fresh policy
-            // decision, so it relays plainly too.
+            // AI host → control-end responses are plain relayed types (no
+            // authorization injection on the reply path). ResolveExec rides the
+            // prior approval, not a fresh policy decision, so it relays plainly
+            // too.
             | SignalingType::AgentResponse
             | SignalingType::DiagnoseEvent
-            | SignalingType::DiagnoseCancel
             | SignalingType::ExecPreview
             | SignalingType::ResolveExec
             | SignalingType::ExecResult => {
@@ -793,8 +792,16 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // through the fleet policy decision point, which authorizes and
             // wraps them in an `AuthorizedControlPayload`; in the signal server
             // (no authorizer) they relay unwrapped, exactly like before.
+            //
+            // `DiagnoseCancel` is included so the manager can run it centrally:
+            // diagnosis is orchestrated on the manager (thin-edge model), so a
+            // handoff/abort must cancel the manager's pending collection and
+            // record the cancellation rather than be relayed to a host that has
+            // no diagnose task. With no authorizer (signal server) it relays to
+            // the host that is running the diagnosis, exactly like before.
             SignalingType::AgentRequest
             | SignalingType::Diagnose
+            | SignalingType::DiagnoseCancel
             | SignalingType::ConfirmExec => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer

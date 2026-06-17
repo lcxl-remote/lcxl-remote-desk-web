@@ -2235,7 +2235,7 @@ mod tests {
             WorkerToService::SignalingError(p) => {
                 assert_eq!(p.request_id, "req-err-1");
                 assert_eq!(p.connection_id, "conn-err");
-                assert!(matches!(p.signaling_type, SignalingType::StartTerminal));
+                assert_eq!(p.signaling_type, SignalingType::StartTerminal);
                 assert_eq!(p.error_code, 401);
                 assert_eq!(p.error_message.as_deref(), Some("Permission denied"));
             }

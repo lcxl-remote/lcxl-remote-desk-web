@@ -80,13 +80,13 @@ fn is_allowed(cap: Capability, request: &DiagnoseRequestData, policy: &Collectio
     }
 }
 
-/// Select the capabilities to collect for a diagnosis: the request's explicit
-/// set (or the default set), filtered by the server policy, de-duplicated while
-/// preserving order.
-pub fn select_capabilities(
-    request: &DiagnoseRequestData,
-    policy: &CollectionPolicy,
-) -> Vec<Capability> {
+/// The capability set a request *asks for*, before any policy filter: the
+/// explicit `context_kinds` (mapped, unknown/exec names dropped) or the default
+/// read set, plus the screenshot when the request toggles it, de-duplicated
+/// while preserving order. This is the pre-policy intent both the edge (which
+/// then filters by its local [`CollectionPolicy`]) and the central PDP (which
+/// intersects it with the granted scope) start from.
+pub fn requested_capabilities(request: &DiagnoseRequestData) -> Vec<Capability> {
     let mut requested: Vec<Capability> = if request.context_kinds.is_empty() {
         default_read_set()
     } else {
@@ -101,14 +101,78 @@ pub fn select_capabilities(
     if request.include_screen && !requested.contains(&Capability::ScreenCaptureCurrent) {
         requested.push(Capability::ScreenCaptureCurrent);
     }
-
-    let mut selected = Vec::new();
+    let mut deduped = Vec::new();
     for cap in requested {
-        if is_allowed(cap, request, policy) && !selected.contains(&cap) {
-            selected.push(cap);
+        if !deduped.contains(&cap) {
+            deduped.push(cap);
         }
     }
-    selected
+    deduped
+}
+
+/// The dotted capability name for a collectable evidence capability, or `None`
+/// for the exec capabilities (which a diagnosis never collects). Inverse of the
+/// `context_kinds` name → [`Capability`] map.
+pub fn capability_name(cap: Capability) -> Option<&'static str> {
+    Some(match cap {
+        Capability::SystemInfo => "system.info",
+        Capability::ProcessList => "process.list",
+        Capability::NetworkPorts => "network.ports",
+        Capability::ServiceStatus => "service.status",
+        Capability::LogRecent => "log.recent",
+        Capability::ContainerList => "container.list",
+        Capability::ContainerInspect => "container.inspect",
+        Capability::ContainerLogs => "container.logs",
+        Capability::ScreenCaptureCurrent => "screen.capture.current",
+        Capability::ShellExecReadonly | Capability::ShellExecConfirmed => return None,
+    })
+}
+
+/// Narrow a diagnose request to the capabilities the policy granted (the central
+/// PDP step). Returns the request with `context_kinds` rewritten to exactly the
+/// granted-and-requested capabilities and `include_screen` cleared unless a
+/// screenshot is among them, or `None` when the granted scope permits no evidence
+/// at all — the diagnosis must then be refused **before** any collection is asked
+/// of the edge. The edge still applies its own [`CollectionPolicy`] afterwards as
+/// a second, defence-in-depth gate.
+///
+/// Capabilities this generic path cannot actually collect (the parameterized
+/// `container.inspect` / `container.logs`, which need a container id —
+/// [`context_input_for`] returns `None`) are dropped here too: keeping them would
+/// let a request that names *only* such a capability pass narrowing, collect an
+/// empty snapshot, and still call the model. Dropping them means such a request
+/// narrows to `None` and is refused up front.
+pub fn narrow_to_granted(
+    request: &DiagnoseRequestData,
+    granted: &[Capability],
+) -> Option<DiagnoseRequestData> {
+    let allowed: Vec<Capability> = requested_capabilities(request)
+        .into_iter()
+        .filter(|cap| granted.contains(cap) && context_input_for(*cap).is_some())
+        .collect();
+    if allowed.is_empty() {
+        return None;
+    }
+    let mut narrowed = request.clone();
+    narrowed.context_kinds = allowed
+        .iter()
+        .filter_map(|cap| capability_name(*cap).map(str::to_string))
+        .collect();
+    narrowed.include_screen = allowed.contains(&Capability::ScreenCaptureCurrent);
+    Some(narrowed)
+}
+
+/// Select the capabilities to collect for a diagnosis: the requested set
+/// ([`requested_capabilities`]) filtered by the server policy, de-duplicated
+/// while preserving order.
+pub fn select_capabilities(
+    request: &DiagnoseRequestData,
+    policy: &CollectionPolicy,
+) -> Vec<Capability> {
+    requested_capabilities(request)
+        .into_iter()
+        .filter(|cap| is_allowed(*cap, request, policy))
+        .collect()
 }
 
 /// Build the default read-context input for a capability, or `None` when the
@@ -242,6 +306,95 @@ mod tests {
         };
         let caps = select_capabilities(&request(&["process.list", "process.list"], false), &policy);
         assert_eq!(caps, vec![Capability::ProcessList]);
+    }
+
+    /// `narrow_to_granted` keeps only the requested capabilities that the policy
+    /// granted, rewriting `context_kinds` to make the gate explicit (so the edge
+    /// cannot re-expand an empty request to the default set).
+    #[test]
+    fn narrow_keeps_only_granted_of_default_set() {
+        let granted = [Capability::SystemInfo, Capability::ProcessList];
+        let narrowed = narrow_to_granted(&request(&[], false), &granted).expect("non-empty");
+        // The default set intersected with the grant → exactly the two granted.
+        assert_eq!(
+            narrowed.context_kinds,
+            vec!["system.info".to_string(), "process.list".to_string()]
+        );
+        assert!(!narrowed.include_screen);
+    }
+
+    /// A request naming only a non-constructible parameterized capability
+    /// (`container.logs` needs a container id) narrows to `None` even when it is
+    /// granted, so the diagnosis is refused instead of collecting an empty
+    /// snapshot and still calling the model.
+    #[test]
+    fn narrow_drops_unconstructable_parameterized_caps() {
+        let granted = [Capability::ContainerLogs, Capability::ContainerInspect];
+        assert!(narrow_to_granted(&request(&["container.logs"], false), &granted).is_none());
+        // Mixed with a constructible grant, only the constructible one survives.
+        let granted = [Capability::ContainerLogs, Capability::SystemInfo];
+        let narrowed = narrow_to_granted(
+            &request(&["container.logs", "system.info"], false),
+            &granted,
+        )
+        .expect("system.info survives");
+        assert_eq!(narrowed.context_kinds, vec!["system.info".to_string()]);
+    }
+
+    /// A request for capabilities none of which are granted yields `None` — the
+    /// diagnosis must be refused before any collection is asked of the edge.
+    #[test]
+    fn narrow_empty_intersection_is_none() {
+        // Granted an unrelated capability only.
+        let granted = [Capability::NetworkPorts];
+        assert!(narrow_to_granted(&request(&["system.info"], false), &granted).is_none());
+        // ai.diagnose granted but no evidence capability at all.
+        assert!(narrow_to_granted(&request(&[], false), &[]).is_none());
+    }
+
+    /// A screenshot survives narrowing only when explicitly granted; otherwise
+    /// `include_screen` is cleared even though the request asked for it.
+    #[test]
+    fn narrow_gates_screenshot_on_grant() {
+        // Requested screen but not granted → cleared, other granted kept.
+        let granted = [Capability::SystemInfo];
+        let narrowed = narrow_to_granted(&request(&["system.info"], true), &granted).expect("kept");
+        assert!(!narrowed.include_screen);
+        assert!(
+            !narrowed
+                .context_kinds
+                .contains(&"screen.capture.current".to_string())
+        );
+
+        // Requested + granted → retained.
+        let granted = [Capability::SystemInfo, Capability::ScreenCaptureCurrent];
+        let narrowed = narrow_to_granted(&request(&["system.info"], true), &granted).expect("kept");
+        assert!(narrowed.include_screen);
+        assert!(
+            narrowed
+                .context_kinds
+                .contains(&"screen.capture.current".to_string())
+        );
+    }
+
+    /// `capability_name` round-trips the collectable names and rejects exec.
+    #[test]
+    fn capability_name_round_trips_collectable() {
+        for name in [
+            "system.info",
+            "process.list",
+            "network.ports",
+            "service.status",
+            "log.recent",
+            "container.list",
+            "container.inspect",
+            "container.logs",
+            "screen.capture.current",
+        ] {
+            let cap = capability_from_name(name).expect("known");
+            assert_eq!(capability_name(cap), Some(name));
+        }
+        assert_eq!(capability_name(Capability::ShellExecReadonly), None);
     }
 
     /// Parameter-free reads build an input; container inspect/logs and exec do

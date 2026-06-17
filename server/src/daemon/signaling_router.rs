@@ -652,6 +652,7 @@ async fn handle_collect_request_inbound(
         send_collect_error(
             &ctx.outbound_tx,
             &request_id,
+            AgentErrorKind::SessionUnavailable,
             "evidence collector is not available on this host",
         );
         return Ok(());
@@ -676,13 +677,16 @@ async fn handle_collect_request_inbound(
                     send_collect_error(
                         &ctx.outbound_tx,
                         &request_id,
+                        AgentErrorKind::Internal,
                         &format!("failed to encode evidence snapshot: {e}"),
                     );
                 }
             }
         }
         Err(e) => {
-            send_collect_error(&ctx.outbound_tx, &request_id, &e.message);
+            // Preserve the failure class (notably a fail-closed `RedactionFailed`)
+            // so the central orchestrator audits it correctly.
+            send_collect_error(&ctx.outbound_tx, &request_id, e.kind, &e.message);
         }
     }
     Ok(())
@@ -704,12 +708,19 @@ fn send_collect_response(outbound_tx: &broadcast::Sender<String>, response: &Col
     }
 }
 
-/// Emit a wholesale [`CollectResponse::Error`] for `request_id`.
-fn send_collect_error(outbound_tx: &broadcast::Sender<String>, request_id: &str, reason: &str) {
+/// Emit a wholesale [`CollectResponse::Error`] for `request_id`, tagged with the
+/// structured failure `kind` so the central orchestrator can audit it.
+fn send_collect_error(
+    outbound_tx: &broadcast::Sender<String>,
+    request_id: &str,
+    kind: AgentErrorKind,
+    reason: &str,
+) {
     send_collect_response(
         outbound_tx,
         &CollectResponse::Error(CollectResponseError {
             request_id: request_id.to_string(),
+            error_kind: kind,
             reason: reason.to_string(),
         }),
     );
@@ -4990,7 +5001,7 @@ mod tests {
             .await
             .unwrap();
         let frame = read_response(&mut rx);
-        assert!(matches!(frame.signaling_type, SignalingType::DiagnoseEvent));
+        assert_eq!(frame.signaling_type, SignalingType::DiagnoseEvent);
         // Notification, not a one-shot response.
         assert!(frame.response_state.is_none());
         let event = frame.get_data::<DiagnoseEvent>().expect("DiagnoseEvent");
@@ -5224,7 +5235,7 @@ mod tests {
         assert_eq!(frames.last().unwrap().1.kind, DiagnoseEventKind::Final);
         // Every frame is a notification-style DiagnoseEvent.
         for (m, _) in &frames {
-            assert!(matches!(m.signaling_type, SignalingType::DiagnoseEvent));
+            assert_eq!(m.signaling_type, SignalingType::DiagnoseEvent);
             assert!(
                 m.response_state.is_none(),
                 "diagnose frames must not be one-shot responses"

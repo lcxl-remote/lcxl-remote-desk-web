@@ -277,6 +277,25 @@ impl AuditEvent {
         event
     }
 
+    /// `ai.task.failed` correlated only by `request_id` — the central
+    /// orchestrator path, which fails a diagnosis without a per-capability
+    /// [`AgentEnvelope`] (e.g. the remote evidence collection or the model call
+    /// failed). Like [`task_failed`](Self::task_failed) the error *kind* is the
+    /// content-free output summary; the human message may carry policy detail and
+    /// is not stored.
+    pub fn task_failed_for_request(
+        event_id: String,
+        created_at: String,
+        request_id: &str,
+        error: &AgentError,
+    ) -> Self {
+        let mut event =
+            Self::task_scoped(event_id, created_at, AuditEventType::TaskFailed, request_id);
+        event.result = "error".to_string();
+        event.output_summary = Some(format!("{:?}", error.kind));
+        event
+    }
+
     /// Base for orchestrator **task-level** events (model / redaction / cancel).
     /// These are correlated by `request_id` rather than a per-capability
     /// [`AgentEnvelope`], so the subject fields the envelope would supply
@@ -921,6 +940,28 @@ mod tests {
         assert_eq!(e.duration_ms, Some(5));
         // The kind is recorded; the (potentially sensitive) message is not.
         assert_eq!(e.output_summary.as_deref(), Some("UnsupportedCapability"));
+        assert!(!e.output_summary.as_deref().unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn task_failed_for_request_records_kind_and_request_id_without_envelope() {
+        let error = AgentError {
+            kind: AgentErrorKind::RedactionFailed,
+            message: "secret policy detail".into(),
+            retryable: false,
+            safe_for_model: true,
+        };
+        let e = AuditEvent::task_failed_for_request(
+            "evt_tf".into(),
+            "2026-06-16T00:00:00Z".into(),
+            "req_99",
+            &error,
+        );
+        assert_eq!(e.event_type, "ai.task.failed");
+        assert_eq!(e.result, "error");
+        assert_eq!(e.request_id, "req_99");
+        // Kind is recorded; the (potentially sensitive) message is not.
+        assert_eq!(e.output_summary.as_deref(), Some("RedactionFailed"));
         assert!(!e.output_summary.as_deref().unwrap().contains("secret"));
     }
 

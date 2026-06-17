@@ -308,7 +308,7 @@ mod tests {
         let snap = snapshot(vec![(Capability::SystemInfo, read(system_info()))]);
         let msgs = build_messages("why slow?", &snap, 128_000, None, &[]);
         assert_eq!(msgs.len(), 2);
-        assert!(matches!(msgs[0].role, ChatRole::System));
+        assert_eq!(msgs[0].role, ChatRole::System);
         assert!(msgs[0].text.contains("untrusted DATA"));
         assert!(msgs[0].text.contains("\"summary\""));
         // No locale → no language directive appended.
