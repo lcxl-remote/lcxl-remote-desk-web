@@ -59,7 +59,7 @@ pub async fn update_settings(
     requst_json: web::Json<SystemSettings>,
     settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, AWError> {
-    let params = requst_json.into_inner();
+    let mut params = requst_json.into_inner();
     let mut settings = settings.write().await;
 
     // Check auto_start flag and update system registry/startup folder if needed
@@ -69,6 +69,10 @@ pub async fn update_settings(
         log::error!("Failed to update auto start status: {:?}", e);
     }
 
+    // The console form omits the auto-generated internal fields; carry them over
+    // from the current settings so a full replace doesn't wipe client_id and the
+    // signaling/IPC/session secrets.
+    params.preserve_internal_fields(&settings.system);
     settings.system = params;
     // save new settings to file
     settings.save()?;

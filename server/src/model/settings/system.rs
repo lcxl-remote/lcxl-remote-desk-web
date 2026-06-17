@@ -182,6 +182,29 @@ impl SystemSettings {
         self.client_id = Some(new_id.clone());
         new_id
     }
+
+    /// Carry over the auto-generated, internally-managed fields that the console
+    /// settings form never sends in its payload. Without this, a full-struct
+    /// replace from `POST /settings` resets them to `None`, which drops the
+    /// persisted `client_id` (silently breaking the manager signaling proxy, as
+    /// it returns early before even attempting to connect), the local signaling
+    /// token, the Tauri IPC token and the session signing key. Each field is
+    /// only restored when the incoming value is absent, so an explicit override
+    /// (should the payload ever carry one) still wins.
+    pub fn preserve_internal_fields(&mut self, previous: &SystemSettings) {
+        if self.client_id.is_none() {
+            self.client_id = previous.client_id.clone();
+        }
+        if self.local_signaling_token.is_none() {
+            self.local_signaling_token = previous.local_signaling_token.clone();
+        }
+        if self.tauri_ipc_token.is_none() {
+            self.tauri_ipc_token = previous.tauri_ipc_token.clone();
+        }
+        if self.session_secret_key.is_none() {
+            self.session_secret_key = previous.session_secret_key.clone();
+        }
+    }
 }
 
 impl Default for SystemSettings {
@@ -207,5 +230,56 @@ impl Default for SystemSettings {
             webrtc_ice_disconnected_timeout_secs: None,
             webrtc_ice_failed_timeout_secs: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserve_internal_fields_keeps_secrets_when_update_omits_them() {
+        let previous = SystemSettings {
+            client_id: Some("cid".to_string()),
+            local_signaling_token: Some("lst".to_string()),
+            tauri_ipc_token: Some("tit".to_string()),
+            session_secret_key: Some("ssk".to_string()),
+            ..SystemSettings::default()
+        };
+
+        // Simulates the console payload: a real form field is set, the
+        // auto-generated internal fields are absent (deserialized to None).
+        let mut incoming = SystemSettings {
+            manager_url: Some("ws://manager/api/desk/signaling".to_string()),
+            ..SystemSettings::default()
+        };
+
+        incoming.preserve_internal_fields(&previous);
+
+        assert_eq!(incoming.client_id.as_deref(), Some("cid"));
+        assert_eq!(incoming.local_signaling_token.as_deref(), Some("lst"));
+        assert_eq!(incoming.tauri_ipc_token.as_deref(), Some("tit"));
+        assert_eq!(incoming.session_secret_key.as_deref(), Some("ssk"));
+        // The actual form field still takes effect.
+        assert_eq!(
+            incoming.manager_url.as_deref(),
+            Some("ws://manager/api/desk/signaling")
+        );
+    }
+
+    #[test]
+    fn preserve_internal_fields_respects_explicit_incoming_values() {
+        let previous = SystemSettings {
+            client_id: Some("old".to_string()),
+            ..SystemSettings::default()
+        };
+        let mut incoming = SystemSettings {
+            client_id: Some("new".to_string()),
+            ..SystemSettings::default()
+        };
+
+        incoming.preserve_internal_fields(&previous);
+
+        assert_eq!(incoming.client_id.as_deref(), Some("new"));
     }
 }
