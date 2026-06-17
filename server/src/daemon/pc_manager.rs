@@ -197,19 +197,27 @@ impl DaemonFtWindow {
 }
 
 /// Filter the request's ICE servers down to the ones this node should
-/// actually use given the local `traversal_mode` and `startup_mode`.
+/// actually use given the local `traversal_mode`.
 ///
-/// - `Stun` mode keeps STUN servers and drops TURN.
-/// - `Turn` mode keeps STUN; keeps TURN only on `DeskServer` startups
-///   (other modes do not traverse so they do not need TURN credentials).
-/// - `Direct` mode drops everything.
+/// `traversal_mode` is the operator's explicit traversal intent and alone
+/// decides what is kept — independent of startup mode:
+/// - `Turn` keeps both STUN and TURN.
+/// - `Stun` keeps STUN, drops TURN.
+/// - `None` drops everything (host candidates only).
+///
+/// A node that wants no relay candidates simply has no TURN to inject in the
+/// first place: a portable node with an empty TURN config never gets TURN
+/// entries pushed upstream (`get_rest_ice_servers` returns `None`), so nothing
+/// reaches this filter. Conversely, a node configured with a TURN server (or
+/// reached through a manager that injects one) has explicitly opted into relay,
+/// so keeping TURN — and the credential that rides with it — is the intended
+/// behaviour.
 ///
 /// Servers with no / unrecognised transport are skipped with a warning.
 /// Pure function — no I/O, no settings lookup, easy to unit test.
 pub fn filter_ice_servers(
     request_ice_servers: &[LcxlRTCIceServer],
     traversal_mode: &TraversalMode,
-    startup_mode: StartupMode,
 ) -> Vec<LcxlRTCIceServer> {
     let mut filtered = Vec::new();
     for ice_server in request_ice_servers {
@@ -220,9 +228,7 @@ pub fn filter_ice_servers(
                 }
             }
             Some(TurnTransport::Turn) => {
-                if matches!(traversal_mode, TraversalMode::Turn)
-                    && startup_mode == StartupMode::DeskServer
-                {
+                if matches!(traversal_mode, TraversalMode::Turn) {
                     filtered.push(ice_server.clone());
                 }
             }
@@ -611,7 +617,6 @@ impl PcRegistry {
         let filtered = filter_ice_servers(
             &request_remote.ice_servers,
             &local_settings.turn_client.traversal_mode,
-            local_settings.args.startup_mode.clone(),
         );
 
         let pc = build_peer_connection(filtered.iter().map(Into::into).collect(), local_settings)
@@ -3151,34 +3156,23 @@ mod tests {
             ice("stun:stun.l.google.com:19302"),
             ice("turn:turn.example.com:3478"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::Stun, StartupMode::DeskServer);
+        let kept = filter_ice_servers(&request, &TraversalMode::Stun);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].urls[0], "stun:stun.l.google.com:19302");
     }
 
+    /// Turn mode keeps both STUN and TURN. `traversal_mode` is the sole
+    /// authority — startup mode no longer gates TURN, so a `Default` /
+    /// `ServiceDaemon` host reached through a manager relays its TURN just like
+    /// a dedicated `DeskServer`.
     #[test]
-    fn filter_keeps_both_in_turn_mode_for_desk_server() {
+    fn filter_keeps_both_in_turn_mode() {
         let request = vec![
             ice("stun:stun.l.google.com:19302"),
             ice("turn:turn.example.com:3478"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::Turn, StartupMode::DeskServer);
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn);
         assert_eq!(kept.len(), 2);
-    }
-
-    /// In Turn mode but on a non-DeskServer startup, TURN servers are
-    /// dropped because non-DeskServer modes never traverse — they would
-    /// burn TURN credentials for nothing and risk a credential leak via
-    /// the browser-side ICE candidate dump.
-    #[test]
-    fn filter_drops_turn_in_turn_mode_when_not_desk_server() {
-        let request = vec![
-            ice("stun:stun.l.google.com:19302"),
-            ice("turn:turn.example.com:3478"),
-        ];
-        let kept = filter_ice_servers(&request, &TraversalMode::Turn, StartupMode::ServiceDaemon);
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].urls[0], "stun:stun.l.google.com:19302");
     }
 
     /// `TraversalMode::None` means "no STUN, no TURN, host candidates
@@ -3189,7 +3183,7 @@ mod tests {
             ice("stun:stun.l.google.com:19302"),
             ice("turn:turn.example.com:3478"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::None, StartupMode::DeskServer);
+        let kept = filter_ice_servers(&request, &TraversalMode::None);
         assert!(kept.is_empty());
     }
 
@@ -3201,7 +3195,7 @@ mod tests {
             ice("https://not-a-stun-or-turn.example.com"),
             ice("stun:stun.l.google.com:19302"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::Stun, StartupMode::DeskServer);
+        let kept = filter_ice_servers(&request, &TraversalMode::Stun);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].urls[0], "stun:stun.l.google.com:19302");
     }
