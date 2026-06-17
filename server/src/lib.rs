@@ -737,22 +737,16 @@ pub async fn run_with_hub(
                     })),
             )
     });
-    if settings.system.enable_ipv6 && check_ipv6_available() {
-        let addr = format!(
-            "{}:{}",
-            settings.system.listen_addr_ipv6, settings.system.port
-        );
+    let ipv6_active = settings.system.enable_ipv6 && check_ipv6_available();
+    for addr in resolve_bind_addrs(
+        ipv6_active,
+        settings.system.listen_addr_ipv4.as_str(),
+        settings.system.listen_addr_ipv6.as_str(),
+        settings.system.port,
+        cfg!(windows),
+    ) {
         http_server = http_server.bind(addr.as_str())?;
         info!("Server started at http://{}", addr);
-    } else {
-        http_server = http_server.bind((
-            settings.system.listen_addr_ipv4.as_str(),
-            settings.system.port,
-        ))?;
-        info!(
-            "Server started at http://{}:{}",
-            settings.system.listen_addr_ipv4, settings.system.port
-        );
     }
     if embedded_should_disable_signals(host_control_hub.is_some()) {
         // The Tauri shell owns the process lifecycle. Letting actix trap SIGINT
@@ -776,9 +770,56 @@ fn embedded_should_disable_signals(has_shared_hub: bool) -> bool {
     has_shared_hub
 }
 
+/// Compute the socket addresses the HTTP server should bind.
+///
+/// On Windows an IPv6 wildcard socket is `v6only` by default, so binding `::`
+/// alone does not accept IPv4 clients (browsers on `127.0.0.1`, peers reaching
+/// the server over an IPv4 LAN address). When IPv6 is active we therefore
+/// additionally bind the IPv4 wildcard on Windows. On other platforms `::` is
+/// dual-stack and already accepts IPv4-mapped clients, so binding the IPv4
+/// wildcard too would collide on the same port.
+fn resolve_bind_addrs(
+    ipv6_active: bool,
+    ipv4_addr: &str,
+    ipv6_addr: &str,
+    port: u16,
+    is_windows: bool,
+) -> Vec<String> {
+    if ipv6_active {
+        let mut addrs = vec![format!("{ipv6_addr}:{port}")];
+        if is_windows {
+            addrs.push(format!("{ipv4_addr}:{port}"));
+        }
+        addrs
+    } else {
+        vec![format!("{ipv4_addr}:{port}")]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_with_ipv6_binds_both_stacks() {
+        let addrs = resolve_bind_addrs(true, "0.0.0.0", "::", 8081, true);
+        assert_eq!(
+            addrs,
+            vec![":::8081".to_string(), "0.0.0.0:8081".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_windows_with_ipv6_binds_ipv6_only() {
+        let addrs = resolve_bind_addrs(true, "0.0.0.0", "::", 8081, false);
+        assert_eq!(addrs, vec![":::8081".to_string()]);
+    }
+
+    #[test]
+    fn ipv6_inactive_binds_ipv4_only() {
+        let addrs = resolve_bind_addrs(false, "0.0.0.0", "::", 8081, true);
+        assert_eq!(addrs, vec!["0.0.0.0:8081".to_string()]);
+    }
 
     // Constant-time eq is correct on equal slices.
     #[test]
