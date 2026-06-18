@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest"
 import {
     canEnableAdaptiveResolution,
     formatDisplayLabel,
+    hasNoDisplaysForMode,
 } from "./desk-config-dialog"
 import type { DisplayInfo } from "@/services/types"
 
@@ -110,5 +111,32 @@ describe("canEnableAdaptiveResolution", () => {
         expect(canEnableAdaptiveResolution(undefined, "\\\\.\\DISPLAY8")).toBe(
             false,
         )
+    })
+})
+
+describe("hasNoDisplaysForMode", () => {
+    const display = makeDisplayInfo({
+        desktop_coordinates: { left: 0, top: 0, right: 1280, bottom: 800 },
+    })
+
+    it("flags a chosen mode whose enumerated display list is empty", () => {
+        // The headless / detached-session case: the WGC key exists so the mode
+        // is offered, but EnumDisplayMonitors returned zero, so no picker can
+        // render. Connect must be blocked.
+        expect(hasNoDisplaysForMode("WGC", [])).toBe(true)
+        expect(hasNoDisplaysForMode("WGC", null)).toBe(true)
+        expect(hasNoDisplaysForMode("WGC", undefined)).toBe(true)
+    })
+
+    it("does not flag a mode that has at least one display", () => {
+        expect(hasNoDisplaysForMode("WGC", [display])).toBe(false)
+    })
+
+    it("does not flag before any capture mode is selected", () => {
+        // Nothing to gate yet — the empty list is just the no-selection state,
+        // not a host-without-display state.
+        expect(hasNoDisplaysForMode("", [])).toBe(false)
+        expect(hasNoDisplaysForMode(undefined, [])).toBe(false)
+        expect(hasNoDisplaysForMode(null, undefined)).toBe(false)
     })
 })

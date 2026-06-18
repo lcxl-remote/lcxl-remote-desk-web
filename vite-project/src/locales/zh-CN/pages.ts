@@ -417,6 +417,8 @@ export default {
   'pages.desk.displayDeviceRequired': '请选择一个显示设备!',
   'pages.desk.displayDeviceStaleWarning.title': '上次选择的显示设备已不可用',
   'pages.desk.displayDeviceStaleWarning.body': '上次选择的显示设备 {{name}} 已经不存在（可能被拔出，或虚拟屏已分离）。已为您预选主显示器，如果需要请重新选择。',
+  'pages.desk.noDisplayWarning.title': '远程主机未检测到显示器',
+  'pages.desk.noDisplayWarning.body': '远程主机在该捕获模式下没有可捕获的显示器（可能处于无头状态、会话已断开，或所有显示器已分离）。请接回显示器/远程会话或启用虚拟屏，然后重新打开本对话框。在有可用显示器之前无法连接。',
   'pages.desk.showRemoteMouse': '显示远程鼠标',
   'pages.desk.adaptiveResolution': '自适应网页分辨率',
   'pages.desk.adaptiveResolutionVirtualOnly': '仅在选中虚拟屏时可用',

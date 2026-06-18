@@ -419,6 +419,8 @@ export default {
   'pages.desk.displayDeviceRequired': 'Please select a display device!',
   'pages.desk.displayDeviceStaleWarning.title': 'Previously selected display is unavailable',
   'pages.desk.displayDeviceStaleWarning.body': 'The display {{name}} you picked last time is no longer enumerated (it may have been unplugged or the virtual monitor detached). We prefilled the primary monitor; pick a different one if needed.',
+  'pages.desk.noDisplayWarning.title': 'No display detected on the remote host',
+  'pages.desk.noDisplayWarning.body': 'The remote host reported no capturable display for this mode (it may be headless, the session disconnected, or all monitors detached). Reconnect a monitor / remote session or enable the virtual display, then reopen this dialog. Connecting is disabled until a display is available.',
   'pages.desk.showRemoteMouse': 'Show Remote Mouse',
   'pages.desk.adaptiveResolution': 'Adaptive Web Page Resolution',
   'pages.desk.adaptiveResolutionVirtualOnly': 'Available only when the virtual display is selected',

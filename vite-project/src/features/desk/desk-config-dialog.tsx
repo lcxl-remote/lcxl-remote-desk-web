@@ -77,6 +77,24 @@ export function canEnableAdaptiveResolution(
     )
 }
 
+/**
+ * Whether the chosen capture mode offers no display to capture. A backend key
+ * (WGC / DXGI / GDI) can be present in `video_device_list` while its display
+ * array is empty — e.g. a headless or disconnected host session where
+ * `EnumDisplayMonitors` returns zero monitors. The display picker only renders
+ * for a non-empty list, so its `required` rule never registers and a submit
+ * would slip through with an empty `video_device_name` into a doomed media
+ * pipeline. The dialog uses this to block Connect and explain why. Returns
+ * `false` before any mode is chosen (nothing to gate yet). Pure so the unit
+ * test can pin it without Radix / react-hook-form.
+ */
+export function hasNoDisplaysForMode(
+    selectedImageCapture: string | undefined | null,
+    videoDeviceList: ReadonlyArray<DisplayInfo> | undefined | null,
+): boolean {
+    return !!selectedImageCapture && (!videoDeviceList || videoDeviceList.length === 0)
+}
+
 interface DeskConfigDialogProps {
     open: boolean
     onOpenChange: (open: boolean) => void
@@ -240,6 +258,7 @@ export function DeskConfigDialog({
     const videoDeviceList = initData && selectedImageCapture && initData.video_device_list
         ? initData.video_device_list[selectedImageCapture]
         : []
+    const noDisplaysForMode = hasNoDisplaysForMode(selectedImageCapture, videoDeviceList)
 
     // Audio states
     const enableAudio = form.watch("enable_audio")
@@ -250,6 +269,11 @@ export function DeskConfigDialog({
         : []
 
     const handleSubmit = (values: FormSettings) => {
+        // Defence in depth: never start a session without a display, even if the
+        // disabled submit button is bypassed (e.g. implicit Enter-key submit).
+        if (noDisplaysForMode || !values.video_device_name) {
+            return
+        }
         // Ensure numbers are properly typed
         const submitData: DeskSettings = {
             ...values,
@@ -366,6 +390,24 @@ export function DeskConfigDialog({
                                             {t(
                                                 "pages.desk.dxgiVideoBlackBarWarning.body",
                                                 "DXGI captures DWM's framebuffer. Browser-decoded video uses a hardware overlay surface that DXGI cannot read, so brief black bars may flash while playing video. Switch to WGC for correct video capture."
+                                            )}
+                                        </AlertDescription>
+                                    </Alert>
+                                )}
+
+                                {noDisplaysForMode && (
+                                    <Alert variant="destructive">
+                                        <AlertTriangle className="h-4 w-4" />
+                                        <AlertTitle>
+                                            {t(
+                                                "pages.desk.noDisplayWarning.title",
+                                                "No display detected on the remote host",
+                                            )}
+                                        </AlertTitle>
+                                        <AlertDescription>
+                                            {t(
+                                                "pages.desk.noDisplayWarning.body",
+                                                "The remote host reported no capturable display for this mode (it may be headless, the session disconnected, or all monitors detached). Reconnect a monitor / remote session or enable the virtual display, then reopen this dialog. Connecting is disabled until a display is available.",
                                             )}
                                         </AlertDescription>
                                     </Alert>
@@ -940,7 +982,7 @@ export function DeskConfigDialog({
                             <Button type="button" variant="outline" onClick={onCancel}>
                                 {t('pages.desk.close', 'Cancel')}
                             </Button>
-                            <Button type="submit">
+                            <Button type="submit" disabled={noDisplaysForMode}>
                                 {t('pages.desk.connect', 'Connect')}
                             </Button>
                         </DialogFooter>
