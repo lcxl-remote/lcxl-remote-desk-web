@@ -55,11 +55,15 @@ pub struct DiagnoseRequestData {
 // only party permitted to issue a request and the only party permitted to
 // consume a response (enforced at the signaling layer).
 
-/// Aggregated-continuation cap the signaling WebSocket enforces on a single
-/// inbound frame (`max_continuation_size` on the receiving side). A chunked
-/// [`CollectResponse`] rides this socket — not the daemon↔worker IPC channel —
-/// so a chunk's serialized `SignalingModel` frame must stay strictly below this
-/// or the receiver drops the host connection with "payload reached size limit".
+/// Per-frame size limit the manager's signaling WebSocket endpoint must accept
+/// so a chunked [`CollectResponse`] can be received. A chunk rides the signaling
+/// socket — not the daemon↔worker IPC channel — as a single (unfragmented) WS
+/// text frame. The actix-ws codec defaults its per-frame ceiling to 64 KiB and
+/// rejects anything larger with `ProtocolError::Overflow` ("payload reached size
+/// limit") *before* continuation aggregation, dropping the host connection. The
+/// manager therefore raises `max_frame_size` (and `max_continuation_size`) to
+/// this value; [`COLLECT_CHUNK_PAYLOAD_LIMIT`] is held below it with headroom for
+/// the surrounding JSON + `SignalingModel` envelope.
 pub const SIGNALING_FRAME_LIMIT: usize = 1024 * 1024;
 
 /// Upper bound on the base64 `payload_b64` slice in a single
