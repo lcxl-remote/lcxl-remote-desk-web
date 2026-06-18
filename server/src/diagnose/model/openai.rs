@@ -93,19 +93,23 @@ impl ModelAdapter for OpenAiCompatAdapter {
     ) -> Result<ChatResponse, AgentError> {
         // Build a TLS-capable client. `awc::Client::default()` has no TLS
         // connector, so it fails instantly on `https://` gateways (hosted
-        // providers); a rustls connector handles both http and https. The crypto
-        // provider install is idempotent — production daemon/worker already
-        // install one, but the diagnose path may also run in contexts that did
-        // not.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        // providers); a rustls connector handles both http and https.
         let mut root_store = rustls::RootCertStore::empty();
         // `CertificateResult` may carry partial errors; use whatever loaded.
         for cert in rustls_native_certs::load_native_certs().certs {
             let _ = root_store.add(cert);
         }
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(std::sync::Arc::new(root_store))
-            .with_no_client_auth();
+        // Pin the `ring` crypto provider rather than the rustls default
+        // (`aws_lc_rs`): on Windows `aws_lc_rs` fast-fails the process with
+        // STATUS_STACK_BUFFER_OVERRUN on the first TLS handshake. An explicit
+        // provider also makes this independent of the process-wide default.
+        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("ring provider supports the default TLS protocol versions")
+        .with_root_certificates(std::sync::Arc::new(root_store))
+        .with_no_client_auth();
         let client = awc::Client::builder()
             .connector(
                 awc::Connector::new()

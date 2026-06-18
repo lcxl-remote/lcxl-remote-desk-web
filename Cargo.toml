@@ -91,7 +91,10 @@ actix-rt = "2"
 awc = { version = "3.5", features = ["rustls-0_23"] }
 actix-service = "2.0"
 
-rustls = "0.23"
+# `ring` feature enabled so the model HTTP clients can pin it explicitly: the
+# default `aws_lc_rs` provider fast-fails (STATUS_STACK_BUFFER_OVERRUN) on the
+# first TLS handshake on Windows.
+rustls = { version = "0.23", features = ["ring"] }
 rustls-native-certs = "0.8"
 
 webrtc = "0.17"

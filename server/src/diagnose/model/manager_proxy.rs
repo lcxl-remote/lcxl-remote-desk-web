@@ -81,14 +81,20 @@ pub(crate) fn proxy_url(manager_url: &str) -> Option<String> {
 
 /// Build a TLS-capable `awc` client (the manager may be reached over https).
 fn build_client() -> awc::Client {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mut root_store = rustls::RootCertStore::empty();
     for cert in rustls_native_certs::load_native_certs().certs {
         let _ = root_store.add(cert);
     }
-    let tls = rustls::ClientConfig::builder()
-        .with_root_certificates(Arc::new(root_store))
-        .with_no_client_auth();
+    // Pin the `ring` crypto provider rather than the rustls default
+    // (`aws_lc_rs`): on Windows `aws_lc_rs` fast-fails the process with
+    // STATUS_STACK_BUFFER_OVERRUN on the first TLS handshake.
+    let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring provider supports the default TLS protocol versions")
+    .with_root_certificates(Arc::new(root_store))
+    .with_no_client_auth();
     awc::Client::builder()
         .connector(
             awc::Connector::new()

@@ -124,15 +124,18 @@ impl ModelAdapter for AnthropicAdapter {
         on_delta: &(dyn Fn(String) + Send + Sync),
     ) -> Result<ChatResponse, AgentError> {
         // Build a TLS-capable client (see the OpenAI adapter for the rationale on
-        // the rustls connector and the idempotent crypto-provider install).
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        // the rustls connector and pinning the `ring` crypto provider).
         let mut root_store = rustls::RootCertStore::empty();
         for cert in rustls_native_certs::load_native_certs().certs {
             let _ = root_store.add(cert);
         }
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(std::sync::Arc::new(root_store))
-            .with_no_client_auth();
+        let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("ring provider supports the default TLS protocol versions")
+        .with_root_certificates(std::sync::Arc::new(root_store))
+        .with_no_client_auth();
         let client = awc::Client::builder()
             .connector(
                 awc::Connector::new()
