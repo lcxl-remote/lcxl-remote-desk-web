@@ -3,7 +3,7 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import DeskSession from './desk-session';
+import DeskSession, { shouldOpenConfigDialog } from './desk-session';
 import React from 'react';
 
 // Mock routing
@@ -184,6 +184,50 @@ describe('DeskSession Control Bar', () => {
 
     // We expect it to still be expanded
     expect(content).toHaveClass('expanded');
+  });
+});
+
+describe('shouldOpenConfigDialog', () => {
+  const base = {
+    hasInitData: true,
+    isRTCConnected: false,
+    hasAttemptedConnect: false,
+    rtcFailed: false,
+  };
+
+  it('opens for the initial settings pick (INIT arrived, no attempt yet)', () => {
+    expect(shouldOpenConfigDialog(base)).toBe(true);
+  });
+
+  it('stays closed before INIT data arrives', () => {
+    expect(shouldOpenConfigDialog({ ...base, hasInitData: false })).toBe(false);
+  });
+
+  it('stays closed while connected', () => {
+    expect(shouldOpenConfigDialog({ ...base, isRTCConnected: true })).toBe(false);
+  });
+
+  it('does NOT reopen on a transient disconnect after a connect attempt', () => {
+    // The reported flapping: attempted a connect, ICE dipped to `disconnected`
+    // (isRTCConnected false) but not `failed`. Reopening here would strand the
+    // recovering video behind the dialog.
+    expect(
+      shouldOpenConfigDialog({
+        ...base,
+        hasAttemptedConnect: true,
+        rtcFailed: false,
+      }),
+    ).toBe(false);
+  });
+
+  it('reopens after a terminal ICE failure so the user can retry', () => {
+    expect(
+      shouldOpenConfigDialog({
+        ...base,
+        hasAttemptedConnect: true,
+        rtcFailed: true,
+      }),
+    ).toBe(true);
   });
 });
 

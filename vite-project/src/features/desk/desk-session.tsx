@@ -47,6 +47,30 @@ import {
     SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
 } from "./constants"
 
+/**
+ * Whether the desk config dialog should be (re)opened automatically.
+ *
+ * It opens for the initial settings pick (INIT arrived, no connect attempt yet)
+ * and after a terminal ICE failure so the user can retry. It must NOT reopen on
+ * a transient `disconnected` — that flips `isRTCConnected` to false but leaves
+ * `rtcFailed` false, and ICE typically recovers on its own; reopening there
+ * leaves the recovered video sitting behind a spurious dialog (the reported
+ * "dialog pops back up, then the screen appears behind it" flapping). Pure so
+ * the unit test can pin every branch without rendering the component.
+ */
+export function shouldOpenConfigDialog(args: {
+    hasInitData: boolean
+    isRTCConnected: boolean
+    hasAttemptedConnect: boolean
+    rtcFailed: boolean
+}): boolean {
+    const { hasInitData, isRTCConnected, hasAttemptedConnect, rtcFailed } = args
+    if (!hasInitData || isRTCConnected) {
+        return false
+    }
+    return !hasAttemptedConnect || rtcFailed
+}
+
 export default function DeskSession() {
     const { id: deskId } = useParams<{ id: string }>()
     const navigate = useNavigate()
@@ -80,6 +104,10 @@ export default function DeskSession() {
     const controlBarRef = useRef<HTMLDivElement>(null)
 
     const [isConfigOpen, setIsConfigOpen] = useState(false);
+    // True once the user has kicked off a WebRTC connect from the dialog. Gates
+    // the auto-reopen so a transient ICE `disconnected` during/after negotiation
+    // does not pop the dialog back up over a connection that is still healing.
+    const hasAttemptedConnectRef = useRef(false);
     const [isVideoReady, setIsVideoReady] = useState(false);
     const [isMuted, setIsMuted] = useState(() => {
         // Safari/iOS requires muted for autoPlay
@@ -146,7 +174,7 @@ export default function DeskSession() {
     const [isPrivateScreen, setIsPrivateScreen] = useState(false);
     const [isPrivateScreenSupported, setIsPrivateScreenSupported] = useState(true);
 
-    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, closeRTC, rtcStats } = useDeskRTC({
+    const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
         lastMessage,
         sendMessage
@@ -320,16 +348,34 @@ export default function DeskSession() {
         }
     }, [isConnected]);
 
-    // Wait for INIT data, then show the config dialog so the user can
-    // pick capture settings. The auto-reconnect path that fired after
-    // `DesktopReady` is gone — the daemon-held PC
-    // survives worker swaps so INIT only ever arrives once per session.
+    // Wait for INIT data, then show the config dialog so the user can pick
+    // capture settings. Reopen it only for the initial pick or after a terminal
+    // ICE failure (retry) — never on a transient `disconnected`, which heals on
+    // its own (see `shouldOpenConfigDialog`). The auto-reconnect path that fired
+    // after `DesktopReady` is gone — the daemon-held PC survives worker swaps so
+    // INIT only ever arrives once per session.
     useEffect(() => {
-        if (initData && !isRTCConnected && !document.getElementById("desk-config-dialog")) {
+        if (
+            shouldOpenConfigDialog({
+                hasInitData: !!initData,
+                isRTCConnected,
+                hasAttemptedConnect: hasAttemptedConnectRef.current,
+                rtcFailed,
+            })
+        ) {
             console.log("Showing config dialog for remote connection");
             setIsConfigOpen(true);
         }
-    }, [initData, isRTCConnected]);
+    }, [initData, isRTCConnected, rtcFailed]);
+
+    // Once the media link is up, close the config dialog. Guards against a
+    // dialog that was reopened by an earlier not-connected state lingering in
+    // front of the now-playing remote video.
+    useEffect(() => {
+        if (isRTCConnected) {
+            setIsConfigOpen(false);
+        }
+    }, [isRTCConnected]);
 
     // Attach remote stream to video element
     useEffect(() => {
@@ -541,6 +587,9 @@ export default function DeskSession() {
             console.log("Updating desk settings dynamically...", settingsWithPrefs);
             sendMessage(SIGNALING_TYPE_CODE_UPDATE_DESK_SETTINGS, settingsWithPrefs, deskId);
         } else {
+            // Mark that a connect is in flight so a transient ICE drop during
+            // negotiation does not auto-reopen this dialog.
+            hasAttemptedConnectRef.current = true;
             connect(settingsWithPrefs);
         }
         setIsConfigOpen(false);

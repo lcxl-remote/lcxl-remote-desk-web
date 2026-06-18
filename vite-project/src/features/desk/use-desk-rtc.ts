@@ -71,6 +71,12 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
     const whiteboardChannel = useRef<RTCDataChannel | null>(null);
     const cursorSyncChannel = useRef<RTCDataChannel | null>(null);
     const [isRTCConnected, setIsRTCConnected] = useState(false);
+    // Terminal ICE failure, distinct from a transient `disconnected`. ICE
+    // routinely dips to `disconnected` (consent refresh, relay path changes)
+    // and recovers on its own; only `failed` means negotiation gave up. The UI
+    // uses this to decide whether to reopen the config dialog — a transient
+    // drop must not, or the recovered video ends up behind a spurious dialog.
+    const [rtcFailed, setRtcFailed] = useState(false);
 
     const [rtcStats, setRtcStats] = useState<RTCStatsData>({
         fps: 0, bitrate: 0, rtt: 0,
@@ -168,6 +174,8 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
             iceServers: initData.ice_servers || [],
         });
         peerConnection.current = pc;
+        // Fresh attempt: clear any terminal failure from a previous connection.
+        setRtcFailed(false);
 
         pc.onicecandidate = (event) => {
             if (event.candidate !== null) {
@@ -180,8 +188,17 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
             console.log(`[WebRTC] ICE Connection State changed to: ${pc.iceConnectionState}`);
             if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                 setIsRTCConnected(true);
-            } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+                // A successful (re)connection clears any prior terminal failure.
+                setRtcFailed(false);
+            } else if (pc.iceConnectionState === 'disconnected') {
+                // Transient: mark the link down but NOT failed — ICE usually
+                // heals on its own, so the UI must not reopen the config dialog.
                 setIsRTCConnected(false);
+            } else if (pc.iceConnectionState === 'failed') {
+                // Terminal: negotiation gave up. Surface it so the UI can offer
+                // a retry.
+                setIsRTCConnected(false);
+                setRtcFailed(true);
             }
         }
 
@@ -473,6 +490,7 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         whiteboardChannel,
         cursorSyncChannel,
         isRTCConnected,
+        rtcFailed,
         rtcStats
     };
 }
