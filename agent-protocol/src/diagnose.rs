@@ -55,13 +55,22 @@ pub struct DiagnoseRequestData {
 // only party permitted to issue a request and the only party permitted to
 // consume a response (enforced at the signaling layer).
 
+/// Aggregated-continuation cap the signaling WebSocket enforces on a single
+/// inbound frame (`max_continuation_size` on the receiving side). A chunked
+/// [`CollectResponse`] rides this socket — not the daemon↔worker IPC channel —
+/// so a chunk's serialized `SignalingModel` frame must stay strictly below this
+/// or the receiver drops the host connection with "payload reached size limit".
+pub const SIGNALING_FRAME_LIMIT: usize = 1024 * 1024;
+
 /// Upper bound on the base64 `payload_b64` slice in a single
-/// [`CollectResponseChunk`]. The signaling transport caps a frame at
-/// `MAX_MESSAGE_SIZE` (16 MiB); base64 inflates bytes by ~4/3, so the raw slice
-/// per chunk must stay below `MAX_MESSAGE_SIZE * 3/4` with headroom for the
-/// surrounding JSON envelope. 1 MiB of base64 text per chunk leaves ample
-/// margin while keeping the chunk count small for typical snapshots.
-pub const COLLECT_CHUNK_PAYLOAD_LIMIT: usize = 1024 * 1024;
+/// [`CollectResponseChunk`]. Held well below [`SIGNALING_FRAME_LIMIT`] so the
+/// surrounding JSON envelope (request id, seq, totals, hash, and the
+/// `SignalingModel` wrapper) cannot push the wire frame past the WebSocket's
+/// continuation cap. This budgets the inflated base64 text (base64 grows raw
+/// bytes by ~4/3, so the raw slice per chunk is ~3/4 of this); the 256 KiB of
+/// headroom under the cap dwarfs the few hundred bytes of envelope while keeping
+/// the chunk count small for typical snapshots.
+pub const COLLECT_CHUNK_PAYLOAD_LIMIT: usize = 768 * 1024;
 
 /// A→B: ask the edge to collect read-only evidence for a diagnosis.
 ///
@@ -482,6 +491,40 @@ mod tests {
         let back: CollectResponse = serde_json::from_str(&json).expect("decode");
         assert_eq!(resp, back);
         assert_eq!(resp.request_id(), "req_1");
+    }
+
+    /// A maximally-sized chunk, once serialized as a `CollectResponse` and
+    /// wrapped with the few extra bytes a `SignalingModel` adds, must stay below
+    /// the signaling WebSocket's continuation cap. A chunk budget equal to (or
+    /// above) the cap let the JSON envelope push the frame over it, so the
+    /// receiver aborted the host link with "payload reached size limit" and the
+    /// pending diagnosis failed with "target host disconnected before evidence
+    /// was collected". Pin the headroom so the budget can never regress to the
+    /// cap again.
+    #[test]
+    fn max_chunk_frame_stays_under_signaling_cap() {
+        assert!(
+            COLLECT_CHUNK_PAYLOAD_LIMIT < SIGNALING_FRAME_LIMIT,
+            "chunk payload budget must leave room for the frame envelope"
+        );
+        let chunk = CollectResponseChunk {
+            request_id: "00000000-0000-0000-0000-000000000000".into(),
+            seq: u32::MAX,
+            last: true,
+            total_len: u64::MAX,
+            // A real chunk caps payload_b64 at COLLECT_CHUNK_PAYLOAD_LIMIT chars.
+            payload_b64: "A".repeat(COLLECT_CHUNK_PAYLOAD_LIMIT),
+            sha256: Some("f".repeat(64)),
+        };
+        let resp = CollectResponse::Chunk(chunk);
+        let json = serde_json::to_string(&resp).expect("encode");
+        // Allow generous slack for the SignalingModel wrapper layered on top.
+        assert!(
+            json.len() + 4096 < SIGNALING_FRAME_LIMIT,
+            "serialized chunk frame ({} bytes) too close to the {}-byte cap",
+            json.len(),
+            SIGNALING_FRAME_LIMIT
+        );
     }
 
     #[test]

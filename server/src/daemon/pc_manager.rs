@@ -59,9 +59,7 @@ use crate::error::DeskError;
 use crate::host_control::HostControlHub;
 use crate::model::data_channel::SignalRequestControlData;
 use crate::model::security_approval::{SecurityPermissionType, check_security_permission};
-use crate::model::settings::{
-    Settings, SharedSettings, StartupMode, SystemSettings, TraversalMode,
-};
+use crate::model::settings::{Settings, SharedSettings, SystemSettings, TraversalMode};
 use crate::service::signaling::{should_short_circuit_clipboard, should_short_circuit_control};
 use desk_capture_engine::audio_encoder::audio_encoder_factory::list_audio_encoder;
 use desk_capture_engine::model::video_encoder::{VideoEncoderType, VideoEncoderTypeHelper};
@@ -2802,6 +2800,7 @@ pub struct ControlOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::settings::StartupMode;
     use desk_ipc_protocol::message::MediaCodec;
 
     // ============== DaemonFtWindow ==============
