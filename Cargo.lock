@@ -2736,6 +2736,7 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "actix-ws",
+ "async-trait",
  "bytes",
  "bytestring",
  "chrono",

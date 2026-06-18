@@ -34,13 +34,13 @@ const REQUEST_REMOTE_TURN_TTL_SECS: u64 = 86_400;
 /// the requesting browser — receives usable credentials. Returns `None` when
 /// there is no recipient or the provider cannot issue a credential. Pure (no
 /// I/O), so it is unit-testable without a WebSocket session.
-fn build_request_remote_ice(
+async fn build_request_remote_ice(
     model: &SignalingModel,
     turn: Option<&Arc<dyn TurnProvider>>,
     ttl_secs: u64,
 ) -> Option<LcxlRTCIceServer> {
     let to_connection_id = model.to_connection_id.as_deref()?;
-    turn?.get_rest_ice_servers(to_connection_id, ttl_secs)
+    turn?.get_rest_ice_servers(to_connection_id, ttl_secs).await
 }
 
 #[cfg(test)]
@@ -54,11 +54,12 @@ mod request_remote_ice_tests {
     struct FakeTurn {
         issue: bool,
     }
+    #[async_trait::async_trait]
     impl TurnProvider for FakeTurn {
-        fn get_ice_servers(&self, _username: &str, _credential: &str) -> LcxlRTCIceServer {
+        async fn get_ice_servers(&self, _username: &str, _credential: &str) -> LcxlRTCIceServer {
             unreachable!("REQUEST_REMOTE injection must use get_rest_ice_servers")
         }
-        fn get_rest_ice_servers(&self, name: &str, _ttl: u64) -> Option<LcxlRTCIceServer> {
+        async fn get_rest_ice_servers(&self, name: &str, _ttl: u64) -> Option<LcxlRTCIceServer> {
             self.issue.then(|| LcxlRTCIceServer {
                 urls: vec!["turn:host:3478?transport=udp".to_string()],
                 username: format!("9999999999:{name}"),
@@ -82,31 +83,44 @@ mod request_remote_ice_tests {
         Arc::new(FakeTurn { issue })
     }
 
-    #[test]
-    fn injects_for_recipient_via_trait_object() {
+    #[tokio::test]
+    async fn injects_for_recipient_via_trait_object() {
         let turn = provider(true);
-        let ice =
-            build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60).expect("ice server");
+        let ice = build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60)
+            .await
+            .expect("ice server");
         // Username embeds the RECIPIENT id, proving recipient identity is used
         // (not the sender `browser-conn`), through the trait-object override.
         assert!(ice.username.ends_with(":host-1"));
     }
 
-    #[test]
-    fn none_without_recipient() {
+    #[tokio::test]
+    async fn none_without_recipient() {
         let turn = provider(true);
-        assert!(build_request_remote_ice(&model(None), Some(&turn), 60).is_none());
+        assert!(
+            build_request_remote_ice(&model(None), Some(&turn), 60)
+                .await
+                .is_none()
+        );
     }
 
-    #[test]
-    fn none_without_turn() {
-        assert!(build_request_remote_ice(&model(Some("host-1")), None, 60).is_none());
+    #[tokio::test]
+    async fn none_without_turn() {
+        assert!(
+            build_request_remote_ice(&model(Some("host-1")), None, 60)
+                .await
+                .is_none()
+        );
     }
 
-    #[test]
-    fn none_when_provider_declines() {
+    #[tokio::test]
+    async fn none_when_provider_declines() {
         let turn = provider(false);
-        assert!(build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60).is_none());
+        assert!(
+            build_request_remote_ice(&model(Some("host-1")), Some(&turn), 60)
+                .await
+                .is_none()
+        );
     }
 }
 
@@ -687,7 +701,9 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     &signaling_model,
                     self.turn.as_ref(),
                     REQUEST_REMOTE_TURN_TTL_SECS,
-                ) {
+                )
+                .await
+                {
                     data.ice_servers.push(ice_server);
                 }
                 let data = Some(serde_json::to_value(data)?);
@@ -711,10 +727,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 let client_id_opt = self.connection_state.model.version_info.client_id.clone();
                 if let Some(client_id) = client_id_opt {
                     if let Some(turn) = &self.turn {
-                        let ice_server = turn.get_ice_servers(
-                            &self.connection_state.model.connection_id,
-                            &client_id,
-                        );
+                        let ice_server = turn
+                            .get_ice_servers(
+                                &self.connection_state.model.connection_id,
+                                &client_id,
+                            )
+                            .await;
                         if !ice_server.urls.is_empty() {
                             data.ice_servers.push(ice_server);
                         } else {

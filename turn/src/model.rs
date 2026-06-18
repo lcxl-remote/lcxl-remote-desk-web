@@ -213,12 +213,16 @@ mod rest_ice_server_tests {
     }
 }
 
+#[async_trait::async_trait]
 impl desk_signal_facade::model::signal::TurnProvider for TurnSettings {
-    fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer {
+    async fn get_ice_servers(&self, username: &str, credential: &str) -> LcxlRTCIceServer {
+        // Delegates to the inherent (sync, pure) method of the same name;
+        // inherent methods take precedence in resolution, so this does not
+        // recurse into the trait method.
         self.get_ice_servers(username, credential)
     }
 
-    fn get_rest_ice_servers(&self, name: &str, ttl_secs: u64) -> Option<LcxlRTCIceServer> {
+    async fn get_rest_ice_servers(&self, name: &str, ttl_secs: u64) -> Option<LcxlRTCIceServer> {
         self.get_rest_ice_servers(name, ttl_secs)
     }
 }

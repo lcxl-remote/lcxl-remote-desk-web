@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 desk-utils = { workspace = true }
+async-trait = { workspace = true }
 
 actix-web = { workspace = true }
 actix-ws = { workspace = true }
