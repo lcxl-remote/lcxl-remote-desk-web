@@ -57,6 +57,13 @@ impl DeskErrorCode {
 
     pub const FILE_PATH_NOT_FOUND: DeskErrorCode = DeskErrorCode(11);
     pub const CLIENT_ID_NOT_FOUND: DeskErrorCode = DeskErrorCode(12);
+    /// Optimistic-concurrency conflict: a write supplied an `expected_revision`
+    /// that no longer matches the current persisted revision (another writer or
+    /// instance committed in between). The caller should re-read the current
+    /// revision/value — returned in the response payload — and retry. This is a
+    /// business-level outcome carried in the `RestResponse.code`, never an HTTP
+    /// status code.
+    pub const REVISION_CONFLICT: DeskErrorCode = DeskErrorCode(13);
 
     pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
     pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
@@ -150,5 +157,30 @@ impl From<log::ParseLevelError> for DeskUtilsError {
 impl From<log::SetLoggerError> for DeskUtilsError {
     fn from(err: log::SetLoggerError) -> Self {
         DeskUtilsError::SetLoggerError(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeskErrorCode;
+
+    /// Lock the numeric wire value of `REVISION_CONFLICT`. Clients and the
+    /// manager both branch on this exact code, so the value is a contract and
+    /// must not drift.
+    #[test]
+    fn revision_conflict_code_is_stable() {
+        assert_eq!(DeskErrorCode::REVISION_CONFLICT.code(), 13);
+    }
+
+    /// The new code must not collide with any existing assignment around it.
+    #[test]
+    fn revision_conflict_code_is_distinct() {
+        let others = [
+            DeskErrorCode::PRECONDITION_FAILED.code(),
+            DeskErrorCode::FILE_PATH_NOT_FOUND.code(),
+            DeskErrorCode::CLIENT_ID_NOT_FOUND.code(),
+            DeskErrorCode::NOT_ALLOW_DELETE_FILE.code(),
+        ];
+        assert!(!others.contains(&DeskErrorCode::REVISION_CONFLICT.code()));
     }
 }
