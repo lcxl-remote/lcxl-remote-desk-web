@@ -1,6 +1,1 @@
-{
-  "type": "string",
-  "description": "Where the model call is dialed from.",
-  "enum": ["direct", "manager_proxy"],
-  "x-readme-ref-name": "GatewayMode"
-}
+{"type":"string","description":"Where the model call is dialed from.","enum":["direct","manager_proxy"],"x-readme-ref-name":"GatewayMode"}

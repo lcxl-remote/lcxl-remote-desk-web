@@ -1,13 +1,1 @@
-{
-  "type": "object",
-  "required": ["error_code"],
-  "properties": {
-    "error_code": {
-      "type": "integer",
-      "format": "int32",
-      "description": "error code\n\nsee alse: desk_utils::DeskErrorCode"
-    },
-    "message": { "type": ["string", "null"], "description": "error message" }
-  },
-  "x-readme-ref-name": "SignalingResponseState"
-}
+{"type":"object","required":["error_code"],"properties":{"error_code":{"type":"integer","format":"int32","description":"error code\n\nsee alse: desk_utils::DeskErrorCode"},"message":{"type":["string","null"],"description":"error message"}},"x-readme-ref-name":"SignalingResponseState"}

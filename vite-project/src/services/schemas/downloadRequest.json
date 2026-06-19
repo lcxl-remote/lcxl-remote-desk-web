@@ -1,9 +1,1 @@
-{
-  "type": "object",
-  "required": ["transfer_id", "file_path"],
-  "properties": {
-    "file_path": { "type": "string" },
-    "transfer_id": { "type": "string" }
-  },
-  "x-readme-ref-name": "DownloadRequest"
-}
+{"type":"object","required":["transfer_id","file_path"],"properties":{"file_path":{"type":"string"},"transfer_id":{"type":"string"}},"x-readme-ref-name":"DownloadRequest"}

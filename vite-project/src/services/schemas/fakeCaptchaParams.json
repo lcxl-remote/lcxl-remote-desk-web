@@ -1,5 +1,1 @@
-{
-  "type": "object",
-  "properties": { "phone": { "type": ["string", "null"] } },
-  "x-readme-ref-name": "FakeCaptchaParams"
-}
+{"type":"object","properties":{"phone":{"type":["string","null"]}},"x-readme-ref-name":"FakeCaptchaParams"}

@@ -1,8 +1,1 @@
-{
-  "type": "object",
-  "properties": {
-    "code": { "type": ["integer", "null"], "format": "int32", "minimum": 0 },
-    "status": { "type": ["string", "null"] }
-  },
-  "x-readme-ref-name": "FakeCaptcha"
-}
+{"type":"object","properties":{"code":{"type":["integer","null"],"format":"int32","minimum":0},"status":{"type":["string","null"]}},"x-readme-ref-name":"FakeCaptcha"}

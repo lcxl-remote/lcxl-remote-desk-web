@@ -1,15 +1,1 @@
-{
-  "type": "object",
-  "description": "Request body for `POST /api/service/install`.",
-  "properties": {
-    "install_idd_driver": {
-      "type": "boolean",
-      "description": "Whether to also stage the LcxlVirtualDisplay IDD driver during\nthe install flow. The Tauri shell sets this from the\n\"install IDD virtual display driver\" checkbox on the install\ndialog; defaults to `false` for older clients that don't send\nthe field."
-    },
-    "install_path": {
-      "type": ["string", "null"],
-      "description": "Installation directory. Uses the platform default when absent."
-    }
-  },
-  "x-readme-ref-name": "InstallServiceRequest"
-}
+{"type":"object","description":"Request body for `POST /api/service/install`.","properties":{"install_idd_driver":{"type":"boolean","description":"Whether to also stage the LcxlVirtualDisplay IDD driver during\nthe install flow. The Tauri shell sets this from the\n\"install IDD virtual display driver\" checkbox on the install\ndialog; defaults to `false` for older clients that don't send\nthe field."},"install_path":{"type":["string","null"],"description":"Installation directory. Uses the platform default when absent."}},"x-readme-ref-name":"InstallServiceRequest"}

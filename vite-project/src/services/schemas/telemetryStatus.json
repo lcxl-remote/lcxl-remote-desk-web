@@ -1,9 +1,1 @@
-{
-  "type": "object",
-  "required": ["needed"],
-  "properties": {
-    "consented": { "type": ["boolean", "null"] },
-    "needed": { "type": "boolean" }
-  },
-  "x-readme-ref-name": "TelemetryStatus"
-}
+{"type":"object","required":["needed"],"properties":{"consented":{"type":["boolean","null"]},"needed":{"type":"boolean"}},"x-readme-ref-name":"TelemetryStatus"}

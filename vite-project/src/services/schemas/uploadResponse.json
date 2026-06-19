@@ -1,10 +1,1 @@
-{
-  "type": "object",
-  "required": ["transfer_id", "accepted"],
-  "properties": {
-    "accepted": { "type": "boolean" },
-    "message": { "type": ["string", "null"] },
-    "transfer_id": { "type": "string" }
-  },
-  "x-readme-ref-name": "UploadResponse"
-}
+{"type":"object","required":["transfer_id","accepted"],"properties":{"accepted":{"type":"boolean"},"message":{"type":["string","null"]},"transfer_id":{"type":"string"}},"x-readme-ref-name":"UploadResponse"}

@@ -1,12 +1,1 @@
-{
-  "type": "object",
-  "description": "Used by Tauri to send security approval requests to the frontend",
-  "required": ["req_id", "permission_type", "i18n_key"],
-  "properties": {
-    "from_connection_id": { "type": ["string", "null"] },
-    "i18n_key": { "type": "string" },
-    "permission_type": { "type": "string" },
-    "req_id": { "type": "string" }
-  },
-  "x-readme-ref-name": "SecurityApprovalEventPayload"
-}
+{"type":"object","description":"Used by Tauri to send security approval requests to the frontend","required":["req_id","permission_type","i18n_key"],"properties":{"from_connection_id":{"type":["string","null"]},"i18n_key":{"type":"string"},"permission_type":{"type":"string"},"req_id":{"type":"string"}},"x-readme-ref-name":"SecurityApprovalEventPayload"}

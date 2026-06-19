@@ -1,6 +1,1 @@
-{
-  "type": "object",
-  "required": ["req_id"],
-  "properties": { "req_id": { "type": "string" } },
-  "x-readme-ref-name": "ApprovalAckParams"
-}
+{"type":"object","required":["req_id"],"properties":{"req_id":{"type":"string"}},"x-readme-ref-name":"ApprovalAckParams"}

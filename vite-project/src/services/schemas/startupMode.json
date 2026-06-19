@@ -1,12 +1,1 @@
-{
-  "type": "string",
-  "enum": [
-    "default",
-    "signaling",
-    "desk-server",
-    "service-daemon",
-    "session-worker",
-    "mcp-stdio"
-  ],
-  "x-readme-ref-name": "StartupMode"
-}
+{"type":"string","enum":["default","signaling","desk-server","service-daemon","session-worker","mcp-stdio"],"x-readme-ref-name":"StartupMode"}

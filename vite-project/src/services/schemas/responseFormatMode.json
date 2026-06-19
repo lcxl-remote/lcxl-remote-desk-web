@@ -1,6 +1,1 @@
-{
-  "type": "string",
-  "description": "How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).",
-  "enum": ["none", "json_object", "json_schema"],
-  "x-readme-ref-name": "ResponseFormatMode"
-}
+{"type":"string","description":"How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).","enum":["none","json_object","json_schema"],"x-readme-ref-name":"ResponseFormatMode"}
