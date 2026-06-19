@@ -93,15 +93,56 @@ The project is fine-tuned via `conf/config.toml`. Key parameters:
 
 ## 📡 How It Works
 
+### Connection & media path
+
 ```mermaid
-graph LR
-    browser[Browser Client]<-->Signaling[Signaling Service]
-    Signaling<-->DeskServer[Remote Desk Service]
-    browser<-->STUN[STUN/TURN Server]<-->DeskServer
-    browser<-- P2P Connection / Relay -->DeskServer
+flowchart LR
+    subgraph BR["🌐 Browser Client"]
+        direction TB
+        dash["Management Dashboard"]
+        ctrl["Remote Control Client"]
+    end
+
+    SIG["📨 Signaling Service<br/>(WebSocket · SDP / ICE)"]
+    ICE["🧭 STUN / TURN<br/>(NAT traversal · relay)"]
+
+    subgraph DS["🖥️ Desk Server (controlled device)"]
+        direction TB
+        CAP["Screen / Audio Capture + Encode"]
+        INJ["Input Injection · File · Clipboard"]
+    end
+
+    ctrl <-->|"① SDP / ICE"| SIG <-->|"① SDP / ICE"| DS
+    ctrl <-->|"② candidate gathering"| ICE <-->|"② candidate gathering"| DS
+    ctrl <==>|"③ WebRTC P2P · TURN relay fallback"| DS
 ```
 
-The browser and the remote desk service exchange connection information through the signaling service, then use STUN/TURN for NAT traversal to establish a direct P2P connection whenever possible, falling back to relay when necessary. The signaling and TURN servers are integrated into `server` by default, and direct P2P connections are prioritized in public or local network environments.
+The browser and the remote desk service first exchange SDP / ICE through the **signaling service** (a WebSocket connection), gather candidates via **STUN/TURN**, then establish a direct **WebRTC P2P** connection whenever possible — falling back to **TURN relay** only when NAT traversal fails. Signaling and TURN are integrated into `server` by default, so a single binary covers public and local-network deployments.
+
+Once the peer connection is up, everything rides over it: **video track(s)** (AV1 / H.264 / VP8 / VP9, with dirty-rectangle incremental encoding), an **Opus audio track**, and a set of **data channels** for mouse, keyboard, file transfer, clipboard, and whiteboard. The remote terminal runs over its own channel.
+
+### Process model
+
+`server` runs in several startup modes (`--startup-mode`). The simplest — `default` / `desk-server` — keeps the whole pipeline (WebRTC, capture/encode, input injection) in **one process**. To capture the Windows login / UAC / lock screen, the `service-daemon` mode splits the work across a privilege boundary:
+
+```mermaid
+flowchart LR
+    BR["🌐 Browser"] <==>|"WebRTC"| DM
+
+    subgraph HOST["Controlled Host — service-daemon mode"]
+        direction TB
+        DM["ServiceDaemon (SYSTEM)<br/>SignalingProxy · WebRTC PeerConnection · WorkerManager"]
+        subgraph SESS["User Desktop Session"]
+            WK["SessionWorker<br/>Capture + Encode · Input · File / Clipboard"]
+        end
+        DM <-->|"event pipe (bidirectional)<br/>signaling · DC payloads · control"| WK
+        WK -->|"media pipe (one-way)<br/>encoded MediaFrames →"| DM
+    end
+
+    DM <-->|"signaling"| SIG2["Signaling Service"]
+```
+
+The **ServiceDaemon** (SYSTEM account) owns the WebRTC peer connection, the signaling proxy, and the worker lifecycle. It spawns a **SessionWorker** inside each interactive desktop session to do the actual screen/audio capture, encoding, and input injection. The two are linked by two IPC pipes (named pipes on Windows / Unix sockets elsewhere): a **bidirectional event pipe** (signaling, data-channel payloads, control — never dropped) and a **one-way media pipe** (encoded `MediaFrame`s flowing worker → daemon, which writes them onto the WebRTC tracks). This lets a session worker restart on session switch without tearing down the browser's connection.
 
 ---
 

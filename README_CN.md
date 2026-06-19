@@ -93,15 +93,56 @@ cargo tauri dev
 
 ## 📡 工作原理
 
+### 连接与媒体链路
+
 ```mermaid
-graph LR
-    browser[浏览器]<-->Signaling[信令服务]
-    Signaling<-->DeskServer[远程桌面服务]
-    browser<-->STUN[STUN/TURN 服务器]<-->DeskServer
-    browser<-- P2P 连接/中继传输 -->DeskServer
+flowchart LR
+    subgraph BR["🌐 浏览器客户端"]
+        direction TB
+        dash["管理控制台"]
+        ctrl["远程控制端"]
+    end
+
+    SIG["📨 信令服务<br/>(WebSocket · SDP / ICE)"]
+    ICE["🧭 STUN / TURN<br/>(NAT 穿透 · 中继)"]
+
+    subgraph DS["🖥️ 远程桌面服务（被控端）"]
+        direction TB
+        CAP["屏幕 / 音频采集 + 编码"]
+        INJ["输入注入 · 文件 · 剪贴板"]
+    end
+
+    ctrl <-->|"① SDP / ICE"| SIG <-->|"① SDP / ICE"| DS
+    ctrl <-->|"② 候选收集"| ICE <-->|"② 候选收集"| DS
+    ctrl <==>|"③ WebRTC P2P · TURN 中继兜底"| DS
 ```
 
-浏览器与远程桌面服务通过信令服务交换连接信息，随后借助 STUN/TURN 完成 NAT 穿透，尽可能建立 P2P 直连、必要时回退中继。信令服务器和 TURN 服务器已默认集成到 `server` 中，在公网或局域网环境下系统会自动尝试 P2P 直连。
+浏览器与远程桌面服务先通过**信令服务**（WebSocket 连接）交换 SDP / ICE，借助 **STUN/TURN** 收集候选地址，随后尽可能建立 **WebRTC P2P** 直连——仅在 NAT 穿透失败时才回退 **TURN 中继**。信令与 TURN 已默认集成进 `server`，单个二进制即可覆盖公网与局域网部署。
+
+连接建立后，所有数据都跑在这条链路上：**视频轨**（AV1 / H.264 / VP8 / VP9，支持脏矩形增量编码）、**Opus 音频轨**，以及一组用于鼠标、键盘、文件传输、剪贴板、白板的**数据通道（Data Channel）**；远程终端走自己的独立通道。
+
+### 进程模型
+
+`server` 通过 `--startup-mode` 支持多种启动模式。最简单的 `default` / `desk-server` 把整条流水线（WebRTC、采集编码、输入注入）放在**单个进程**里。为了能采集 Windows 登录 / UAC / 锁屏界面，`service-daemon` 模式沿权限边界把工作拆开：
+
+```mermaid
+flowchart LR
+    BR["🌐 浏览器"] <==>|"WebRTC"| DM
+
+    subgraph HOST["被控主机 — service-daemon 模式"]
+        direction TB
+        DM["ServiceDaemon (SYSTEM)<br/>SignalingProxy · WebRTC 对等连接 · WorkerManager"]
+        subgraph SESS["用户桌面会话"]
+            WK["SessionWorker<br/>采集 + 编码 · 输入 · 文件 / 剪贴板"]
+        end
+        DM <-->|"event 管道（双向）<br/>信令 · DC 负载 · 控制"| WK
+        WK -->|"media 管道（单向）<br/>编码后的 MediaFrame →"| DM
+    end
+
+    DM <-->|"信令"| SIG2["信令服务"]
+```
+
+**ServiceDaemon**（SYSTEM 账户）持有 WebRTC 对等连接、信令代理以及工作进程的生命周期，并在每个交互式桌面会话内启动一个 **SessionWorker** 来真正完成屏幕/音频采集、编码与输入注入。两者由两条 IPC 管道连接（Windows 为命名管道 / 其他平台为 Unix 套接字）：一条**双向 event 管道**（承载信令、数据通道负载、控制消息，永不丢弃），一条**单向 media 管道**（编码后的 `MediaFrame` 由 worker → daemon 流动，再由 daemon 写入 WebRTC 轨道）。如此一来，会话切换时 worker 可以重启而不必拆掉浏览器的连接。
 
 ---
 
