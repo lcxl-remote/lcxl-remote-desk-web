@@ -12,6 +12,11 @@ export default defineConfig({
     output: {
         path: './src/services',
         clean: true,
+        // Disable kubb's post-generation formatter (default 'prettier'). Prettier
+        // is not a dependency here, so 'auto'/'prettier' only emits a noisy
+        // "Prettier not found" hook failure before falling back to kubb's
+        // built-in formatting anyway. `false` keeps the raw output and silences it.
+        format: false,
     },
     plugins: [
         pluginOas({
