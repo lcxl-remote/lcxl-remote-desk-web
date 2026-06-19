@@ -64,6 +64,12 @@ impl DeskErrorCode {
     /// business-level outcome carried in the `RestResponse.code`, never an HTTP
     /// status code.
     pub const REVISION_CONFLICT: DeskErrorCode = DeskErrorCode(13);
+    /// A fleet (multi-device) request resolved to zero diagnosable targets after
+    /// applying the caller's policy visibility. Returned uniformly whether the
+    /// selector matched nothing or every match was policy-invisible, so it leaks
+    /// no information about devices the caller cannot see. Carried in
+    /// `RestResponse.code`, never an HTTP status.
+    pub const NO_VISIBLE_TARGETS: DeskErrorCode = DeskErrorCode(14);
 
     pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
     pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
@@ -182,5 +188,19 @@ mod tests {
             DeskErrorCode::NOT_ALLOW_DELETE_FILE.code(),
         ];
         assert!(!others.contains(&DeskErrorCode::REVISION_CONFLICT.code()));
+    }
+
+    /// Lock the numeric wire value of `NO_VISIBLE_TARGETS`. The manager returns it
+    /// and the console branches on it, so the value is a contract.
+    #[test]
+    fn no_visible_targets_code_is_stable_and_distinct() {
+        assert_eq!(DeskErrorCode::NO_VISIBLE_TARGETS.code(), 14);
+        let others = [
+            DeskErrorCode::REVISION_CONFLICT.code(),
+            DeskErrorCode::PRECONDITION_FAILED.code(),
+            DeskErrorCode::FILE_PATH_NOT_FOUND.code(),
+            DeskErrorCode::CLIENT_ID_NOT_FOUND.code(),
+        ];
+        assert!(!others.contains(&DeskErrorCode::NO_VISIBLE_TARGETS.code()));
     }
 }
