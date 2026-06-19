@@ -111,74 +111,36 @@ pub struct ApiRouteConfig {
     pub tauri_is_admin: Option<web::Data<TauriIsAdminOverride>>,
 }
 
-/// Register the core API routes onto `cfg` using plain actix-web (no utoipa).
-/// Used by the ServiceDaemon local API. The embedded portable server keeps its
-/// own utoipa-wrapped registration for OpenAPI doc generation in
-/// `run_with_hub` — keep both registrations in sync when adding endpoints.
+/// Selects *which* routes [`configure_api_surface`] registers. Pure route-set
+/// selection — carries no runtime `app_data` (callers mount `Data` on their own
+/// `App`), so it stays a clean single source of truth for the HTTP surface.
+#[derive(Clone, Copy, Debug)]
+pub struct ApiSurfaceOpts {
+    /// Register the signaling WS handle (top level, bypasses `reject_anonymous_users`).
+    pub include_signaling: bool,
+    /// Register file management + device-code admin under `/api/desk`.
+    pub include_file_device_code: bool,
+    /// Register the `/api/turn/*` management scope.
+    pub include_turn: bool,
+}
+
+/// Single source of truth for the desk-server HTTP API surface: every
+/// `#[utoipa::path]` route plus its scope nesting. The portable server
+/// (`run_with_hub`), the daemon's local API (`run_local_api`), and the offline
+/// [`build_openapi`] all register through this one function, so the served
+/// routes and the generated OpenAPI client cannot drift apart.
 ///
-/// Excluded in all modes: signaling WS, TURN management.
-/// (Signaling WS is registered separately by the caller before this fn;
-/// TURN endpoints stay in the embedded portable server only.)
-pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig) {
-    use crate::controller::{
-        info::{query_backend_info, query_server_info, query_sysinfo},
-        init::init_system,
-        login::{change_password, get_captcha, login_account, login_tauri, logout_account},
-        service_mgmt::{install_service, uninstall_service},
-        settings::{
-            ack_security_approval, query_ai_model_settings, query_collection_policy_settings,
-            query_log_settings, query_security_settings, query_settings, query_telemetry_status,
-            query_turn_client_settings, query_turn_settings, regenerate_turn_secret,
-            submit_security_approval, update_ai_model_settings, update_collection_policy_settings,
-            update_log_settings, update_security_settings, update_settings,
-            update_telemetry_consent, update_turn_client_settings, update_turn_settings,
-        },
-        user::{get_current_user, reject_anonymous_users},
-        virtual_display::{
-            install_driver as install_virtual_display_driver, query_driver_status,
-            query_virtual_display_settings, uninstall_driver as uninstall_virtual_display_driver,
-            update_virtual_display_settings,
-        },
-    };
-    use desk_signal::controller::{
-        connection::list_connections,
-        device_code::{
-            batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
-            update_device_code,
-        },
-        terminal::{list_terminal, open_terminal_session},
-    };
-    use desk_signal_facade::controller::files::{delete_file, list_files};
-
-    let ApiRouteConfig {
-        settings,
-        tauri_login_token,
-        connection_map,
-        host_control_hub,
-        tauri_is_admin,
-    } = config;
-
-    cfg.app_data(settings)
-        .app_data(tauri_login_token)
-        .app_data(connection_map)
-        .app_data(host_control_hub)
-        .app_data(
-            web::JsonConfig::default()
-                .limit((4096 * 1024) << 2)
-                .error_handler(|err, req| {
-                    warn!("request {} json error: {}", req.path(), err);
-                    let msg = err.to_string();
-                    InternalError::from_response(
-                        err,
-                        HttpResponse::BadRequest().json(desk_utils::rest::RestResponse::failed(
-                            desk_utils::error::DeskErrorCode::SYSTEM_ERROR,
-                            msg,
-                        )),
-                    )
-                    .into()
-                }),
-        )
-        .service(login_account)
+/// Built on `utoipa_actix_web::service_config::ServiceConfig` so the same
+/// registration both serves requests and feeds the OpenAPI collector.
+///
+/// Intentionally excluded (handled by each caller on its own `App`): `app_data`,
+/// middleware, the non-utoipa host-control `/ws/*` routes, and static files.
+pub fn configure_api_surface(
+    cfg: &mut utoipa_actix_web::service_config::ServiceConfig,
+    opts: ApiSurfaceOpts,
+) {
+    // Public routes (no login required).
+    cfg.service(login_account)
         .service(login_tauri)
         .service(logout_account)
         .service(get_current_user)
@@ -186,75 +148,119 @@ pub fn configure_api_routes(cfg: &mut web::ServiceConfig, config: ApiRouteConfig
         .service(query_server_info)
         .service(install_service)
         .service(uninstall_service)
-        .service(init_system)
-        .service(
-            web::scope("/api")
-                .wrap(actix_web::middleware::from_fn(reject_anonymous_users))
-                .service(query_driver_status)
-                .service(install_virtual_display_driver)
-                .service(uninstall_virtual_display_driver)
-                .service(
-                    web::scope("/desk")
-                        .service(change_password)
-                        .service(query_settings)
-                        .service(update_settings)
-                        .service(query_ai_model_settings)
-                        .service(update_ai_model_settings)
-                        .service(query_collection_policy_settings)
-                        .service(update_collection_policy_settings)
-                        .service(query_turn_settings)
-                        .service(update_turn_settings)
-                        .service(query_turn_client_settings)
-                        .service(update_turn_client_settings)
-                        .service(query_log_settings)
-                        .service(update_log_settings)
-                        .service(query_security_settings)
-                        .service(update_security_settings)
-                        .service(submit_security_approval)
-                        .service(ack_security_approval)
-                        .service(regenerate_turn_secret)
-                        .service(query_telemetry_status)
-                        .service(update_telemetry_consent)
-                        .service(list_connections)
-                        .service(query_sysinfo)
-                        .service(query_backend_info)
-                        .service(query_virtual_display_settings)
-                        .service(update_virtual_display_settings)
-                        // Remote terminal + file management. The browser
-                        // hits these on the daemon's 8082 port; the
-                        // controllers go through the local
-                        // `connection_map` (populated by the daemon's own
-                        // `signaling_proxy` self-loop client) and the
-                        // request rides typed `ServiceToWorker::*` IPC
-                        // to the user-session worker. Mirrors the
-                        // utoipa registration in `run_with_hub` so
-                        // portable + ServiceDaemon expose the same
-                        // surface.
-                        .service(list_terminal)
-                        .service(open_terminal_session)
-                        .service(list_files)
-                        .service(delete_file)
-                        // Device-code admin (CRUD over `/device_codes`).
-                        // Safe in ServiceDaemon mode because
-                        // `daemon::run_service_daemon_inner` initialises
-                        // the same Sea-ORM signal database the portable
-                        // server uses (see `desk_signal::db::init_db`),
-                        // and the handlers only touch that DB plus the
-                        // already-registered `SharedConnectionMap` for
-                        // online-state lookups. No additional state is
-                        // required.
-                        .service(list_device_codes)
-                        .service(create_device_code)
-                        .service(update_device_code)
-                        .service(delete_device_code)
-                        .service(batch_delete_device_codes),
-                ),
-        )
-        .configure(move |inner| {
-            if let Some(ref override_data) = tauri_is_admin {
-                inner.app_data(override_data.clone());
-            }
-        });
+        .service(init_system);
+
+    // Signaling WS is registered at the top level (outside the `/api` scope) so
+    // it bypasses `reject_anonymous_users` — the handler performs its own
+    // token/session auth. It MUST be registered before the `/api` scope below.
+    if opts.include_signaling {
+        cfg.service(open_signaling_handle);
+    }
+
+    cfg.service(
+        utoipa_actix_web::scope("/api")
+            .wrap(from_fn(reject_anonymous_users))
+            .service(query_virtual_display_driver_status)
+            .service(install_virtual_display_driver)
+            .service(uninstall_virtual_display_driver)
+            .service(
+                utoipa_actix_web::scope("/desk")
+                    .service(change_password)
+                    .service(query_settings)
+                    .service(update_settings)
+                    .service(query_ai_model_settings)
+                    .service(update_ai_model_settings)
+                    .service(query_collection_policy_settings)
+                    .service(update_collection_policy_settings)
+                    .service(query_turn_settings)
+                    .service(update_turn_settings)
+                    .service(query_turn_client_settings)
+                    .service(update_turn_client_settings)
+                    .service(query_log_settings)
+                    .service(update_log_settings)
+                    .service(query_security_settings)
+                    .service(update_security_settings)
+                    .service(submit_security_approval)
+                    .service(ack_security_approval)
+                    .service(regenerate_turn_secret)
+                    .service(query_telemetry_status)
+                    .service(update_telemetry_consent)
+                    .service(list_connections)
+                    .service(list_terminal)
+                    .service(open_terminal_session)
+                    .service(query_sysinfo)
+                    .service(query_backend_info)
+                    .service(query_virtual_display_settings)
+                    .service(update_virtual_display_settings)
+                    .configure(move |cfg| {
+                        if opts.include_file_device_code {
+                            cfg.service(delete_file)
+                                .service(list_files)
+                                .service(create_device_code)
+                                .service(list_device_codes)
+                                .service(update_device_code)
+                                .service(delete_device_code)
+                                .service(batch_delete_device_codes);
+                        }
+                    }),
+            )
+            .configure(move |cfg| {
+                if opts.include_turn {
+                    cfg.service(
+                        utoipa_actix_web::scope("/turn")
+                            .service(get_turn_info)
+                            .service(get_turn_session)
+                            .service(get_turn_session_statistics)
+                            .service(delete_turn_session)
+                            .service(get_turn_metrics),
+                    );
+                }
+            }),
+    );
+}
+
+/// Shared JSON extractor config used by both the portable App and the daemon's
+/// local API: a 16 MiB body limit plus a uniform `RestResponse` error body on
+/// malformed JSON. Mounted as `app_data` by each caller (kept out of
+/// [`configure_api_surface`], which stays pure route registration).
+pub fn api_json_config() -> web::JsonConfig {
+    web::JsonConfig::default()
+        .limit((4096 * 1024) << 2)
+        .error_handler(|err, req| {
+            warn!("progress request {} err: {}", req.path(), err);
+            let err_message = err.to_string();
+            InternalError::from_response(
+                err,
+                HttpResponse::BadRequest().json(RestResponse::failed(
+                    DeskErrorCode::SYSTEM_ERROR,
+                    err_message,
+                )),
+            )
+            .into()
+        })
+}
+
+/// Build the OpenAPI spec offline from [`configure_api_surface`] with the full
+/// superset of routes, without binding a socket or touching any infrastructure
+/// (no DB / Redis / HTTP / lock). Used by the `dump-openapi` CLI to regenerate
+/// the typed frontend client locally and in CI. Reuses the exact same
+/// registration the live servers serve, so the spec cannot drift.
+pub fn build_openapi() -> utoipa::openapi::OpenApi {
+    let (_app, mut api) = App::new()
+        .into_utoipa_app()
+        .configure(|cfg| {
+            configure_api_surface(
+                cfg,
+                ApiSurfaceOpts {
+                    include_signaling: true,
+                    include_file_device_code: true,
+                    include_turn: true,
+                },
+            )
+        })
+        .split_for_parts();
+    api.merge(openapi::ExtraSchemas::openapi());
+    api
 }
 
 /// Service management operations that can be requested by the embedded HTTP
@@ -532,6 +538,17 @@ pub async fn run_with_hub(
         let host_control_hub_data = host_control_hub_data.clone();
         let validator_data = validator_data.clone();
         let host_control_endpoint_state = host_control_endpoint_state.clone();
+        let surface_opts = ApiSurfaceOpts {
+            include_signaling: matches!(
+                startup_mode,
+                StartupMode::Default | StartupMode::Signaling
+            ),
+            include_file_device_code: matches!(
+                startup_mode,
+                StartupMode::Default | StartupMode::Signaling
+            ),
+            include_turn: turn_api_state.is_some(),
+        };
         App::new()
             .into_utoipa_app()
             .map(|app| app.wrap(Logger::default()))
@@ -576,135 +593,25 @@ pub async fn run_with_hub(
                     cfg.app_data(turn_api_state.clone());
                 }
             })
-            .app_data(
-                web::JsonConfig::default()
-                    .limit((4096 * 1024) << 2)
-                    .error_handler(|err, req| {
-                        // <- create custom error response
-                        warn!("progress request {} err: {}", req.path(), err);
-                        let err_message = err.to_string();
-                        InternalError::from_response(
-                            err,
-                            HttpResponse::BadRequest().json(RestResponse::failed(
-                                DeskErrorCode::SYSTEM_ERROR,
-                                err_message,
-                            )),
-                        )
-                        .into()
-                    }),
-            ) // <- limit size of the payload (global configuration)
-            // no need to login for these routes
-            .service(login_account)
-            .service(login_tauri)
-            .service(logout_account)
-            .service(get_current_user)
-            .service(get_captcha)
-            .service(query_server_info)
-            .service(install_service)
-            .service(uninstall_service)
-            .service(init_system)
-            .configure({
-                let startup_mode = startup_mode.clone();
-                move |cfg| {
-                    if startup_mode == StartupMode::Default
-                        || startup_mode == StartupMode::Signaling
-                    {
-                        log::info!("Registering signaling route at /api/desk/signaling");
-                        cfg.service(open_signaling_handle);
-                    }
-                }
-            })
+            .app_data(api_json_config()) // limit payload size + uniform error body
             .configure(|cfg| {
                 if let Some(state) = host_control_endpoint_state.clone() {
                     log::info!(
                         "Registering host control routes (mode={:?})",
                         state.hub.mode()
                     );
-                    // The portable App is built on `utoipa_actix_web`, whose
-                    // `ServiceConfig` is a distinct type from
-                    // `actix_web::web::ServiceConfig`, so we can't delegate
-                    // to `host_control::endpoint::register_routes` here.
-                    // Mirror its body verbatim instead — `Data::from(Arc<T>)`
-                    // yields `Data<T>`, matching the handler signature
-                    // `state: web::Data<EndpointState>`.
-                    cfg.app_data(web::Data::from(state))
-                        .route(
-                            "/ws/tauri_ipc",
-                            web::get().to(host_control::endpoint::ws_handler),
-                        )
-                        .route(
-                            "/ws/host_upstream",
-                            web::get().to(host_control::endpoint::ws_upstream_handler),
-                        );
+                    // Host-control `/ws/*` are plain actix (non-utoipa) and
+                    // depend on runtime endpoint state, so they stay with the
+                    // caller. Bridge into the inner plain `ServiceConfig` via
+                    // `.map` to reuse `register_routes` (whose closure must
+                    // return `inner`).
+                    cfg.map(|inner| {
+                        host_control::endpoint::register_routes(inner, state);
+                        inner
+                    });
                 }
             })
-            // TODO need to login for these routes
-            .service(
-                // need to login for these routes
-                utoipa_actix_web::scope("/api")
-                    .wrap(from_fn(reject_anonymous_users))
-                    .service(query_virtual_display_driver_status)
-                    .service(install_virtual_display_driver)
-                    .service(uninstall_virtual_display_driver)
-                    .service(
-                        utoipa_actix_web::scope("/desk")
-                            .service(change_password)
-                            .service(query_settings)
-                            .service(update_settings)
-                            .service(query_ai_model_settings)
-                            .service(update_ai_model_settings)
-                            .service(query_collection_policy_settings)
-                            .service(update_collection_policy_settings)
-                            .service(query_turn_settings)
-                            .service(update_turn_settings)
-                            .service(query_turn_client_settings)
-                            .service(update_turn_client_settings)
-                            .service(query_log_settings)
-                            .service(update_log_settings)
-                            .service(query_security_settings)
-                            .service(update_security_settings)
-                            .service(submit_security_approval)
-                            .service(ack_security_approval)
-                            .service(regenerate_turn_secret)
-                            .service(query_telemetry_status)
-                            .service(update_telemetry_consent)
-                            .service(list_connections)
-                            .service(list_terminal)
-                            .service(open_terminal_session)
-                            .service(query_sysinfo)
-                            .service(query_backend_info)
-                            .service(query_virtual_display_settings)
-                            .service(update_virtual_display_settings)
-                            .configure({
-                                let startup_mode = startup_mode.clone();
-                                move |cfg| {
-                                    if startup_mode == StartupMode::Default
-                                        || startup_mode == StartupMode::Signaling
-                                    {
-                                        cfg.service(delete_file)
-                                            .service(list_files)
-                                            .service(create_device_code)
-                                            .service(list_device_codes)
-                                            .service(update_device_code)
-                                            .service(delete_device_code)
-                                            .service(batch_delete_device_codes);
-                                    }
-                                }
-                            }),
-                    )
-                    .configure(|cfg| {
-                        if turn_api_state.is_some() {
-                            cfg.service(
-                                utoipa_actix_web::scope("/turn")
-                                    .service(get_turn_info)
-                                    .service(get_turn_session)
-                                    .service(get_turn_session_statistics)
-                                    .service(delete_turn_session)
-                                    .service(get_turn_metrics),
-                            );
-                        }
-                    }),
-            )
+            .configure(move |cfg| configure_api_surface(cfg, surface_opts))
             .openapi_service(|mut api| {
                 api.merge(openapi::ExtraSchemas::openapi());
                 SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api)
@@ -894,286 +801,254 @@ mod tests {
         let _coerce: fn(ServerHandle) -> (Server, Option<WorkerGuard>) = _shape_check;
     }
 
-    /// Regression: the four browser-facing endpoints for the remote terminal
-    /// and remote file management features must be registered by
-    /// `configure_api_routes` so the daemon's 8082 HTTP App exposes them. An
-    /// earlier revision intentionally excluded these in ServiceDaemon mode,
-    /// which left users with `404` from
-    /// `GET /api/desk/file/list?connection_id=...` and an empty shell list
-    /// from `GET /api/desk/terminals/{id}` even though the typed-IPC chain
-    /// to the worker was fully wired. We do not check authentication here —
-    /// the request lacks a session cookie and the `reject_anonymous_users`
-    /// middleware will return `401 Unauthorized`, which is sufficient to
-    /// prove the route matched (vs the `404 Not Found` failure mode).
-    #[actix_web::test]
-    async fn configure_api_routes_registers_terminal_and_file_endpoints() {
-        use crate::model::settings::Settings;
+    /// Build the daemon-style HTTP App (utoipa surface with daemon opts +
+    /// session middleware) and assert each probe matches a registered route
+    /// (status != 404). A middleware/handler rejection (e.g. 401 without a
+    /// session) still proves the route is registered — same success criterion
+    /// as before the single-source-of-truth refactor.
+    async fn assert_daemon_routes_registered(probes: &[(&str, &str)]) {
+        use crate::model::settings::{Settings, SharedSettings};
         use actix_web::test;
         use desk_signal::model::SharedConnectionMap;
+        use utoipa_actix_web::AppExt as _;
 
-        let settings = Arc::new(crate::model::settings::SharedSettings::from(
-            Settings::default(),
-        ));
-        let route_config = ApiRouteConfig {
-            settings: web::Data::from(settings),
-            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
-            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
-            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
-            tauri_is_admin: None,
-        };
-
+        let settings: web::Data<SharedSettings> =
+            web::Data::from(Arc::new(SharedSettings::from(Settings::default())));
         let secret_key = Key::generate();
         let app = test::init_service(
             App::new()
+                .into_utoipa_app()
+                .app_data(settings)
+                .app_data(web::Data::new(None::<TauriLoginToken>))
+                .app_data(web::Data::new(SharedConnectionMap::from(BTreeMap::new())))
+                .app_data(web::Data::new(None::<Arc<host_control::HostControlHub>>))
+                .configure(|cfg| {
+                    configure_api_surface(
+                        cfg,
+                        ApiSurfaceOpts {
+                            include_signaling: true,
+                            include_file_device_code: true,
+                            include_turn: false,
+                        },
+                    )
+                })
+                .into_app()
                 .wrap(
                     SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
                         .cookie_secure(false)
                         .build(),
-                )
-                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
-        )
-        .await;
-
-        // The four routes that ServiceDaemon mode used to drop. Each one
-        // should at least *match* — `reject_anonymous_users` middleware
-        // will then return `Err(ErrorUnauthorized)` because no session
-        // cookie is present, but emphatically NOT a `Ok(404)`. Use
-        // `try_call_service` so the `Err` path doesn't panic the test —
-        // an `Err` here means the route matched and the middleware ran,
-        // which is exactly what we want to prove.
-        let probes = [
-            ("GET", "/api/desk/file/list?connection_id=test"),
-            ("GET", "/api/desk/terminals/test"),
-            ("GET", "/api/desk/terminal/test?command=cmd"),
-            ("DELETE", "/api/desk/file"),
-        ];
-        for (method, uri) in probes {
-            let req = match method {
-                "GET" => test::TestRequest::get().uri(uri).to_request(),
-                "DELETE" => test::TestRequest::delete().uri(uri).to_request(),
-                _ => unreachable!(),
-            };
-            match test::try_call_service(&app, req).await {
-                Ok(resp) => assert_ne!(
-                    resp.status(),
-                    actix_web::http::StatusCode::NOT_FOUND,
-                    "{method} {uri} returned 404 — route must be \
-                     registered by configure_api_routes (it was \
-                     previously excluded in ServiceDaemon mode and \
-                     broke remote terminal + file management on the \
-                     daemon's 8082 port)",
                 ),
-                Err(_) => {
-                    // Middleware-level rejection (e.g. 401 Unauthorized
-                    // from `reject_anonymous_users`) means the route
-                    // matched — which is the success criterion of this
-                    // regression test.
-                }
-            }
-        }
-    }
-
-    /// Regression: the five new virtual-display endpoints
-    /// (`/api/virtual-display/driver/{status,install,uninstall}` and
-    /// `/api/desk/settings/virtual-display` GET/POST) must be
-    /// registered by `configure_api_routes` so the daemon's 8082 HTTP
-    /// App exposes them. The browser hits these on the daemon side
-    /// for both modes; missing them would leave the new UI broken on
-    /// service-daemon installs.
-    #[actix_web::test]
-    async fn configure_api_routes_registers_virtual_display_endpoints() {
-        use crate::model::settings::Settings;
-        use actix_web::test;
-        use desk_signal::model::SharedConnectionMap;
-
-        let settings = Arc::new(crate::model::settings::SharedSettings::from(
-            Settings::default(),
-        ));
-        let route_config = ApiRouteConfig {
-            settings: web::Data::from(settings),
-            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
-            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
-            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
-            tauri_is_admin: None,
-        };
-
-        let secret_key = Key::generate();
-        let app = test::init_service(
-            App::new()
-                .wrap(
-                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
-                        .cookie_secure(false)
-                        .build(),
-                )
-                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
         )
         .await;
 
-        let probes = [
-            ("GET", "/api/virtual-display/driver/status"),
-            ("POST", "/api/virtual-display/driver/install"),
-            ("POST", "/api/virtual-display/driver/uninstall"),
-            ("GET", "/api/desk/settings/virtual-display"),
-            ("POST", "/api/desk/settings/virtual-display"),
-        ];
-        for (method, uri) in probes {
-            let req = match method {
-                "GET" => test::TestRequest::get().uri(uri).to_request(),
-                "POST" => test::TestRequest::post().uri(uri).to_request(),
-                _ => unreachable!(),
-            };
-            match test::try_call_service(&app, req).await {
-                Ok(resp) => assert_ne!(
-                    resp.status(),
-                    actix_web::http::StatusCode::NOT_FOUND,
-                    "{method} {uri} returned 404 — route must be \
-                     registered by configure_api_routes so the daemon's \
-                     8082 port exposes the new virtual-display UI",
-                ),
-                Err(_) => {
-                    // Middleware-level rejection (401 from
-                    // `reject_anonymous_users`) means the route matched —
-                    // the success criterion.
-                }
-            }
-        }
-    }
-
-    /// Regression: the AI model settings endpoint
-    /// (`/api/desk/settings/ai-model` GET/POST) must be registered by
-    /// `configure_api_routes` at its real mounted path — the unit tests in
-    /// `controller::settings` mount the bare service at `/settings/ai-model`,
-    /// so only this smoke test proves the `/api` → `/desk` → `/settings` scope
-    /// nesting (and thus the daemon's 8082 surface) actually exposes it.
-    #[actix_web::test]
-    async fn configure_api_routes_registers_ai_model_settings_endpoint() {
-        use crate::model::settings::Settings;
-        use actix_web::test;
-        use desk_signal::model::SharedConnectionMap;
-
-        let settings = Arc::new(crate::model::settings::SharedSettings::from(
-            Settings::default(),
-        ));
-        let route_config = ApiRouteConfig {
-            settings: web::Data::from(settings),
-            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
-            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
-            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
-            tauri_is_admin: None,
-        };
-
-        let secret_key = Key::generate();
-        let app = test::init_service(
-            App::new()
-                .wrap(
-                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
-                        .cookie_secure(false)
-                        .build(),
-                )
-                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
-        )
-        .await;
-
-        let probes = [
-            ("GET", "/api/desk/settings/ai-model"),
-            ("POST", "/api/desk/settings/ai-model"),
-        ];
-        for (method, uri) in probes {
-            let req = match method {
-                "GET" => test::TestRequest::get().uri(uri).to_request(),
-                "POST" => test::TestRequest::post().uri(uri).to_request(),
-                _ => unreachable!(),
-            };
-            match test::try_call_service(&app, req).await {
-                Ok(resp) => assert_ne!(
-                    resp.status(),
-                    actix_web::http::StatusCode::NOT_FOUND,
-                    "{method} {uri} returned 404 — the AI model settings route must \
-                     be registered by configure_api_routes at the /api/desk/settings \
-                     scope so the daemon's 8082 port exposes it",
-                ),
-                Err(_) => {
-                    // A middleware-level rejection (401 from
-                    // `reject_anonymous_users`) means the route matched — the
-                    // success criterion, same as the sibling smoke tests.
-                }
-            }
-        }
-    }
-
-    /// Regression: the five device-code admin endpoints
-    /// (`/api/desk/device_codes` CRUD + `/api/desk/device_codes/batch_delete`)
-    /// must be registered by `configure_api_routes` so the daemon's 8082
-    /// HTTP App exposes them on the manager UI. Earlier revisions
-    /// intentionally restricted device-code admin to portable
-    /// (`Default | Signaling`) modes, leaving daemon installations with
-    /// `404` whenever an operator opened the device-code page. The
-    /// daemon does initialise the same Sea-ORM signal database as the
-    /// portable server (see `desk_signal::db::init_db` invocation in
-    /// `daemon::run_service_daemon_inner`), so re-using the same
-    /// handlers is safe. We do not authenticate here — the request
-    /// lacks a session cookie and `reject_anonymous_users` will reject
-    /// before the handler runs (and before any `get_db()` call), which
-    /// is sufficient to prove the route matched (vs a `404 Not Found`).
-    #[actix_web::test]
-    async fn configure_api_routes_registers_device_code_endpoints() {
-        use crate::model::settings::Settings;
-        use actix_web::test;
-        use desk_signal::model::SharedConnectionMap;
-
-        let settings = Arc::new(crate::model::settings::SharedSettings::from(
-            Settings::default(),
-        ));
-        let route_config = ApiRouteConfig {
-            settings: web::Data::from(settings),
-            tauri_login_token: web::Data::new(None::<TauriLoginToken>),
-            connection_map: web::Data::new(SharedConnectionMap::from(BTreeMap::new())),
-            host_control_hub: web::Data::new(None::<Arc<host_control::HostControlHub>>),
-            tauri_is_admin: None,
-        };
-
-        let secret_key = Key::generate();
-        let app = test::init_service(
-            App::new()
-                .wrap(
-                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
-                        .cookie_secure(false)
-                        .build(),
-                )
-                .configure(move |cfg| configure_api_routes(cfg, route_config.clone())),
-        )
-        .await;
-
-        let probes = [
-            ("GET", "/api/desk/device_codes"),
-            ("POST", "/api/desk/device_codes"),
-            ("PUT", "/api/desk/device_codes/1"),
-            ("DELETE", "/api/desk/device_codes/1"),
-            ("POST", "/api/desk/device_codes/batch_delete"),
-        ];
-        for (method, uri) in probes {
+        for &(method, uri) in probes {
             let req = match method {
                 "GET" => test::TestRequest::get().uri(uri).to_request(),
                 "POST" => test::TestRequest::post().uri(uri).to_request(),
                 "PUT" => test::TestRequest::put().uri(uri).to_request(),
                 "DELETE" => test::TestRequest::delete().uri(uri).to_request(),
-                _ => unreachable!(),
+                _ => unreachable!("unhandled method {method}"),
             };
             match test::try_call_service(&app, req).await {
                 Ok(resp) => assert_ne!(
                     resp.status(),
                     actix_web::http::StatusCode::NOT_FOUND,
-                    "{method} {uri} returned 404 — route must be \
-                     registered by configure_api_routes (it was \
-                     previously restricted to portable modes and broke \
-                     device-code admin on the daemon's 8082 port)",
+                    "{method} {uri} returned 404 — route must be registered by \
+                     configure_api_surface (daemon opts)",
                 ),
-                Err(_) => {
-                    // Same convention as
-                    // `configure_api_routes_registers_terminal_and_file_endpoints`:
-                    // a middleware-level rejection means the route matched.
-                }
+                // A middleware/handler rejection (e.g. 401) means the route matched.
+                Err(_) => {}
             }
         }
+    }
+
+    /// Regression: remote terminal + file management endpoints must be exposed
+    /// on the daemon's 8082 surface (once dropped in ServiceDaemon mode → 404).
+    #[actix_web::test]
+    async fn daemon_surface_registers_terminal_and_file_endpoints() {
+        assert_daemon_routes_registered(&[
+            ("GET", "/api/desk/file/list?connection_id=test"),
+            ("GET", "/api/desk/terminals/test"),
+            ("GET", "/api/desk/terminal/test?command=cmd"),
+            ("DELETE", "/api/desk/file"),
+        ])
+        .await;
+    }
+
+    /// Regression: virtual-display endpoints must be exposed on the daemon surface.
+    #[actix_web::test]
+    async fn daemon_surface_registers_virtual_display_endpoints() {
+        assert_daemon_routes_registered(&[
+            ("GET", "/api/virtual-display/driver/status"),
+            ("POST", "/api/virtual-display/driver/install"),
+            ("POST", "/api/virtual-display/driver/uninstall"),
+            ("GET", "/api/desk/settings/virtual-display"),
+            ("POST", "/api/desk/settings/virtual-display"),
+        ])
+        .await;
+    }
+
+    /// Regression: AI model settings endpoint exposed at its real nested path
+    /// (`/api` → `/desk` → `/settings/ai-model`).
+    #[actix_web::test]
+    async fn daemon_surface_registers_ai_model_settings_endpoint() {
+        assert_daemon_routes_registered(&[
+            ("GET", "/api/desk/settings/ai-model"),
+            ("POST", "/api/desk/settings/ai-model"),
+        ])
+        .await;
+    }
+
+    /// Regression: device-code admin CRUD exposed on the daemon surface.
+    #[actix_web::test]
+    async fn daemon_surface_registers_device_code_endpoints() {
+        assert_daemon_routes_registered(&[
+            ("GET", "/api/desk/device_codes"),
+            ("POST", "/api/desk/device_codes"),
+            ("PUT", "/api/desk/device_codes/1"),
+            ("DELETE", "/api/desk/device_codes/1"),
+            ("POST", "/api/desk/device_codes/batch_delete"),
+        ])
+        .await;
+    }
+
+    /// TURN management lives only in the portable server. With daemon opts
+    /// (`include_turn = false`) the `/api/turn/*` scope must NOT be registered.
+    /// Asserted at the spec level (an HTTP probe can't distinguish "route
+    /// absent" from the `/api` scope's anonymous-rejection 401).
+    #[test]
+    fn daemon_opts_exclude_turn_scope() {
+        use utoipa_actix_web::AppExt as _;
+
+        let (_app, daemon_api) = App::new()
+            .into_utoipa_app()
+            .configure(|cfg| {
+                configure_api_surface(
+                    cfg,
+                    ApiSurfaceOpts {
+                        include_signaling: true,
+                        include_file_device_code: true,
+                        include_turn: false,
+                    },
+                )
+            })
+            .split_for_parts();
+
+        assert!(
+            !daemon_api
+                .paths
+                .paths
+                .keys()
+                .any(|p| p.starts_with("/api/turn")),
+            "daemon opts must not register /api/turn/*; got {:?}",
+            daemon_api.paths.paths.keys().collect::<Vec<_>>(),
+        );
+        // Sanity: the superset spec (portable / dump) does include it.
+        assert!(build_openapi().paths.paths.contains_key("/api/turn/info"));
+    }
+
+    /// The offline spec is a superset built through the same scope nesting as the
+    /// live servers, so every conditional route appears with its real `/api`
+    /// prefix (not the bare path the old `AllPathsDoc` would emit).
+    #[test]
+    fn build_openapi_includes_prefixed_conditional_routes() {
+        let api = build_openapi();
+        for expected in [
+            "/api/desk/settings",
+            "/api/desk/device_codes",
+            "/api/desk/signaling",
+            "/api/turn/info",
+        ] {
+            assert!(
+                api.paths.paths.contains_key(expected),
+                "build_openapi() missing {expected}; got {:?}",
+                api.paths.paths.keys().collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    /// Auth-order guard: signaling is registered at the top level, *before* the
+    /// `/api` scope's `reject_anonymous_users`. With a valid node token (and no
+    /// session) the handler must pass its own auth and reach the WebSocket
+    /// handshake — so the response is neither a `404` (route absent) nor a `401`
+    /// (which would mean the anonymous-rejection middleware ran first because
+    /// signaling was wrongly nested under `/api`).
+    #[actix_web::test]
+    async fn signaling_bypasses_anonymous_rejection_on_daemon_surface() {
+        use crate::model::settings::{Settings, SharedSettings};
+        use actix_web::test;
+        use desk_signal::model::SharedConnectionMap;
+        use desk_signal_facade::model::version::VersionInfo;
+        use desk_signal_facade::model::{os::OperationSystemEnum, signal::RemoteDeskTypeEnum};
+        use desk_signal_facade::service::NodeTokenValidator;
+        use utoipa_actix_web::AppExt as _;
+
+        struct AlwaysValidValidator;
+        impl NodeTokenValidator for AlwaysValidValidator {
+            fn validate_node_token<'a>(
+                &'a self,
+                _token: &'a str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>
+            {
+                Box::pin(async { true })
+            }
+        }
+
+        let settings: web::Data<SharedSettings> =
+            web::Data::from(Arc::new(SharedSettings::from(Settings::default())));
+        let validator: web::Data<Arc<dyn NodeTokenValidator>> =
+            web::Data::new(Arc::new(AlwaysValidValidator) as Arc<dyn NodeTokenValidator>);
+        let secret_key = Key::generate();
+        let app = test::init_service(
+            App::new()
+                .into_utoipa_app()
+                .app_data(settings)
+                .app_data(validator)
+                .app_data(web::Data::new(None::<TauriLoginToken>))
+                .app_data(web::Data::new(SharedConnectionMap::from(BTreeMap::new())))
+                .app_data(web::Data::new(None::<Arc<host_control::HostControlHub>>))
+                .configure(|cfg| {
+                    configure_api_surface(
+                        cfg,
+                        ApiSurfaceOpts {
+                            include_signaling: true,
+                            include_file_device_code: true,
+                            include_turn: false,
+                        },
+                    )
+                })
+                .into_app()
+                .wrap(
+                    SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
+                        .cookie_secure(false)
+                        .build(),
+                ),
+        )
+        .await;
+
+        let version = VersionInfo {
+            api_version: 1,
+            build_number: 1,
+            commit_hash: "test".into(),
+            remote_desk_type: RemoteDeskTypeEnum::Browser,
+            operation_system: OperationSystemEnum::Windows,
+            display_name: None,
+            client_id: None,
+            token: Some("test-token".into()),
+        };
+        let query = serde_urlencoded::to_string(&version).unwrap();
+        let uri = format!("/api/desk/signaling?{query}");
+        let req = test::TestRequest::get().uri(&uri).to_request();
+        let resp = test::call_service(&app, req).await;
+        // 400 = the handler ran, passed token auth, and reached the WebSocket
+        // handshake which fails on the missing upgrade headers. A 401 would mean
+        // `reject_anonymous_users` ran first (signaling wrongly nested under
+        // `/api`); a 404 would mean the route is absent.
+        assert_eq!(
+            resp.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "signaling should bypass reject_anonymous and reach the WS handshake (got {})",
+            resp.status(),
+        );
     }
 }

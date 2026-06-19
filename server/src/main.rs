@@ -27,7 +27,42 @@ struct ServerArgs {
     install_idd_driver: bool,
 }
 
+/// Offline OpenAPI dump command. Parsed only when `argv[1]` is exactly
+/// `dump-openapi`, *before* the legacy `ServerArgs` / `Args` parsers, so it
+/// connects no infrastructure (no config / DB / Redis / runtime). Strict
+/// (no `ignore_errors`): an unknown flag fails via clap as usual.
+#[derive(clap::Parser, Debug)]
+struct DumpOpenapiCli {
+    /// Output path for the generated `openapi.json`.
+    #[arg(long, default_value = "openapi.json")]
+    out: String,
+}
+
 fn main() {
+    // Offline OpenAPI dump: handled first, on every platform, before any other
+    // argv parsing or startup. Gated on an exact `argv[1] == "dump-openapi"`
+    // match so it never interferes with `--startup-mode` / `--pipe` / Windows
+    // service flags. `parse_from(args().skip(1))` makes `dump-openapi` occupy
+    // clap's ignored bin-name slot, leaving only `--out` to parse.
+    if std::env::args().nth(1).as_deref() == Some("dump-openapi") {
+        let cli = DumpOpenapiCli::parse_from(std::env::args().skip(1));
+        let spec = lcxl_remote_desk_server::build_openapi();
+        match spec.to_json() {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&cli.out, json) {
+                    eprintln!("dump-openapi: failed to write {}: {e}", cli.out);
+                    std::process::exit(1);
+                }
+                eprintln!("Wrote OpenAPI spec to {}", cli.out);
+            }
+            Err(e) => {
+                eprintln!("dump-openapi: failed to serialize spec: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Handle one-shot service management flags before entering any startup mode.
     // Use plain println!/eprintln! — no logging framework is initialised yet.
     #[cfg(target_os = "windows")]
@@ -108,5 +143,49 @@ fn main() {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DumpOpenapiCli;
+    use clap::Parser as _;
+
+    /// Mirrors the gate in `main`: only an exact `dump-openapi` first argument
+    /// (after the program name) enters the offline-dump branch.
+    fn is_dump_invocation(argv: &[&str]) -> bool {
+        argv.get(1).copied() == Some("dump-openapi")
+    }
+
+    // `parse_from` treats the first element as the (ignored) bin-name slot, so
+    // these mirror the real `parse_from(std::env::args().skip(1))` call.
+    #[test]
+    fn dump_cli_defaults_out_to_openapi_json() {
+        let cli = DumpOpenapiCli::parse_from(["dump-openapi"]);
+        assert_eq!(cli.out, "openapi.json");
+    }
+
+    #[test]
+    fn dump_cli_accepts_explicit_out() {
+        let cli = DumpOpenapiCli::parse_from(["dump-openapi", "--out", "foo.json"]);
+        assert_eq!(cli.out, "foo.json");
+    }
+
+    #[test]
+    fn dump_cli_rejects_unknown_flag() {
+        assert!(DumpOpenapiCli::try_parse_from(["dump-openapi", "--nope"]).is_err());
+    }
+
+    #[test]
+    fn legacy_argv_does_not_enter_dump_branch() {
+        assert!(!is_dump_invocation(&[
+            "server",
+            "--startup-mode",
+            "session-worker",
+            "--pipe",
+            "p",
+        ]));
+        assert!(!is_dump_invocation(&["server", "--install-service"]));
+        assert!(is_dump_invocation(&["server", "dump-openapi"]));
     }
 }

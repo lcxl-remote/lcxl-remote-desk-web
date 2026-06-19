@@ -4,14 +4,13 @@
 //! `openapi.json` regresses to empty tags, which makes Kubb fall back to the
 //! `undefinedController/` group and produces a broken frontend layout.
 //!
-//! Coverage source: [`lcxl_remote_desk_server::openapi::AllPathsDoc`] —
-//! the static `OpenApi` derive listing every handler the binary can route
-//! at runtime (including `StartupMode`-conditional ones like device-code
-//! CRUD, signaling, and TURN). New handlers must be added to that list when
-//! they are introduced; this test fails if any listed operation lacks a tag.
+//! Coverage source: [`lcxl_remote_desk_server::build_openapi`] — the offline
+//! superset spec assembled through `configure_api_surface` (the single source of
+//! truth for the HTTP API surface), so it includes every route the binary can
+//! serve at its real `/api`-prefixed path. New handlers flow in automatically
+//! via `configure_api_surface`; this test fails if any operation lacks a tag.
 
-use lcxl_remote_desk_server::openapi::AllPathsDoc;
-use utoipa::OpenApi;
+use lcxl_remote_desk_server::build_openapi;
 use utoipa::openapi::path::{Operation, PathItem};
 
 /// PathItem stores each HTTP method on its own field (`get`, `post`, `put`,
@@ -35,7 +34,7 @@ fn operations_of(item: &PathItem) -> Vec<(&'static str, &Operation)> {
 
 #[test]
 fn all_operations_have_non_empty_tags() {
-    let api = AllPathsDoc::openapi();
+    let api = build_openapi();
     let mut violations: Vec<String> = Vec::new();
     let mut total_operations = 0_usize;
     for (path, item) in &api.paths.paths {

@@ -22,10 +22,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cd vite-project && npm ci && npm run dev               # 开发服务器 (默认端口 :5174)
 cd vite-project && npm run build                       # 类型检查 + 构建
 
-# 后端 API 变更后，重新生成前端客户端代码
+# 后端 API 变更后，重新生成前端客户端代码（离线 dump，无需运行中的 server）
 # Windows: cd vite-project && .\update_openapi.ps1
 # Linux/macOS: cd vite-project && ./update_openapi.sh
-# (需要 server 运行在 :8081 端口)
+# (脚本内部走 `dump-openapi` 子命令，从路由注册离线导出 spec，不连 DB/Redis/HTTP)
 ```
 
 ### Linux 系统依赖

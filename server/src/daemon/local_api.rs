@@ -1,17 +1,19 @@
 use crate::{
-    ApiRouteConfig, daemon::tauri_ipc::TauriIpcBridge, host_control,
-    model::settings::SharedSettings, service::signaling::LocalNodeTokenValidator,
+    ApiRouteConfig, ApiSurfaceOpts, api_json_config, configure_api_surface,
+    daemon::tauri_ipc::TauriIpcBridge, host_control, model::settings::SharedSettings,
+    service::signaling::LocalNodeTokenValidator,
 };
 use actix_files;
 use actix_service::fn_service;
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
 use actix_web::{App, HttpServer, cookie::Key, dev::ServiceResponse, middleware::Logger, web};
-use desk_signal::{controller::signaling::open_signaling_handle, model::SharedConnectionMap};
+use desk_signal::model::SharedConnectionMap;
 use desk_signal_facade::service::NodeTokenValidator;
 use log::{error, info};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::oneshot;
+use utoipa_actix_web::AppExt as _;
 
 pub const SERVICE_API_PORT: u16 = 8082;
 
@@ -98,29 +100,51 @@ pub async fn run_local_api(
         let default_path = static_file_path.clone();
         let rc = route_config.clone();
         let endpoint_state_for_routes = Arc::clone(&endpoint_state);
+        let tauri_is_admin = rc.tauri_is_admin.clone();
 
         App::new()
-            .wrap(Logger::default())
+            .into_utoipa_app()
+            .map(|app| app.wrap(Logger::default()))
+            // App-level `app_data` (previously mounted inside `configure_api_routes`).
+            .app_data(rc.settings.clone())
+            .app_data(rc.tauri_login_token.clone())
+            .app_data(rc.connection_map.clone())
+            .app_data(rc.host_control_hub.clone())
+            .app_data(validator_data.clone())
+            .app_data(api_json_config())
+            .configure(move |cfg| {
+                if let Some(admin) = tauri_is_admin {
+                    cfg.app_data(admin);
+                }
+            })
+            // Host-control `/ws/*` are plain actix (non-utoipa) and depend on
+            // runtime endpoint state, so they stay here. Bridge into the inner
+            // plain `ServiceConfig` via `.map` (closure must return `inner`).
+            .configure(move |cfg| {
+                cfg.map(|inner| {
+                    host_control::endpoint::register_routes(inner, endpoint_state_for_routes);
+                    inner
+                });
+            })
+            // Single source of truth for the HTTP API surface. The daemon serves
+            // signaling + file/device-code unconditionally; TURN management lives
+            // only in the portable server, so `include_turn = false`.
+            .configure(|cfg| {
+                configure_api_surface(
+                    cfg,
+                    ApiSurfaceOpts {
+                        include_signaling: true,
+                        include_file_device_code: true,
+                        include_turn: false,
+                    },
+                )
+            })
+            .into_app()
             .wrap(
                 SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
                     .cookie_secure(false)
                     .build(),
             )
-            // Register signaling and IPC routes BEFORE configure_api_routes so they
-            // are matched first and bypass the /api scope's reject_anonymous_users
-            // middleware (which would otherwise intercept /api/desk/signaling).
-            .app_data(validator_data.clone())
-            .service(open_signaling_handle)
-            // Host-control hub endpoints replace the legacy `TauriIpcBridge`
-            // ws handler. Always go through `register_routes` so the
-            // `web::Data` wrapping (`Data::from(Arc<T>)` → `Data<T>`) is
-            // identical to what the unit tests exercise. Inline registration
-            // with `web::Data::new(Arc::clone(...))` produced
-            // `Data<Arc<EndpointState>>` and made every ws request 500.
-            .configure(move |cfg| {
-                host_control::endpoint::register_routes(cfg, Arc::clone(&endpoint_state_for_routes))
-            })
-            .configure(move |cfg| crate::configure_api_routes(cfg, rc.clone()))
             .service(
                 actix_files::Files::new("/", static_file_path.clone())
                     .index_file("index.html")
