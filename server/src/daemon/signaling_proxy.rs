@@ -1330,6 +1330,7 @@ mod tests {
                 argv: vec!["Get-Disk".into()],
                 effect: ExecEffect::ReadOnly,
             }],
+            command_template_revision: Some(1),
         };
         let model = SignalingModel::new(
             "rs",
@@ -1375,6 +1376,60 @@ mod tests {
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
+    }
+
+    /// A current daemon accepts a v1 payload (from an old manager during a rolling
+    /// upgrade — no revision, applied as `None`) and ignores a payload whose
+    /// version is outside the supported range (a future version reaching this
+    /// older daemon), leaving the cache untouched.
+    #[tokio::test]
+    async fn command_template_sync_accepts_v1_and_ignores_unknown_version() {
+        use desk_agent_protocol::command_template::{
+            CommandTemplateSyncPayload, SyncedCommandTemplate,
+        };
+        use desk_agent_protocol::exec::ExecEffect;
+        let (router_ctx, _out_tx) = make_router_ctx();
+
+        let make_text = |version: u16, revision: Option<i64>| {
+            let payload = CommandTemplateSyncPayload {
+                version,
+                templates: vec![SyncedCommandTemplate {
+                    template_id: "get_disk".into(),
+                    argv: vec!["Get-Disk".into()],
+                    effect: ExecEffect::ReadOnly,
+                }],
+                command_template_revision: revision,
+            };
+            let model = SignalingModel::new(
+                "rs",
+                SignalingType::CommandTemplateSync,
+                None,
+                None,
+                Some(serde_json::to_value(payload).unwrap()),
+                None,
+            );
+            serde_json::to_string(&model).unwrap()
+        };
+
+        // v1 (no revision) from Manager: applied; cache revision stays None.
+        handle_inbound_signaling_text(
+            make_text(1, None),
+            &router_ctx,
+            InboundSignalingSource::Manager,
+        )
+        .await;
+        assert_eq!(router_ctx.command_templates.len(), 1);
+        assert_eq!(router_ctx.command_templates.revision(), None);
+
+        // An unsupported future version is ignored — the cache keeps the v1 apply.
+        handle_inbound_signaling_text(
+            make_text(99, Some(5)),
+            &router_ctx,
+            InboundSignalingSource::Manager,
+        )
+        .await;
+        assert_eq!(router_ctx.command_templates.len(), 1);
+        assert_eq!(router_ctx.command_templates.revision(), None);
     }
 
     // ====== Source-gated authorization wrapper ======

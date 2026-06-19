@@ -736,6 +736,7 @@ fn handle_command_template_sync_inbound(
 ) -> Result<(), RouterError> {
     use desk_agent_protocol::command_template::{
         COMMAND_TEMPLATE_SYNC_VERSION, CommandTemplateSyncPayload,
+        MIN_COMMAND_TEMPLATE_SYNC_VERSION,
     };
     let payload = match model.get_data::<CommandTemplateSyncPayload>() {
         Ok(p) => p,
@@ -744,15 +745,26 @@ fn handle_command_template_sync_inbound(
             return Ok(());
         }
     };
-    if payload.version != COMMAND_TEMPLATE_SYNC_VERSION {
+    // Accept any version in the supported range. A v1 payload (old manager during
+    // a rolling upgrade) carries no revision but still replaces the cache; a v2
+    // payload carries the shared revision. A version outside the range (e.g. a
+    // future v3 reaching this older daemon) is safely ignored.
+    if !(MIN_COMMAND_TEMPLATE_SYNC_VERSION..=COMMAND_TEMPLATE_SYNC_VERSION)
+        .contains(&payload.version)
+    {
         log::warn!(
             "[router] ignoring CommandTemplateSync with unsupported version {}",
             payload.version
         );
         return Ok(());
     }
-    let accepted = ctx.command_templates.replace(payload.templates);
-    log::info!("[router] applied operator command-template sync: {accepted} template(s)");
+    let revision = payload.command_template_revision;
+    let accepted = ctx
+        .command_templates
+        .replace(payload.templates, revision);
+    log::info!(
+        "[router] applied operator command-template sync: {accepted} template(s) (revision {revision:?})"
+    );
     Ok(())
 }
 
@@ -5583,6 +5595,7 @@ mod tests {
         let payload = CommandTemplateSyncPayload {
             version: COMMAND_TEMPLATE_SYNC_VERSION,
             templates,
+            command_template_revision: Some(1),
         };
         SignalingModel::new(
             "rs",
@@ -5643,11 +5656,14 @@ mod tests {
             ExecutionMode::ConfirmEachAction,
             desk_agent_protocol::RiskLevel::Low,
         ));
-        ctx.command_templates.replace(vec![SyncedCommandTemplate {
-            template_id: "net_stop".into(),
-            argv: vec!["net".into(), "stop".into(), "spooler".into()],
-            effect: ExecEffect::Mutating,
-        }]);
+        ctx.command_templates.replace(
+            vec![SyncedCommandTemplate {
+                template_id: "net_stop".into(),
+                argv: vec!["net".into(), "stop".into(), "spooler".into()],
+                effect: ExecEffect::Mutating,
+            }],
+            Some(1),
+        );
 
         handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "net stop spooler"))
             .await
@@ -5676,11 +5692,14 @@ mod tests {
             ExecutionMode::ConfirmEachAction,
             desk_agent_protocol::RiskLevel::High,
         ));
-        ctx.command_templates.replace(vec![SyncedCommandTemplate {
-            template_id: "net_stop".into(),
-            argv: vec!["net".into(), "stop".into(), "spooler".into()],
-            effect: ExecEffect::Mutating,
-        }]);
+        ctx.command_templates.replace(
+            vec![SyncedCommandTemplate {
+                template_id: "net_stop".into(),
+                argv: vec!["net".into(), "stop".into(), "spooler".into()],
+                effect: ExecEffect::Mutating,
+            }],
+            Some(1),
+        );
 
         handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "net stop spooler"))
             .await
@@ -5706,11 +5725,14 @@ mod tests {
             ExecutionMode::ConfirmEachAction,
             desk_agent_protocol::RiskLevel::High,
         ));
-        ctx.command_templates.replace(vec![SyncedCommandTemplate {
-            template_id: "net_stop".into(),
-            argv: vec!["net".into(), "stop".into(), "spooler".into()],
-            effect: ExecEffect::Mutating,
-        }]);
+        ctx.command_templates.replace(
+            vec![SyncedCommandTemplate {
+                template_id: "net_stop".into(),
+                argv: vec!["net".into(), "stop".into(), "spooler".into()],
+                effect: ExecEffect::Mutating,
+            }],
+            Some(1),
+        );
 
         handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "net stop spooler"))
             .await

@@ -21,9 +21,24 @@ use serde::{Deserialize, Serialize};
 use crate::RiskLevel;
 use crate::exec::ExecEffect;
 
-/// Current `CommandTemplateSync` payload wire version. The daemon ignores a
-/// payload whose version it does not understand.
-pub const COMMAND_TEMPLATE_SYNC_VERSION: u16 = 1;
+/// Current `CommandTemplateSync` payload wire version the manager emits. A daemon
+/// accepts any version in `[MIN_COMMAND_TEMPLATE_SYNC_VERSION,
+/// COMMAND_TEMPLATE_SYNC_VERSION]` and ignores anything outside it.
+///
+/// - v1: `{ version, templates }`.
+/// - v2: adds `command_template_revision` (the shared monotonic revision the
+///   manager stamped the set with).
+///
+/// During a rolling upgrade an old daemon (which only knows v1) receives a v2
+/// payload and safely ignores it — it keeps its prior template set rather than
+/// misapplying an unknown shape; a fleet exec request it cannot template-match is
+/// then refused by its PEP, never mis-executed.
+pub const COMMAND_TEMPLATE_SYNC_VERSION: u16 = 2;
+
+/// Oldest `CommandTemplateSync` payload version a current daemon still accepts.
+/// A v1 payload (from an old manager during a rolling upgrade) carries no
+/// revision and still replaces the cache.
+pub const MIN_COMMAND_TEMPLATE_SYNC_VERSION: u16 = 1;
 
 /// One operator-configured exact-argv command template, as synced from the
 /// manager to the daemon.
@@ -66,6 +81,14 @@ pub fn risk_for_effect(effect: ExecEffect) -> RiskLevel {
 pub struct CommandTemplateSyncPayload {
     pub version: u16,
     pub templates: Vec<SyncedCommandTemplate>,
+    /// The shared monotonic command-template revision in force when the manager
+    /// built this payload (v2+). `None` on a v1 payload from an old manager. The
+    /// daemon stores it for diagnostics; it does **not** ACK an applied revision —
+    /// execution-time safety comes from the daemon PEP re-validate plus the
+    /// manager intent-transaction recheck, not from this value (no per-device
+    /// applied-revision tracking in v1).
+    #[serde(default)]
+    pub command_template_revision: Option<i64>,
 }
 
 /// Why an operator template's argv was rejected.
@@ -164,5 +187,44 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    fn sample_template() -> SyncedCommandTemplate {
+        SyncedCommandTemplate {
+            template_id: "docker_ps".into(),
+            argv: vec!["docker".into(), "ps".into()],
+            effect: ExecEffect::ReadOnly,
+        }
+    }
+
+    #[test]
+    fn v2_payload_round_trips_with_revision() {
+        let payload = CommandTemplateSyncPayload {
+            version: COMMAND_TEMPLATE_SYNC_VERSION,
+            templates: vec![sample_template()],
+            command_template_revision: Some(42),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let back: CommandTemplateSyncPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, payload);
+        assert_eq!(back.command_template_revision, Some(42));
+    }
+
+    #[test]
+    fn v1_payload_without_revision_deserializes_as_none() {
+        // A v1 frame from an old manager has no `command_template_revision` field;
+        // a current daemon must still decode it (serde default → None) and apply it.
+        let v1_json = r#"{"version":1,"templates":[{"template_id":"docker_ps","argv":["docker","ps"],"effect":"read_only"}]}"#;
+        let payload: CommandTemplateSyncPayload = serde_json::from_str(v1_json).unwrap();
+        assert_eq!(payload.version, 1);
+        assert_eq!(payload.command_template_revision, None);
+        assert_eq!(payload.templates, vec![sample_template()]);
+    }
+
+    #[test]
+    fn current_version_is_in_supported_range() {
+        // The emitted version must not be below the minimum supported one.
+        assert_eq!(COMMAND_TEMPLATE_SYNC_VERSION, 2);
+        assert_eq!(MIN_COMMAND_TEMPLATE_SYNC_VERSION, 1);
     }
 }

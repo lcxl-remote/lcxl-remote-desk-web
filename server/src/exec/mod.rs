@@ -18,54 +18,18 @@
 
 #[cfg(test)]
 mod acceptance;
-mod blocklist;
 mod templates;
 mod tokenize;
 
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
-use desk_agent_protocol::exec::{
-    CommandClassification, ExecDecision, ExecPlanDraft, ExecShellKind,
+use desk_agent_protocol::exec::{CommandClassification, ExecDecision, ExecPlanDraft};
+use desk_agent_protocol::exec_policy::{
+    blocked_raw_command, build_exact_argv_draft, fingerprint,
 };
 use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
+pub use desk_agent_protocol::exec_policy::ExecLimits;
 pub use templates::{CommandForm, command_forms};
-
-/// Hard caps the daemon enforces on control-end-supplied limits before they
-/// reach the worker.
-const MAX_TIMEOUT_MS: u32 = 60_000;
-const DEFAULT_TIMEOUT_MS: u32 = 30_000;
-const MIN_TIMEOUT_MS: u32 = 1_000;
-const MAX_OUTPUT_BYTES: u32 = 1 << 20; // 1 MiB
-const DEFAULT_OUTPUT_BYTES: u32 = 64 * 1024;
-
-/// Execution limits after clamping. Built from an [`ExecInput`] so a control end
-/// cannot ask for an unbounded timeout or output buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExecLimits {
-    pub timeout_ms: u32,
-    pub max_stdout_bytes: u32,
-    pub max_stderr_bytes: u32,
-}
-
-impl ExecLimits {
-    /// Clamp control-end-supplied limits into the enforced range, substituting
-    /// a default for an unset (`0`) value.
-    pub fn clamped(input: &ExecInput) -> Self {
-        let timeout_ms = match input.timeout_ms {
-            0 => DEFAULT_TIMEOUT_MS,
-            t => t.clamp(MIN_TIMEOUT_MS, MAX_TIMEOUT_MS),
-        };
-        let clamp_output = |v: u32| match v {
-            0 => DEFAULT_OUTPUT_BYTES,
-            v => v.min(MAX_OUTPUT_BYTES),
-        };
-        ExecLimits {
-            timeout_ms,
-            max_stdout_bytes: clamp_output(input.max_stdout_bytes),
-            max_stderr_bytes: clamp_output(input.max_stderr_bytes),
-        }
-    }
-}
 
 /// Result of classifying an exec request.
 pub struct ClassifyOutcome {
@@ -81,7 +45,7 @@ pub fn classify_command(input: &ExecInput) -> ClassifyOutcome {
     let command = input.command.as_str();
 
     // Step 1: blocklist (hard deny), checked on the raw command.
-    if let Some(category) = blocklist::blocked_category(command) {
+    if let Some(category) = blocked_raw_command(command) {
         return ClassifyOutcome {
             classification: CommandClassification {
                 risk: RiskLevel::Blocked,
@@ -189,25 +153,8 @@ pub fn classify_command_with(
     };
 
     let limits = ExecLimits::clamped(input);
-    let program = t.argv[0].clone();
-    let argv = t.argv[1..].to_vec();
-    let cwd = input.cwd.clone();
-    let fingerprint = fingerprint(&program, &argv, cwd.as_deref(), &limits);
+    let draft = build_exact_argv_draft(t, limits, input.cwd.clone());
     let risk = t.risk();
-
-    let draft = ExecPlanDraft {
-        program,
-        argv,
-        cwd,
-        // Operator argv is executed as a direct spawn (no shell wrapping).
-        shell: ExecShellKind::Native,
-        risk,
-        template_id: t.template_id.clone(),
-        fingerprint,
-        timeout_ms: limits.timeout_ms,
-        max_stdout_bytes: limits.max_stdout_bytes,
-        max_stderr_bytes: limits.max_stderr_bytes,
-    };
 
     ClassifyOutcome {
         classification: CommandClassification {
@@ -236,36 +183,13 @@ fn not_executable() -> ClassifyOutcome {
     }
 }
 
-/// Stable, deterministic fingerprint over the rendered plan + limits (FNV-1a,
-/// hex). Detects any divergence between the previewed and executed plan; it is
-/// not a cryptographic commitment (the draft is held server-side and immutable),
-/// only a tamper check.
-fn fingerprint(program: &str, argv: &[String], cwd: Option<&str>, limits: &ExecLimits) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut feed = |bytes: &[u8]| {
-        for &b in bytes {
-            hash ^= b as u64;
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        // Field separator (a NUL never appears in a token).
-        hash ^= 0;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    };
-    feed(program.as_bytes());
-    for a in argv {
-        feed(a.as_bytes());
-    }
-    feed(cwd.unwrap_or("").as_bytes());
-    feed(&limits.timeout_ms.to_le_bytes());
-    feed(&limits.max_stdout_bytes.to_le_bytes());
-    feed(&limits.max_stderr_bytes.to_le_bytes());
-    format!("{hash:016x}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use desk_agent_protocol::exec::ExecEffect;
+    use desk_agent_protocol::exec_policy::{
+        DEFAULT_OUTPUT_BYTES, DEFAULT_TIMEOUT_MS, MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS,
+    };
 
     fn shell_input(command: &str) -> ExecInput {
         ExecInput {

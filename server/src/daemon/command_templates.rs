@@ -20,6 +20,10 @@ use desk_agent_protocol::command_template::{SyncedCommandTemplate, validate_temp
 #[derive(Default)]
 pub struct CommandTemplateCache {
     inner: RwLock<Arc<Vec<SyncedCommandTemplate>>>,
+    /// The shared command-template revision last applied (from a v2 sync). `None`
+    /// before the first v2 sync. Stored for diagnostics only — the daemon does not
+    /// ACK it (no per-device applied-revision tracking in v1).
+    revision: RwLock<Option<i64>>,
 }
 
 impl CommandTemplateCache {
@@ -35,9 +39,15 @@ impl CommandTemplateCache {
             .clone()
     }
 
+    /// The last applied command-template revision, if any.
+    pub fn revision(&self) -> Option<i64> {
+        *self.revision.read().expect("command template revision lock")
+    }
+
     /// Replace the cache with a synced set, dropping any entry whose argv fails
-    /// the shape check (fail-closed). Returns the number of templates accepted.
-    pub fn replace(&self, templates: Vec<SyncedCommandTemplate>) -> usize {
+    /// the shape check (fail-closed). `revision` is the sync payload's revision
+    /// (`None` for a v1 payload). Returns the number of templates accepted.
+    pub fn replace(&self, templates: Vec<SyncedCommandTemplate>, revision: Option<i64>) -> usize {
         let accepted: Vec<SyncedCommandTemplate> = templates
             .into_iter()
             .filter(|t| match validate_template_argv(&t.argv) {
@@ -53,6 +63,7 @@ impl CommandTemplateCache {
             .collect();
         let count = accepted.len();
         *self.inner.write().expect("command template cache lock") = Arc::new(accepted);
+        *self.revision.write().expect("command template revision lock") = revision;
         count
     }
 
@@ -82,26 +93,38 @@ mod tests {
     fn replace_accepts_valid_and_snapshots() {
         let cache = CommandTemplateCache::new();
         assert_eq!(cache.snapshot().len(), 0);
-        let n = cache.replace(vec![tpl("a", &["docker", "ps"]), tpl("b", &["Get-Disk"])]);
+        let n = cache.replace(
+            vec![tpl("a", &["docker", "ps"]), tpl("b", &["Get-Disk"])],
+            Some(7),
+        );
         assert_eq!(n, 2);
         assert_eq!(cache.snapshot().len(), 2);
+        assert_eq!(cache.revision(), Some(7));
     }
 
     #[test]
     fn replace_drops_invalid_argv_fail_closed() {
         let cache = CommandTemplateCache::new();
-        let n = cache.replace(vec![tpl("ok", &["docker", "ps"]), tpl("bad", &["a;b"])]);
+        let n = cache.replace(vec![tpl("ok", &["docker", "ps"]), tpl("bad", &["a;b"])], None);
         assert_eq!(n, 1, "the metachar entry must be dropped");
         assert_eq!(cache.snapshot().len(), 1);
     }
 
     #[test]
-    fn replace_is_wholesale() {
+    fn replace_is_wholesale_and_updates_revision() {
         let cache = CommandTemplateCache::new();
-        cache.replace(vec![tpl("a", &["docker", "ps"])]);
-        cache.replace(vec![tpl("b", &["Get-Disk"])]);
+        cache.replace(vec![tpl("a", &["docker", "ps"])], Some(1));
+        cache.replace(vec![tpl("b", &["Get-Disk"])], Some(2));
         let snap = cache.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].template_id, "b");
+        assert_eq!(cache.revision(), Some(2));
+    }
+
+    #[test]
+    fn v1_replace_leaves_revision_none() {
+        let cache = CommandTemplateCache::new();
+        cache.replace(vec![tpl("a", &["docker", "ps"])], None);
+        assert_eq!(cache.revision(), None);
     }
 }
