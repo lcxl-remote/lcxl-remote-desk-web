@@ -18,30 +18,10 @@ use desk_agent_protocol::AgentOutcome;
 use desk_agent_protocol::evidence::EvidenceSnapshot;
 use serde_json::{Value, json};
 
-/// Role of a chat message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
-    System,
-    User,
-}
-
-impl ChatRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ChatRole::System => "system",
-            ChatRole::User => "user",
-        }
-    }
-}
-
-/// One chat message. `image_data_url`, when set, is attached as a vision image
-/// alongside the text (OpenAI multi-part content).
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub text: String,
-    pub image_data_url: Option<String>,
-}
+// The neutral chat-message types live in [`crate::chat`] (they are shared with
+// the model adapters and the agentic loop). Re-exported here so existing
+// `prompt::{ChatRole, ChatMessage}` paths keep resolving.
+pub use crate::chat::{ChatMessage, ChatRole};
 
 /// What `response_format` the gateway is asked for. The diagnosis-specific
 /// schema (for [`ResponseFormatSpec::JsonSchema`]) is built here and carried
@@ -251,16 +231,19 @@ pub fn build_messages(
         }
     }
 
+    // The single-turn diagnose conversation is ephemeral, so message ids are
+    // simple positional anchors here; the agentic loop mints stable ids when it
+    // owns a persisted conversation.
+    let user = ChatMessage::text(
+        "prompt-user",
+        ChatRole::User,
+        serde_json::to_string(&user_payload).unwrap_or_else(|_| "{}".to_string()),
+    );
     vec![
-        ChatMessage {
-            role: ChatRole::System,
-            text: system_text,
-            image_data_url: None,
-        },
-        ChatMessage {
-            role: ChatRole::User,
-            text: serde_json::to_string(&user_payload).unwrap_or_else(|_| "{}".to_string()),
-            image_data_url: screen_data_url,
+        ChatMessage::text("prompt-system", ChatRole::System, system_text),
+        match screen_data_url {
+            Some(url) => user.with_image(url),
+            None => user,
         },
     ]
 }

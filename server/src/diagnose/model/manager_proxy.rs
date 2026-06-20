@@ -16,7 +16,7 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 use futures_util::StreamExt;
 
 use super::openai::SseAccumulator;
-use super::{ChatMessage, ChatResponse, ResponseFormatSpec};
+use super::{ChatMessage, ModelTurn, ResponseFormatSpec};
 
 fn transport_error(message: impl Into<String>) -> AgentError {
     AgentError {
@@ -115,7 +115,7 @@ pub async fn stream_proxy_chat(
     source_request_id: Option<String>,
     client_id: Option<String>,
     on_delta: &(dyn Fn(String) + Send + Sync),
-) -> Result<ChatResponse, AgentError> {
+) -> Result<ModelTurn, AgentError> {
     let url = proxy_url(manager_url).ok_or_else(|| AgentError {
         kind: AgentErrorKind::UnsupportedCapability,
         message: "manager URL is not configured for the model proxy".to_string(),
@@ -190,11 +190,7 @@ mod tests {
     #[test]
     fn message_and_format_mapping() {
         use super::super::ChatRole;
-        let msgs = vec![ChatMessage {
-            role: ChatRole::User,
-            text: "hi".into(),
-            image_data_url: Some("data:img".into()),
-        }];
+        let msgs = vec![ChatMessage::text("m", ChatRole::User, "hi").with_image("data:img")];
         let pm = to_proxy_messages(&msgs);
         assert_eq!(pm[0].role, "user");
         assert_eq!(pm[0].image_data_url.as_deref(), Some("data:img"));
