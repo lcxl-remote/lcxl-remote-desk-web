@@ -71,6 +71,31 @@ impl DeskErrorCode {
     /// `RestResponse.code`, never an HTTP status.
     pub const NO_VISIBLE_TARGETS: DeskErrorCode = DeskErrorCode(14);
 
+    // ---- Fleet batch execution (write path) ----
+    /// A batch approval no longer matches the previewed plan: the draft fingerprint
+    /// set, `preview_generation`, or one of the bound revisions
+    /// (policy / template / guardrail) drifted between preview and the approval /
+    /// execution attempt. The whole batch is stale and must be re-previewed; never
+    /// a partial silent drop. Carried in `RestResponse.code`, never an HTTP status.
+    pub const FLEET_APPROVAL_STALE: DeskErrorCode = DeskErrorCode(15);
+    /// A high-risk batch did not satisfy the guardrail (blast-radius cap exceeded,
+    /// or the required two-person review was not met). Carried in
+    /// `RestResponse.code`, never an HTTP status.
+    pub const FLEET_HIGH_RISK_BLOCKED: DeskErrorCode = DeskErrorCode(16);
+    /// A batch execution preview resolved to zero executable targets (every device
+    /// was not-executable / blocked / denied), so no execution task is created.
+    /// Carried in `RestResponse.code`, never an HTTP status.
+    pub const FLEET_NOT_EXECUTABLE: DeskErrorCode = DeskErrorCode(17);
+    /// An approve / execute action was attempted on a dry-run task, which has no
+    /// execution path by construction. Carried in `RestResponse.code`, never an
+    /// HTTP status.
+    pub const FLEET_DRY_RUN_NOT_APPROVABLE: DeskErrorCode = DeskErrorCode(18);
+    /// The approver lacks `shell.exec.confirmed` on at least one covered device, so
+    /// the whole approval fails (the approved set must equal exactly the previewed
+    /// draft set — never silently narrowed). Distinct from a stale approval.
+    /// Carried in `RestResponse.code`, never an HTTP status.
+    pub const FLEET_APPROVAL_FORBIDDEN: DeskErrorCode = DeskErrorCode(19);
+
     pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
     pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
 
@@ -202,5 +227,30 @@ mod tests {
             DeskErrorCode::CLIENT_ID_NOT_FOUND.code(),
         ];
         assert!(!others.contains(&DeskErrorCode::NO_VISIBLE_TARGETS.code()));
+    }
+
+    /// Lock the numeric wire values of the fleet batch-execution codes. The
+    /// manager returns them and the console branches on each, so the values are a
+    /// contract; they must also be mutually distinct.
+    #[test]
+    fn fleet_exec_codes_are_stable_and_distinct() {
+        assert_eq!(DeskErrorCode::FLEET_APPROVAL_STALE.code(), 15);
+        assert_eq!(DeskErrorCode::FLEET_HIGH_RISK_BLOCKED.code(), 16);
+        assert_eq!(DeskErrorCode::FLEET_NOT_EXECUTABLE.code(), 17);
+        assert_eq!(DeskErrorCode::FLEET_DRY_RUN_NOT_APPROVABLE.code(), 18);
+        assert_eq!(DeskErrorCode::FLEET_APPROVAL_FORBIDDEN.code(), 19);
+        let codes = [
+            DeskErrorCode::FLEET_APPROVAL_STALE.code(),
+            DeskErrorCode::FLEET_HIGH_RISK_BLOCKED.code(),
+            DeskErrorCode::FLEET_NOT_EXECUTABLE.code(),
+            DeskErrorCode::FLEET_DRY_RUN_NOT_APPROVABLE.code(),
+            DeskErrorCode::FLEET_APPROVAL_FORBIDDEN.code(),
+        ];
+        let mut sorted = codes.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "fleet codes must be distinct");
+        // Distinct from the adjacent NO_VISIBLE_TARGETS contract value.
+        assert!(!codes.contains(&DeskErrorCode::NO_VISIBLE_TARGETS.code()));
     }
 }
