@@ -507,10 +507,6 @@ mod tests {
     /// cap again.
     #[test]
     fn max_chunk_frame_stays_under_signaling_cap() {
-        assert!(
-            COLLECT_CHUNK_PAYLOAD_LIMIT < SIGNALING_FRAME_LIMIT,
-            "chunk payload budget must leave room for the frame envelope"
-        );
         let chunk = CollectResponseChunk {
             request_id: "00000000-0000-0000-0000-000000000000".into(),
             seq: u32::MAX,

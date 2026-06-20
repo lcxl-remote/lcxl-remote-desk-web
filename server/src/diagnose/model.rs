@@ -37,9 +37,17 @@ use crate::worker::agent::eval::EvidenceSnapshot;
 /// `desk-diagnose-core` crate; re-exported so existing `super::{ChatMessage,
 /// ChatRole, ResponseFormatSpec}` paths in the adapters keep resolving.
 pub use desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES;
+pub use desk_diagnose_core::chat::{
+    ModelTurn, StopReason, TokenUsage, ToolCall, ToolCallRef, ToolChoice, ToolSpec,
+};
 pub use desk_diagnose_core::prompt::{ChatMessage, ChatRole, ResponseFormatSpec};
 
 /// A chat-completion request to the model gateway.
+///
+/// `tools` advertises the tools the model may call; `tool_choice` steers it
+/// toward (or away from) them. The single-turn diagnose path leaves `tools`
+/// empty (`tool_choice = Auto`), which maps to a tool-free request identical to
+/// the pre-tool-calling shape — the adapters omit the tool fields entirely.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub base_url: String,
@@ -47,25 +55,16 @@ pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub response_format: ResponseFormatSpec,
-}
-
-/// Token accounting reported by the gateway.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TokenUsage {
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-}
-
-/// The accumulated model response.
-#[derive(Debug, Clone, Default)]
-pub struct ChatResponse {
-    pub content: String,
-    pub usage: TokenUsage,
+    pub tools: Vec<ToolSpec>,
+    pub tool_choice: ToolChoice,
 }
 
 /// Streaming transport to a chat-completions gateway. `on_delta` is called with
 /// each incremental content fragment as it arrives. Object-safe so the model
 /// holds `Arc<dyn ModelAdapter>` and tests substitute a mock.
+///
+/// Returns a normalized [`ModelTurn`] (assistant text + any tool calls +
+/// stop reason + usage), so the caller never sees a provider's wire shape.
 ///
 /// `?Send`: the OpenAI implementation uses `awc` (`!Send`), and the diagnose
 /// path runs on actix's single-threaded runtime — see [`super::DiagnoseModel`].
@@ -75,7 +74,7 @@ pub trait ModelAdapter: Send + Sync {
         &self,
         request: ChatRequest,
         on_delta: &(dyn Fn(String) + Send + Sync),
-    ) -> Result<ChatResponse, AgentError>;
+    ) -> Result<ModelTurn, AgentError>;
 
     /// Stable adapter identifier recorded in the audit trail.
     fn name(&self) -> &'static str;
@@ -330,19 +329,23 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
                     None,
                 ))
                 .await;
+            // The single-turn diagnose advertises no tools (the agentic loop is
+            // the path that registers them), so this maps to a tool-free request.
             let request = ChatRequest {
                 base_url,
                 api_key,
                 model,
                 messages,
                 response_format,
+                tools: Vec::new(),
+                tool_choice: ToolChoice::Auto,
             };
             let response = adapter.stream_chat(request, on_partial).await?;
             (caller, response)
         };
         let duration_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
 
-        let (diagnosis, parse_outcome) = parser::parse_diagnosis(&response.content);
+        let (diagnosis, parse_outcome) = parser::parse_diagnosis(&response.text);
         // Skip the local model-accounting audit under ManagerProxy (the manager
         // records the authoritative row); always record on the Direct path.
         if record_model_audit {
@@ -392,14 +395,16 @@ mod tests {
             &self,
             request: ChatRequest,
             on_delta: &(dyn Fn(String) + Send + Sync),
-        ) -> Result<ChatResponse, AgentError> {
+        ) -> Result<ModelTurn, AgentError> {
             *self.seen.lock().unwrap() = Some(request);
             for f in &self.fragments {
                 on_delta(f.clone());
             }
-            Ok(ChatResponse {
-                content: self.content.clone(),
+            Ok(ModelTurn {
+                text: self.content.clone(),
                 usage: self.usage,
+                stop_reason: StopReason::EndTurn,
+                ..Default::default()
             })
         }
         fn name(&self) -> &'static str {
@@ -415,7 +420,7 @@ mod tests {
             &self,
             _request: ChatRequest,
             _on_delta: &(dyn Fn(String) + Send + Sync),
-        ) -> Result<ChatResponse, AgentError> {
+        ) -> Result<ModelTurn, AgentError> {
             Err(AgentError {
                 kind: desk_agent_protocol::AgentErrorKind::TransportError,
                 message: "connection refused".into(),

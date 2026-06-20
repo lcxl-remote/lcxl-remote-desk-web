@@ -2634,11 +2634,13 @@ dependencies = [
 name = "desk-diagnose-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "desk-agent-protocol",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
 ]
 
 [[package]]

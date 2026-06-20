@@ -1,0 +1,238 @@
+//! Tool registry and the server-authoritative exposure matrix.
+//!
+//! A [`RegisteredTool`] binds a model-facing [`ToolSpec`] to the [`Capability`]
+//! it requires and the [`ToolEffect`] it has. [`exposed_tools`] is the first line
+//! of prompt-injection defence (§D8): the model is only ever shown the tools that
+//! the current scope grants and the current mode permits — and a mutating tool is
+//! hidden while a prior execution's outcome is still unknown.
+//!
+//! Read tools are exposed in every mode (reads are not "execution"); a mutating
+//! tool is exposed only at `ConfirmEachAction` or higher. The same matrix is used
+//! both to advertise tools to the model and to validate a tool call the model
+//! returns, so the two can never disagree.
+
+use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
+use serde::{Deserialize, Serialize};
+
+use crate::chat::ToolSpec;
+use crate::session::ExecutionState;
+
+/// Whether a tool reads state or changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffect {
+    /// Reads device state; runs immediately, no approval.
+    ReadOnly,
+    /// Changes device state; requires user approval before running.
+    Mutating,
+}
+
+/// A tool registered with the agent loop: its model-facing spec, the capability
+/// it requires (for scope gating), and its effect (for mode / approval gating).
+#[derive(Debug, Clone)]
+pub struct RegisteredTool {
+    pub spec: ToolSpec,
+    pub required_capability: Capability,
+    pub effect: ToolEffect,
+}
+
+impl RegisteredTool {
+    /// The tool's model-facing name.
+    pub fn name(&self) -> &str {
+        &self.spec.name
+    }
+}
+
+/// Whether the execution mode permits a tool with this effect at all. Reads are
+/// allowed in every mode (including `SuggestOnly`); mutation needs an explicit
+/// confirm-or-higher mode.
+fn mode_allows_effect(mode: ExecutionMode, effect: ToolEffect) -> bool {
+    match effect {
+        ToolEffect::ReadOnly => true,
+        ToolEffect::Mutating => matches!(
+            mode,
+            ExecutionMode::ConfirmEachAction
+                | ExecutionMode::SessionApproved
+                | ExecutionMode::Automated
+        ),
+    }
+}
+
+/// Whether a single tool is exposed under the given scope and execution state.
+/// Requires the granted capability, a mode that permits the effect, and — for a
+/// mutating tool — no in-flight execution whose outcome is unknown.
+pub fn is_exposed(
+    tool: &RegisteredTool,
+    scope: &AgentScope,
+    execution_state: &ExecutionState,
+) -> bool {
+    if !scope.granted.contains(&tool.required_capability) {
+        return false;
+    }
+    if !mode_allows_effect(scope.mode, tool.effect) {
+        return false;
+    }
+    if tool.effect == ToolEffect::Mutating && !execution_state.allows_new_mutation() {
+        return false;
+    }
+    true
+}
+
+/// The registered tools exposed for a turn (server-authoritative). Used to build
+/// the tool list advertised to the model and to validate a returned tool call.
+pub fn exposed_tools<'a>(
+    registry: &'a [RegisteredTool],
+    scope: &AgentScope,
+    execution_state: &ExecutionState,
+) -> Vec<&'a RegisteredTool> {
+    registry
+        .iter()
+        .filter(|t| is_exposed(t, scope, execution_state))
+        .collect()
+}
+
+/// The [`ToolSpec`]s to advertise to the model (the exposed tools' specs).
+pub fn exposed_specs(
+    registry: &[RegisteredTool],
+    scope: &AgentScope,
+    execution_state: &ExecutionState,
+) -> Vec<ToolSpec> {
+    exposed_tools(registry, scope, execution_state)
+        .into_iter()
+        .map(|t| t.spec.clone())
+        .collect()
+}
+
+/// Look up an exposed tool by the name the model used. Returns `None` if the name
+/// is unknown **or** the tool is not exposed under the current scope/state — so a
+/// model that names a tool it was never shown is rejected uniformly.
+pub fn lookup_exposed<'a>(
+    registry: &'a [RegisteredTool],
+    name: &str,
+    scope: &AgentScope,
+    execution_state: &ExecutionState,
+) -> Option<&'a RegisteredTool> {
+    registry
+        .iter()
+        .find(|t| t.name() == name && is_exposed(t, scope, execution_state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool(name: &str, cap: Capability, effect: ToolEffect) -> RegisteredTool {
+        RegisteredTool {
+            spec: ToolSpec {
+                name: name.into(),
+                description: "t".into(),
+                parameters_schema: json!({"type":"object"}),
+            },
+            required_capability: cap,
+            effect,
+        }
+    }
+
+    fn scope(granted: &[Capability], mode: ExecutionMode) -> AgentScope {
+        AgentScope {
+            granted: granted.to_vec(),
+            mode,
+            expires_at: None,
+            policy_name: None,
+        }
+    }
+
+    fn registry() -> Vec<RegisteredTool> {
+        vec![
+            tool("file_read", Capability::LogRecent, ToolEffect::ReadOnly),
+            tool("sysinfo", Capability::SystemInfo, ToolEffect::ReadOnly),
+            tool("file_write", Capability::LogRecent, ToolEffect::Mutating),
+        ]
+    }
+
+    /// Only tools whose required capability is granted are exposed; an ungranted
+    /// capability hides its tool regardless of mode.
+    #[test]
+    fn exposure_requires_granted_capability() {
+        let reg = registry();
+        let s = scope(&[Capability::SystemInfo], ExecutionMode::ReadOnly);
+        let names: Vec<_> = exposed_tools(&reg, &s, &ExecutionState::None)
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        assert_eq!(names, vec!["sysinfo"]);
+    }
+
+    /// Read tools are exposed in every mode (including SuggestOnly); mutating
+    /// tools are hidden below ConfirmEachAction.
+    #[test]
+    fn read_exposed_everywhere_mutating_gated_by_mode() {
+        let reg = registry();
+        let granted = [Capability::SystemInfo, Capability::LogRecent];
+
+        for mode in [ExecutionMode::SuggestOnly, ExecutionMode::ReadOnly] {
+            let names: Vec<_> = exposed_tools(&reg, &scope(&granted, mode), &ExecutionState::None)
+                .iter()
+                .map(|t| t.name().to_string())
+                .collect();
+            assert!(names.contains(&"file_read".to_string()));
+            assert!(names.contains(&"sysinfo".to_string()));
+            assert!(
+                !names.contains(&"file_write".to_string()),
+                "mutating tool must be hidden in {mode:?}"
+            );
+        }
+
+        // ConfirmEachAction exposes the mutating tool too.
+        let names: Vec<_> = exposed_tools(
+            &reg,
+            &scope(&granted, ExecutionMode::ConfirmEachAction),
+            &ExecutionState::None,
+        )
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+        assert!(names.contains(&"file_write".to_string()));
+    }
+
+    /// While an execution outcome is unknown, mutating tools are hidden but read
+    /// tools stay available (read-only follow-up is allowed).
+    #[test]
+    fn outcome_unknown_hides_mutating_keeps_read() {
+        let reg = registry();
+        let s = scope(
+            &[Capability::SystemInfo, Capability::LogRecent],
+            ExecutionMode::ConfirmEachAction,
+        );
+        let unknown = ExecutionState::OutcomeUnknown {
+            work_id: 1,
+            execution_id: "e".into(),
+            exec_request_id: "x".into(),
+            placeholder_message_id: "p".into(),
+            since: "t".into(),
+        };
+        let names: Vec<_> = exposed_tools(&reg, &s, &unknown)
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        assert!(names.contains(&"file_read".to_string()));
+        assert!(
+            !names.contains(&"file_write".to_string()),
+            "no new mutation while an outcome is unknown"
+        );
+    }
+
+    /// `lookup_exposed` rejects a tool the model was never shown (unknown name or
+    /// not exposed), preventing a model from invoking an out-of-scope tool.
+    #[test]
+    fn lookup_rejects_unexposed_tool() {
+        let reg = registry();
+        let s = scope(&[Capability::SystemInfo], ExecutionMode::ReadOnly);
+        assert!(lookup_exposed(&reg, "sysinfo", &s, &ExecutionState::None).is_some());
+        // file_read needs LogRecent, which is not granted here.
+        assert!(lookup_exposed(&reg, "file_read", &s, &ExecutionState::None).is_none());
+        // Unknown name.
+        assert!(lookup_exposed(&reg, "nope", &s, &ExecutionState::None).is_none());
+    }
+}

@@ -21,12 +21,17 @@
 //! state machine) so it is unit-tested without a network; the HTTP send is a
 //! thin wrapper over `awc`.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 use desk_agent_protocol::{AgentError, AgentErrorKind};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 
-use super::{ChatRequest, ChatResponse, ChatRole, ModelAdapter, TokenUsage};
+use super::{
+    ChatMessage, ChatRequest, ChatRole, ModelAdapter, ModelTurn, StopReason, TokenUsage, ToolCall,
+    ToolChoice,
+};
 
 /// Upper bound on generated tokens. Anthropic requires `max_tokens`; the
 /// diagnosis output is short, so a generous fixed cap is enough for now.
@@ -67,10 +72,64 @@ fn split_data_url(url: &str) -> Option<(&str, &str)> {
     Some((media_type, data))
 }
 
+/// Map one non-system [`ChatMessage`] to an Anthropic `messages[]` entry.
+///
+/// - Tool result → a **user** turn carrying a `tool_result` block (Anthropic has
+///   no `tool` role; results are user-role content blocks).
+/// - Assistant with tool calls → an assistant turn whose content is an optional
+///   `text` block followed by `tool_use` blocks (`input` is the parsed arguments).
+/// - Plain text → a string content, or a `text`+`image` block array with a
+///   vision image.
+fn message_to_json(m: &ChatMessage) -> Value {
+    if m.role == ChatRole::Tool {
+        return json!({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                "content": m.text,
+            }],
+        });
+    }
+
+    if m.role == ChatRole::Assistant && !m.tool_calls.is_empty() {
+        let mut blocks: Vec<Value> = Vec::new();
+        if !m.text.is_empty() {
+            blocks.push(json!({"type": "text", "text": m.text}));
+        }
+        for c in &m.tool_calls {
+            // The arguments were produced by the model as a JSON object; fall back
+            // to an empty object if a replayed string is not parseable.
+            let input: Value = serde_json::from_str(&c.arguments_json)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new()));
+            blocks.push(json!({
+                "type": "tool_use",
+                "id": c.id,
+                "name": c.name,
+                "input": input,
+            }));
+        }
+        return json!({"role": "assistant", "content": blocks});
+    }
+
+    let content = match m.image_data_url.as_deref().and_then(split_data_url) {
+        Some((media_type, data)) => json!([
+            {"type": "text", "text": m.text},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            }},
+        ]),
+        None => json!(m.text),
+    };
+    json!({"role": m.role.as_str(), "content": content})
+}
+
 /// Build the Messages request body, mapping the generic [`ChatRequest`] to the
-/// Anthropic shape: system text is hoisted to the top-level `system` field, and
-/// the remaining messages become the `messages` array (string content, or a
-/// text+image block array when a vision image is attached).
+/// Anthropic shape: system text is hoisted to the top-level `system` field, the
+/// remaining messages become the `messages` array, and any tools are advertised
+/// with `input_schema`.
 fn build_body(request: &ChatRequest) -> Value {
     // System messages are merged into the top-level `system` field; everything
     // else becomes a turn in `messages`.
@@ -84,18 +143,7 @@ fn build_body(request: &ChatRequest) -> Value {
             system.push_str(&m.text);
             continue;
         }
-        let content = match m.image_data_url.as_deref().and_then(split_data_url) {
-            Some((media_type, data)) => json!([
-                {"type": "text", "text": m.text},
-                {"type": "image", "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": data,
-                }},
-            ]),
-            None => json!(m.text),
-        };
-        messages.push(json!({"role": m.role.as_str(), "content": content}));
+        messages.push(message_to_json(m));
     }
 
     let mut body = json!({
@@ -106,6 +154,29 @@ fn build_body(request: &ChatRequest) -> Value {
     });
     if !system.is_empty() {
         body["system"] = json!(system);
+    }
+    // Anthropic has no `tool_choice:"none"`; that intent is expressed by omitting
+    // the tools entirely. So advertise tools only when some are registered AND the
+    // choice is not None; map Auto→`{type:"auto"}`, Required→`{type:"any"}`.
+    if request.tool_choice != ToolChoice::None && !request.tools.is_empty() {
+        body["tools"] = Value::Array(
+            request
+                .tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters_schema,
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = match request.tool_choice {
+            ToolChoice::Required => json!({"type": "any"}),
+            // Auto (and the unreachable None) map to the model deciding.
+            _ => json!({"type": "auto"}),
+        };
     }
     body
 }
@@ -122,7 +193,7 @@ impl ModelAdapter for AnthropicAdapter {
         &self,
         request: ChatRequest,
         on_delta: &(dyn Fn(String) + Send + Sync),
-    ) -> Result<ChatResponse, AgentError> {
+    ) -> Result<ModelTurn, AgentError> {
         // Build a TLS-capable client (see the OpenAI adapter for the rationale on
         // the rustls connector and pinning the `ring` crypto provider).
         let mut root_store = rustls::RootCertStore::empty();
@@ -175,14 +246,28 @@ impl ModelAdapter for AnthropicAdapter {
     }
 }
 
+/// A tool-use block assembled incrementally from an Anthropic stream. The block's
+/// `id` / `name` arrive on `content_block_start`; its JSON `input` arrives as a
+/// sequence of `input_json_delta.partial_json` fragments concatenated in order.
+#[derive(Default)]
+struct ToolUseBuilder {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 /// Incremental parser for an Anthropic Messages SSE stream. Bytes are fed in as
 /// they arrive; complete `data:` lines are parsed by their `type` for text
-/// deltas and usage. The `event:` lines are ignored — the `data` payload carries
-/// the discriminating `type`, mirroring the OpenAI accumulator's data-only view.
+/// deltas, tool-use blocks, the stop reason, and usage. The `event:` lines are
+/// ignored — the `data` payload carries the discriminating `type`, mirroring the
+/// OpenAI accumulator's data-only view.
 pub(crate) struct AnthropicSseAccumulator {
     pending: Vec<u8>,
     content: String,
     usage: TokenUsage,
+    /// Tool-use blocks keyed by their stream `index` (ordering preserved).
+    tool_uses: BTreeMap<usize, ToolUseBuilder>,
+    stop_reason: Option<String>,
 }
 
 impl AnthropicSseAccumulator {
@@ -191,12 +276,16 @@ impl AnthropicSseAccumulator {
             pending: Vec::new(),
             content: String::new(),
             usage: TokenUsage::default(),
+            tool_uses: BTreeMap::new(),
+            stop_reason: None,
         }
     }
 
     /// Feed a chunk of bytes, emitting any newly completed text deltas via
     /// `on_delta`. Lines are split on `\n` (ASCII), so multi-byte UTF-8 content
-    /// within a line is never split — a line is only decoded once complete.
+    /// within a line is never split — a line is only decoded once complete. Only
+    /// assistant text is streamed; tool-use input fragments are accumulated
+    /// silently (they are provisional until the stop reason is known).
     fn push_bytes(&mut self, chunk: &[u8], on_delta: &(dyn Fn(String) + Send + Sync)) {
         self.pending.extend_from_slice(chunk);
         while let Some(idx) = self.pending.iter().position(|&b| b == b'\n') {
@@ -218,13 +307,38 @@ impl AnthropicSseAccumulator {
             return; // tolerate a malformed chunk rather than aborting the stream
         };
         match value["type"].as_str() {
+            Some("content_block_start") => {
+                // A tool_use block opens here with its id and name; a text block
+                // needs no setup. Index keys it for the following input deltas.
+                if value["content_block"]["type"] == "tool_use"
+                    && let Some(index) = value["index"].as_u64()
+                {
+                    let builder = self.tool_uses.entry(index as usize).or_default();
+                    if let Some(id) = value["content_block"]["id"].as_str() {
+                        builder.id = id.to_string();
+                    }
+                    if let Some(name) = value["content_block"]["name"].as_str() {
+                        builder.name = name.to_string();
+                    }
+                }
+            }
             Some("content_block_delta") => {
-                if value["delta"]["type"] == "text_delta"
-                    && let Some(text) = value["delta"]["text"].as_str()
+                let delta = &value["delta"];
+                if delta["type"] == "text_delta"
+                    && let Some(text) = delta["text"].as_str()
                     && !text.is_empty()
                 {
                     self.content.push_str(text);
                     on_delta(text.to_string());
+                } else if delta["type"] == "input_json_delta"
+                    && let Some(partial) = delta["partial_json"].as_str()
+                    && let Some(index) = value["index"].as_u64()
+                {
+                    self.tool_uses
+                        .entry(index as usize)
+                        .or_default()
+                        .arguments
+                        .push_str(partial);
                 }
             }
             Some("message_start") => {
@@ -237,18 +351,42 @@ impl AnthropicSseAccumulator {
                 }
             }
             Some("message_delta") => {
-                // The cumulative output token count lands here at end of stream.
+                // The cumulative output token count and the stop reason land here.
                 if let Some(output) = value["usage"]["output_tokens"].as_i64() {
                     self.usage.output_tokens = Some(output);
                 }
+                if let Some(reason) = value["delta"]["stop_reason"].as_str() {
+                    self.stop_reason = Some(reason.to_string());
+                }
             }
-            _ => {} // ping / content_block_start / content_block_stop / message_stop
+            _ => {} // ping / content_block_stop / message_stop
         }
     }
 
-    fn finish(self) -> ChatResponse {
-        ChatResponse {
-            content: self.content,
+    /// Finalize the assembled turn. The Anthropic `stop_reason` maps to a neutral
+    /// [`StopReason`] (`end_turn`→EndTurn, `tool_use`→ToolUse,
+    /// `max_tokens`→MaxTokens, anything else / absent → Other); assembled tool-use
+    /// blocks become [`ToolCall`]s in index order.
+    fn finish(self) -> ModelTurn {
+        let stop_reason = match self.stop_reason.as_deref() {
+            Some("end_turn") => StopReason::EndTurn,
+            Some("tool_use") => StopReason::ToolUse,
+            Some("max_tokens") => StopReason::MaxTokens,
+            _ => StopReason::Other,
+        };
+        let tool_calls = self
+            .tool_uses
+            .into_values()
+            .map(|b| ToolCall {
+                id: b.id,
+                name: b.name,
+                arguments_json: b.arguments,
+            })
+            .collect();
+        ModelTurn {
+            text: self.content,
+            tool_calls,
+            stop_reason,
             usage: self.usage,
         }
     }
@@ -259,7 +397,7 @@ mod tests {
     use super::super::{ChatMessage, ChatRole};
     use super::*;
 
-    fn collect(chunks: &[&[u8]]) -> (ChatResponse, Vec<String>) {
+    fn collect(chunks: &[&[u8]]) -> (ModelTurn, Vec<String>) {
         use std::sync::Mutex;
         let deltas = Mutex::new(Vec::<String>::new());
         let mut acc = AnthropicSseAccumulator::new();
@@ -285,7 +423,7 @@ data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usa
 event: message_stop\n\
 data: {\"type\":\"message_stop\"}\n\n";
         let (resp, deltas) = collect(&[stream]);
-        assert_eq!(resp.content, "Hello world");
+        assert_eq!(resp.text, "Hello world");
         assert_eq!(deltas, vec!["Hello", " world"]);
         assert_eq!(resp.usage.input_tokens, Some(25));
         assert_eq!(resp.usage.output_tokens, Some(7));
@@ -297,7 +435,7 @@ data: {\"type\":\"message_stop\"}\n\n";
         let part1 = b"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel";
         let part2 = b"lo\"}}\n\n";
         let (resp, deltas) = collect(&[part1, part2]);
-        assert_eq!(resp.content, "Hello");
+        assert_eq!(resp.text, "Hello");
         assert_eq!(deltas, vec!["Hello"]);
     }
 
@@ -308,7 +446,7 @@ data: {\"type\":\"message_stop\"}\n\n";
         let full = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"你好\"}}\n\n".as_bytes();
         let mid = full.len() / 2;
         let (resp, _) = collect(&[&full[..mid], &full[mid..]]);
-        assert_eq!(resp.content, "你好");
+        assert_eq!(resp.text, "你好");
     }
 
     /// Non-data lines (the `event:` field, comments, blank lines) are ignored;
@@ -320,7 +458,7 @@ event: content_block_delta\n\
 \n\
 data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}\n\n";
         let (resp, deltas) = collect(&[stream]);
-        assert_eq!(resp.content, "x");
+        assert_eq!(resp.text, "x");
         assert_eq!(deltas, vec!["x"]);
     }
 
@@ -333,7 +471,7 @@ data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"tex
 data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\n\
 data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n";
         let (resp, deltas) = collect(&[stream]);
-        assert_eq!(resp.content, "ok");
+        assert_eq!(resp.text, "ok");
         assert_eq!(deltas, vec!["ok"]);
     }
 
@@ -355,19 +493,14 @@ data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"tex
             api_key: "k".into(),
             model: "claude-x".into(),
             messages: vec![
-                ChatMessage {
-                    role: ChatRole::System,
-                    text: "you are a diagnostician".into(),
-                    image_data_url: None,
-                },
-                ChatMessage {
-                    role: ChatRole::User,
-                    text: "look".into(),
-                    image_data_url: Some("data:image/jpeg;base64,AAA".into()),
-                },
+                ChatMessage::text("s", ChatRole::System, "you are a diagnostician"),
+                ChatMessage::text("u", ChatRole::User, "look")
+                    .with_image("data:image/jpeg;base64,AAA"),
             ],
             // Anthropic ignores response_format; any value maps the same.
             response_format: super::super::ResponseFormatSpec::JsonObject,
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
         }
     }
 
@@ -419,5 +552,107 @@ data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"tex
             split_data_url("data:image/png;base64,QkJC"),
             Some(("image/png", "QkJC"))
         );
+    }
+
+    fn tool_spec() -> super::super::ToolSpec {
+        super::super::ToolSpec {
+            name: "file_read".into(),
+            description: "read a file".into(),
+            parameters_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }
+    }
+
+    /// Registered tools map to Anthropic `input_schema` specs; Auto→`{type:"auto"}`
+    /// and Required→`{type:"any"}`.
+    #[test]
+    fn body_advertises_tools_with_input_schema() {
+        for (choice, kind) in [(ToolChoice::Auto, "auto"), (ToolChoice::Required, "any")] {
+            let mut r = req();
+            r.tools = vec![tool_spec()];
+            r.tool_choice = choice;
+            let body = build_body(&r);
+            assert_eq!(body["tools"][0]["name"], "file_read");
+            assert_eq!(
+                body["tools"][0]["input_schema"]["properties"]["path"]["type"],
+                "string"
+            );
+            assert_eq!(body["tool_choice"]["type"], kind);
+        }
+    }
+
+    /// `ToolChoice::None` is expressed by omitting `tools` entirely — the
+    /// structural difference from the OpenAI adapter (which sends
+    /// `tool_choice:"none"`).
+    #[test]
+    fn tool_choice_none_omits_tools() {
+        let mut r = req();
+        r.tools = vec![tool_spec()];
+        r.tool_choice = ToolChoice::None;
+        let body = build_body(&r);
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    /// An assistant tool call maps to a `tool_use` block (with parsed `input`), and
+    /// a tool result maps to a **user** turn carrying a `tool_result` block — there
+    /// is no `tool` role in Anthropic.
+    #[test]
+    fn body_maps_assistant_tool_use_and_tool_result() {
+        let mut r = req();
+        r.messages = vec![
+            ChatMessage::assistant_tool_calls(
+                "a1",
+                "checking",
+                vec![super::super::ToolCallRef {
+                    id: "toolu_1".into(),
+                    name: "file_read".into(),
+                    arguments_json: r#"{"path":"/x"}"#.into(),
+                }],
+            ),
+            ChatMessage::tool_result("t1", "toolu_1", "contents"),
+        ];
+        let body = build_body(&r);
+        // Assistant turn: optional text block then a tool_use block with parsed input.
+        assert_eq!(body["messages"][0]["role"], "assistant");
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(body["messages"][0]["content"][1]["type"], "tool_use");
+        assert_eq!(body["messages"][0]["content"][1]["id"], "toolu_1");
+        assert_eq!(body["messages"][0]["content"][1]["input"]["path"], "/x");
+        // Tool result rides on a user turn as a tool_result block.
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"][0]["type"], "tool_result");
+        assert_eq!(body["messages"][1]["content"][0]["tool_use_id"], "toolu_1");
+        assert_eq!(body["messages"][1]["content"][0]["content"], "contents");
+    }
+
+    /// A tool-use turn: the block id/name come from `content_block_start` and the
+    /// JSON input is concatenated from `input_json_delta` fragments;
+    /// `stop_reason:"tool_use"` maps to ToolUse. Tool input is not streamed as text.
+    #[test]
+    fn stream_assembles_tool_use_block() {
+        let stream = b"event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_9\",\"name\":\"file_read\",\"input\":{}}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\"\"}}\n\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\":\\\"/x\\\"}\"}}\n\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}\n\n";
+        let (turn, deltas) = collect(&[stream]);
+        assert_eq!(turn.stop_reason, StopReason::ToolUse);
+        assert!(deltas.is_empty(), "tool input is not streamed as text");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "toolu_9");
+        assert_eq!(turn.tool_calls[0].name, "file_read");
+        assert_eq!(turn.tool_calls[0].arguments_json, r#"{"path":"/x"}"#);
+    }
+
+    /// Stop-reason mapping: `end_turn`→EndTurn, `max_tokens`→MaxTokens, unknown /
+    /// absent → Other.
+    #[test]
+    fn stream_maps_stop_reasons() {
+        let max = b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":1}}\n\n";
+        assert_eq!(collect(&[max]).0.stop_reason, StopReason::MaxTokens);
+
+        // No message_delta at all → no stop reason → Other.
+        let none = b"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
+        assert_eq!(collect(&[none]).0.stop_reason, StopReason::Other);
     }
 }

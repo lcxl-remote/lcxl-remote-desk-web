@@ -31,7 +31,9 @@ use desk_agent_protocol::{
     ReadContextOutput, RiskLevel,
 };
 
-use super::model::{ChatRequest, ChatResponse, ModelAdapter, ModelBackedDiagnoseModel, TokenUsage};
+use super::model::{
+    ChatRequest, ModelAdapter, ModelBackedDiagnoseModel, ModelTurn, StopReason, TokenUsage,
+};
 use super::redaction::RegexRedactor;
 use super::{ContextCollector, DiagnoseEventSink, DiagnoseOrchestrator};
 use crate::model::settings::{Settings, SharedSettings};
@@ -118,7 +120,7 @@ impl ModelAdapter for ReplayAdapter {
         &self,
         request: ChatRequest,
         on_delta: &(dyn Fn(String) + Send + Sync),
-    ) -> Result<ChatResponse, AgentError> {
+    ) -> Result<ModelTurn, AgentError> {
         *self.seen.lock().unwrap() = Some(request);
         // Stream in two fragments so the first-token-before-final ordering is
         // observable to the orchestrator.
@@ -131,9 +133,11 @@ impl ModelAdapter for ReplayAdapter {
             .unwrap_or(0);
         on_delta(self.canned[..split].to_string());
         on_delta(self.canned[split..].to_string());
-        Ok(ChatResponse {
-            content: self.canned.clone(),
+        Ok(ModelTurn {
+            text: self.canned.clone(),
             usage: self.usage,
+            stop_reason: StopReason::EndTurn,
+            ..Default::default()
         })
     }
     fn name(&self) -> &'static str {
