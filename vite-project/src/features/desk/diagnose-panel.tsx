@@ -256,7 +256,7 @@ export function DiagnosePanel({
     const streamingSummary = extractStreamingSummary(state.partialSummary)
 
     return (
-        <div className="absolute top-4 right-4 z-50 flex w-[380px] max-w-[90vw] max-h-[85vh] flex-col rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text">
+        <div className="absolute top-4 right-4 z-50 flex w-[380px] max-w-[90vw] max-h-[calc(100%-2rem)] flex-col rounded-lg border border-white/20 bg-black/70 text-white shadow-xl backdrop-blur-md select-text">
             {/* Header */}
             <div className="flex items-center justify-between border-b border-white/15 px-4 py-3">
                 <div className="flex items-center gap-2 text-sm font-bold text-white/90">

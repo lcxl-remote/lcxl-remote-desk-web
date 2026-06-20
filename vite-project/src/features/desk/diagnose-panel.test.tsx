@@ -250,4 +250,23 @@ describe("DiagnosePanel", () => {
         fireEvent.click(screen.getByLabelText("Close"));
         expect(onClose).toHaveBeenCalled();
     });
+
+    it("caps its height to the containing desk view, not the viewport, so the footer stays inside an unfullscreened window", () => {
+        // The panel is absolutely positioned inside the (shorter-than-viewport)
+        // desk view, which clips overflow. A viewport-relative `85vh` cap let a
+        // tall result push the footer past the container's bottom edge; the cap
+        // must be relative to the container (100% minus the top/bottom gap).
+        const { container } = render(
+            <DiagnosePanel
+                state={{ ...baseState, phase: "running", status: "modeling" }}
+                onStart={vi.fn()}
+                onHandoff={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+            />,
+        );
+        const root = container.firstElementChild as HTMLElement;
+        expect(root.className).toContain("max-h-[calc(100%-2rem)]");
+        expect(root.className).not.toContain("max-h-[85vh]");
+    });
 });
