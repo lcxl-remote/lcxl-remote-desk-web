@@ -302,10 +302,14 @@ pub async fn start_inprocess_daemon(
     args: crate::model::settings::Args,
     settings: web::Data<SharedSettings>,
     host_control_hub: Arc<crate::host_control::HostControlHub>,
+    own_turn_endpoints: Arc<std::collections::HashSet<String>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting in-process daemon (portable mode)");
 
-    let pc_registry = PcRegistry::new();
+    // Endpoints of this node's own bundled TURN (frozen at startup from the
+    // running `TurnApiState`; empty when no embedded TURN runs) so the PC
+    // manager never relays through itself.
+    let pc_registry = PcRegistry::new().with_own_turn_endpoints(own_turn_endpoints);
     let (worker_mgr, worker_rx) =
         worker_manager::WorkerManager::new(settings.clone(), pc_registry.clone());
 

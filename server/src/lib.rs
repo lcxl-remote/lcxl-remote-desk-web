@@ -517,9 +517,21 @@ pub async fn run_with_hub(
             let settings_clone = shared_settings_data.clone();
             let session_hub = host_control_hub_arc.clone();
             let args_clone = settings.args.clone();
+            // Freeze this node's own bundled-TURN endpoints from the running
+            // `TurnApiState` (same snapshot the local signaling injects from;
+            // `None` -> empty when no embedded TURN started) so the daemon's PC
+            // manager never relays through itself.
+            let own_turn_endpoints = Arc::new(daemon::pc_manager::own_turn_endpoints(
+                turn_api_state.as_ref().map(|s| &s.settings),
+            ));
             actix_web::rt::spawn(async move {
-                if let Err(e) =
-                    daemon::start_inprocess_daemon(args_clone, settings_clone, session_hub).await
+                if let Err(e) = daemon::start_inprocess_daemon(
+                    args_clone,
+                    settings_clone,
+                    session_hub,
+                    own_turn_endpoints,
+                )
+                .await
                 {
                     error!("In-process daemon failed to start: {e}");
                 }

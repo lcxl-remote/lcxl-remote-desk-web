@@ -19,7 +19,7 @@
 //! feeds the worker's media transport into the per-PC tracks it holds,
 //! and registers the DataChannel handlers on top.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -71,6 +71,7 @@ use desk_ipc_protocol::message::{
     StartMediaPayload, StopMediaPayload, UpdateMediaSettingsPayload,
 };
 use desk_signal_facade::model::signal::InitSignalingData;
+use desk_turn::model::TurnSettings;
 use std::time::Duration;
 use webrtc::media::Sample;
 
@@ -194,28 +195,58 @@ impl DaemonFtWindow {
     }
 }
 
+/// The external `host:port` endpoints of the TURN server this node hosts
+/// itself, used to recognise (and drop) a relay candidate that would point
+/// back at our own bundled TURN.
+///
+/// Sourced from the live `TurnApiState` produced when the embedded TURN
+/// server actually started (`None` when no embedded TURN is running — a
+/// non-`Default`/`Signaling` startup, or a `startup_turn_server` failure),
+/// so it stays in lock-step with the same `TurnApiState` the local signaling
+/// uses to inject TURN. `None` yields an empty set: nothing is treated as
+/// self-hosted, so no remote relay is ever dropped.
+pub fn own_turn_endpoints(turn: Option<&TurnSettings>) -> HashSet<String> {
+    turn.map(|t| {
+        t.interfaces
+            .iter()
+            .map(|iface| iface.external.clone())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Extract the `external` (`host:port`) token from a `turn:host:port?...` URL.
+/// Only the `turn:` scheme is handled because [`LcxlRTCIceServer::transport`]
+/// reports `Turn` solely for `turn:`-prefixed URLs (`turns:` never reaches the
+/// TURN branch), so this is only ever called on `turn:` URLs.
+fn turn_url_endpoint(url: &str) -> Option<&str> {
+    url.strip_prefix("turn:")
+        .map(|rest| rest.split('?').next().unwrap_or(rest))
+}
+
 /// Filter the request's ICE servers down to the ones this node should
 /// actually use given the local `traversal_mode`.
 ///
-/// `traversal_mode` is the operator's explicit traversal intent and alone
-/// decides what is kept — independent of startup mode:
+/// `traversal_mode` is the operator's explicit traversal intent and decides
+/// what kind of server is kept — independent of startup mode:
 /// - `Turn` keeps both STUN and TURN.
 /// - `Stun` keeps STUN, drops TURN.
 /// - `None` drops everything (host candidates only).
 ///
-/// A node that wants no relay candidates simply has no TURN to inject in the
-/// first place: a portable node with an empty TURN config never gets TURN
-/// entries pushed upstream (`get_rest_ice_servers` returns `None`), so nothing
-/// reaches this filter. Conversely, a node configured with a TURN server (or
-/// reached through a manager that injects one) has explicitly opted into relay,
-/// so keeping TURN — and the credential that rides with it — is the intended
-/// behaviour.
+/// On top of that, a TURN URL pointing back at this node's own bundled TURN
+/// (`own_turn_endpoints`) is dropped at URL granularity: relaying through a
+/// TURN server we host ourselves is pointless and, on a co-located portable
+/// node, the self-allocation can stall ICE gathering long enough to starve
+/// consent-freshness on the otherwise-working pair. A server keeps any of its
+/// non-self URLs (and the credential that rides with them); it is removed
+/// entirely only when every URL was self-hosted.
 ///
 /// Servers with no / unrecognised transport are skipped with a warning.
 /// Pure function — no I/O, no settings lookup, easy to unit test.
 pub fn filter_ice_servers(
     request_ice_servers: &[LcxlRTCIceServer],
     traversal_mode: &TraversalMode,
+    own_turn_endpoints: &HashSet<String>,
 ) -> Vec<LcxlRTCIceServer> {
     let mut filtered = Vec::new();
     for ice_server in request_ice_servers {
@@ -226,8 +257,34 @@ pub fn filter_ice_servers(
                 }
             }
             Some(TurnTransport::Turn) => {
-                if matches!(traversal_mode, TraversalMode::Turn) {
+                if !matches!(traversal_mode, TraversalMode::Turn) {
+                    continue;
+                }
+                if own_turn_endpoints.is_empty() {
                     filtered.push(ice_server.clone());
+                    continue;
+                }
+                // Drop only the URLs that point back at our own TURN; keep the
+                // rest of the object (URLs + shared credential) intact.
+                let kept_urls: Vec<String> = ice_server
+                    .urls
+                    .iter()
+                    .filter(|url| {
+                        let is_self = turn_url_endpoint(url)
+                            .is_some_and(|ep| own_turn_endpoints.contains(ep));
+                        if is_self {
+                            log::debug!("Dropping self-hosted TURN ICE url: {url}");
+                        }
+                        !is_self
+                    })
+                    .cloned()
+                    .collect();
+                if !kept_urls.is_empty() {
+                    filtered.push(LcxlRTCIceServer {
+                        urls: kept_urls,
+                        username: ice_server.username.clone(),
+                        credential: ice_server.credential.clone(),
+                    });
                 }
             }
             None => {
@@ -446,6 +503,12 @@ pub struct PcRegistry {
     /// RAII guard that decrements on drop (panics / early returns are
     /// covered).
     pending_requests: Arc<AtomicUsize>,
+    /// External `host:port` endpoints of this node's own bundled TURN server,
+    /// frozen at daemon startup from the live `TurnApiState` (empty when no
+    /// embedded TURN runs). [`filter_ice_servers`] drops relay candidates that
+    /// point back at these so the node never relays through itself. Shared via
+    /// `Arc` so registry clones stay cheap and consistent.
+    own_turn_endpoints: Arc<HashSet<String>>,
     /// Test-only phantom PC counter added to `len()`. See
     /// [`Self::set_test_len_extra`] — it lets the signaling router unit
     /// tests simulate multi-PC topologies without building real
@@ -476,6 +539,16 @@ impl Drop for PendingRequestGuard {
 impl PcRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Install the node's own bundled-TURN endpoints (see
+    /// [`PcRegistry::own_turn_endpoints`]). Builder-style so existing
+    /// `PcRegistry::new()` call sites stay unchanged; the daemon entry point
+    /// chains this once at startup with the set derived from the live
+    /// `TurnApiState`.
+    pub fn with_own_turn_endpoints(mut self, own_turn_endpoints: Arc<HashSet<String>>) -> Self {
+        self.own_turn_endpoints = own_turn_endpoints;
+        self
     }
 
     /// Install the daemon's [`WorkerManager`] so the file-transfer
@@ -615,6 +688,7 @@ impl PcRegistry {
         let filtered = filter_ice_servers(
             &request_remote.ice_servers,
             &local_settings.turn_client.traversal_mode,
+            &self.own_turn_endpoints,
         );
 
         let pc = build_peer_connection(filtered.iter().map(Into::into).collect(), local_settings)
@@ -3149,13 +3223,36 @@ mod tests {
         let _ = pc.close().await;
     }
 
+    /// No self-hosted TURN endpoints — the common case for a desk reached
+    /// through a remote signaling/manager (its own embedded TURN is not
+    /// running, so nothing is treated as self).
+    fn no_own() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    /// A `TurnSettings` advertising the given `external` endpoints, one UDP
+    /// interface each, so `own_turn_endpoints` has something to map.
+    fn turn_settings_with(externals: &[&str]) -> TurnSettings {
+        TurnSettings {
+            interfaces: externals
+                .iter()
+                .map(|ext| desk_turn::model::TurnInterface {
+                    transport: desk_turn::model::TurnTransport::UDP,
+                    listen: "0.0.0.0:3479".to_string(),
+                    external: (*ext).to_string(),
+                })
+                .collect(),
+            ..TurnSettings::default()
+        }
+    }
+
     #[test]
     fn filter_keeps_stun_only_in_stun_mode() {
         let request = vec![
             ice("stun:stun.l.google.com:19302"),
             ice("turn:turn.example.com:3478"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::Stun);
+        let kept = filter_ice_servers(&request, &TraversalMode::Stun, &no_own());
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].urls[0], "stun:stun.l.google.com:19302");
     }
@@ -3170,7 +3267,7 @@ mod tests {
             ice("stun:stun.l.google.com:19302"),
             ice("turn:turn.example.com:3478"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::Turn);
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &no_own());
         assert_eq!(kept.len(), 2);
     }
 
@@ -3182,7 +3279,7 @@ mod tests {
             ice("stun:stun.l.google.com:19302"),
             ice("turn:turn.example.com:3478"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::None);
+        let kept = filter_ice_servers(&request, &TraversalMode::None, &no_own());
         assert!(kept.is_empty());
     }
 
@@ -3194,9 +3291,156 @@ mod tests {
             ice("https://not-a-stun-or-turn.example.com"),
             ice("stun:stun.l.google.com:19302"),
         ];
-        let kept = filter_ice_servers(&request, &TraversalMode::Stun);
+        let kept = filter_ice_servers(&request, &TraversalMode::Stun, &no_own());
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].urls[0], "stun:stun.l.google.com:19302");
+    }
+
+    #[test]
+    fn own_turn_endpoints_maps_interfaces() {
+        let turn = TurnSettings {
+            interfaces: vec![
+                desk_turn::model::TurnInterface {
+                    transport: desk_turn::model::TurnTransport::UDP,
+                    listen: "0.0.0.0:3479".to_string(),
+                    external: "192.168.50.5:3479".to_string(),
+                },
+                desk_turn::model::TurnInterface {
+                    transport: desk_turn::model::TurnTransport::TCP,
+                    listen: "0.0.0.0:3478".to_string(),
+                    external: "192.168.50.5:3478".to_string(),
+                },
+            ],
+            // enable_turn does not gate the mapping — the caller's `Option`
+            // (presence of a running `TurnApiState`) is the only gate.
+            enable_turn: false,
+            ..TurnSettings::default()
+        };
+        let eps = own_turn_endpoints(Some(&turn));
+        assert_eq!(eps.len(), 2);
+        assert!(eps.contains("192.168.50.5:3479"));
+        assert!(eps.contains("192.168.50.5:3478"));
+    }
+
+    /// `None` (the embedded TURN never started — non-`Default`/`Signaling`
+    /// startup, or a `startup_turn_server` failure) yields an empty set, so
+    /// nothing is treated as self-hosted and no remote relay is dropped.
+    #[test]
+    fn own_turn_endpoints_none_is_empty() {
+        assert!(own_turn_endpoints(None).is_empty());
+    }
+
+    #[test]
+    fn own_turn_endpoints_empty_interfaces_is_empty() {
+        assert!(own_turn_endpoints(Some(&TurnSettings::default())).is_empty());
+    }
+
+    /// Turn mode, but the only TURN URL points back at our own bundled TURN:
+    /// the relay candidate is dropped while STUN survives.
+    #[test]
+    fn filter_drops_self_hosted_turn() {
+        let request = vec![
+            ice("stun:192.168.50.5:3479"),
+            ice("turn:192.168.50.5:3479?transport=udp"),
+        ];
+        let own = own_turn_endpoints(Some(&turn_settings_with(&["192.168.50.5:3479"])));
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].urls[0], "stun:192.168.50.5:3479");
+    }
+
+    /// A single ICE server carrying both a self URL and a remote URL keeps the
+    /// remote URL (and its credential); only the self URL is removed.
+    #[test]
+    fn filter_partial_drops_self_url_keeps_remote() {
+        let request = vec![LcxlRTCIceServer {
+            urls: vec![
+                "turn:192.168.50.5:3479?transport=udp".to_string(),
+                "turn:relay.example.com:3478?transport=udp".to_string(),
+            ],
+            username: "user".to_string(),
+            credential: "pw".to_string(),
+        }];
+        let own = own_turn_endpoints(Some(&turn_settings_with(&["192.168.50.5:3479"])));
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].urls, vec!["turn:relay.example.com:3478?transport=udp"]);
+        assert_eq!(kept[0].username, "user");
+        assert_eq!(kept[0].credential, "pw");
+    }
+
+    /// When every URL of an object is self-hosted, the whole object is dropped.
+    #[test]
+    fn filter_drops_object_when_all_urls_self() {
+        let request = vec![LcxlRTCIceServer {
+            urls: vec![
+                "turn:192.168.50.5:3479?transport=udp".to_string(),
+                "turn:192.168.50.5:3478?transport=tcp".to_string(),
+            ],
+            username: "user".to_string(),
+            credential: "pw".to_string(),
+        }];
+        let own = own_turn_endpoints(Some(&turn_settings_with(&[
+            "192.168.50.5:3479",
+            "192.168.50.5:3478",
+        ])));
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
+        assert!(kept.is_empty());
+    }
+
+    /// A remote manager's TURN (a different endpoint) is kept even when this
+    /// node hosts its own TURN — only self-hosted relays are dropped.
+    #[test]
+    fn filter_keeps_remote_turn_in_turn_mode() {
+        let request = vec![ice("turn:relay.example.com:3478?transport=udp")];
+        let own = own_turn_endpoints(Some(&turn_settings_with(&["192.168.50.5:3479"])));
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].urls[0], "turn:relay.example.com:3478?transport=udp");
+    }
+
+    /// No self-hosting (DeskServer / ServiceDaemon, own set empty): a remote
+    /// TURN is kept untouched.
+    #[test]
+    fn filter_keeps_turn_when_not_self_hosting() {
+        let request = vec![ice("turn:192.168.50.5:3479?transport=udp")];
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &no_own());
+        assert_eq!(kept.len(), 1);
+    }
+
+    /// The own-set is a frozen snapshot independent of any later live-settings
+    /// change: a relay at the startup address `A` is still filtered even though
+    /// the function only ever sees the passed-in set, never live settings.
+    #[test]
+    fn filter_uses_frozen_set_not_live() {
+        let request = vec![ice("turn:192.168.50.5:3479?transport=udp")];
+        // Frozen own-set captured at startup (address A).
+        let own = own_turn_endpoints(Some(&turn_settings_with(&["192.168.50.5:3479"])));
+        // Even if live settings had since moved to address B, the filter only
+        // consults the frozen set, so the startup-A relay is still dropped.
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
+        assert!(kept.is_empty());
+    }
+
+    /// A TCP `external` endpoint is matched against the `turn:...?transport=tcp`
+    /// URL just like UDP.
+    #[test]
+    fn filter_matches_tcp_interface() {
+        let request = vec![ice("turn:192.168.50.5:3478?transport=tcp")];
+        let own = own_turn_endpoints(Some(&turn_settings_with(&["192.168.50.5:3478"])));
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
+        assert!(kept.is_empty());
+    }
+
+    /// An IPv6-shaped `external` matches purely as a string. This only
+    /// exercises the string match; it does NOT imply the IPv6 TURN runtime
+    /// path is wired up.
+    #[test]
+    fn filter_matches_ipv6_endpoint_string_only() {
+        let request = vec![ice("turn:[fe80::1]:3479?transport=udp")];
+        let own = own_turn_endpoints(Some(&turn_settings_with(&["[fe80::1]:3479"])));
+        let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
+        assert!(kept.is_empty());
     }
 
     /// Sanity: the construction path itself works with an empty ICE
