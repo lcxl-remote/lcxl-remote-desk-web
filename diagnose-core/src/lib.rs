@@ -20,12 +20,15 @@
 //! - [`seam`]: the [`ModelSeam`](seam::ModelSeam) the loop calls, abstracting the
 //!   wire dialect.
 
+pub mod agent_loop;
 pub mod chat;
 pub mod chunk;
 pub mod parser;
 pub mod prompt;
+pub mod registry;
 pub mod seam;
 pub mod selection;
+pub mod session;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB).
 pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 131_072;
