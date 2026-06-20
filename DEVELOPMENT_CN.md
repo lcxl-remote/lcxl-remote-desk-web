@@ -72,6 +72,20 @@ sudo apt install -y cmake
 sudo apt install -y libvpx-dev
 ```
 
+### macOS 系统依赖
+
+通过 Homebrew 安装（`x264`、`libvpx` 经 `pkg-config` 解析；`cmake` 用于从源码编译内置的 Opus）：
+
+```bash
+brew install pkgconf libvpx x264 cmake
+```
+
+Apple Silicon 上需确保 `pkg-config` 能找到 Homebrew 的 `.pc` 文件：
+
+```bash
+export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
+```
+
 ### Windows 系统
 
 - 无需额外依赖，项目通过 Cargo 自动管理

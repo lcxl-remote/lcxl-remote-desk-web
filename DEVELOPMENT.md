@@ -68,6 +68,24 @@ This document provides a comprehensive guide for the LCXL Remote Desk Web projec
 sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev libpipewire-0.3-dev libx11-dev libxcb1-dev libxcb-randr0-dev libxext-dev clang libclang-dev cmake libvpx-dev
 ```
 
+### macOS System Dependencies
+
+Install via Homebrew (`x264` and `libvpx` are resolved through `pkg-config`; `cmake` is required to build the bundled Opus from source):
+
+```bash
+brew install pkgconf libvpx x264 cmake
+```
+
+On Apple Silicon, make sure `pkg-config` can locate the Homebrew `.pc` files:
+
+```bash
+export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
+```
+
+### Windows System Dependencies
+
+No extra dependencies; everything is managed automatically through Cargo.
+
 ## Quick Start
 
 ### 1. Backend Development
