@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, Stethoscope } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, Sparkles } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -1343,11 +1343,10 @@ export default function DeskSession() {
                                     <svg width="0" height="0" className="absolute h-0 w-0" aria-hidden="true">
                                         <defs>
                                             <linearGradient id="ai-rainbow-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                                <stop offset="0%" stopColor="#6366f1" />
-                                                <stop offset="25%" stopColor="#a855f7" />
-                                                <stop offset="50%" stopColor="#ec4899" />
-                                                <stop offset="75%" stopColor="#f59e0b" />
-                                                <stop offset="100%" stopColor="#10b981" />
+                                                <stop offset="0%" stopColor="#3b82f6" />
+                                                <stop offset="33%" stopColor="#8b5cf6" />
+                                                <stop offset="66%" stopColor="#d946ef" />
+                                                <stop offset="100%" stopColor="#f43f5e" />
                                             </linearGradient>
                                         </defs>
                                     </svg>
@@ -1359,7 +1358,7 @@ export default function DeskSession() {
                                                 className={`controlButton ${showDiagnose ? "bg-white/20" : ""}`}
                                                 onClick={() => setShowDiagnose(!showDiagnose)}
                                             >
-                                                <Stethoscope style={{ stroke: "url(#ai-rainbow-gradient)" }} />
+                                                <Sparkles style={{ stroke: "url(#ai-rainbow-gradient)" }} />
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
