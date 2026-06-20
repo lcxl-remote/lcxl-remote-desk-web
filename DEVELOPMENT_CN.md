@@ -86,6 +86,8 @@ Apple Silicon 上需确保 `pkg-config` 能找到 Homebrew 的 `.pc` 文件：
 export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
 ```
 
+此外，`capture-engine` 的 macOS 采集后端使用 `screencapturekit` 8.x，它通过 swift-bridge 在 `build.rs` 中调用 `swift build` 编译一个 Swift 静态库，因此构建机需要可用的 `swift`（SwiftPM）+ `xcrun` + **macOS 13+ SDK**。`swift` 也随 Xcode Command Line Tools 分发（足够新且 SDK ≥ 13 即可），CI / 开发机推荐安装完整 Xcode。构建时显式设置 `MACOSX_DEPLOYMENT_TARGET=13.0`，运行底线为 **macOS 13.0**（屏幕录制还要求应用 `Info.plist` 含 `NSScreenCaptureUsageDescription`，否则触发录屏授权时系统会直接终止 app）。
+
 ### Windows 系统
 
 - 无需额外依赖，项目通过 Cargo 自动管理

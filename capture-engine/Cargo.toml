@@ -64,7 +64,6 @@ wayland-protocols = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { workspace = true }
-screencapturekit-sys = { workspace = true }
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
 core-graphics = { workspace = true }
