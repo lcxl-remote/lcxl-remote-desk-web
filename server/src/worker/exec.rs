@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use desk_agent_protocol::exec::ExecPlan;
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentOutcome, ExecOutput, OperationOutput};
+use log::warn;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
@@ -62,6 +63,12 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
+            // The control end only sees a generic `internal` kind; log the real
+            // OS error here so the cause (e.g. a missing program) is traceable.
+            warn!(
+                "exec spawn failed: template={} program={} error={e}",
+                plan.template_id, plan.program,
+            );
             return AgentOutcome::Err(err(
                 AgentErrorKind::Internal,
                 format!("failed to start command: {e}"),
@@ -91,6 +98,10 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
             Ok(result) => result,
             Err(_) => {
                 let _ = child.start_kill();
+                warn!(
+                    "exec timed out: template={} program={} timeout_ms={}",
+                    plan.template_id, plan.program, plan.timeout_ms,
+                );
                 return AgentOutcome::Err(err(
                     AgentErrorKind::Timeout,
                     format!("command timed out after {} ms", plan.timeout_ms),
@@ -101,6 +112,10 @@ pub async fn execute_plan(plan: &ExecPlan) -> AgentOutcome {
     let status = match status {
         Ok(status) => status,
         Err(e) => {
+            warn!(
+                "exec wait failed: template={} program={} error={e}",
+                plan.template_id, plan.program,
+            );
             return AgentOutcome::Err(err(
                 AgentErrorKind::Internal,
                 format!("command failed: {e}"),
