@@ -24,19 +24,16 @@ use std::sync::Arc;
 
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
-    AgentScope, AuditMeta, CallerRef, CallerType, Capability, ContainerListParams, ContextKind,
-    DeviceAgent, ExecutionMode, LogRecentParams, NetworkPortsParams, OperationInput,
-    ProcessListParams, ProtocolVersion, ReadContextInput, RequestId, ServiceStatusParams,
-    SystemInfoParams, TargetRef,
+    AgentScope, AuditMeta, CallerRef, CallerType, Capability, DeviceAgent, ExecutionMode,
+    OperationInput, ProtocolVersion, RequestId, TargetRef,
 };
-use desk_diagnose_core::chat::{ModelTurn, StopReason, ToolCall, ToolSpec};
-use desk_diagnose_core::registry::{RegisteredTool, ToolEffect};
+use desk_diagnose_core::chat::{ModelTurn, StopReason, ToolCall};
+use desk_diagnose_core::read_tools::build_read_operation;
 use desk_diagnose_core::seam::{
     ClaimError, ClaimTurnParams, ModelRequest, ModelSeam, SessionSeam, ToolRunOutput, ToolSeam,
     TurnSink,
 };
 use desk_diagnose_core::session::PersistedAgentSession;
-use serde::de::DeserializeOwned;
 
 use super::model::{AdapterSelector, ChatRequest};
 use super::redaction::{Redactor, redact_snapshot};
@@ -47,154 +44,6 @@ use crate::worker::agent::eval::EvidenceSnapshot;
 /// Current time as an RFC3339 string.
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-fn bad_arguments(detail: impl std::fmt::Display) -> AgentError {
-    AgentError {
-        kind: AgentErrorKind::InvalidInput,
-        message: format!("invalid tool arguments: {detail}"),
-        retryable: false,
-        safe_for_model: true,
-    }
-}
-
-// ============================ Read tool registry ============================
-
-/// Build a read tool's spec from its model-facing name, description, and a JSON
-/// Schema for its arguments.
-fn spec(name: &str, description: &str, parameters_schema: serde_json::Value) -> ToolSpec {
-    ToolSpec {
-        name: name.to_string(),
-        description: description.to_string(),
-        parameters_schema,
-    }
-}
-
-fn read(
-    name: &str,
-    cap: Capability,
-    description: &str,
-    schema: serde_json::Value,
-) -> RegisteredTool {
-    RegisteredTool {
-        spec: spec(name, description, schema),
-        required_capability: cap,
-        effect: ToolEffect::ReadOnly,
-    }
-}
-
-/// The read-only tools the agent loop exposes (subject to scope/mode filtering).
-/// Each tool name maps to one [`ContextKind`] in [`build_read_operation`].
-pub fn read_tool_registry() -> Vec<RegisteredTool> {
-    use serde_json::json;
-    vec![
-        read(
-            "read_system_info",
-            Capability::SystemInfo,
-            "Read the device's OS, CPU, memory, and uptime summary.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "include_hardware": {"type": "boolean"},
-                    "include_network_summary": {"type": "boolean"}
-                }
-            }),
-        ),
-        read(
-            "read_process_list",
-            Capability::ProcessList,
-            "List running processes, optionally sorted and limited.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 0},
-                    "sort": {"type": "string", "enum": ["cpu_desc", "memory_desc", "pid"]},
-                    "include_command_line": {"type": "boolean"}
-                }
-            }),
-        ),
-        read(
-            "read_network_ports",
-            Capability::NetworkPorts,
-            "List listening network ports; optionally filter by protocol.",
-            json!({
-                "type": "object",
-                "properties": {"protocol": {"type": "string"}}
-            }),
-        ),
-        read(
-            "read_service_status",
-            Capability::ServiceStatus,
-            "Read the status of system services; name one or enumerate.",
-            json!({
-                "type": "object",
-                "properties": {"name": {"type": "string"}}
-            }),
-        ),
-        read(
-            "read_recent_logs",
-            Capability::LogRecent,
-            "Read recent system log events (redacted).",
-            json!({"type": "object"}),
-        ),
-        read(
-            "read_container_list",
-            Capability::ContainerList,
-            "List containers on the device.",
-            json!({"type": "object"}),
-        ),
-    ]
-}
-
-/// Parse a params struct from the model's `arguments_json`, treating empty / `{}`
-/// as defaults (every read params type is all-optional).
-fn parse_params<T: DeserializeOwned + Default>(arguments_json: &str) -> Result<T, AgentError> {
-    let trimmed = arguments_json.trim();
-    if trimmed.is_empty() {
-        return Ok(T::default());
-    }
-    serde_json::from_str(trimmed).map_err(bad_arguments)
-}
-
-/// Map a read tool call (name + arguments) to a server-side read operation and
-/// the capability it requires (derived from the built input — one source).
-fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInput), AgentError> {
-    let kind = match call.name.as_str() {
-        "read_system_info" => {
-            ContextKind::SystemInfo(parse_params::<SystemInfoParams>(&call.arguments_json)?)
-        }
-        "read_process_list" => {
-            ContextKind::ProcessList(parse_params::<ProcessListParams>(&call.arguments_json)?)
-        }
-        "read_network_ports" => {
-            ContextKind::NetworkPorts(parse_params::<NetworkPortsParams>(&call.arguments_json)?)
-        }
-        "read_service_status" => {
-            ContextKind::ServiceStatus(parse_params::<ServiceStatusParams>(&call.arguments_json)?)
-        }
-        "read_recent_logs" => {
-            ContextKind::LogRecent(parse_params::<LogRecentParams>(&call.arguments_json)?)
-        }
-        "read_container_list" => {
-            ContextKind::ContainerList(parse_params::<ContainerListParams>(&call.arguments_json)?)
-        }
-        other => {
-            return Err(AgentError {
-                kind: AgentErrorKind::UnsupportedCapability,
-                message: format!("unknown read tool `{other}`"),
-                retryable: false,
-                safe_for_model: true,
-            });
-        }
-    };
-    let input = OperationInput::ReadContext(ReadContextInput { kind });
-    let cap = input.capability().ok_or_else(|| AgentError {
-        kind: AgentErrorKind::UnsupportedCapability,
-        message: "read tool maps to no capability".to_string(),
-        retryable: false,
-        safe_for_model: true,
-    })?;
-    Ok((cap, input))
 }
 
 // ============================ Tool seam (read) ============================
@@ -427,73 +276,12 @@ mod tests {
     use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, run_agent_turn};
     use desk_diagnose_core::chat::{ChatMessage, ChatRole, ModelTurn, StopReason, ToolCall};
     use desk_diagnose_core::prompt::ResponseFormatSpec;
+    use desk_diagnose_core::read_tools::read_tool_registry;
     use desk_diagnose_core::seam::TurnSink;
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
     use super::super::redaction::RegexRedactor;
-
-    /// `build_read_operation` maps each known tool name to the right capability
-    /// and accepts both empty and populated arguments.
-    #[test]
-    fn read_operation_mapping() {
-        let (cap, _) = build_read_operation(&ToolCall {
-            id: "c".into(),
-            name: "read_system_info".into(),
-            arguments_json: String::new(),
-        })
-        .unwrap();
-        assert_eq!(cap, Capability::SystemInfo);
-
-        let (cap, input) = build_read_operation(&ToolCall {
-            id: "c".into(),
-            name: "read_process_list".into(),
-            arguments_json: r#"{"limit": 5, "sort": "memory_desc"}"#.into(),
-        })
-        .unwrap();
-        assert_eq!(cap, Capability::ProcessList);
-        assert!(matches!(
-            input,
-            OperationInput::ReadContext(ReadContextInput {
-                kind: ContextKind::ProcessList(_)
-            })
-        ));
-
-        // Unknown tool is rejected.
-        assert!(
-            build_read_operation(&ToolCall {
-                id: "c".into(),
-                name: "nope".into(),
-                arguments_json: String::new(),
-            })
-            .is_err()
-        );
-
-        // Malformed arguments are an error (not a silent default).
-        assert!(
-            build_read_operation(&ToolCall {
-                id: "c".into(),
-                name: "read_process_list".into(),
-                arguments_json: "{not json".into(),
-            })
-            .is_err()
-        );
-    }
-
-    /// Every registered tool is read-only and its name maps back to a capability.
-    #[test]
-    fn registry_is_read_only_and_maps() {
-        for tool in read_tool_registry() {
-            assert_eq!(tool.effect, ToolEffect::ReadOnly);
-            let (cap, _) = build_read_operation(&ToolCall {
-                id: "c".into(),
-                name: tool.name().into(),
-                arguments_json: String::new(),
-            })
-            .unwrap();
-            assert_eq!(cap, tool.required_capability);
-        }
-    }
 
     /// The direct tool seam runs `read_system_info` against the real in-process
     /// agent and returns a JSON result (succeeds on every CI host).

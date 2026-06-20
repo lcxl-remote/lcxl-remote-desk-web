@@ -25,6 +25,7 @@ pub mod chat;
 pub mod chunk;
 pub mod parser;
 pub mod prompt;
+pub mod read_tools;
 pub mod registry;
 pub mod seam;
 pub mod selection;
