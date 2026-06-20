@@ -37,6 +37,7 @@ pub mod exec;
 pub mod exec_policy;
 pub mod fleet_exec;
 pub mod model_proxy;
+pub mod remote_tool;
 
 use crate::exec::{CommandClassification, ExecDecision, ExecEffect};
 
