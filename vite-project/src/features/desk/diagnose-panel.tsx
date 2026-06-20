@@ -272,7 +272,7 @@ export function DiagnosePanel({
                 </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-3 text-sm">
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
                 {/* Question form (idle) */}
                 {state.phase === "idle" && (
                     <div className="flex flex-col gap-3">

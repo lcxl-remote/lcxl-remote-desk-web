@@ -56,6 +56,27 @@ describe('extractStreamingSummary', () => {
             'The disk is full because',
         );
     });
+
+    it('hides reasoning while a <think> block is still open', () => {
+        // DeepSeek-R1 streams its chain-of-thought first; show nothing until the
+        // structured answer begins rather than leaking raw reasoning.
+        expect(extractStreamingSummary('<think>Let me look at the CPU')).toBe('');
+        expect(extractStreamingSummary('<think>still thinking...\nmore')).toBe('');
+    });
+
+    it('extracts the summary after a completed <think> block', () => {
+        const raw = '<think>reasoning here</think>\n{"summary":"The CPU is busy';
+        expect(extractStreamingSummary(raw)).toBe('The CPU is busy');
+    });
+
+    it('ignores a ```json fence / prose preamble before the JSON', () => {
+        expect(
+            extractStreamingSummary('```json\n{"summary":"Disk almost full'),
+        ).toBe('Disk almost full');
+        expect(
+            extractStreamingSummary('Here is my analysis:\n{"summary":"All good'),
+        ).toBe('All good');
+    });
 });
 
 describe('useDeskDiagnose', () => {

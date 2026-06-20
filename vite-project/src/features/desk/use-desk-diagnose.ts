@@ -67,34 +67,53 @@ export type DiagnoseStartOptions = {
 /**
  * Extract a human-readable streaming summary from a partially-received model
  * response so the panel can show flowing text instead of a growing raw JSON
- * string while the structured output is still being produced.
+ * string (or a model's raw reasoning) while the structured output is still
+ * being produced.
  *
- * When the model is constrained to JSON (`response_format` = json_object /
- * json_schema), the streamed deltas form an incomplete JSON document. This reads
- * the value of the `"summary"` string field as it grows — tolerant of the
- * document being truncated mid-string and of a trailing incomplete escape — and
- * returns it decoded. If the stream is not JSON (free-text mode) the raw text is
- * returned as-is; if the `summary` field has not appeared yet, an empty string
- * is returned so the caller can fall back to a "working" indicator.
+ * Mirrors the backend parser's tolerance (`desk-diagnose-core`): a reasoning
+ * model (e.g. DeepSeek-R1) prepends a `<think>...</think>` block, and some
+ * models wrap the JSON in a ```json fence or a sentence of prose. Those would
+ * otherwise stream out as raw, unformatted text. The logic is:
+ *
+ * 1. Drop completed `<think>...</think>` blocks; if a block is still open (its
+ *    closing tag has not streamed yet) the whole tail is reasoning, so nothing
+ *    is shown yet.
+ * 2. From the first `{` (skipping any fence / prose preamble) read the value of
+ *    the `"summary"` string field as it grows — tolerant of the document being
+ *    truncated mid-string and of a trailing incomplete escape — and return it
+ *    decoded. Before `"summary"` appears, return an empty string so the caller
+ *    falls back to a "working" indicator.
+ * 3. With no `{` at all (free-text mode), return the prose as-is.
  */
 export function extractStreamingSummary(raw: string): string {
     if (!raw) return '';
-    // Free-text mode: not a JSON object, show the prose directly.
-    if (!raw.trimStart().startsWith('{')) return raw;
 
-    const key = raw.match(/"summary"\s*:\s*"/);
+    // Step 1: strip reasoning. Remove completed think blocks; truncate at an
+    // unterminated one (everything after it is still reasoning).
+    let text = raw.replace(/<think>[\s\S]*?<\/think>/g, '');
+    const openThink = text.lastIndexOf('<think>');
+    if (openThink !== -1) text = text.slice(0, openThink);
+
+    // Step 3 (no JSON yet): free-text prose, shown directly.
+    const brace = text.indexOf('{');
+    if (brace === -1) return text.trimStart();
+
+    // Step 2: read the "summary" value from the first JSON object, ignoring any
+    // fence / prose before the opening brace.
+    const json = text.slice(brace);
+    const key = json.match(/"summary"\s*:\s*"/);
     if (!key || key.index === undefined) return '';
 
     let out = '';
-    for (let i = key.index + key[0].length; i < raw.length; i++) {
-        const ch = raw[i];
+    for (let i = key.index + key[0].length; i < json.length; i++) {
+        const ch = json[i];
         if (ch === '"') break; // closing quote of the summary value
         if (ch !== '\\') {
             out += ch;
             continue;
         }
         // Escape sequence; bail out if it is truncated at the end of the stream.
-        const next = raw[i + 1];
+        const next = json[i + 1];
         if (next === undefined) break;
         switch (next) {
             case 'n': out += '\n'; break;
@@ -106,7 +125,7 @@ export function extractStreamingSummary(raw: string): string {
             case '\\': out += '\\'; break;
             case '/': out += '/'; break;
             case 'u': {
-                const hex = raw.slice(i + 2, i + 6);
+                const hex = json.slice(i + 2, i + 6);
                 if (hex.length < 4) return out; // incomplete \uXXXX at stream end
                 out += String.fromCharCode(parseInt(hex, 16));
                 i += 4;
