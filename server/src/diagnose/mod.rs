@@ -17,6 +17,7 @@
 //! [`StubDiagnoseModel`] remains for the unconfigured / test paths. Evidence is
 //! always redacted before it reaches the model trait.
 
+pub mod agent;
 pub mod collector;
 pub mod model;
 pub mod redaction;
