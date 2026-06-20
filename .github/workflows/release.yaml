@@ -259,7 +259,8 @@ jobs:
             <key>CFBundleVersion</key><string>__VERSION__</string>
             <key>CFBundleShortVersionString</key><string>__VERSION__</string>
             <key>NSHighResolutionCapable</key><true/>
-            <key>LSMinimumSystemVersion</key><string>10.15</string>
+            <key>LSMinimumSystemVersion</key><string>13.0</string>
+            <key>NSScreenCaptureUsageDescription</key><string>Screen capture for remote desktop sessions.</string>
             <key>NSMicrophoneUsageDescription</key><string>Audio capture for remote desktop sessions.</string>
             <key>NSCameraUsageDescription</key><string>Camera access for remote desktop sessions.</string>
           </dict>

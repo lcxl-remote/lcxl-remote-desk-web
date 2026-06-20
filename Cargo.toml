@@ -255,8 +255,7 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 # for macos
-screencapturekit = "0.2"
-screencapturekit-sys = "0.2"
+screencapturekit = { version = "8", features = ["macos_13_0"] }
 objc2 = "0.5"
 objc2-foundation = "0.2"
 core-graphics = { version = "0.23", features = ["highsierra"] }
