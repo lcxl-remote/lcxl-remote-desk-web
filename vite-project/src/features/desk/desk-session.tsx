@@ -122,6 +122,7 @@ export default function DeskSession() {
 
     const [showStats, setShowStats] = useState(false);
     const [showDiagnose, setShowDiagnose] = useState(false);
+    const [isDiagnoseHovered, setIsDiagnoseHovered] = useState(false);
 
     const [isControlBarHovered, setIsControlBarHovered] = useState(false);
     const [isControlBarMenuOpen, setIsControlBarMenuOpen] = useState(false);
@@ -1343,10 +1344,18 @@ export default function DeskSession() {
                                     <svg width="0" height="0" className="absolute h-0 w-0" aria-hidden="true">
                                         <defs>
                                             <linearGradient id="ai-rainbow-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                                <stop offset="0%" stopColor="#3b82f6" />
-                                                <stop offset="33%" stopColor="#8b5cf6" />
-                                                <stop offset="66%" stopColor="#d946ef" />
-                                                <stop offset="100%" stopColor="#f43f5e" />
+                                                <stop offset="0%" stopColor="#3b82f6">
+                                                    <animate attributeName="stop-color" values="#3b82f6; #8b5cf6; #d946ef; #f43f5e; #3b82f6" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
+                                                </stop>
+                                                <stop offset="33%" stopColor="#8b5cf6">
+                                                    <animate attributeName="stop-color" values="#8b5cf6; #d946ef; #f43f5e; #3b82f6; #8b5cf6" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
+                                                </stop>
+                                                <stop offset="66%" stopColor="#d946ef">
+                                                    <animate attributeName="stop-color" values="#d946ef; #f43f5e; #3b82f6; #8b5cf6; #d946ef" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
+                                                </stop>
+                                                <stop offset="100%" stopColor="#f43f5e">
+                                                    <animate attributeName="stop-color" values="#f43f5e; #3b82f6; #8b5cf6; #d946ef; #f43f5e" dur={isDiagnoseHovered ? "0.8s" : "4s"} repeatCount="indefinite" />
+                                                </stop>
                                             </linearGradient>
                                         </defs>
                                     </svg>
@@ -1357,6 +1366,8 @@ export default function DeskSession() {
                                                 variant="ghost"
                                                 className={`controlButton ${showDiagnose ? "bg-white/20" : ""}`}
                                                 onClick={() => setShowDiagnose(!showDiagnose)}
+                                                onMouseEnter={() => setIsDiagnoseHovered(true)}
+                                                onMouseLeave={() => setIsDiagnoseHovered(false)}
                                             >
                                                 <Sparkles style={{ stroke: "url(#ai-rainbow-gradient)" }} />
                                             </Button>
