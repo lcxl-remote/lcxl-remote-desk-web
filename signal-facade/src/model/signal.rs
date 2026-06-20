@@ -246,6 +246,26 @@ pub enum SignalingType {
     #[wincode(tag = 612)]
     CollectResponse = 612,
 
+    /// Fleet batch-execution request (manager → desk-server daemon only).
+    /// Carries `AuthorizedControlPayload<desk_agent_protocol::exec::ExecPlan>` —
+    /// a manager-sealed, approved execution plan plus the
+    /// `desk_agent_protocol::authz::AuthorizationBlock` that scopes it (max_risk,
+    /// actor/device, per-attempt request_id binding, audience, and expiry). The
+    /// daemon re-validates (PEP) before handing the argv to the worker. Accepted
+    /// only from the trusted manager link (the inbound source gate drops it from
+    /// any other source); a client sending it inbound to the signaling server is
+    /// a protocol error and is swallowed. Notification-style
+    /// (`response_state = None`).
+    #[wincode(tag = 613)]
+    FleetExecRequest = 613,
+    /// Fleet batch-execution result (desk-server daemon → manager only). Carries
+    /// `desk_agent_protocol::fleet_exec::FleetExecResultPayload` (the per-attempt
+    /// `request_id` + a structured `FleetExecDisposition`). Consumed by the
+    /// manager's execution pending store, never relayed to a browser or another
+    /// peer. Notification-style (`response_state = None`).
+    #[wincode(tag = 614)]
+    FleetExecResult = 614,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,
@@ -867,7 +887,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 49] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 51] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -902,6 +922,8 @@ mod wincode_tests {
             (SignalingType::CommandTemplateSync, 610),
             (SignalingType::CollectRequest, 611),
             (SignalingType::CollectResponse, 612),
+            (SignalingType::FleetExecRequest, 613),
+            (SignalingType::FleetExecResult, 614),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),

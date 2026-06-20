@@ -41,7 +41,10 @@ impl CommandTemplateCache {
 
     /// The last applied command-template revision, if any.
     pub fn revision(&self) -> Option<i64> {
-        *self.revision.read().expect("command template revision lock")
+        *self
+            .revision
+            .read()
+            .expect("command template revision lock")
     }
 
     /// Replace the cache with a synced set, dropping any entry whose argv fails
@@ -63,7 +66,10 @@ impl CommandTemplateCache {
             .collect();
         let count = accepted.len();
         *self.inner.write().expect("command template cache lock") = Arc::new(accepted);
-        *self.revision.write().expect("command template revision lock") = revision;
+        *self
+            .revision
+            .write()
+            .expect("command template revision lock") = revision;
         count
     }
 
@@ -105,7 +111,10 @@ mod tests {
     #[test]
     fn replace_drops_invalid_argv_fail_closed() {
         let cache = CommandTemplateCache::new();
-        let n = cache.replace(vec![tpl("ok", &["docker", "ps"]), tpl("bad", &["a;b"])], None);
+        let n = cache.replace(
+            vec![tpl("ok", &["docker", "ps"]), tpl("bad", &["a;b"])],
+            None,
+        );
         assert_eq!(n, 1, "the metachar entry must be dropped");
         assert_eq!(cache.snapshot().len(), 1);
     }

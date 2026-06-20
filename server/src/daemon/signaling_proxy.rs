@@ -125,6 +125,10 @@ pub async fn run_signaling_proxy(
         // Per-call manager authorization is injected by the inbound dispatcher;
         // the shared base context carries none.
         inbound_authz: None,
+        // Fleet exec correlation set, shared with the worker-message loop below so
+        // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
+        // manager as a `FleetExecResult`.
+        fleet_exec_pending: Default::default(),
     };
 
     let local_handle = {
@@ -685,6 +689,24 @@ pub async fn run_signaling_proxy(
                         )
                         .await;
                 }
+                // Fleet exec correlation: if this result is for an in-flight
+                // fleet attempt, relay it to the manager as a `FleetExecResult`
+                // (`Executed`) instead of an `ExecResult(609)` toward a browser.
+                let is_fleet = router_ctx
+                    .fleet_exec_pending
+                    .lock()
+                    .map(|mut p| p.remove(&payload.request_id))
+                    .unwrap_or(false);
+                if is_fleet {
+                    signaling_router::send_fleet_exec_result(
+                        &outbound_tx,
+                        &payload.request_id,
+                        desk_agent_protocol::fleet_exec::FleetExecDisposition::Executed {
+                            outcome: payload.result.outcome.clone(),
+                        },
+                    );
+                    continue;
+                }
                 match serde_json::to_value(&payload.result) {
                     Ok(value) => {
                         let frame = SignalingModel::new(
@@ -1132,6 +1154,80 @@ fn gate_authz_frame(
     AuthzGateOutcome::Pass(unwrapped, Some(wrapper.authz))
 }
 
+/// Outcome of the dedicated `FleetExecRequest` authorization gate. Unlike the
+/// generic [`gate_authz_frame`] (which drops a frame whose wrapper fails to
+/// validate), a fleet request from the trusted Manager link that fails
+/// validation is answered with a synthesized denied result so the manager's
+/// pending entry resolves rather than hanging. Only a frame that cannot be
+/// correlated at all (no `request_id`) is dropped outright.
+#[derive(Debug)]
+enum FleetExecGateOutcome {
+    /// Validated: the unwrapped frame (data = inner `ExecPlan`) plus the
+    /// validated authorization block to thread into the router handler.
+    Pass(SignalingModel, AuthorizationBlock),
+    /// Trusted source but the request is unauthorized / malformed; answer the
+    /// manager with a `RejectedBeforeDispatch` carrying `reason`.
+    Denied { request_id: String, reason: String },
+    /// Uncorrelatable garbage; drop silently (no result can be attributed).
+    Drop(String),
+}
+
+/// Dedicated authorization gate for `FleetExecRequest` (manager → daemon). The
+/// caller has already confirmed the Manager source. Validates the
+/// `AuthorizedControlPayload<ExecPlan>` wrapper; on success unwraps the inner
+/// plan and returns the validated authorization block.
+fn gate_fleet_exec_frame(
+    model: SignalingModel,
+    expected_audience: &str,
+    now_rfc3339: &str,
+) -> FleetExecGateOutcome {
+    let request_id = model.request_id.clone();
+    if request_id.is_empty() {
+        return FleetExecGateOutcome::Drop(
+            "FleetExecRequest without request_id (cannot correlate a result)".to_string(),
+        );
+    }
+
+    let raw = match model.get_raw_data().clone() {
+        Some(v) => v,
+        None => {
+            return FleetExecGateOutcome::Denied {
+                request_id,
+                reason: "pep_rejected:authz:missing_payload".to_string(),
+            };
+        }
+    };
+    let wrapper: AuthorizedControlPayload<serde_json::Value> = match serde_json::from_value(raw) {
+        Ok(w) => w,
+        Err(e) => {
+            return FleetExecGateOutcome::Denied {
+                request_id,
+                reason: format!("pep_rejected:authz:malformed_wrapper:{e}"),
+            };
+        }
+    };
+
+    if let Err(e) = wrapper
+        .authz
+        .validate(&request_id, expected_audience, now_rfc3339)
+    {
+        return FleetExecGateOutcome::Denied {
+            request_id,
+            reason: format!("pep_rejected:authz:{e:?}"),
+        };
+    }
+
+    let unwrapped = SignalingModel::new(
+        &request_id,
+        model.signaling_type,
+        model.from_connection_id.clone(),
+        model.to_connection_id.clone(),
+        Some(wrapper.inner),
+        model.response_state.clone(),
+    );
+    FleetExecGateOutcome::Pass(unwrapped, wrapper.authz)
+}
+
 /// Inbound-text dispatcher pulled out of `maintain_proxy_connection`
 /// so the parse / route sequence is reusable for tests and the
 /// per-frame logic stays out of the WS select loop.
@@ -1155,13 +1251,16 @@ async fn handle_inbound_signaling_text(
         }
     };
 
-    // Source gate: `CommandTemplateSync` and `CollectRequest` are trusted
-    // manager→daemon plumbing. Accept them only from the Manager link; a Local /
-    // remote-signaling origin (no trusted PDP) must never inject operator
-    // templates or drive an evidence collection.
+    // Source gate: `CommandTemplateSync`, `CollectRequest`, and
+    // `FleetExecRequest` are trusted manager→daemon plumbing. Accept them only
+    // from the Manager link; a Local / remote-signaling origin (no trusted PDP)
+    // must never inject operator templates, drive an evidence collection, or
+    // dispatch a sealed execution plan.
     if matches!(
         parsed.signaling_type,
-        SignalingType::CommandTemplateSync | SignalingType::CollectRequest
+        SignalingType::CommandTemplateSync
+            | SignalingType::CollectRequest
+            | SignalingType::FleetExecRequest
     ) && source != InboundSignalingSource::Manager
     {
         warn!(
@@ -1176,6 +1275,38 @@ async fn handle_inbound_signaling_text(
         s.system.get_client_id().unwrap_or_default()
     };
     let now = chrono::Utc::now().to_rfc3339();
+
+    // `FleetExecRequest` uses a dedicated authorization gate: a trusted-but-
+    // invalid request is answered with a synthesized denied result (so the
+    // manager's pending entry resolves) rather than silently dropped.
+    if parsed.signaling_type == SignalingType::FleetExecRequest {
+        match gate_fleet_exec_frame(parsed, &expected_audience, &now) {
+            FleetExecGateOutcome::Pass(unwrapped, block) => {
+                let effective_ctx = RouterContext {
+                    inbound_authz: Some(block),
+                    ..router_ctx.clone()
+                };
+                if let Err(e) = signaling_router::route(&unwrapped, &effective_ctx).await {
+                    warn!("[Proxy] router handler failed for FleetExecRequest: {e}");
+                }
+            }
+            FleetExecGateOutcome::Denied { request_id, reason } => {
+                warn!("[Proxy] FleetExecRequest denied ({reason}); replying denied result");
+                signaling_router::send_fleet_exec_result(
+                    &router_ctx.outbound_tx,
+                    &request_id,
+                    desk_agent_protocol::fleet_exec::FleetExecDisposition::RejectedBeforeDispatch {
+                        reason,
+                    },
+                );
+            }
+            FleetExecGateOutcome::Drop(reason) => {
+                warn!("[Proxy] Dropping FleetExecRequest: {reason}");
+            }
+        }
+        return;
+    }
+
     let (parsed, authz) = match gate_authz_frame(parsed, source, &expected_audience, &now) {
         AuthzGateOutcome::Pass(m, authz) => (m, authz),
         AuthzGateOutcome::Drop(reason) => {
@@ -1240,6 +1371,7 @@ mod tests {
             audit: Arc::new(LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
+            fleet_exec_pending: Default::default(),
         };
         (ctx, outbound_tx)
     }
@@ -1560,6 +1692,102 @@ mod tests {
                 "wrapper from {source:?} must be dropped"
             );
         }
+    }
+
+    // ====== FleetExecRequest dedicated gate ======
+
+    fn fleet_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
+        let template = desk_agent_protocol::command_template::SyncedCommandTemplate {
+            template_id: "svc_restart".into(),
+            argv: vec!["net".into(), "stop".into(), "spooler".into()],
+            effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+        };
+        let draft = desk_agent_protocol::exec_policy::build_exact_argv_draft(
+            &template,
+            desk_agent_protocol::exec_policy::ExecLimits::defaults(),
+            None,
+        );
+        desk_agent_protocol::exec::ExecPlan::from_draft(
+            desk_agent_protocol::exec::ExecRequestId("a1".into()),
+            desk_agent_protocol::exec::ApprovalId("appr-1".into()),
+            draft,
+        )
+    }
+
+    fn wrapped_fleet_exec_model(request_id: &str, audience: &str) -> SignalingModel {
+        let wrapper = AuthorizedControlPayload {
+            inner: fleet_exec_plan(),
+            authz: block(request_id, audience),
+        };
+        SignalingModel::new(
+            request_id,
+            SignalingType::FleetExecRequest,
+            None,
+            None,
+            Some(serde_json::to_value(&wrapper).unwrap()),
+            None,
+        )
+    }
+
+    #[test]
+    fn fleet_gate_passes_a_valid_wrapper_and_unwraps_the_plan() {
+        let model = wrapped_fleet_exec_model("a1", "dev-1");
+        match gate_fleet_exec_frame(model, "dev-1", NOW) {
+            FleetExecGateOutcome::Pass(unwrapped, authz) => {
+                // The inner ExecPlan is now the frame data (the wrapper is gone).
+                let plan = unwrapped
+                    .get_data::<desk_agent_protocol::exec::ExecPlan>()
+                    .expect("inner ExecPlan");
+                assert_eq!(plan.template_id, "svc_restart");
+                assert_eq!(authz.request_id, "a1");
+            }
+            other => panic!("expected Pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_gate_denies_an_audience_mismatch() {
+        // Validation fails (wrong audience) → a denied result is synthesized so
+        // the manager's pending entry resolves, rather than a silent drop.
+        let model = wrapped_fleet_exec_model("a1", "dev-1");
+        match gate_fleet_exec_frame(model, "other-device", NOW) {
+            FleetExecGateOutcome::Denied { request_id, reason } => {
+                assert_eq!(request_id, "a1");
+                assert!(reason.contains("pep_rejected:authz"), "{reason}");
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_gate_denies_a_malformed_wrapper() {
+        // A FleetExecRequest whose body is not an AuthorizedControlPayload is
+        // still correlatable (it has a request_id) → denied, not dropped.
+        let model = SignalingModel::new(
+            "a1",
+            SignalingType::FleetExecRequest,
+            None,
+            None,
+            Some(serde_json::json!({ "not": "a wrapper" })),
+            None,
+        );
+        match gate_fleet_exec_frame(model, "dev-1", NOW) {
+            FleetExecGateOutcome::Denied { request_id, reason } => {
+                assert_eq!(request_id, "a1");
+                assert!(reason.contains("malformed_wrapper"), "{reason}");
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fleet_gate_drops_an_uncorrelatable_request() {
+        // No request_id → no result can be attributed → drop.
+        let model = wrapped_fleet_exec_model("", "dev-1");
+        assert!(matches!(
+            gate_fleet_exec_frame(model, "dev-1", NOW),
+            FleetExecGateOutcome::Drop(_)
+        ));
     }
 
     #[test]

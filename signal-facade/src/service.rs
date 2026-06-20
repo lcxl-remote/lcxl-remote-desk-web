@@ -226,6 +226,23 @@ pub trait CollectObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== FleetExecObserver trait ======
+
+/// Consumes inbound `FleetExecResult` frames (a structured
+/// `FleetExecDisposition` for one fleet execution attempt) from a desk-server
+/// daemon. The manager implements this to route the result into its execution
+/// pending store, keyed by the per-attempt `request_id` and validated against
+/// the connection that the matching `FleetExecRequest` was pushed to; the signal
+/// server leaves it unset, so the frames are ignored there. `source` is the
+/// reporting connection (a token-authenticated desk server).
+pub trait FleetExecObserver: Send + Sync {
+    fn on_fleet_exec_result<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -315,6 +332,10 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its orchestrator's
     /// pending store); `None` elsewhere, where they are ignored.
     pub collect_observer: Option<Arc<dyn CollectObserver>>,
+    /// Fleet-execution result consumer for inbound `FleetExecResult` frames.
+    /// `Some` only in the manager (which feeds them into its execution pending
+    /// store); `None` elsewhere, where they are ignored.
+    pub fleet_exec_observer: Option<Arc<dyn FleetExecObserver>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -475,6 +496,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             control_authorizer: None,
             audit_observer: None,
             collect_observer: None,
+            fleet_exec_observer: None,
         })
     }
 
@@ -497,6 +519,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// `CollectResponse` frames are ignored there.
     pub fn with_collect_observer(mut self, observer: Arc<dyn CollectObserver>) -> Self {
         self.collect_observer = Some(observer);
+        self
+    }
+
+    /// Attach a fleet-execution result consumer (the manager execution pending
+    /// store). The signal server never calls this, so inbound `FleetExecResult`
+    /// frames are ignored there.
+    pub fn with_fleet_exec_observer(mut self, observer: Arc<dyn FleetExecObserver>) -> Self {
+        self.fleet_exec_observer = Some(observer);
         self
     }
 
@@ -868,6 +898,28 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 if let Some(observer) = self.collect_observer.clone() {
                     observer
                         .on_collect_response(&self.connection_state, &signaling_model)
+                        .await;
+                }
+            }
+            SignalingType::FleetExecRequest => {
+                // Manager → daemon only, originated server-side and written
+                // directly to the desk-server's session (the manager is the PDP).
+                // A client sending it inbound to the signaling server is a
+                // protocol error; swallow it so a control end cannot forge a
+                // sealed execution plan.
+                log::warn!(
+                    "Received fleet-exec request from client {}, ignoring",
+                    self.connection_state.model.connection_id
+                );
+            }
+            SignalingType::FleetExecResult => {
+                // Desk-server daemon → manager only. Consumed by the manager
+                // execution pending store; never relayed to a peer (it must not
+                // re-enter the control-end broadcast lane). Ignored where no
+                // execution consumer is attached (the signal server).
+                if let Some(observer) = self.fleet_exec_observer.clone() {
+                    observer
+                        .on_fleet_exec_result(&self.connection_state, &signaling_model)
                         .await;
                 }
             }

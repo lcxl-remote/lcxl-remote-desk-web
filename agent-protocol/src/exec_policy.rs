@@ -373,7 +373,11 @@ mod tests {
 
     #[test]
     fn build_exact_argv_draft_splits_program_and_args() {
-        let t = template("docker_ps_all", &["docker", "ps", "-a"], ExecEffect::ReadOnly);
+        let t = template(
+            "docker_ps_all",
+            &["docker", "ps", "-a"],
+            ExecEffect::ReadOnly,
+        );
         let draft = build_exact_argv_draft(&t, ExecLimits::defaults(), None);
         assert_eq!(draft.program, "docker");
         assert_eq!(draft.argv, vec!["ps", "-a"]);
@@ -393,7 +397,11 @@ mod tests {
 
     #[test]
     fn build_exact_argv_draft_carries_mutating_high_risk() {
-        let t = template("net_stop", &["net", "stop", "spooler"], ExecEffect::Mutating);
+        let t = template(
+            "net_stop",
+            &["net", "stop", "spooler"],
+            ExecEffect::Mutating,
+        );
         let draft = build_exact_argv_draft(&t, ExecLimits::defaults(), None);
         assert_eq!(draft.risk, RiskLevel::High);
     }

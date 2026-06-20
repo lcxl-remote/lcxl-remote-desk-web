@@ -35,6 +35,7 @@ pub mod diagnose;
 pub mod evidence;
 pub mod exec;
 pub mod exec_policy;
+pub mod fleet_exec;
 pub mod model_proxy;
 
 use crate::exec::{CommandClassification, ExecDecision, ExecEffect};

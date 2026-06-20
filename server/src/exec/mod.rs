@@ -23,9 +23,7 @@ mod tokenize;
 
 use desk_agent_protocol::command_template::SyncedCommandTemplate;
 use desk_agent_protocol::exec::{CommandClassification, ExecDecision, ExecPlanDraft};
-use desk_agent_protocol::exec_policy::{
-    blocked_raw_command, build_exact_argv_draft, fingerprint,
-};
+use desk_agent_protocol::exec_policy::{blocked_raw_command, build_exact_argv_draft, fingerprint};
 use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
 
 pub use desk_agent_protocol::exec_policy::ExecLimits;

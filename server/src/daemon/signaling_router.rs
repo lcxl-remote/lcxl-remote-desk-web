@@ -32,8 +32,11 @@ use desk_agent_protocol::diagnose::{
     DiagnoseEvent, DiagnoseRequestData,
 };
 use desk_agent_protocol::exec::{
-    ConfirmExecData, ExecDecision, ExecEffect, ExecPreview, ExecResultPayload, ResolveExecData,
+    ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,
+    ResolveExecData,
 };
+use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
+use desk_agent_protocol::fleet_exec::{FleetExecDisposition, FleetExecResultPayload};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode, OperationInput,
@@ -196,6 +199,14 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // inbound here, so a stray inbound copy is swallowed daemon-side.
         SignalingType::CollectRequest | SignalingType::CollectResponse => RouteOwnership::Daemon,
 
+        // Fleet batch-execution: `FleetExecRequest` is manager → daemon (the
+        // daemon PEP re-validates the manager-sealed `ExecPlan` and dispatches it
+        // to the worker); handled inline against the daemon's worker, never
+        // forwarded as-is. `FleetExecResult` is daemon-emitted toward the manager
+        // and never received inbound here, so a stray inbound copy is swallowed
+        // daemon-side.
+        SignalingType::FleetExecRequest | SignalingType::FleetExecResult => RouteOwnership::Daemon,
+
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
         // its own per-connection encoder set.
@@ -344,6 +355,12 @@ pub struct RouterContext {
     /// through the context (rather than the handler signatures) so the existing
     /// `route()` / handler call sites stay untouched.
     pub inbound_authz: Option<desk_agent_protocol::authz::AuthorizationBlock>,
+    /// Per-attempt `request_id`s of fleet executions currently dispatched to the
+    /// worker. When the worker replies with `WorkerToService::ExecResult` whose
+    /// `request_id` is in this set, the proxy emits a `FleetExecResult(614)`
+    /// toward the manager instead of an `ExecResult(609)` toward a browser.
+    /// Always present (in-memory state); only populated on the fleet exec path.
+    pub fleet_exec_pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Fresh audit event id.
@@ -622,6 +639,15 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // CollectResponse is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own stream).
         SignalingType::CollectResponse => Ok(()),
+        // Fleet batch-execution request from the manager: PEP re-validate the
+        // manager-sealed `ExecPlan` and dispatch it to the worker, correlating
+        // the worker's result back to the manager as a `FleetExecResult`. The
+        // source gate + dedicated authz gate (`signaling_proxy`) have already
+        // dropped non-Manager origins and unwrapped/validated the authorization.
+        SignalingType::FleetExecRequest => handle_fleet_exec_request_inbound(ctx, model).await,
+        // FleetExecResult is emitted by this daemon toward the manager; a stray
+        // inbound frame is swallowed (the daemon never consumes its own replies).
+        SignalingType::FleetExecResult => Ok(()),
     }
 }
 
@@ -759,9 +785,7 @@ fn handle_command_template_sync_inbound(
         return Ok(());
     }
     let revision = payload.command_template_revision;
-    let accepted = ctx
-        .command_templates
-        .replace(payload.templates, revision);
+    let accepted = ctx.command_templates.replace(payload.templates, revision);
     log::info!(
         "[router] applied operator command-template sync: {accepted} template(s) (revision {revision:?})"
     );
@@ -2716,6 +2740,181 @@ async fn dispatch_exec_plan(
     }
 }
 
+/// Send a `FleetExecResult(614)` toward the manager as a notification-style
+/// frame, correlated by the per-attempt `request_id`. Used both for the early
+/// PEP rejections (synthesized here) and for the worker's completed result
+/// (relayed by the signaling proxy).
+pub(crate) fn send_fleet_exec_result(
+    outbound_tx: &broadcast::Sender<String>,
+    request_id: &str,
+    disposition: FleetExecDisposition,
+) {
+    let payload = FleetExecResultPayload {
+        request_id: request_id.to_string(),
+        disposition,
+    };
+    send_notification(
+        outbound_tx,
+        request_id,
+        SignalingType::FleetExecResult,
+        None,
+        &payload,
+        "FleetExecResult",
+    );
+}
+
+/// Re-validate a manager-sealed [`ExecPlan`] against this daemon's own view
+/// (defense in depth — the manager draft is never trusted). Returns the model-
+/// safe rejection reason on the first failure, or `None` when the plan passes
+/// every check. The order mirrors the manager's preview: blocklist → exact-argv
+/// whitelist + fingerprint → `risk <= max_risk`.
+fn pep_validate_fleet_plan(
+    plan: &ExecPlan,
+    max_risk: desk_agent_protocol::RiskLevel,
+    templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
+) -> Option<String> {
+    // The blocklist operates over the full argv (program is `argv[0]`).
+    let full_argv: Vec<String> = std::iter::once(plan.program.clone())
+        .chain(plan.argv.iter().cloned())
+        .collect();
+    if let Some(rule) = blocked_argv(&full_argv) {
+        return Some(format!("pep_rejected:blocklist:{rule}"));
+    }
+
+    // Exact-argv whitelist: the plan's `template_id` must be in the synced
+    // allowlist, and re-rendering that template with the fleet-fixed limits must
+    // reproduce the plan byte-for-byte (program + argv + risk + fingerprint).
+    // The fingerprint folds in the limits, so a mismatched timeout / output cap
+    // is caught here too.
+    let Some(template) = templates.iter().find(|t| t.template_id == plan.template_id) else {
+        return Some("pep_rejected:template_not_in_allowlist".to_string());
+    };
+    let expected = build_exact_argv_draft(template, ExecLimits::defaults(), plan.cwd.clone());
+    if expected.program != plan.program
+        || expected.argv != plan.argv
+        || expected.risk != plan.risk
+        || expected.fingerprint != plan.fingerprint
+    {
+        return Some("pep_rejected:template_drift".to_string());
+    }
+
+    // max_risk ceiling (independent of the manager's per-device decision).
+    if plan.risk > max_risk {
+        return Some(format!(
+            "pep_rejected:risk_exceeds_max:{:?}>{:?}",
+            plan.risk, max_risk
+        ));
+    }
+
+    None
+}
+
+/// Handle an inbound `FleetExecRequest` from the manager. The frame has already
+/// passed the proxy's source gate (Manager-only) and dedicated authz gate (which
+/// unwrapped the inner [`ExecPlan`] and set `ctx.inbound_authz`). This re-
+/// validates the plan (PEP) and, on success, dispatches it to the worker
+/// correlated as a fleet execution; every exit emits exactly one
+/// `FleetExecResult` so the manager's pending entry always resolves.
+async fn handle_fleet_exec_request_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    let request_id = model.request_id.clone();
+
+    // The dedicated authz gate sets `inbound_authz` on success; its absence here
+    // is a routing fault. Reject (definitely not executed) rather than dispatch
+    // an unauthorized plan.
+    let Some(authz) = ctx.inbound_authz.clone() else {
+        send_fleet_exec_result(
+            &ctx.outbound_tx,
+            &request_id,
+            FleetExecDisposition::RejectedBeforeDispatch {
+                reason: "pep_rejected:missing_authorization".to_string(),
+            },
+        );
+        return Ok(());
+    };
+
+    let plan = match model.get_data::<ExecPlan>() {
+        Ok(p) => p,
+        Err(e) => {
+            send_fleet_exec_result(
+                &ctx.outbound_tx,
+                &request_id,
+                FleetExecDisposition::RejectedBeforeDispatch {
+                    reason: format!("pep_rejected:malformed_plan:{e}"),
+                },
+            );
+            return Ok(());
+        }
+    };
+
+    // Exec must be runnable in this startup mode. The manager's pre-claim version
+    // gate normally prevents dispatch to a daemon that cannot execute, but a PEP
+    // must never assume the PDP got it right.
+    if !ctx.exec_supported {
+        send_fleet_exec_result(
+            &ctx.outbound_tx,
+            &request_id,
+            FleetExecDisposition::RejectedBeforeDispatch {
+                reason: "pep_rejected:exec_unsupported_in_mode".to_string(),
+            },
+        );
+        return Ok(());
+    }
+
+    let templates = ctx.command_templates.snapshot();
+    if let Some(reason) = pep_validate_fleet_plan(&plan, authz.max_risk, &templates) {
+        log::warn!("[fleet-exec] PEP rejected plan for request {request_id}: {reason}");
+        send_fleet_exec_result(
+            &ctx.outbound_tx,
+            &request_id,
+            FleetExecDisposition::RejectedBeforeDispatch { reason },
+        );
+        return Ok(());
+    }
+
+    dispatch_fleet_exec_plan(ctx, &request_id, plan).await;
+    Ok(())
+}
+
+/// Dispatch a PEP-validated fleet [`ExecPlan`] to the worker, correlated so the
+/// worker's `WorkerToService::ExecResult` is relayed back to the manager as a
+/// `FleetExecResult(Executed{..})` (see the proxy's `ExecResult` handler). On a
+/// send failure the plan never reached the worker, so the change definitely did
+/// not run → `DispatchFailedBeforeWorker`.
+async fn dispatch_fleet_exec_plan(ctx: &RouterContext, request_id: &str, plan: ExecPlan) {
+    // Register the in-flight correlation BEFORE sending so a fast worker reply
+    // cannot race ahead of the marker.
+    if let Ok(mut pending) = ctx.fleet_exec_pending.lock() {
+        pending.insert(request_id.to_string());
+    }
+    let payload = ExecPlanPayload {
+        request_id: request_id.to_string(),
+        // No browser connection: a fleet result is routed by `request_id`, not a
+        // control-end connection id.
+        connection_id: None,
+        plan,
+        audit_source_request_id: Some(request_id.to_string()),
+    };
+    if let Err(e) = ctx
+        .worker_mgr
+        .send_to_worker(ServiceToWorker::ExecPlan(payload))
+        .await
+    {
+        if let Ok(mut pending) = ctx.fleet_exec_pending.lock() {
+            pending.remove(request_id);
+        }
+        send_fleet_exec_result(
+            &ctx.outbound_tx,
+            request_id,
+            FleetExecDisposition::DispatchFailedBeforeWorker {
+                reason: format!("worker unavailable: {e}"),
+            },
+        );
+    }
+}
+
 /// Assemble the authoritative [`AgentEnvelope`] from a parsed control-end
 /// operation by injecting every trusted field server-side. Pure so the
 /// trusted-field-injection invariant is unit-testable.
@@ -2940,6 +3139,10 @@ mod tests {
             SignalingType::Unknown,
             // AgentResponse only flows worker → control end.
             SignalingType::AgentResponse,
+            // Fleet exec: request handled inline (PEP + dispatch); result is
+            // daemon-emitted toward the manager.
+            SignalingType::FleetExecRequest,
+            SignalingType::FleetExecResult,
         ] {
             assert_eq!(
                 classify(t),
@@ -3008,6 +3211,7 @@ mod tests {
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
+            fleet_exec_pending: Default::default(),
         }
     }
 
@@ -5743,6 +5947,278 @@ mod tests {
             "a confirmed grant must allow the mutating command"
         );
         assert!(preview.requires_confirmation);
+    }
+
+    // ====== Fleet exec PEP + dispatch ======
+
+    use desk_agent_protocol::command_template::SyncedCommandTemplate;
+    use desk_agent_protocol::exec::ApprovalId;
+
+    /// A mutating exact-argv template that maps to `High` risk.
+    fn fleet_template() -> SyncedCommandTemplate {
+        SyncedCommandTemplate {
+            template_id: "svc_restart".into(),
+            argv: vec!["net".into(), "stop".into(), "spooler".into()],
+            effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+        }
+    }
+
+    /// Seal a manager-style fleet `ExecPlan` from a template (fleet-fixed limits,
+    /// no cwd) under the given per-attempt request id.
+    fn fleet_plan(template: &SyncedCommandTemplate, request_id: &str) -> ExecPlan {
+        let draft = build_exact_argv_draft(template, ExecLimits::defaults(), None);
+        ExecPlan::from_draft(
+            ExecRequestId(request_id.to_string()),
+            ApprovalId("appr-1".to_string()),
+            draft,
+        )
+    }
+
+    fn fleet_exec_model(request_id: &str, plan: &ExecPlan) -> SignalingModel {
+        // After the proxy's dedicated gate unwraps the wrapper, the router handler
+        // sees the inner `ExecPlan` as the frame data.
+        SignalingModel::new(
+            request_id,
+            SignalingType::FleetExecRequest,
+            None,
+            None,
+            Some(serde_json::to_value(plan).unwrap()),
+            None,
+        )
+    }
+
+    fn read_fleet_result(rx: &mut broadcast::Receiver<String>) -> FleetExecResultPayload {
+        read_response(rx)
+            .get_data::<FleetExecResultPayload>()
+            .expect("FleetExecResultPayload")
+    }
+
+    #[test]
+    fn pep_accepts_a_faithful_plan() {
+        let template = fleet_template();
+        let plan = fleet_plan(&template, "a1");
+        assert_eq!(
+            pep_validate_fleet_plan(
+                &plan,
+                desk_agent_protocol::RiskLevel::High,
+                std::slice::from_ref(&template)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pep_rejects_template_not_in_allowlist() {
+        let template = fleet_template();
+        let plan = fleet_plan(&template, "a1");
+        let reason = pep_validate_fleet_plan(&plan, desk_agent_protocol::RiskLevel::High, &[])
+            .expect("empty allowlist must reject");
+        assert!(reason.contains("template_not_in_allowlist"), "{reason}");
+    }
+
+    #[test]
+    fn pep_rejects_argv_tampering() {
+        let template = fleet_template();
+        let mut plan = fleet_plan(&template, "a1");
+        // Tamper with the argv after sealing; the fingerprint no longer matches
+        // the re-rendered template.
+        plan.argv.push("--force".into());
+        let reason = pep_validate_fleet_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::High,
+            std::slice::from_ref(&template),
+        )
+        .expect("tampered argv must reject");
+        assert!(reason.contains("template_drift"), "{reason}");
+    }
+
+    #[test]
+    fn pep_rejects_fingerprint_tampering() {
+        let template = fleet_template();
+        let mut plan = fleet_plan(&template, "a1");
+        plan.fingerprint = "deadbeef".into();
+        let reason = pep_validate_fleet_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::High,
+            std::slice::from_ref(&template),
+        )
+        .expect("tampered fingerprint must reject");
+        assert!(reason.contains("template_drift"), "{reason}");
+    }
+
+    #[test]
+    fn pep_rejects_risk_above_max() {
+        let template = fleet_template();
+        let plan = fleet_plan(&template, "a1");
+        // The plan is High; cap max_risk at Medium.
+        let reason = pep_validate_fleet_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::Medium,
+            std::slice::from_ref(&template),
+        )
+        .expect("risk above max_risk must reject");
+        assert!(reason.contains("risk_exceeds_max"), "{reason}");
+    }
+
+    #[test]
+    fn pep_rejects_blocklisted_argv() {
+        // A template whose argv hits the shared blocklist must be refused even if
+        // it were (hypothetically) synced.
+        let template = SyncedCommandTemplate {
+            template_id: "danger".into(),
+            argv: vec!["wevtutil".into(), "cl".into(), "System".into()],
+            effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+        };
+        let plan = fleet_plan(&template, "a1");
+        let reason = pep_validate_fleet_plan(
+            &plan,
+            desk_agent_protocol::RiskLevel::Critical,
+            std::slice::from_ref(&template),
+        )
+        .expect("blocklisted argv must reject");
+        assert!(reason.contains("blocklist"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn fleet_exec_without_authz_is_denied() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = None;
+        let template = fleet_template();
+        ctx.command_templates
+            .replace(vec![template.clone()], Some(1));
+        let plan = fleet_plan(&template, "a1");
+
+        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+        let result = read_fleet_result(&mut rx);
+        assert_eq!(result.request_id, "a1");
+        match result.disposition {
+            FleetExecDisposition::RejectedBeforeDispatch { reason } => {
+                assert!(reason.contains("missing_authorization"), "{reason}");
+            }
+            other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_exec_unsupported_mode_is_denied() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.exec_supported = false;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates
+            .replace(vec![template.clone()], Some(1));
+        let plan = fleet_plan(&template, "a1");
+
+        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+        match read_fleet_result(&mut rx).disposition {
+            FleetExecDisposition::RejectedBeforeDispatch { reason } => {
+                assert!(reason.contains("exec_unsupported_in_mode"), "{reason}");
+            }
+            other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_exec_pep_drift_is_denied_and_not_dispatched() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        // Sync a *different* template so the inbound plan does not match.
+        ctx.command_templates.replace(
+            vec![SyncedCommandTemplate {
+                template_id: "svc_restart".into(),
+                argv: vec!["net".into(), "start".into(), "spooler".into()],
+                effect: desk_agent_protocol::exec::ExecEffect::Mutating,
+            }],
+            Some(1),
+        );
+        let plan = fleet_plan(&fleet_template(), "a1");
+
+        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+        match read_fleet_result(&mut rx).disposition {
+            FleetExecDisposition::RejectedBeforeDispatch { reason } => {
+                assert!(reason.contains("template_drift"), "{reason}");
+            }
+            other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
+        }
+        // A rejected plan is never marked in-flight.
+        assert!(ctx.fleet_exec_pending.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fleet_exec_valid_plan_dispatches_to_worker_and_marks_in_flight() {
+        let (mut ctx, _rx, mut ipc_rx) = make_ctx_with_attached_supervisor().await;
+        ctx.exec_supported = true;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates
+            .replace(vec![template.clone()], Some(1));
+        let plan = fleet_plan(&template, "a1");
+
+        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+
+        // The worker received the sealed plan, correlated by the per-attempt id,
+        // and the daemon marked the attempt in-flight so the eventual worker
+        // ExecResult relays back as a FleetExecResult.
+        match ipc_rx.try_recv().expect("ExecPlan IPC") {
+            ServiceToWorker::ExecPlan(payload) => {
+                assert_eq!(payload.request_id, "a1");
+                assert!(payload.connection_id.is_none());
+                assert_eq!(payload.plan.template_id, "svc_restart");
+            }
+            other => panic!("expected ExecPlan IPC, got {other:?}"),
+        }
+        assert!(ctx.fleet_exec_pending.lock().unwrap().contains("a1"));
+    }
+
+    #[tokio::test]
+    async fn fleet_exec_valid_plan_without_worker_reports_dispatch_failed() {
+        let (mut ctx, mut rx) = exec_enabled_ctx(ExecutionMode::ConfirmEachAction).await;
+        ctx.inbound_authz = Some(authz_block(
+            vec![Capability::ShellExecConfirmed],
+            vec![],
+            ExecutionMode::ConfirmEachAction,
+            desk_agent_protocol::RiskLevel::High,
+        ));
+        let template = fleet_template();
+        ctx.command_templates
+            .replace(vec![template.clone()], Some(1));
+        let plan = fleet_plan(&template, "a1");
+
+        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+            .await
+            .unwrap();
+        // No worker is installed, so the dispatch fails before the worker ran.
+        match read_fleet_result(&mut rx).disposition {
+            FleetExecDisposition::DispatchFailedBeforeWorker { reason } => {
+                assert!(reason.contains("worker unavailable"), "{reason}");
+            }
+            other => panic!("expected DispatchFailedBeforeWorker, got {other:?}"),
+        }
+        // The in-flight marker is cleared on a failed dispatch.
+        assert!(ctx.fleet_exec_pending.lock().unwrap().is_empty());
     }
 
     /// SessionApproved: the first confirmation of a template prompts and parks a
