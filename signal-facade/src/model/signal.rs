@@ -266,6 +266,22 @@ pub enum SignalingType {
     #[wincode(tag = 614)]
     FleetExecResult = 614,
 
+    /// Remote read-tool request (manager owner instance → desk-server daemon
+    /// only). Carries `desk_agent_protocol::remote_tool::RemoteToolRequest`: one
+    /// server-stamped capability call the agentic loop (running centrally on the
+    /// manager) wants the edge to run. The owning instance writes it directly to
+    /// the edge's session; a client sending it inbound to the signaling server is a
+    /// protocol error and is swallowed. Notification-style (`response_state = None`).
+    #[wincode(tag = 615)]
+    RemoteToolRequest = 615,
+    /// Remote read-tool response (desk-server daemon → manager owner instance
+    /// only). Carries `desk_agent_protocol::remote_tool::RemoteToolResponse` (a
+    /// chunk of the already-redacted result or a wholesale error). Consumed by the
+    /// manager's remote-tool pending store, never relayed to a browser or another
+    /// peer. Notification-style (`response_state = None`).
+    #[wincode(tag = 616)]
+    RemoteToolResponse = 616,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,
@@ -887,7 +903,7 @@ mod wincode_tests {
     /// the enum, this table must be extended — leaving it incomplete
     /// is precisely the regression `signaling_type_wire_tag_matches_…`
     /// is built to catch.
-    fn all_variants_with_tag() -> [(SignalingType, i32); 51] {
+    fn all_variants_with_tag() -> [(SignalingType, i32); 53] {
         [
             (SignalingType::Heartbeat, 1),
             (SignalingType::FetchConnections, 21),
@@ -924,6 +940,8 @@ mod wincode_tests {
             (SignalingType::CollectResponse, 612),
             (SignalingType::FleetExecRequest, 613),
             (SignalingType::FleetExecResult, 614),
+            (SignalingType::RemoteToolRequest, 615),
+            (SignalingType::RemoteToolResponse, 616),
             (SignalingType::ManagerSystemInfo, 10003),
             (SignalingType::ManagerSystemStatue, 10004),
             (SignalingType::ManagerFileList, 10005),

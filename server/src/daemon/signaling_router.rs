@@ -207,6 +207,15 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // daemon-side.
         SignalingType::FleetExecRequest | SignalingType::FleetExecResult => RouteOwnership::Daemon,
 
+        // Remote read-tool RPC (§8.3): `RemoteToolRequest` is manager → daemon
+        // (the daemon runs the one server-stamped read locally); handled inline,
+        // never forwarded. `RemoteToolResponse` is daemon-emitted toward the
+        // manager and never received inbound here, so a stray inbound copy is
+        // swallowed daemon-side.
+        SignalingType::RemoteToolRequest | SignalingType::RemoteToolResponse => {
+            RouteOwnership::Daemon
+        }
+
         // Connection-list bookkeeping is daemon state too — the
         // daemon knows about every active PC, the worker only knows
         // its own per-connection encoder set.
@@ -322,6 +331,11 @@ pub struct RouterContext {
     /// remote-collect edge path and cancel audit); `None` in ServiceDaemon mode,
     /// where `Diagnose` replies feature-unavailable.
     pub diagnose_agent: Option<Arc<crate::diagnose::direct_runtime::DirectAgentRuntime>>,
+    /// Serves a manager remote read tool call (§8.3) against the in-process device
+    /// agent. Present in the same modes as `diagnose_orchestrator` (an in-process
+    /// worker can read locally); `None` in ServiceDaemon, where a `RemoteToolRequest`
+    /// replies with a wholesale error.
+    pub remote_read: Option<Arc<crate::diagnose::remote_read::EdgeReadInvoker>>,
     /// Whether confirmed execution is available in this startup mode. `true`
     /// only where an in-process worker can execute (Default / DeskServer);
     /// `false` in ServiceDaemon mode, where `ConfirmExec` / `ResolveExec` reply
@@ -654,6 +668,14 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // FleetExecResult is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own replies).
         SignalingType::FleetExecResult => Ok(()),
+        // Remote read-tool request from the manager (agentic loop running
+        // centrally): run the one server-stamped read locally and stream a chunked
+        // RemoteToolResponse back. The source gate has already dropped any
+        // non-Manager origin before reaching here.
+        SignalingType::RemoteToolRequest => handle_remote_tool_request_inbound(ctx, model).await,
+        // RemoteToolResponse is emitted by this daemon toward the manager; a stray
+        // inbound frame is swallowed (the daemon never consumes its own stream).
+        SignalingType::RemoteToolResponse => Ok(()),
     }
 }
 
@@ -754,6 +776,111 @@ fn send_collect_error(
             request_id: request_id.to_string(),
             error_kind: kind,
             reason: reason.to_string(),
+        }),
+    );
+}
+
+/// Handle an inbound remote read-tool request from the manager (§8.3). Runs the
+/// one server-stamped capability call against the in-process device agent (which
+/// enforces the envelope's gate), redacts the result fail-closed, and streams it
+/// back as a chunked `RemoteToolResponse`. Always replies (a chunk stream or an
+/// error frame) so the manager's pending entry never hangs.
+async fn handle_remote_tool_request_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_agent_protocol::remote_tool::{
+        REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT, RemoteToolRequest, RemoteToolResponse,
+    };
+    let request: RemoteToolRequest = match model.get_data::<RemoteToolRequest>() {
+        Ok(r) => r,
+        Err(e) => {
+            // No request_id to correlate; log and drop (the manager times out).
+            log::warn!("[router] dropping malformed RemoteToolRequest: {e}");
+            return Ok(());
+        }
+    };
+    let request_id = request.request_id.clone();
+
+    // The read invoker is only injected where an in-process worker can read
+    // (Default / DeskServer). Without it the edge cannot serve a remote read.
+    let Some(invoker) = ctx.remote_read.clone() else {
+        send_remote_tool_error(
+            &ctx.outbound_tx,
+            &request_id,
+            AgentErrorKind::SessionUnavailable,
+            "remote read is not available on this host",
+        );
+        return Ok(());
+    };
+
+    match invoker.invoke_redacted(request.envelope).await {
+        Ok(outcome) => match serde_json::to_vec(&outcome) {
+            Ok(bytes) => {
+                for chunk in desk_diagnose_core::chunk::chunk_bytes(
+                    &request_id,
+                    &bytes,
+                    REMOTE_TOOL_CHUNK_PAYLOAD_LIMIT,
+                ) {
+                    send_remote_tool_response(&ctx.outbound_tx, &RemoteToolResponse::Chunk(chunk));
+                }
+            }
+            Err(e) => {
+                send_remote_tool_error(
+                    &ctx.outbound_tx,
+                    &request_id,
+                    AgentErrorKind::Internal,
+                    &format!("failed to encode remote tool result: {e}"),
+                );
+            }
+        },
+        Err(e) => {
+            // Preserve the failure class (notably a fail-closed `RedactionFailed`
+            // or a gate `PermissionDenied`) so the central loop reports it safely.
+            send_remote_tool_error(&ctx.outbound_tx, &request_id, e.kind, &e.message);
+        }
+    }
+    Ok(())
+}
+
+/// Serialize and emit a [`RemoteToolResponse`](desk_agent_protocol::remote_tool::RemoteToolResponse)
+/// frame toward the manager over the outbound lane (correlation rides the
+/// payload's `request_id`, consumed only by the manager's remote-tool observer).
+fn send_remote_tool_response(
+    outbound_tx: &broadcast::Sender<String>,
+    response: &desk_agent_protocol::remote_tool::RemoteToolResponse,
+) {
+    match SignalingModel::new_request(SignalingType::RemoteToolResponse, None, Some(response)) {
+        Ok(model) => match serde_json::to_string(&model) {
+            Ok(text) => {
+                let _ = outbound_tx.send(text);
+            }
+            Err(e) => log::warn!("[rtool] failed to serialize RemoteToolResponse: {e}"),
+        },
+        Err(e) => log::warn!("[rtool] failed to build RemoteToolResponse model: {e}"),
+    }
+}
+
+/// Emit a wholesale [`RemoteToolResponse::Error`](desk_agent_protocol::remote_tool::RemoteToolResponse)
+/// for `request_id`, tagged with the model-safe failure so the central loop turns
+/// it into an error tool-result.
+fn send_remote_tool_error(
+    outbound_tx: &broadcast::Sender<String>,
+    request_id: &str,
+    kind: AgentErrorKind,
+    reason: &str,
+) {
+    use desk_agent_protocol::remote_tool::{RemoteToolResponse, RemoteToolResponseError};
+    send_remote_tool_response(
+        outbound_tx,
+        &RemoteToolResponse::Error(RemoteToolResponseError {
+            request_id: request_id.to_string(),
+            error: AgentError {
+                kind,
+                message: reason.to_string(),
+                retryable: false,
+                safe_for_model: true,
+            },
         }),
     );
 }
@@ -3200,6 +3327,7 @@ mod tests {
             virtual_display: None,
             diagnose_orchestrator: None,
             diagnose_agent: None,
+            remote_read: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             session_approvals: Arc::new(

@@ -243,6 +243,23 @@ pub trait FleetExecObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== RemoteToolObserver trait ======
+
+/// Consumes inbound `RemoteToolResponse` frames (chunks of an already-redacted
+/// remote read result, or a wholesale error) from a desk-server daemon. The
+/// manager implements this to feed the chunk into its remote-tool pending store,
+/// keyed by `request_id` and validated against the connection the matching
+/// `RemoteToolRequest` was written to; the signal server leaves it unset, so the
+/// frames are ignored there. `source` is the reporting connection (a
+/// token-authenticated desk server).
+pub trait RemoteToolObserver: Send + Sync {
+    fn on_remote_tool_response<'a>(
+        &'a self,
+        source: &'a ConnectionState,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -336,6 +353,10 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its execution pending
     /// store); `None` elsewhere, where they are ignored.
     pub fleet_exec_observer: Option<Arc<dyn FleetExecObserver>>,
+    /// Remote read-tool response consumer for inbound `RemoteToolResponse` frames.
+    /// `Some` only in the manager (which feeds them into its remote-tool pending
+    /// store); `None` elsewhere, where they are ignored.
+    pub remote_tool_observer: Option<Arc<dyn RemoteToolObserver>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -497,6 +518,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             audit_observer: None,
             collect_observer: None,
             fleet_exec_observer: None,
+            remote_tool_observer: None,
         })
     }
 
@@ -527,6 +549,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_fleet_exec_observer(mut self, observer: Arc<dyn FleetExecObserver>) -> Self {
         self.fleet_exec_observer = Some(observer);
+        self
+    }
+
+    /// Attach a remote-tool response consumer (the manager's remote-tool pending
+    /// store). The signal server never calls this, so inbound `RemoteToolResponse`
+    /// frames are ignored there.
+    pub fn with_remote_tool_observer(mut self, observer: Arc<dyn RemoteToolObserver>) -> Self {
+        self.remote_tool_observer = Some(observer);
         self
     }
 
@@ -911,6 +941,26 @@ impl<U: SignalingUser> SignalingHandler<U> {
                     "Received fleet-exec request from client {}, ignoring",
                     self.connection_state.model.connection_id
                 );
+            }
+            SignalingType::RemoteToolRequest => {
+                // Manager owner instance → daemon only, written directly to the
+                // desk-server's session. A client sending it inbound to the
+                // signaling server is a protocol error; swallow it so a control end
+                // cannot forge a remote tool invocation.
+                log::warn!(
+                    "Received remote-tool request from client {}, ignoring",
+                    self.connection_state.model.connection_id
+                );
+            }
+            SignalingType::RemoteToolResponse => {
+                // Desk-server daemon → manager only. Consumed by the manager
+                // remote-tool pending store; never relayed to a peer. Ignored where
+                // no remote-tool consumer is attached (the signal server).
+                if let Some(observer) = self.remote_tool_observer.clone() {
+                    observer
+                        .on_remote_tool_response(&self.connection_state, &signaling_model)
+                        .await;
+                }
             }
             SignalingType::FleetExecResult => {
                 // Desk-server daemon → manager only. Consumed by the manager
