@@ -363,6 +363,18 @@ impl PersistedAgentSession {
         true
     }
 
+    /// The tool-call ids the conversation left unanswered — an assistant tool call
+    /// with no matching tool result, left dangling when a turn was interrupted
+    /// mid-execution. A recovering [`SessionSeam`] reads these to correlate the
+    /// in-flight call with its durable work item before deciding the recovery
+    /// [`verdict`]. First-seen order, de-duplicated.
+    ///
+    /// [`verdict`]: RecoveryVerdict
+    /// [`SessionSeam`]: crate::seam::SessionSeam
+    pub fn unclosed_tool_call_ids(&self) -> Vec<String> {
+        unclosed_tool_call_ids(&self.conversation)
+    }
+
     /// Recover an orphaned **active** session (its lease expired and was taken over)
     /// into a well-formed, settled state, per an explicitly supplied [`verdict`].
     ///
@@ -851,6 +863,34 @@ mod tests {
         s.begin_turn("t2", None, None, 7, s.scope_snapshot.clone(), "t")
             .unwrap();
         assert_eq!(s.lease_token, 2, "second claim rotates again");
+    }
+
+    /// The public accessor surfaces dangling tool calls (no matching tool result)
+    /// so a recovering seam can correlate them with durable work; answered calls are
+    /// excluded.
+    #[test]
+    fn unclosed_tool_call_ids_lists_only_dangling_calls() {
+        use crate::chat::{ChatMessage, ToolCallRef};
+        let mut s = session();
+        s.conversation.push(ChatMessage::assistant_tool_calls(
+            "a1",
+            String::new(),
+            vec![
+                ToolCallRef {
+                    id: "answered".into(),
+                    name: "read".into(),
+                    arguments_json: "{}".into(),
+                },
+                ToolCallRef {
+                    id: "dangling".into(),
+                    name: "exec_command".into(),
+                    arguments_json: "{}".into(),
+                },
+            ],
+        ));
+        s.conversation
+            .push(ChatMessage::tool_result("r1", "answered", "ok"));
+        assert_eq!(s.unclosed_tool_call_ids(), vec!["dangling".to_string()]);
     }
 
     /// Recovery of an interrupted mutating turn with no recoverable identity closes
