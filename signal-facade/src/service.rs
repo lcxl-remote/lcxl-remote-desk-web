@@ -842,13 +842,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::DesktopSwitching
             | SignalingType::DesktopReady
             // AI host → control-end responses are plain relayed types (no
-            // authorization injection on the reply path). ResolveExec rides the
-            // prior approval, not a fresh policy decision, so it relays plainly
-            // too.
+            // authorization injection on the reply path).
             | SignalingType::AgentResponse
             | SignalingType::DiagnoseEvent
             | SignalingType::ExecPreview
-            | SignalingType::ResolveExec
             | SignalingType::ExecResult => {
                 // Generic forwarding
                 self.forward_to_peer(&signaling_model, false).await?;
@@ -877,10 +874,15 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // record the cancellation rather than be relayed to a host that has
             // no diagnose task. With no authorizer (signal server) it relays to
             // the host that is running the diagnosis, exactly like before.
+            // `ResolveExec` is included so the manager can consume an agentic exec
+            // approval centrally (it owns the durable work item). A host exec's
+            // ResolveExec is relayed unwrapped by the authorizer (`Forward`); with no
+            // authorizer (signal server) it relays plainly, exactly like before.
             SignalingType::AgentRequest
             | SignalingType::Diagnose
             | SignalingType::DiagnoseCancel
-            | SignalingType::ConfirmExec => {
+            | SignalingType::ConfirmExec
+            | SignalingType::ResolveExec => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
                     match authorizer
                         .authorize(&self.connection_state, &self.connection_map, &signaling_model)
