@@ -313,6 +313,12 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
         system_prompt: build_agentic_system_message(request.locale.as_deref()),
         max_context_bytes: desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES,
         clock: &clock,
+        // No background lease renewer on the Direct runtime: a conversation has a
+        // single in-process owner, so a lapsed lease is never concurrently taken
+        // over mid-run (only a later claim of the same id recovers an orphan, and
+        // the frontend mints a new id on reset/handoff). The owner's own saves keep
+        // the lease fresh while it makes progress.
+        heartbeat: None,
     };
     let claim = ClaimTurnParams {
         conversation_id: conversation_key,
@@ -769,9 +775,13 @@ mod tests {
             settings(true),
         );
         let (_s1, sink1) = recorder();
-        runtime.run("req-a", request("first question"), None, None, sink1).await;
+        runtime
+            .run("req-a", request("first question"), None, None, sink1)
+            .await;
         let (_s2, sink2) = recorder();
-        runtime.run("req-b", request("second question"), None, None, sink2).await;
+        runtime
+            .run("req-b", request("second question"), None, None, sink2)
+            .await;
 
         let seen = model.seen.lock().unwrap();
         let turn2: Vec<&str> = seen[1].iter().map(|m| m.text.as_str()).collect();

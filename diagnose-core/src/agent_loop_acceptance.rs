@@ -268,6 +268,7 @@ fn deps<'a>(
         system_prompt: build_agentic_system_message(None),
         max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
         clock,
+        heartbeat: None,
     }
 }
 

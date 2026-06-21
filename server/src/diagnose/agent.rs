@@ -799,6 +799,7 @@ mod tests {
             system_prompt: desk_diagnose_core::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES,
             clock: &clock,
+            heartbeat: None,
         };
         let claim = ClaimTurnParams {
             conversation_id: "conv-1".into(),

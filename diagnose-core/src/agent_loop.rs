@@ -86,6 +86,11 @@ pub struct LoopDeps<'a> {
     pub max_context_bytes: usize,
     /// Wall-clock source (RFC3339); the core stays free of a time dependency.
     pub clock: &'a dyn Fn() -> String,
+    /// Optional background lease renewer. After the turn is claimed the loop starts
+    /// it with the claimed lease token and drops it when the turn settles, so a
+    /// long-running turn keeps its lease alive and is not reclaimed as an orphan.
+    /// `None` disables renewal (test stubs / runtimes without a lease).
+    pub heartbeat: Option<&'a dyn crate::seam::LeaseHeartbeat>,
 }
 
 /// Run one agent turn end to end. `user_message` is appended after the turn is
@@ -104,6 +109,12 @@ pub async fn run_agent_turn(
         Err(ClaimError::Subject(m)) => return Ok(LoopOutcome::SubjectRejected(m)),
         Err(ClaimError::Backend(e)) => return Err(e),
     };
+
+    // Keep the lease alive for the (possibly long) turn with the just-claimed
+    // token; the guard stops renewal when dropped on every exit path below.
+    let _lease_guard = deps
+        .heartbeat
+        .map(|h| h.start(session.conversation_id.clone(), session.lease_token));
 
     // Append the user's message and persist before the first model call.
     session.conversation.push(user_message);
@@ -554,6 +565,7 @@ mod tests {
             system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
             clock,
+            heartbeat: None,
         }
     }
 
@@ -1074,6 +1086,7 @@ mod tests {
             system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
             clock,
+            heartbeat: None,
         }
     }
 
@@ -1291,6 +1304,7 @@ mod tests {
             system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
             clock: &clock,
+            heartbeat: None,
         };
         let err = run_agent_turn(&deps, exec_claim(), user, &mut sink)
             .await
