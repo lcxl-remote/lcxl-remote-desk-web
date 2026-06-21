@@ -252,12 +252,26 @@ pub struct Diagnosis {
 pub enum DiagnoseEventKind {
     /// A lifecycle status update (collecting / redacting / modeling / ...).
     Status,
-    /// An incremental summary token from the streaming model.
+    /// An incremental summary / answer token from the streaming model.
     Partial,
-    /// Terminal: the structured result.
+    /// Terminal: the structured result (single-turn diagnose).
     Final,
     /// Terminal: the diagnosis failed.
     Error,
+    /// An agentic turn has started (carries `turn_id`).
+    TurnStarted,
+    /// A tool call was dispatched (read tool) or is awaiting approval (mutating
+    /// tool); carries `tool_name` + `tool_call_id` (and `awaiting_approval`).
+    ToolStarted,
+    /// A dispatched tool call produced its result; carries `tool_call_id` +
+    /// `tool_ok`.
+    ToolFinished,
+    /// Terminal: the agentic turn committed a final natural-language answer
+    /// (carries `answer`). Distinct from [`Final`], which carries a structured
+    /// [`Diagnosis`] for the single-turn path.
+    ///
+    /// [`Final`]: DiagnoseEventKind::Final
+    Answer,
 }
 
 /// One streamed frame of a diagnosis (server → control end). Notification-style:
@@ -283,66 +297,139 @@ pub struct DiagnoseEvent {
     /// `retryable` carry through to the UI).
     #[serde(default)]
     pub error: Option<AgentError>,
+    /// `kind = TurnStarted`: the id of the agentic turn that started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// `kind = ToolStarted`: the model-facing name of the tool being run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// `kind = ToolStarted` / `ToolFinished`: the tool call id, correlating the
+    /// start and finish of one call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// `kind = ToolStarted`: whether the tool is a mutating one waiting for the
+    /// operator's approval (vs a read tool that runs immediately).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_approval: bool,
+    /// `kind = ToolFinished`: whether the call produced a usable result (vs an
+    /// error / rejection / unknown outcome).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ok: Option<bool>,
+    /// `kind = Answer`: the agentic turn's final natural-language answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 impl DiagnoseEvent {
+    /// An empty frame of `kind` with all payload fields cleared; the public
+    /// constructors set only the field their kind carries.
+    fn base(request_id: impl Into<String>, seq: u32, kind: DiagnoseEventKind) -> Self {
+        Self {
+            request_id: request_id.into(),
+            seq,
+            kind,
+            status: None,
+            partial_summary: None,
+            final_result: None,
+            error: None,
+            turn_id: None,
+            tool_name: None,
+            tool_call_id: None,
+            awaiting_approval: false,
+            tool_ok: None,
+            answer: None,
+        }
+    }
+
     /// A `Status` frame announcing a lifecycle phase.
     pub fn status(request_id: impl Into<String>, seq: u32, phase: impl Into<String>) -> Self {
         Self {
-            request_id: request_id.into(),
-            seq,
-            kind: DiagnoseEventKind::Status,
             status: Some(phase.into()),
-            partial_summary: None,
-            final_result: None,
-            error: None,
+            ..Self::base(request_id, seq, DiagnoseEventKind::Status)
         }
     }
 
-    /// A `Partial` frame carrying a streaming summary fragment.
+    /// A `Partial` frame carrying a streaming summary / answer fragment.
     pub fn partial(request_id: impl Into<String>, seq: u32, fragment: impl Into<String>) -> Self {
         Self {
-            request_id: request_id.into(),
-            seq,
-            kind: DiagnoseEventKind::Partial,
-            status: None,
             partial_summary: Some(fragment.into()),
-            final_result: None,
-            error: None,
+            ..Self::base(request_id, seq, DiagnoseEventKind::Partial)
         }
     }
 
-    /// A terminal `Final` frame carrying the structured diagnosis.
+    /// A terminal `Final` frame carrying the structured diagnosis (single-turn).
     pub fn final_result(request_id: impl Into<String>, seq: u32, diagnosis: Diagnosis) -> Self {
         Self {
-            request_id: request_id.into(),
-            seq,
-            kind: DiagnoseEventKind::Final,
-            status: None,
-            partial_summary: None,
             final_result: Some(diagnosis),
-            error: None,
+            ..Self::base(request_id, seq, DiagnoseEventKind::Final)
         }
     }
 
     /// A terminal `Error` frame.
     pub fn error(request_id: impl Into<String>, seq: u32, error: AgentError) -> Self {
         Self {
-            request_id: request_id.into(),
-            seq,
-            kind: DiagnoseEventKind::Error,
-            status: None,
-            partial_summary: None,
-            final_result: None,
             error: Some(error),
+            ..Self::base(request_id, seq, DiagnoseEventKind::Error)
         }
     }
 
-    /// Whether this is a terminal frame (`Final` or `Error`).
+    /// A `TurnStarted` frame announcing an agentic turn.
+    pub fn turn_started(
+        request_id: impl Into<String>,
+        seq: u32,
+        turn_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            turn_id: Some(turn_id.into()),
+            ..Self::base(request_id, seq, DiagnoseEventKind::TurnStarted)
+        }
+    }
+
+    /// A `ToolStarted` frame: a read tool dispatched, or — when
+    /// `awaiting_approval` — a mutating tool waiting for the operator.
+    pub fn tool_started(
+        request_id: impl Into<String>,
+        seq: u32,
+        tool_name: impl Into<String>,
+        tool_call_id: impl Into<String>,
+        awaiting_approval: bool,
+    ) -> Self {
+        Self {
+            tool_name: Some(tool_name.into()),
+            tool_call_id: Some(tool_call_id.into()),
+            awaiting_approval,
+            ..Self::base(request_id, seq, DiagnoseEventKind::ToolStarted)
+        }
+    }
+
+    /// A `ToolFinished` frame: a dispatched tool call produced its result.
+    pub fn tool_finished(
+        request_id: impl Into<String>,
+        seq: u32,
+        tool_call_id: impl Into<String>,
+        ok: bool,
+    ) -> Self {
+        Self {
+            tool_call_id: Some(tool_call_id.into()),
+            tool_ok: Some(ok),
+            ..Self::base(request_id, seq, DiagnoseEventKind::ToolFinished)
+        }
+    }
+
+    /// A terminal `Answer` frame carrying the agentic turn's final answer text.
+    pub fn answer(request_id: impl Into<String>, seq: u32, answer: impl Into<String>) -> Self {
+        Self {
+            answer: Some(answer.into()),
+            ..Self::base(request_id, seq, DiagnoseEventKind::Answer)
+        }
+    }
+
+    /// Whether this is a terminal frame: a single-turn `Final`, an agentic
+    /// `Answer`, or an `Error` — each ends its request's stream.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self.kind,
-            DiagnoseEventKind::Final | DiagnoseEventKind::Error
+            DiagnoseEventKind::Final | DiagnoseEventKind::Answer | DiagnoseEventKind::Error
         )
     }
 }
@@ -429,9 +516,13 @@ mod tests {
     }
 
     #[test]
-    fn only_final_and_error_are_terminal() {
+    fn terminal_frames_are_final_answer_and_error() {
         assert!(!DiagnoseEvent::status("r", 0, "x").is_terminal());
         assert!(!DiagnoseEvent::partial("r", 1, "y").is_terminal());
+        assert!(!DiagnoseEvent::turn_started("r", 0, "turn-1").is_terminal());
+        assert!(!DiagnoseEvent::tool_started("r", 1, "sysinfo", "c1", false).is_terminal());
+        assert!(!DiagnoseEvent::tool_finished("r", 2, "c1", true).is_terminal());
+        assert!(DiagnoseEvent::answer("r", 3, "all good").is_terminal());
         assert!(DiagnoseEvent::final_result("r", 2, Diagnosis::default()).is_terminal());
         assert!(
             DiagnoseEvent::error(
@@ -446,6 +537,39 @@ mod tests {
             )
             .is_terminal()
         );
+    }
+
+    /// The agentic tool/turn frames round-trip through both JSON and wincode, and
+    /// a mutating tool start carries the awaiting-approval flag.
+    #[test]
+    fn agentic_event_frames_round_trip() {
+        let config = unbounded_config();
+        let frames = [
+            DiagnoseEvent::turn_started("req_1", 0, "turn-1"),
+            DiagnoseEvent::tool_started("req_1", 1, "read_system_info", "c1", false),
+            DiagnoseEvent::tool_started("req_1", 2, "exec_command", "c2", true),
+            DiagnoseEvent::tool_finished("req_1", 3, "c1", true),
+            DiagnoseEvent::tool_finished("req_1", 4, "c2", false),
+            DiagnoseEvent::answer("req_1", 5, "the host is healthy"),
+        ];
+        for frame in frames {
+            let json = serde_json::to_string(&frame).expect("json encode");
+            let back: DiagnoseEvent = serde_json::from_str(&json).expect("json decode");
+            assert_eq!(frame, back);
+
+            let bytes = wincode::config::serialize(&frame, config).expect("wincode encode");
+            let back2: DiagnoseEvent =
+                wincode::config::deserialize(&bytes, config).expect("wincode decode");
+            assert_eq!(frame, back2);
+        }
+
+        // The mutating tool start is flagged awaiting approval; a read start is not.
+        assert!(DiagnoseEvent::tool_started("r", 0, "exec_command", "c", true).awaiting_approval);
+        let read = DiagnoseEvent::tool_started("r", 0, "sysinfo", "c", false);
+        assert!(!read.awaiting_approval);
+        // The default-false flag is omitted from JSON.
+        let json = serde_json::to_string(&read).unwrap();
+        assert!(!json.contains("awaiting_approval"));
     }
 
     #[test]
