@@ -32,6 +32,21 @@ describe('getKeyboardShortcuts', () => {
         ]);
     });
 
+    it('appends an Esc entry only when includeEscape is set', () => {
+        for (const os of ['Mac', 'Windows', undefined] as const) {
+            expect(getKeyboardShortcuts(os).some(s => s.id === 'escape')).toBe(false);
+            const withEsc = getKeyboardShortcuts(os, { includeEscape: true });
+            const esc = withEsc.find(s => s.id === 'escape');
+            expect(esc).toBeDefined();
+            // Esc is appended last and sends a bare Escape (VK 27).
+            expect(withEsc[withEsc.length - 1].id).toBe('escape');
+            expect(esc!.events).toEqual([
+                { event: 'keydown', keyCode: 27 },
+                { event: 'keyup', keyCode: 27 },
+            ]);
+        }
+    });
+
     it('gives every shortcut a unique id and an i18n label key', () => {
         for (const os of ['Mac', 'Windows'] as const) {
             const shortcuts = getKeyboardShortcuts(os);

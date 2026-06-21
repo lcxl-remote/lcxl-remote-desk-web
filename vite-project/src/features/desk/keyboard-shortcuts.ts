@@ -70,11 +70,32 @@ const MACOS_SHORTCUTS: KeyboardShortcut[] = [
     { id: "quitApp", labelKey: "pages.desk.shortcut.quitApp", labelFallback: "⌘ + Q (Quit App)", events: chord(VK.META, VK.Q) },
 ];
 
+// Sending a bare Escape to the host. Offered as an explicit menu entry only
+// when the Keyboard Lock API is unavailable (no HTTPS / non-Chromium), because
+// then a plain fullscreen swallows Escape and the host never receives it.
+const ESCAPE_SHORTCUT: KeyboardShortcut = {
+    id: "escape",
+    labelKey: "pages.desk.shortcut.escape",
+    labelFallback: "Esc",
+    events: chord(VK.ESC),
+};
+
+export type KeyboardShortcutOptions = {
+    /** Append an explicit Esc entry (use when Escape cannot be captured). */
+    includeEscape?: boolean;
+};
+
 /**
  * Host-targeted keyboard-shortcut menu for the given remote OS. macOS hosts get
  * the Command-based set; every other (or unknown) host falls back to the
- * Windows set, which is also a reasonable default for Linux desktops.
+ * Windows set, which is also a reasonable default for Linux desktops. When
+ * `includeEscape` is set, an Esc entry is appended so the user can still send
+ * Escape to the host where the Keyboard Lock API cannot capture it.
  */
-export function getKeyboardShortcuts(os: OperationSystemEnum | undefined): KeyboardShortcut[] {
-    return os === "Mac" ? MACOS_SHORTCUTS : WINDOWS_SHORTCUTS;
+export function getKeyboardShortcuts(
+    os: OperationSystemEnum | undefined,
+    options: KeyboardShortcutOptions = {},
+): KeyboardShortcut[] {
+    const base = os === "Mac" ? MACOS_SHORTCUTS : WINDOWS_SHORTCUTS;
+    return options.includeEscape ? [...base, ESCAPE_SHORTCUT] : base;
 }

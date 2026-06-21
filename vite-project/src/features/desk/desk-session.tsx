@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react"
+import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -23,7 +23,7 @@ import { DiagnosePanel } from "./diagnose-panel"
 import { useDeskExec } from "./use-desk-exec"
 import { useDeskInput } from "./use-desk-input"
 import { getKeyboardShortcuts } from "./keyboard-shortcuts"
-import { lockEscapeKey, unlockKeyboard } from "./fullscreen-keyboard"
+import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from "./fullscreen-keyboard"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
 import { useCursorSync } from "./use-cursor-sync"
@@ -117,6 +117,12 @@ export default function DeskSession() {
     });
     const [audioVolume, setAudioVolume] = useState(100);
     const [isFullscreen, setIsFullscreen] = useState(false);
+    // Whether this environment can capture Escape via the Keyboard Lock API
+    // (Chromium + secure context). When it cannot, Escape is swallowed by the
+    // browser in fullscreen, so we expose Esc in the shortcut menu and warn the
+    // user. Stable for the session.
+    const keyboardLockSupported = useMemo(() => isKeyboardLockSupported(), []);
+    const [showEscHint, setShowEscHint] = useState(false);
 
     // Drag UI state
     const [isDragging, setIsDragging] = useState(false);
@@ -697,6 +703,18 @@ export default function DeskSession() {
         return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
     }, []);
 
+    // When entering fullscreen in an environment that cannot capture Escape,
+    // briefly remind the user that Esc must be sent via the shortcut menu.
+    useEffect(() => {
+        if (!isFullscreen || keyboardLockSupported) {
+            setShowEscHint(false);
+            return;
+        }
+        setShowEscHint(true);
+        const timer = setTimeout(() => setShowEscHint(false), 6000);
+        return () => clearTimeout(timer);
+    }, [isFullscreen, keyboardLockSupported]);
+
     const handleVolumeChange = (value: number) => {
         if (!videoRef.current) return;
         setAudioVolume(value);
@@ -857,6 +875,15 @@ export default function DeskSession() {
                             tabIndex={0}
                             onCanPlay={() => setIsVideoReady(true)}
                         />
+
+                        {/* Escape hint shown in fullscreen when the Keyboard
+                            Lock API can't capture Esc. Lives inside the
+                            fullscreen element so it stays in the top layer. */}
+                        {showEscHint && (
+                            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[60] max-w-[90%] rounded-md bg-black/80 px-4 py-2 text-center text-sm text-white shadow-lg backdrop-blur-md">
+                                {t('pages.desk.escHintFullscreen', 'Pressing Esc exits fullscreen and is not sent to the host. Use the keyboard shortcut menu to send Esc.')}
+                            </div>
+                        )}
 
                         {/* Whiteboard canvas overlay */}
                         <WhiteboardCanvas
@@ -1432,7 +1459,7 @@ export default function DeskSession() {
                                                 </Button>
                                             </DropdownMenuTrigger>
                                             <DropdownMenuContent align="end" className="w-56 bg-background/90 backdrop-blur-md border-white/10">
-                                                {getKeyboardShortcuts(initData?.operation_system).map(shortcut => (
+                                                {getKeyboardShortcuts(initData?.operation_system, { includeEscape: !keyboardLockSupported }).map(shortcut => (
                                                     <DropdownMenuItem
                                                         key={shortcut.id}
                                                         onClick={() => sendKeyboardEvents(shortcut.events)}

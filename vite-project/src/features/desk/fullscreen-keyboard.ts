@@ -17,6 +17,21 @@ type KeyboardLockApi = {
 export type KeyboardLockNavigator = { keyboard?: KeyboardLockApi };
 
 /**
+ * Whether the Keyboard Lock API can capture Escape in this environment.
+ *
+ * `navigator.keyboard` is only exposed in a secure context (HTTPS / localhost)
+ * on Chromium, so probing for `lock` covers both the non-secure-context and the
+ * unsupported-browser cases. When this returns false, Escape cannot be
+ * forwarded to the host while fullscreen — callers should offer an explicit Esc
+ * shortcut instead.
+ */
+export function isKeyboardLockSupported(
+    nav: KeyboardLockNavigator = navigator as unknown as KeyboardLockNavigator,
+): boolean {
+    return typeof nav.keyboard?.lock === "function";
+}
+
+/**
  * Capture the Escape key for the page while in fullscreen. No-op (returns
  * false) when the Keyboard Lock API is unavailable or the request is rejected.
  * Must be called once the document is actually in fullscreen.

@@ -254,6 +254,8 @@ export default {
   'pages.desk.shortcut.screenshot': '⌘ + ⇧ + 4 (Screenshot)',
   'pages.desk.shortcut.closeWindow': '⌘ + W (Close Window)',
   'pages.desk.shortcut.quitApp': '⌘ + Q (Quit App)',
+  'pages.desk.shortcut.escape': 'Esc (Send Escape)',
+  'pages.desk.escHintFullscreen': "Pressing Esc exits fullscreen and isn't sent to the host. Use the keyboard shortcut menu to send Esc.",
   'pages.desk.requestControl': 'Request Control',
   'pages.desk.exitFullscreen': 'Exit Fullscreen',
   'pages.desk.fullscreen': 'Fullscreen',

@@ -252,6 +252,8 @@ export default {
   'pages.desk.shortcut.screenshot': '⌘ + ⇧ + 4（区域截图）',
   'pages.desk.shortcut.closeWindow': '⌘ + W（关闭窗口）',
   'pages.desk.shortcut.quitApp': '⌘ + Q（退出应用）',
+  'pages.desk.shortcut.escape': 'Esc（发送退出键）',
+  'pages.desk.escHintFullscreen': '当前环境无法捕获 Esc 键：按 Esc 只会退出全屏、不会发送到被控端。请通过键盘快捷键菜单发送 Esc。',
   'pages.desk.requestControl': '请求控制',
   'pages.desk.exitFullscreen': '退出全屏',
   'pages.desk.fullscreen': '全屏',

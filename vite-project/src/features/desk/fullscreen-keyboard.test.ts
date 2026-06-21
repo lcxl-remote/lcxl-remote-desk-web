@@ -1,5 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
-import { lockEscapeKey, unlockKeyboard } from './fullscreen-keyboard';
+import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from './fullscreen-keyboard';
+
+describe('isKeyboardLockSupported', () => {
+    it('is true only when navigator.keyboard.lock is a function', () => {
+        expect(isKeyboardLockSupported({ keyboard: { lock: async () => {} } })).toBe(true);
+    });
+
+    it('is false without the Keyboard Lock API (non-Chromium / insecure context)', () => {
+        expect(isKeyboardLockSupported({})).toBe(false);
+        expect(isKeyboardLockSupported({ keyboard: {} })).toBe(false);
+        expect(isKeyboardLockSupported({ keyboard: { unlock: () => {} } })).toBe(false);
+    });
+});
 
 describe('lockEscapeKey', () => {
     it('locks the Escape key and resolves true when the API is available', async () => {
