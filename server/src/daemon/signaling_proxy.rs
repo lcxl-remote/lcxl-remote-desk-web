@@ -165,8 +165,8 @@ pub async fn run_signaling_proxy(
         inbound_authz: None,
         // Fleet exec correlation set, shared with the worker-message loop below so
         // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
-        // manager as a `FleetExecResult`.
-        fleet_exec_pending: Default::default(),
+        // manager as a `EdgeExecResult`.
+        edge_exec_pending: Default::default(),
     };
 
     let local_handle = {
@@ -738,18 +738,18 @@ pub async fn run_signaling_proxy(
                     continue;
                 }
                 // Fleet exec correlation: if this result is for an in-flight
-                // fleet attempt, relay it to the manager as a `FleetExecResult`
+                // fleet attempt, relay it to the manager as a `EdgeExecResult`
                 // (`Executed`) instead of an `ExecResult(609)` toward a browser.
                 let is_fleet = router_ctx
-                    .fleet_exec_pending
+                    .edge_exec_pending
                     .lock()
                     .map(|mut p| p.remove(&payload.request_id))
                     .unwrap_or(false);
                 if is_fleet {
-                    signaling_router::send_fleet_exec_result(
+                    signaling_router::send_edge_exec_result(
                         &outbound_tx,
                         &payload.request_id,
-                        desk_agent_protocol::fleet_exec::FleetExecDisposition::Executed {
+                        desk_agent_protocol::edge_exec::EdgeExecDisposition::Executed {
                             outcome: payload.result.outcome.clone(),
                         },
                     );
@@ -1202,7 +1202,7 @@ fn gate_authz_frame(
     AuthzGateOutcome::Pass(unwrapped, Some(wrapper.authz))
 }
 
-/// Outcome of the dedicated `FleetExecRequest` authorization gate. Unlike the
+/// Outcome of the dedicated `EdgeExecRequest` authorization gate. Unlike the
 /// generic [`gate_authz_frame`] (which drops a frame whose wrapper fails to
 /// validate), a fleet request from the trusted Manager link that fails
 /// validation is answered with a synthesized denied result so the manager's
@@ -1220,7 +1220,7 @@ enum FleetExecGateOutcome {
     Drop(String),
 }
 
-/// Dedicated authorization gate for `FleetExecRequest` (manager → daemon). The
+/// Dedicated authorization gate for `EdgeExecRequest` (manager → daemon). The
 /// caller has already confirmed the Manager source. Validates the
 /// `AuthorizedControlPayload<ExecPlan>` wrapper; on success unwraps the inner
 /// plan and returns the validated authorization block.
@@ -1232,7 +1232,7 @@ fn gate_fleet_exec_frame(
     let request_id = model.request_id.clone();
     if request_id.is_empty() {
         return FleetExecGateOutcome::Drop(
-            "FleetExecRequest without request_id (cannot correlate a result)".to_string(),
+            "EdgeExecRequest without request_id (cannot correlate a result)".to_string(),
         );
     }
 
@@ -1299,7 +1299,7 @@ async fn handle_inbound_signaling_text(
         }
     };
 
-    // Source gate: `CommandTemplateSync`, `CollectRequest`, `FleetExecRequest`,
+    // Source gate: `CommandTemplateSync`, `CollectRequest`, `EdgeExecRequest`,
     // and `RemoteToolRequest` are trusted manager→daemon plumbing. Accept them
     // only from the Manager link; a Local / remote-signaling origin (no trusted
     // PDP) must never inject operator templates, drive an evidence collection,
@@ -1308,7 +1308,7 @@ async fn handle_inbound_signaling_text(
         parsed.signaling_type,
         SignalingType::CommandTemplateSync
             | SignalingType::CollectRequest
-            | SignalingType::FleetExecRequest
+            | SignalingType::EdgeExecRequest
             | SignalingType::RemoteToolRequest
     ) && source != InboundSignalingSource::Manager
     {
@@ -1325,10 +1325,10 @@ async fn handle_inbound_signaling_text(
     };
     let now = chrono::Utc::now().to_rfc3339();
 
-    // `FleetExecRequest` uses a dedicated authorization gate: a trusted-but-
+    // `EdgeExecRequest` uses a dedicated authorization gate: a trusted-but-
     // invalid request is answered with a synthesized denied result (so the
     // manager's pending entry resolves) rather than silently dropped.
-    if parsed.signaling_type == SignalingType::FleetExecRequest {
+    if parsed.signaling_type == SignalingType::EdgeExecRequest {
         match gate_fleet_exec_frame(parsed, &expected_audience, &now) {
             FleetExecGateOutcome::Pass(unwrapped, block) => {
                 let effective_ctx = RouterContext {
@@ -1336,21 +1336,21 @@ async fn handle_inbound_signaling_text(
                     ..router_ctx.clone()
                 };
                 if let Err(e) = signaling_router::route(&unwrapped, &effective_ctx).await {
-                    warn!("[Proxy] router handler failed for FleetExecRequest: {e}");
+                    warn!("[Proxy] router handler failed for EdgeExecRequest: {e}");
                 }
             }
             FleetExecGateOutcome::Denied { request_id, reason } => {
-                warn!("[Proxy] FleetExecRequest denied ({reason}); replying denied result");
-                signaling_router::send_fleet_exec_result(
+                warn!("[Proxy] EdgeExecRequest denied ({reason}); replying denied result");
+                signaling_router::send_edge_exec_result(
                     &router_ctx.outbound_tx,
                     &request_id,
-                    desk_agent_protocol::fleet_exec::FleetExecDisposition::RejectedBeforeDispatch {
+                    desk_agent_protocol::edge_exec::EdgeExecDisposition::RejectedBeforeDispatch {
                         reason,
                     },
                 );
             }
             FleetExecGateOutcome::Drop(reason) => {
-                warn!("[Proxy] Dropping FleetExecRequest: {reason}");
+                warn!("[Proxy] Dropping EdgeExecRequest: {reason}");
             }
         }
         return;
@@ -1423,7 +1423,7 @@ mod tests {
             audit: Arc::new(LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
-            fleet_exec_pending: Default::default(),
+            edge_exec_pending: Default::default(),
         };
         (ctx, outbound_tx)
     }
@@ -1746,7 +1746,7 @@ mod tests {
         }
     }
 
-    // ====== FleetExecRequest dedicated gate ======
+    // ====== EdgeExecRequest dedicated gate ======
 
     fn fleet_exec_plan() -> desk_agent_protocol::exec::ExecPlan {
         let template = desk_agent_protocol::command_template::SyncedCommandTemplate {
@@ -1773,7 +1773,7 @@ mod tests {
         };
         SignalingModel::new(
             request_id,
-            SignalingType::FleetExecRequest,
+            SignalingType::EdgeExecRequest,
             None,
             None,
             Some(serde_json::to_value(&wrapper).unwrap()),
@@ -1813,11 +1813,11 @@ mod tests {
 
     #[test]
     fn fleet_gate_denies_a_malformed_wrapper() {
-        // A FleetExecRequest whose body is not an AuthorizedControlPayload is
+        // A EdgeExecRequest whose body is not an AuthorizedControlPayload is
         // still correlatable (it has a request_id) → denied, not dropped.
         let model = SignalingModel::new(
             "a1",
-            SignalingType::FleetExecRequest,
+            SignalingType::EdgeExecRequest,
             None,
             None,
             Some(serde_json::json!({ "not": "a wrapper" })),

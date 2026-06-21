@@ -257,14 +257,14 @@ pub enum SignalingType {
     /// a protocol error and is swallowed. Notification-style
     /// (`response_state = None`).
     #[wincode(tag = 613)]
-    FleetExecRequest = 613,
+    EdgeExecRequest = 613,
     /// Fleet batch-execution result (desk-server daemon → manager only). Carries
-    /// `desk_agent_protocol::fleet_exec::FleetExecResultPayload` (the per-attempt
-    /// `request_id` + a structured `FleetExecDisposition`). Consumed by the
+    /// `desk_agent_protocol::edge_exec::EdgeExecResultPayload` (the per-attempt
+    /// `request_id` + a structured `EdgeExecDisposition`). Consumed by the
     /// manager's execution pending store, never relayed to a browser or another
     /// peer. Notification-style (`response_state = None`).
     #[wincode(tag = 614)]
-    FleetExecResult = 614,
+    EdgeExecResult = 614,
 
     /// Remote read-tool request (manager owner instance → desk-server daemon
     /// only). Carries `desk_agent_protocol::remote_tool::RemoteToolRequest`: one
@@ -938,8 +938,8 @@ mod wincode_tests {
             (SignalingType::CommandTemplateSync, 610),
             (SignalingType::CollectRequest, 611),
             (SignalingType::CollectResponse, 612),
-            (SignalingType::FleetExecRequest, 613),
-            (SignalingType::FleetExecResult, 614),
+            (SignalingType::EdgeExecRequest, 613),
+            (SignalingType::EdgeExecResult, 614),
             (SignalingType::RemoteToolRequest, 615),
             (SignalingType::RemoteToolResponse, 616),
             (SignalingType::ManagerSystemInfo, 10003),

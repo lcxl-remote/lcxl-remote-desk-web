@@ -33,9 +33,9 @@ pub mod authz;
 pub mod command_template;
 pub mod diagnose;
 pub mod evidence;
+pub mod edge_exec;
 pub mod exec;
 pub mod exec_policy;
-pub mod fleet_exec;
 pub mod model_proxy;
 pub mod remote_tool;
 

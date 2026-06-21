@@ -36,7 +36,7 @@ use desk_agent_protocol::exec::{
     ResolveExecData,
 };
 use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
-use desk_agent_protocol::fleet_exec::{FleetExecDisposition, FleetExecResultPayload};
+use desk_agent_protocol::edge_exec::{EdgeExecDisposition, EdgeExecResultPayload};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode, OperationInput,
@@ -199,13 +199,13 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // inbound here, so a stray inbound copy is swallowed daemon-side.
         SignalingType::CollectRequest | SignalingType::CollectResponse => RouteOwnership::Daemon,
 
-        // Fleet batch-execution: `FleetExecRequest` is manager → daemon (the
+        // Fleet batch-execution: `EdgeExecRequest` is manager → daemon (the
         // daemon PEP re-validates the manager-sealed `ExecPlan` and dispatches it
         // to the worker); handled inline against the daemon's worker, never
-        // forwarded as-is. `FleetExecResult` is daemon-emitted toward the manager
+        // forwarded as-is. `EdgeExecResult` is daemon-emitted toward the manager
         // and never received inbound here, so a stray inbound copy is swallowed
         // daemon-side.
-        SignalingType::FleetExecRequest | SignalingType::FleetExecResult => RouteOwnership::Daemon,
+        SignalingType::EdgeExecRequest | SignalingType::EdgeExecResult => RouteOwnership::Daemon,
 
         // Remote read-tool RPC (§8.3): `RemoteToolRequest` is manager → daemon
         // (the daemon runs the one server-stamped read locally); handled inline,
@@ -382,10 +382,10 @@ pub struct RouterContext {
     pub inbound_authz: Option<desk_agent_protocol::authz::AuthorizationBlock>,
     /// Per-attempt `request_id`s of fleet executions currently dispatched to the
     /// worker. When the worker replies with `WorkerToService::ExecResult` whose
-    /// `request_id` is in this set, the proxy emits a `FleetExecResult(614)`
+    /// `request_id` is in this set, the proxy emits a `EdgeExecResult(614)`
     /// toward the manager instead of an `ExecResult(609)` toward a browser.
     /// Always present (in-memory state); only populated on the fleet exec path.
-    pub fleet_exec_pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub edge_exec_pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Fresh audit event id.
@@ -666,13 +666,13 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         SignalingType::CollectResponse => Ok(()),
         // Fleet batch-execution request from the manager: PEP re-validate the
         // manager-sealed `ExecPlan` and dispatch it to the worker, correlating
-        // the worker's result back to the manager as a `FleetExecResult`. The
+        // the worker's result back to the manager as a `EdgeExecResult`. The
         // source gate + dedicated authz gate (`signaling_proxy`) have already
         // dropped non-Manager origins and unwrapped/validated the authorization.
-        SignalingType::FleetExecRequest => handle_fleet_exec_request_inbound(ctx, model).await,
-        // FleetExecResult is emitted by this daemon toward the manager; a stray
+        SignalingType::EdgeExecRequest => handle_edge_exec_request_inbound(ctx, model).await,
+        // EdgeExecResult is emitted by this daemon toward the manager; a stray
         // inbound frame is swallowed (the daemon never consumes its own replies).
-        SignalingType::FleetExecResult => Ok(()),
+        SignalingType::EdgeExecResult => Ok(()),
         // Remote read-tool request from the manager (agentic loop running
         // centrally): run the one server-stamped read locally and stream a chunked
         // RemoteToolResponse back. The source gate has already dropped any
@@ -2896,26 +2896,26 @@ async fn dispatch_exec_plan(
     }
 }
 
-/// Send a `FleetExecResult(614)` toward the manager as a notification-style
+/// Send a `EdgeExecResult(614)` toward the manager as a notification-style
 /// frame, correlated by the per-attempt `request_id`. Used both for the early
 /// PEP rejections (synthesized here) and for the worker's completed result
 /// (relayed by the signaling proxy).
-pub(crate) fn send_fleet_exec_result(
+pub(crate) fn send_edge_exec_result(
     outbound_tx: &broadcast::Sender<String>,
     request_id: &str,
-    disposition: FleetExecDisposition,
+    disposition: EdgeExecDisposition,
 ) {
-    let payload = FleetExecResultPayload {
+    let payload = EdgeExecResultPayload {
         request_id: request_id.to_string(),
         disposition,
     };
     send_notification(
         outbound_tx,
         request_id,
-        SignalingType::FleetExecResult,
+        SignalingType::EdgeExecResult,
         None,
         &payload,
-        "FleetExecResult",
+        "EdgeExecResult",
     );
 }
 
@@ -2924,7 +2924,7 @@ pub(crate) fn send_fleet_exec_result(
 /// safe rejection reason on the first failure, or `None` when the plan passes
 /// every check. The order mirrors the manager's preview: blocklist → exact-argv
 /// whitelist + fingerprint → `risk <= max_risk`.
-fn pep_validate_fleet_plan(
+fn pep_validate_edge_exec_plan(
     plan: &ExecPlan,
     max_risk: desk_agent_protocol::RiskLevel,
     templates: &[desk_agent_protocol::command_template::SyncedCommandTemplate],
@@ -2965,13 +2965,13 @@ fn pep_validate_fleet_plan(
     None
 }
 
-/// Handle an inbound `FleetExecRequest` from the manager. The frame has already
+/// Handle an inbound `EdgeExecRequest` from the manager. The frame has already
 /// passed the proxy's source gate (Manager-only) and dedicated authz gate (which
 /// unwrapped the inner [`ExecPlan`] and set `ctx.inbound_authz`). This re-
 /// validates the plan (PEP) and, on success, dispatches it to the worker
 /// correlated as a fleet execution; every exit emits exactly one
-/// `FleetExecResult` so the manager's pending entry always resolves.
-async fn handle_fleet_exec_request_inbound(
+/// `EdgeExecResult` so the manager's pending entry always resolves.
+async fn handle_edge_exec_request_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
@@ -2981,10 +2981,10 @@ async fn handle_fleet_exec_request_inbound(
     // is a routing fault. Reject (definitely not executed) rather than dispatch
     // an unauthorized plan.
     let Some(authz) = ctx.inbound_authz.clone() else {
-        send_fleet_exec_result(
+        send_edge_exec_result(
             &ctx.outbound_tx,
             &request_id,
-            FleetExecDisposition::RejectedBeforeDispatch {
+            EdgeExecDisposition::RejectedBeforeDispatch {
                 reason: "pep_rejected:missing_authorization".to_string(),
             },
         );
@@ -2994,10 +2994,10 @@ async fn handle_fleet_exec_request_inbound(
     let plan = match model.get_data::<ExecPlan>() {
         Ok(p) => p,
         Err(e) => {
-            send_fleet_exec_result(
+            send_edge_exec_result(
                 &ctx.outbound_tx,
                 &request_id,
-                FleetExecDisposition::RejectedBeforeDispatch {
+                EdgeExecDisposition::RejectedBeforeDispatch {
                     reason: format!("pep_rejected:malformed_plan:{e}"),
                 },
             );
@@ -3009,10 +3009,10 @@ async fn handle_fleet_exec_request_inbound(
     // gate normally prevents dispatch to a daemon that cannot execute, but a PEP
     // must never assume the PDP got it right.
     if !ctx.exec_supported {
-        send_fleet_exec_result(
+        send_edge_exec_result(
             &ctx.outbound_tx,
             &request_id,
-            FleetExecDisposition::RejectedBeforeDispatch {
+            EdgeExecDisposition::RejectedBeforeDispatch {
                 reason: "pep_rejected:exec_unsupported_in_mode".to_string(),
             },
         );
@@ -3020,12 +3020,12 @@ async fn handle_fleet_exec_request_inbound(
     }
 
     let templates = ctx.command_templates.snapshot();
-    if let Some(reason) = pep_validate_fleet_plan(&plan, authz.max_risk, &templates) {
+    if let Some(reason) = pep_validate_edge_exec_plan(&plan, authz.max_risk, &templates) {
         log::warn!("[fleet-exec] PEP rejected plan for request {request_id}: {reason}");
-        send_fleet_exec_result(
+        send_edge_exec_result(
             &ctx.outbound_tx,
             &request_id,
-            FleetExecDisposition::RejectedBeforeDispatch { reason },
+            EdgeExecDisposition::RejectedBeforeDispatch { reason },
         );
         return Ok(());
     }
@@ -3036,13 +3036,13 @@ async fn handle_fleet_exec_request_inbound(
 
 /// Dispatch a PEP-validated fleet [`ExecPlan`] to the worker, correlated so the
 /// worker's `WorkerToService::ExecResult` is relayed back to the manager as a
-/// `FleetExecResult(Executed{..})` (see the proxy's `ExecResult` handler). On a
+/// `EdgeExecResult(Executed{..})` (see the proxy's `ExecResult` handler). On a
 /// send failure the plan never reached the worker, so the change definitely did
 /// not run → `DispatchFailedBeforeWorker`.
 async fn dispatch_fleet_exec_plan(ctx: &RouterContext, request_id: &str, plan: ExecPlan) {
     // Register the in-flight correlation BEFORE sending so a fast worker reply
     // cannot race ahead of the marker.
-    if let Ok(mut pending) = ctx.fleet_exec_pending.lock() {
+    if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
         pending.insert(request_id.to_string());
     }
     let payload = ExecPlanPayload {
@@ -3058,13 +3058,13 @@ async fn dispatch_fleet_exec_plan(ctx: &RouterContext, request_id: &str, plan: E
         .send_to_worker(ServiceToWorker::ExecPlan(payload))
         .await
     {
-        if let Ok(mut pending) = ctx.fleet_exec_pending.lock() {
+        if let Ok(mut pending) = ctx.edge_exec_pending.lock() {
             pending.remove(request_id);
         }
-        send_fleet_exec_result(
+        send_edge_exec_result(
             &ctx.outbound_tx,
             request_id,
-            FleetExecDisposition::DispatchFailedBeforeWorker {
+            EdgeExecDisposition::DispatchFailedBeforeWorker {
                 reason: format!("worker unavailable: {e}"),
             },
         );
@@ -3297,8 +3297,8 @@ mod tests {
             SignalingType::AgentResponse,
             // Fleet exec: request handled inline (PEP + dispatch); result is
             // daemon-emitted toward the manager.
-            SignalingType::FleetExecRequest,
-            SignalingType::FleetExecResult,
+            SignalingType::EdgeExecRequest,
+            SignalingType::EdgeExecResult,
         ] {
             assert_eq!(
                 classify(t),
@@ -3370,7 +3370,7 @@ mod tests {
             audit: Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
             diagnose_tasks: Default::default(),
             inbound_authz: None,
-            fleet_exec_pending: Default::default(),
+            edge_exec_pending: Default::default(),
         }
     }
 
@@ -6158,7 +6158,7 @@ mod tests {
         // sees the inner `ExecPlan` as the frame data.
         SignalingModel::new(
             request_id,
-            SignalingType::FleetExecRequest,
+            SignalingType::EdgeExecRequest,
             None,
             None,
             Some(serde_json::to_value(plan).unwrap()),
@@ -6166,10 +6166,10 @@ mod tests {
         )
     }
 
-    fn read_fleet_result(rx: &mut broadcast::Receiver<String>) -> FleetExecResultPayload {
+    fn read_fleet_result(rx: &mut broadcast::Receiver<String>) -> EdgeExecResultPayload {
         read_response(rx)
-            .get_data::<FleetExecResultPayload>()
-            .expect("FleetExecResultPayload")
+            .get_data::<EdgeExecResultPayload>()
+            .expect("EdgeExecResultPayload")
     }
 
     #[test]
@@ -6177,7 +6177,7 @@ mod tests {
         let template = fleet_template();
         let plan = fleet_plan(&template, "a1");
         assert_eq!(
-            pep_validate_fleet_plan(
+            pep_validate_edge_exec_plan(
                 &plan,
                 desk_agent_protocol::RiskLevel::High,
                 std::slice::from_ref(&template)
@@ -6190,7 +6190,7 @@ mod tests {
     fn pep_rejects_template_not_in_allowlist() {
         let template = fleet_template();
         let plan = fleet_plan(&template, "a1");
-        let reason = pep_validate_fleet_plan(&plan, desk_agent_protocol::RiskLevel::High, &[])
+        let reason = pep_validate_edge_exec_plan(&plan, desk_agent_protocol::RiskLevel::High, &[])
             .expect("empty allowlist must reject");
         assert!(reason.contains("template_not_in_allowlist"), "{reason}");
     }
@@ -6202,7 +6202,7 @@ mod tests {
         // Tamper with the argv after sealing; the fingerprint no longer matches
         // the re-rendered template.
         plan.argv.push("--force".into());
-        let reason = pep_validate_fleet_plan(
+        let reason = pep_validate_edge_exec_plan(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
@@ -6216,7 +6216,7 @@ mod tests {
         let template = fleet_template();
         let mut plan = fleet_plan(&template, "a1");
         plan.fingerprint = "deadbeef".into();
-        let reason = pep_validate_fleet_plan(
+        let reason = pep_validate_edge_exec_plan(
             &plan,
             desk_agent_protocol::RiskLevel::High,
             std::slice::from_ref(&template),
@@ -6230,7 +6230,7 @@ mod tests {
         let template = fleet_template();
         let plan = fleet_plan(&template, "a1");
         // The plan is High; cap max_risk at Medium.
-        let reason = pep_validate_fleet_plan(
+        let reason = pep_validate_edge_exec_plan(
             &plan,
             desk_agent_protocol::RiskLevel::Medium,
             std::slice::from_ref(&template),
@@ -6249,7 +6249,7 @@ mod tests {
             effect: desk_agent_protocol::exec::ExecEffect::Mutating,
         };
         let plan = fleet_plan(&template, "a1");
-        let reason = pep_validate_fleet_plan(
+        let reason = pep_validate_edge_exec_plan(
             &plan,
             desk_agent_protocol::RiskLevel::Critical,
             std::slice::from_ref(&template),
@@ -6267,13 +6267,13 @@ mod tests {
             .replace(vec![template.clone()], Some(1));
         let plan = fleet_plan(&template, "a1");
 
-        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
             .await
             .unwrap();
         let result = read_fleet_result(&mut rx);
         assert_eq!(result.request_id, "a1");
         match result.disposition {
-            FleetExecDisposition::RejectedBeforeDispatch { reason } => {
+            EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
                 assert!(reason.contains("missing_authorization"), "{reason}");
             }
             other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
@@ -6295,11 +6295,11 @@ mod tests {
             .replace(vec![template.clone()], Some(1));
         let plan = fleet_plan(&template, "a1");
 
-        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
             .await
             .unwrap();
         match read_fleet_result(&mut rx).disposition {
-            FleetExecDisposition::RejectedBeforeDispatch { reason } => {
+            EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
                 assert!(reason.contains("exec_unsupported_in_mode"), "{reason}");
             }
             other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
@@ -6326,17 +6326,17 @@ mod tests {
         );
         let plan = fleet_plan(&fleet_template(), "a1");
 
-        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
             .await
             .unwrap();
         match read_fleet_result(&mut rx).disposition {
-            FleetExecDisposition::RejectedBeforeDispatch { reason } => {
+            EdgeExecDisposition::RejectedBeforeDispatch { reason } => {
                 assert!(reason.contains("template_drift"), "{reason}");
             }
             other => panic!("expected RejectedBeforeDispatch, got {other:?}"),
         }
         // A rejected plan is never marked in-flight.
-        assert!(ctx.fleet_exec_pending.lock().unwrap().is_empty());
+        assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -6354,13 +6354,13 @@ mod tests {
             .replace(vec![template.clone()], Some(1));
         let plan = fleet_plan(&template, "a1");
 
-        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
             .await
             .unwrap();
 
         // The worker received the sealed plan, correlated by the per-attempt id,
         // and the daemon marked the attempt in-flight so the eventual worker
-        // ExecResult relays back as a FleetExecResult.
+        // ExecResult relays back as a EdgeExecResult.
         match ipc_rx.try_recv().expect("ExecPlan IPC") {
             ServiceToWorker::ExecPlan(payload) => {
                 assert_eq!(payload.request_id, "a1");
@@ -6369,7 +6369,7 @@ mod tests {
             }
             other => panic!("expected ExecPlan IPC, got {other:?}"),
         }
-        assert!(ctx.fleet_exec_pending.lock().unwrap().contains("a1"));
+        assert!(ctx.edge_exec_pending.lock().unwrap().contains("a1"));
     }
 
     #[tokio::test]
@@ -6386,18 +6386,18 @@ mod tests {
             .replace(vec![template.clone()], Some(1));
         let plan = fleet_plan(&template, "a1");
 
-        handle_fleet_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
+        handle_edge_exec_request_inbound(&ctx, &fleet_exec_model("a1", &plan))
             .await
             .unwrap();
         // No worker is installed, so the dispatch fails before the worker ran.
         match read_fleet_result(&mut rx).disposition {
-            FleetExecDisposition::DispatchFailedBeforeWorker { reason } => {
+            EdgeExecDisposition::DispatchFailedBeforeWorker { reason } => {
                 assert!(reason.contains("worker unavailable"), "{reason}");
             }
             other => panic!("expected DispatchFailedBeforeWorker, got {other:?}"),
         }
         // The in-flight marker is cleared on a failed dispatch.
-        assert!(ctx.fleet_exec_pending.lock().unwrap().is_empty());
+        assert!(ctx.edge_exec_pending.lock().unwrap().is_empty());
     }
 
     /// SessionApproved: the first confirmation of a template prompts and parks a

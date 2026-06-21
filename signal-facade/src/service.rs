@@ -226,16 +226,16 @@ pub trait CollectObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
-// ====== FleetExecObserver trait ======
+// ====== EdgeExecObserver trait ======
 
-/// Consumes inbound `FleetExecResult` frames (a structured
-/// `FleetExecDisposition` for one fleet execution attempt) from a desk-server
+/// Consumes inbound `EdgeExecResult` frames (a structured
+/// `EdgeExecDisposition` for one fleet execution attempt) from a desk-server
 /// daemon. The manager implements this to route the result into its execution
 /// pending store, keyed by the per-attempt `request_id` and validated against
-/// the connection that the matching `FleetExecRequest` was pushed to; the signal
+/// the connection that the matching `EdgeExecRequest` was pushed to; the signal
 /// server leaves it unset, so the frames are ignored there. `source` is the
 /// reporting connection (a token-authenticated desk server).
-pub trait FleetExecObserver: Send + Sync {
+pub trait EdgeExecObserver: Send + Sync {
     fn on_fleet_exec_result<'a>(
         &'a self,
         source: &'a ConnectionState,
@@ -349,10 +349,10 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its orchestrator's
     /// pending store); `None` elsewhere, where they are ignored.
     pub collect_observer: Option<Arc<dyn CollectObserver>>,
-    /// Fleet-execution result consumer for inbound `FleetExecResult` frames.
+    /// Fleet-execution result consumer for inbound `EdgeExecResult` frames.
     /// `Some` only in the manager (which feeds them into its execution pending
     /// store); `None` elsewhere, where they are ignored.
-    pub fleet_exec_observer: Option<Arc<dyn FleetExecObserver>>,
+    pub edge_exec_observer: Option<Arc<dyn EdgeExecObserver>>,
     /// Remote read-tool response consumer for inbound `RemoteToolResponse` frames.
     /// `Some` only in the manager (which feeds them into its remote-tool pending
     /// store); `None` elsewhere, where they are ignored.
@@ -517,7 +517,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             control_authorizer: None,
             audit_observer: None,
             collect_observer: None,
-            fleet_exec_observer: None,
+            edge_exec_observer: None,
             remote_tool_observer: None,
         })
     }
@@ -545,10 +545,10 @@ impl<U: SignalingUser> SignalingHandler<U> {
     }
 
     /// Attach a fleet-execution result consumer (the manager execution pending
-    /// store). The signal server never calls this, so inbound `FleetExecResult`
+    /// store). The signal server never calls this, so inbound `EdgeExecResult`
     /// frames are ignored there.
-    pub fn with_fleet_exec_observer(mut self, observer: Arc<dyn FleetExecObserver>) -> Self {
-        self.fleet_exec_observer = Some(observer);
+    pub fn with_edge_exec_observer(mut self, observer: Arc<dyn EdgeExecObserver>) -> Self {
+        self.edge_exec_observer = Some(observer);
         self
     }
 
@@ -931,7 +931,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .await;
                 }
             }
-            SignalingType::FleetExecRequest => {
+            SignalingType::EdgeExecRequest => {
                 // Manager → daemon only, originated server-side and written
                 // directly to the desk-server's session (the manager is the PDP).
                 // A client sending it inbound to the signaling server is a
@@ -962,12 +962,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
                         .await;
                 }
             }
-            SignalingType::FleetExecResult => {
+            SignalingType::EdgeExecResult => {
                 // Desk-server daemon → manager only. Consumed by the manager
                 // execution pending store; never relayed to a peer (it must not
                 // re-enter the control-end broadcast lane). Ignored where no
                 // execution consumer is attached (the signal server).
-                if let Some(observer) = self.fleet_exec_observer.clone() {
+                if let Some(observer) = self.edge_exec_observer.clone() {
                     observer
                         .on_fleet_exec_result(&self.connection_state, &signaling_model)
                         .await;
