@@ -142,6 +142,10 @@ objc2 = { workspace = true }
 objc2-foundation = { workspace = true }
 core-graphics = { workspace = true }
 core-audio-types = { workspace = true }
+# macOS network.ports backend: per-process socket enumeration via libproc
+# (proc_pidfdinfo / PROC_PIDFDSOCKETINFO), the same data source as lsof.
+libproc = "0.14"
+libc = { workspace = true }
 
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

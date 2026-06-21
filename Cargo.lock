@@ -4978,6 +4978,7 @@ dependencies = [
  "hound",
  "image",
  "libc",
+ "libproc",
  "log",
  "mime",
  "objc2 0.5.2",
@@ -5228,6 +5229,17 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "libproc"
+version = "0.14.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a54ad7278b8bc5301d5ffd2a94251c004feb971feba96c971ea4063645990757"
+dependencies = [
+ "bindgen 0.72.1",
+ "errno",
+ "libc",
+]
 
 [[package]]
 name = "libredox"

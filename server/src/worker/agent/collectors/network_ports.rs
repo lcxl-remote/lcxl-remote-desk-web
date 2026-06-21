@@ -7,6 +7,9 @@
 //! - **Linux** parses `/proc/net/{tcp,tcp6,udp,udp6}` best-effort (addresses +
 //!   ports, no PID — the inode→PID scan is costly and permission-limited, so it
 //!   is deferred). TCP is filtered to the LISTEN state.
+//! - **macOS** enumerates per-process sockets via libproc
+//!   (`proc_pidfdinfo` / `PROC_PIDFDSOCKETINFO`, the `lsof` data source) with full
+//!   owning-PID resolution (TCP is filtered to LISTEN; UDP is all bound ports).
 //! - Other platforms return `UnsupportedPlatform`.
 //!
 //! PIDs (when present) are resolved to process names via `sysinfo`.
@@ -21,6 +24,8 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 
@@ -126,7 +131,11 @@ fn enumerate() -> Result<Vec<RawPort>, AgentError> {
     {
         linux::enumerate()
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::enumerate()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Err(AgentError {
             kind: AgentErrorKind::UnsupportedPlatform,
@@ -253,7 +262,7 @@ mod tests {
     /// Live enumeration on a platform with a backend: results must be
     /// well-formed and the protocol filter must narrow them. Exercises the
     /// Windows IpHelper FFI / Linux procfs path end to end.
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
     fn live_enumeration_is_well_formed() {
         let out = collect(&NetworkPortsParams::default()).expect("supported platform");
