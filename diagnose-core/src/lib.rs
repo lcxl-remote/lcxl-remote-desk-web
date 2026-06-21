@@ -21,6 +21,7 @@
 //!   wire dialect.
 
 pub mod agent_loop;
+pub mod agentic_prompt;
 pub mod chat;
 pub mod chunk;
 pub mod exec_tools;
@@ -31,6 +32,7 @@ pub mod registry;
 pub mod seam;
 pub mod selection;
 pub mod session;
+pub mod trim;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB).
 pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 131_072;

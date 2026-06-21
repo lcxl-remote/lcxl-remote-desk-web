@@ -560,6 +560,8 @@ mod tests {
             tools: &tools,
             registry: &registry,
             response_format: ResponseFormatSpec::None,
+            system_prompt: desk_diagnose_core::agentic_prompt::build_agentic_system_message(None),
+            max_context_bytes: desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES,
             clock: &clock,
         };
         let claim = ClaimTurnParams {

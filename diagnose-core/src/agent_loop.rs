@@ -75,6 +75,15 @@ pub struct LoopDeps<'a> {
     pub tools: &'a dyn ToolSeam,
     pub registry: &'a [RegisteredTool],
     pub response_format: crate::prompt::ResponseFormatSpec,
+    /// The system message prepended to the (trimmed) conversation on every model
+    /// call. The caller builds it (with the control-end locale) via
+    /// [`crate::agentic_prompt::build_agentic_system_message`]; it is never stored
+    /// in the persisted conversation, so a prompt-version bump applies to
+    /// in-flight conversations.
+    pub system_prompt: ChatMessage,
+    /// Byte budget for the conversation history sent to the model (§ trimming).
+    /// The system prompt is prepended on top of this and is not counted against it.
+    pub max_context_bytes: usize,
     /// Wall-clock source (RFC3339); the core stays free of a time dependency.
     pub clock: &'a dyn Fn() -> String,
 }
@@ -143,11 +152,20 @@ async fn run_inner(
             &session.scope_snapshot,
             &session.execution_state,
         );
-        let request =
-            ModelRequest::text_only(session.conversation.clone(), deps.response_format.clone());
+        // Assemble the model request: a freshly built system prompt prepended to a
+        // trailing, budget-trimmed window of the stored conversation. The system
+        // prompt is never persisted, so it is added here on every call.
+        let mut messages = Vec::with_capacity(session.conversation.len() + 1);
+        messages.push(deps.system_prompt.clone());
+        messages.extend(crate::trim::trim_conversation(
+            &session.conversation,
+            deps.max_context_bytes,
+        ));
         let request = ModelRequest {
+            messages,
             tools: specs,
-            ..request
+            tool_choice: crate::chat::ToolChoice::Auto,
+            response_format: deps.response_format.clone(),
         };
 
         let turn = deps.model.call(request, sink).await?;
@@ -162,10 +180,14 @@ async fn run_inner(
                     turn.text.clone(),
                 ));
                 deps.session_seam.save(session).await?;
+                sink.on_answer_committed(&turn.text);
                 return Ok(LoopOutcome::Answered(turn.text));
             }
             // A truncated turn is discarded: nothing is appended or executed.
-            Ok(TurnDisposition::Discard) => return Ok(LoopOutcome::Truncated),
+            Ok(TurnDisposition::Discard) => {
+                sink.on_turn_discarded();
+                return Ok(LoopOutcome::Truncated);
+            }
             Ok(TurnDisposition::InvokeTools) => {
                 // Record the assistant's tool-call message so the conversation
                 // stays well-formed when replayed to the model.
@@ -221,20 +243,33 @@ async fn run_inner(
                         ToolEffect::ReadOnly => {
                             // A read tool error is reported back as a tool result;
                             // the backend transport itself does not fail the turn.
-                            let out = match deps.tools.run_read(call).await {
-                                Ok(out) => out,
-                                Err(e) => crate::seam::ToolRunOutput {
-                                    content: format!("tool error: {}", e.message),
-                                    image_data_url: None,
-                                },
+                            sink.on_tool_started(&call.name, &call.id);
+                            let (out, ok) = match deps.tools.run_read(call).await {
+                                Ok(out) => (out, true),
+                                Err(e) => (
+                                    crate::seam::ToolRunOutput {
+                                        content: format!("tool error: {}", e.message),
+                                        image_data_url: None,
+                                    },
+                                    false,
+                                ),
                             };
                             let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
                             msg.image_data_url = out.image_data_url;
                             session.conversation.push(msg);
+                            sink.on_tool_finished(&call.id, ok);
                         }
                         ToolEffect::Mutating => {
-                            run_mutating(deps, session, turn_id, call, &mut mint, &mut halted)
-                                .await?;
+                            run_mutating(
+                                deps,
+                                session,
+                                turn_id,
+                                call,
+                                &mut mint,
+                                &mut halted,
+                                sink,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -252,6 +287,7 @@ async fn run_inner(
 /// [`TurnState::AwaitingApproval`] so other instances / the UI can observe it; it
 /// is restored to `Running` afterward for any read-only follow-up. On a non-success
 /// outcome `halted` is set so the rest of the turn's calls are not executed.
+#[allow(clippy::too_many_arguments)]
 async fn run_mutating<F: FnMut() -> String>(
     deps: &LoopDeps<'_>,
     session: &mut crate::session::PersistedAgentSession,
@@ -259,6 +295,7 @@ async fn run_mutating<F: FnMut() -> String>(
     call: &crate::chat::ToolCall,
     mint: &mut F,
     halted: &mut Option<String>,
+    sink: &mut dyn TurnSink,
 ) -> Result<(), AgentError> {
     let ctx = ExecContext {
         conversation_id: session.conversation_id.clone(),
@@ -273,6 +310,7 @@ async fn run_mutating<F: FnMut() -> String>(
     // observable across instances; restore Running once the seam returns.
     session.turn_state = TurnState::AwaitingApproval;
     deps.session_seam.save(session).await?;
+    sink.on_awaiting_approval(&call.name, &call.id);
     let outcome = deps.tools.confirm_and_exec(call, &ctx).await;
     session.turn_state = TurnState::Running;
 
@@ -281,6 +319,7 @@ async fn run_mutating<F: FnMut() -> String>(
             let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
             msg.image_data_url = out.image_data_url;
             session.conversation.push(msg);
+            sink.on_tool_finished(&call.id, true);
         }
         Ok(ExecOutcome::Rejected { reason }) => {
             let text = match reason {
@@ -290,6 +329,7 @@ async fn run_mutating<F: FnMut() -> String>(
             session
                 .conversation
                 .push(ChatMessage::tool_result(mint(), &call.id, text));
+            sink.on_tool_finished(&call.id, false);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
         Ok(ExecOutcome::ApprovalTimeout) => {
@@ -298,6 +338,7 @@ async fn run_mutating<F: FnMut() -> String>(
                 &call.id,
                 "approval timed out; the command was not executed",
             ));
+            sink.on_tool_finished(&call.id, false);
             *halted = Some("not executed: a prior command in this turn was not run".to_string());
         }
         Ok(ExecOutcome::Unknown(id)) => {
@@ -317,6 +358,7 @@ async fn run_mutating<F: FnMut() -> String>(
                 placeholder_message_id: placeholder_id,
                 since: (deps.clock)(),
             };
+            sink.on_tool_finished(&call.id, false);
             *halted = Some("not executed: a prior command's outcome is unknown".to_string());
         }
         // A model-safe execution error becomes an error tool-result; a backend
@@ -327,6 +369,7 @@ async fn run_mutating<F: FnMut() -> String>(
                 &call.id,
                 format!("execution error: {}", e.message),
             ));
+            sink.on_tool_finished(&call.id, false);
             *halted = Some("not executed: a prior command failed".to_string());
         }
         Err(e) => {
@@ -506,6 +549,8 @@ mod tests {
             tools,
             registry,
             response_format: ResponseFormatSpec::None,
+            system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
+            max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
             clock,
         }
     }
@@ -797,6 +842,150 @@ mod tests {
         assert_eq!(outcome, LoopOutcome::TurnBusy);
     }
 
+    /// The model request is assembled as [system prompt] + conversation: the first
+    /// message is the agentic system prompt and the user message follows it.
+    #[tokio::test]
+    async fn prepends_system_prompt() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([answer("ok")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "x".into(),
+        };
+        let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "q");
+        run_agent_turn(
+            &deps(&sess, &model, &tools, &reg, &clock),
+            claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        let reqs = model.requests.borrow();
+        let msgs = &reqs[0].messages;
+        assert_eq!(msgs[0].role, ChatRole::System);
+        assert!(msgs[0].text.contains("untrusted DATA"));
+        assert_eq!(msgs[1].role, ChatRole::User);
+        assert_eq!(msgs[1].text, "q");
+    }
+
+    /// Two sequential turns over the same session continue one conversation: the
+    /// second turn's model call sees the first turn's user + assistant history
+    /// followed by the new user message (§9 multi-turn continuation).
+    #[tokio::test]
+    async fn follow_up_turn_continues_conversation() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([answer("first"), answer("second")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "x".into(),
+        };
+        let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        run_agent_turn(
+            &deps(&sess, &model, &tools, &reg, &clock),
+            claim(),
+            ChatMessage::text("u1", ChatRole::User, "q1"),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        // Second turn: a distinct turn id so minted message ids do not collide.
+        let mut c2 = claim();
+        c2.turn_id = "turn-2".into();
+        run_agent_turn(
+            &deps(&sess, &model, &tools, &reg, &clock),
+            c2,
+            ChatMessage::text("u2", ChatRole::User, "q2"),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        let reqs = model.requests.borrow();
+        let second = &reqs[1].messages;
+        let roles: Vec<_> = second.iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                ChatRole::System,
+                ChatRole::User,
+                ChatRole::Assistant,
+                ChatRole::User
+            ]
+        );
+        assert_eq!(second[1].text, "q1");
+        assert_eq!(second[3].text, "q2");
+        assert_eq!(
+            sess.inner.borrow().as_ref().unwrap().conversation.len(),
+            4,
+            "both turns persisted in one conversation"
+        );
+    }
+
+    /// A tight context budget trims old history out of the model request while the
+    /// system prompt (prepended on top, not counted) and the newest message stay.
+    #[tokio::test]
+    async fn trims_history_to_budget() {
+        let sess = MemSession::default();
+        {
+            let mut s =
+                PersistedAgentSession::new("conv", None, "actor", "device", 1, scope(), "t");
+            s.conversation.push(ChatMessage::text(
+                "old1",
+                ChatRole::User,
+                "x".repeat(50_000),
+            ));
+            s.conversation.push(ChatMessage::text(
+                "old2",
+                ChatRole::Assistant,
+                "y".repeat(50_000),
+            ));
+            *sess.inner.borrow_mut() = Some(s);
+        }
+        let model = ScriptModel {
+            turns: RefCell::new([answer("ok")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "x".into(),
+        };
+        let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let mut d = deps(&sess, &model, &tools, &reg, &clock);
+        d.max_context_bytes = 500;
+        run_agent_turn(
+            &d,
+            claim(),
+            ChatMessage::text("u", ChatRole::User, "recent"),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        let reqs = model.requests.borrow();
+        let msgs = &reqs[0].messages;
+        assert_eq!(msgs[0].role, ChatRole::System);
+        assert!(
+            msgs.iter().all(|m| !m.text.contains(&"x".repeat(100))),
+            "the large old user message was trimmed out"
+        );
+        assert!(
+            msgs.iter().any(|m| m.text == "recent"),
+            "the newest message is kept"
+        );
+    }
+
     // ---------------------------- Mutating path ----------------------------
 
     use crate::seam::ExecIdentity;
@@ -880,6 +1069,8 @@ mod tests {
             tools: scripted,
             registry,
             response_format: ResponseFormatSpec::None,
+            system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
+            max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
             clock,
         }
     }
@@ -1095,6 +1286,8 @@ mod tests {
             tools: &failing,
             registry: &reg,
             response_format: ResponseFormatSpec::None,
+            system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
+            max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
             clock: &clock,
         };
         let err = run_agent_turn(&deps, exec_claim(), user, &mut sink)
@@ -1106,5 +1299,141 @@ mod tests {
             sess.inner.borrow().as_ref().unwrap().turn_state,
             TurnState::Failed
         );
+    }
+
+    // ---------------------------- Streaming lifecycle ----------------------------
+
+    /// A sink that records every lifecycle event in order (text deltas excluded so
+    /// the assertions key on the structured events).
+    struct EventLog(Rc<RefCell<Vec<String>>>);
+    impl TurnSink for EventLog {
+        fn on_text_delta(&mut self, _delta: &str) {}
+        fn on_tool_started(&mut self, tool_name: &str, call_id: &str) {
+            self.0
+                .borrow_mut()
+                .push(format!("started:{tool_name}:{call_id}"));
+        }
+        fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str) {
+            self.0
+                .borrow_mut()
+                .push(format!("approval:{tool_name}:{call_id}"));
+        }
+        fn on_tool_finished(&mut self, call_id: &str, ok: bool) {
+            self.0.borrow_mut().push(format!("finished:{call_id}:{ok}"));
+        }
+        fn on_answer_committed(&mut self, text: &str) {
+            self.0.borrow_mut().push(format!("answer:{text}"));
+        }
+        fn on_turn_discarded(&mut self) {
+            self.0.borrow_mut().push("discarded".into());
+        }
+    }
+
+    /// A read-tool turn emits start → finish(ok) → answer events in order.
+    #[tokio::test]
+    async fn streams_read_tool_lifecycle_events() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([tool_use("c1", "sysinfo"), answer("done")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "ok".into(),
+        };
+        let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+        let clock = || "t".to_string();
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut sink = EventLog(log.clone());
+        let user = ChatMessage::text("u", ChatRole::User, "q");
+        run_agent_turn(
+            &deps(&sess, &model, &tools, &reg, &clock),
+            claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "started:sysinfo:c1".to_string(),
+                "finished:c1:true".to_string(),
+                "answer:done".to_string(),
+            ]
+        );
+    }
+
+    /// A mutating turn emits an awaiting-approval event (not a read start) before
+    /// the result, then finish(ok) and the answer.
+    #[tokio::test]
+    async fn streams_awaiting_approval_event() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([tool_use("c1", "exec_command"), answer("ok")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![ExecOutcome::Executed(ToolRunOutput {
+            content: "exit_code=0".into(),
+            image_data_url: None,
+        })]);
+        let reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        let clock = || "t".to_string();
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut sink = EventLog(log.clone());
+        let user = ChatMessage::text("u", ChatRole::User, "restart");
+        run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "approval:exec_command:c1".to_string(),
+                "finished:c1:true".to_string(),
+                "answer:ok".to_string(),
+            ]
+        );
+    }
+
+    /// A truncated turn signals discard (no answer committed).
+    #[tokio::test]
+    async fn streams_discarded_on_truncated_turn() {
+        let sess = MemSession::default();
+        let truncated = ModelTurn {
+            text: "half".into(),
+            stop_reason: StopReason::MaxTokens,
+            ..Default::default()
+        };
+        let model = ScriptModel {
+            turns: RefCell::new([truncated].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "x".into(),
+        };
+        let reg = vec![read_tool("sysinfo", Capability::SystemInfo)];
+        let clock = || "t".to_string();
+        let log = Rc::new(RefCell::new(vec![]));
+        let mut sink = EventLog(log.clone());
+        let user = ChatMessage::text("u", ChatRole::User, "q");
+        let outcome = run_agent_turn(
+            &deps(&sess, &model, &tools, &reg, &clock),
+            claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, LoopOutcome::Truncated);
+        assert_eq!(*log.borrow(), vec!["discarded".to_string()]);
     }
 }

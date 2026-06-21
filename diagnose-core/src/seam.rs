@@ -43,17 +43,53 @@ impl ModelRequest {
     }
 }
 
-/// Receives streaming output from a model turn as it arrives.
+/// Receives streaming output and lifecycle events from an agent turn as they
+/// happen, so a runtime can forward them to the UI (the manager maps these onto
+/// `DiagnoseEvent` tool/turn frames; the Direct runtime onto its own stream).
 ///
 /// Text deltas are **provisional** until the turn's [`StopReason`] is known: the
-/// loop commits them only on a final answer (`EndTurn`) and discards them
-/// otherwise, so intermediate tool-calling turns never leak half-text to the UI.
+/// loop commits them only on a final answer (via [`on_answer_committed`]) and
+/// signals [`on_turn_discarded`] on a truncated turn, so intermediate
+/// tool-calling turns never leak half-text to the UI. The tool hooks bracket each
+/// dispatched tool call (a read tool, or a mutating tool's approval wait), letting
+/// the UI show progress without parsing the conversation. All hooks but
+/// [`on_text_delta`] default to no-ops so an existing text-only sink keeps working.
 /// Object-safe so a `&mut dyn TurnSink` can be passed across the seam.
 ///
 /// [`StopReason`]: crate::chat::StopReason
+/// [`on_answer_committed`]: TurnSink::on_answer_committed
+/// [`on_turn_discarded`]: TurnSink::on_turn_discarded
+/// [`on_text_delta`]: TurnSink::on_text_delta
 pub trait TurnSink {
-    /// An incremental fragment of the assistant's text for the current turn.
+    /// An incremental fragment of the assistant's text for the current turn
+    /// (provisional until the turn commits).
     fn on_text_delta(&mut self, delta: &str);
+
+    /// A read tool call was dispatched (about to run).
+    fn on_tool_started(&mut self, tool_name: &str, call_id: &str) {
+        let _ = (tool_name, call_id);
+    }
+
+    /// A mutating tool call is waiting for the operator's approval decision.
+    fn on_awaiting_approval(&mut self, tool_name: &str, call_id: &str) {
+        let _ = (tool_name, call_id);
+    }
+
+    /// A dispatched tool call produced its result; `ok` is whether it yielded a
+    /// usable result (an executed/read success) rather than an error / rejection /
+    /// unknown outcome.
+    fn on_tool_finished(&mut self, call_id: &str, ok: bool) {
+        let _ = (call_id, ok);
+    }
+
+    /// The turn committed a final natural-language answer.
+    fn on_answer_committed(&mut self, text: &str) {
+        let _ = text;
+    }
+
+    /// The turn was truncated (`MaxTokens` / `Other`) and discarded; any
+    /// provisional text streamed for it must be dropped by the UI.
+    fn on_turn_discarded(&mut self) {}
 }
 
 /// A sink that ignores all streamed output (for non-streaming callers / tests).
