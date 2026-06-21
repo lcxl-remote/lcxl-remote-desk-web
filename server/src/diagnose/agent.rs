@@ -1169,6 +1169,30 @@ mod tests {
         );
     }
 
+    /// Once the turn settles, the heartbeat refuses (it only renews active turns),
+    /// so a background renewer stops cleanly.
+    #[tokio::test]
+    async fn heartbeat_stops_after_turn_settles() {
+        let clock = Arc::new(FakeClock::new());
+        let seam = InMemorySessionSeam::with_clock(clock.clone());
+        clock.set(0);
+        let mut s = seam
+            .claim_turn(claim_params("conv-1"))
+            .await
+            .expect("claim");
+        seam.heartbeat("conv-1", s.lease_token, "t")
+            .await
+            .expect("renew while active");
+
+        s.finish_turn(TurnState::Idle, now_rfc3339());
+        seam.save(&mut s).await.expect("settle save");
+        let err = seam
+            .heartbeat("conv-1", s.lease_token, "t")
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, AgentErrorKind::SessionUnavailable);
+    }
+
     // ---------------------------- Mutating exec path ----------------------------
 
     use desk_agent_protocol::exec::{ExecEffect, ExecShellKind};
