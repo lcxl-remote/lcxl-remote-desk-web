@@ -23,6 +23,7 @@ import { DiagnosePanel } from "./diagnose-panel"
 import { useDeskExec } from "./use-desk-exec"
 import { useDeskInput } from "./use-desk-input"
 import { getKeyboardShortcuts } from "./keyboard-shortcuts"
+import { lockEscapeKey, unlockKeyboard } from "./fullscreen-keyboard"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
 import { useCursorSync } from "./use-cursor-sync"
@@ -653,25 +654,22 @@ export default function DeskSession() {
         sendMessage(SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN, { enable: newState }, deskId);
     };
 
-    const handleFullscreen = () => {
+    const handleFullscreen = async () => {
         if (!document.fullscreenElement) {
-            videoWrapperRef.current?.requestFullscreen().catch(err => {
-                console.log(`Error attempting to enable fullscreen: ${err.message}`);
-            });
             try {
-                (navigator as any).keyboard?.lock(['Escape']);
-                console.log("Keyboard lock: ESC key captured");
-            } catch (error) {
-                console.warn("Failed to lock keyboard:", error);
+                await videoWrapperRef.current?.requestFullscreen();
+            } catch (err) {
+                console.log(`Error attempting to enable fullscreen: ${(err as Error).message}`);
+                return;
             }
+            // Lock Escape only after fullscreen is actually active, otherwise
+            // Chromium does not engage the press-and-hold-to-exit behaviour and
+            // keeps swallowing Escape (so the host never receives it).
+            await lockEscapeKey();
         } else {
+            // Releasing the lock is handled by the fullscreenchange listener so
+            // it also covers exiting via press-and-hold Escape.
             document.exitFullscreen();
-            try {
-                (navigator as any).keyboard?.unlock();
-                console.log("Keyboard unlock: ESC key released");
-            } catch (error) {
-                console.warn("Failed to unlock keyboard:", error);
-            }
         }
     };
 
@@ -679,6 +677,12 @@ export default function DeskSession() {
     useEffect(() => {
         const handleFullscreenChange = () => {
             setIsFullscreen(!!document.fullscreenElement);
+            // Release the Escape keyboard lock whenever we leave fullscreen,
+            // including the press-and-hold-Escape exit path that never goes
+            // through handleFullscreen.
+            if (!document.fullscreenElement) {
+                unlockKeyboard();
+            }
             // Re-center control bar if it exists
             if (controlBarRef.current) {
                 const cb = controlBarRef.current;
