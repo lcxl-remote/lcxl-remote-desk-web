@@ -3364,7 +3364,10 @@ mod tests {
         let own = own_turn_endpoints(Some(&turn_settings_with(&["192.168.50.5:3479"])));
         let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].urls, vec!["turn:relay.example.com:3478?transport=udp"]);
+        assert_eq!(
+            kept[0].urls,
+            vec!["turn:relay.example.com:3478?transport=udp"]
+        );
         assert_eq!(kept[0].username, "user");
         assert_eq!(kept[0].credential, "pw");
     }
