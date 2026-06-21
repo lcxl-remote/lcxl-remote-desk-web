@@ -87,13 +87,76 @@ pub struct ToolRunOutput {
     pub image_data_url: Option<String>,
 }
 
-/// Runs the loop's tools. Read tools run immediately; the mutating path (approval
-/// + real execution) is added with the mutating PR.
+/// The immutable identity of a dispatched mutating execution, used to fence a late
+/// result and to record the unknown-outcome execution state. The manager fills it
+/// from the durable work item; a runtime without durable work (Direct) uses a
+/// process-local `work_id` sentinel and synthetic ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecIdentity {
+    pub work_id: i64,
+    pub execution_id: String,
+    pub exec_request_id: String,
+}
+
+/// The terminal outcome of a mutating tool call's approval + execution. The seam
+/// owns the whole approval → dispatch → result wait (Direct: a local oneshot
+/// confirm + in-process exec; Manager: a durable work item + central approval +
+/// cross-instance dispatch). The loop turns this into the conversation and the
+/// execution-reconciliation state.
+#[derive(Debug, Clone)]
+pub enum ExecOutcome {
+    /// Approved and executed to a known, already-redacted result.
+    Executed(ToolRunOutput),
+    /// The operator rejected the command; nothing ran.
+    Rejected { reason: Option<String> },
+    /// Approval expired before any decision; nothing ran.
+    ApprovalTimeout,
+    /// The command may have run but its outcome is unknown (cancel / timeout /
+    /// crash after dispatch). The loop closes the conversation with a placeholder
+    /// tool result and records [`ExecutionState::OutcomeUnknown`]; a late result
+    /// reconciles it in place.
+    ///
+    /// [`ExecutionState::OutcomeUnknown`]: crate::session::ExecutionState::OutcomeUnknown
+    Unknown(ExecIdentity),
+}
+
+/// Per-call context the loop hands the mutating seam: the turn's identity plus the
+/// authorization the work item is minted under. The subject (actor / device) is
+/// already held by the seam (it is built per turn); these are the fields the loop
+/// owns and the seam needs to mint a durable work item.
+#[derive(Debug, Clone)]
+pub struct ExecContext {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub tool_call_id: String,
+    pub policy_revision: i64,
+    pub scope: AgentScope,
+}
+
+/// Runs the loop's tools. Read tools run immediately; a mutating tool goes through
+/// approval + real execution via [`confirm_and_exec`](ToolSeam::confirm_and_exec).
 #[async_trait(?Send)]
 pub trait ToolSeam {
     /// Run a read-only tool call and return its redacted result. The loop has
     /// already validated that the call names an exposed read tool.
     async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError>;
+
+    /// Approve and execute a mutating tool call, returning its terminal
+    /// [`ExecOutcome`]. The loop has already validated the call names an exposed
+    /// mutating tool and that no prior execution outcome is still unknown. A
+    /// model-safe `Err` is turned into an error tool-result by the loop; a backend
+    /// transport `Err` fails the turn. The default rejects, so a read-only runtime
+    /// need not implement it.
+    async fn confirm_and_exec(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+    ) -> Result<ExecOutcome, AgentError> {
+        let _ = (call, ctx);
+        Ok(ExecOutcome::Rejected {
+            reason: Some("mutating execution is not supported by this runtime".into()),
+        })
+    }
 }
 
 /// Inputs to atomically claim a turn for a conversation. The subject fields pin

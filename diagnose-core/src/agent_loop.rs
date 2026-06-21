@@ -3,12 +3,17 @@
 //! [`run_agent_turn`] drives one conversational turn over the seams: it claims
 //! the turn (atomically, via [`SessionSeam`]), then repeatedly calls the model
 //! ([`ModelSeam`]), validates each turn with [`classify_model_turn`], and either
-//! returns the final answer or runs the requested read tools ([`ToolSeam`]) and
-//! loops. An outer wrapper guarantees the turn machine is always settled
-//! (`finish_turn`) on every exit path.
+//! returns the final answer or runs the requested tools ([`ToolSeam`]) and loops.
+//! An outer wrapper guarantees the turn machine is always settled (`finish_turn`)
+//! on every exit path.
 //!
-//! Only read tools run here; the mutating path (approval + real execution) is
-//! added in a later PR. The same exposure matrix ([`registry::exposed_specs`] /
+//! Read tools run immediately; a mutating tool goes through approval + real
+//! execution via [`ToolSeam::confirm_and_exec`], whose terminal outcome the loop
+//! turns into the conversation and the execution-reconciliation state — including
+//! the unknown-outcome closure (§6): a placeholder tool result keeps the model
+//! history well-formed and a late result replaces it in place. Mutating calls in
+//! one turn run serially; a rejection / timeout / unknown outcome halts the rest.
+//! The same exposure matrix ([`registry::exposed_specs`] /
 //! [`registry::lookup_exposed`]) both advertises tools to the model and validates
 //! a returned call, so a model can never invoke a tool it was not shown.
 //!
@@ -26,9 +31,16 @@ use desk_agent_protocol::AgentError;
 use crate::chat::{ChatMessage, ModelTurnError, TurnDisposition, classify_model_turn};
 use crate::registry::{RegisteredTool, ToolEffect, exposed_specs, lookup_exposed};
 use crate::seam::{
-    ClaimError, ClaimTurnParams, ModelRequest, ModelSeam, SessionSeam, ToolSeam, TurnSink,
+    ClaimError, ClaimTurnParams, ExecContext, ExecOutcome, ModelRequest, ModelSeam, SessionSeam,
+    ToolSeam, TurnSink,
 };
-use crate::session::{SubjectMismatch, TurnState};
+use crate::session::{ExecutionState, SubjectMismatch, TurnState};
+
+/// The placeholder tool-result text written when a mutating execution's outcome is
+/// unknown (§6): it keeps the conversation well-formed and tells the model not to
+/// assume the command succeeded. A late real result replaces it in place.
+const OUTCOME_UNKNOWN_PLACEHOLDER: &str =
+    "execution outcome unknown; the command may have executed; do not assume success";
 
 /// Why the loop's circuit breaker stopped a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,7 +176,20 @@ async fn run_inner(
                     refs,
                 ));
 
+                // Mutating tools in one turn run serially; once one is rejected,
+                // times out, or goes to an unknown outcome, the rest of the turn's
+                // calls are not executed (§3). `halted` holds the skip note.
+                let mut halted: Option<String> = None;
                 for call in &turn.tool_calls {
+                    if let Some(note) = &halted {
+                        session.conversation.push(ChatMessage::tool_result(
+                            mint(),
+                            &call.id,
+                            note.clone(),
+                        ));
+                        continue;
+                    }
+
                     // Same-tool repeat circuit breaker.
                     let count = same_tool.entry(call.name.clone()).or_insert(0);
                     *count += 1;
@@ -175,10 +200,43 @@ async fn run_inner(
                         ));
                     }
 
-                    let result_text = run_one_tool(deps, session, call).await?;
-                    let mut msg = ChatMessage::tool_result(mint(), &call.id, result_text.content);
-                    msg.image_data_url = result_text.image_data_url;
-                    session.conversation.push(msg);
+                    // A call naming a tool not exposed under the current scope/state
+                    // becomes an error tool-result so the conversation stays
+                    // well-formed and the model can adjust.
+                    let Some(tool) = lookup_exposed(
+                        deps.registry,
+                        &call.name,
+                        &session.scope_snapshot,
+                        &session.execution_state,
+                    ) else {
+                        session.conversation.push(ChatMessage::tool_result(
+                            mint(),
+                            &call.id,
+                            format!("tool `{}` is not available in the current scope", call.name),
+                        ));
+                        continue;
+                    };
+
+                    match tool.effect {
+                        ToolEffect::ReadOnly => {
+                            // A read tool error is reported back as a tool result;
+                            // the backend transport itself does not fail the turn.
+                            let out = match deps.tools.run_read(call).await {
+                                Ok(out) => out,
+                                Err(e) => crate::seam::ToolRunOutput {
+                                    content: format!("tool error: {}", e.message),
+                                    image_data_url: None,
+                                },
+                            };
+                            let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
+                            msg.image_data_url = out.image_data_url;
+                            session.conversation.push(msg);
+                        }
+                        ToolEffect::Mutating => {
+                            run_mutating(deps, session, turn_id, call, &mut mint, &mut halted)
+                                .await?;
+                        }
+                    }
                 }
                 deps.session_seam.save(session).await?;
                 // Loop again with the tool results in context.
@@ -187,48 +245,95 @@ async fn run_inner(
     }
 }
 
-/// Run a single validated tool call, returning the (redacted) result to feed back
-/// to the model. A call naming a tool that is not exposed under the current scope,
-/// or a tool error, is turned into an error tool-result so the conversation stays
-/// well-formed and the model can adjust — neither aborts the turn.
-async fn run_one_tool(
+/// Run one validated mutating tool call: approval + execution via the seam, then
+/// translate its terminal [`ExecOutcome`] into the conversation + execution state.
+///
+/// Before the (possibly long) approval wait the turn is persisted as
+/// [`TurnState::AwaitingApproval`] so other instances / the UI can observe it; it
+/// is restored to `Running` afterward for any read-only follow-up. On a non-success
+/// outcome `halted` is set so the rest of the turn's calls are not executed.
+async fn run_mutating<F: FnMut() -> String>(
     deps: &LoopDeps<'_>,
-    session: &crate::session::PersistedAgentSession,
+    session: &mut crate::session::PersistedAgentSession,
+    turn_id: &str,
     call: &crate::chat::ToolCall,
-) -> Result<crate::seam::ToolRunOutput, AgentError> {
-    let Some(tool) = lookup_exposed(
-        deps.registry,
-        &call.name,
-        &session.scope_snapshot,
-        &session.execution_state,
-    ) else {
-        return Ok(error_output(format!(
-            "tool `{}` is not available in the current scope",
-            call.name
-        )));
+    mint: &mut F,
+    halted: &mut Option<String>,
+) -> Result<(), AgentError> {
+    let ctx = ExecContext {
+        conversation_id: session.conversation_id.clone(),
+        turn_id: turn_id.to_string(),
+        tool_call_id: call.id.clone(),
+        policy_revision: session.policy_revision,
+        scope: session.scope_snapshot.clone(),
     };
 
-    match tool.effect {
-        ToolEffect::ReadOnly => match deps.tools.run_read(call).await {
-            Ok(out) => Ok(out),
-            // A safe-for-model tool error is reported back as a tool result; the
-            // backend transport itself does not fail the turn.
-            Err(e) => Ok(error_output(format!("tool error: {}", e.message))),
-        },
-        // The mutating path (approval + execution) is added in a later PR.
-        ToolEffect::Mutating => Ok(error_output(format!(
-            "tool `{}` requires execution support that is not enabled",
-            call.name
-        ))),
-    }
-}
+    // Persist "awaiting approval" before the wait so the pending decision is
+    // observable across instances; restore Running once the seam returns.
+    session.turn_state = TurnState::AwaitingApproval;
+    deps.session_seam.save(session).await?;
+    let outcome = deps.tools.confirm_and_exec(call, &ctx).await;
+    session.turn_state = TurnState::Running;
 
-/// A tool result carrying an error message (no image).
-fn error_output(message: String) -> crate::seam::ToolRunOutput {
-    crate::seam::ToolRunOutput {
-        content: message,
-        image_data_url: None,
+    match outcome {
+        Ok(ExecOutcome::Executed(out)) => {
+            let mut msg = ChatMessage::tool_result(mint(), &call.id, out.content);
+            msg.image_data_url = out.image_data_url;
+            session.conversation.push(msg);
+        }
+        Ok(ExecOutcome::Rejected { reason }) => {
+            let text = match reason {
+                Some(r) => format!("the operator rejected this command: {r}"),
+                None => "the operator rejected this command".to_string(),
+            };
+            session
+                .conversation
+                .push(ChatMessage::tool_result(mint(), &call.id, text));
+            *halted = Some("not executed: a prior command in this turn was not run".to_string());
+        }
+        Ok(ExecOutcome::ApprovalTimeout) => {
+            session.conversation.push(ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                "approval timed out; the command was not executed",
+            ));
+            *halted = Some("not executed: a prior command in this turn was not run".to_string());
+        }
+        Ok(ExecOutcome::Unknown(id)) => {
+            // §6: close the conversation with a placeholder tool result (so the
+            // model history stays well-formed) and record the unknown outcome; a
+            // late real result replaces the placeholder in place.
+            let placeholder_id = mint();
+            session.conversation.push(ChatMessage::tool_result(
+                placeholder_id.clone(),
+                &call.id,
+                OUTCOME_UNKNOWN_PLACEHOLDER,
+            ));
+            session.execution_state = ExecutionState::OutcomeUnknown {
+                work_id: id.work_id,
+                execution_id: id.execution_id,
+                exec_request_id: id.exec_request_id,
+                placeholder_message_id: placeholder_id,
+                since: (deps.clock)(),
+            };
+            *halted = Some("not executed: a prior command's outcome is unknown".to_string());
+        }
+        // A model-safe execution error becomes an error tool-result; a backend
+        // transport error fails the turn.
+        Err(e) if e.safe_for_model => {
+            session.conversation.push(ChatMessage::tool_result(
+                mint(),
+                &call.id,
+                format!("execution error: {}", e.message),
+            ));
+            *halted = Some("not executed: a prior command failed".to_string());
+        }
+        Err(e) => {
+            deps.session_seam.save(session).await?;
+            return Err(e);
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -689,5 +794,316 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome, LoopOutcome::TurnBusy);
+    }
+
+    // ---------------------------- Mutating path ----------------------------
+
+    use crate::seam::ExecIdentity;
+
+    /// A tool seam that scripts mutating outcomes and records read + exec calls.
+    struct ScriptedTools {
+        reads: Rc<RefCell<Vec<String>>>,
+        execs: RefCell<std::collections::VecDeque<ExecOutcome>>,
+        exec_calls: Rc<RefCell<Vec<String>>>,
+    }
+    #[async_trait(?Send)]
+    impl ToolSeam for ScriptedTools {
+        async fn run_read(&self, call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+            self.reads.borrow_mut().push(call.name.clone());
+            Ok(ToolRunOutput {
+                content: format!("{}: ok", call.name),
+                image_data_url: None,
+            })
+        }
+        async fn confirm_and_exec(
+            &self,
+            call: &ToolCall,
+            _ctx: &ExecContext,
+        ) -> Result<ExecOutcome, AgentError> {
+            self.exec_calls.borrow_mut().push(call.id.clone());
+            Ok(self
+                .execs
+                .borrow_mut()
+                .pop_front()
+                .expect("a scripted exec outcome"))
+        }
+    }
+
+    fn mutating_tool(name: &str, cap: Capability) -> RegisteredTool {
+        RegisteredTool {
+            spec: ToolSpec {
+                name: name.into(),
+                description: "exec".into(),
+                parameters_schema: serde_json::json!({"type":"object"}),
+            },
+            required_capability: cap,
+            effect: ToolEffect::Mutating,
+        }
+    }
+
+    /// A scope that exposes the mutating exec tool: grants its capability and runs
+    /// at `ConfirmEachAction`.
+    fn exec_scope() -> AgentScope {
+        AgentScope {
+            granted: vec![Capability::ShellExecConfirmed, Capability::SystemInfo],
+            mode: ExecutionMode::ConfirmEachAction,
+            expires_at: None,
+            policy_name: None,
+        }
+    }
+
+    fn exec_claim() -> ClaimTurnParams {
+        let mut c = claim();
+        c.current_pdp_scope = exec_scope();
+        c
+    }
+
+    fn tools(execs: Vec<ExecOutcome>) -> ScriptedTools {
+        ScriptedTools {
+            reads: Rc::new(RefCell::new(vec![])),
+            execs: RefCell::new(execs.into()),
+            exec_calls: Rc::new(RefCell::new(vec![])),
+        }
+    }
+
+    fn exec_deps<'a>(
+        sess: &'a MemSession,
+        model: &'a ScriptModel,
+        scripted: &'a ScriptedTools,
+        registry: &'a [RegisteredTool],
+        clock: &'a dyn Fn() -> String,
+    ) -> LoopDeps<'a> {
+        LoopDeps {
+            session_seam: sess,
+            model,
+            tools: scripted,
+            registry,
+            response_format: ResponseFormatSpec::None,
+            clock,
+        }
+    }
+
+    /// A mutating tool that the operator approves runs to a known result; its
+    /// result is appended and the turn settles to Idle with no in-flight execution.
+    #[tokio::test]
+    async fn mutating_executes_then_answers() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([tool_use("c1", "exec_command"), answer("done")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![ExecOutcome::Executed(ToolRunOutput {
+            content: "exit_code=0".into(),
+            image_data_url: None,
+        })]);
+        let reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "restart it");
+        let outcome = run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, LoopOutcome::Answered("done".into()));
+        assert_eq!(*scripted.exec_calls.borrow(), vec!["c1"]);
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        // user, assistant(tool_calls), tool result, assistant(answer).
+        assert_eq!(s.conversation.len(), 4);
+        assert_eq!(s.conversation[2].role, ChatRole::Tool);
+        assert_eq!(s.conversation[2].text, "exit_code=0");
+        assert_eq!(s.execution_state, ExecutionState::None);
+        assert_eq!(s.turn_state, TurnState::Idle);
+    }
+
+    /// An unknown-outcome execution closes the conversation with a placeholder tool
+    /// result, records `OutcomeUnknown`, and hides the mutating tool from the next
+    /// model call (only read-only follow-up); the late result reconciles it later.
+    #[tokio::test]
+    async fn mutating_unknown_closes_with_placeholder_and_hides_mutating() {
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new(
+                [
+                    tool_use("c1", "exec_command"),
+                    tool_use("c2", "read_sys"),
+                    answer("status"),
+                ]
+                .into(),
+            ),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![ExecOutcome::Unknown(ExecIdentity {
+            work_id: 5,
+            execution_id: "e1".into(),
+            exec_request_id: "r1".into(),
+        })]);
+        let reg = vec![
+            mutating_tool("exec_command", Capability::ShellExecConfirmed),
+            read_tool("read_sys", Capability::SystemInfo),
+        ];
+        let clock = || "2026-06-20T00:00:09Z".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "restart it");
+        let outcome = run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, LoopOutcome::Answered("status".into()));
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        // The placeholder is recorded with the unknown outcome.
+        match &s.execution_state {
+            ExecutionState::OutcomeUnknown {
+                execution_id,
+                placeholder_message_id,
+                ..
+            } => {
+                assert_eq!(execution_id, "e1");
+                let ph = s
+                    .conversation
+                    .iter()
+                    .find(|m| &m.message_id == placeholder_message_id)
+                    .unwrap();
+                assert_eq!(ph.tool_call_id.as_deref(), Some("c1"));
+                assert!(ph.text.contains("outcome unknown"));
+            }
+            other => panic!("expected OutcomeUnknown, got {other:?}"),
+        }
+        // The follow-up model call did not advertise the mutating tool (no new
+        // mutation while an outcome is unknown), but kept the read tool.
+        let reqs = model.requests.borrow();
+        let follow_up: Vec<_> = reqs[1].tools.iter().map(|t| t.name.clone()).collect();
+        assert!(!follow_up.contains(&"exec_command".to_string()));
+        assert!(follow_up.contains(&"read_sys".to_string()));
+        // The first model call DID advertise the mutating tool.
+        let first: Vec<_> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
+        assert!(first.contains(&"exec_command".to_string()));
+    }
+
+    /// Two mutating calls in one turn run serially: a rejection halts the rest, so
+    /// the second is skipped (not executed) but still gets a tool result.
+    #[tokio::test]
+    async fn mutating_rejected_skips_remaining_in_turn() {
+        let sess = MemSession::default();
+        let two = ModelTurn {
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: "exec_command".into(),
+                    arguments_json: "{}".into(),
+                },
+                ToolCall {
+                    id: "c2".into(),
+                    name: "exec_command".into(),
+                    arguments_json: "{}".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let model = ScriptModel {
+            turns: RefCell::new([two, answer("ok")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let scripted = tools(vec![ExecOutcome::Rejected {
+            reason: Some("not now".into()),
+        }]);
+        let reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "restart both");
+        let outcome = run_agent_turn(
+            &exec_deps(&sess, &model, &scripted, &reg, &clock),
+            exec_claim(),
+            user,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, LoopOutcome::Answered("ok".into()));
+        // Only the first call was attempted; the second was skipped.
+        assert_eq!(*scripted.exec_calls.borrow(), vec!["c1"]);
+        let s = sess.inner.borrow();
+        let s = s.as_ref().unwrap();
+        // user, assistant(2 calls), rejected result(c1), skipped result(c2), answer.
+        assert_eq!(s.conversation.len(), 5);
+        assert_eq!(s.conversation[2].tool_call_id.as_deref(), Some("c1"));
+        assert!(s.conversation[2].text.contains("rejected"));
+        assert_eq!(s.conversation[3].tool_call_id.as_deref(), Some("c2"));
+        assert!(s.conversation[3].text.contains("not executed"));
+        assert_eq!(s.execution_state, ExecutionState::None);
+    }
+
+    /// A backend transport error from the mutating seam (not model-safe) fails the
+    /// turn rather than becoming a tool result.
+    #[tokio::test]
+    async fn mutating_backend_error_fails_turn() {
+        struct FailingExec;
+        #[async_trait(?Send)]
+        impl ToolSeam for FailingExec {
+            async fn run_read(&self, _call: &ToolCall) -> Result<ToolRunOutput, AgentError> {
+                unreachable!("no read in this test")
+            }
+            async fn confirm_and_exec(
+                &self,
+                _call: &ToolCall,
+                _ctx: &ExecContext,
+            ) -> Result<ExecOutcome, AgentError> {
+                Err(AgentError {
+                    kind: desk_agent_protocol::AgentErrorKind::Internal,
+                    message: "db down".into(),
+                    retryable: false,
+                    safe_for_model: false,
+                })
+            }
+        }
+        let sess = MemSession::default();
+        let model = ScriptModel {
+            turns: RefCell::new([tool_use("c1", "exec_command")].into()),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let failing = FailingExec;
+        let reg = vec![mutating_tool(
+            "exec_command",
+            Capability::ShellExecConfirmed,
+        )];
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "do it");
+        let deps = LoopDeps {
+            session_seam: &sess,
+            model: &model,
+            tools: &failing,
+            registry: &reg,
+            response_format: ResponseFormatSpec::None,
+            clock: &clock,
+        };
+        let err = run_agent_turn(&deps, exec_claim(), user, &mut sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, desk_agent_protocol::AgentErrorKind::Internal);
+        // The turn settled to Failed.
+        assert_eq!(
+            sess.inner.borrow().as_ref().unwrap().turn_state,
+            TurnState::Failed
+        );
     }
 }

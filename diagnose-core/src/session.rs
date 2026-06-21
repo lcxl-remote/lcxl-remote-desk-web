@@ -50,10 +50,10 @@ impl TurnState {
 
 /// The execution-reconciliation machine, orthogonal to [`TurnState`].
 ///
-/// Only the mutating path (a later PR) drives the non-`None` variants; a
-/// read-only turn leaves this at [`ExecutionState::None`]. The `work_id` /
-/// `execution_id` / `exec_request_id` fields identify the durable work item and
-/// the immutable dispatch generation used for late-result fencing.
+/// Only the mutating path drives the non-`None` variants; a read-only turn leaves
+/// this at [`ExecutionState::None`]. The `work_id` / `execution_id` /
+/// `exec_request_id` fields identify the durable work item and the immutable
+/// dispatch generation used for late-result fencing.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ExecutionState {
@@ -267,6 +267,40 @@ impl PersistedAgentSession {
     pub fn finish_turn(&mut self, terminal: TurnState, now: impl Into<String>) {
         self.turn_state = terminal;
         self.updated_at = now.into();
+    }
+
+    /// Reconcile a late execution result against an unknown outcome (§6.2): if the
+    /// execution machine is [`ExecutionState::OutcomeUnknown`] for `execution_id`,
+    /// replace the placeholder tool-result message (matched by its `message_id`)
+    /// text **in place** — never appending a second tool result for the same call —
+    /// and clear the execution machine to [`ExecutionState::None`]. Returns whether
+    /// a reconciliation happened (false if already resolved / a different
+    /// execution / not unknown). The durable result is written first by the caller;
+    /// this only mutates the conversation + execution state.
+    pub fn reconcile_late_result(
+        &mut self,
+        execution_id: &str,
+        result_text: impl Into<String>,
+        now: impl Into<String>,
+    ) -> bool {
+        let placeholder_id = match &self.execution_state {
+            ExecutionState::OutcomeUnknown {
+                execution_id: current,
+                placeholder_message_id,
+                ..
+            } if current == execution_id => placeholder_message_id.clone(),
+            _ => return false,
+        };
+        if let Some(msg) = self
+            .conversation
+            .iter_mut()
+            .find(|m| m.message_id == placeholder_id)
+        {
+            msg.text = result_text.into();
+        }
+        self.execution_state = ExecutionState::None;
+        self.updated_at = now.into();
+        true
     }
 }
 
@@ -487,6 +521,53 @@ mod tests {
             s.lifetime_tokens.output_tokens,
             Some(2 * crate::MAX_STEPS_PER_TURN as i64)
         );
+    }
+
+    /// A late result reconciles an unknown outcome: it replaces the placeholder
+    /// message text in place (no second tool result) and clears the execution
+    /// machine; a mismatched execution id or an already-resolved state is a no-op.
+    #[test]
+    fn reconcile_late_result_replaces_placeholder_in_place() {
+        let mut s = session();
+        s.conversation.push(crate::chat::ChatMessage::tool_result(
+            "ph-1",
+            "call-1",
+            "execution outcome unknown; the command may have executed; do not assume success",
+        ));
+        s.execution_state = ExecutionState::OutcomeUnknown {
+            work_id: 7,
+            execution_id: "exec-1".into(),
+            exec_request_id: "req-1".into(),
+            placeholder_message_id: "ph-1".into(),
+            since: "2026-06-20T00:00:00Z".into(),
+        };
+        let conv_len = s.conversation.len();
+
+        // A different execution id does not reconcile.
+        assert!(!s.reconcile_late_result("other", "ran ok", "2026-06-20T00:01:00Z"));
+        assert!(matches!(
+            s.execution_state,
+            ExecutionState::OutcomeUnknown { .. }
+        ));
+
+        // The matching id replaces the placeholder text in place and clears state.
+        assert!(s.reconcile_late_result("exec-1", "exit_code=0", "2026-06-20T00:02:00Z"));
+        assert_eq!(s.execution_state, ExecutionState::None);
+        assert_eq!(
+            s.conversation.len(),
+            conv_len,
+            "no second tool result appended"
+        );
+        let ph = s
+            .conversation
+            .iter()
+            .find(|m| m.message_id == "ph-1")
+            .unwrap();
+        assert_eq!(ph.text, "exit_code=0");
+        assert_eq!(ph.tool_call_id.as_deref(), Some("call-1"));
+
+        // A second reconcile is a no-op (already resolved).
+        assert!(!s.reconcile_late_result("exec-1", "again", "2026-06-20T00:03:00Z"));
     }
 
     /// The session round-trips through serde (manager persistence).
