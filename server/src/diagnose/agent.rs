@@ -652,6 +652,24 @@ mod tests {
         }
     }
 
+    /// An approver that records how many previews it was asked to push, to prove a
+    /// blocked command is short-circuited before any approval card is shown.
+    struct RecordingApprover {
+        pushes: Arc<std::sync::atomic::AtomicUsize>,
+        decision: DirectApproval,
+    }
+    #[async_trait::async_trait(?Send)]
+    impl DirectExecApprover for RecordingApprover {
+        async fn request_approval(
+            &self,
+            _request: &ExecApprovalRequest,
+        ) -> Result<DirectApproval, AgentError> {
+            self.pushes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.decision)
+        }
+    }
+
     enum RunKind {
         Ok,
         Unknown,
@@ -805,6 +823,37 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(out, ExecOutcome::Rejected { .. }));
+    }
+
+    /// Defence-in-depth: a blocked command never reaches the approver, so no
+    /// approval card is ever pushed to the control end — the classifier short-
+    /// circuits it. Even an approver that would say "approved" is never consulted.
+    #[tokio::test]
+    async fn exec_blocked_never_reaches_approver() {
+        let pushes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seam = DirectToolSeam::new(
+            Arc::new(LocalDeviceAgent::new()),
+            Arc::new(RegexRedactor::new()),
+            "agent-loop",
+        )
+        .with_exec(DirectExecParts {
+            classifier: Arc::new(FakeClassifier(blocked())),
+            approver: Arc::new(RecordingApprover {
+                pushes: pushes.clone(),
+                decision: DirectApproval::Approved,
+            }),
+            runner: Arc::new(FakeRunner(RunKind::Ok)),
+        });
+        let out = seam
+            .confirm_and_exec(&exec_call(), &exec_ctx())
+            .await
+            .unwrap();
+        assert!(matches!(out, ExecOutcome::Rejected { .. }));
+        assert_eq!(
+            pushes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a blocked command must not push an approval preview"
+        );
     }
 
     /// A rejected approval yields Rejected; a timeout yields ApprovalTimeout.
