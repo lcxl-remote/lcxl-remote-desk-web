@@ -237,16 +237,54 @@ pub enum ClaimError {
 #[async_trait(?Send)]
 pub trait SessionSeam {
     /// Atomically load-or-create the session for `conversation_id` and claim a
-    /// turn (`Idle → Running`), recomputing scope at the turn boundary and
-    /// resetting the turn-level counters. Returns the claimed session, or a
-    /// [`ClaimError`] (busy / subject mismatch / backend). Atomicity is the
-    /// implementation's responsibility.
+    /// turn (settled → `Running`), recomputing scope at the turn boundary,
+    /// resetting the turn-level counters, and rotating the lease token. An
+    /// orphaned active session whose lease has expired is recovered (settled +
+    /// closed) before the claim, so a crashed turn never blocks follow-ups
+    /// forever. Returns the claimed session, or a [`ClaimError`] (busy / subject
+    /// mismatch / backend). Atomicity is the implementation's responsibility.
     async fn claim_turn(
         &self,
         params: ClaimTurnParams,
     ) -> Result<PersistedAgentSession, ClaimError>;
 
     /// Persist the session after a step (conversation growth, counters, the
-    /// finishing turn-state transition).
-    async fn save(&self, session: &PersistedAgentSession) -> Result<(), AgentError>;
+    /// finishing turn-state transition), under a **fencing CAS on both the lease
+    /// token and the version**: the held `session.lease_token` must still be the
+    /// current owner's and the held `session.version` the latest. On success the
+    /// implementation advances the stored version and writes the new value back
+    /// into `session.version` so the next save CASes against it. A token mismatch
+    /// (the lease was taken over by another owner) or a version conflict fails the
+    /// save — the loop ends the turn rather than overwriting the new owner's work.
+    async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError>;
+
+    /// Renew the lease for an active turn: extend its deadline if `lease_token` is
+    /// still the current owner's and the turn is still active. It **never** bumps
+    /// the version (so a concurrent [`save`](Self::save) is unaffected) and is a
+    /// no-op once the session settles. A token mismatch / settled session returns
+    /// an error so a background renewer stops. The default is a no-op for runtimes
+    /// (and test stubs) that do not lease.
+    async fn heartbeat(
+        &self,
+        conversation_id: &str,
+        lease_token: u64,
+        now: &str,
+    ) -> Result<(), AgentError> {
+        let _ = (conversation_id, lease_token, now);
+        Ok(())
+    }
 }
+
+/// Starts a background lease-renewal ticker for one active turn. The core has no
+/// timer/runtime, so each runtime supplies it; the loop starts it right after a
+/// successful claim (with the claimed `lease_token`) and drops the returned guard
+/// when the turn settles, stopping renewal.
+pub trait LeaseHeartbeat {
+    /// Begin periodically calling [`SessionSeam::heartbeat`] for this turn until the
+    /// returned guard is dropped.
+    fn start(&self, conversation_id: String, lease_token: u64) -> Box<dyn HeartbeatGuard>;
+}
+
+/// Opaque handle whose `Drop` stops the lease-renewal ticker started by
+/// [`LeaseHeartbeat::start`].
+pub trait HeartbeatGuard {}

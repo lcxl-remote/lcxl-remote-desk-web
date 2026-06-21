@@ -104,11 +104,24 @@ pub enum ExecutionState {
         placeholder_message_id: String,
         since: String,
     },
+    /// A turn was interrupted (crash / lease takeover) while a mutating tool was
+    /// outstanding, but with **no recoverable execution identity** — the runtime
+    /// could not prove whether the command ran or even reached dispatch. Unlike
+    /// [`OutcomeUnknown`], no late result will ever reconcile this, so the
+    /// conversation is permanently barred from new mutation (read-only follow-up
+    /// only). This is the conservative recovery verdict when nothing better is known.
+    ///
+    /// [`OutcomeUnknown`]: ExecutionState::OutcomeUnknown
+    Interrupted { since: String },
 }
 
 impl ExecutionState {
-    /// Whether a mutating tool may be exposed/started right now. While an outcome
-    /// is unknown, only read-only follow-up is allowed (no new mutation).
+    /// Whether a mutating tool may be exposed/started right now. A new mutation is
+    /// allowed only from a clean [`None`] state; while an outcome is unknown or the
+    /// session was interrupted with no recoverable identity, only read-only
+    /// follow-up is allowed.
+    ///
+    /// [`None`]: ExecutionState::None
     pub fn allows_new_mutation(&self) -> bool {
         matches!(self, ExecutionState::None)
     }
@@ -148,6 +161,17 @@ pub struct PersistedAgentSession {
     // ---- The two orthogonal machines ----
     pub turn_state: TurnState,
     pub execution_state: ExecutionState,
+
+    /// Lease fencing token. Rotated on every claim (and on lease takeover during
+    /// recovery), it identifies the *current* turn owner. A [`SessionSeam::save`]
+    /// CAS matches on this token **and** the `version`: the version blocks a stale
+    /// snapshot from the same owner, while the token blocks a *revived* old owner
+    /// whose lease already expired and was taken over — its save fails because the
+    /// token has since rotated, so it can never overwrite the new owner's work.
+    ///
+    /// [`SessionSeam::save`]: crate::seam::SessionSeam::save
+    #[serde(default)]
+    pub lease_token: u64,
 
     // ---- Counting: turn-level (circuit breaker) + lifetime (audit / budget) ----
     pub current_turn_steps: u32,
@@ -202,6 +226,7 @@ impl PersistedAgentSession {
             current_turn_id: None,
             turn_state: TurnState::Idle,
             execution_state: ExecutionState::None,
+            lease_token: 0,
             current_turn_steps: 0,
             current_turn_tokens: TokenUsage::default(),
             lifetime_steps: 0,
@@ -256,6 +281,9 @@ impl PersistedAgentSession {
         if !self.turn_state.can_claim() {
             return Err(TurnClaimError::Busy);
         }
+        // Rotate the fencing token: this claim becomes the sole owner, and any
+        // prior owner whose lease was taken over now holds a stale token.
+        self.lease_token = self.lease_token.wrapping_add(1);
         self.turn_state = TurnState::Running;
         self.current_turn_id = Some(turn_id.into());
         self.current_request_id = request_id;
@@ -334,6 +362,159 @@ impl PersistedAgentSession {
         self.updated_at = now.into();
         true
     }
+
+    /// Recover an orphaned **active** session (its lease expired and was taken over)
+    /// into a well-formed, settled state, per an explicitly supplied [`verdict`].
+    ///
+    /// A crash mid-turn can leave the conversation malformed: an assistant
+    /// tool-call message with no matching tool result (the loop never returned from
+    /// `confirm_and_exec`). Recovery closes every such unclosed tool call with a
+    /// placeholder result so the model history replays cleanly, settles the turn to
+    /// [`TurnState::Failed`] so a read-only follow-up can be claimed, and sets the
+    /// execution machine according to the verdict:
+    ///
+    /// - [`NotExecuted`] — the command provably never ran: a plain "not executed"
+    ///   result; execution machine cleared to [`None`] (a later turn may mutate).
+    /// - [`OutcomeUnknown`] — dispatched with a recoverable identity: a placeholder
+    ///   a late real result can replace in place ([`reconcile_late_result`]); only
+    ///   read-only follow-up until then.
+    /// - [`InterruptedUnknown`] — no recoverable identity: closed as interrupted and
+    ///   the conversation is permanently barred from new mutation, without
+    ///   fabricating an unreconcilable identity.
+    ///
+    /// The caller (a [`SessionSeam`]) decides the verdict and performs this inside
+    /// the same atomic claim that rotates the lease token; recovery itself is pure.
+    ///
+    /// [`verdict`]: RecoveryVerdict
+    /// [`NotExecuted`]: RecoveryVerdict::NotExecuted
+    /// [`OutcomeUnknown`]: RecoveryVerdict::OutcomeUnknown
+    /// [`InterruptedUnknown`]: RecoveryVerdict::InterruptedUnknown
+    /// [`None`]: ExecutionState::None
+    /// [`reconcile_late_result`]: Self::reconcile_late_result
+    /// [`SessionSeam`]: crate::seam::SessionSeam
+    pub fn recover_session(&mut self, verdict: RecoveryVerdict, now: impl Into<String>) {
+        let now = now.into();
+        let unclosed = unclosed_tool_call_ids(&self.conversation);
+        match verdict {
+            RecoveryVerdict::NotExecuted => {
+                for call_id in &unclosed {
+                    self.conversation
+                        .push(crate::chat::ChatMessage::tool_result(
+                            recovery_message_id(call_id),
+                            call_id,
+                            RECOVER_NOT_EXECUTED,
+                        ));
+                }
+                self.execution_state = ExecutionState::None;
+            }
+            RecoveryVerdict::OutcomeUnknown {
+                work_id,
+                execution_id,
+                exec_request_id,
+            } => {
+                // At most one mutating call is in flight at a time; close the first
+                // unclosed call with a placeholder a late result can replace in
+                // place, and record the unknown outcome with its identity.
+                if let Some(call_id) = unclosed.first() {
+                    let placeholder_id = recovery_message_id(call_id);
+                    self.conversation
+                        .push(crate::chat::ChatMessage::tool_result(
+                            placeholder_id.clone(),
+                            call_id,
+                            RECOVER_OUTCOME_UNKNOWN,
+                        ));
+                    self.execution_state = ExecutionState::OutcomeUnknown {
+                        work_id,
+                        execution_id,
+                        exec_request_id,
+                        placeholder_message_id: placeholder_id,
+                        since: now.clone(),
+                    };
+                }
+                // Defensive: any further stragglers are closed as not-executed.
+                for call_id in unclosed.iter().skip(1) {
+                    self.conversation
+                        .push(crate::chat::ChatMessage::tool_result(
+                            recovery_message_id(call_id),
+                            call_id,
+                            RECOVER_NOT_EXECUTED,
+                        ));
+                }
+            }
+            RecoveryVerdict::InterruptedUnknown => {
+                for call_id in &unclosed {
+                    self.conversation
+                        .push(crate::chat::ChatMessage::tool_result(
+                            recovery_message_id(call_id),
+                            call_id,
+                            RECOVER_INTERRUPTED,
+                        ));
+                }
+                self.execution_state = ExecutionState::Interrupted { since: now.clone() };
+            }
+        }
+        self.finish_turn(TurnState::Failed, now);
+    }
+}
+
+/// The placeholder tool-result text written when recovery proves a mutating call
+/// never ran.
+const RECOVER_NOT_EXECUTED: &str = "not executed: the turn was interrupted before this command ran";
+/// The placeholder text for a recovered call whose outcome is unknown but
+/// reconcilable; a late real result replaces it in place.
+const RECOVER_OUTCOME_UNKNOWN: &str =
+    "execution outcome unknown; the command may have executed; do not assume success";
+/// The placeholder text for a recovered call with no recoverable identity (the
+/// conversation is barred from further mutation).
+const RECOVER_INTERRUPTED: &str = "the turn was interrupted; this command's outcome is unknown and cannot be reconciled; do not assume success";
+
+/// Deterministic message id for a recovery-appended tool result, derived from the
+/// closed tool call so it is unique within the conversation and stable for the
+/// `OutcomeUnknown` placeholder's later in-place reconciliation.
+fn recovery_message_id(tool_call_id: &str) -> String {
+    format!("recover-{tool_call_id}")
+}
+
+/// Find tool-call ids that have no matching tool-result message — an assistant
+/// tool call left unanswered when a turn was interrupted mid-execution. Preserves
+/// first-seen order and de-duplicates.
+fn unclosed_tool_call_ids(conversation: &[crate::chat::ChatMessage]) -> Vec<String> {
+    let answered: std::collections::HashSet<&str> = conversation
+        .iter()
+        .filter_map(|m| m.tool_call_id.as_deref())
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for m in conversation {
+        for c in &m.tool_calls {
+            if !answered.contains(c.id.as_str()) && !out.iter().any(|x| x == &c.id) {
+                out.push(c.id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// The verdict a [`SessionSeam`] supplies to [`PersistedAgentSession::recover_session`]
+/// when taking over an orphaned active session — how to close an outstanding
+/// mutating tool call. Determining it requires runtime knowledge the pure session
+/// does not hold (whether a durable work item was dispatched), so it is passed in.
+///
+/// [`SessionSeam`]: crate::seam::SessionSeam
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryVerdict {
+    /// The command provably never ran (no dispatch); safe to clear the execution
+    /// machine and allow a later mutation.
+    NotExecuted,
+    /// The command was dispatched and carries a recoverable identity; its outcome
+    /// is unknown and a late result can reconcile it in place.
+    OutcomeUnknown {
+        work_id: i64,
+        execution_id: String,
+        exec_request_id: String,
+    },
+    /// No recoverable identity is known; close conservatively and bar further
+    /// mutation without fabricating an unreconcilable identity.
+    InterruptedUnknown,
 }
 
 /// Add a [`TokenUsage`] delta into an accumulator, treating `None` as 0 and
@@ -655,6 +836,122 @@ mod tests {
 
         // A second reconcile is a no-op (already resolved).
         assert!(!s.reconcile_late_result("exec-1", "again", "2026-06-20T00:03:00Z"));
+    }
+
+    /// Each claim rotates the fencing token, so a stale prior owner can be told
+    /// apart from the current one.
+    #[test]
+    fn begin_turn_rotates_lease_token() {
+        let mut s = session();
+        assert_eq!(s.lease_token, 0);
+        s.begin_turn("t1", None, None, 7, s.scope_snapshot.clone(), "t")
+            .unwrap();
+        assert_eq!(s.lease_token, 1, "first claim rotates to 1");
+        s.finish_turn(TurnState::Idle, "t");
+        s.begin_turn("t2", None, None, 7, s.scope_snapshot.clone(), "t")
+            .unwrap();
+        assert_eq!(s.lease_token, 2, "second claim rotates again");
+    }
+
+    /// Recovery of an interrupted mutating turn with no recoverable identity closes
+    /// the unclosed tool call, settles to Failed, and bars further mutation.
+    #[test]
+    fn recover_interrupted_unknown_closes_and_bars_mutation() {
+        use crate::chat::{ChatMessage, ChatRole, ToolCallRef};
+        let mut s = session();
+        s.begin_turn("t1", None, None, 7, s.scope_snapshot.clone(), "t")
+            .unwrap();
+        s.conversation
+            .push(ChatMessage::text("u1", ChatRole::User, "restart it"));
+        // Assistant requested a mutating call that never got a tool result (crash
+        // during the approval/exec wait → AwaitingApproval).
+        s.conversation.push(ChatMessage::assistant_tool_calls(
+            "a1",
+            String::new(),
+            vec![ToolCallRef {
+                id: "call-x".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        s.turn_state = TurnState::AwaitingApproval;
+
+        s.recover_session(RecoveryVerdict::InterruptedUnknown, "2026-06-20T01:00:00Z");
+
+        assert_eq!(s.turn_state, TurnState::Failed);
+        assert!(
+            matches!(s.execution_state, ExecutionState::Interrupted { .. }),
+            "interrupted bars new mutation"
+        );
+        assert!(!s.execution_state.allows_new_mutation());
+        let closed = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-x"))
+            .expect("the unclosed call was closed");
+        assert_eq!(closed.role, ChatRole::Tool);
+        assert!(closed.text.contains("interrupted"));
+    }
+
+    /// Recovery with `NotExecuted` closes the call as not-run and clears the
+    /// execution machine so a later turn may mutate again.
+    #[test]
+    fn recover_not_executed_clears_execution_state() {
+        use crate::chat::{ChatMessage, ToolCallRef};
+        let mut s = session();
+        s.begin_turn("t1", None, None, 7, s.scope_snapshot.clone(), "t")
+            .unwrap();
+        s.conversation.push(ChatMessage::assistant_tool_calls(
+            "a1",
+            String::new(),
+            vec![ToolCallRef {
+                id: "call-y".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        s.recover_session(RecoveryVerdict::NotExecuted, "t2");
+        assert_eq!(s.turn_state, TurnState::Failed);
+        assert_eq!(s.execution_state, ExecutionState::None);
+        assert!(s.execution_state.allows_new_mutation());
+    }
+
+    /// Recovery with `OutcomeUnknown` records the identity + a placeholder that a
+    /// late real result reconciles in place.
+    #[test]
+    fn recover_outcome_unknown_records_reconcilable_placeholder() {
+        use crate::chat::{ChatMessage, ToolCallRef};
+        let mut s = session();
+        s.begin_turn("t1", None, None, 7, s.scope_snapshot.clone(), "t")
+            .unwrap();
+        s.conversation.push(ChatMessage::assistant_tool_calls(
+            "a1",
+            String::new(),
+            vec![ToolCallRef {
+                id: "call-z".into(),
+                name: "exec_command".into(),
+                arguments_json: "{}".into(),
+            }],
+        ));
+        s.recover_session(
+            RecoveryVerdict::OutcomeUnknown {
+                work_id: 9,
+                execution_id: "exec-9".into(),
+                exec_request_id: "rq-9".into(),
+            },
+            "t2",
+        );
+        assert_eq!(s.turn_state, TurnState::Failed);
+        assert!(!s.execution_state.allows_new_mutation());
+        // A late result for exec-9 reconciles the placeholder in place.
+        assert!(s.reconcile_late_result("exec-9", "exit_code=0", "t3"));
+        assert_eq!(s.execution_state, ExecutionState::None);
+        let closed = s
+            .conversation
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call-z"))
+            .unwrap();
+        assert_eq!(closed.text, "exit_code=0");
     }
 
     /// The session round-trips through serde (manager persistence).

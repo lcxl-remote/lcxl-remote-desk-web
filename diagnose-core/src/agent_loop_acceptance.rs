@@ -94,7 +94,7 @@ impl SessionSeam for MemSession {
         *slot = Some(session.clone());
         Ok(session)
     }
-    async fn save(&self, session: &PersistedAgentSession) -> Result<(), AgentError> {
+    async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {
         *self.inner.borrow_mut() = Some(session.clone());
         Ok(())
     }

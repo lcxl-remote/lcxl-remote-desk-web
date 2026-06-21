@@ -107,7 +107,7 @@ pub async fn run_agent_turn(
 
     // Append the user's message and persist before the first model call.
     session.conversation.push(user_message);
-    deps.session_seam.save(&session).await?;
+    deps.session_seam.save(&mut session).await?;
 
     // Run the loop; whatever happens, settle the turn machine and persist once.
     let result = run_inner(deps, &mut session, &turn_id, sink).await;
@@ -119,7 +119,7 @@ pub async fn run_agent_turn(
     };
     session.finish_turn(terminal, (deps.clock)());
     // Surface a save failure only if the loop itself otherwise succeeded.
-    let save = deps.session_seam.save(&session).await;
+    let save = deps.session_seam.save(&mut session).await;
     match (result, save) {
         (Ok(outcome), Ok(())) => Ok(outcome),
         (Ok(_), Err(e)) => Err(e),
@@ -430,7 +430,7 @@ mod tests {
             *slot = Some(session.clone());
             Ok(session)
         }
-        async fn save(&self, session: &PersistedAgentSession) -> Result<(), AgentError> {
+        async fn save(&self, session: &mut PersistedAgentSession) -> Result<(), AgentError> {
             *self.inner.borrow_mut() = Some(session.clone());
             Ok(())
         }
