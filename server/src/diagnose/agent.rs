@@ -119,11 +119,13 @@ pub trait DirectExecRunner {
 }
 
 /// The Direct runtime's mutating-exec dependencies, injected to enable the path.
+/// The trait objects are `Send + Sync` so a [`DirectToolSeam`] holding them stays
+/// shareable across the router's tasks (the seam method futures are still `!Send`).
 #[derive(Clone)]
 pub struct DirectExecParts {
-    pub classifier: Arc<dyn DirectExecClassifier>,
-    pub approver: Arc<dyn DirectExecApprover>,
-    pub runner: Arc<dyn DirectExecRunner>,
+    pub classifier: Arc<dyn DirectExecClassifier + Send + Sync>,
+    pub approver: Arc<dyn DirectExecApprover + Send + Sync>,
+    pub runner: Arc<dyn DirectExecRunner + Send + Sync>,
 }
 
 /// Render an execution outcome into the text fed back to the model (already redacted

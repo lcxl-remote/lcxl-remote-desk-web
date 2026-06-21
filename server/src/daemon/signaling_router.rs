@@ -65,7 +65,7 @@ use tokio::sync::broadcast;
 use crate::daemon::pc_manager::{self, PcRegistry};
 use crate::daemon::virtual_display::{EnsureAttachedOutcome, VirtualDisplaySupervisor};
 use crate::daemon::worker_manager::WorkerManager;
-use crate::diagnose::{DiagnoseEventSink, DiagnoseOrchestrator};
+use crate::diagnose::DiagnoseOrchestrator;
 
 /// Bound on how long the `RequestRemote` branch waits for the IDD to
 /// finish bring-up before falling through to a capabilities-without-IDD
@@ -316,6 +316,12 @@ pub struct RouterContext {
     /// ServiceDaemon mode (cross-process collection is a later additive step),
     /// so the `Diagnose` route replies with a feature-unavailable error there.
     pub diagnose_orchestrator: Option<Arc<DiagnoseOrchestrator>>,
+    /// The agentic tool-calling runtime for `Diagnose`, present in the same modes
+    /// as `diagnose_orchestrator` (an in-process worker can read locally). When
+    /// present, `Diagnose` runs the agentic loop (the orchestrator is kept for the
+    /// remote-collect edge path and cancel audit); `None` in ServiceDaemon mode,
+    /// where `Diagnose` replies feature-unavailable.
+    pub diagnose_agent: Option<Arc<crate::diagnose::direct_runtime::DirectAgentRuntime>>,
     /// Whether confirmed execution is available in this startup mode. `true`
     /// only where an in-process worker can execute (Default / DeskServer);
     /// `false` in ServiceDaemon mode, where `ConfirmExec` / `ResolveExec` reply
@@ -1807,19 +1813,6 @@ fn emit_diagnose_event(ctx: &RouterContext, model: &SignalingModel, event: Diagn
     send_diagnose_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
 }
 
-/// Streams a diagnosis to the control end over the connection's outbound
-/// channel. Created per `Diagnose` request and handed to the orchestrator.
-struct OutboundDiagnoseSink {
-    outbound_tx: broadcast::Sender<String>,
-    to_connection_id: Option<String>,
-}
-
-impl DiagnoseEventSink for OutboundDiagnoseSink {
-    fn emit(&self, event: DiagnoseEvent) {
-        send_diagnose_frame(&self.outbound_tx, self.to_connection_id.clone(), event);
-    }
-}
-
 /// Route a control-end `Diagnose`: feature gate → mode gate → parse → run the
 /// daemon-side orchestrator, streaming `DiagnoseEvent` frames back. All failures
 /// surface as a terminal `DiagnoseEvent::error` (never `SignalingResponseState`,
@@ -1908,10 +1901,10 @@ async fn handle_diagnose_inbound(
         }
     }
 
-    // The orchestrator is only injected where an in-process worker can collect
-    // (Default / DeskServer). ServiceDaemon leaves it `None`: diagnose over the
-    // cross-process collection path is a later additive step.
-    let Some(orchestrator) = ctx.diagnose_orchestrator.clone() else {
+    // The agentic runtime is only injected where an in-process worker can read
+    // locally (Default / DeskServer). ServiceDaemon leaves it `None`: diagnose
+    // over the cross-process collection path is a later additive step.
+    let Some(agent_runtime) = ctx.diagnose_agent.clone() else {
         emit_diagnose_event(
             ctx,
             model,
@@ -1993,12 +1986,18 @@ async fn handle_diagnose_inbound(
     let to_connection_id = model.from_connection_id.clone();
     let request_id = model.request_id.clone();
     let tasks = ctx.diagnose_tasks.clone();
+    // The manager authorization (if any) rode into this handler on the context;
+    // capture it so the agentic scope can be intersected with the PDP grant.
+    let authz = ctx.inbound_authz.clone();
     let handle = actix_web::rt::spawn(async move {
-        let sink = OutboundDiagnoseSink {
-            outbound_tx,
-            to_connection_id,
+        // The agentic loop streams its tool/turn lifecycle to the bridge, which
+        // emits `DiagnoseEvent` frames over the connection's outbound channel.
+        let frame_sink = move |event: DiagnoseEvent| {
+            send_diagnose_frame(&outbound_tx, to_connection_id.clone(), event);
         };
-        orchestrator.run(&request_id, request, &sink).await;
+        agent_runtime
+            .run(&request_id, request, authz.as_ref(), frame_sink)
+            .await;
         // Drop our own registry entry on natural completion so a later cancel is
         // a harmless no-op.
         tasks
@@ -3200,6 +3199,7 @@ mod tests {
             worker_mgr,
             virtual_display: None,
             diagnose_orchestrator: None,
+            diagnose_agent: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             session_approvals: Arc::new(
@@ -5311,16 +5311,17 @@ mod tests {
     /// if it already finished, so no stale handle leaks.
     #[actix_web::test]
     async fn diagnose_immediate_completion_leaves_no_stale_task() {
-        use crate::diagnose::redaction::RegexRedactor;
-        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
-        use desk_agent_protocol::audit::NoopAuditSink;
+        use crate::diagnose::direct_runtime::DirectAgentRuntime;
+        use desk_diagnose_core::chat::{ModelTurn, StopReason};
         let (mut ctx, mut rx) = make_ctx_with_rx();
         configure_ai_model(&ctx).await;
-        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
-            Arc::new(NoopContextCollector),
-            Arc::new(RegexRedactor::new()),
-            Arc::new(StubDiagnoseModel),
-            Arc::new(NoopAuditSink),
+        ctx.diagnose_agent = Some(Arc::new(DirectAgentRuntime::for_test(
+            vec![ModelTurn {
+                text: "all good".into(),
+                stop_reason: StopReason::EndTurn,
+                ..Default::default()
+            }],
+            ctx.settings.clone().into_inner(),
         )));
         let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
         handle_diagnose_inbound(&ctx, &diagnose_model(raw))
@@ -5348,16 +5349,15 @@ mod tests {
     /// (not overwritten), so a later cancel still targets the right run.
     #[actix_web::test]
     async fn diagnose_duplicate_request_id_is_rejected() {
-        use crate::diagnose::redaction::RegexRedactor;
-        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
-        use desk_agent_protocol::audit::NoopAuditSink;
+        use crate::diagnose::direct_runtime::DirectAgentRuntime;
         let (mut ctx, mut rx) = make_ctx_with_rx();
         configure_ai_model(&ctx).await;
-        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
-            Arc::new(NoopContextCollector),
-            Arc::new(RegexRedactor::new()),
-            Arc::new(StubDiagnoseModel),
-            Arc::new(NoopAuditSink),
+        // The agent runtime must be present so the request passes the
+        // availability gate and reaches the duplicate-id check (the scripted
+        // turns are never consumed — the duplicate is rejected first).
+        ctx.diagnose_agent = Some(Arc::new(DirectAgentRuntime::for_test(
+            vec![],
+            ctx.settings.clone().into_inner(),
         )));
 
         // Pre-register an in-flight task under the model's request_id so the next
@@ -5385,27 +5385,42 @@ mod tests {
         assert!(tasks.get(&request_id).is_some_and(|h| !h.is_finished()));
     }
 
-    /// Configured + orchestrator present (Default / DeskServer-like): the
-    /// diagnosis streams a sequence of frames ending in exactly one `Final`, and **every**
-    /// frame is notification-style (`response_state = None`) so the control end
-    /// is not collapsed to a single response by the signaling one-shot callback.
+    /// Configured + agent runtime present (Default / DeskServer-like): the agentic
+    /// diagnosis streams a sequence of frames ending in exactly one terminal
+    /// `Answer`, and **every** frame is notification-style (`response_state =
+    /// None`) so the control end is not collapsed to a single response by the
+    /// signaling one-shot callback.
     ///
-    /// `handle_diagnose_inbound` runs the orchestrator on a detached
-    /// `rt::spawn` task (so the proxy loop can forward frames as they stream),
-    /// hence `#[actix_web::test]` for the local-task runtime and a yield loop to
-    /// let the spawned task emit before draining.
+    /// `handle_diagnose_inbound` runs the loop on a detached `rt::spawn` task (so
+    /// the proxy loop can forward frames as they stream), hence `#[actix_web::test]`
+    /// for the local-task runtime and a yield loop to let the spawned task emit
+    /// before draining.
     #[actix_web::test]
-    async fn diagnose_with_orchestrator_streams_notification_frames() {
-        use crate::diagnose::redaction::RegexRedactor;
-        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
-        use desk_agent_protocol::audit::NoopAuditSink;
+    async fn diagnose_with_agent_streams_notification_frames() {
+        use crate::diagnose::direct_runtime::DirectAgentRuntime;
+        use desk_diagnose_core::chat::{ModelTurn, StopReason, ToolCall};
         let (mut ctx, mut rx) = make_ctx_with_rx();
         configure_ai_model(&ctx).await;
-        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
-            Arc::new(NoopContextCollector),
-            Arc::new(RegexRedactor::new()),
-            Arc::new(StubDiagnoseModel),
-            Arc::new(NoopAuditSink),
+        // A read-tool turn then an answer → TurnStarted, ToolStarted, ToolFinished,
+        // Answer (a multi-frame notification stream).
+        ctx.diagnose_agent = Some(Arc::new(DirectAgentRuntime::for_test(
+            vec![
+                ModelTurn {
+                    stop_reason: StopReason::ToolUse,
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        name: "read_system_info".into(),
+                        arguments_json: "{}".into(),
+                    }],
+                    ..Default::default()
+                },
+                ModelTurn {
+                    text: "the host is healthy".into(),
+                    stop_reason: StopReason::EndTurn,
+                    ..Default::default()
+                },
+            ],
+            ctx.settings.clone().into_inner(),
         )));
         let raw = serde_json::to_value(DiagnoseRequestData {
             question: "why is cpu high?".into(),
@@ -5436,19 +5451,24 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // A multi-frame stream arrived (status + partials + final).
+        // A multi-frame stream arrived (turn started + tool lifecycle + answer).
         assert!(
             frames.len() >= 3,
             "expected a streamed sequence, got {}",
             frames.len()
         );
-        // Exactly one terminal frame, and it is the last, and it is Final.
+        // Exactly one terminal frame, and it is the last, and it is the agentic
+        // `Answer`.
         assert_eq!(
             frames.iter().filter(|(_, e)| e.is_terminal()).count(),
             1,
             "exactly one terminal frame"
         );
-        assert_eq!(frames.last().unwrap().1.kind, DiagnoseEventKind::Final);
+        assert_eq!(frames.last().unwrap().1.kind, DiagnoseEventKind::Answer);
+        assert_eq!(
+            frames.first().unwrap().1.kind,
+            DiagnoseEventKind::TurnStarted
+        );
         // Every frame is a notification-style DiagnoseEvent.
         for (m, _) in &frames {
             assert_eq!(m.signaling_type, SignalingType::DiagnoseEvent);

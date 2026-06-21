@@ -49,8 +49,11 @@ pub async fn run_signaling_proxy(
     // scrubbed by the regex redactor, then sent to the configured model via the
     // OpenAI-compatible adapter (which degrades to a not-configured diagnosis
     // when no model is set).
-    let diagnose_orchestrator = match settings.read().await.args.startup_mode {
-        StartupMode::ServiceDaemon => None,
+    // `Diagnose` runs the agentic tool-calling loop (`diagnose_agent`); the
+    // orchestrator is retained for the remote-collect edge path and cancel audit.
+    // Both share the one in-process device agent and exist in the same modes.
+    let (diagnose_orchestrator, diagnose_agent) = match settings.read().await.args.startup_mode {
+        StartupMode::ServiceDaemon => (None, None),
         _ => {
             let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
             let agent = Arc::new(
@@ -58,7 +61,7 @@ pub async fn run_signaling_proxy(
                     .with_audit(audit.clone()),
             );
             let collector = Arc::new(AgentContextCollector::new(
-                agent,
+                agent.clone(),
                 settings.clone().into_inner(),
             ));
             // Resolve the adapter per diagnosis from the configured provider, so
@@ -68,12 +71,17 @@ pub async fn run_signaling_proxy(
                 settings.clone().into_inner(),
                 audit.clone(),
             ));
-            Some(Arc::new(DiagnoseOrchestrator::new(
+            let orchestrator = Arc::new(DiagnoseOrchestrator::new(
                 collector,
                 Arc::new(RegexRedactor::new()),
                 model,
                 audit,
-            )))
+            ));
+            let agent_runtime = Arc::new(crate::diagnose::direct_runtime::DirectAgentRuntime::new(
+                agent,
+                settings.clone().into_inner(),
+            ));
+            (Some(orchestrator), Some(agent_runtime))
         }
     };
 
@@ -112,6 +120,7 @@ pub async fn run_signaling_proxy(
         // ChangeDisplaySettings.
         virtual_display: virtual_display.clone(),
         diagnose_orchestrator: diagnose_orchestrator.clone(),
+        diagnose_agent: diagnose_agent.clone(),
         // Confirmed execution is available wherever an in-process worker can
         // execute (Default / DeskServer), gated like the diagnose orchestrator.
         exec_supported: diagnose_orchestrator.is_some(),
@@ -1360,6 +1369,7 @@ mod tests {
             worker_mgr,
             virtual_display: None,
             diagnose_orchestrator: None,
+            diagnose_agent: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
             session_approvals: Arc::new(
