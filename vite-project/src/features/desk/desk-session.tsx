@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
+import type { SignalingMessage } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskDiagnose } from "./use-desk-diagnose"
 import { DiagnosePanel } from "./diagnose-panel"
@@ -86,7 +87,7 @@ export default function DeskSession() {
     const [isWaitingApproval, setIsWaitingApproval] = useState(false);
     const hasRequestedRef = useRef(false);
 
-    const { isConnected, lastMessage, sendMessage } = useDeskSignaling(deskId || null)
+    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued } = useDeskSignaling(deskId || null)
 
     const handleConnect = useCallback(() => {
         if (deskId && !hasRequestedRef.current) {
@@ -186,8 +187,10 @@ export default function DeskSession() {
 
     const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
-        lastMessage,
-        sendMessage
+        subscribe,
+        sendMessage,
+        sendTracked,
+        cancelQueued
     });
 
     // Guard against accidentally closing/reloading an active session.
@@ -197,7 +200,7 @@ export default function DeskSession() {
     // frames off the same signaling channel.
     const diagnose = useDeskDiagnose({
         deskId: deskId || null,
-        lastMessage,
+        subscribe,
         sendMessage,
     });
 
@@ -205,7 +208,7 @@ export default function DeskSession() {
     // ResolveExec -> ExecResult, keyed by command row.
     const exec = useDeskExec({
         deskId: deskId || null,
-        lastMessage,
+        subscribe,
         sendMessage,
     });
 
@@ -229,11 +232,11 @@ export default function DeskSession() {
     const [activeSettings, setActiveSettings] = useState<DeskSettings | null>(null);
 
     // Adaptive resolution: request ids the hook has emitted but not yet
-    // seen an echo for. The lastMessage listener uses this set as a
-    // membership check to detect auto-resolution echoes (so manual
-    // path echoes from future UI keep working unchanged), while the
-    // `useResolutionToast` hook below drives the right-bottom toast
-    // state machine off the same `lastMessage` stream.
+    // seen an echo for. The control-signaling subscription uses this set as
+    // a membership check to detect auto-resolution echoes (so manual path
+    // echoes from future UI keep working unchanged), while the
+    // `useResolutionToast` hook below drives the right-bottom toast state
+    // machine off the same signaling subscription.
     const pendingAutoRequestIdsRef = useRef<Set<string>>(new Set());
 
     // Adaptive-resolution status toast (right-bottom corner). Lives in
@@ -246,7 +249,7 @@ export default function DeskSession() {
     // directly to keep the hook framework-agnostic for testing.
     const { resolutionToast, registerSent: registerResolutionSent } =
         useResolutionToast({
-            lastMessage,
+            subscribe,
             isRTCConnected,
             changeDisplaySettingsType: SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
             translate: (key, fallback) => t(key, fallback),
@@ -304,54 +307,63 @@ export default function DeskSession() {
 
     const { forceError } = microphone;
 
-    // Handle incoming signaling messages regarding control
-    useEffect(() => {
-        if (!lastMessage) return;
-        const { signaling_type } = lastMessage;
+    // `forceError` (from the microphone hook) changes identity ~1 Hz with
+    // the rtcStats pulse; route it through a ref so the control-signaling
+    // subscription below stays stable instead of re-registering each tick.
+    const forceErrorRef = useRef(forceError);
+    forceErrorRef.current = forceError;
 
-        if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
-            console.log("Remote control request ACCEPTED by peer.");
-            setHasControl(true);
-            setIsWaitingApproval(false);
-            videoRef.current?.focus();
-        } else if (signaling_type === SIGNALING_TYPE_CODE_DENY_CONTROL) {
-            console.log("Remote control request DENIED by peer.");
-            setHasControl(false);
-            setIsWaitingApproval(false);
-        } else if (signaling_type === SIGNALING_TYPE_CODE_CLOSE_CONTROL) {
-            console.log("Remote control CLOSED by peer.");
-            setHasControl(false);
-            setIsWaitingApproval(false);
-        } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
-            const data = lastMessage.signaling_data;
-            if (data) {
-                console.log("Private screen state changed:", data);
-                setIsPrivateScreen(data.visible ?? false);
-                setIsPrivateScreenSupported(data.is_supported ?? true);
-                if (data.error_msg) {
-                    console.error("Private screen error:", data.error_msg);
+    // Handle incoming control-related signaling messages off the lossless
+    // subscription stream (every message delivered in order, none coalesced).
+    useEffect(() => {
+        const handle = (message: SignalingMessage) => {
+            const { signaling_type } = message;
+
+            if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
+                console.log("Remote control request ACCEPTED by peer.");
+                setHasControl(true);
+                setIsWaitingApproval(false);
+                videoRef.current?.focus();
+            } else if (signaling_type === SIGNALING_TYPE_CODE_DENY_CONTROL) {
+                console.log("Remote control request DENIED by peer.");
+                setHasControl(false);
+                setIsWaitingApproval(false);
+            } else if (signaling_type === SIGNALING_TYPE_CODE_CLOSE_CONTROL) {
+                console.log("Remote control CLOSED by peer.");
+                setHasControl(false);
+                setIsWaitingApproval(false);
+            } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
+                const data = message.signaling_data;
+                if (data) {
+                    console.log("Private screen state changed:", data);
+                    setIsPrivateScreen(data.visible ?? false);
+                    setIsPrivateScreenSupported(data.is_supported ?? true);
+                    if (data.error_msg) {
+                        console.error("Private screen error:", data.error_msg);
+                    }
+                }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR) {
+                const data = message.signaling_data;
+                if (data && data.error) {
+                    console.error("Remote audio playback error:", data.error);
+                    forceErrorRef.current(data.error);
+                }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
+                // Adaptive-resolution echo: the right-bottom status toast
+                // is driven by `useResolutionToast`, which subscribes to
+                // the signaling stream directly and gates transitions by the
+                // most recent request id. Here we only need to drain
+                // `pendingAutoRequestIdsRef` so the membership-tracking
+                // contract used by future manual ChangeDisplaySettings UI
+                // does not leak.
+                const requestId = message.request_id;
+                if (requestId && pendingAutoRequestIdsRef.current.delete(requestId)) {
+                    console.debug("[adaptive-resolution] response", message);
                 }
             }
-        } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR) {
-            const data = lastMessage.signaling_data;
-            if (data && data.error) {
-                console.error("Remote audio playback error:", data.error);
-                forceError(data.error);
-            }
-        } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
-            // Adaptive-resolution echo: the right-bottom status toast
-            // is driven by `useResolutionToast`, which subscribes to
-            // `lastMessage` directly and gates transitions by the most
-            // recent request id. Here we only need to drain
-            // `pendingAutoRequestIdsRef` so the membership-tracking
-            // contract used by future manual ChangeDisplaySettings UI
-            // does not leak.
-            const requestId = lastMessage.request_id;
-            if (requestId && pendingAutoRequestIdsRef.current.delete(requestId)) {
-                console.debug("[adaptive-resolution] response", lastMessage);
-            }
-        }
-    }, [lastMessage, forceError, sendMessage, deskId]);
+        };
+        return subscribe(handle);
+    }, [subscribe]);
 
     // Reset requested state if connection drops
     useEffect(() => {

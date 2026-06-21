@@ -1,5 +1,6 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { v4 } from 'uuid';
 import {
     SIGNALING_TYPE_CODE_INIT,
     SIGNALING_TYPE_CODE_OFFER,
@@ -7,17 +8,56 @@ import {
     SIGNALING_TYPE_CODE_CANID,
     SIGNALING_TYPE_CODE_ERROR,
 } from './constants';
-import type { SignalingMessage } from './use-desk-signaling';
+import type {
+    SignalingMessage,
+    SignalingSubscriber,
+    SendTrackedOptions,
+    SendTrackedResult,
+} from './use-desk-signaling';
+import {
+    createIceRetryCoordinator,
+    type IceRetryCoordinator,
+} from './ice-retry-coordinator';
+
+// Auto-retry tuning. With lossless candidate delivery in place a healthy
+// attempt completes its ICE checks in well under a couple of seconds on a
+// wired LAN, so these windows are deliberately wide: a retry should fire
+// only when checking genuinely stalls (a real network fault), never while
+// legitimate gathering/checking is still in progress. The `checking` stall
+// window uses capped exponential backoff (5s -> 10s -> 15s -> 15s ...) so a
+// weak network gets progressively more patience without churny restarts,
+// and the budget is small because — the message-loss root cause aside —
+// deep retrying rarely helps.
+const ICE_ANSWER_TIMEOUT_MS = 5000;
+const ICE_STALL_BASE_MS = 5000;
+const ICE_STALL_MAX_MS = 15000;
+const MAX_ICE_RETRY = 4;
+
+/** Pull the `ice-ufrag` out of an SDP blob so trickled candidates can be
+ *  matched to the generation they belong to. */
+function parseIceUfrag(sdp: string | undefined | null): string | null {
+    if (!sdp) return null;
+    const m = sdp.match(/^a=ice-ufrag:(.+)$/m);
+    return m ? m[1].trim() : null;
+}
+
+/** Stable signaling-queue dedup key for this desk's OFFER, so a superseded
+ *  OFFER queued while offline is replaced rather than piling up. */
+function offerReplaceKey(id: string | null): string {
+    return `offer:${id ?? ''}`;
+}
 
 type UseDeskRTCProps = {
     deskId: string | null;
-    lastMessage: SignalingMessage | null;
+    subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: (
         type: number,
         data: any,
         connectionId?: string,
         requestId?: string,
     ) => string;
+    sendTracked: (opts: SendTrackedOptions) => SendTrackedResult;
+    cancelQueued: (replaceKey: string) => void;
 };
 
 export type RTCStatsData = {
@@ -59,7 +99,7 @@ export type RTCStatsData = {
     jitterMs: number;
 };
 
-export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps) {
+export function useDeskRTC({ deskId, subscribe, sendMessage, sendTracked, cancelQueued }: UseDeskRTCProps) {
     const peerConnection = useRef<RTCPeerConnection | null>(null);
     const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
     const [initData, setInitData] = useState<any | null>(null);
@@ -91,6 +131,77 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         jitterMs: 0,
     });
     const remoteCandidatesQueue = useRef<RTCIceCandidateInit[]>([]);
+
+    // Mutable handles the ICE-retry coordinator's callbacks read at fire
+    // time, so the coordinator can be created once yet always see the
+    // current deskId / signaling fns / cached OFFER. Refreshed every render
+    // below.
+    const rtcDeps = useRef({
+        deskId,
+        sendTracked,
+        cancelQueued,
+        settings: undefined as any,
+        cachedOfferModel: undefined as any,
+    });
+    rtcDeps.current.deskId = deskId;
+    rtcDeps.current.sendTracked = sendTracked;
+    rtcDeps.current.cancelQueued = cancelQueued;
+
+    // Self-healing negotiation. Created once; its callbacks resend the
+    // cached OFFER (signaling loss) or issue a fresh `iceRestart` OFFER
+    // (ICE stall), and drive the connected/failed UI state.
+    const coordinatorRef = useRef<IceRetryCoordinator | null>(null);
+    if (!coordinatorRef.current) {
+        coordinatorRef.current = createIceRetryCoordinator({
+            resendCachedOffer: (requestId, onSent) => {
+                const d = rtcDeps.current;
+                d.sendTracked({
+                    type: SIGNALING_TYPE_CODE_OFFER,
+                    data: d.cachedOfferModel,
+                    toConnectionId: d.deskId ?? undefined,
+                    requestId,
+                    replaceKey: offerReplaceKey(d.deskId),
+                    onSent,
+                });
+            },
+            sendIceRestartOffer: async (requestId, onSent) => {
+                const pc = peerConnection.current;
+                if (!pc) throw new Error('No peer connection for ICE restart');
+                const offer = await pc.createOffer({ iceRestart: true });
+                await pc.setLocalDescription(offer);
+                const d = rtcDeps.current;
+                const offerModel = {
+                    offer: pc.localDescription,
+                    desk_settings: d.settings,
+                };
+                d.cachedOfferModel = offerModel;
+                d.sendTracked({
+                    type: SIGNALING_TYPE_CODE_OFFER,
+                    data: offerModel,
+                    toConnectionId: d.deskId ?? undefined,
+                    requestId,
+                    replaceKey: offerReplaceKey(d.deskId),
+                    onSent,
+                });
+            },
+            onConnected: () => {
+                setIsRTCConnected(true);
+                setRtcFailed(false);
+            },
+            onFailed: () => {
+                setIsRTCConnected(false);
+                setRtcFailed(true);
+            },
+            genRequestId: () => v4(),
+            config: {
+                answerTimeoutMs: ICE_ANSWER_TIMEOUT_MS,
+                iceStallBaseMs: ICE_STALL_BASE_MS,
+                iceStallMaxMs: ICE_STALL_MAX_MS,
+                maxRetry: MAX_ICE_RETRY,
+            },
+        });
+    }
+
     const lastBytesReceivedRef = useRef<number>(0);
     const lastStatsTimeRef = useRef<number>(0);
     const lastPacketsLostRef = useRef<number>(0);
@@ -105,61 +216,125 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
     const lastKeyFramesRef = useRef<number>(0);
     const lastPliCountRef = useRef<number>(0);
 
-    // Handle incoming signaling messages
-    useEffect(() => {
-        if (!lastMessage || !deskId) return;
+    // Inbound signaling is buffered in a ref FIFO and drained by a single
+    // serialized async loop, so a burst (trickled ICE candidates arriving
+    // within one tick) is processed in arrival order with none dropped.
+    // Routing this stream through a single `lastMessage` state would let
+    // React coalesce rapid updates down to the burst's first and last
+    // value — silently dropping the middle, which on a LAN is exactly
+    // where the only routable host candidate tends to land.
+    const inboundQueueRef = useRef<SignalingMessage[]>([]);
+    const drainingRef = useRef(false);
 
-        const { signaling_type, signaling_data } = lastMessage;
+    // The former effect body, parameterized by the message instead of a
+    // single `lastMessage`. Stable identity (reads everything via refs)
+    // so the subscription below never needs to re-register mid-stream.
+    const handleSignalingMessage = useCallback(async (message: SignalingMessage) => {
+        if (!rtcDeps.current.deskId) return;
 
-        const handleSignaling = async () => {
-            // The daemon owns the WebRTC PC and
-            // keeps it alive across worker swaps (UAC / lock screen /
-            // session change). Browser-facing DesktopSwitching /
-            // DesktopReady signals are no longer emitted, so the
-            // tear-down-and-reconnect path that lived here is gone.
-            if (signaling_type === SIGNALING_TYPE_CODE_INIT) {
-                console.log('Received INIT', signaling_data);
-                setInitData(signaling_data);
+        const { signaling_type, signaling_data } = message;
 
-            } else if (signaling_type === SIGNALING_TYPE_CODE_ANSWER) {
-                console.log('Received ANSWER');
-                const pc = peerConnection.current;
-                if (pc) {
-                    await pc.setRemoteDescription(new RTCSessionDescription(signaling_data));
-                    console.log(`[WebRTC] Remote description set successfully. Flushing ${remoteCandidatesQueue.current.length} queued candidates.`);
+        // The daemon owns the WebRTC PC and
+        // keeps it alive across worker swaps (UAC / lock screen /
+        // session change). Browser-facing DesktopSwitching /
+        // DesktopReady signals are no longer emitted, so the
+        // tear-down-and-reconnect path that lived here is gone.
+        if (signaling_type === SIGNALING_TYPE_CODE_INIT) {
+            console.log('Received INIT', signaling_data);
+            setInitData(signaling_data);
 
-                    // Flush the ICE candidate queue
-                    while (remoteCandidatesQueue.current.length > 0) {
-                        const candidate = remoteCandidatesQueue.current.shift();
-                        if (candidate) {
-                            try {
-                                await pc.addIceCandidate(new RTCIceCandidate(candidate));
-                            } catch (e) {
-                                console.warn('[WebRTC] Error adding queued ICE candidate', e);
-                            }
-                        }
-                    }
-                }
-            } else if (signaling_type === SIGNALING_TYPE_CODE_CANID) {
-                const pc = peerConnection.current;
-                if (pc) {
-                    if (pc.remoteDescription && pc.remoteDescription.type) {
-                        try {
-                            await pc.addIceCandidate(new RTCIceCandidate(signaling_data));
-                        } catch (e) {
-                            console.warn('[WebRTC] Error adding ICE candidate', e);
-                        }
-                    } else {
-                        console.log('[WebRTC] Queuing ICE candidate because remote description is not set yet');
-                        remoteCandidatesQueue.current.push(signaling_data);
+        } else if (signaling_type === SIGNALING_TYPE_CODE_ANSWER) {
+            console.log('Received ANSWER');
+            const coordinator = coordinatorRef.current;
+            // Drop a stale ANSWER from a superseded OFFER generation
+            // (an in-flight initial OFFER whose ANSWER arrives after a
+            // retry already rolled the generation forward).
+            if (
+                coordinator &&
+                message.request_id &&
+                !coordinator.shouldAcceptAnswer(message.request_id)
+            ) {
+                console.warn('[WebRTC] Dropping stale ANSWER for request', message.request_id);
+                return;
+            }
+            const pc = peerConnection.current;
+            if (pc) {
+                await pc.setRemoteDescription(new RTCSessionDescription(signaling_data));
+                const ufrag = parseIceUfrag(signaling_data?.sdp);
+                coordinator?.onAnswerApplied(ufrag);
+                console.log(`[WebRTC] Remote description set (ufrag=${ufrag}). Flushing ${remoteCandidatesQueue.current.length} queued candidates.`);
+
+                // Flush queued candidates, keeping only those that belong
+                // to the current generation (matching ufrag); anything
+                // from a superseded generation is dropped.
+                const queued = remoteCandidatesQueue.current;
+                remoteCandidatesQueue.current = [];
+                for (const candidate of queued) {
+                    const disposition = coordinator
+                        ? coordinator.classifyCandidate(candidate.usernameFragment)
+                        : 'apply';
+                    if (disposition !== 'apply') continue;
+                    try {
+                        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                    } catch (e) {
+                        console.warn('[WebRTC] Error adding queued ICE candidate', e);
                     }
                 }
             }
-        };
+        } else if (signaling_type === SIGNALING_TYPE_CODE_CANID) {
+            const pc = peerConnection.current;
+            if (pc) {
+                const coordinator = coordinatorRef.current;
+                const candidate = signaling_data as RTCIceCandidateInit;
+                const disposition = coordinator
+                    ? coordinator.classifyCandidate(candidate.usernameFragment)
+                    : (pc.remoteDescription?.type ? 'apply' : 'queue');
+                if (disposition === 'reject') {
+                    console.log('[WebRTC] Dropping stale ICE candidate (ufrag mismatch)');
+                } else if (disposition === 'queue' || !pc.remoteDescription?.type) {
+                    console.log('[WebRTC] Queuing ICE candidate until the matching ANSWER is applied');
+                    remoteCandidatesQueue.current.push(candidate);
+                } else {
+                    try {
+                        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                    } catch (e) {
+                        console.warn('[WebRTC] Error adding ICE candidate', e);
+                    }
+                }
+            }
+        }
+    }, []);
 
-        handleSignaling().catch(console.error);
+    // Serialized FIFO drain: guarantees in-order, lossless processing even
+    // when several messages land before the first one finishes its async
+    // work (so `setRemoteDescription` always precedes the `addIceCandidate`
+    // calls for that generation).
+    const drainInbound = useCallback(async () => {
+        if (drainingRef.current) return;
+        drainingRef.current = true;
+        try {
+            while (inboundQueueRef.current.length > 0) {
+                const message = inboundQueueRef.current.shift()!;
+                try {
+                    await handleSignalingMessage(message);
+                } catch (e) {
+                    console.error('[WebRTC] signaling handler error', e);
+                }
+            }
+        } finally {
+            drainingRef.current = false;
+        }
+    }, [handleSignalingMessage]);
 
-    }, [lastMessage, deskId]);
+    // Subscribe to the lossless signaling stream and feed the FIFO.
+    useEffect(() => {
+        if (!deskId) return;
+        const unsubscribe = subscribe((message) => {
+            inboundQueueRef.current.push(message);
+            void drainInbound();
+        });
+        return unsubscribe;
+    }, [subscribe, deskId, drainInbound]);
 
     const connect = useCallback(async (settings: any) => {
         if (!initData || !deskId) return;
@@ -169,6 +344,12 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         if (peerConnection.current) {
             peerConnection.current.close();
         }
+
+        // Fresh PeerConnection: roll the coordinator's epoch (invalidating
+        // any prior PC's late callbacks) and reset the retry budget.
+        const coordinator = coordinatorRef.current!;
+        coordinator.resetForNewPc();
+        const epoch = coordinator.currentEpoch();
 
         const pc = new RTCPeerConnection({
             iceServers: initData.ice_servers || [],
@@ -186,20 +367,21 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
 
         pc.oniceconnectionstatechange = () => {
             console.log(`[WebRTC] ICE Connection State changed to: ${pc.iceConnectionState}`);
-            if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-                setIsRTCConnected(true);
-                // A successful (re)connection clears any prior terminal failure.
-                setRtcFailed(false);
-            } else if (pc.iceConnectionState === 'disconnected') {
+            // Ignore callbacks from a PeerConnection that has since been
+            // replaced (epoch moved on).
+            if (epoch !== coordinator.currentEpoch()) return;
+            if (pc.iceConnectionState === 'disconnected') {
                 // Transient: mark the link down but NOT failed — ICE usually
-                // heals on its own, so the UI must not reopen the config dialog.
+                // heals on its own, so the UI must not reopen the config
+                // dialog. The coordinator deliberately does not retry on
+                // `disconnected`.
                 setIsRTCConnected(false);
-            } else if (pc.iceConnectionState === 'failed') {
-                // Terminal: negotiation gave up. Surface it so the UI can offer
-                // a retry.
-                setIsRTCConnected(false);
-                setRtcFailed(true);
+                return;
             }
+            // `connected`/`completed`/`failed` drive the coordinator, which
+            // owns the connected/failed UI state and the auto-retry on
+            // `failed`.
+            coordinator.onIceStateChange(pc.iceConnectionState);
         }
 
         pc.onconnectionstatechange = () => {
@@ -267,23 +449,43 @@ export function useDeskRTC({ deskId, lastMessage, sendMessage }: UseDeskRTCProps
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        // Send Offer immediately (Trickle ICE)
+        // Cache the immutable OfferModel so the coordinator can re-send it
+        // verbatim on an awaiting-answer timeout (signaling loss).
         const offerModel = {
             offer: pc.localDescription,
             desk_settings: settings,
         };
-        sendMessage(SIGNALING_TYPE_CODE_OFFER, offerModel, deskId);
+        rtcDeps.current.settings = settings;
+        rtcDeps.current.cachedOfferModel = offerModel;
 
-    }, [initData, deskId, sendMessage]);
+        // Send Offer immediately (Trickle ICE). The ANSWER watchdog is armed
+        // by the coordinator only once this OFFER actually reaches the wire
+        // (`onSent`), so a queued-while-offline OFFER never burns a retry.
+        const requestId = coordinator.beginOffer();
+        sendTracked({
+            type: SIGNALING_TYPE_CODE_OFFER,
+            data: offerModel,
+            toConnectionId: deskId ?? undefined,
+            requestId,
+            replaceKey: offerReplaceKey(deskId),
+            onSent: (id) => coordinator.markOfferSent(id),
+        });
+
+    }, [initData, deskId, sendMessage, sendTracked]);
 
     const closeRTC = useCallback(() => {
+        // Tear down auto-retry first: bump the epoch so any in-flight
+        // callback/timer is inert, then purge a still-queued OFFER so a later
+        // signaling reconnect doesn't replay a stale negotiation.
+        coordinatorRef.current?.dispose();
+        cancelQueued(offerReplaceKey(rtcDeps.current.deskId));
         if (peerConnection.current) {
             peerConnection.current.close();
             peerConnection.current = null;
         }
         setIsRTCConnected(false);
         setRemoteStream(null);
-    }, []);
+    }, [cancelQueued]);
 
     // RTCPeerConnection Stats Monitor
     useEffect(() => {

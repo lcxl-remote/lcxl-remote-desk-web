@@ -36,8 +36,13 @@ export interface ResolutionEchoMessage {
 }
 
 export interface UseResolutionToastParams {
-    /** Most recent signaling message observed on the wire. */
-    lastMessage: ResolutionEchoMessage | null | undefined;
+    /**
+     * Subscribe to inbound signaling messages; returns an unsubscribe
+     * function. The hook keeps its own narrow `ResolutionEchoMessage`
+     * shape so its tests stay decoupled from the full signaling type
+     * tree (the real signaling message is structurally compatible).
+     */
+    subscribe: (handler: (msg: ResolutionEchoMessage) => void) => () => void;
     /** WebRTC liveness — used to drop a stuck toast when the connection dies. */
     isRTCConnected: boolean;
     /** Numeric `SignalingType::ChangeDisplaySettings` discriminant (205). */
@@ -102,7 +107,7 @@ export function useResolutionToast(
     params: UseResolutionToastParams,
 ): UseResolutionToastResult {
     const {
-        lastMessage,
+        subscribe,
         isRTCConnected,
         changeDisplaySettingsType,
         translate,
@@ -124,8 +129,8 @@ export function useResolutionToast(
      * builds the translator as an inline arrow `(k, f) => t(k, f)` on
      * every render, so the prop's identity changes ~1 Hz (rtcStats
      * setState pulse). If the effects below listed `translate`
-     * directly in their deps, every render would re-run them; the
-     * `lastMessage` handler would then `setResolutionToast(success)`
+     * directly in their deps, every render would re-subscribe them; the
+     * signaling handler would then `setResolutionToast(success)`
      * (a fresh object reference) on each tick, triggering yet another
      * render — React error #185 (Maximum update depth exceeded) the
      * moment a 205 echo lands. Routing through a ref keeps the
@@ -209,43 +214,45 @@ export function useResolutionToast(
 
     // Drive the state machine off incoming signaling messages.
     useEffect(() => {
-        if (!lastMessage) return;
-        if (lastMessage.signaling_type !== changeDisplaySettingsType) return;
-        const reqId = lastMessage.request_id;
-        if (!reqId || reqId !== latestReqIdRef.current) {
-            // Stale echo from a request that was already superseded
-            // by a newer registration. Drop it on the floor — the
-            // toast must reflect the latest user intent, not the
-            // resolution of a vacated request.
-            return;
-        }
-        clearWatchdog();
-        const errorCode = lastMessage.response_state?.error_code ?? 0;
-        if (errorCode === 0) {
-            const data = lastMessage.signaling_data ?? {};
-            setResolutionToast({
-                phase: "success",
-                appliedW: data.width ?? 0,
-                appliedH: data.height ?? 0,
-            });
-            armAutoClear(successAutoClearMs);
-        } else {
-            setResolutionToast({
-                phase: "failed",
-                reason:
-                    lastMessage.response_state?.message ??
-                    translateRef.current(
-                        "pages.desk.resolutionFailed",
-                        "Update failed",
-                    ),
-            });
-            armAutoClear(failureAutoClearMs);
-        }
+        const handle = (message: ResolutionEchoMessage) => {
+            if (message.signaling_type !== changeDisplaySettingsType) return;
+            const reqId = message.request_id;
+            if (!reqId || reqId !== latestReqIdRef.current) {
+                // Stale echo from a request that was already superseded
+                // by a newer registration. Drop it on the floor — the
+                // toast must reflect the latest user intent, not the
+                // resolution of a vacated request.
+                return;
+            }
+            clearWatchdog();
+            const errorCode = message.response_state?.error_code ?? 0;
+            if (errorCode === 0) {
+                const data = message.signaling_data ?? {};
+                setResolutionToast({
+                    phase: "success",
+                    appliedW: data.width ?? 0,
+                    appliedH: data.height ?? 0,
+                });
+                armAutoClear(successAutoClearMs);
+            } else {
+                setResolutionToast({
+                    phase: "failed",
+                    reason:
+                        message.response_state?.message ??
+                        translateRef.current(
+                            "pages.desk.resolutionFailed",
+                            "Update failed",
+                        ),
+                });
+                armAutoClear(failureAutoClearMs);
+            }
+        };
+        return subscribe(handle);
         // `translate` deliberately omitted — see translateRef block
         // above. Including it here would make the effect re-run on
         // every parent render and infinite-loop after a 205 echo.
     }, [
-        lastMessage,
+        subscribe,
         armAutoClear,
         clearWatchdog,
         changeDisplaySettingsType,

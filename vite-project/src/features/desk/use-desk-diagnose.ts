@@ -4,7 +4,7 @@ import {
     SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
     SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
 } from './constants';
-import type { SignalingMessage } from './use-desk-signaling';
+import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::diagnose`. These ride the
 // `Diagnose` / `DiagnoseEvent` / `DiagnoseCancel` signaling types as
@@ -167,7 +167,7 @@ const INITIAL_STATE: DiagnoseState = {
 
 type UseDeskDiagnoseProps = {
     deskId: string | null;
-    lastMessage: SignalingMessage | null;
+    subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: (
         type: number,
         data: unknown,
@@ -182,7 +182,7 @@ type UseDeskDiagnoseProps = {
  * `seq`), and exposes a 转人工 (handoff) action that closes the flow while
  * retaining the gathered result and notifies the host for auditing.
  */
-export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDiagnoseProps) {
+export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagnoseProps) {
     const [state, setState] = useState<DiagnoseState>(INITIAL_STATE);
     const activeRequestRef = useRef<string | null>(null);
     // Highest applied seq, so duplicate / out-of-order frames cannot corrupt
@@ -233,38 +233,44 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
     }, [deskId, sendMessage]);
 
     useEffect(() => {
-        if (!lastMessage) return;
-        if (lastMessage.signaling_type !== SIGNALING_TYPE_CODE_DIAGNOSE_EVENT) return;
-        const event = lastMessage.signaling_data as DiagnoseEvent | null;
-        if (!event || event.request_id !== activeRequestRef.current) return;
-        // Ignore stale / replayed frames.
-        if (event.seq <= lastSeqRef.current) return;
-        lastSeqRef.current = event.seq;
+        // Subscribe to the lossless signaling stream. DiagnoseEvent frames
+        // are pushed rapidly (status / partial / final) and ordered by
+        // `seq`; the previous single-value delivery could coalesce a burst
+        // and drop intermediate frames, so streaming relies on this path.
+        const handle = (message: SignalingMessage) => {
+            if (message.signaling_type !== SIGNALING_TYPE_CODE_DIAGNOSE_EVENT) return;
+            const event = message.signaling_data as DiagnoseEvent | null;
+            if (!event || event.request_id !== activeRequestRef.current) return;
+            // Ignore stale / replayed frames.
+            if (event.seq <= lastSeqRef.current) return;
+            lastSeqRef.current = event.seq;
 
-        setState((prev) => {
-            switch (event.kind) {
-                case 'status':
-                    return { ...prev, status: event.status ?? prev.status };
-                case 'partial':
-                    return {
-                        ...prev,
-                        partialSummary: prev.partialSummary + (event.partial_summary ?? ''),
-                    };
-                case 'final':
-                    activeRequestRef.current = null;
-                    return { ...prev, phase: 'done', result: event.final_result ?? null };
-                case 'error':
-                    activeRequestRef.current = null;
-                    return {
-                        ...prev,
-                        phase: 'error',
-                        error: event.error?.message ?? 'diagnosis failed',
-                    };
-                default:
-                    return prev;
-            }
-        });
-    }, [lastMessage]);
+            setState((prev) => {
+                switch (event.kind) {
+                    case 'status':
+                        return { ...prev, status: event.status ?? prev.status };
+                    case 'partial':
+                        return {
+                            ...prev,
+                            partialSummary: prev.partialSummary + (event.partial_summary ?? ''),
+                        };
+                    case 'final':
+                        activeRequestRef.current = null;
+                        return { ...prev, phase: 'done', result: event.final_result ?? null };
+                    case 'error':
+                        activeRequestRef.current = null;
+                        return {
+                            ...prev,
+                            phase: 'error',
+                            error: event.error?.message ?? 'diagnosis failed',
+                        };
+                    default:
+                        return prev;
+                }
+            });
+        };
+        return subscribe(handle);
+    }, [subscribe]);
 
     return { state, start, handoff, reset };
 }

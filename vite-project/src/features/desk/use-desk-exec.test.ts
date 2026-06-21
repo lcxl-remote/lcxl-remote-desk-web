@@ -60,9 +60,21 @@ function executablePreview(): ExecPreview {
 }
 
 function render() {
-    const props = { deskId: 'desk-1', lastMessage: null as SignalingMessage | null, sendMessage };
+    // Controllable signaling subscription: `feed` synchronously delivers a
+    // message to the hook's registered handler, mirroring the real lossless
+    // fan-out. Call sites already wrap `feed` in `act(...)`.
+    const handlers = new Set<(m: SignalingMessage) => void>();
+    const subscribe = (h: (m: SignalingMessage) => void) => {
+        handlers.add(h);
+        return () => {
+            handlers.delete(h);
+        };
+    };
+    const props = { deskId: 'desk-1', subscribe, sendMessage };
     const hook = renderHook((p: typeof props) => useDeskExec(p), { initialProps: props });
-    const feed = (msg: SignalingMessage) => hook.rerender({ ...props, lastMessage: msg });
+    const feed = (msg: SignalingMessage) => {
+        handlers.forEach((h) => h(msg));
+    };
     return { hook, feed };
 }
 

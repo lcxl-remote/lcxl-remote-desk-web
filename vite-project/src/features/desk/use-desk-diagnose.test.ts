@@ -79,11 +79,30 @@ describe('extractStreamingSummary', () => {
     });
 });
 
+// Controllable signaling subscription: `feed` synchronously delivers a
+// DiagnoseEvent frame to the hook's registered handler (wrapped in `act`),
+// mirroring the real lossless fan-out that streaming relies on.
+function renderDiagnose() {
+    const handlers = new Set<(m: SignalingMessage) => void>();
+    const subscribe = (h: (m: SignalingMessage) => void) => {
+        handlers.add(h);
+        return () => {
+            handlers.delete(h);
+        };
+    };
+    const view = renderHook(() =>
+        useDeskDiagnose({ deskId: 'desk-1', subscribe, sendMessage }),
+    );
+    const feed = (msg: SignalingMessage) =>
+        act(() => {
+            handlers.forEach((h) => h(msg));
+        });
+    return { ...view, feed };
+}
+
 describe('useDeskDiagnose', () => {
     it('start sends a Diagnose request and enters the running phase', () => {
-        const { result } = renderHook(() =>
-            useDeskDiagnose({ deskId: 'desk-1', lastMessage: null, sendMessage }),
-        );
+        const { result } = renderDiagnose();
 
         act(() => result.current.start('why slow?', { includeScreen: true }));
 
@@ -97,23 +116,19 @@ describe('useDeskDiagnose', () => {
     });
 
     it('aggregates status + partial frames in order, then resolves on final', () => {
-        const { result, rerender } = renderHook(
-            ({ msg }: { msg: SignalingMessage | null }) =>
-                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
-            { initialProps: { msg: null as SignalingMessage | null } },
-        );
+        const { result, feed } = renderDiagnose();
 
         act(() => result.current.start('why?', {}));
 
-        rerender({ msg: frame({ request_id: 'req-1', seq: 0, kind: 'status', status: 'collecting' }) });
+        feed(frame({ request_id: 'req-1', seq: 0, kind: 'status', status: 'collecting' }));
         expect(result.current.state.status).toBe('collecting');
 
-        rerender({ msg: frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: 'Port ' }) });
-        rerender({ msg: frame({ request_id: 'req-1', seq: 2, kind: 'partial', partial_summary: '8080 busy' }) });
+        feed(frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: 'Port ' }));
+        feed(frame({ request_id: 'req-1', seq: 2, kind: 'partial', partial_summary: '8080 busy' }));
         expect(result.current.state.partialSummary).toBe('Port 8080 busy');
 
-        rerender({
-            msg: frame({
+        feed(
+            frame({
                 request_id: 'req-1',
                 seq: 3,
                 kind: 'final',
@@ -127,58 +142,46 @@ describe('useDeskDiagnose', () => {
                     collected: ['network.ports'],
                 },
             }),
-        });
+        );
         expect(result.current.state.phase).toBe('done');
         expect(result.current.state.result?.summary).toBe('Port conflict');
         expect(result.current.state.result?.collected).toEqual(['network.ports']);
     });
 
     it('ignores frames for a different request and stale seq numbers', () => {
-        const { result, rerender } = renderHook(
-            ({ msg }: { msg: SignalingMessage | null }) =>
-                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
-            { initialProps: { msg: null as SignalingMessage | null } },
-        );
+        const { result, feed } = renderDiagnose();
         act(() => result.current.start('why?', {}));
 
         // Wrong request id — ignored.
-        rerender({ msg: frame({ request_id: 'other', seq: 0, kind: 'partial', partial_summary: 'X' }) });
+        feed(frame({ request_id: 'other', seq: 0, kind: 'partial', partial_summary: 'X' }));
         expect(result.current.state.partialSummary).toBe('');
 
-        rerender({ msg: frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: 'A' }) });
+        feed(frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: 'A' }));
         // Stale seq (<= last applied) — ignored.
-        rerender({ msg: frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: 'dup' }) });
-        rerender({ msg: frame({ request_id: 'req-1', seq: 0, kind: 'partial', partial_summary: 'old' }) });
+        feed(frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: 'dup' }));
+        feed(frame({ request_id: 'req-1', seq: 0, kind: 'partial', partial_summary: 'old' }));
         expect(result.current.state.partialSummary).toBe('A');
     });
 
     it('an error frame moves to the error phase with the message', () => {
-        const { result, rerender } = renderHook(
-            ({ msg }: { msg: SignalingMessage | null }) =>
-                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
-            { initialProps: { msg: null as SignalingMessage | null } },
-        );
+        const { result, feed } = renderDiagnose();
         act(() => result.current.start('why?', {}));
-        rerender({
-            msg: frame({
+        feed(
+            frame({
                 request_id: 'req-1',
                 seq: 0,
                 kind: 'error',
                 error: { kind: 'redaction_failed', message: 'redaction failed', retryable: false, safe_for_model: true },
             }),
-        });
+        );
         expect(result.current.state.phase).toBe('error');
         expect(result.current.state.error).toBe('redaction failed');
     });
 
     it('handoff sends DiagnoseCancel with the diagnosis id and keeps the result', () => {
-        const { result, rerender } = renderHook(
-            ({ msg }: { msg: SignalingMessage | null }) =>
-                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
-            { initialProps: { msg: null as SignalingMessage | null } },
-        );
+        const { result, feed } = renderDiagnose();
         act(() => result.current.start('why?', {}));
-        rerender({ msg: frame({ request_id: 'req-1', seq: 0, kind: 'partial', partial_summary: 'partial text' }) });
+        feed(frame({ request_id: 'req-1', seq: 0, kind: 'partial', partial_summary: 'partial text' }));
 
         act(() => result.current.handoff());
 
@@ -192,14 +195,12 @@ describe('useDeskDiagnose', () => {
         expect(result.current.state.partialSummary).toBe('partial text');
 
         // Frames after handoff are ignored (no active request).
-        rerender({ msg: frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: ' more' }) });
+        feed(frame({ request_id: 'req-1', seq: 1, kind: 'partial', partial_summary: ' more' }));
         expect(result.current.state.partialSummary).toBe('partial text');
     });
 
     it('reset returns to the idle question form', () => {
-        const { result } = renderHook(() =>
-            useDeskDiagnose({ deskId: 'desk-1', lastMessage: null, sendMessage }),
-        );
+        const { result } = renderDiagnose();
         act(() => result.current.start('why?', {}));
         act(() => result.current.reset());
         expect(result.current.state.phase).toBe('idle');
@@ -207,9 +208,7 @@ describe('useDeskDiagnose', () => {
     });
 
     it('reset while a run is in flight cancels it on the host', () => {
-        const { result } = renderHook(() =>
-            useDeskDiagnose({ deskId: 'desk-1', lastMessage: null, sendMessage }),
-        );
+        const { result } = renderDiagnose();
         act(() => result.current.start('why?', {}));
         sendMessage.mockClear();
         act(() => result.current.reset());
@@ -224,9 +223,7 @@ describe('useDeskDiagnose', () => {
     });
 
     it('reset from idle does not send a cancel (no in-flight request)', () => {
-        const { result } = renderHook(() =>
-            useDeskDiagnose({ deskId: 'desk-1', lastMessage: null, sendMessage }),
-        );
+        const { result } = renderDiagnose();
         act(() => result.current.reset());
         expect(sendMessage).not.toHaveBeenCalled();
     });

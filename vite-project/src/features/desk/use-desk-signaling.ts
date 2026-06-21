@@ -9,6 +9,43 @@ export type SignalingMessage = {
     to_connection_id?: string;
 };
 
+/** A handler invoked synchronously for every inbound non-heartbeat
+ *  signaling message, in arrival order. Registered via `subscribe`. */
+export type SignalingSubscriber = (msg: SignalingMessage) => void;
+
+/**
+ * Options for {@link useDeskSignaling}'s `sendTracked`. `replaceKey`
+ * collapses superseded messages still waiting in the offline queue (only
+ * the newest with a given key survives); `onSent` fires exactly once when
+ * the message genuinely reaches the wire (`ws.send` succeeds), whether
+ * that happens immediately or later when a reconnect flushes the queue.
+ */
+export type SendTrackedOptions = {
+    type: number;
+    data: any;
+    toConnectionId?: string;
+    requestId?: string;
+    replaceKey?: string;
+    onSent?: (requestId: string) => void;
+};
+
+/** Result of `sendTracked`: the wire `request_id` plus whether the
+ *  message was sent immediately (`sent`) or parked in the offline queue
+ *  (`queued`, to be flushed on the next reconnect). */
+export type SendTrackedResult = {
+    requestId: string;
+    disposition: 'sent' | 'queued';
+};
+
+/** An entry in the offline send queue. Carries the optional `replaceKey`
+ *  (dedup) and `onSent` (delivery notification) so both survive until the
+ *  message is actually flushed. */
+type QueuedMessage = {
+    msg: SignalingMessage;
+    replaceKey?: string;
+    onSent?: (requestId: string) => void;
+};
+
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_TIMEOUT_MS = 60_000; // 2 missed heartbeats = dead
 const RECONNECT_BASE_DELAY_MS = 1_000;
@@ -17,8 +54,44 @@ const RECONNECT_MAX_DELAY_MS = 30_000;
 export function useDeskSignaling(deskId: string | null) {
     const socketRef = useRef<WebSocket | null>(null);
     const [isConnected, setIsConnected] = useState(false);
-    const [lastMessage, setLastMessage] = useState<SignalingMessage | null>(null);
-    const messageQueue = useRef<SignalingMessage[]>([]);
+    const messageQueue = useRef<QueuedMessage[]>([]);
+    const subscribersRef = useRef<Set<SignalingSubscriber>>(new Set());
+
+    /**
+     * Register a handler invoked synchronously for every inbound
+     * non-heartbeat signaling message, in arrival order; returns an
+     * unsubscribe function. This is the sole, lossless delivery path: a
+     * burst of messages arriving within one tick (e.g. trickled ICE
+     * candidates) is delivered in full. Routing the stream through a
+     * single React state value instead would let React coalesce rapid
+     * updates and silently drop the middle of a burst — the LAN
+     * connection-failure root cause this design replaces.
+     */
+    const subscribe = useCallback((handler: SignalingSubscriber) => {
+        subscribersRef.current.add(handler);
+        return () => {
+            subscribersRef.current.delete(handler);
+        };
+    }, []);
+
+    /**
+     * Append a message to the offline queue. When the item carries a
+     * `replaceKey`, any existing queued item with the same key is
+     * overwritten in place (so a superseded OFFER does not pile up and
+     * the dropped item's `onSent` is never invoked).
+     */
+    const enqueue = useCallback((item: QueuedMessage) => {
+        if (item.replaceKey !== undefined) {
+            const idx = messageQueue.current.findIndex(
+                (q) => q.replaceKey === item.replaceKey,
+            );
+            if (idx >= 0) {
+                messageQueue.current[idx] = item;
+                return;
+            }
+        }
+        messageQueue.current.push(item);
+    }, []);
 
     // Heartbeat state
     const heartbeatTimerRef = useRef<number | null>(null);
@@ -86,11 +159,21 @@ export function useDeskSignaling(deskId: string | null) {
                 }
             }, HEARTBEAT_INTERVAL_MS);
 
-            // Process queued messages
+            // Process queued messages. Each successful `ws.send` fires the
+            // item's `onSent` (delivery notification); a send that throws
+            // re-queues the item for the next reconnect and does NOT fire
+            // `onSent`, so callers never treat an undelivered message as
+            // sent.
             const queue = [...messageQueue.current];
             messageQueue.current = [];
-            queue.forEach(msg => {
-                ws.send(JSON.stringify(msg));
+            queue.forEach(item => {
+                try {
+                    ws.send(JSON.stringify(item.msg));
+                    item.onSent?.(item.msg.request_id!);
+                } catch (e) {
+                    console.warn('Failed to flush queued signaling message, re-queuing', e);
+                    messageQueue.current.push(item);
+                }
             });
         };
 
@@ -124,7 +207,18 @@ export function useDeskSignaling(deskId: string | null) {
                     return; // Don't propagate heartbeat to consumers
                 }
 
-                setLastMessage(message);
+                // Hand every message to each subscriber synchronously, in
+                // arrival order. A bursty stream routed through a single
+                // React state value would be coalesced by rendering down to
+                // its first and last value, silently dropping everything
+                // between; synchronous fan-out here cannot.
+                subscribersRef.current.forEach((handler) => {
+                    try {
+                        handler(message);
+                    } catch (e) {
+                        console.error('Signaling subscriber threw', e);
+                    }
+                });
             } catch (e) {
                 console.error('Failed to parse signaling message', e);
             }
@@ -162,13 +256,62 @@ export function useDeskSignaling(deskId: string | null) {
             socketRef.current.send(JSON.stringify(msg));
         } else {
             console.warn('WebSocket not connected, queuing message', type);
-            messageQueue.current.push(msg);
+            enqueue({ msg });
             if (!socketRef.current || socketRef.current.readyState === WebSocket.CLOSED) {
                 connect();
             }
         }
         return id;
-    }, [connect]);
+    }, [connect, enqueue]);
+
+    /**
+     * Like {@link sendMessage} but reports delivery: returns
+     * `{ requestId, disposition }` and (via `opts.onSent`) notifies the
+     * caller when the message actually reaches the wire. Used by the RTC
+     * retry coordinator so an OFFER's ANSWER watchdog only starts once the
+     * OFFER is genuinely sent — never while it sits queued offline. A
+     * `ws.send` that throws parks the message in the queue (disposition
+     * `queued`) instead of dropping it.
+     */
+    const sendTracked = useCallback((opts: SendTrackedOptions): SendTrackedResult => {
+        const id = opts.requestId ?? v4();
+        const msg: SignalingMessage = {
+            request_id: id,
+            signaling_type: opts.type,
+            signaling_data: opts.data,
+            to_connection_id: opts.toConnectionId,
+        };
+
+        if (socketRef.current?.readyState === WebSocket.OPEN) {
+            try {
+                socketRef.current.send(JSON.stringify(msg));
+                opts.onSent?.(id);
+                return { requestId: id, disposition: 'sent' };
+            } catch (e) {
+                console.warn('sendTracked: ws.send failed, queuing message', opts.type, e);
+                enqueue({ msg, replaceKey: opts.replaceKey, onSent: opts.onSent });
+                return { requestId: id, disposition: 'queued' };
+            }
+        }
+
+        enqueue({ msg, replaceKey: opts.replaceKey, onSent: opts.onSent });
+        if (!socketRef.current || socketRef.current.readyState === WebSocket.CLOSED) {
+            connect();
+        }
+        return { requestId: id, disposition: 'queued' };
+    }, [connect, enqueue]);
+
+    /**
+     * Drop every still-queued message carrying the given `replaceKey`
+     * without sending it (its `onSent` is never invoked). Lets the RTC
+     * coordinator purge a pending OFFER on teardown so a later reconnect
+     * doesn't replay a stale negotiation.
+     */
+    const cancelQueued = useCallback((replaceKey: string) => {
+        messageQueue.current = messageQueue.current.filter(
+            (q) => q.replaceKey !== replaceKey,
+        );
+    }, []);
 
     useEffect(() => {
         intentionalCloseRef.current = false;
@@ -189,7 +332,9 @@ export function useDeskSignaling(deskId: string | null) {
 
     return {
         isConnected,
-        lastMessage,
+        subscribe,
         sendMessage,
+        sendTracked,
+        cancelQueued,
     };
 }
