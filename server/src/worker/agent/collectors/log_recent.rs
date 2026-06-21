@@ -4,13 +4,19 @@
 //! publisher metadata into formatted messages for us — matching the codebase's
 //! existing pattern of shelling structured queries to PowerShell (driver ops).
 //! The severity / source / since / limit filters map onto a `Get-WinEvent`
-//! `FilterHashtable`. Other platforms return `UnsupportedPlatform` (journald
-//! integration is deferred; Windows comes first).
+//! `FilterHashtable`. macOS reads the unified log via `log show --style ndjson`,
+//! parsing each entry and filtering severity in Rust (the unified log has no
+//! native "warning" level). Other platforms return `UnsupportedPlatform`
+//! (journald integration is deferred).
 
-use desk_agent_protocol::{
-    AgentError, AgentErrorKind, LogEvent, LogRecentOutput, LogRecentParams, LogSeverity,
-};
+use desk_agent_protocol::{AgentError, LogEvent, LogRecentOutput, LogRecentParams, LogSeverity};
+// `AgentErrorKind` is only referenced by the Windows JSON parser and the
+// unsupported-platform fallback; on macOS (outside tests) neither is compiled.
+#[cfg(not(all(target_os = "macos", not(test))))]
+use desk_agent_protocol::AgentErrorKind;
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 
@@ -32,16 +38,90 @@ pub fn collect(params: &LogRecentParams) -> Result<LogRecentOutput, AgentError> 
         events.truncate(limit as usize);
         Ok(LogRecentOutput { events, truncated })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let ndjson = macos::query(params, limit)?;
+        let mut events = parse_ndjson(&ndjson);
+        // The unified log cannot filter severity via predicate, so apply the
+        // requested severities here (empty means "any").
+        if !params.severity.is_empty() {
+            events.retain(|e| params.severity.contains(&e.severity));
+        }
+        let truncated = events.len() as u32 >= limit;
+        events.truncate(limit as usize);
+        Ok(LogRecentOutput { events, truncated })
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (params, limit);
         Err(AgentError {
             kind: AgentErrorKind::UnsupportedPlatform,
-            message: "log.recent is only implemented on Windows".to_string(),
+            message: "log.recent is not supported on this platform".to_string(),
             retryable: false,
             safe_for_model: true,
         })
     }
+}
+
+/// Map a macOS unified-log `messageType` to a protocol severity. The unified
+/// log levels are Debug / Info / Default / Error / Fault; with no native
+/// "warning" tier, `Default` and `Info` both fold into `Info`. Platform-agnostic
+/// for unit testing.
+#[cfg(any(target_os = "macos", test))]
+fn message_type_to_severity(message_type: &str) -> LogSeverity {
+    match message_type.to_ascii_lowercase().as_str() {
+        "error" | "fault" => LogSeverity::Error,
+        "debug" => LogSeverity::Debug,
+        // "info", "default", and any unknown type.
+        _ => LogSeverity::Info,
+    }
+}
+
+/// Parse `log show --style ndjson` output into log events, one per line. Lines
+/// that are not valid JSON, or that carry no `eventMessage` (activity / signpost
+/// entries), are skipped. The source is the entry's subsystem when present,
+/// otherwise its process name. Platform-agnostic so the parse is unit tested on
+/// any host.
+#[cfg(any(target_os = "macos", test))]
+fn parse_ndjson(text: &str) -> Vec<LogEvent> {
+    #[derive(serde::Deserialize)]
+    struct RawEntry {
+        timestamp: Option<String>,
+        #[serde(rename = "messageType")]
+        message_type: Option<String>,
+        subsystem: Option<String>,
+        process: Option<String>,
+        #[serde(rename = "eventMessage")]
+        event_message: Option<String>,
+    }
+
+    let mut events = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(raw) = serde_json::from_str::<RawEntry>(line) else {
+            continue;
+        };
+        let Some(message) = raw.event_message.filter(|m| !m.is_empty()) else {
+            continue;
+        };
+        let source = raw
+            .subsystem
+            .filter(|s| !s.is_empty())
+            .or(raw.process)
+            .unwrap_or_default();
+        events.push(LogEvent {
+            timestamp: raw.timestamp.unwrap_or_default(),
+            source,
+            severity: message_type_to_severity(raw.message_type.as_deref().unwrap_or("default")),
+            message,
+            // Redaction is applied downstream by the diagnose pipeline.
+            redactions: Vec::new(),
+        });
+    }
+    events
 }
 
 /// Map requested protocol severities to the Windows Event Log numeric levels
@@ -196,6 +276,67 @@ mod tests {
         assert_eq!(events[0].severity, LogSeverity::Info);
         assert_eq!(events[0].message, "");
         assert_eq!(events[0].timestamp, "");
+    }
+
+    #[test]
+    fn message_type_maps_to_severity() {
+        assert_eq!(message_type_to_severity("Error"), LogSeverity::Error);
+        assert_eq!(message_type_to_severity("Fault"), LogSeverity::Error);
+        assert_eq!(message_type_to_severity("Debug"), LogSeverity::Debug);
+        assert_eq!(message_type_to_severity("Info"), LogSeverity::Info);
+        assert_eq!(message_type_to_severity("Default"), LogSeverity::Info);
+        // Unknown / absent types fall back to Info.
+        assert_eq!(message_type_to_severity("whatever"), LogSeverity::Info);
+    }
+
+    #[test]
+    fn parses_ndjson_entries() {
+        let text = "{\"timestamp\":\"2026-06-21 10:00:00.000000-0700\",\"messageType\":\"Error\",\"subsystem\":\"com.apple.network\",\"process\":\"networkd\",\"eventMessage\":\"link down\"}\n\
+                    {\"timestamp\":\"2026-06-21 10:01:00.000000-0700\",\"messageType\":\"Default\",\"subsystem\":\"\",\"process\":\"kernel\",\"eventMessage\":\"boot\"}\n";
+        let events = parse_ndjson(text);
+        assert_eq!(events.len(), 2);
+
+        assert_eq!(events[0].severity, LogSeverity::Error);
+        // Subsystem wins as the source when present.
+        assert_eq!(events[0].source, "com.apple.network");
+        assert_eq!(events[0].message, "link down");
+        assert!(events[0].redactions.is_empty());
+
+        assert_eq!(events[1].severity, LogSeverity::Info);
+        // Falls back to the process name when subsystem is empty.
+        assert_eq!(events[1].source, "kernel");
+    }
+
+    #[test]
+    fn ndjson_skips_non_log_and_malformed_lines() {
+        let text = "not json at all\n\
+                    {\"timestamp\":\"t\",\"messageType\":\"activityCreateEvent\"}\n\
+                    \n\
+                    {\"timestamp\":\"t\",\"messageType\":\"Info\",\"process\":\"p\",\"eventMessage\":\"keep me\"}\n";
+        let events = parse_ndjson(text);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message, "keep me");
+    }
+
+    /// Live read on macOS: the unified log always holds recent entries. Verifies
+    /// the `log show` round trip produces well-formed, capped output. `log show`
+    /// can take several seconds to walk the store, so this is `#[ignore]`d by
+    /// default and run explicitly.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "log show can take several seconds to scan the unified log store"]
+    fn live_macos_reads_unified_log() {
+        let out = collect(&LogRecentParams {
+            source: None,
+            since_minutes: Some(60),
+            limit: Some(5),
+            severity: Vec::new(),
+        })
+        .expect("unified log read must succeed");
+        assert!(out.events.len() <= 5);
+        for event in &out.events {
+            assert!(!event.message.is_empty());
+        }
     }
 
     /// Live read on Windows: the System log always has recent events. Verifies
