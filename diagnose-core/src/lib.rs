@@ -23,6 +23,7 @@
 pub mod agent_loop;
 pub mod chat;
 pub mod chunk;
+pub mod exec_tools;
 pub mod parser;
 pub mod prompt;
 pub mod read_tools;
