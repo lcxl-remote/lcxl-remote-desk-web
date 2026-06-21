@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, Sparkles } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -880,8 +880,11 @@ export default function DeskSession() {
                             Lock API can't capture Esc. Lives inside the
                             fullscreen element so it stays in the top layer. */}
                         {showEscHint && (
-                            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[60] max-w-[90%] rounded-md bg-black/80 px-4 py-2 text-center text-sm text-white shadow-lg backdrop-blur-md">
-                                {t('pages.desk.escHintFullscreen', 'Pressing Esc exits fullscreen and is not sent to the host. Use the keyboard shortcut menu to send Esc.')}
+                            <div className="absolute top-5 left-1/2 -translate-x-1/2 z-[60] flex max-w-[92%] items-center gap-3 rounded-xl border border-amber-300/70 bg-amber-500/95 px-5 py-3 text-sm font-semibold text-amber-950 shadow-2xl shadow-black/40 ring-1 ring-black/20 backdrop-blur-md animate-in fade-in slide-in-from-top-4 zoom-in-95 duration-300">
+                                <AlertTriangle className="h-6 w-6 shrink-0 animate-pulse" />
+                                <span className="leading-snug">
+                                    {t('pages.desk.escHintFullscreen', 'Pressing Esc exits fullscreen and is not sent to the host. Use the keyboard shortcut menu to send Esc.')}
+                                </span>
                             </div>
                         )}
 
