@@ -1173,6 +1173,8 @@ export default function DeskSession() {
                                 onClose={() => setShowDiagnose(false)}
                                 isConnected={isConnected}
                                 exec={exec}
+                                onApproveExec={diagnose.approveExec}
+                                onRejectExec={diagnose.rejectExec}
                             />
                         )}
 

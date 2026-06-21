@@ -7,7 +7,10 @@ import {
     SIGNALING_TYPE_CODE_DIAGNOSE,
     SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
     SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
+    SIGNALING_TYPE_CODE_EXEC_PREVIEW,
+    SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
+import type { ExecPreview } from './use-desk-exec';
 
 // `sendMessage` returns the wire request_id; the hook keys its aggregation on
 // it. Fixed to "req-1" so test frames can target the active request.
@@ -22,6 +25,30 @@ function frame(event: DiagnoseEvent): SignalingMessage {
         request_id: event.request_id,
         signaling_type: SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
         signaling_data: event,
+    };
+}
+
+// The agentic loop's unsolicited ExecPreview rides the ExecPreview signaling
+// type; its wire request_id equals the server-minted exec_request_id.
+function execPreviewFrame(overrides: Partial<ExecPreview> = {}): SignalingMessage {
+    const preview: ExecPreview = {
+        exec_request_id: 'exec-1',
+        shell: 'bash',
+        command: 'systemctl restart nginx',
+        cwd: null,
+        timeout_ms: 30_000,
+        risk: 'high',
+        impact: 'Restarts the nginx service.',
+        policy_note: null,
+        requires_confirmation: true,
+        executable: true,
+        blocked_reason: null,
+        ...overrides,
+    };
+    return {
+        request_id: preview.exec_request_id ?? 'exec-1',
+        signaling_type: SIGNALING_TYPE_CODE_EXEC_PREVIEW,
+        signaling_data: preview,
     };
 }
 
@@ -288,5 +315,72 @@ describe('useDeskDiagnose', () => {
 
         rerender({ msg: frame({ request_id: 'req-1', seq: 1, kind: 'tool_finished', tool_call_id: 'c1', tool_ok: false }) });
         expect(result.current.state.tools[0].status).toBe('failed');
+    });
+
+    it('captures an agentic ExecPreview while a run is in flight and approves it', () => {
+        const { result, rerender } = renderHook(
+            ({ msg }: { msg: SignalingMessage | null }) =>
+                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
+            { initialProps: { msg: null as SignalingMessage | null } },
+        );
+        act(() => result.current.start('restart nginx', {}));
+
+        rerender({ msg: execPreviewFrame() });
+        expect(result.current.state.pendingExec?.command).toBe('systemctl restart nginx');
+
+        sendMessage.mockClear();
+        act(() => result.current.approveExec());
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            { exec_request_id: 'exec-1', decision: 'approve' },
+            'desk-1',
+        );
+        // The card clears once resolved; completion shows via the tool timeline.
+        expect(result.current.state.pendingExec).toBeNull();
+    });
+
+    it('rejects an agentic ExecPreview with a reject decision', () => {
+        const { result, rerender } = renderHook(
+            ({ msg }: { msg: SignalingMessage | null }) =>
+                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
+            { initialProps: { msg: null as SignalingMessage | null } },
+        );
+        act(() => result.current.start('restart nginx', {}));
+        rerender({ msg: execPreviewFrame() });
+
+        sendMessage.mockClear();
+        act(() => result.current.rejectExec());
+        expect(sendMessage).toHaveBeenCalledWith(
+            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            { exec_request_id: 'exec-1', decision: 'reject' },
+            'desk-1',
+        );
+        expect(result.current.state.pendingExec).toBeNull();
+    });
+
+    it('ignores an ExecPreview when no run is in flight (suggested-command path owns it)', () => {
+        const { result, rerender } = renderHook(
+            ({ msg }: { msg: SignalingMessage | null }) =>
+                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
+            { initialProps: { msg: null as SignalingMessage | null } },
+        );
+        // No start() — activeRequest is null, so the preview is not the agentic one.
+        rerender({ msg: execPreviewFrame() });
+        expect(result.current.state.pendingExec).toBeNull();
+    });
+
+    it('clears a pending approval when the run terminates', () => {
+        const { result, rerender } = renderHook(
+            ({ msg }: { msg: SignalingMessage | null }) =>
+                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
+            { initialProps: { msg: null as SignalingMessage | null } },
+        );
+        act(() => result.current.start('restart nginx', {}));
+        rerender({ msg: execPreviewFrame() });
+        expect(result.current.state.pendingExec).not.toBeNull();
+
+        rerender({ msg: frame({ request_id: 'req-1', seq: 0, kind: 'answer', answer: 'done' }) });
+        expect(result.current.state.phase).toBe('done');
+        expect(result.current.state.pendingExec).toBeNull();
     });
 });

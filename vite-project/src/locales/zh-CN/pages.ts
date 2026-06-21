@@ -318,6 +318,7 @@ export default {
   'pages.desk.diagnose.exec.execute': '执行',
   'pages.desk.diagnose.exec.classifying': '正在检查命令…',
   'pages.desk.diagnose.exec.confirmTitle': '确认执行',
+  'pages.desk.diagnose.exec.agenticTitle': 'AI 请求执行一条命令',
   'pages.desk.diagnose.exec.timeout': '超时',
   'pages.desk.diagnose.exec.approve': '确认并执行',
   'pages.desk.diagnose.exec.reject': '拒绝',

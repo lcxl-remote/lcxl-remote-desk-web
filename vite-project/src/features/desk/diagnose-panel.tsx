@@ -13,7 +13,7 @@ import {
     type ToolActivity,
     type ToolActivityStatus,
 } from "./use-desk-diagnose"
-import type { ExecEntry } from "./use-desk-exec"
+import type { ExecEntry, ExecPreview } from "./use-desk-exec"
 
 type ExecControls = {
     entries: Record<number, ExecEntry>
@@ -34,6 +34,10 @@ type DiagnosePanelProps = {
     isConnected?: boolean
     /** Confirmed-execution controls; omitted in suggest-only contexts. */
     exec?: ExecControls
+    /** Approve the command the agentic loop is parked on (agentic path). */
+    onApproveExec?: () => void
+    /** Reject the command the agentic loop is parked on (agentic path). */
+    onRejectExec?: () => void
 }
 
 /** Map the backend confidence to a badge colour. */
@@ -259,6 +263,72 @@ function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
     )
 }
 
+/**
+ * The agentic loop's mid-run approval card: the model initiated a mutating
+ * command and the loop is blocked until the operator approves or rejects it.
+ * Unlike `ExecRow` (a suggested command the operator chose to run), this is
+ * pushed by the AI itself, so it shows the full command the model wants to run
+ * alongside the server's classification (risk / impact / policy / timeout).
+ * Nothing runs without an explicit Approve.
+ */
+function AgenticExecApproval({
+    preview,
+    onApprove,
+    onReject,
+}: {
+    preview: ExecPreview
+    onApprove: () => void
+    onReject: () => void
+}) {
+    const { t } = useTranslation()
+    return (
+        <section className="flex flex-col gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
+            <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-amber-200">
+                    {t("pages.desk.diagnose.exec.agenticTitle", "The AI wants to run a command")}
+                </span>
+                <Badge variant="outline" className={riskClass(preview.risk)}>
+                    {t(`pages.desk.diagnose.risk.${preview.risk}`, preview.risk)}
+                </Badge>
+            </div>
+            <div className="flex items-center gap-1 text-[10px] uppercase text-white/50">
+                <TerminalIcon className="h-3 w-3" />
+                {preview.shell}
+            </div>
+            <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded bg-black/40 p-1.5 font-mono text-xs text-green-300">
+                {preview.command}
+            </pre>
+            <div className="text-xs text-white/80">{preview.impact}</div>
+            {preview.policy_note && (
+                <div className="text-[10px] text-white/50">{preview.policy_note}</div>
+            )}
+            <div className="text-[10px] text-white/50">
+                {t("pages.desk.diagnose.exec.timeout", "Timeout")}:{" "}
+                {Math.round(preview.timeout_ms / 1000)}s
+            </div>
+            <div className="mt-1 flex gap-2">
+                <Button
+                    size="sm"
+                    className="h-7 flex-1 bg-red-600 text-xs hover:bg-red-700"
+                    onClick={onApprove}
+                >
+                    <Check className="mr-1 h-3 w-3" />
+                    {t("pages.desk.diagnose.exec.approve", "Approve & run")}
+                </Button>
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 flex-1 text-xs"
+                    onClick={onReject}
+                >
+                    <Ban className="mr-1 h-3 w-3" />
+                    {t("pages.desk.diagnose.exec.reject", "Reject")}
+                </Button>
+            </div>
+        </section>
+    )
+}
+
 export function DiagnosePanel({
     state,
     onStart,
@@ -267,6 +337,8 @@ export function DiagnosePanel({
     onClose,
     isConnected = true,
     exec,
+    onApproveExec,
+    onRejectExec,
 }: DiagnosePanelProps) {
     const { t, i18n } = useTranslation()
     const [question, setQuestion] = useState("")
@@ -391,6 +463,13 @@ export function DiagnosePanel({
                             </p>
                         )}
                         <ToolTimeline tools={state.tools} />
+                        {state.pendingExec && onApproveExec && onRejectExec && (
+                            <AgenticExecApproval
+                                preview={state.pendingExec}
+                                onApprove={onApproveExec}
+                                onReject={onRejectExec}
+                            />
+                        )}
                         {!isConnected && (
                             <div className="flex items-start gap-2 text-xs text-amber-300">
                                 <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

@@ -3,7 +3,10 @@ import {
     SIGNALING_TYPE_CODE_DIAGNOSE,
     SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
     SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL,
+    SIGNALING_TYPE_CODE_EXEC_PREVIEW,
+    SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
+import type { ExecPreview } from './use-desk-exec';
 import type { SignalingMessage } from './use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::diagnose`. These ride the
@@ -195,6 +198,14 @@ export type DiagnoseState = {
     tools: ToolActivity[];
     /** The agentic turn's final answer text, set on an `answer` frame. */
     answer: string | null;
+    /**
+     * A mutating command the agentic loop initiated and is now blocked on,
+     * awaiting the operator's approval. Set from the unsolicited `ExecPreview`
+     * the backend pushes while the loop is parked; cleared once the operator
+     * resolves it or the run ends. At most one is pending at a time because the
+     * loop executes tools sequentially.
+     */
+    pendingExec: ExecPreview | null;
 };
 
 const INITIAL_STATE: DiagnoseState = {
@@ -207,6 +218,7 @@ const INITIAL_STATE: DiagnoseState = {
     turnId: null,
     tools: [],
     answer: null,
+    pendingExec: null,
 };
 
 type UseDeskDiagnoseProps = {
@@ -259,7 +271,7 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
             sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL, null, deskId, requestId);
         }
         activeRequestRef.current = null;
-        setState((prev) => ({ ...prev, phase: 'done' }));
+        setState((prev) => ({ ...prev, phase: 'done', pendingExec: null }));
     }, [deskId, sendMessage]);
 
     // Full reset back to the question form. If a run is still in flight (the
@@ -276,8 +288,54 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
         setState(INITIAL_STATE);
     }, [deskId, sendMessage]);
 
+    // Approve the command the agentic loop is parked on: send `ResolveExec`
+    // (correlated by the server-minted `exec_request_id`) so the backend
+    // unblocks the loop and dispatches the command to the worker. The result
+    // flows back through the loop and surfaces as the tool-timeline entry's
+    // completion, not a separate `ExecResult` frame.
+    const approveExec = useCallback(() => {
+        const reqId = state.pendingExec?.exec_request_id;
+        if (!deskId || !reqId) return;
+        sendMessage(
+            SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+            { exec_request_id: reqId, decision: 'approve' },
+            deskId,
+        );
+        setState((prev) => ({ ...prev, pendingExec: null }));
+    }, [deskId, sendMessage, state.pendingExec]);
+
+    // Reject the parked command: send `ResolveExec` with `reject` so the loop
+    // gets a rejection outcome and can adapt, then clear the approval card.
+    const rejectExec = useCallback(() => {
+        const reqId = state.pendingExec?.exec_request_id;
+        if (deskId && reqId) {
+            sendMessage(
+                SIGNALING_TYPE_CODE_RESOLVE_EXEC,
+                { exec_request_id: reqId, decision: 'reject' },
+                deskId,
+            );
+        }
+        setState((prev) => ({ ...prev, pendingExec: null }));
+    }, [deskId, sendMessage, state.pendingExec]);
+
     useEffect(() => {
         if (!lastMessage) return;
+
+        // An unsolicited `ExecPreview` arriving while a run is in flight is the
+        // agentic loop asking to run a command. The suggested-command flow
+        // (`use-desk-exec`) owns previews it requested and correlates them by its
+        // own ConfirmExec request_id; it drops anything it did not request, so
+        // claiming the agentic one here causes no double handling.
+        if (lastMessage.signaling_type === SIGNALING_TYPE_CODE_EXEC_PREVIEW) {
+            if (activeRequestRef.current === null) return;
+            const preview = lastMessage.signaling_data as ExecPreview | null;
+            if (!preview || !preview.exec_request_id) return;
+            setState((prev) =>
+                prev.phase === 'running' ? { ...prev, pendingExec: preview } : prev,
+            );
+            return;
+        }
+
         if (lastMessage.signaling_type !== SIGNALING_TYPE_CODE_DIAGNOSE_EVENT) return;
         const event = lastMessage.signaling_data as DiagnoseEvent | null;
         if (!event || event.request_id !== activeRequestRef.current) return;
@@ -296,13 +354,19 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
                     };
                 case 'final':
                     activeRequestRef.current = null;
-                    return { ...prev, phase: 'done', result: event.final_result ?? null };
+                    return {
+                        ...prev,
+                        phase: 'done',
+                        result: event.final_result ?? null,
+                        pendingExec: null,
+                    };
                 case 'error':
                     activeRequestRef.current = null;
                     return {
                         ...prev,
                         phase: 'error',
                         error: event.error?.message ?? 'diagnosis failed',
+                        pendingExec: null,
                     };
                 case 'turn_started':
                     return { ...prev, turnId: event.turn_id ?? prev.turnId };
@@ -334,12 +398,17 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
                 }
                 case 'answer':
                     activeRequestRef.current = null;
-                    return { ...prev, phase: 'done', answer: event.answer ?? '' };
+                    return {
+                        ...prev,
+                        phase: 'done',
+                        answer: event.answer ?? '',
+                        pendingExec: null,
+                    };
                 default:
                     return prev;
             }
         });
     }, [lastMessage]);
 
-    return { state, start, handoff, reset };
+    return { state, start, handoff, reset, approveExec, rejectExec };
 }

@@ -320,6 +320,7 @@ export default {
   'pages.desk.diagnose.exec.execute': 'Execute',
   'pages.desk.diagnose.exec.classifying': 'Checking command...',
   'pages.desk.diagnose.exec.confirmTitle': 'Confirm execution',
+  'pages.desk.diagnose.exec.agenticTitle': 'The AI wants to run a command',
   'pages.desk.diagnose.exec.timeout': 'Timeout',
   'pages.desk.diagnose.exec.approve': 'Approve & run',
   'pages.desk.diagnose.exec.reject': 'Reject',

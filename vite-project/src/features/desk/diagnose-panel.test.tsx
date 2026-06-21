@@ -20,6 +20,10 @@ const baseState: DiagnoseState = {
     partialSummary: "",
     result: null,
     error: null,
+    turnId: null,
+    tools: [],
+    answer: null,
+    pendingExec: null,
 };
 
 function renderPanel(state: Partial<DiagnoseState>) {
@@ -243,6 +247,45 @@ describe("DiagnosePanel", () => {
             screen.getByText("Blocked: matches a prohibited pattern (download-and-execute)"),
         ).toBeInTheDocument();
         expect(screen.queryByText("Approve & run")).not.toBeInTheDocument();
+    });
+
+    it("agentic: a pending exec approval shows the command with Approve / Reject", () => {
+        const onApproveExec = vi.fn();
+        const onRejectExec = vi.fn();
+        render(
+            <DiagnosePanel
+                state={{
+                    ...baseState,
+                    phase: "running",
+                    status: "modeling",
+                    pendingExec: {
+                        exec_request_id: "exec-1",
+                        shell: "bash",
+                        command: "systemctl restart nginx",
+                        cwd: null,
+                        timeout_ms: 30000,
+                        risk: "high",
+                        impact: "Restarts the nginx service.",
+                        policy_note: null,
+                        requires_confirmation: true,
+                        executable: true,
+                        blocked_reason: null,
+                    },
+                }}
+                onStart={vi.fn()}
+                onHandoff={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                onApproveExec={onApproveExec}
+                onRejectExec={onRejectExec}
+            />,
+        );
+        expect(screen.getByText("The AI wants to run a command")).toBeInTheDocument();
+        expect(screen.getByText("systemctl restart nginx")).toBeInTheDocument();
+        fireEvent.click(screen.getByText("Approve & run"));
+        expect(onApproveExec).toHaveBeenCalled();
+        fireEvent.click(screen.getByText("Reject"));
+        expect(onRejectExec).toHaveBeenCalled();
     });
 
     it("close button calls onClose", () => {
