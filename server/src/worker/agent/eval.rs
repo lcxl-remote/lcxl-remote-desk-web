@@ -201,9 +201,9 @@ mod tests {
     use super::*;
 
     // Committed fixtures, loaded at compile time so replay needs no filesystem.
-    const FIXTURE_HIGH_CPU: &str = include_str!("fixtures/high_cpu.json");
-    const FIXTURE_PORT_OCCUPIED: &str = include_str!("fixtures/port_occupied.json");
-    const FIXTURE_CONTAINER_FAILURE: &str = include_str!("fixtures/container_failure.json");
+    const FIXTURE_HIGH_CPU: &str = include_str!("eval/fixtures/high_cpu.json");
+    const FIXTURE_PORT_OCCUPIED: &str = include_str!("eval/fixtures/port_occupied.json");
+    const FIXTURE_CONTAINER_FAILURE: &str = include_str!("eval/fixtures/container_failure.json");
 
     /// Regenerate the committed fixtures from the in-code scenario builders.
     /// Ignored by default — run explicitly after changing a builder:
