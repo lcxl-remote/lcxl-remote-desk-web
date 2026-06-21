@@ -120,15 +120,18 @@ pub enum ExecOutcome {
     Unknown(ExecIdentity),
 }
 
-/// Per-call context the loop hands the mutating seam: the turn's identity plus the
-/// authorization the work item is minted under. The subject (actor / device) is
-/// already held by the seam (it is built per turn); these are the fields the loop
-/// owns and the seam needs to mint a durable work item.
+/// Per-call context the loop hands the mutating seam: the turn's identity, the
+/// session subject the durable work item is pinned to, and the authorization it is
+/// minted under. The loop owns all of these (they come from the persisted session),
+/// so a control end can never influence the work item's subject.
 #[derive(Debug, Clone)]
 pub struct ExecContext {
     pub conversation_id: String,
     pub turn_id: String,
     pub tool_call_id: String,
+    /// The session's pinned subject actor; the work item is created under it and a
+    /// later resolve re-verifies the cookie subject against it.
+    pub actor_id: String,
     pub policy_revision: i64,
     pub scope: AgentScope,
 }

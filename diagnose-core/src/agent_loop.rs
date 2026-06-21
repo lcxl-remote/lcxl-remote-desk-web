@@ -264,6 +264,7 @@ async fn run_mutating<F: FnMut() -> String>(
         conversation_id: session.conversation_id.clone(),
         turn_id: turn_id.to_string(),
         tool_call_id: call.id.clone(),
+        actor_id: session.actor_id.clone(),
         policy_revision: session.policy_revision,
         scope: session.scope_snapshot.clone(),
     };
