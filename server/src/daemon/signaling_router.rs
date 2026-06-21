@@ -31,12 +31,12 @@ use desk_agent_protocol::diagnose::{
     COLLECT_CHUNK_PAYLOAD_LIMIT, CollectRequest, CollectResponse, CollectResponseError,
     DiagnoseEvent, DiagnoseRequestData,
 };
+use desk_agent_protocol::edge_exec::{EdgeExecDisposition, EdgeExecResultPayload};
 use desk_agent_protocol::exec::{
     ConfirmExecData, ExecDecision, ExecEffect, ExecPlan, ExecPreview, ExecResultPayload,
     ResolveExecData,
 };
 use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
-use desk_agent_protocol::edge_exec::{EdgeExecDisposition, EdgeExecResultPayload};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode, OperationInput,
