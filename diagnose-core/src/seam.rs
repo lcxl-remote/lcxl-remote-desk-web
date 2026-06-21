@@ -170,6 +170,11 @@ pub struct ExecContext {
     pub actor_id: String,
     pub policy_revision: i64,
     pub scope: AgentScope,
+    /// The control-end connection that started the turn, if any. The mutating seam
+    /// routes the approval preview back to it (Direct: the local browser link;
+    /// Manager: the originating browser instance). `None` on a runtime with no live
+    /// control connection.
+    pub connection_id: Option<String>,
 }
 
 /// Runs the loop's tools. Read tools run immediately; a mutating tool goes through

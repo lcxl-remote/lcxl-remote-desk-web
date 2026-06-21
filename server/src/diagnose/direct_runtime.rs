@@ -9,8 +9,11 @@
 //!
 //! Scope: the read tools the model may call are gated by the device's local
 //! collection policy (`allow_logs`) and, when the request rode a manager
-//! authorization, intersected with the PDP-granted scope. Only read tools are
-//! exposed here; mutating execution lands with the exec path.
+//! authorization, intersected with the PDP-granted scope. When the runtime is
+//! built with [`new_with_exec`](DirectAgentRuntime::new_with_exec) the mutating
+//! `exec_command` tool is also exposed — but only under a confirm-or-higher
+//! execution mode and always behind operator approval (an `ExecPreview` pushed to
+//! the control connection, resolved by `ResolveExec`).
 //!
 //! A request id keys a fresh in-memory session (one single-turn conversation per
 //! request); cross-question continuation over a stable conversation id is a later
@@ -61,6 +64,11 @@ pub struct DirectAgentRuntime {
     session: Arc<dyn SessionSeam + Send + Sync>,
     registry: Arc<Vec<RegisteredTool>>,
     settings: Arc<SharedSettings>,
+    /// Whether the mutating exec tool is wired (the tool seam has exec parts and
+    /// the registry includes `exec_command`). When set, the run scope also grants
+    /// `shell.exec.confirmed` under the configured execution mode, so the model can
+    /// reach the exec path (always through operator approval).
+    exec_enabled: bool,
 }
 
 impl DirectAgentRuntime {
@@ -83,6 +91,36 @@ impl DirectAgentRuntime {
             session: Arc::new(InMemorySessionSeam::new()),
             registry: Arc::new(read_tool_registry()),
             settings,
+            exec_enabled: false,
+        }
+    }
+
+    /// Build the production runtime with the mutating exec path enabled: read tools
+    /// plus `exec_command`, the exec tool seam wired to classify → operator approval
+    /// (an `ExecPreview` pushed to the control connection, resolved by `ResolveExec`)
+    /// → local worker execution. The exec tool is only exposed to the model when the
+    /// configured execution mode permits mutation (and a manager authorization, when
+    /// present, grants `shell.exec.confirmed`).
+    pub fn new_with_exec(
+        agent: Arc<LocalDeviceAgent>,
+        settings: Arc<SharedSettings>,
+        support: super::direct_exec::DirectExecSupport,
+    ) -> Self {
+        let tools = Arc::new(
+            DirectToolSeam::new(agent, Arc::new(RegexRedactor::new()), DIRECT_AGENT_ACTOR)
+                .with_exec(support.into_parts()),
+        );
+        let model = Arc::new(AdapterModelSeam::new(
+            Arc::new(ProviderAdapterSelector),
+            settings.clone(),
+        ));
+        Self {
+            tools,
+            model,
+            session: Arc::new(InMemorySessionSeam::new()),
+            registry: Arc::new(super::agent::agent_tool_registry()),
+            settings,
+            exec_enabled: true,
         }
     }
 
@@ -100,6 +138,26 @@ impl DirectAgentRuntime {
             session,
             registry: Arc::new(read_tool_registry()),
             settings,
+            exec_enabled: false,
+        }
+    }
+
+    /// Like [`with_seams`](Self::with_seams) but exposing the exec tool + scope (for
+    /// tests that drive the mutating path with injected seams).
+    #[cfg(test)]
+    pub fn with_exec_seams(
+        model: Arc<dyn ModelSeam + Send + Sync>,
+        tools: Arc<dyn ToolSeam + Send + Sync>,
+        session: Arc<dyn SessionSeam + Send + Sync>,
+        settings: Arc<SharedSettings>,
+    ) -> Self {
+        Self {
+            tools,
+            model,
+            session,
+            registry: Arc::new(super::agent::agent_tool_registry()),
+            settings,
+            exec_enabled: true,
         }
     }
 
@@ -111,10 +169,26 @@ impl DirectAgentRuntime {
         request_id: &str,
         request: DiagnoseRequestData,
         authz: Option<&AuthorizationBlock>,
+        connection_id: Option<String>,
         sink: S,
     ) {
-        let allow_logs = self.settings.read().await.collection_policy.allow_logs;
-        let scope = direct_read_scope(&self.registry, allow_logs, authz);
+        let (allow_logs, execution_mode) = {
+            let s = self.settings.read().await;
+            (s.collection_policy.allow_logs, s.ai_model.execution_mode)
+        };
+        let mut scope = direct_read_scope(&self.registry, allow_logs, authz);
+        // When exec is wired, grant the mutating capability + adopt the configured
+        // execution mode, so the loop exposes `exec_command` (always through operator
+        // approval). A manager authorization, when present, must also grant it.
+        if self.exec_enabled
+            && mode_allows_exec(execution_mode)
+            && authz
+                .map(|a| a.scope.granted.contains(&Capability::ShellExecConfirmed))
+                .unwrap_or(true)
+        {
+            scope.granted.push(Capability::ShellExecConfirmed);
+            scope.mode = execution_mode;
+        }
         let (actor_id, device_id, tenant_id) = subject_for(authz);
         run_direct_agent_turn(
             self.session.as_ref(),
@@ -127,10 +201,21 @@ impl DirectAgentRuntime {
             actor_id,
             device_id,
             tenant_id,
+            connection_id,
             sink,
         )
         .await;
     }
+}
+
+/// Whether the execution mode permits the mutating exec tool to be exposed (it is
+/// always gated behind operator approval afterward). Suggest-only / read-only never
+/// expose it; automated is not implemented on this runtime, so it is excluded.
+fn mode_allows_exec(mode: ExecutionMode) -> bool {
+    matches!(
+        mode,
+        ExecutionMode::ConfirmEachAction | ExecutionMode::SessionApproved
+    )
 }
 
 /// The read scope a Direct agentic turn runs under: the read tools' capabilities
@@ -196,6 +281,7 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
     actor_id: String,
     device_id: String,
     tenant_id: Option<String>,
+    connection_id: Option<String>,
     sink: S,
 ) {
     let turn_id = format!("{request_id}-t0");
@@ -225,7 +311,7 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
         current_pdp_scope: scope,
         turn_id: turn_id.clone(),
         request_id: Some(request_id.to_string()),
-        connection_id: None,
+        connection_id,
         now,
     };
     let user = ChatMessage::text(format!("{request_id}-u0"), ChatRole::User, request.question);
@@ -438,7 +524,7 @@ mod tests {
         );
         let (store, sink) = recorder();
         runtime
-            .run("req-1", request("how is it?"), None, sink)
+            .run("req-1", request("how is it?"), None, None, sink)
             .await;
 
         let ev = store.borrow();
@@ -466,12 +552,128 @@ mod tests {
         );
     }
 
+    /// A fake tool seam that exposes the exec path: it records the `ExecContext`
+    /// connection id the loop passed and returns an `Executed` outcome.
+    struct FakeExecTools {
+        seen_connection: std::sync::Mutex<Option<String>>,
+    }
+    impl FakeExecTools {
+        fn new() -> Self {
+            Self {
+                seen_connection: std::sync::Mutex::new(None),
+            }
+        }
+    }
+    #[async_trait::async_trait(?Send)]
+    impl desk_diagnose_core::seam::ToolSeam for FakeExecTools {
+        async fn run_read(
+            &self,
+            _call: &desk_diagnose_core::chat::ToolCall,
+        ) -> Result<desk_diagnose_core::seam::ToolRunOutput, desk_agent_protocol::AgentError>
+        {
+            Ok(desk_diagnose_core::seam::ToolRunOutput {
+                content: "{}".into(),
+                image_data_url: None,
+            })
+        }
+        async fn confirm_and_exec(
+            &self,
+            _call: &desk_diagnose_core::chat::ToolCall,
+            ctx: &desk_diagnose_core::seam::ExecContext,
+        ) -> Result<desk_diagnose_core::seam::ExecOutcome, desk_agent_protocol::AgentError>
+        {
+            *self.seen_connection.lock().unwrap() = ctx.connection_id.clone();
+            Ok(desk_diagnose_core::seam::ExecOutcome::Executed(
+                desk_diagnose_core::seam::ToolRunOutput {
+                    content: "{\"exit_code\":0}".into(),
+                    image_data_url: None,
+                },
+            ))
+        }
+    }
+
+    fn settings_confirm_exec() -> Arc<SharedSettings> {
+        let mut s = Settings::default();
+        s.ai_model.execution_mode = ExecutionMode::ConfirmEachAction;
+        Arc::new(SharedSettings::from(s))
+    }
+
+    fn exec_tool_use(id: &str) -> ModelTurn {
+        ModelTurn {
+            stop_reason: StopReason::ToolUse,
+            tool_calls: vec![ToolCall {
+                id: id.into(),
+                name: "exec_command".into(),
+                arguments_json: r#"{"command":"Restart-Service X"}"#.into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// With exec wired and a confirm-each-action mode, the model's `exec_command`
+    /// call streams ToolStarted (awaiting approval) → ToolFinished → Answer, and the
+    /// control connection id flows into the seam's `ExecContext`.
+    #[tokio::test]
+    async fn drives_exec_tool_through_approval_to_answer() {
+        let tools = Arc::new(FakeExecTools::new());
+        let runtime = DirectAgentRuntime::with_exec_seams(
+            Arc::new(test_seams::ScriptedModel::new(vec![
+                exec_tool_use("c1"),
+                answer("done"),
+            ])),
+            tools.clone(),
+            Arc::new(InMemorySessionSeam::new()),
+            settings_confirm_exec(),
+        );
+        let (store, sink) = recorder();
+        runtime
+            .run(
+                "req-x",
+                request("restart the service"),
+                None,
+                Some("browser-7".into()),
+                sink,
+            )
+            .await;
+
+        let ev = store.borrow();
+        assert_eq!(
+            ev.iter().map(|e| e.kind).collect::<Vec<_>>(),
+            vec![
+                DiagnoseEventKind::TurnStarted,
+                DiagnoseEventKind::ToolStarted,
+                DiagnoseEventKind::ToolFinished,
+                DiagnoseEventKind::Answer,
+            ]
+        );
+        // The mutating tool's ToolStarted flags it as awaiting operator approval.
+        assert!(ev[1].awaiting_approval);
+        assert_eq!(ev[1].tool_name.as_deref(), Some("exec_command"));
+        assert_eq!(ev[2].tool_ok, Some(true));
+        // The control connection id reached the seam's ExecContext.
+        assert_eq!(
+            tools.seen_connection.lock().unwrap().as_deref(),
+            Some("browser-7")
+        );
+    }
+
+    /// Without exec wiring (read-only runtime) the exec tool is not exposed, so the
+    /// scope grants no mutating capability.
+    #[tokio::test]
+    async fn read_only_runtime_does_not_expose_exec() {
+        let runtime = DirectAgentRuntime::for_test(vec![answer("ok")], settings_confirm_exec());
+        // The read-only registry never includes exec_command.
+        assert!(!runtime.registry.iter().any(|t| t.name() == "exec_command"));
+    }
+
     /// An immediate answer (no tool call) streams TurnStarted → Answer.
     #[tokio::test]
     async fn drives_immediate_answer_to_frames() {
         let runtime = DirectAgentRuntime::for_test(vec![answer("all good")], settings(true));
         let (store, sink) = recorder();
-        runtime.run("req-2", request("status?"), None, sink).await;
+        runtime
+            .run("req-2", request("status?"), None, None, sink)
+            .await;
         let ev = store.borrow();
         assert_eq!(
             ev.iter().map(|e| e.kind).collect::<Vec<_>>(),

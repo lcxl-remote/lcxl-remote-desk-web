@@ -1,3 +1,4 @@
+pub mod agentic_exec;
 pub mod bitrate_controller;
 pub mod command_templates;
 pub mod exec_approval;

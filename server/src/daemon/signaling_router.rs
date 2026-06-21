@@ -346,6 +346,11 @@ pub struct RouterContext {
     /// `exec_request_id`. Always present (in-memory state); the startup-mode and
     /// execution-mode gates decide whether it is ever populated.
     pub exec_approvals: Arc<crate::daemon::exec_approval::PendingApprovalStore>,
+    /// Await-based coordination for the agentic (model-initiated) exec path: bridges
+    /// the inbound `ResolveExec` decision and the worker's `ExecResult` to the loop's
+    /// awaiting seam (distinct from the browser-initiated `exec_approvals` flow).
+    /// Always present; populated only while an agentic exec is in flight.
+    pub agentic_exec: Arc<crate::daemon::agentic_exec::AgenticExecCoordinator>,
     /// Session-scoped approvals for `ExecutionMode::SessionApproved`, keyed by
     /// the control-end connection. Once a template is confirmed in this mode it
     /// is granted for the rest of that connection's session; releasing control
@@ -2111,6 +2116,10 @@ async fn handle_diagnose_inbound(
     // `rt::spawn` (`spawn_local`) — the same arbiter the proxy loop runs on.
     let outbound_tx = ctx.outbound_tx.clone();
     let to_connection_id = model.from_connection_id.clone();
+    // The control connection the turn runs for: where the agentic exec approval
+    // preview (`ExecPreview`) is routed back to, threaded into the loop's
+    // `ExecContext`. Cloned out before the frame-sink closure takes the original.
+    let exec_connection_id = to_connection_id.clone();
     let request_id = model.request_id.clone();
     let tasks = ctx.diagnose_tasks.clone();
     // The manager authorization (if any) rode into this handler on the context;
@@ -2123,7 +2132,13 @@ async fn handle_diagnose_inbound(
             send_diagnose_frame(&outbound_tx, to_connection_id.clone(), event);
         };
         agent_runtime
-            .run(&request_id, request, authz.as_ref(), frame_sink)
+            .run(
+                &request_id,
+                request,
+                authz.as_ref(),
+                exec_connection_id,
+                frame_sink,
+            )
             .await;
         // Drop our own registry entry on natural completion so a later cancel is
         // a harmless no-op.
@@ -2176,7 +2191,7 @@ async fn handle_diagnose_cancel_inbound(
 /// Send an `ExecPreview(606)` to the control end as a notification-style frame
 /// (`response_state = None`), mirroring `send_diagnose_frame`. Build / serialise
 /// failures are non-fatal — log + drop.
-fn send_exec_preview(
+pub(crate) fn send_exec_preview(
     outbound_tx: &broadcast::Sender<String>,
     request_id: &str,
     to_connection_id: Option<String>,
@@ -2693,6 +2708,21 @@ async fn handle_resolve_exec_inbound(
 
     use crate::daemon::exec_approval::TakeOutcome;
     use desk_agent_protocol::exec::ApprovalDecision;
+
+    // Agentic (model-initiated) exec: the loop is awaiting this decision through the
+    // coordinator. If it matches, deliver the decision and stop — the agentic seam
+    // drives dispatch itself, so it must not also run the browser-initiated
+    // park/consume flow below. The command's completion is audited on the worker
+    // `ExecResult` round-trip (the `command_completed` event); approval-event audit
+    // parity with the browser flow is a follow-up (the manager runtime records the
+    // full approval lifecycle in its durable work-item audit).
+    if ctx.agentic_exec.resolve_approval(
+        &data.exec_request_id.0,
+        matches!(data.decision, ApprovalDecision::Approve),
+    ) {
+        return Ok(());
+    }
+
     // Approve / reject are bound to the connection that requested the preview.
     let outcome = ctx
         .exec_approvals
@@ -3330,6 +3360,7 @@ mod tests {
             remote_read: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+            agentic_exec: Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new()),
             session_approvals: Arc::new(
                 crate::daemon::session_approval::SessionApprovalStore::new(),
             ),

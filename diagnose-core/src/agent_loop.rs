@@ -304,6 +304,8 @@ async fn run_mutating<F: FnMut() -> String>(
         actor_id: session.actor_id.clone(),
         policy_revision: session.policy_revision,
         scope: session.scope_snapshot.clone(),
+        // Route the approval preview back to the connection that started the turn.
+        connection_id: session.active_control_connection_id.clone(),
     };
 
     // Persist "awaiting approval" before the wait so the pending decision is

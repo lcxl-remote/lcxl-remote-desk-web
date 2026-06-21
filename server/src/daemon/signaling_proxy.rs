@@ -42,6 +42,13 @@ pub async fn run_signaling_proxy(
 
     let (outbound_tx, _seed_rx) = broadcast::channel::<String>(128);
 
+    // Operator command templates (built-in baseline ∪ manager-synced) and the
+    // agentic exec coordinator are shared by the agentic diagnose runtime (exec
+    // classify + approval/result waits), the router (ResolveExec routing), and the
+    // worker-message loop (ExecResult delivery), so all reference the same state.
+    let command_templates = Arc::new(crate::daemon::command_templates::CommandTemplateCache::new());
+    let agentic_exec = Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new());
+
     // The diagnose orchestrator runs daemon-side wherever an in-process worker
     // can collect locally (Default / DeskServer). ServiceDaemon leaves it
     // `None`, so `Diagnose` replies feature-unavailable until the cross-process
@@ -78,11 +85,22 @@ pub async fn run_signaling_proxy(
                     model,
                     audit,
                 ));
-                let agent_runtime =
-                    Arc::new(crate::diagnose::direct_runtime::DirectAgentRuntime::new(
+                // The agentic runtime with the mutating exec path wired: classify
+                // via the shared command templates, push an `ExecPreview` to the
+                // control connection and await `ResolveExec` + the worker's result
+                // through the shared coordinator, execute on the local worker.
+                let agent_runtime = Arc::new(
+                    crate::diagnose::direct_runtime::DirectAgentRuntime::new_with_exec(
                         agent.clone(),
                         settings.clone().into_inner(),
-                    ));
+                        crate::diagnose::direct_exec::DirectExecSupport {
+                            coordinator: agentic_exec.clone(),
+                            outbound_tx: outbound_tx.clone(),
+                            worker_mgr: worker_mgr.clone(),
+                            command_templates: command_templates.clone(),
+                        },
+                    ),
+                );
                 // Serves a manager remote read (§8.3) against the same in-process
                 // agent, redacting fail-closed.
                 let edge_read = Arc::new(crate::diagnose::remote_read::EdgeReadInvoker::new(
@@ -135,8 +153,9 @@ pub async fn run_signaling_proxy(
         // execute (Default / DeskServer), gated like the diagnose orchestrator.
         exec_supported: diagnose_orchestrator.is_some(),
         exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+        agentic_exec: agentic_exec.clone(),
         session_approvals: Arc::new(crate::daemon::session_approval::SessionApprovalStore::new()),
-        command_templates: Arc::new(crate::daemon::command_templates::CommandTemplateCache::new()),
+        command_templates: command_templates.clone(),
         // Audit sink: in fleet mode (a manager is configured) report events to
         // the manager for DB persistence; otherwise keep the local log sink.
         audit: audit_sink.clone(),
@@ -707,6 +726,16 @@ pub async fn run_signaling_proxy(
                             .with_task_id(payload.audit_source_request_id.as_deref()),
                         )
                         .await;
+                }
+                // Agentic exec correlation: if the model-initiated loop is awaiting
+                // this result (keyed by `exec_request_id`), hand it to the awaiting
+                // runner and suppress the browser-bound frame — the loop feeds the
+                // result back to the model instead.
+                if router_ctx.agentic_exec.deliver_result(
+                    &payload.result.exec_request_id.0,
+                    payload.result.outcome.clone(),
+                ) {
+                    continue;
                 }
                 // Fleet exec correlation: if this result is for an in-flight
                 // fleet attempt, relay it to the manager as a `FleetExecResult`
@@ -1384,6 +1413,7 @@ mod tests {
             remote_read: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
+            agentic_exec: Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new()),
             session_approvals: Arc::new(
                 crate::daemon::session_approval::SessionApprovalStore::new(),
             ),

@@ -15,9 +15,11 @@
 //! [`read_tool_registry`] is the read-only tool set exposed to the model; each
 //! tool maps onto one [`ContextKind`].
 //!
-//! Only read tools are wired here; the mutating path lands in a later PR. There
-//! is no token streaming yet (the loop's `TurnSink` is unused on this path);
-//! streaming is added with the UI PR.
+//! Read tools run immediately; the mutating `exec_command` tool runs through
+//! [`DirectToolSeam::with_exec`] (classify → operator approval → local worker
+//! execution). The model call itself feeds the adapter a no-op delta sink — the
+//! `DiagnoseEvent` streaming is driven by the loop's `TurnSink` in the Direct
+//! runtime entry, not by per-token deltas here.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -79,6 +81,15 @@ pub struct ExecApprovalRequest {
     pub classification: CommandClassification,
     pub draft: ExecPlanDraft,
     pub reason: Option<String>,
+    /// The original command text the model proposed (shown to the operator).
+    pub command: String,
+    /// The shell label of the command target (empty for a non-shell target).
+    pub shell: String,
+    /// The command's working directory, if the model set one.
+    pub cwd: Option<String>,
+    /// The control connection to route the approval preview back to (from the
+    /// turn's [`ExecContext`]). `None` on a runtime with no live control link.
+    pub connection_id: Option<String>,
 }
 
 /// The operator's decision on a previewed Direct execution.
@@ -191,13 +202,29 @@ impl DirectToolSeam {
 
     /// Run the mutating exec flow: classify, request approval, then run on the local
     /// worker, mapping the terminal state to an [`ExecOutcome`].
-    async fn run_exec(&self, call: &ToolCall) -> Result<ExecOutcome, AgentError> {
+    async fn run_exec(
+        &self,
+        call: &ToolCall,
+        ctx: &ExecContext,
+    ) -> Result<ExecOutcome, AgentError> {
         let Some(exec) = &self.exec else {
             return Ok(ExecOutcome::Rejected {
                 reason: Some("execution is not enabled in this runtime".to_string()),
             });
         };
         let (input, reason) = build_exec_input(call)?;
+        // The original command / shell / cwd shown to the operator in the preview.
+        let (command, shell, cwd) = match &input {
+            OperationInput::Exec(e) => (
+                e.command.clone(),
+                match &e.target {
+                    desk_agent_protocol::ExecTarget::Shell { shell } => shell.clone(),
+                    desk_agent_protocol::ExecTarget::Domain { .. } => String::new(),
+                },
+                e.cwd.clone(),
+            ),
+            _ => (String::new(), String::new(), None),
+        };
         let classified = exec.classifier.classify(&input, reason.as_deref()).await?;
         let draft = match classified.classification.decision {
             ExecDecision::ConfirmRequired => classified.draft.clone().ok_or_else(|| {
@@ -229,6 +256,10 @@ impl DirectToolSeam {
                 classification: classified.classification.clone(),
                 draft: draft.clone(),
                 reason,
+                command,
+                shell,
+                cwd,
+                connection_id: ctx.connection_id.clone(),
             })
             .await?;
         match approval {
@@ -336,9 +367,9 @@ impl ToolSeam for DirectToolSeam {
     async fn confirm_and_exec(
         &self,
         call: &ToolCall,
-        _ctx: &ExecContext,
+        ctx: &ExecContext,
     ) -> Result<ExecOutcome, AgentError> {
-        self.run_exec(call).await
+        self.run_exec(call, ctx).await
     }
 }
 
@@ -721,6 +752,7 @@ mod tests {
                 expires_at: None,
                 policy_name: None,
             },
+            connection_id: Some("browser-1".into()),
         }
     }
 
