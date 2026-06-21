@@ -38,7 +38,20 @@ export type Diagnosis = {
     collected: string[];
 };
 
-export type DiagnoseEventKind = 'status' | 'partial' | 'final' | 'error';
+// `status` / `partial` / `final` / `error` are the single-turn diagnose frames.
+// `turn_started` / `tool_started` / `tool_finished` / `answer` are the agentic
+// multi-turn loop's frames: a turn boundary, a tool call's start (a read tool, or
+// a mutating tool awaiting approval) and finish, and a terminal free-text answer
+// (distinct from `final`, which carries a structured `Diagnosis`).
+export type DiagnoseEventKind =
+    | 'status'
+    | 'partial'
+    | 'final'
+    | 'error'
+    | 'turn_started'
+    | 'tool_started'
+    | 'tool_finished'
+    | 'answer';
 
 export type AgentError = {
     kind: string;
@@ -55,6 +68,28 @@ export type DiagnoseEvent = {
     partial_summary?: string | null;
     final_result?: Diagnosis | null;
     error?: AgentError | null;
+    /** `turn_started`: the id of the agentic turn that started. */
+    turn_id?: string | null;
+    /** `tool_started`: the model-facing tool name. */
+    tool_name?: string | null;
+    /** `tool_started` / `tool_finished`: the tool call id. */
+    tool_call_id?: string | null;
+    /** `tool_started`: a mutating tool waiting for the operator's approval. */
+    awaiting_approval?: boolean;
+    /** `tool_finished`: whether the call produced a usable result. */
+    tool_ok?: boolean | null;
+    /** `answer`: the agentic turn's final natural-language answer. */
+    answer?: string | null;
+};
+
+/** A tool call's lifecycle status, shown in the agentic activity timeline. */
+export type ToolActivityStatus = 'running' | 'awaiting_approval' | 'ok' | 'failed';
+
+/** One tool call's visible activity for the current run (keyed by call id). */
+export type ToolActivity = {
+    callId: string;
+    name: string;
+    status: ToolActivityStatus;
 };
 
 export type DiagnoseStartOptions = {
@@ -150,10 +185,16 @@ export type DiagnoseState = {
     status: string | null;
     /** Accumulated streaming summary fragments. */
     partialSummary: string;
-    /** The structured result, set on a `final` frame. */
+    /** The structured result, set on a `final` frame (single-turn path). */
     result: Diagnosis | null;
     /** A human-readable failure message, set on an `error` frame. */
     error: string | null;
+    /** Latest agentic turn id (set on a `turn_started` frame). */
+    turnId: string | null;
+    /** The agentic tool-activity timeline, in call order (agentic path). */
+    tools: ToolActivity[];
+    /** The agentic turn's final answer text, set on an `answer` frame. */
+    answer: string | null;
 };
 
 const INITIAL_STATE: DiagnoseState = {
@@ -163,6 +204,9 @@ const INITIAL_STATE: DiagnoseState = {
     partialSummary: '',
     result: null,
     error: null,
+    turnId: null,
+    tools: [],
+    answer: null,
 };
 
 type UseDeskDiagnoseProps = {
@@ -260,6 +304,37 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
                         phase: 'error',
                         error: event.error?.message ?? 'diagnosis failed',
                     };
+                case 'turn_started':
+                    return { ...prev, turnId: event.turn_id ?? prev.turnId };
+                case 'tool_started': {
+                    if (!event.tool_call_id) return prev;
+                    const activity: ToolActivity = {
+                        callId: event.tool_call_id,
+                        name: event.tool_name ?? event.tool_call_id,
+                        status: event.awaiting_approval ? 'awaiting_approval' : 'running',
+                    };
+                    // Replace an existing entry for the same call (e.g. a re-emit)
+                    // rather than duplicating it.
+                    const tools = prev.tools.some((tt) => tt.callId === activity.callId)
+                        ? prev.tools.map((tt) =>
+                              tt.callId === activity.callId ? activity : tt,
+                          )
+                        : [...prev.tools, activity];
+                    return { ...prev, tools };
+                }
+                case 'tool_finished': {
+                    if (!event.tool_call_id) return prev;
+                    const status: ToolActivityStatus = event.tool_ok ? 'ok' : 'failed';
+                    return {
+                        ...prev,
+                        tools: prev.tools.map((tt) =>
+                            tt.callId === event.tool_call_id ? { ...tt, status } : tt,
+                        ),
+                    };
+                }
+                case 'answer':
+                    activeRequestRef.current = null;
+                    return { ...prev, phase: 'done', answer: event.answer ?? '' };
                 default:
                     return prev;
             }

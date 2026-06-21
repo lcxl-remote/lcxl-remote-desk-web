@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { useTranslation } from "react-i18next"
-import { Loader2, Stethoscope, X, UserCog, AlertCircle, Play, Check, Ban, Terminal as TerminalIcon } from "lucide-react"
+import { Loader2, Stethoscope, X, UserCog, AlertCircle, Play, Check, Ban, Terminal as TerminalIcon, Wrench, Clock, CheckCircle2, XCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -10,6 +10,8 @@ import {
     type DiagnoseStartOptions,
     type RiskLevel,
     type SuggestedCommand,
+    type ToolActivity,
+    type ToolActivityStatus,
 } from "./use-desk-diagnose"
 import type { ExecEntry } from "./use-desk-exec"
 
@@ -209,6 +211,54 @@ function ExecRow({
     )
 }
 
+/** Status icon for one tool call in the agentic activity timeline. */
+function ToolStatusIcon({ status }: { status: ToolActivityStatus }) {
+    switch (status) {
+        case "running":
+            return <Loader2 className="h-3 w-3 shrink-0 animate-spin text-blue-300" />
+        case "awaiting_approval":
+            return <Clock className="h-3 w-3 shrink-0 text-amber-300" />
+        case "ok":
+            return <CheckCircle2 className="h-3 w-3 shrink-0 text-green-300" />
+        default:
+            return <XCircle className="h-3 w-3 shrink-0 text-red-300" />
+    }
+}
+
+/**
+ * The agentic loop's tool-activity timeline: each tool call the model made this
+ * turn, with its live status (running / awaiting approval / ok / failed). Empty
+ * for the single-turn diagnose path, so it renders nothing there.
+ */
+function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
+    const { t } = useTranslation()
+    if (tools.length === 0) return null
+    return (
+        <section className="flex flex-col gap-1.5">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                {t("pages.desk.diagnose.toolActivity", "Tool activity")}
+            </h3>
+            <ul className="flex flex-col gap-1">
+                {tools.map((tool) => (
+                    <li
+                        key={tool.callId}
+                        className="flex items-center gap-2 text-xs text-white/80"
+                    >
+                        <ToolStatusIcon status={tool.status} />
+                        <Wrench className="h-3 w-3 shrink-0 text-white/40" />
+                        <span className="truncate font-mono">{tool.name}</span>
+                        {tool.status === "awaiting_approval" && (
+                            <span className="text-amber-300">
+                                {t("pages.desk.diagnose.toolAwaiting", "awaiting approval")}
+                            </span>
+                        )}
+                    </li>
+                ))}
+            </ul>
+        </section>
+    )
+}
+
 export function DiagnosePanel({
     state,
     onStart,
@@ -340,6 +390,7 @@ export function DiagnosePanel({
                                 {streamingSummary}
                             </p>
                         )}
+                        <ToolTimeline tools={state.tools} />
                         {!isConnected && (
                             <div className="flex items-start gap-2 text-xs text-amber-300">
                                 <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -527,9 +578,24 @@ export function DiagnosePanel({
                                     </section>
                                 )}
                             </>
+                        ) : state.answer !== null ? (
+                            // Agentic loop final answer (free text, not a
+                            // structured Diagnosis) plus the tool timeline.
+                            <div className="flex flex-col gap-4">
+                                <ToolTimeline tools={state.tools} />
+                                <section className="flex flex-col gap-2">
+                                    <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                                        {t("pages.desk.diagnose.answer", "Answer")}
+                                    </h3>
+                                    <p className="whitespace-pre-wrap text-sm text-white/90">
+                                        {state.answer || streamingSummary}
+                                    </p>
+                                </section>
+                            </div>
                         ) : (
                             // Handed off mid-stream with whatever was gathered.
                             <div className="flex flex-col gap-2">
+                                <ToolTimeline tools={state.tools} />
                                 {streamingSummary ? (
                                     <p className="whitespace-pre-wrap text-sm text-white/90">
                                         {streamingSummary}

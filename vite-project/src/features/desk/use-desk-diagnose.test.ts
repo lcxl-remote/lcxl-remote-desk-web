@@ -230,4 +230,63 @@ describe('useDeskDiagnose', () => {
         act(() => result.current.reset());
         expect(sendMessage).not.toHaveBeenCalled();
     });
+
+    it('tracks the agentic tool timeline and resolves on an answer frame', () => {
+        const { result, rerender } = renderHook(
+            ({ msg }: { msg: SignalingMessage | null }) =>
+                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
+            { initialProps: { msg: null as SignalingMessage | null } },
+        );
+        act(() => result.current.start('restart it', {}));
+
+        rerender({ msg: frame({ request_id: 'req-1', seq: 0, kind: 'turn_started', turn_id: 'turn-1' }) });
+        expect(result.current.state.turnId).toBe('turn-1');
+
+        rerender({
+            msg: frame({
+                request_id: 'req-1',
+                seq: 1,
+                kind: 'tool_started',
+                tool_name: 'read_system_info',
+                tool_call_id: 'c1',
+            }),
+        });
+        expect(result.current.state.tools).toEqual([
+            { callId: 'c1', name: 'read_system_info', status: 'running' },
+        ]);
+
+        rerender({ msg: frame({ request_id: 'req-1', seq: 2, kind: 'tool_finished', tool_call_id: 'c1', tool_ok: true }) });
+        expect(result.current.state.tools[0].status).toBe('ok');
+
+        rerender({ msg: frame({ request_id: 'req-1', seq: 3, kind: 'answer', answer: 'the host is healthy' }) });
+        expect(result.current.state.phase).toBe('done');
+        expect(result.current.state.answer).toBe('the host is healthy');
+        // Frames after the terminal answer are ignored (request closed).
+        rerender({ msg: frame({ request_id: 'req-1', seq: 4, kind: 'answer', answer: 'late' }) });
+        expect(result.current.state.answer).toBe('the host is healthy');
+    });
+
+    it('marks a mutating tool as awaiting approval, then failed on a bad finish', () => {
+        const { result, rerender } = renderHook(
+            ({ msg }: { msg: SignalingMessage | null }) =>
+                useDeskDiagnose({ deskId: 'desk-1', lastMessage: msg, sendMessage }),
+            { initialProps: { msg: null as SignalingMessage | null } },
+        );
+        act(() => result.current.start('do it', {}));
+
+        rerender({
+            msg: frame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'tool_started',
+                tool_name: 'exec_command',
+                tool_call_id: 'c1',
+                awaiting_approval: true,
+            }),
+        });
+        expect(result.current.state.tools[0].status).toBe('awaiting_approval');
+
+        rerender({ msg: frame({ request_id: 'req-1', seq: 1, kind: 'tool_finished', tool_call_id: 'c1', tool_ok: false }) });
+        expect(result.current.state.tools[0].status).toBe('failed');
+    });
 });
