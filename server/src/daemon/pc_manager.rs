@@ -1617,6 +1617,9 @@ pub async fn handle_request_remote(
         virtual_display_current_refresh_hz,
         virtual_display_device_name,
         adaptive_resolution,
+        // The daemon/server process runs on the host, so the compile-time OS
+        // is the host's OS. The browser uses this to tailor host-targeted UI.
+        operation_system: desk_signal_facade::model::os::OperationSystemEnum::default(),
     };
     log::info!(
         "[pc_manager] Sending Init reply for {from_connection_id} \

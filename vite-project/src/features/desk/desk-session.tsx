@@ -22,6 +22,7 @@ import { useDeskDiagnose } from "./use-desk-diagnose"
 import { DiagnosePanel } from "./diagnose-panel"
 import { useDeskExec } from "./use-desk-exec"
 import { useDeskInput } from "./use-desk-input"
+import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
 import { useCursorSync } from "./use-cursor-sync"
@@ -1427,98 +1428,14 @@ export default function DeskSession() {
                                                 </Button>
                                             </DropdownMenuTrigger>
                                             <DropdownMenuContent align="end" className="w-56 bg-background/90 backdrop-blur-md border-white/10">
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 17 }, // Ctrl
-                                                        { event: "keydown", keyCode: 18 }, // Alt
-                                                        { event: "keydown", keyCode: 46 }, // Del
-                                                        { event: "keyup", keyCode: 46 },
-                                                        { event: "keyup", keyCode: 18 },
-                                                        { event: "keyup", keyCode: 17 },
-                                                    ]);
-                                                }}>
-                                                    Ctrl + Alt + Del
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 17 }, // Ctrl
-                                                        { event: "keydown", keyCode: 16 }, // Shift
-                                                        { event: "keydown", keyCode: 27 }, // Esc
-                                                        { event: "keyup", keyCode: 27 },
-                                                        { event: "keyup", keyCode: 16 },
-                                                        { event: "keyup", keyCode: 17 },
-                                                    ]);
-                                                }}>
-                                                    Ctrl + Shift + Esc (任务管理器)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 18 }, // Alt
-                                                        { event: "keydown", keyCode: 115 }, // F4
-                                                        { event: "keyup", keyCode: 115 },
-                                                        { event: "keyup", keyCode: 18 },
-                                                    ]);
-                                                }}>
-                                                    Alt + F4
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 18 }, // Alt
-                                                        { event: "keydown", keyCode: 9 }, // Tab
-                                                        { event: "keyup", keyCode: 9 },
-                                                        { event: "keyup", keyCode: 18 },
-                                                    ]);
-                                                }}>
-                                                    Alt + Tab (切换窗口)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Windows Key
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 68 }, // D
-                                                        { event: "keyup", keyCode: 68 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + D (显示桌面)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 69 }, // E
-                                                        { event: "keyup", keyCode: 69 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + E (打开资源管理器)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 82 }, // R
-                                                        { event: "keyup", keyCode: 82 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + R (运行)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 76 }, // L
-                                                        { event: "keyup", keyCode: 76 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + L (锁定计算机)
-                                                </DropdownMenuItem>
+                                                {getKeyboardShortcuts(initData?.operation_system).map(shortcut => (
+                                                    <DropdownMenuItem
+                                                        key={shortcut.id}
+                                                        onClick={() => sendKeyboardEvents(shortcut.events)}
+                                                    >
+                                                        {t(shortcut.labelKey, shortcut.labelFallback)}
+                                                    </DropdownMenuItem>
+                                                ))}
                                             </DropdownMenuContent>
                                         </DropdownMenu>
                                     )}
