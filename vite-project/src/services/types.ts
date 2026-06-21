@@ -3565,6 +3565,89 @@ export type UpdateAiModelSettingsMutation = {
     Errors: any;
 };
 
+export type AiModelValidation = {
+    /**
+     * @description The wire adapter that was used.
+     * @type string
+    */
+    adapter: string;
+    /**
+     * @description Prompt tokens the gateway reported, if any.
+     * @type integer,null, int64
+    */
+    input_tokens?: number | null;
+    /**
+     * @description The model that answered the probe.
+     * @type string
+    */
+    model: string;
+    /**
+     * @description Completion tokens the gateway reported, if any.
+     * @type integer,null, int64
+    */
+    output_tokens?: number | null;
+    /**
+     * @description The provider whose adapter answered (e.g. `openai-compatible`).
+     * @type string
+    */
+    provider: string;
+};
+
+export type RestResponseAiModelValidation = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description The outcome of a successful AI model gateway validation. On success the probe\nconfirms the gateway is reachable, the credentials are accepted, and the model\nanswered; these fields echo which provider / model responded.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The wire adapter that was used.
+         * @type string
+        */
+        adapter: string;
+        /**
+         * @description Prompt tokens the gateway reported, if any.
+         * @type integer,null, int64
+        */
+        input_tokens?: number | null;
+        /**
+         * @description The model that answered the probe.
+         * @type string
+        */
+        model: string;
+        /**
+         * @description Completion tokens the gateway reported, if any.
+         * @type integer,null, int64
+        */
+        output_tokens?: number | null;
+        /**
+         * @description The provider whose adapter answered (e.g. `openai-compatible`).
+         * @type string
+        */
+        provider: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type ValidateAiModelSettings200 = RestResponseAiModelValidation;
+
+export type ValidateAiModelSettingsMutationResponse = ValidateAiModelSettings200;
+
+export type ValidateAiModelSettingsMutation = {
+    Response: ValidateAiModelSettings200;
+    Errors: any;
+};
+
 /**
  * @description Query collection policy successfully
 */

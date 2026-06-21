@@ -1,5 +1,6 @@
 use actix_web::{Error as AWError, HttpResponse, get, post, web};
-use desk_utils::rest::RestResponse;
+use desk_agent_protocol::AgentErrorKind;
+use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 use log::info;
 
 use serde::{Deserialize, Serialize};
@@ -117,6 +118,65 @@ pub async fn update_ai_model_settings(
     // No content logged: the body carries the write-only api_key.
     info!("Update AI model settings successfully");
     Ok(HttpResponse::Ok().finish())
+}
+
+/// The outcome of a successful AI model gateway validation. On success the probe
+/// confirms the gateway is reachable, the credentials are accepted, and the model
+/// answered; these fields echo which provider / model responded.
+#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
+pub struct AiModelValidation {
+    /// The provider whose adapter answered (e.g. `openai-compatible`).
+    pub provider: String,
+    /// The model that answered the probe.
+    pub model: String,
+    /// The wire adapter that was used.
+    pub adapter: String,
+    /// Prompt tokens the gateway reported, if any.
+    pub input_tokens: Option<i64>,
+    /// Completion tokens the gateway reported, if any.
+    pub output_tokens: Option<i64>,
+}
+
+#[utoipa::path(
+    tag = "AiModel",
+    summary = "Validate the configured AI model gateway",
+    responses(
+        (status = 200, description = "Validation result. On success `data` carries the answering provider / model; on a gateway rejection the failure `message` carries the gateway's own reason.", body=RestResponse<AiModelValidation>),
+    ),
+)]
+#[post("/settings/ai-model/validate")]
+pub async fn validate_ai_model_settings(
+    settings: web::Data<SharedSettings>,
+) -> Result<HttpResponse, AWError> {
+    match crate::diagnose::model::probe_gateway(settings.get_ref()).await {
+        Ok(probe) => {
+            // No request/response content is logged — only that it succeeded and
+            // which adapter answered.
+            info!("AI model validation succeeded (adapter={})", probe.adapter);
+            Ok(
+                HttpResponse::Ok().json(RestResponse::succeed_with_data(AiModelValidation {
+                    provider: probe.provider,
+                    model: probe.model,
+                    adapter: probe.adapter,
+                    input_tokens: probe.input_tokens,
+                    output_tokens: probe.output_tokens,
+                })),
+            )
+        }
+        Err(e) => {
+            // The error carries the gateway's own reason (now including its
+            // response body); surface it so the operator can fix the config. An
+            // unconfigured / unready gateway is a precondition failure; anything
+            // else (transport / status / parse) is a system-level error. The
+            // message is the gateway's error text and never contains the api_key.
+            log::warn!("AI model validation failed: {}", e.message);
+            let code = match e.kind {
+                AgentErrorKind::UnsupportedCapability => DeskErrorCode::PRECONDITION_FAILED,
+                _ => DeskErrorCode::SYSTEM_ERROR,
+            };
+            Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(code, e.message)))
+        }
+    }
 }
 
 #[utoipa::path(
@@ -546,6 +606,32 @@ mod tests {
             Some("openai-compatible")
         );
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// `POST /settings/ai-model/validate` with an unconfigured gateway returns a
+    /// business failure (`PRECONDITION_FAILED`) and never touches the network.
+    #[actix_web::test]
+    async fn validate_ai_model_settings_unconfigured_is_precondition_failed() {
+        let shared = web::Data::new(SharedSettings::from(Settings::default()));
+        let app = test::init_service(
+            App::new()
+                .app_data(shared.clone())
+                .service(validate_ai_model_settings),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/settings/ai-model/validate")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        // Business errors ride in the body, not the HTTP status.
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = test::read_body_json(resp).await;
+        assert_eq!(
+            body["code"].as_i64(),
+            Some(DeskErrorCode::PRECONDITION_FAILED.code() as i64)
+        );
+        assert_eq!(body["success"].as_bool(), Some(false));
     }
 
     fn hub_data(hub: Option<HostControlHub>) -> web::Data<Option<Arc<HostControlHub>>> {

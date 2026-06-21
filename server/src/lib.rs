@@ -34,6 +34,7 @@ use crate::{
             submit_security_approval, update_ai_model_settings, update_collection_policy_settings,
             update_log_settings, update_security_settings, update_settings,
             update_telemetry_consent, update_turn_client_settings, update_turn_settings,
+            validate_ai_model_settings,
         },
         turn::{
             delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
@@ -170,6 +171,7 @@ pub fn configure_api_surface(
                     .service(update_settings)
                     .service(query_ai_model_settings)
                     .service(update_ai_model_settings)
+                    .service(validate_ai_model_settings)
                     .service(query_collection_policy_settings)
                     .service(update_collection_policy_settings)
                     .service(query_turn_settings)

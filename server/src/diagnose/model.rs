@@ -372,6 +372,177 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
     }
 }
 
+/// Collapse a gateway's non-success response body into a single-line, bounded
+/// snippet for surfacing in the returned error and a server log. The snippet is
+/// the gateway's own error text (e.g. `{"error":{"message":"model not found"}}`)
+/// — it never echoes the request's `api_key`, so it is safe to log. Bounded to
+/// 2000 chars and whitespace-collapsed so a verbose HTML error page stays a
+/// readable one-liner.
+pub(crate) fn gateway_error_detail(body: &[u8]) -> String {
+    let text: String = String::from_utf8_lossy(body).chars().take(2000).collect();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A successful gateway probe: enough to confirm the round-trip and show the
+/// operator which provider / model answered, plus any reported token usage.
+#[derive(Debug, Clone)]
+pub struct GatewayProbe {
+    pub provider: String,
+    pub model: String,
+    pub adapter: String,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+}
+
+fn not_configured_error() -> AgentError {
+    AgentError {
+        kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
+        message: "AI model gateway is not configured; set the model, base URL, and API key in AI \
+                  model settings"
+            .to_string(),
+        retryable: false,
+        safe_for_model: true,
+    }
+}
+
+fn manager_proxy_not_ready_error() -> AgentError {
+    AgentError {
+        kind: desk_agent_protocol::AgentErrorKind::UnsupportedCapability,
+        message: "manager-proxied model gateway requires a configured manager URL and token"
+            .to_string(),
+        retryable: false,
+        safe_for_model: true,
+    }
+}
+
+/// The tool specs advertised by the validation probe. Mirrors the agentic
+/// diagnosis loop's registry ([`super::agent::agent_tool_registry`]) so the probe
+/// exercises the model's function-calling support exactly as a real diagnosis
+/// would — a provider / model that does not support tools rejects this, which the
+/// probe must catch.
+fn probe_tool_specs() -> Vec<ToolSpec> {
+    super::agent::agent_tool_registry()
+        .into_iter()
+        .map(|t| t.spec)
+        .collect()
+}
+
+/// Send a minimal chat to the configured gateway to confirm reachability, auth,
+/// model availability, and request-body acceptance — the operator's "validate"
+/// action. It mirrors the real diagnose request: the same `response_format` (a
+/// trivial schema under `json_schema`) and the same advertised tools, so a
+/// rejection of structured output *or* of function calling (e.g. an Anthropic
+/// model without tool support) surfaces here exactly as it would during a real
+/// diagnosis — not a tool-free false positive.
+///
+/// Returns the model's reported usage on success, or the adapter's [`AgentError`]
+/// — which, after a non-success status, now carries the gateway's error body, so
+/// the caller can show the operator the precise reason a request was rejected.
+pub async fn probe_gateway(settings: &SharedSettings) -> Result<GatewayProbe, AgentError> {
+    let config = { settings.read().await.ai_model.clone() };
+
+    let response_format = match config.response_format {
+        ResponseFormatMode::None => ResponseFormatSpec::None,
+        ResponseFormatMode::JsonObject => ResponseFormatSpec::JsonObject,
+        ResponseFormatMode::JsonSchema => ResponseFormatSpec::JsonSchema {
+            name: "connectivity_check".to_string(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "ok": { "type": "string" } },
+                "required": ["ok"],
+                "additionalProperties": false,
+            }),
+        },
+    };
+
+    // A minimal two-message exchange. The word "json" satisfies OpenAI JSON
+    // mode's prompt requirement; a structured-output gateway must still accept
+    // the request body, which is the point of the probe.
+    let messages = vec![
+        ChatMessage::text(
+            new_event_id(),
+            ChatRole::System,
+            "You are a connectivity probe. Reply with a short JSON object such as {\"ok\":\"OK\"}.",
+        ),
+        ChatMessage::text(new_event_id(), ChatRole::User, "ping"),
+    ];
+    let noop = |_delta: String| {};
+
+    if config.gateway_mode == GatewayMode::ManagerProxy {
+        let (manager_url, manager_token, client_id) = {
+            let s = settings.read().await;
+            (
+                s.system.manager_url.clone(),
+                s.system.manager_api_token.clone(),
+                s.system.get_client_id().ok(),
+            )
+        };
+        let (Some(manager_url), Some(manager_token)) = (manager_url, manager_token) else {
+            return Err(manager_proxy_not_ready_error());
+        };
+        if manager_url.is_empty() || manager_token.is_empty() {
+            return Err(manager_proxy_not_ready_error());
+        }
+        let turn = manager_proxy::stream_proxy_chat(
+            &manager_url,
+            &manager_token,
+            &messages,
+            &response_format,
+            None,
+            client_id,
+            &noop,
+        )
+        .await?;
+        return Ok(GatewayProbe {
+            provider: "manager-proxy".to_string(),
+            model: config.model.unwrap_or_default(),
+            adapter: "manager-proxy".to_string(),
+            input_tokens: turn.usage.input_tokens,
+            output_tokens: turn.usage.output_tokens,
+        });
+    }
+
+    let (Some(model), Some(base_url), Some(api_key)) = (
+        config.model.clone(),
+        config.base_url.clone(),
+        config.api_key.clone(),
+    ) else {
+        return Err(not_configured_error());
+    };
+    if model.is_empty() || base_url.is_empty() || api_key.is_empty() {
+        return Err(not_configured_error());
+    }
+
+    let adapter = build_adapter(config.provider.as_deref());
+    let adapter_name = adapter.name().to_string();
+    let request = ChatRequest {
+        base_url,
+        api_key,
+        model: model.clone(),
+        messages,
+        response_format,
+        // Advertise the same tools the agentic diagnosis loop uses
+        // (`tool_choice = Auto`), so the probe reproduces the real request shape.
+        // A provider / model without function-calling support rejects a
+        // tools-bearing request — the probe must surface that, not pass a
+        // tool-free call (a false positive that lets validation "succeed" while
+        // every real diagnosis fails).
+        tools: probe_tool_specs(),
+        tool_choice: ToolChoice::Auto,
+    };
+    let turn = adapter.stream_chat(request, &noop).await?;
+    Ok(GatewayProbe {
+        provider: config
+            .provider
+            .clone()
+            .unwrap_or_else(|| "openai-compatible".to_string()),
+        model,
+        adapter: adapter_name,
+        input_tokens: turn.usage.input_tokens,
+        output_tokens: turn.usage.output_tokens,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +551,44 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::model::settings::Settings;
+
+    /// The gateway error snippet collapses whitespace, bounds length to 2000
+    /// chars, and is empty for an empty body — so a verbose upstream error stays
+    /// a readable one-liner.
+    #[test]
+    fn gateway_error_detail_collapses_and_bounds() {
+        assert_eq!(
+            gateway_error_detail(b"{\n  \"error\": \"model not found\"\n}"),
+            "{ \"error\": \"model not found\" }"
+        );
+        assert_eq!(gateway_error_detail(b""), "");
+        assert_eq!(gateway_error_detail(b"   \n\t  "), "");
+        let big = vec![b'x'; 5000];
+        assert_eq!(gateway_error_detail(&big).chars().count(), 2000);
+    }
+
+    /// The probe advertises the agentic loop's tool registry, so a model without
+    /// function-calling support fails validation exactly as it fails a real
+    /// diagnosis — guarding against a tool-free probe that would falsely pass.
+    #[test]
+    fn probe_advertises_tools() {
+        assert!(
+            !probe_tool_specs().is_empty(),
+            "probe must advertise tools to exercise function-calling support"
+        );
+    }
+
+    /// `probe_gateway` short-circuits with an `UnsupportedCapability` error (no
+    /// network) when the direct gateway is missing model / base URL / api key.
+    #[actix_web::test]
+    async fn probe_gateway_unconfigured_is_unsupported() {
+        let settings = SharedSettings::from(Settings::default());
+        let err = probe_gateway(&settings).await.unwrap_err();
+        assert_eq!(
+            err.kind,
+            desk_agent_protocol::AgentErrorKind::UnsupportedCapability
+        );
+    }
 
     /// A mock adapter that streams fixed fragments and returns a canned response.
     struct MockAdapter {

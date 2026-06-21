@@ -143,10 +143,19 @@ pub async fn stream_proxy_chat(
         .map_err(|e| transport_error(format!("manager proxy request failed: {e}")))?;
 
     if !response.status().is_success() {
-        return Err(transport_error(format!(
-            "manager proxy returned status {}",
-            response.status()
-        )));
+        let status = response.status();
+        // Read the proxy's error body (bounded) so the precise reason — an
+        // unconfigured manager-side provider, a rejected model — is visible
+        // instead of a bare status. The proxy never echoes our credentials in
+        // an error body, so it is safe to log.
+        let body = response.body().limit(16 * 1024).await.unwrap_or_default();
+        let detail = super::gateway_error_detail(&body);
+        log::warn!("manager proxy returned {status}: {detail}");
+        return Err(transport_error(if detail.is_empty() {
+            format!("manager proxy returned status {status}")
+        } else {
+            format!("manager proxy returned status {status}: {detail}")
+        }));
     }
 
     let mut acc = SseAccumulator::new();

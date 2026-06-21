@@ -1,15 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 
-// i18n: t() echoes the fallback the component always provides.
+// i18n: t() echoes the fallback the component always provides, interpolating
+// any {{name}} placeholders from the options object (like i18next does).
 vi.mock("react-i18next", () => ({
     useTranslation: () => ({
-        t: (_key: string, fallback?: string) => fallback ?? _key,
+        t: (_key: string, fallback?: string, opts?: Record<string, unknown>) => {
+            const template = fallback ?? _key
+            if (!opts) return template
+            return template.replace(/\{\{(\w+)\}\}/g, (_m, name) => String(opts[name] ?? ""))
+        },
     }),
 }))
 
 vi.mock("@/hooks/use-toast", () => ({
-    useToast: () => ({ toast: () => undefined }),
+    useToast: () => ({ toast: h.toast }),
 }))
 
 // Mutable query payload + spy on the update mutation.
@@ -18,6 +23,9 @@ const h = vi.hoisted(() => ({
     mutateAsync: vi.fn(async () => ({})),
     policyData: {} as Record<string, unknown>,
     policyMutateAsync: vi.fn(async () => ({})),
+    // The validate mutation returns a RestResponse body; tests override it.
+    validateMutateAsync: vi.fn(async () => ({ success: true, data: {} }) as Record<string, unknown>),
+    toast: vi.fn(),
 }))
 
 vi.mock("@/services/hooks/aiModelController/useQueryAiModelSettings", () => ({
@@ -25,6 +33,9 @@ vi.mock("@/services/hooks/aiModelController/useQueryAiModelSettings", () => ({
 }))
 vi.mock("@/services/hooks/aiModelController/useUpdateAiModelSettings", () => ({
     useUpdateAiModelSettings: () => ({ mutateAsync: h.mutateAsync, isPending: false }),
+}))
+vi.mock("@/services/hooks/aiModelController/useValidateAiModelSettings", () => ({
+    useValidateAiModelSettings: () => ({ mutateAsync: h.validateMutateAsync, isPending: false }),
 }))
 vi.mock("@/services/hooks/aiModelController/useQueryCollectionPolicySettings", () => ({
     useQueryCollectionPolicySettings: () => ({ data: { data: h.policyData }, isLoading: false }),
@@ -42,6 +53,9 @@ function lastPayload() {
 beforeEach(() => {
     h.mutateAsync.mockClear()
     h.policyMutateAsync.mockClear()
+    h.validateMutateAsync.mockClear()
+    h.toast.mockClear()
+    h.validateMutateAsync.mockResolvedValue({ success: true, data: {} })
     h.publicData = {
         provider: "openai-compatible",
         model: "gpt-4o-mini",
@@ -140,6 +154,40 @@ describe("AiModelSettings", () => {
         fireEvent.click(screen.getAllByText("Save Settings")[0])
         await waitFor(() => expect(h.mutateAsync).toHaveBeenCalled())
         expect(lastPayload().provider).toBe("openai-compatible")
+    })
+
+    it("validates the saved gateway and shows a success toast with provider / model", async () => {
+        h.validateMutateAsync.mockResolvedValue({
+            success: true,
+            data: { provider: "openai-compatible", model: "gpt-4o-mini", adapter: "lcxl-openai-compat" },
+        })
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        fireEvent.click(screen.getByText("Validate"))
+        await waitFor(() => expect(h.validateMutateAsync).toHaveBeenCalled())
+        await waitFor(() => expect(h.toast).toHaveBeenCalled())
+        const arg = h.toast.mock.calls.at(-1)![0] as { variant?: string; description?: string }
+        // A success toast is not the destructive variant and echoes the model.
+        expect(arg.variant).toBeUndefined()
+        expect(arg.description).toContain("gpt-4o-mini")
+    })
+
+    it("surfaces the gateway's own reason on a validation failure", async () => {
+        h.validateMutateAsync.mockResolvedValue({
+            success: false,
+            code: 1,
+            message: "model gateway returned status 400 Bad Request: unknown model",
+        })
+        render(<AiModelSettings />)
+        await waitFor(() => expect(screen.getByDisplayValue("gpt-4o-mini")).toBeInTheDocument())
+
+        fireEvent.click(screen.getByText("Validate"))
+        await waitFor(() => expect(h.toast).toHaveBeenCalled())
+        const arg = h.toast.mock.calls.at(-1)![0] as { variant?: string; description?: string }
+        expect(arg.variant).toBe("destructive")
+        // The gateway's verbatim reason is shown so the operator can fix the config.
+        expect(arg.description).toContain("status 400")
     })
 
     it("hides the clear toggle when no key is configured", async () => {

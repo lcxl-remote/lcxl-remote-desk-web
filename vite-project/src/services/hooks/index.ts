@@ -3,6 +3,7 @@ export type { QueryAiModelSettingsSuspenseQueryKey } from "./aiModelController/u
 export type { QueryCollectionPolicySettingsQueryKey } from "./aiModelController/useQueryCollectionPolicySettings.ts";
 export type { QueryCollectionPolicySettingsSuspenseQueryKey } from "./aiModelController/useQueryCollectionPolicySettingsSuspense.ts";
 export type { UpdateAiModelSettingsMutationKey } from "./aiModelController/useUpdateAiModelSettings.ts";
+export type { ValidateAiModelSettingsMutationKey } from "./aiModelController/useValidateAiModelSettings.ts";
 export type { UpdateCollectionPolicySettingsMutationKey } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
 export type { ChangePasswordMutationKey } from "./authController/useChangePassword.ts";
 export type { GetCaptchaMutationKey } from "./authController/useGetCaptcha.ts";
@@ -89,6 +90,9 @@ export { useQueryCollectionPolicySettingsSuspense } from "./aiModelController/us
 export { updateAiModelSettingsMutationKey } from "./aiModelController/useUpdateAiModelSettings.ts";
 export { updateAiModelSettingsMutationOptions } from "./aiModelController/useUpdateAiModelSettings.ts";
 export { useUpdateAiModelSettings } from "./aiModelController/useUpdateAiModelSettings.ts";
+export { validateAiModelSettingsMutationKey } from "./aiModelController/useValidateAiModelSettings.ts";
+export { validateAiModelSettingsMutationOptions } from "./aiModelController/useValidateAiModelSettings.ts";
+export { useValidateAiModelSettings } from "./aiModelController/useValidateAiModelSettings.ts";
 export { updateCollectionPolicySettingsMutationKey } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
 export { updateCollectionPolicySettingsMutationOptions } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
 export { useUpdateCollectionPolicySettings } from "./aiModelController/useUpdateCollectionPolicySettings.ts";

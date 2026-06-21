@@ -3,10 +3,11 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save } from "lucide-react"
+import { Loader2, Save, ShieldCheck } from "lucide-react"
 
 import { useQueryAiModelSettings } from "@/services/hooks/aiModelController/useQueryAiModelSettings"
 import { useUpdateAiModelSettings } from "@/services/hooks/aiModelController/useUpdateAiModelSettings"
+import { useValidateAiModelSettings } from "@/services/hooks/aiModelController/useValidateAiModelSettings"
 import { useQueryCollectionPolicySettings } from "@/services/hooks/aiModelController/useQueryCollectionPolicySettings"
 import { useUpdateCollectionPolicySettings } from "@/services/hooks/aiModelController/useUpdateCollectionPolicySettings"
 import type { AiModelSettingsUpdate, CollectionPolicySettingsUpdate } from "@/services/types"
@@ -50,6 +51,7 @@ export function AiModelSettings() {
 
     const { data: settingsResponse, isLoading } = useQueryAiModelSettings()
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateAiModelSettings()
+    const { mutateAsync: validateSettings, isPending: isValidating } = useValidateAiModelSettings()
 
     // Whether a key is already stored (the value itself is never returned).
     const [apiKeySet, setApiKeySet] = useState(false)
@@ -131,6 +133,41 @@ export function AiModelSettings() {
                 variant: "destructive",
                 title: t("pages.system.settings.error", "Error"),
                 description: t("pages.aiModel.settings.updateFailedMessage", "Failed to update AI model settings"),
+            })
+        }
+    }
+
+    // Validate the *saved* gateway config by sending a minimal probe request
+    // server-side. The api_key stays on the server (it is never returned to the
+    // browser), so the operator saves first, then validates. The endpoint always
+    // returns HTTP 200; success/failure rides in the RestResponse body, and on a
+    // gateway rejection `message` carries the gateway's own reason (e.g. a 400
+    // with the offending field) so the operator can fix the configuration.
+    const onValidate = async () => {
+        try {
+            const res = await validateSettings()
+            if (res?.success) {
+                const data = res.data
+                toast({
+                    title: t("pages.aiModel.settings.validateSucceedTitle", "Validation succeeded"),
+                    description: t(
+                        "pages.aiModel.settings.validateSucceedMessage",
+                        "The gateway answered. Provider: {{provider}}, model: {{model}}.",
+                        { provider: data?.provider ?? "", model: data?.model ?? "" },
+                    ),
+                })
+            } else {
+                toast({
+                    variant: "destructive",
+                    title: t("pages.aiModel.settings.validateFailedTitle", "Validation failed"),
+                    description: res?.message || t("pages.aiModel.settings.validateFailedMessage", "The gateway rejected the request."),
+                })
+            }
+        } catch {
+            toast({
+                variant: "destructive",
+                title: t("pages.aiModel.settings.validateFailedTitle", "Validation failed"),
+                description: t("pages.aiModel.settings.validateFailedMessage", "The gateway rejected the request."),
             })
         }
     }
@@ -376,7 +413,11 @@ export function AiModelSettings() {
                                 />
                             </div>
 
-                            <div className="flex justify-end">
+                            <div className="flex justify-end gap-2">
+                                <Button type="button" variant="outline" onClick={onValidate} disabled={isValidating || isUpdating}>
+                                    {isValidating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
+                                    {t("pages.aiModel.settings.validate", "Validate")}
+                                </Button>
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save", "Save Settings")}

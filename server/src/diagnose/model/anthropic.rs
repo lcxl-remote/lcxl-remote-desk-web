@@ -227,10 +227,18 @@ impl ModelAdapter for AnthropicAdapter {
             .map_err(|e| transport_error(format!("model request failed: {e}")))?;
 
         if !response.status().is_success() {
-            return Err(transport_error(format!(
-                "model gateway returned status {}",
-                response.status()
-            )));
+            let status = response.status();
+            // Read the gateway's error body (bounded) so the precise reason is
+            // visible instead of a bare status. The body is the gateway's own
+            // error text and never contains our api_key, so it is safe to log.
+            let body = response.body().limit(16 * 1024).await.unwrap_or_default();
+            let detail = super::gateway_error_detail(&body);
+            log::warn!("anthropic gateway returned {status}: {detail}");
+            return Err(transport_error(if detail.is_empty() {
+                format!("model gateway returned status {status}")
+            } else {
+                format!("model gateway returned status {status}: {detail}")
+            }));
         }
 
         let mut acc = AnthropicSseAccumulator::new();
