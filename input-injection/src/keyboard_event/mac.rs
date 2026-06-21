@@ -2,7 +2,7 @@ use crate::{
     error::InputError,
     model::data_channel::{KeyboardEventData, KeyboardEventHandler},
 };
-use core_graphics::event::{CGEvent, CGEventTapLocation, CGKeyCode, KeyCode};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode, KeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use desk_utils::error::DeskErrorCode;
 
@@ -24,12 +24,41 @@ impl MacKeyboardEventHandler {
     }
 }
 
+/// Build the explicit modifier mask for an injected key event from the
+/// per-event modifier booleans the controller sends with every keystroke.
+///
+/// Synthetic events posted via `HIDSystemState` would otherwise inherit the
+/// system's *current* modifier state, which is only ever updated by the
+/// separately injected modifier key down/up events. If any modifier key-up is
+/// dropped in transit (a browser quirk on macOS controllers swallows key-ups
+/// while Cmd is held), that modifier stays stuck down and silently contaminates
+/// every later key — e.g. a bare `f` becomes Ctrl+Cmd+F (macOS "Full Screen").
+/// Stamping the flags explicitly makes each keystroke self-describing, so a key
+/// with no modifiers can never inherit a stale flag.
+fn cg_event_flags(event: &KeyboardEventData) -> CGEventFlags {
+    let mut flags = CGEventFlags::empty();
+    if event.shift_key {
+        flags |= CGEventFlags::CGEventFlagShift;
+    }
+    if event.ctrl_key {
+        flags |= CGEventFlags::CGEventFlagControl;
+    }
+    if event.alt_key {
+        flags |= CGEventFlags::CGEventFlagAlternate;
+    }
+    if event.meta_key {
+        flags |= CGEventFlags::CGEventFlagCommand;
+    }
+    flags
+}
+
 impl KeyboardEventHandler for MacKeyboardEventHandler {
     fn handle_key_down(&mut self, event: &KeyboardEventData) -> Result<(), InputError> {
         if let Some(keycode) = win_vk_to_mac_keycode(event.key_code) {
             let source = Self::create_source()?;
             match CGEvent::new_keyboard_event(source, keycode, true) {
                 Ok(cg_event) => {
+                    cg_event.set_flags(cg_event_flags(event));
                     cg_event.post(CGEventTapLocation::HID);
                     Ok(())
                 }
@@ -49,6 +78,7 @@ impl KeyboardEventHandler for MacKeyboardEventHandler {
             let source = Self::create_source()?;
             match CGEvent::new_keyboard_event(source, keycode, false) {
                 Ok(cg_event) => {
+                    cg_event.set_flags(cg_event_flags(event));
                     cg_event.post(CGEventTapLocation::HID);
                     Ok(())
                 }
@@ -164,5 +194,74 @@ fn win_vk_to_mac_keycode(vk: u32) -> Option<CGKeyCode> {
         0xC0 => Some(0x32), // `
 
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_event(ctrl: bool, shift: bool, alt: bool, meta: bool) -> KeyboardEventData {
+        KeyboardEventData {
+            event: "keydown".to_string(),
+            key: "f".to_string(),
+            code: "KeyF".to_string(),
+            key_code: 0x46,
+            ctrl_key: ctrl,
+            shift_key: shift,
+            alt_key: alt,
+            meta_key: meta,
+            location: 0,
+            repeat: false,
+            is_composing: false,
+        }
+    }
+
+    #[test]
+    fn bare_key_has_no_modifier_flags() {
+        // A plain `f` must not inherit any modifier; otherwise the host could
+        // interpret it as Ctrl+Cmd+F (macOS "Full Screen") when modifier state
+        // has drifted.
+        assert_eq!(
+            cg_event_flags(&key_event(false, false, false, false)),
+            CGEventFlags::empty()
+        );
+    }
+
+    #[test]
+    fn each_modifier_maps_to_its_flag() {
+        assert_eq!(
+            cg_event_flags(&key_event(true, false, false, false)),
+            CGEventFlags::CGEventFlagControl
+        );
+        assert_eq!(
+            cg_event_flags(&key_event(false, true, false, false)),
+            CGEventFlags::CGEventFlagShift
+        );
+        assert_eq!(
+            cg_event_flags(&key_event(false, false, true, false)),
+            CGEventFlags::CGEventFlagAlternate
+        );
+        assert_eq!(
+            cg_event_flags(&key_event(false, false, false, true)),
+            CGEventFlags::CGEventFlagCommand
+        );
+    }
+
+    #[test]
+    fn combined_modifiers_are_or_ed() {
+        // Ctrl+Cmd held together (the real macOS "Full Screen" chord) must
+        // produce exactly both flags and nothing else.
+        assert_eq!(
+            cg_event_flags(&key_event(true, false, false, true)),
+            CGEventFlags::CGEventFlagControl | CGEventFlags::CGEventFlagCommand
+        );
+        assert_eq!(
+            cg_event_flags(&key_event(true, true, true, true)),
+            CGEventFlags::CGEventFlagControl
+                | CGEventFlags::CGEventFlagShift
+                | CGEventFlags::CGEventFlagAlternate
+                | CGEventFlags::CGEventFlagCommand
+        );
     }
 }

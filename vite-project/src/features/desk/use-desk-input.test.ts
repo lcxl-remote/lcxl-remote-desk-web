@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useDeskInput } from './use-desk-input';
+import { useDeskInput, buildKeyboardEventSequence } from './use-desk-input';
 
 // `useDeskInput` wires DOM listeners onto the <video> element and a few
 // browser globals (ResizeObserver). jsdom does not implement
@@ -130,5 +130,99 @@ describe('useDeskInput — blur release uses last known cursor position', () => 
         fire('blur', {});
         // No held button → nothing to release on the reliable channel.
         expect(mouseChannel.send).not.toHaveBeenCalled();
+    });
+});
+
+describe('buildKeyboardEventSequence — modifier state tracking', () => {
+    it('reports the modifiers held at each step of a Ctrl+Alt+Del chord', () => {
+        const seq = buildKeyboardEventSequence([
+            { event: 'keydown', keyCode: 17 }, // Ctrl
+            { event: 'keydown', keyCode: 18 }, // Alt
+            { event: 'keydown', keyCode: 46 }, // Del
+            { event: 'keyup', keyCode: 46 },
+            { event: 'keyup', keyCode: 18 },
+            { event: 'keyup', keyCode: 17 },
+        ]);
+
+        // Ctrl keydown: its own event already reflects ctrl held.
+        expect(seq[0]).toMatchObject({ key_code: 17, ctrl_key: true, alt_key: false });
+        // Alt keydown: both modifiers now held.
+        expect(seq[1]).toMatchObject({ key_code: 18, ctrl_key: true, alt_key: true });
+        // Del down/up: carries both modifiers (previously hard-coded to false,
+        // which dropped the chord on the macOS host).
+        expect(seq[2]).toMatchObject({ key_code: 46, ctrl_key: true, alt_key: true });
+        expect(seq[3]).toMatchObject({ key_code: 46, ctrl_key: true, alt_key: true });
+        // Alt release clears only alt.
+        expect(seq[4]).toMatchObject({ key_code: 18, ctrl_key: true, alt_key: false });
+        // Ctrl release clears everything.
+        expect(seq[5]).toMatchObject({ key_code: 17, ctrl_key: false, alt_key: false });
+    });
+
+    it('tracks the meta (Win/Cmd) key for both left and right key codes', () => {
+        expect(buildKeyboardEventSequence([{ event: 'keydown', keyCode: 91 }])[0])
+            .toMatchObject({ meta_key: true });
+        expect(buildKeyboardEventSequence([{ event: 'keydown', keyCode: 92 }])[0])
+            .toMatchObject({ meta_key: true });
+    });
+
+    it('leaves a plain key with no modifiers', () => {
+        const [event] = buildKeyboardEventSequence([{ event: 'keydown', keyCode: 70 }]); // F
+        expect(event).toMatchObject({
+            key_code: 70,
+            ctrl_key: false,
+            shift_key: false,
+            alt_key: false,
+            meta_key: false,
+        });
+    });
+});
+
+describe('useDeskInput — hidden page releases held keys', () => {
+    function setup() {
+        const handlers: Record<string, Handler[]> = {};
+        const element = makeVideo(handlers);
+        const keyboardChannel = makeChannel();
+        const mouseChannel = makeChannel();
+        const videoRef = { current: element };
+        renderHook(() =>
+            useDeskInput({
+                videoRef,
+                mouseChannel: { current: mouseChannel as unknown as RTCDataChannel },
+                keyboardChannel: { current: keyboardChannel as unknown as RTCDataChannel },
+                isConnected: true,
+            }),
+        );
+        act(() => {
+            resizeCallback?.([{ contentRect: { width: 1920, height: 1080 } }]);
+        });
+        const fire = (type: string, event: Record<string, unknown>) => {
+            act(() => {
+                for (const cb of handlers[type] || []) {
+                    cb({ preventDefault: () => {}, stopPropagation: () => {}, ...event });
+                }
+            });
+        };
+        return { keyboardChannel, fire };
+    }
+
+    it('sends key-up for keys still held when the page becomes hidden', () => {
+        const { keyboardChannel, fire } = setup();
+
+        // Hold the Meta (Cmd) key — the classic macOS Cmd+Tab "stuck modifier"
+        // scenario where the browser may never deliver its key-up.
+        fire('keydown', { key: 'Meta', code: 'MetaLeft', keyCode: 91, metaKey: true });
+        keyboardChannel.send.mockClear();
+
+        Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+        act(() => {
+            document.dispatchEvent(new Event('visibilitychange'));
+        });
+
+        const released = keyboardChannel.send.mock.calls
+            .map(call => JSON.parse(call[0] as string))
+            .filter(payload => payload.event === 'keyup' && payload.key_code === 91);
+        expect(released).toHaveLength(1);
+
+        Object.defineProperty(document, 'hidden', { value: false, configurable: true });
     });
 });

@@ -7,7 +7,7 @@ import {
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
 import type { ExecPreview } from './use-desk-exec';
-import type { SignalingMessage } from './use-desk-signaling';
+import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::diagnose`. These ride the
 // `Diagnose` / `DiagnoseEvent` / `DiagnoseCancel` signaling types as
@@ -223,7 +223,7 @@ const INITIAL_STATE: DiagnoseState = {
 
 type UseDeskDiagnoseProps = {
     deskId: string | null;
-    lastMessage: SignalingMessage | null;
+    subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: (
         type: number,
         data: unknown,
@@ -238,7 +238,7 @@ type UseDeskDiagnoseProps = {
  * `seq`), and exposes a 转人工 (handoff) action that closes the flow while
  * retaining the gathered result and notifies the host for auditing.
  */
-export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDiagnoseProps) {
+export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagnoseProps) {
     const [state, setState] = useState<DiagnoseState>(INITIAL_STATE);
     const activeRequestRef = useRef<string | null>(null);
     // Highest applied seq, so duplicate / out-of-order frames cannot corrupt
@@ -319,96 +319,101 @@ export function useDeskDiagnose({ deskId, lastMessage, sendMessage }: UseDeskDia
     }, [deskId, sendMessage, state.pendingExec]);
 
     useEffect(() => {
-        if (!lastMessage) return;
-
-        // An unsolicited `ExecPreview` arriving while a run is in flight is the
-        // agentic loop asking to run a command. The suggested-command flow
-        // (`use-desk-exec`) owns previews it requested and correlates them by its
-        // own ConfirmExec request_id; it drops anything it did not request, so
-        // claiming the agentic one here causes no double handling.
-        if (lastMessage.signaling_type === SIGNALING_TYPE_CODE_EXEC_PREVIEW) {
-            if (activeRequestRef.current === null) return;
-            const preview = lastMessage.signaling_data as ExecPreview | null;
-            if (!preview || !preview.exec_request_id) return;
-            setState((prev) =>
-                prev.phase === 'running' ? { ...prev, pendingExec: preview } : prev,
-            );
-            return;
-        }
-
-        if (lastMessage.signaling_type !== SIGNALING_TYPE_CODE_DIAGNOSE_EVENT) return;
-        const event = lastMessage.signaling_data as DiagnoseEvent | null;
-        if (!event || event.request_id !== activeRequestRef.current) return;
-        // Ignore stale / replayed frames.
-        if (event.seq <= lastSeqRef.current) return;
-        lastSeqRef.current = event.seq;
-
-        setState((prev) => {
-            switch (event.kind) {
-                case 'status':
-                    return { ...prev, status: event.status ?? prev.status };
-                case 'partial':
-                    return {
-                        ...prev,
-                        partialSummary: prev.partialSummary + (event.partial_summary ?? ''),
-                    };
-                case 'final':
-                    activeRequestRef.current = null;
-                    return {
-                        ...prev,
-                        phase: 'done',
-                        result: event.final_result ?? null,
-                        pendingExec: null,
-                    };
-                case 'error':
-                    activeRequestRef.current = null;
-                    return {
-                        ...prev,
-                        phase: 'error',
-                        error: event.error?.message ?? 'diagnosis failed',
-                        pendingExec: null,
-                    };
-                case 'turn_started':
-                    return { ...prev, turnId: event.turn_id ?? prev.turnId };
-                case 'tool_started': {
-                    if (!event.tool_call_id) return prev;
-                    const activity: ToolActivity = {
-                        callId: event.tool_call_id,
-                        name: event.tool_name ?? event.tool_call_id,
-                        status: event.awaiting_approval ? 'awaiting_approval' : 'running',
-                    };
-                    // Replace an existing entry for the same call (e.g. a re-emit)
-                    // rather than duplicating it.
-                    const tools = prev.tools.some((tt) => tt.callId === activity.callId)
-                        ? prev.tools.map((tt) =>
-                              tt.callId === activity.callId ? activity : tt,
-                          )
-                        : [...prev.tools, activity];
-                    return { ...prev, tools };
-                }
-                case 'tool_finished': {
-                    if (!event.tool_call_id) return prev;
-                    const status: ToolActivityStatus = event.tool_ok ? 'ok' : 'failed';
-                    return {
-                        ...prev,
-                        tools: prev.tools.map((tt) =>
-                            tt.callId === event.tool_call_id ? { ...tt, status } : tt,
-                        ),
-                    };
-                }
-                case 'answer':
-                    activeRequestRef.current = null;
-                    return {
-                        ...prev,
-                        phase: 'done',
-                        answer: event.answer ?? '',
-                        pendingExec: null,
-                    };
-                default:
-                    return prev;
+        // Subscribe to the lossless signaling stream. DiagnoseEvent frames
+        // are pushed rapidly (status / partial / final) and ordered by
+        // `seq`; the previous single-value delivery could coalesce a burst
+        // and drop intermediate frames, so streaming relies on this path.
+        const handle = (message: SignalingMessage) => {
+            // An unsolicited `ExecPreview` arriving while a run is in flight is the
+            // agentic loop asking to run a command. The suggested-command flow
+            // (`use-desk-exec`) owns previews it requested and correlates them by its
+            // own ConfirmExec request_id; it drops anything it did not request, so
+            // claiming the agentic one here causes no double handling.
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_PREVIEW) {
+                if (activeRequestRef.current === null) return;
+                const preview = message.signaling_data as ExecPreview | null;
+                if (!preview || !preview.exec_request_id) return;
+                setState((prev) =>
+                    prev.phase === 'running' ? { ...prev, pendingExec: preview } : prev,
+                );
+                return;
             }
-        });
-    }, [lastMessage]);
+
+            if (message.signaling_type !== SIGNALING_TYPE_CODE_DIAGNOSE_EVENT) return;
+            const event = message.signaling_data as DiagnoseEvent | null;
+            if (!event || event.request_id !== activeRequestRef.current) return;
+            // Ignore stale / replayed frames.
+            if (event.seq <= lastSeqRef.current) return;
+            lastSeqRef.current = event.seq;
+
+            setState((prev) => {
+                switch (event.kind) {
+                    case 'status':
+                        return { ...prev, status: event.status ?? prev.status };
+                    case 'partial':
+                        return {
+                            ...prev,
+                            partialSummary: prev.partialSummary + (event.partial_summary ?? ''),
+                        };
+                    case 'final':
+                        activeRequestRef.current = null;
+                        return {
+                            ...prev,
+                            phase: 'done',
+                            result: event.final_result ?? null,
+                            pendingExec: null,
+                        };
+                    case 'error':
+                        activeRequestRef.current = null;
+                        return {
+                            ...prev,
+                            phase: 'error',
+                            error: event.error?.message ?? 'diagnosis failed',
+                            pendingExec: null,
+                        };
+                    case 'turn_started':
+                        return { ...prev, turnId: event.turn_id ?? prev.turnId };
+                    case 'tool_started': {
+                        if (!event.tool_call_id) return prev;
+                        const activity: ToolActivity = {
+                            callId: event.tool_call_id,
+                            name: event.tool_name ?? event.tool_call_id,
+                            status: event.awaiting_approval ? 'awaiting_approval' : 'running',
+                        };
+                        // Replace an existing entry for the same call (e.g. a re-emit)
+                        // rather than duplicating it.
+                        const tools = prev.tools.some((tt) => tt.callId === activity.callId)
+                            ? prev.tools.map((tt) =>
+                                  tt.callId === activity.callId ? activity : tt,
+                              )
+                            : [...prev.tools, activity];
+                        return { ...prev, tools };
+                    }
+                    case 'tool_finished': {
+                        if (!event.tool_call_id) return prev;
+                        const status: ToolActivityStatus = event.tool_ok ? 'ok' : 'failed';
+                        return {
+                            ...prev,
+                            tools: prev.tools.map((tt) =>
+                                tt.callId === event.tool_call_id ? { ...tt, status } : tt,
+                            ),
+                        };
+                    }
+                    case 'answer':
+                        activeRequestRef.current = null;
+                        return {
+                            ...prev,
+                            phase: 'done',
+                            answer: event.answer ?? '',
+                            pendingExec: null,
+                        };
+                    default:
+                        return prev;
+                }
+            });
+        };
+        return subscribe(handle);
+    }, [subscribe]);
 
     return { state, start, handoff, reset, approveExec, rejectExec };
 }

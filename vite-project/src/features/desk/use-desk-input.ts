@@ -2,6 +2,54 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { RefObject } from 'react';
 
+// Windows virtual-key codes of the modifier keys, mapped to the modifier flag
+// they drive. Used to reconstruct the modifier state of a synthetic key
+// sequence (e.g. the on-screen shortcut menu) so each emitted event carries the
+// correct ctrl/shift/alt/meta booleans.
+const MODIFIER_KEY_CODES: Record<number, 'shift' | 'ctrl' | 'alt' | 'meta'> = {
+    16: 'shift', // VK_SHIFT
+    17: 'ctrl',  // VK_CONTROL
+    18: 'alt',   // VK_MENU
+    91: 'meta',  // VK_LWIN
+    92: 'meta',  // VK_RWIN
+};
+
+export type SyntheticKeyEvent = { event: 'keydown' | 'keyup'; keyCode: number };
+
+/**
+ * Expand a synthetic key sequence (ordered down/up events) into full keyboard
+ * payloads, tracking modifier state so every event reports the modifiers held
+ * at that point. A chord such as Ctrl+Alt+Del therefore reports ctrl_key/alt_key
+ * true on the inner events instead of hard-coding all modifiers to false — the
+ * macOS host stamps CGEvent flags from these booleans, so without this the chord
+ * would lose its modifiers there.
+ */
+export function buildKeyboardEventSequence(events: SyntheticKeyEvent[]) {
+    const state = { shift: false, ctrl: false, alt: false, meta: false };
+    return events.map(ev => {
+        const modifier = MODIFIER_KEY_CODES[ev.keyCode];
+        if (modifier) {
+            // Update before emitting so the modifier key's own event reflects
+            // its new state (matching a real KeyboardEvent: a Ctrl keydown
+            // already reports ctrlKey === true).
+            state[modifier] = ev.event === 'keydown';
+        }
+        return {
+            event: ev.event,
+            key: '',
+            code: '',
+            key_code: ev.keyCode,
+            alt_key: state.alt,
+            ctrl_key: state.ctrl,
+            shift_key: state.shift,
+            meta_key: state.meta,
+            repeat: false,
+            location: 0,
+            is_composing: false,
+        };
+    });
+}
+
 type UseDeskInputProps = {
     videoRef: RefObject<HTMLVideoElement | null>;
     mouseChannel: RefObject<RTCDataChannel | null>;
@@ -243,6 +291,16 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
             pressedKeysRef.current.clear();
         };
 
+        const handleVisibilityChange = () => {
+            // Switching tabs or minimising (e.g. Cmd+Tab on macOS, which can
+            // swallow the key-up of keys held across the switch) does not always
+            // fire a window blur. Release everything when the page is hidden so
+            // no key — especially a modifier — stays stuck down on the host.
+            if (document.hidden) {
+                handleBlur();
+            }
+        };
+
         element.addEventListener("mousemove", onMouseMove);
         element.addEventListener("mouseup", onMouseUp);
         element.addEventListener("mousedown", onMouseDown);
@@ -258,6 +316,7 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
 
         element.addEventListener("blur", handleBlur);
         window.addEventListener("blur", handleBlur);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
 
         return () => {
             element.removeEventListener("mousemove", onMouseMove);
@@ -275,29 +334,17 @@ export function useDeskInput({ videoRef, mouseChannel, keyboardChannel, mouseMov
 
             element.removeEventListener("blur", handleBlur);
             window.removeEventListener("blur", handleBlur);
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
     }, [videoRef, isConnected, mouseChannel, keyboardChannel, mouseMoveChannel, ignoreInputEvents]);
 
-    const sendKeyboardEvents = useCallback((events: { event: "keydown" | "keyup", keyCode: number }[]) => {
+    const sendKeyboardEvents = useCallback((events: SyntheticKeyEvent[]) => {
         if (!keyboardChannel.current || keyboardChannel.current.readyState !== "open") {
             return;
         }
-        events.forEach(ev => {
-            const kbEvent = {
-                event: ev.event,
-                key: "",
-                code: "",
-                key_code: ev.keyCode,
-                alt_key: false,
-                ctrl_key: false,
-                shift_key: false,
-                meta_key: false,
-                repeat: false,
-                location: 0,
-                is_composing: false,
-            };
+        for (const kbEvent of buildKeyboardEventSequence(events)) {
             keyboardChannel.current?.send(JSON.stringify(kbEvent));
-        });
+        }
     }, [keyboardChannel]);
 
     return { sendKeyboardEvents };

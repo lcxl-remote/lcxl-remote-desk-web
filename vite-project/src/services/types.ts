@@ -1299,6 +1299,11 @@ export type InitSignalingData = {
     */
     is_admin: boolean;
     /**
+     * @description Operation system enum
+     * @type string | undefined
+    */
+    operation_system?: OperationSystemEnum;
+    /**
      * @description User name for signaling.
      * @type string
     */

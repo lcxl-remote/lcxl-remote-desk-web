@@ -4,6 +4,14 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const WHITEBOARD_WINDOW_LABEL: &str = "whiteboard";
 
+/// Returns whether a whiteboard command from `from_connection_id` may act on the
+/// overlay, given the connection that currently owns it (if any). The first
+/// controller to `Show` the board claims ownership; commands from any other
+/// connection are rejected until the owner releases it via `Hide`.
+fn command_allowed(current_owner: Option<&str>, from_connection_id: &str) -> bool {
+    current_owner.is_none_or(|owner| owner == from_connection_id)
+}
+
 pub struct WhiteboardManager {
     app_handle: AppHandle,
     frontend_url: String,
@@ -26,9 +34,10 @@ impl WhiteboardManager {
                 match cmd_receiver.recv() {
                     Ok(cmd) => match cmd {
                         WhiteboardCommand::Show(from_connection_id) => {
-                            if let Some(ref controlled) = self.controlled_by_connection_id
-                                && controlled != &from_connection_id
-                            {
+                            if !command_allowed(
+                                self.controlled_by_connection_id.as_deref(),
+                                &from_connection_id,
+                            ) {
                                 log::warn!(
                                     "Whiteboard is already controlled by another connection"
                                 );
@@ -62,9 +71,10 @@ impl WhiteboardManager {
                             }
                         }
                         WhiteboardCommand::Hide(from_connection_id) => {
-                            if let Some(ref controlled) = self.controlled_by_connection_id
-                                && controlled != &from_connection_id
-                            {
+                            if !command_allowed(
+                                self.controlled_by_connection_id.as_deref(),
+                                &from_connection_id,
+                            ) {
                                 log::warn!(
                                     "Whiteboard is already controlled by another connection"
                                 );
@@ -118,7 +128,16 @@ impl WhiteboardManager {
         }
 
         window.show().map_err(|e| e.to_string())?;
-        window.set_fullscreen(true).map_err(|e| e.to_string())?;
+        // On macOS, native fullscreen (`set_fullscreen`) moves the window into
+        // its own Space with an opaque black backing, so the transparent overlay
+        // would render the whole screen black. Simple fullscreen instead hides
+        // the menu bar and Dock and sizes the window to the full screen frame
+        // without a separate Space, keeping the live desktop visible beneath the
+        // transparent overlay. On non-macOS platforms this falls back to
+        // `set_fullscreen`, preserving the previous behavior.
+        window
+            .set_simple_fullscreen(true)
+            .map_err(|e| e.to_string())?;
         window.set_always_on_top(true).map_err(|e| e.to_string())?;
         // Mouse events pass through to the desktop beneath
         let _ = window.set_ignore_cursor_events(true);
@@ -131,5 +150,29 @@ impl WhiteboardManager {
             window.close().map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unowned_overlay_accepts_any_connection() {
+        // Before anyone claims the board, the first Show from any connection is
+        // allowed (and goes on to claim ownership).
+        assert!(command_allowed(None, "conn-a"));
+        assert!(command_allowed(None, "conn-b"));
+    }
+
+    #[test]
+    fn owner_can_keep_driving_its_overlay() {
+        assert!(command_allowed(Some("conn-a"), "conn-a"));
+    }
+
+    #[test]
+    fn other_connection_is_rejected_while_owned() {
+        // A second connection cannot Show/Hide the board while another owns it.
+        assert!(!command_allowed(Some("conn-a"), "conn-b"));
     }
 }

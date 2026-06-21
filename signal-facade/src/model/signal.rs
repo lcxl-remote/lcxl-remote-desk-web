@@ -21,6 +21,7 @@ use crate::{
         audio_capture::AudioDevice,
         desk_settings::DeskSettings,
         image_capture::DisplayInfo,
+        os::OperationSystemEnum,
         virtual_display::{DEFAULT_ADAPTIVE_DEBOUNCE_MS, DEFAULT_ADAPTIVE_MIN_DELTA_PX},
     },
 };
@@ -746,6 +747,21 @@ pub struct InitSignalingData {
     /// `AdaptiveResolutionParams::Default` (5000 ms / 16 px).
     #[serde(default)]
     pub adaptive_resolution: AdaptiveResolutionParams,
+    /// Operating system of the remote host. Lets the browser tailor
+    /// host-targeted UI (e.g. the keyboard-shortcut menu) to the host's
+    /// platform instead of assuming Windows. Missing in legacy responses ⇒
+    /// `OperationSystemEnum::Other` (unknown host) — NOT the deserializing
+    /// machine's own OS, which is what `OperationSystemEnum::default()` yields.
+    #[serde(default = "unknown_host_os")]
+    pub operation_system: OperationSystemEnum,
+}
+
+/// Serde fallback for a host that does not advertise its OS. Unlike
+/// `OperationSystemEnum::default()` (which resolves to the *local* compile-time
+/// OS, the right answer when a host reports its own OS) a decoded-but-absent
+/// field means the host OS is simply unknown.
+fn unknown_host_os() -> OperationSystemEnum {
+    OperationSystemEnum::Other
 }
 
 /// WebRTC Connection State
@@ -1027,6 +1043,33 @@ mod init_signaling_data_tests {
             data.adaptive_resolution.min_delta_px,
             DEFAULT_ADAPTIVE_MIN_DELTA_PX
         );
+        // Legacy peers predate the host-OS field; it must default to Other so
+        // the browser falls back to a generic (Windows) shortcut menu rather
+        // than mislabelling the host.
+        assert_eq!(data.operation_system, OperationSystemEnum::Other);
+    }
+
+    /// A host that advertises its OS must round-trip so the browser can tailor
+    /// host-targeted UI (e.g. macOS shortcuts) instead of assuming Windows.
+    #[test]
+    fn init_signaling_data_round_trips_host_os() {
+        let raw = r#"{
+            "ice_servers": [],
+            "user_name": "tester",
+            "audio_device_list": {},
+            "audio_encoder_list": [],
+            "video_device_list": {},
+            "video_encoder_list": [],
+            "desk_settings": {},
+            "is_admin": false,
+            "operation_system": "Mac"
+        }"#;
+        let data: InitSignalingData = serde_json::from_str(raw).expect("decode");
+        assert_eq!(data.operation_system, OperationSystemEnum::Mac);
+
+        let encoded = serde_json::to_string(&data).expect("encode");
+        let decoded: InitSignalingData = serde_json::from_str(&encoded).expect("re-decode");
+        assert_eq!(decoded.operation_system, OperationSystemEnum::Mac);
     }
 
     /// Empty `AdaptiveResolutionParams` JSON must fall back to the shared

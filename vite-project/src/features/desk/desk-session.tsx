@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, useCallback } from "react"
+import { useEffect, useRef, useState, useCallback, useMemo } from "react"
 import type { MouseEvent as ReactMouseEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
-import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, Sparkles } from "lucide-react"
+import { Menu, Loader2, Folder, Terminal as TerminalIcon, MousePointer2, XSquare, Maximize, Minimize, Settings, Volume2, VolumeX, Power, Keyboard, Activity, ShieldCheck, ShieldOff, Clipboard, ClipboardX, PenTool, Mic, MicOff, CheckCircle2, AlertCircle, AlertTriangle, Sparkles } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
     DropdownMenu,
@@ -17,11 +17,15 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import "./desk-session.css"
 import { useDeskSignaling } from "./use-desk-signaling"
+import type { SignalingMessage } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskDiagnose } from "./use-desk-diagnose"
 import { DiagnosePanel } from "./diagnose-panel"
 import { useDeskExec } from "./use-desk-exec"
 import { useDeskInput } from "./use-desk-input"
+import { getKeyboardShortcuts } from "./keyboard-shortcuts"
+import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from "./fullscreen-keyboard"
+import { useBeforeUnloadConfirm } from "./use-before-unload-confirm"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
 import { useCursorSync } from "./use-cursor-sync"
@@ -83,7 +87,7 @@ export default function DeskSession() {
     const [isWaitingApproval, setIsWaitingApproval] = useState(false);
     const hasRequestedRef = useRef(false);
 
-    const { isConnected, lastMessage, sendMessage } = useDeskSignaling(deskId || null)
+    const { isConnected, subscribe, sendMessage, sendTracked, cancelQueued } = useDeskSignaling(deskId || null)
 
     const handleConnect = useCallback(() => {
         if (deskId && !hasRequestedRef.current) {
@@ -115,6 +119,12 @@ export default function DeskSession() {
     });
     const [audioVolume, setAudioVolume] = useState(100);
     const [isFullscreen, setIsFullscreen] = useState(false);
+    // Whether this environment can capture Escape via the Keyboard Lock API
+    // (Chromium + secure context). When it cannot, Escape is swallowed by the
+    // browser in fullscreen, so we expose Esc in the shortcut menu and warn the
+    // user. Stable for the session.
+    const keyboardLockSupported = useMemo(() => isKeyboardLockSupported(), []);
+    const [showEscHint, setShowEscHint] = useState(false);
 
     // Drag UI state
     const [isDragging, setIsDragging] = useState(false);
@@ -177,15 +187,20 @@ export default function DeskSession() {
 
     const { peerConnection, remoteStream, initData, connect, mouseChannel, keyboardChannel, mouseMoveChannel, clipboardChannel, whiteboardChannel, cursorSyncChannel, isRTCConnected, rtcFailed, closeRTC, rtcStats } = useDeskRTC({
         deskId: deskId || null,
-        lastMessage,
-        sendMessage
+        subscribe,
+        sendMessage,
+        sendTracked,
+        cancelQueued
     });
+
+    // Guard against accidentally closing/reloading an active session.
+    useBeforeUnloadConfirm(isRTCConnected);
 
     // AI diagnose stream: sends `Diagnose` and aggregates `DiagnoseEvent`
     // frames off the same signaling channel.
     const diagnose = useDeskDiagnose({
         deskId: deskId || null,
-        lastMessage,
+        subscribe,
         sendMessage,
     });
 
@@ -193,7 +208,7 @@ export default function DeskSession() {
     // ResolveExec -> ExecResult, keyed by command row.
     const exec = useDeskExec({
         deskId: deskId || null,
-        lastMessage,
+        subscribe,
         sendMessage,
     });
 
@@ -217,11 +232,11 @@ export default function DeskSession() {
     const [activeSettings, setActiveSettings] = useState<DeskSettings | null>(null);
 
     // Adaptive resolution: request ids the hook has emitted but not yet
-    // seen an echo for. The lastMessage listener uses this set as a
-    // membership check to detect auto-resolution echoes (so manual
-    // path echoes from future UI keep working unchanged), while the
-    // `useResolutionToast` hook below drives the right-bottom toast
-    // state machine off the same `lastMessage` stream.
+    // seen an echo for. The control-signaling subscription uses this set as
+    // a membership check to detect auto-resolution echoes (so manual path
+    // echoes from future UI keep working unchanged), while the
+    // `useResolutionToast` hook below drives the right-bottom toast state
+    // machine off the same signaling subscription.
     const pendingAutoRequestIdsRef = useRef<Set<string>>(new Set());
 
     // Adaptive-resolution status toast (right-bottom corner). Lives in
@@ -234,7 +249,7 @@ export default function DeskSession() {
     // directly to keep the hook framework-agnostic for testing.
     const { resolutionToast, registerSent: registerResolutionSent } =
         useResolutionToast({
-            lastMessage,
+            subscribe,
             isRTCConnected,
             changeDisplaySettingsType: SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
             translate: (key, fallback) => t(key, fallback),
@@ -292,54 +307,63 @@ export default function DeskSession() {
 
     const { forceError } = microphone;
 
-    // Handle incoming signaling messages regarding control
-    useEffect(() => {
-        if (!lastMessage) return;
-        const { signaling_type } = lastMessage;
+    // `forceError` (from the microphone hook) changes identity ~1 Hz with
+    // the rtcStats pulse; route it through a ref so the control-signaling
+    // subscription below stays stable instead of re-registering each tick.
+    const forceErrorRef = useRef(forceError);
+    forceErrorRef.current = forceError;
 
-        if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
-            console.log("Remote control request ACCEPTED by peer.");
-            setHasControl(true);
-            setIsWaitingApproval(false);
-            videoRef.current?.focus();
-        } else if (signaling_type === SIGNALING_TYPE_CODE_DENY_CONTROL) {
-            console.log("Remote control request DENIED by peer.");
-            setHasControl(false);
-            setIsWaitingApproval(false);
-        } else if (signaling_type === SIGNALING_TYPE_CODE_CLOSE_CONTROL) {
-            console.log("Remote control CLOSED by peer.");
-            setHasControl(false);
-            setIsWaitingApproval(false);
-        } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
-            const data = lastMessage.signaling_data;
-            if (data) {
-                console.log("Private screen state changed:", data);
-                setIsPrivateScreen(data.visible ?? false);
-                setIsPrivateScreenSupported(data.is_supported ?? true);
-                if (data.error_msg) {
-                    console.error("Private screen error:", data.error_msg);
+    // Handle incoming control-related signaling messages off the lossless
+    // subscription stream (every message delivered in order, none coalesced).
+    useEffect(() => {
+        const handle = (message: SignalingMessage) => {
+            const { signaling_type } = message;
+
+            if (signaling_type === SIGNALING_TYPE_CODE_ACCEPT_CONTROL) {
+                console.log("Remote control request ACCEPTED by peer.");
+                setHasControl(true);
+                setIsWaitingApproval(false);
+                videoRef.current?.focus();
+            } else if (signaling_type === SIGNALING_TYPE_CODE_DENY_CONTROL) {
+                console.log("Remote control request DENIED by peer.");
+                setHasControl(false);
+                setIsWaitingApproval(false);
+            } else if (signaling_type === SIGNALING_TYPE_CODE_CLOSE_CONTROL) {
+                console.log("Remote control CLOSED by peer.");
+                setHasControl(false);
+                setIsWaitingApproval(false);
+            } else if (signaling_type === SIGNALING_TYPE_CODE_PRIVATE_SCREEN_STATE_CHANGED) {
+                const data = message.signaling_data;
+                if (data) {
+                    console.log("Private screen state changed:", data);
+                    setIsPrivateScreen(data.visible ?? false);
+                    setIsPrivateScreenSupported(data.is_supported ?? true);
+                    if (data.error_msg) {
+                        console.error("Private screen error:", data.error_msg);
+                    }
+                }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR) {
+                const data = message.signaling_data;
+                if (data && data.error) {
+                    console.error("Remote audio playback error:", data.error);
+                    forceErrorRef.current(data.error);
+                }
+            } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
+                // Adaptive-resolution echo: the right-bottom status toast
+                // is driven by `useResolutionToast`, which subscribes to
+                // the signaling stream directly and gates transitions by the
+                // most recent request id. Here we only need to drain
+                // `pendingAutoRequestIdsRef` so the membership-tracking
+                // contract used by future manual ChangeDisplaySettings UI
+                // does not leak.
+                const requestId = message.request_id;
+                if (requestId && pendingAutoRequestIdsRef.current.delete(requestId)) {
+                    console.debug("[adaptive-resolution] response", message);
                 }
             }
-        } else if (signaling_type === SIGNALING_TYPE_CODE_AUDIO_PLAYBACK_ERROR) {
-            const data = lastMessage.signaling_data;
-            if (data && data.error) {
-                console.error("Remote audio playback error:", data.error);
-                forceError(data.error);
-            }
-        } else if (signaling_type === SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS) {
-            // Adaptive-resolution echo: the right-bottom status toast
-            // is driven by `useResolutionToast`, which subscribes to
-            // `lastMessage` directly and gates transitions by the most
-            // recent request id. Here we only need to drain
-            // `pendingAutoRequestIdsRef` so the membership-tracking
-            // contract used by future manual ChangeDisplaySettings UI
-            // does not leak.
-            const requestId = lastMessage.request_id;
-            if (requestId && pendingAutoRequestIdsRef.current.delete(requestId)) {
-                console.debug("[adaptive-resolution] response", lastMessage);
-            }
-        }
-    }, [lastMessage, forceError, sendMessage, deskId]);
+        };
+        return subscribe(handle);
+    }, [subscribe]);
 
     // Reset requested state if connection drops
     useEffect(() => {
@@ -652,25 +676,22 @@ export default function DeskSession() {
         sendMessage(SIGNALING_TYPE_CODE_ENABLE_PRIVATE_SCREEN, { enable: newState }, deskId);
     };
 
-    const handleFullscreen = () => {
+    const handleFullscreen = async () => {
         if (!document.fullscreenElement) {
-            videoWrapperRef.current?.requestFullscreen().catch(err => {
-                console.log(`Error attempting to enable fullscreen: ${err.message}`);
-            });
             try {
-                (navigator as any).keyboard?.lock(['Escape']);
-                console.log("Keyboard lock: ESC key captured");
-            } catch (error) {
-                console.warn("Failed to lock keyboard:", error);
+                await videoWrapperRef.current?.requestFullscreen();
+            } catch (err) {
+                console.log(`Error attempting to enable fullscreen: ${(err as Error).message}`);
+                return;
             }
+            // Lock Escape only after fullscreen is actually active, otherwise
+            // Chromium does not engage the press-and-hold-to-exit behaviour and
+            // keeps swallowing Escape (so the host never receives it).
+            await lockEscapeKey();
         } else {
+            // Releasing the lock is handled by the fullscreenchange listener so
+            // it also covers exiting via press-and-hold Escape.
             document.exitFullscreen();
-            try {
-                (navigator as any).keyboard?.unlock();
-                console.log("Keyboard unlock: ESC key released");
-            } catch (error) {
-                console.warn("Failed to unlock keyboard:", error);
-            }
         }
     };
 
@@ -678,6 +699,12 @@ export default function DeskSession() {
     useEffect(() => {
         const handleFullscreenChange = () => {
             setIsFullscreen(!!document.fullscreenElement);
+            // Release the Escape keyboard lock whenever we leave fullscreen,
+            // including the press-and-hold-Escape exit path that never goes
+            // through handleFullscreen.
+            if (!document.fullscreenElement) {
+                unlockKeyboard();
+            }
             // Re-center control bar if it exists
             if (controlBarRef.current) {
                 const cb = controlBarRef.current;
@@ -691,6 +718,18 @@ export default function DeskSession() {
         document.addEventListener('fullscreenchange', handleFullscreenChange);
         return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
     }, []);
+
+    // When entering fullscreen in an environment that cannot capture Escape,
+    // briefly remind the user that Esc must be sent via the shortcut menu.
+    useEffect(() => {
+        if (!isFullscreen || keyboardLockSupported) {
+            setShowEscHint(false);
+            return;
+        }
+        setShowEscHint(true);
+        const timer = setTimeout(() => setShowEscHint(false), 6000);
+        return () => clearTimeout(timer);
+    }, [isFullscreen, keyboardLockSupported]);
 
     const handleVolumeChange = (value: number) => {
         if (!videoRef.current) return;
@@ -852,6 +891,18 @@ export default function DeskSession() {
                             tabIndex={0}
                             onCanPlay={() => setIsVideoReady(true)}
                         />
+
+                        {/* Escape hint shown in fullscreen when the Keyboard
+                            Lock API can't capture Esc. Lives inside the
+                            fullscreen element so it stays in the top layer. */}
+                        {showEscHint && (
+                            <div className="absolute top-5 left-1/2 -translate-x-1/2 z-[60] flex max-w-[92%] items-center gap-3 rounded-xl border border-amber-300/70 bg-amber-500/95 px-5 py-3 text-sm font-semibold text-amber-950 shadow-2xl shadow-black/40 ring-1 ring-black/20 backdrop-blur-md animate-in fade-in slide-in-from-top-4 zoom-in-95 duration-300">
+                                <AlertTriangle className="h-6 w-6 shrink-0 animate-pulse" />
+                                <span className="leading-snug">
+                                    {t('pages.desk.escHintFullscreen', 'Pressing Esc exits fullscreen and is not sent to the host. Use the keyboard shortcut menu to send Esc.')}
+                                </span>
+                            </div>
+                        )}
 
                         {/* Whiteboard canvas overlay */}
                         <WhiteboardCanvas
@@ -1429,98 +1480,14 @@ export default function DeskSession() {
                                                 </Button>
                                             </DropdownMenuTrigger>
                                             <DropdownMenuContent align="end" className="w-56 bg-background/90 backdrop-blur-md border-white/10">
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 17 }, // Ctrl
-                                                        { event: "keydown", keyCode: 18 }, // Alt
-                                                        { event: "keydown", keyCode: 46 }, // Del
-                                                        { event: "keyup", keyCode: 46 },
-                                                        { event: "keyup", keyCode: 18 },
-                                                        { event: "keyup", keyCode: 17 },
-                                                    ]);
-                                                }}>
-                                                    Ctrl + Alt + Del
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 17 }, // Ctrl
-                                                        { event: "keydown", keyCode: 16 }, // Shift
-                                                        { event: "keydown", keyCode: 27 }, // Esc
-                                                        { event: "keyup", keyCode: 27 },
-                                                        { event: "keyup", keyCode: 16 },
-                                                        { event: "keyup", keyCode: 17 },
-                                                    ]);
-                                                }}>
-                                                    Ctrl + Shift + Esc (任务管理器)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 18 }, // Alt
-                                                        { event: "keydown", keyCode: 115 }, // F4
-                                                        { event: "keyup", keyCode: 115 },
-                                                        { event: "keyup", keyCode: 18 },
-                                                    ]);
-                                                }}>
-                                                    Alt + F4
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 18 }, // Alt
-                                                        { event: "keydown", keyCode: 9 }, // Tab
-                                                        { event: "keyup", keyCode: 9 },
-                                                        { event: "keyup", keyCode: 18 },
-                                                    ]);
-                                                }}>
-                                                    Alt + Tab (切换窗口)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Windows Key
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 68 }, // D
-                                                        { event: "keyup", keyCode: 68 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + D (显示桌面)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 69 }, // E
-                                                        { event: "keyup", keyCode: 69 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + E (打开资源管理器)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 82 }, // R
-                                                        { event: "keyup", keyCode: 82 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + R (运行)
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem onClick={() => {
-                                                    sendKeyboardEvents([
-                                                        { event: "keydown", keyCode: 91 }, // Win
-                                                        { event: "keydown", keyCode: 76 }, // L
-                                                        { event: "keyup", keyCode: 76 },
-                                                        { event: "keyup", keyCode: 91 },
-                                                    ]);
-                                                }}>
-                                                    Win + L (锁定计算机)
-                                                </DropdownMenuItem>
+                                                {getKeyboardShortcuts(initData?.operation_system, { includeEscape: !keyboardLockSupported }).map(shortcut => (
+                                                    <DropdownMenuItem
+                                                        key={shortcut.id}
+                                                        onClick={() => sendKeyboardEvents(shortcut.events)}
+                                                    >
+                                                        {t(shortcut.labelKey, shortcut.labelFallback)}
+                                                    </DropdownMenuItem>
+                                                ))}
                                             </DropdownMenuContent>
                                         </DropdownMenu>
                                     )}

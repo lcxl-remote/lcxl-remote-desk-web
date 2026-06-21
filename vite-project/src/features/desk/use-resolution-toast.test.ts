@@ -31,26 +31,38 @@ function makeFailed(reqId: string, code: number, message: string): ResolutionEch
     };
 }
 
-interface RenderProps {
-    lastMessage: ResolutionEchoMessage | null;
-    isRTCConnected: boolean;
+/** A controllable signaling subscription: a stable `subscribe` plus an
+ *  `emit` that synchronously delivers a message to every registered
+ *  handler — mirroring the real hook's lossless fan-out. */
+function makeSignalingHarness() {
+    const handlers = new Set<(m: ResolutionEchoMessage) => void>();
+    const subscribe = (h: (m: ResolutionEchoMessage) => void) => {
+        handlers.add(h);
+        return () => {
+            handlers.delete(h);
+        };
+    };
+    const emit = (m: ResolutionEchoMessage) => {
+        act(() => {
+            handlers.forEach((h) => h(m));
+        });
+    };
+    return { subscribe, emit };
 }
 
-function renderToast(initial: Partial<RenderProps> = {}) {
-    const props: RenderProps = {
-        lastMessage: initial.lastMessage ?? null,
-        isRTCConnected: initial.isRTCConnected ?? true,
-    };
-    return renderHook(
-        (p: RenderProps) =>
+function renderToast(initial: { isRTCConnected?: boolean } = {}) {
+    const { subscribe, emit } = makeSignalingHarness();
+    const view = renderHook(
+        (p: { isRTCConnected: boolean }) =>
             useResolutionToast({
-                lastMessage: p.lastMessage,
+                subscribe,
                 isRTCConnected: p.isRTCConnected,
                 changeDisplaySettingsType: CHANGE_DISPLAY_SETTINGS,
                 translate: tr,
             }),
-        { initialProps: props },
+        { initialProps: { isRTCConnected: initial.isRTCConnected ?? true } },
     );
+    return { ...view, emit };
 }
 
 describe("useResolutionToast", () => {
@@ -79,10 +91,10 @@ describe("useResolutionToast", () => {
     });
 
     it("transitions updating → success on a matching Applied echo and auto-clears", () => {
-        const { result, rerender } = renderToast();
+        const { result, emit } = renderToast();
         act(() => result.current.registerSent("r-1", 1920, 1080));
 
-        rerender({ lastMessage: makeApplied("r-1", 1920, 1080), isRTCConnected: true });
+        emit(makeApplied("r-1", 1920, 1080));
         expect(result.current.resolutionToast).toEqual({
             phase: "success",
             appliedW: 1920,
@@ -97,13 +109,10 @@ describe("useResolutionToast", () => {
     });
 
     it("transitions updating → failed on an error echo with the server message and lingers longer", () => {
-        const { result, rerender } = renderToast();
+        const { result, emit } = renderToast();
         act(() => result.current.registerSent("r-bad", 1280, 720));
 
-        rerender({
-            lastMessage: makeFailed("r-bad", 7, "auto change throttled"),
-            isRTCConnected: true,
-        });
+        emit(makeFailed("r-bad", 7, "auto change throttled"));
         expect(result.current.resolutionToast).toEqual({
             phase: "failed",
             reason: "auto change throttled",
@@ -132,14 +141,11 @@ describe("useResolutionToast", () => {
      * toast into a misleading success.
      */
     it("ignores stale echoes whose request id no longer matches the latest registration", () => {
-        const { result, rerender } = renderToast();
+        const { result, emit } = renderToast();
         act(() => result.current.registerSent("r-old", 1920, 1080));
         act(() => result.current.registerSent("r-new", 2560, 1440));
 
-        rerender({
-            lastMessage: makeApplied("r-old", 1920, 1080),
-            isRTCConnected: true,
-        });
+        emit(makeApplied("r-old", 1920, 1080));
 
         // Should still be updating with the NEW target — the stale
         // echo must not collapse the toast.
@@ -184,7 +190,7 @@ describe("useResolutionToast", () => {
         act(() => result.current.registerSent("r-rtc", 1920, 1080));
         expect(result.current.resolutionToast).not.toBeNull();
 
-        rerender({ lastMessage: null, isRTCConnected: false });
+        rerender({ isRTCConnected: false });
         expect(result.current.resolutionToast).toBeNull();
     });
 
@@ -194,15 +200,12 @@ describe("useResolutionToast", () => {
      * must not pop the toast back open.
      */
     it("does not resurrect the toast from a stale echo after RTC reconnect", () => {
-        const { result, rerender } = renderToast({ isRTCConnected: true });
+        const { result, rerender, emit } = renderToast({ isRTCConnected: true });
         act(() => result.current.registerSent("r-pre-drop", 1920, 1080));
-        rerender({ lastMessage: null, isRTCConnected: false });
+        rerender({ isRTCConnected: false });
         // Reconnect with the same hook instance.
-        rerender({ lastMessage: null, isRTCConnected: true });
-        rerender({
-            lastMessage: makeApplied("r-pre-drop", 1920, 1080),
-            isRTCConnected: true,
-        });
+        rerender({ isRTCConnected: true });
+        emit(makeApplied("r-pre-drop", 1920, 1080));
         expect(result.current.resolutionToast).toBeNull();
     });
 
@@ -211,36 +214,35 @@ describe("useResolutionToast", () => {
      * The `desk-session` parent passes `translate` as an inline arrow
      * `(k, f) => t(k, f)` rebuilt on every render. When the hook's
      * effect listed `translate` in its dep array, every parent render
-     * re-ran the lastMessage effect; once a 205 echo had landed and
+     * re-ran the signaling effect; once a 205 echo had landed and
      * `latestReqIdRef` matched, each re-run produced a fresh
      * `setResolutionToast({ phase: 'success', ... })` object, which
      * re-rendered the parent, which built yet another translate
      * arrow, looping forever and crashing the app the moment 205
      * actually completed. The fix routes translate through a ref so
      * the effect's dep set ignores it. This test pins that
-     * invariant: rerendering with a brand-new translate identity on
-     * top of the same lastMessage must NOT mutate the toast state or
+     * invariant: rerendering with a brand-new translate identity
+     * after an echo has settled must NOT mutate the toast state or
      * re-invoke the translator.
      */
     it("ignores translate prop identity changes after an echo has settled", () => {
         const t1 = vi.fn((_key: string, fallback: string) => fallback);
         const t2 = vi.fn((_key: string, fallback: string) => fallback);
+        const { subscribe, emit } = makeSignalingHarness();
         type Props = {
-            lastMessage: ResolutionEchoMessage | null;
             isRTCConnected: boolean;
             translate: (k: string, f: string) => string;
         };
         const { result, rerender } = renderHook(
             (p: Props) =>
                 useResolutionToast({
-                    lastMessage: p.lastMessage,
+                    subscribe,
                     isRTCConnected: p.isRTCConnected,
                     changeDisplaySettingsType: CHANGE_DISPLAY_SETTINGS,
                     translate: p.translate,
                 }),
             {
                 initialProps: {
-                    lastMessage: null,
                     isRTCConnected: true,
                     translate: t1,
                 },
@@ -256,26 +258,21 @@ describe("useResolutionToast", () => {
             request_id: "r-loop",
             response_state: { error_code: 7 },
         };
-        rerender({
-            lastMessage: failedEcho,
-            isRTCConnected: true,
-            translate: t1,
-        });
+        emit(failedEcho);
         const t1CallsAfterEcho = t1.mock.calls.length;
         const toastAfterEcho = result.current.resolutionToast;
         expect(toastAfterEcho?.phase).toBe("failed");
         expect(t1CallsAfterEcho).toBeGreaterThanOrEqual(1);
 
         // Now rerender 5x with a brand-new translate identity each
-        // time but the SAME lastMessage object. Before the fix, this
-        // would re-fire the effect on every rerender and re-set the
-        // toast, tripping React's #185 in the real app. After the
+        // time without re-emitting. Before the fix, listing translate
+        // in the effect deps re-fired it on every rerender and re-set
+        // the toast, tripping React's #185 in the real app. After the
         // fix the effect's deps no longer include translate, so
         // neither t1 nor t2 gets called again and the toast object
         // stays identical (referential equality).
         for (let i = 0; i < 5; i += 1) {
             rerender({
-                lastMessage: failedEcho,
                 isRTCConnected: true,
                 translate: t2,
             });

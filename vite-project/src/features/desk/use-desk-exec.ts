@@ -6,7 +6,7 @@ import {
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
 import type { AgentError, RiskLevel, SuggestedCommand } from './use-desk-diagnose';
-import type { SignalingMessage } from './use-desk-signaling';
+import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::exec`. These ride the ConfirmExec /
 // ExecPreview / ResolveExec / ExecResult signaling types as `signaling_data`;
@@ -70,7 +70,7 @@ function execOutputFromOutcome(outcome: ExecOutcome): ExecOutput | null {
 
 type UseDeskExecProps = {
     deskId: string | null;
-    lastMessage: SignalingMessage | null;
+    subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: (
         type: number,
         data: unknown,
@@ -87,7 +87,7 @@ type UseDeskExecProps = {
  * it classifies, mints the `exec_request_id`, and only previews/executes
  * whitelist templates.
  */
-export function useDeskExec({ deskId, lastMessage, sendMessage }: UseDeskExecProps) {
+export function useDeskExec({ deskId, subscribe, sendMessage }: UseDeskExecProps) {
     // Keyed by command row index.
     const [entries, setEntries] = useState<Record<number, ExecEntry>>({});
     // Map an in-flight ConfirmExec signaling request_id -> row index, so the
@@ -177,54 +177,58 @@ export function useDeskExec({ deskId, lastMessage, sendMessage }: UseDeskExecPro
     }, []);
 
     useEffect(() => {
-        if (!lastMessage) return;
-
-        if (lastMessage.signaling_type === SIGNALING_TYPE_CODE_EXEC_PREVIEW) {
-            const preview = lastMessage.signaling_data as ExecPreview | null;
-            const reqId = lastMessage.request_id;
-            if (!preview || !reqId) return;
-            const rowIndex = previewReqToRow.current[reqId];
-            if (rowIndex === undefined) return;
-            delete previewReqToRow.current[reqId];
-            if (preview.exec_request_id) {
-                execIdToRow.current[preview.exec_request_id] = rowIndex;
-            }
-            setEntries((prev) => ({
-                ...prev,
-                [rowIndex]: {
-                    phase: preview.executable ? 'awaiting' : 'error',
-                    preview,
-                    execRequestId: preview.exec_request_id,
-                    output: null,
-                    error: preview.executable
-                        ? null
-                        : (preview.blocked_reason ?? preview.policy_note ?? preview.impact),
-                },
-            }));
-            return;
-        }
-
-        if (lastMessage.signaling_type === SIGNALING_TYPE_CODE_EXEC_RESULT) {
-            const payload = lastMessage.signaling_data as ExecResultPayload | null;
-            if (!payload) return;
-            const rowIndex = execIdToRow.current[payload.exec_request_id];
-            if (rowIndex === undefined) return;
-            delete execIdToRow.current[payload.exec_request_id];
-            const output = execOutputFromOutcome(payload.outcome);
-            setEntries((prev) => ({
-                ...prev,
-                [rowIndex]: {
-                    ...prev[rowIndex],
-                    phase: output ? 'done' : 'error',
-                    output,
-                    error:
-                        output || payload.outcome.status !== 'err'
+        // Subscribe to the lossless signaling stream: every ExecPreview /
+        // ExecResult is delivered in order, so two frames arriving in one
+        // tick can no longer coalesce away.
+        const handle = (message: SignalingMessage) => {
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_PREVIEW) {
+                const preview = message.signaling_data as ExecPreview | null;
+                const reqId = message.request_id;
+                if (!preview || !reqId) return;
+                const rowIndex = previewReqToRow.current[reqId];
+                if (rowIndex === undefined) return;
+                delete previewReqToRow.current[reqId];
+                if (preview.exec_request_id) {
+                    execIdToRow.current[preview.exec_request_id] = rowIndex;
+                }
+                setEntries((prev) => ({
+                    ...prev,
+                    [rowIndex]: {
+                        phase: preview.executable ? 'awaiting' : 'error',
+                        preview,
+                        execRequestId: preview.exec_request_id,
+                        output: null,
+                        error: preview.executable
                             ? null
-                            : payload.outcome.data.message,
-                },
-            }));
-        }
-    }, [lastMessage]);
+                            : (preview.blocked_reason ?? preview.policy_note ?? preview.impact),
+                    },
+                }));
+                return;
+            }
+
+            if (message.signaling_type === SIGNALING_TYPE_CODE_EXEC_RESULT) {
+                const payload = message.signaling_data as ExecResultPayload | null;
+                if (!payload) return;
+                const rowIndex = execIdToRow.current[payload.exec_request_id];
+                if (rowIndex === undefined) return;
+                delete execIdToRow.current[payload.exec_request_id];
+                const output = execOutputFromOutcome(payload.outcome);
+                setEntries((prev) => ({
+                    ...prev,
+                    [rowIndex]: {
+                        ...prev[rowIndex],
+                        phase: output ? 'done' : 'error',
+                        output,
+                        error:
+                            output || payload.outcome.status !== 'err'
+                                ? null
+                                : payload.outcome.data.message,
+                    },
+                }));
+            }
+        };
+        return subscribe(handle);
+    }, [subscribe]);
 
     return { entries, requestPreview, approve, reject, dismiss };
 }

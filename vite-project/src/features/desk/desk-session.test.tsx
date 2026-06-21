@@ -23,8 +23,10 @@ vi.mock('react-i18next', () => ({
 vi.mock('./use-desk-signaling', () => ({
   useDeskSignaling: () => ({
     isConnected: true, // Force connected state to show control bar
-    lastMessage: null,
+    subscribe: () => () => {}, // no-op subscription returning an unsubscribe
     sendMessage: vi.fn(),
+    sendTracked: vi.fn(() => ({ requestId: 'r', disposition: 'sent' })),
+    cancelQueued: vi.fn(),
   }),
 }));
 
