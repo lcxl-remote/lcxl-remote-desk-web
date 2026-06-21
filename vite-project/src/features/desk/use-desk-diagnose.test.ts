@@ -109,7 +109,7 @@ describe('extractStreamingSummary', () => {
 // Controllable signaling subscription: `feed` synchronously delivers a
 // DiagnoseEvent frame to the hook's registered handler (wrapped in `act`),
 // mirroring the real lossless fan-out that streaming relies on.
-function renderDiagnose() {
+function renderDiagnose(deskId: string | null = 'desk-1') {
     const handlers = new Set<(m: SignalingMessage) => void>();
     const subscribe = (h: (m: SignalingMessage) => void) => {
         handlers.add(h);
@@ -117,14 +117,28 @@ function renderDiagnose() {
             handlers.delete(h);
         };
     };
-    const view = renderHook(() =>
-        useDeskDiagnose({ deskId: 'desk-1', subscribe, sendMessage }),
+    const view = renderHook(
+        ({ deskId }: { deskId: string | null }) =>
+            useDeskDiagnose({ deskId, subscribe, sendMessage }),
+        { initialProps: { deskId } },
     );
     const feed = (msg: SignalingMessage) =>
         act(() => {
             handlers.forEach((h) => h(msg));
         });
     return { ...view, feed };
+}
+
+/**
+ * The conversation_id of the Nth Diagnose request, skipping interleaved
+ * DiagnoseCancel calls (which carry a null body).
+ */
+function conversationIdOfCall(n: number): string {
+    const diagnoses = sendMessage.mock.calls.filter(
+        (c) => c[0] === SIGNALING_TYPE_CODE_DIAGNOSE,
+    );
+    const body = diagnoses[n][1] as { conversation_id?: string };
+    return body.conversation_id as string;
 }
 
 describe('useDeskDiagnose', () => {
@@ -135,11 +149,17 @@ describe('useDeskDiagnose', () => {
 
         expect(sendMessage).toHaveBeenCalledWith(
             SIGNALING_TYPE_CODE_DIAGNOSE,
-            { question: 'why slow?', include_screen: true, context_kinds: [] },
+            expect.objectContaining({
+                question: 'why slow?',
+                include_screen: true,
+                context_kinds: [],
+                conversation_id: expect.any(String),
+            }),
             'desk-1',
         );
         expect(result.current.state.phase).toBe('running');
         expect(result.current.state.requestId).toBe('req-1');
+        expect(result.current.state.conversationId).toBe(conversationIdOfCall(0));
     });
 
     it('aggregates status + partial frames in order, then resolves on final', () => {
@@ -355,5 +375,84 @@ describe('useDeskDiagnose', () => {
         feed(frame({ request_id: 'req-1', seq: 0, kind: 'answer', answer: 'done' }));
         expect(result.current.state.phase).toBe('done');
         expect(result.current.state.pendingExec).toBeNull();
+    });
+
+    it('threads a stable conversation_id across follow-up turns and keeps history', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('why slow?', {}));
+        const conv = conversationIdOfCall(0);
+        expect(conv).toBeTruthy();
+        expect(result.current.state.conversationId).toBe(conv);
+
+        // Finish the first turn.
+        feed(frame({ request_id: 'req-1', seq: 0, kind: 'answer', answer: 'cpu is busy' }));
+        expect(result.current.state.phase).toBe('done');
+
+        // Follow up: same conversation id, prior turn snapshotted into history.
+        act(() => result.current.start('and memory?', {}));
+        expect(conversationIdOfCall(1)).toBe(conv);
+        expect(result.current.state.phase).toBe('running');
+        expect(result.current.state.question).toBe('and memory?');
+        expect(result.current.state.history).toHaveLength(1);
+        expect(result.current.state.history[0].question).toBe('why slow?');
+        expect(result.current.state.history[0].answer).toBe('cpu is busy');
+    });
+
+    it('a follow-up after an error continues the same conversation', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('why slow?', {}));
+        const conv = conversationIdOfCall(0);
+        feed(
+            frame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'error',
+                error: { kind: 'internal', message: 'boom', retryable: true, safe_for_model: true },
+            }),
+        );
+        expect(result.current.state.phase).toBe('error');
+
+        act(() => result.current.start('try again', {}));
+        // The failed turn is settled, so the follow-up reuses the conversation and
+        // the failed turn is captured in the transcript.
+        expect(conversationIdOfCall(1)).toBe(conv);
+        expect(result.current.state.history).toHaveLength(1);
+        expect(result.current.state.history[0].phase).toBe('error');
+        expect(result.current.state.history[0].error).toBe('boom');
+    });
+
+    it('reset starts a new conversation on the next turn', () => {
+        const { result } = renderDiagnose();
+        act(() => result.current.start('q1', {}));
+        act(() => result.current.reset());
+        act(() => result.current.start('q2', {}));
+        expect(conversationIdOfCall(1)).not.toBe(conversationIdOfCall(0));
+        expect(result.current.state.history).toEqual([]);
+    });
+
+    it('handoff makes the next turn a new conversation', () => {
+        const { result, feed } = renderDiagnose();
+        act(() => result.current.start('q1', {}));
+        feed(frame({ request_id: 'req-1', seq: 0, kind: 'answer', answer: 'a' }));
+        act(() => result.current.handoff());
+        act(() => result.current.start('q2', {}));
+        expect(conversationIdOfCall(1)).not.toBe(conversationIdOfCall(0));
+    });
+
+    it('a desk change regenerates the conversation and clears the transcript', () => {
+        const { result, feed, rerender } = renderDiagnose('desk-1');
+        act(() => result.current.start('q1', {}));
+        feed(frame({ request_id: 'req-1', seq: 0, kind: 'answer', answer: 'a' }));
+        act(() => result.current.start('q2', {}));
+        expect(result.current.state.history).toHaveLength(1);
+
+        act(() => rerender({ deskId: 'desk-2' }));
+        expect(result.current.state.phase).toBe('idle');
+        expect(result.current.state.history).toEqual([]);
+        expect(result.current.state.conversationId).toBeNull();
+
+        act(() => result.current.start('q3', {}));
+        // q1, q2, q3 are the three Diagnose requests; q3 must open a new conversation.
+        expect(conversationIdOfCall(2)).not.toBe(conversationIdOfCall(0));
     });
 });

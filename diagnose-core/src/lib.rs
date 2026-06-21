@@ -29,6 +29,7 @@ mod agent_loop_acceptance;
 pub mod agentic_prompt;
 pub mod chat;
 pub mod chunk;
+pub mod conversation_key;
 pub mod exec_classify;
 pub mod exec_tools;
 pub mod parser;

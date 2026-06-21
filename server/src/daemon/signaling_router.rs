@@ -5275,6 +5275,7 @@ mod tests {
                 include_screen: false,
                 context_kinds: vec![],
                 locale: None,
+                conversation_id: None,
             },
         }
     }
@@ -5370,6 +5371,7 @@ mod tests {
             include_screen: false,
             context_kinds: vec![],
             locale: None,
+            conversation_id: None,
         })
         .unwrap();
         handle_diagnose_inbound(&ctx, &diagnose_model(raw))
@@ -5586,6 +5588,7 @@ mod tests {
             include_screen: false,
             context_kinds: vec![],
             locale: None,
+            conversation_id: None,
         })
         .unwrap();
         handle_diagnose_inbound(&ctx, &diagnose_model(raw))

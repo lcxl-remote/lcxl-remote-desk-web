@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge"
 import {
     extractStreamingSummary,
     type Confidence,
+    type DiagnoseHistoryTurn,
     type DiagnoseState,
     type DiagnoseStartOptions,
     type RiskLevel,
@@ -329,6 +330,81 @@ function AgenticExecApproval({
     )
 }
 
+/**
+ * The settled turns of the current conversation, rendered as a compact chat
+ * transcript (question bubble + the turn's answer / summary / error) above the
+ * live turn. Empty for the first turn, so it renders nothing.
+ */
+function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] }) {
+    const { t } = useTranslation()
+    if (turns.length === 0) return null
+    return (
+        <div className="flex flex-col gap-3 border-b border-white/10 pb-3">
+            {turns.map((turn) => {
+                const reply = turn.error
+                    ? turn.error
+                    : turn.answer ?? turn.result?.summary ?? turn.summary
+                return (
+                    <div key={turn.requestId} className="flex flex-col gap-1.5">
+                        <div className="max-w-[85%] self-end rounded-lg rounded-br-sm bg-blue-500/20 px-2.5 py-1.5 text-xs text-white/90">
+                            {turn.question}
+                        </div>
+                        <div
+                            className={`max-w-[90%] self-start whitespace-pre-wrap rounded-lg rounded-bl-sm px-2.5 py-1.5 text-xs ${
+                                turn.phase === "error"
+                                    ? "bg-red-500/15 text-red-200"
+                                    : "bg-white/10 text-white/80"
+                            }`}
+                        >
+                            {reply ||
+                                t(
+                                    "pages.desk.diagnose.handedOff",
+                                    "Handed off to a human operator.",
+                                )}
+                        </div>
+                    </div>
+                )
+            })}
+        </div>
+    )
+}
+
+/**
+ * A follow-up question composer shown once a turn settles (done or error). It
+ * sends another question on the same conversation so the model keeps the prior
+ * turns' context.
+ */
+function FollowUpComposer({ onSubmit }: { onSubmit: (question: string) => void }) {
+    const { t } = useTranslation()
+    const [text, setText] = useState("")
+    const send = () => {
+        const trimmed = text.trim()
+        if (!trimmed) return
+        onSubmit(trimmed)
+        setText("")
+    }
+    return (
+        <div className="flex flex-col gap-2 border-t border-white/10 pt-3">
+            <label className="text-xs text-gray-400">
+                {t("pages.desk.diagnose.followUpLabel", "Ask a follow-up")}
+            </label>
+            <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                rows={2}
+                className="w-full resize-none rounded-md border border-white/15 bg-white/5 p-2 text-sm text-white outline-none focus:border-white/40"
+                placeholder={t(
+                    "pages.desk.diagnose.followUpPlaceholder",
+                    "Ask a follow-up question…",
+                )}
+            />
+            <Button size="sm" className="w-full" disabled={!text.trim()} onClick={send}>
+                {t("pages.desk.diagnose.followUpSubmit", "Send follow-up")}
+            </Button>
+        </div>
+    )
+}
+
 export function DiagnosePanel({
     state,
     onStart,
@@ -356,6 +432,10 @@ export function DiagnosePanel({
         // Pass the current UI language so the AI answers in it.
         onStart(trimmed, { includeScreen, locale: i18n.language })
     }
+
+    // A follow-up keeps the same conversation; the hook reuses the conversation
+    // id so the model sees the prior turns.
+    const askFollowUp = (q: string) => onStart(q, { includeScreen, locale: i18n.language })
 
     // The lifecycle status name is a backend-provided phase string; map the
     // known ones to localized labels, falling back to the raw value.
@@ -395,6 +475,15 @@ export function DiagnosePanel({
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm">
+                {/* Conversation transcript (prior settled turns) */}
+                {(state.phase === "running" ||
+                    state.phase === "done" ||
+                    state.phase === "error") && (
+                    <div className="mb-3">
+                        <ConversationHistory turns={state.history} />
+                    </div>
+                )}
+
                 {/* Question form (idle) */}
                 {state.phase === "idle" && (
                     <div className="flex flex-col gap-3">
@@ -489,6 +578,9 @@ export function DiagnosePanel({
                             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                             <span>{state.error}</span>
                         </div>
+                        {/* A failed turn is settled, so a follow-up may continue the
+                            same conversation (the backend allows re-claiming it). */}
+                        <FollowUpComposer onSubmit={askFollowUp} />
                     </div>
                 )}
 
@@ -689,6 +781,8 @@ export function DiagnosePanel({
                                 )}
                             </div>
                         )}
+                        {/* Continue the conversation with another question. */}
+                        <FollowUpComposer onSubmit={askFollowUp} />
                     </div>
                 )}
             </div>

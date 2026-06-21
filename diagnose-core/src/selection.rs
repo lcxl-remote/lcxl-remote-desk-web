@@ -206,6 +206,7 @@ mod tests {
             include_screen,
             context_kinds: kinds.iter().map(|s| s.to_string()).collect(),
             locale: None,
+            conversation_id: None,
         }
     }
 

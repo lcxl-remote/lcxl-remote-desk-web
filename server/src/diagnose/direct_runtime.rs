@@ -15,9 +15,11 @@
 //! execution mode and always behind operator approval (an `ExecPreview` pushed to
 //! the control connection, resolved by `ResolveExec`).
 //!
-//! A request id keys a fresh in-memory session (one single-turn conversation per
-//! request); cross-question continuation over a stable conversation id is a later
-//! step that needs a protocol field for it.
+//! Continuation is keyed by a subject-namespaced conversation key derived from
+//! the request's (non-authoritative) `conversation_id`: follow-up questions that
+//! reuse the same client id continue the same in-memory session, so the model
+//! sees the accumulated history. An absent / malformed id falls back to the
+//! per-request id, keying a fresh single-question conversation.
 
 use std::sync::Arc;
 
@@ -27,6 +29,7 @@ use desk_agent_protocol::{AgentScope, Capability, ExecutionMode};
 use desk_diagnose_core::agent_loop::{LoopDeps, run_agent_turn};
 use desk_diagnose_core::agentic_prompt::build_agentic_system_message;
 use desk_diagnose_core::chat::{ChatMessage, ChatRole};
+use desk_diagnose_core::conversation_key::derive_conversation_key;
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::read_tools::read_tool_registry;
 use desk_diagnose_core::registry::RegisteredTool;
@@ -288,6 +291,17 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
     let mut bridge = StreamingTurnSink::new(sink, request_id);
     bridge.turn_started(&turn_id);
 
+    // Derive the subject-namespaced storage key from the client's continuation
+    // intent. A reused (valid) id continues the same session; absent/malformed
+    // falls back to the per-request id (a fresh single-question conversation).
+    let conversation_key = derive_conversation_key(
+        tenant_id.as_deref(),
+        &actor_id,
+        &device_id,
+        request.conversation_id.as_deref(),
+        request_id,
+    );
+
     let clock = now_rfc3339;
     let now = clock();
     let deps = LoopDeps {
@@ -301,7 +315,7 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
         clock: &clock,
     };
     let claim = ClaimTurnParams {
-        conversation_id: request_id.to_string(),
+        conversation_id: conversation_key,
         tenant_id,
         actor_id,
         device_id,
@@ -416,6 +430,7 @@ mod tests {
             include_screen: false,
             context_kinds: vec![],
             locale: None,
+            conversation_id: None,
         }
     }
 
@@ -664,6 +679,106 @@ mod tests {
         let runtime = DirectAgentRuntime::for_test(vec![answer("ok")], settings_confirm_exec());
         // The read-only registry never includes exec_command.
         assert!(!runtime.registry.iter().any(|t| t.name() == "exec_command"));
+    }
+
+    /// A model seam that records the `messages` of every request it receives and
+    /// returns the next queued answer turn. Lets a test assert that a follow-up
+    /// turn's model request carries the prior turn's history.
+    struct RecordingModel {
+        seen: std::sync::Mutex<Vec<Vec<ChatMessage>>>,
+        answers: std::sync::Mutex<std::collections::VecDeque<ModelTurn>>,
+    }
+    impl RecordingModel {
+        fn new(answers: Vec<ModelTurn>) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+                answers: std::sync::Mutex::new(answers.into()),
+            }
+        }
+    }
+    #[async_trait::async_trait(?Send)]
+    impl ModelSeam for RecordingModel {
+        async fn call(
+            &self,
+            request: desk_diagnose_core::seam::ModelRequest,
+            _sink: &mut dyn desk_diagnose_core::seam::TurnSink,
+        ) -> Result<ModelTurn, desk_agent_protocol::AgentError> {
+            self.seen.lock().unwrap().push(request.messages.clone());
+            Ok(self.answers.lock().unwrap().pop_front().expect("an answer"))
+        }
+    }
+
+    /// Two questions carrying the same `conversation_id` continue one session: the
+    /// second turn's model request includes the first turn's user question and
+    /// assistant answer. A differing request id per turn must not start a new
+    /// conversation when the (subject-namespaced) conversation key matches.
+    #[tokio::test]
+    async fn same_conversation_id_threads_history_to_model() {
+        let model = Arc::new(RecordingModel::new(vec![answer("a1"), answer("a2")]));
+        let runtime = DirectAgentRuntime::with_seams(
+            model.clone(),
+            Arc::new(test_seams::FakeReadTools),
+            Arc::new(InMemorySessionSeam::new()),
+            settings(true),
+        );
+
+        let req1 = DiagnoseRequestData {
+            question: "why is cpu high?".into(),
+            include_screen: false,
+            context_kinds: vec![],
+            locale: None,
+            conversation_id: Some("cv-1".into()),
+        };
+        let req2 = DiagnoseRequestData {
+            question: "and memory?".into(),
+            ..req1.clone()
+        };
+        let (_s1, sink1) = recorder();
+        runtime.run("req-a", req1, None, None, sink1).await;
+        let (_s2, sink2) = recorder();
+        runtime.run("req-b", req2, None, None, sink2).await;
+
+        let seen = model.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "model called once per turn");
+        // Turn 2's request must carry turn 1's user question and assistant answer.
+        let turn2: Vec<&str> = seen[1].iter().map(|m| m.text.as_str()).collect();
+        assert!(
+            turn2.iter().any(|t| t.contains("why is cpu high?")),
+            "turn 2 missing prior question: {turn2:?}"
+        );
+        assert!(
+            turn2.iter().any(|t| t.contains("a1")),
+            "turn 2 missing prior answer: {turn2:?}"
+        );
+        assert!(
+            turn2.iter().any(|t| t.contains("and memory?")),
+            "turn 2 missing current question: {turn2:?}"
+        );
+    }
+
+    /// Two questions WITHOUT a conversation id (each falling back to its own
+    /// request id) start independent conversations: the second turn's model
+    /// request must not contain the first turn's content.
+    #[tokio::test]
+    async fn absent_conversation_id_does_not_thread_history() {
+        let model = Arc::new(RecordingModel::new(vec![answer("a1"), answer("a2")]));
+        let runtime = DirectAgentRuntime::with_seams(
+            model.clone(),
+            Arc::new(test_seams::FakeReadTools),
+            Arc::new(InMemorySessionSeam::new()),
+            settings(true),
+        );
+        let (_s1, sink1) = recorder();
+        runtime.run("req-a", request("first question"), None, None, sink1).await;
+        let (_s2, sink2) = recorder();
+        runtime.run("req-b", request("second question"), None, None, sink2).await;
+
+        let seen = model.seen.lock().unwrap();
+        let turn2: Vec<&str> = seen[1].iter().map(|m| m.text.as_str()).collect();
+        assert!(
+            !turn2.iter().any(|t| t.contains("first question")),
+            "independent conversations must not share history: {turn2:?}"
+        );
     }
 
     /// An immediate answer (no tool call) streams TurnStarted → Answer.

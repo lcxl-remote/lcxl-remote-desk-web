@@ -15,7 +15,9 @@ vi.mock("react-i18next", () => ({
 
 const baseState: DiagnoseState = {
     phase: "idle",
+    conversationId: null,
     requestId: null,
+    question: "",
     status: null,
     partialSummary: "",
     result: null,
@@ -24,6 +26,7 @@ const baseState: DiagnoseState = {
     tools: [],
     answer: null,
     pendingExec: null,
+    history: [],
 };
 
 function renderPanel(state: Partial<DiagnoseState>) {
@@ -129,6 +132,49 @@ describe("DiagnosePanel", () => {
     it("error: shows the failure message", () => {
         renderPanel({ phase: "error", error: "evidence redaction failed" });
         expect(screen.getByText("evidence redaction failed")).toBeInTheDocument();
+    });
+
+    it("done: a follow-up composer continues the conversation", () => {
+        const { onStart } = renderPanel({ phase: "done", answer: "the host is healthy" });
+        const followUp = screen.getByPlaceholderText("Ask a follow-up question…");
+        fireEvent.change(followUp, { target: { value: "and the disk?" } });
+        fireEvent.click(screen.getByText("Send follow-up"));
+        expect(onStart).toHaveBeenCalledWith("and the disk?", {
+            includeScreen: false,
+            locale: "en-US",
+        });
+    });
+
+    it("error: also offers a follow-up composer", () => {
+        const { onStart } = renderPanel({ phase: "error", error: "boom" });
+        const followUp = screen.getByPlaceholderText("Ask a follow-up question…");
+        fireEvent.change(followUp, { target: { value: "retry differently" } });
+        fireEvent.click(screen.getByText("Send follow-up"));
+        expect(onStart).toHaveBeenCalledWith("retry differently", {
+            includeScreen: false,
+            locale: "en-US",
+        });
+    });
+
+    it("transcript: prior settled turns render above the live turn", () => {
+        renderPanel({
+            phase: "running",
+            status: "modeling",
+            history: [
+                {
+                    requestId: "req-0",
+                    question: "why is cpu high?",
+                    result: null,
+                    answer: "a runaway process",
+                    summary: "",
+                    tools: [],
+                    phase: "done",
+                    error: null,
+                },
+            ],
+        });
+        expect(screen.getByText("why is cpu high?")).toBeInTheDocument();
+        expect(screen.getByText("a runaway process")).toBeInTheDocument();
     });
 
     const doneWithCommand: Partial<DiagnoseState> = {

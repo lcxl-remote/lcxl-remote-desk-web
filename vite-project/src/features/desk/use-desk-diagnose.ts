@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { v4 } from 'uuid';
 import {
     SIGNALING_TYPE_CODE_DIAGNOSE,
     SIGNALING_TYPE_CODE_DIAGNOSE_EVENT,
@@ -181,9 +182,41 @@ export function extractStreamingSummary(raw: string): string {
 // terminal `error` frame.
 export type DiagnosePhase = 'idle' | 'running' | 'done' | 'error';
 
+/**
+ * One settled turn of the conversation, frozen for the transcript once a newer
+ * follow-up question starts. The live (current) turn is held in the top-level
+ * state fields; when the next `start` begins, the settled live turn is snapshot
+ * into `history` so the panel can render the running conversation.
+ */
+export type DiagnoseHistoryTurn = {
+    requestId: string;
+    /** The question the user asked for this turn. */
+    question: string;
+    /** Structured result, if a `final` frame arrived (single-turn path). */
+    result: Diagnosis | null;
+    /** Agentic free-text answer, if an `answer` frame arrived. */
+    answer: string | null;
+    /** Streaming summary captured for this turn (fallback display text). */
+    summary: string;
+    /** The turn's tool activity. */
+    tools: ToolActivity[];
+    /** How the turn settled. */
+    phase: 'done' | 'error';
+    /** Failure message if the turn errored. */
+    error: string | null;
+};
+
 export type DiagnoseState = {
     phase: DiagnosePhase;
+    /**
+     * Stable id threaded across follow-up turns so the backend continues the
+     * same agentic session (the model sees prior turns). Minted on the first
+     * `start`, regenerated on a desk change / `reset` / `handoff`.
+     */
+    conversationId: string | null;
     requestId: string | null;
+    /** The current (live) turn's question. */
+    question: string;
     /** Latest lifecycle phase name (collecting / redacting / modeling). */
     status: string | null;
     /** Accumulated streaming summary fragments. */
@@ -206,11 +239,15 @@ export type DiagnoseState = {
      * loop executes tools sequentially.
      */
     pendingExec: ExecPreview | null;
+    /** Prior settled turns of this conversation, oldest first. */
+    history: DiagnoseHistoryTurn[];
 };
 
 const INITIAL_STATE: DiagnoseState = {
     phase: 'idle',
+    conversationId: null,
     requestId: null,
+    question: '',
     status: null,
     partialSummary: '',
     result: null,
@@ -219,7 +256,32 @@ const INITIAL_STATE: DiagnoseState = {
     tools: [],
     answer: null,
     pendingExec: null,
+    history: [],
 };
+
+/**
+ * Freeze the previous live turn into a transcript entry when a follow-up turn
+ * begins. Only a settled (`done` / `error`) turn is captured; starting the very
+ * first turn from `idle` adds nothing.
+ */
+function snapshotLiveTurn(prev: DiagnoseState): DiagnoseHistoryTurn[] {
+    if ((prev.phase !== 'done' && prev.phase !== 'error') || !prev.requestId) {
+        return prev.history;
+    }
+    return [
+        ...prev.history,
+        {
+            requestId: prev.requestId,
+            question: prev.question,
+            result: prev.result,
+            answer: prev.answer,
+            summary: extractStreamingSummary(prev.partialSummary),
+            tools: prev.tools,
+            phase: prev.phase,
+            error: prev.error,
+        },
+    ];
+}
 
 type UseDeskDiagnoseProps = {
     deskId: string | null;
@@ -241,23 +303,54 @@ type UseDeskDiagnoseProps = {
 export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagnoseProps) {
     const [state, setState] = useState<DiagnoseState>(INITIAL_STATE);
     const activeRequestRef = useRef<string | null>(null);
+    // The conversation id threaded across follow-up turns. Minted lazily on the
+    // first `start`; cleared on a desk change / reset / handoff so the next turn
+    // opens a fresh conversation (subject-namespaced server-side).
+    const conversationIdRef = useRef<string | null>(null);
     // Highest applied seq, so duplicate / out-of-order frames cannot corrupt
     // the accumulated summary. Reset to -1 per run (frames start at seq 0).
     const lastSeqRef = useRef<number>(-1);
 
+    // A desk change rebinds the subject (a different device/operator). Abandon
+    // the conversation id and clear the transcript so the new desk starts fresh
+    // rather than continuing — or colliding with — the previous desk's session.
+    const firstDeskRef = useRef(true);
+    useEffect(() => {
+        if (firstDeskRef.current) {
+            firstDeskRef.current = false;
+            return;
+        }
+        conversationIdRef.current = null;
+        activeRequestRef.current = null;
+        lastSeqRef.current = -1;
+        setState(INITIAL_STATE);
+    }, [deskId]);
+
     const start = useCallback(
         (question: string, options?: DiagnoseStartOptions) => {
             if (!deskId) return;
+            // Reuse the conversation across follow-ups; mint one on the first turn.
+            if (!conversationIdRef.current) conversationIdRef.current = v4();
+            const conversationId = conversationIdRef.current;
             const data = {
                 question,
                 include_screen: options?.includeScreen ?? false,
                 context_kinds: options?.contextKinds ?? [],
                 locale: options?.locale,
+                conversation_id: conversationId,
             };
             const requestId = sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE, data, deskId);
             activeRequestRef.current = requestId;
             lastSeqRef.current = -1;
-            setState({ ...INITIAL_STATE, phase: 'running', requestId });
+            setState((prev) => ({
+                ...INITIAL_STATE,
+                phase: 'running',
+                conversationId,
+                requestId,
+                question,
+                // Freeze the prior settled turn into the transcript.
+                history: snapshotLiveTurn(prev),
+            }));
         },
         [deskId, sendMessage],
     );
@@ -271,6 +364,9 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL, null, deskId, requestId);
         }
         activeRequestRef.current = null;
+        // A handed-off turn leaves an orphaned session behind; any follow-up must
+        // open a new conversation rather than re-claim it.
+        conversationIdRef.current = null;
         setState((prev) => ({ ...prev, phase: 'done', pendingExec: null }));
     }, [deskId, sendMessage]);
 
@@ -284,6 +380,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
             sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE_CANCEL, null, deskId, requestId);
         }
         activeRequestRef.current = null;
+        conversationIdRef.current = null;
         lastSeqRef.current = -1;
         setState(INITIAL_STATE);
     }, [deskId, sendMessage]);

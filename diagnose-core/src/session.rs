@@ -40,11 +40,38 @@ pub enum TurnState {
 }
 
 impl TurnState {
-    /// Whether a fresh turn may be claimed from this state (only [`Idle`]).
+    /// Whether the turn has reached a settled (terminal) state, so a fresh
+    /// follow-up turn may be claimed while reusing the accumulated conversation
+    /// history. [`Idle`] (a completed turn), [`Failed`] (an errored turn), and
+    /// [`Cancelled`] are all settled.
     ///
     /// [`Idle`]: TurnState::Idle
+    /// [`Failed`]: TurnState::Failed
+    /// [`Cancelled`]: TurnState::Cancelled
+    pub fn is_settled(self) -> bool {
+        matches!(
+            self,
+            TurnState::Idle | TurnState::Failed | TurnState::Cancelled
+        )
+    }
+
+    /// Whether a turn is in flight ([`Running`] or [`AwaitingApproval`]). An
+    /// active turn is **not** directly claimable — it must first be safely
+    /// settled (e.g. by lease recovery) before a follow-up turn can begin.
+    ///
+    /// [`Running`]: TurnState::Running
+    /// [`AwaitingApproval`]: TurnState::AwaitingApproval
+    pub fn is_active(self) -> bool {
+        matches!(self, TurnState::Running | TurnState::AwaitingApproval)
+    }
+
+    /// Whether a fresh turn may be claimed from this state. A turn is claimable
+    /// from any settled state (so follow-up questions continue the same session);
+    /// an active turn ([`is_active`]) is not.
+    ///
+    /// [`is_active`]: TurnState::is_active
     pub fn can_claim(self) -> bool {
-        matches!(self, TurnState::Idle)
+        self.is_settled()
     }
 }
 
@@ -205,11 +232,16 @@ impl PersistedAgentSession {
         Ok(())
     }
 
-    /// Claim the conversation for a new turn (the only `Idle → Running`
-    /// transition). On success: bind the turn routing, recompute the scope at the
-    /// turn boundary (`current_pdp` may expand or narrow vs the last turn), and
-    /// reset the turn-level counters. The caller's [`SessionSeam`] is responsible
-    /// for doing this atomically (DB CAS / in-memory lock).
+    /// Claim the conversation for a new turn (a `settled → Running` transition).
+    /// A turn may be claimed from any settled state ([`TurnState::can_claim`]), so
+    /// a follow-up question continues the same conversation even after the prior
+    /// turn finished or failed; the accumulated `conversation` history is left
+    /// untouched. `execution_state` is also left as-is, so an unresolved
+    /// `OutcomeUnknown` keeps the next turn read-only. On success: bind the turn
+    /// routing, recompute the scope at the turn boundary (`current_pdp` may expand
+    /// or narrow vs the last turn), and reset the turn-level counters. The caller's
+    /// [`SessionSeam`] is responsible for doing this atomically (DB CAS / in-memory
+    /// lock).
     ///
     /// [`SessionSeam`]: crate::seam::SessionSeam
     pub fn begin_turn(
@@ -387,10 +419,10 @@ mod tests {
         )
     }
 
-    /// A turn can be claimed only from Idle; a second claim while Running is
+    /// A turn can be claimed from a settled state; a second claim while Running is
     /// rejected; claiming resets the turn-level counters and adopts the new scope.
     #[test]
-    fn begin_turn_only_from_idle_and_resets_counters() {
+    fn begin_turn_from_settled_and_resets_counters() {
         let mut s = session();
         s.current_turn_steps = 5;
         s.lifetime_steps = 9;
@@ -418,6 +450,61 @@ mod tests {
         // A second claim while Running is refused.
         assert_eq!(
             s.begin_turn("turn-2", None, None, 8, new_scope, "t"),
+            Err(TurnClaimError::Busy)
+        );
+    }
+
+    /// State classification: settled states ([`Idle`]/[`Failed`]/[`Cancelled`])
+    /// are claimable and the complement of the active states
+    /// ([`Running`]/[`AwaitingApproval`]).
+    #[test]
+    fn turn_state_settled_and_active_partition() {
+        for st in [TurnState::Idle, TurnState::Failed, TurnState::Cancelled] {
+            assert!(st.is_settled(), "{st:?} settled");
+            assert!(!st.is_active(), "{st:?} not active");
+            assert!(st.can_claim(), "{st:?} claimable");
+        }
+        for st in [TurnState::Running, TurnState::AwaitingApproval] {
+            assert!(st.is_active(), "{st:?} active");
+            assert!(!st.is_settled(), "{st:?} not settled");
+            assert!(!st.can_claim(), "{st:?} not claimable");
+        }
+    }
+
+    /// A follow-up turn can be claimed after the previous turn ended in `Failed`,
+    /// and the accumulated conversation history is preserved across the re-claim
+    /// (so the model sees the prior turns). An `AwaitingApproval`/`Running` session
+    /// stays `Busy`.
+    #[test]
+    fn settled_session_reclaims_and_keeps_history() {
+        use crate::chat::{ChatMessage, ChatRole};
+        let mut s = session();
+        // First turn runs, accumulates history, then fails.
+        s.begin_turn("t1", None, None, 7, s.scope_snapshot.clone(), "t")
+            .expect("first claim");
+        s.conversation
+            .push(ChatMessage::text("u1", ChatRole::User, "why is cpu high?"));
+        s.conversation
+            .push(ChatMessage::text("a1", ChatRole::Assistant, "checking..."));
+        s.finish_turn(TurnState::Failed, "t");
+        assert_eq!(s.turn_state, TurnState::Failed);
+
+        // A second turn can be claimed from the failed state, history intact.
+        s.begin_turn("t2", None, None, 7, s.scope_snapshot.clone(), "t")
+            .expect("reclaim from failed");
+        assert_eq!(s.turn_state, TurnState::Running);
+        assert_eq!(s.conversation.len(), 2, "history preserved across reclaim");
+
+        // While Running, a further claim is refused.
+        assert_eq!(
+            s.begin_turn("t3", None, None, 7, s.scope_snapshot.clone(), "t"),
+            Err(TurnClaimError::Busy)
+        );
+
+        // AwaitingApproval is likewise not directly claimable.
+        s.turn_state = TurnState::AwaitingApproval;
+        assert_eq!(
+            s.begin_turn("t4", None, None, 7, s.scope_snapshot.clone(), "t"),
             Err(TurnClaimError::Busy)
         );
     }

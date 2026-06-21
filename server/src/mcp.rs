@@ -134,6 +134,7 @@ impl DiagnoseProvider for ServerDiagnoseProvider {
                     include_screen: false,
                     context_kinds: Vec::new(),
                     locale,
+                    conversation_id: None,
                 };
                 let run = orchestrator.run(&request_id, request, &sink);
                 tokio::pin!(run);
@@ -609,6 +610,7 @@ mod tests {
             include_screen: false,
             context_kinds: Vec::new(),
             locale: None,
+            conversation_id: None,
         };
         let snapshot = collector.collect("mcp-live", &request).await;
         assert!(

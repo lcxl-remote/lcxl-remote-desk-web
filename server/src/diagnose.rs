@@ -428,6 +428,7 @@ mod tests {
             include_screen: false,
             context_kinds: vec![],
             locale: None,
+            conversation_id: None,
         }
     }
 

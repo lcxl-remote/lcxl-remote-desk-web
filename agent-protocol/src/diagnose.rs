@@ -43,6 +43,14 @@ pub struct DiagnoseRequestData {
     /// enum values stay in English.
     #[serde(default)]
     pub locale: Option<String>,
+    /// Client intent: a stable id so follow-up questions continue the same
+    /// agentic session and the model sees the prior turns. The server NEVER uses
+    /// this value as a storage key directly — it derives a subject-namespaced
+    /// `conversation_key` from it (see the diagnose entry). `None`/empty starts a
+    /// fresh single-question conversation. Non-authoritative; shape-validated
+    /// (trimmed, length- and charset-bounded) before use.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 // ===================== Remote-collect RPC (A ↔ B) =====================
@@ -473,6 +481,7 @@ mod tests {
             include_screen: true,
             context_kinds: vec!["container.list".into(), "container.logs".into()],
             locale: Some("zh-CN".into()),
+            conversation_id: Some("cv-abc123".into()),
         };
         let json = serde_json::to_string(&req).expect("json encode");
         let back: DiagnoseRequestData = serde_json::from_str(&json).expect("json decode");
@@ -483,6 +492,37 @@ mod tests {
         let back2: DiagnoseRequestData =
             wincode::config::deserialize(&bytes, config).expect("wincode decode");
         assert_eq!(req, back2);
+    }
+
+    /// `conversation_id` round-trips through both JSON and wincode in both its
+    /// `None` (fresh single-question) and `Some` (continuation) forms, and a
+    /// missing JSON field deserializes back to `None` (so older control ends that
+    /// omit it keep working).
+    #[test]
+    fn conversation_id_round_trips_none_and_some() {
+        let config = unbounded_config();
+        for conversation_id in [None, Some("cv-xyz_-9".to_string())] {
+            let req = DiagnoseRequestData {
+                question: "follow up?".into(),
+                include_screen: false,
+                context_kinds: vec![],
+                locale: None,
+                conversation_id: conversation_id.clone(),
+            };
+            let json = serde_json::to_string(&req).expect("json encode");
+            let back: DiagnoseRequestData = serde_json::from_str(&json).expect("json decode");
+            assert_eq!(req, back);
+
+            let bytes = wincode::config::serialize(&req, config).expect("wincode encode");
+            let back2: DiagnoseRequestData =
+                wincode::config::deserialize(&bytes, config).expect("wincode decode");
+            assert_eq!(req, back2);
+        }
+
+        // A request body that omits `conversation_id` entirely decodes to `None`.
+        let legacy: DiagnoseRequestData =
+            serde_json::from_str(r#"{"question":"q"}"#).expect("legacy decode");
+        assert_eq!(legacy.conversation_id, None);
     }
 
     #[test]
@@ -595,6 +635,7 @@ mod tests {
                 include_screen: true,
                 context_kinds: vec!["system.info".into()],
                 locale: Some("zh-CN".into()),
+                conversation_id: None,
             },
         };
         let json = serde_json::to_string(&req).expect("encode");

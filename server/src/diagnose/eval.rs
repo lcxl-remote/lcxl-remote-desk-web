@@ -209,6 +209,7 @@ async fn run_eval(
         include_screen: false,
         context_kinds: vec![],
         locale: None,
+        conversation_id: None,
     };
     orch.run("eval-req", request, &sink).await;
 
@@ -628,6 +629,7 @@ async fn real_model_run() {
             include_screen: false,
             context_kinds: vec![],
             locale: None,
+            conversation_id: None,
         };
         orch.run("real-eval", request, &sink).await;
         let total_ms = started.elapsed().as_millis();
