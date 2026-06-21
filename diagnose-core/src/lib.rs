@@ -17,6 +17,9 @@
 //!   across the chunked remote-collect response.
 //! - [`chat`]: provider-agnostic chat / tool-calling contracts (messages, tools,
 //!   model turn, stop-reason validation) the model adapters and agentic loop share.
+//! - [`exec_classify`]: pure exec command classification (blocklist, tokenizer,
+//!   template whitelist) → a [`desk_agent_protocol::exec::CommandClassification`]
+//!   plus a sealed plan draft, shared so both runtimes gate execution identically.
 //! - [`seam`]: the [`ModelSeam`](seam::ModelSeam) the loop calls, abstracting the
 //!   wire dialect.
 
@@ -24,6 +27,7 @@ pub mod agent_loop;
 pub mod agentic_prompt;
 pub mod chat;
 pub mod chunk;
+pub mod exec_classify;
 pub mod exec_tools;
 pub mod parser;
 pub mod prompt;
