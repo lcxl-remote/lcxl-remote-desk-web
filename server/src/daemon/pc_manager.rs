@@ -473,6 +473,31 @@ pub struct PeerConnectionContext {
     pub adaptive_bitrate: Arc<crate::daemon::bitrate_controller::AdaptiveBitrateShared>,
 }
 
+impl PeerConnectionContext {
+    /// Record this connection's latest `StartMediaPayload` and report
+    /// whether this was the *first* offer to do so.
+    ///
+    /// `handle_offer` uses the result to gate worker `StartMedia` to the
+    /// first negotiation: a later renegotiation (an ICE-restart re-offer)
+    /// overwrites the cached payload — so a future worker-swap
+    /// [`PcRegistry::resume_active_media`] re-issues the most recent one —
+    /// but returns `false`, telling the caller to skip re-issuing
+    /// `StartMedia`. Re-issuing on every offer would make the worker
+    /// rebuild its per-connection input handlers and log a duplicate-start
+    /// warning (`MediaProducer::start_media` ignores the duplicate).
+    ///
+    /// The check-and-set is atomic on `cached_start_media`. Concurrent
+    /// offers for one connection are additionally serialized by the caller
+    /// holding the `PeerConnectionContext` write lock across this call, so
+    /// exactly one of them observes `true`.
+    pub async fn record_start_media_was_first(&self, payload: StartMediaPayload) -> bool {
+        let mut slot = self.cached_start_media.write().await;
+        let was_first = slot.is_none();
+        *slot = Some(payload);
+        was_first
+    }
+}
+
 /// Daemon-wide registry of active per-browser
 /// `PeerConnectionContext`s, indexed by `connection_id`. Equivalent
 /// to the `DeskSession::rtc_peer_connection_map` the worker process
@@ -1843,16 +1868,24 @@ pub async fn handle_offer(
         // `UpdateDeskSettings` round-trip.
         enable_dirty_rect: Some(offer.desk_settings.enable_dirty_rect),
     };
-    // Stash the payload so a worker swap can re-issue it via
-    // `resume_active_media` without forcing the browser through a fresh
-    // SDP offer. Done before `drop(ctx_guard)` so the cache is published
-    // ahead of any concurrent resume that races the swap.
-    let cache_slot = ctx_guard.cached_start_media.clone();
+    // Record the payload + decide first-vs-renegotiation while still
+    // holding `ctx_guard`, so two concurrent offers for the same
+    // connection (an in-flight initial offer racing a frontend
+    // ICE-restart re-offer) cannot both observe an empty cache and
+    // double-issue StartMedia. Publishing here also keeps the cache
+    // ahead of any worker-swap `resume_active_media` that races the swap
+    // (it reads the cache under `ctx.read()`).
+    let is_first_offer = ctx_guard
+        .record_start_media_was_first(start_media_payload.clone())
+        .await;
     drop(ctx_guard);
-    *cache_slot.write().await = Some(start_media_payload.clone());
-    if let Err(e) = worker_mgr
-        .send_to_worker(ServiceToWorker::StartMedia(start_media_payload))
-        .await
+    // Only the first offer starts the worker's per-connection capture +
+    // encode pipeline. A renegotiation (ICE-restart re-offer) finished
+    // the SDP exchange above but must not re-issue StartMedia.
+    if is_first_offer
+        && let Err(e) = worker_mgr
+            .send_to_worker(ServiceToWorker::StartMedia(start_media_payload))
+            .await
     {
         log::warn!(
             "[pc_manager] Failed to issue StartMedia to worker for {from_connection_id}: {e} \
@@ -3367,7 +3400,10 @@ mod tests {
         let own = own_turn_endpoints(Some(&turn_settings_with(&["192.168.50.5:3479"])));
         let kept = filter_ice_servers(&request, &TraversalMode::Turn, &own);
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].urls, vec!["turn:relay.example.com:3478?transport=udp"]);
+        assert_eq!(
+            kept[0].urls,
+            vec!["turn:relay.example.com:3478?transport=udp"]
+        );
         assert_eq!(kept[0].username, "user");
         assert_eq!(kept[0].credential, "pw");
     }
@@ -3573,6 +3609,99 @@ mod tests {
             Ok(_) => panic!("second create_for_request_remote should fail"),
         }
         assert_eq!(registry.len().await, 1);
+    }
+
+    /// Minimal `StartMediaPayload` for the first-offer gating tests.
+    fn start_media_payload_for(connection_id: &str) -> StartMediaPayload {
+        StartMediaPayload {
+            connection_id: connection_id.to_string(),
+            video_codec: MediaCodec::H264,
+            audio_codec: MediaCodec::Opus,
+            video_device: None,
+            audio_device: None,
+            fps: 30,
+            bitrate_kbps: 0,
+            quality: 0,
+            start_video: true,
+            start_audio: true,
+            image_capture: None,
+            enable_dirty_rect: None,
+        }
+    }
+
+    /// `record_start_media_was_first` reports `true` only for the first
+    /// offer and overwrites the cached payload on every call. This is the
+    /// gate `handle_offer` uses to issue worker `StartMedia` exactly once
+    /// (first negotiation) while a renegotiation re-offer skips it but
+    /// still refreshes the cache for a later worker-swap resume.
+    #[tokio::test]
+    async fn record_start_media_marks_only_first_offer() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let ctx = registry
+            .create_for_request_remote("conn-a", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let first = ctx
+            .read()
+            .await
+            .record_start_media_was_first(start_media_payload_for("conn-a"))
+            .await;
+        assert!(first, "the first offer must report is_first_offer = true");
+
+        let second = ctx
+            .read()
+            .await
+            .record_start_media_was_first(start_media_payload_for("conn-a"))
+            .await;
+        assert!(!second, "a renegotiation re-offer must report false");
+
+        // Cache is populated for worker-swap resume regardless of which
+        // offer it was.
+        assert!(ctx.read().await.cached_start_media.read().await.is_some());
+    }
+
+    /// Two offers racing on the same connection (an in-flight initial
+    /// offer vs a frontend ICE-restart re-offer) must yield exactly one
+    /// `true`, so the worker receives a single `StartMedia`. The
+    /// serialization comes from each caller holding the
+    /// `PeerConnectionContext` write lock across the check-and-set,
+    /// mirroring `handle_offer`.
+    #[tokio::test]
+    async fn concurrent_offers_mark_first_once() {
+        let registry = PcRegistry::new();
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let s = settings_with_startup(StartupMode::ServiceDaemon);
+        let ctx = registry
+            .create_for_request_remote("conn-race", &request_remote, &s)
+            .await
+            .expect("create");
+
+        let c1 = Arc::clone(&ctx);
+        let c2 = Arc::clone(&ctx);
+        let t1 = tokio::spawn(async move {
+            let g = c1.write().await;
+            g.record_start_media_was_first(start_media_payload_for("conn-race"))
+                .await
+        });
+        let t2 = tokio::spawn(async move {
+            let g = c2.write().await;
+            g.record_start_media_was_first(start_media_payload_for("conn-race"))
+                .await
+        });
+        let r1 = t1.await.expect("task 1");
+        let r2 = t2.await.expect("task 2");
+        assert_eq!(
+            [r1, r2].into_iter().filter(|x| *x).count(),
+            1,
+            "exactly one of two concurrent offers is the first"
+        );
     }
 
     /// `PendingRequestGuard` is the RAII vehicle used by the router's
