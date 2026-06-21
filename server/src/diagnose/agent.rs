@@ -22,16 +22,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use desk_agent_protocol::exec::{
+    ApprovalId, CommandClassification, ExecDecision, ExecPlan, ExecPlanDraft, ExecRequestId,
+};
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentScope, AuditMeta, CallerRef, CallerType, Capability, DeviceAgent, ExecutionMode,
     OperationInput, ProtocolVersion, RequestId, TargetRef,
 };
 use desk_diagnose_core::chat::{ModelTurn, StopReason, ToolCall};
+use desk_diagnose_core::exec_tools::build_exec_input;
 use desk_diagnose_core::read_tools::build_read_operation;
+use desk_diagnose_core::registry::RegisteredTool;
 use desk_diagnose_core::seam::{
-    ClaimError, ClaimTurnParams, ModelRequest, ModelSeam, SessionSeam, ToolRunOutput, ToolSeam,
-    TurnSink,
+    ClaimError, ClaimTurnParams, ExecContext, ExecIdentity, ExecOutcome, ModelRequest, ModelSeam,
+    SessionSeam, ToolRunOutput, ToolSeam, TurnSink,
 };
 use desk_diagnose_core::session::PersistedAgentSession;
 
@@ -46,14 +51,120 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-// ============================ Tool seam (read) ============================
+// ============================ Mutating exec seams (Direct) ============================
+
+/// What the Direct classifier produced for an exec request.
+#[derive(Debug, Clone)]
+pub struct DirectClassified {
+    pub classification: CommandClassification,
+    /// The sealed plan, present only for a `ConfirmRequired` decision.
+    pub draft: Option<ExecPlanDraft>,
+}
+
+/// Classifies an exec operation locally (whitelist template matching + risk). The
+/// production implementation uses the daemon's command templates; tests fake it.
+#[async_trait::async_trait(?Send)]
+pub trait DirectExecClassifier {
+    async fn classify(
+        &self,
+        input: &OperationInput,
+        reason: Option<&str>,
+    ) -> Result<DirectClassified, AgentError>;
+}
+
+/// The preview shown to the operator for an approval decision.
+#[derive(Debug, Clone)]
+pub struct ExecApprovalRequest {
+    pub exec_request_id: String,
+    pub classification: CommandClassification,
+    pub draft: ExecPlanDraft,
+    pub reason: Option<String>,
+}
+
+/// The operator's decision on a previewed Direct execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectApproval {
+    Approved,
+    Rejected,
+    /// No decision before the deadline (nothing ran).
+    TimedOut,
+    /// The operator cancelled while still awaiting approval (nothing ran).
+    Cancelled,
+}
+
+/// Requests an operator approval for a previewed execution (a oneshot over the
+/// control connection in production; faked in tests).
+#[async_trait::async_trait(?Send)]
+pub trait DirectExecApprover {
+    async fn request_approval(
+        &self,
+        request: &ExecApprovalRequest,
+    ) -> Result<DirectApproval, AgentError>;
+}
+
+/// The result of running an approved plan on the local worker.
+#[derive(Debug, Clone)]
+pub enum DirectRun {
+    /// The plan ran and a result came back.
+    Sent(AgentOutcome),
+    /// The plan may have run but its outcome is unknown (cancel / connection drop).
+    OutcomeUnknown,
+}
+
+/// Runs a sealed [`ExecPlan`] on the local worker and awaits its result (the worker
+/// IPC dispatch in production; faked in tests).
+#[async_trait::async_trait(?Send)]
+pub trait DirectExecRunner {
+    async fn run(&self, plan: ExecPlan) -> Result<DirectRun, AgentError>;
+}
+
+/// The Direct runtime's mutating-exec dependencies, injected to enable the path.
+#[derive(Clone)]
+pub struct DirectExecParts {
+    pub classifier: Arc<dyn DirectExecClassifier>,
+    pub approver: Arc<dyn DirectExecApprover>,
+    pub runner: Arc<dyn DirectExecRunner>,
+}
+
+/// Render an execution outcome into the text fed back to the model (already redacted
+/// by the runner).
+fn outcome_content(outcome: &AgentOutcome) -> String {
+    match outcome {
+        AgentOutcome::Ok(output) => {
+            serde_json::to_string(output).unwrap_or_else(|_| "{}".to_string())
+        }
+        AgentOutcome::Err(e) if e.safe_for_model => format!("execution failed: {}", e.message),
+        AgentOutcome::Err(_) => "execution failed".to_string(),
+    }
+}
+
+fn internal(message: impl Into<String>) -> AgentError {
+    AgentError {
+        kind: AgentErrorKind::Internal,
+        message: message.into(),
+        retryable: false,
+        safe_for_model: false,
+    }
+}
+
+/// The read-only tools plus the mutating exec tool, for the Direct agent loop.
+pub fn agent_tool_registry() -> Vec<RegisteredTool> {
+    let mut reg = desk_diagnose_core::read_tools::read_tool_registry();
+    reg.extend(desk_diagnose_core::exec_tools::exec_tool_registry());
+    reg
+}
+
+// ============================ Tool seam (read + exec) ============================
 
 /// Runs read tools against the in-process device agent, redacting each result
-/// before it returns to the loop (fail-closed).
+/// before it returns to the loop (fail-closed). When exec parts are injected
+/// ([`with_exec`](DirectToolSeam::with_exec)), it also runs the mutating path
+/// (classify → operator approval → local worker execution).
 pub struct DirectToolSeam {
     agent: Arc<LocalDeviceAgent>,
     redactor: Arc<dyn Redactor>,
     actor_id: String,
+    exec: Option<DirectExecParts>,
 }
 
 impl DirectToolSeam {
@@ -66,6 +177,85 @@ impl DirectToolSeam {
             agent,
             redactor,
             actor_id: actor_id.into(),
+            exec: None,
+        }
+    }
+
+    /// Enable the mutating exec path with the given local seams.
+    pub fn with_exec(mut self, exec: DirectExecParts) -> Self {
+        self.exec = Some(exec);
+        self
+    }
+
+    /// Run the mutating exec flow: classify, request approval, then run on the local
+    /// worker, mapping the terminal state to an [`ExecOutcome`].
+    async fn run_exec(&self, call: &ToolCall) -> Result<ExecOutcome, AgentError> {
+        let Some(exec) = &self.exec else {
+            return Ok(ExecOutcome::Rejected {
+                reason: Some("execution is not enabled in this runtime".to_string()),
+            });
+        };
+        let (input, reason) = build_exec_input(call)?;
+        let classified = exec.classifier.classify(&input, reason.as_deref()).await?;
+        let draft = match classified.classification.decision {
+            ExecDecision::ConfirmRequired => classified.draft.clone().ok_or_else(|| {
+                internal("classifier returned confirm_required without a sealed draft")
+            })?,
+            ExecDecision::Blocked => {
+                return Ok(ExecOutcome::Rejected {
+                    reason: Some(format!(
+                        "command blocked by policy: {}",
+                        classified.classification.impact
+                    )),
+                });
+            }
+            ExecDecision::NotExecutable => {
+                return Ok(ExecOutcome::Rejected {
+                    reason: Some(
+                        "command is not executable through the AI path (no matching template)"
+                            .to_string(),
+                    ),
+                });
+            }
+        };
+
+        let exec_request_id = format!("exec_{}", uuid::Uuid::new_v4().simple());
+        let approval = exec
+            .approver
+            .request_approval(&ExecApprovalRequest {
+                exec_request_id: exec_request_id.clone(),
+                classification: classified.classification.clone(),
+                draft: draft.clone(),
+                reason,
+            })
+            .await?;
+        match approval {
+            DirectApproval::Rejected => return Ok(ExecOutcome::Rejected { reason: None }),
+            // An approval-phase timeout or cancel means nothing ran.
+            DirectApproval::TimedOut | DirectApproval::Cancelled => {
+                return Ok(ExecOutcome::ApprovalTimeout);
+            }
+            DirectApproval::Approved => {}
+        }
+
+        let approval_id = format!("appr_{}", uuid::Uuid::new_v4().simple());
+        let plan = ExecPlan::from_draft(
+            ExecRequestId(exec_request_id.clone()),
+            ApprovalId(approval_id),
+            draft,
+        );
+        match exec.runner.run(plan).await? {
+            DirectRun::Sent(outcome) => Ok(ExecOutcome::Executed(ToolRunOutput {
+                content: outcome_content(&outcome),
+                image_data_url: None,
+            })),
+            // No durable work item on this in-process runtime, so the unknown
+            // identity is synthetic; the loop still closes the conversation (§6).
+            DirectRun::OutcomeUnknown => Ok(ExecOutcome::Unknown(ExecIdentity {
+                work_id: 0,
+                execution_id: format!("exec_{}", uuid::Uuid::new_v4().simple()),
+                exec_request_id,
+            })),
         }
     }
 
@@ -139,6 +329,14 @@ impl ToolSeam for DirectToolSeam {
             content,
             image_data_url: entry.image_data_url.clone(),
         })
+    }
+
+    async fn confirm_and_exec(
+        &self,
+        call: &ToolCall,
+        _ctx: &ExecContext,
+    ) -> Result<ExecOutcome, AgentError> {
+        self.run_exec(call).await
     }
 }
 
@@ -388,5 +586,230 @@ mod tests {
             outcome,
             LoopOutcome::Answered("the host looks healthy".into())
         );
+    }
+
+    // ---------------------------- Mutating exec path ----------------------------
+
+    use desk_agent_protocol::exec::{ExecEffect, ExecShellKind};
+    use desk_agent_protocol::{ExecOutput, OperationOutput, RiskLevel};
+    use desk_diagnose_core::seam::{ExecContext, ExecOutcome};
+
+    struct FakeClassifier(DirectClassified);
+    #[async_trait::async_trait(?Send)]
+    impl DirectExecClassifier for FakeClassifier {
+        async fn classify(
+            &self,
+            _input: &OperationInput,
+            _reason: Option<&str>,
+        ) -> Result<DirectClassified, AgentError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FakeApprover(DirectApproval);
+    #[async_trait::async_trait(?Send)]
+    impl DirectExecApprover for FakeApprover {
+        async fn request_approval(
+            &self,
+            _request: &ExecApprovalRequest,
+        ) -> Result<DirectApproval, AgentError> {
+            Ok(self.0)
+        }
+    }
+
+    enum RunKind {
+        Ok,
+        Unknown,
+    }
+    struct FakeRunner(RunKind);
+    #[async_trait::async_trait(?Send)]
+    impl DirectExecRunner for FakeRunner {
+        async fn run(&self, _plan: ExecPlan) -> Result<DirectRun, AgentError> {
+            Ok(match self.0 {
+                RunKind::Ok => {
+                    DirectRun::Sent(AgentOutcome::Ok(OperationOutput::Exec(ExecOutput {
+                        exit_code: 0,
+                        stdout: "Running".into(),
+                        stderr: String::new(),
+                        stdout_truncated: false,
+                        stderr_truncated: false,
+                        duration_ms: 4,
+                        redactions: vec![],
+                    })))
+                }
+                RunKind::Unknown => DirectRun::OutcomeUnknown,
+            })
+        }
+    }
+
+    fn confirm_mutating() -> DirectClassified {
+        DirectClassified {
+            classification: CommandClassification {
+                risk: RiskLevel::High,
+                matched_template: Some("restart".into()),
+                impact: "restarts a service".into(),
+                decision: ExecDecision::ConfirmRequired,
+                effect: Some(ExecEffect::Mutating),
+            },
+            draft: Some(ExecPlanDraft {
+                program: "powershell".into(),
+                argv: vec!["-Command".into(), "Restart-Service X".into()],
+                cwd: None,
+                shell: ExecShellKind::Powershell,
+                risk: RiskLevel::High,
+                template_id: "restart".into(),
+                fingerprint: "fp".into(),
+                timeout_ms: 10_000,
+                max_stdout_bytes: 65_536,
+                max_stderr_bytes: 65_536,
+            }),
+        }
+    }
+
+    fn blocked() -> DirectClassified {
+        DirectClassified {
+            classification: CommandClassification {
+                risk: RiskLevel::Critical,
+                matched_template: None,
+                impact: "deletes everything".into(),
+                decision: ExecDecision::Blocked,
+                effect: None,
+            },
+            draft: None,
+        }
+    }
+
+    fn seam_with_exec(
+        classified: DirectClassified,
+        approval: DirectApproval,
+        run: RunKind,
+    ) -> DirectToolSeam {
+        DirectToolSeam::new(
+            Arc::new(LocalDeviceAgent::new()),
+            Arc::new(RegexRedactor::new()),
+            "agent-loop",
+        )
+        .with_exec(DirectExecParts {
+            classifier: Arc::new(FakeClassifier(classified)),
+            approver: Arc::new(FakeApprover(approval)),
+            runner: Arc::new(FakeRunner(run)),
+        })
+    }
+
+    fn exec_call() -> ToolCall {
+        ToolCall {
+            id: "call-1".into(),
+            name: "exec_command".into(),
+            arguments_json: r#"{"command":"Restart-Service X"}"#.into(),
+        }
+    }
+
+    fn exec_ctx() -> ExecContext {
+        ExecContext {
+            conversation_id: "conv-1".into(),
+            turn_id: "turn-1".into(),
+            tool_call_id: "call-1".into(),
+            actor_id: "actor-1".into(),
+            policy_revision: 1,
+            scope: AgentScope {
+                granted: vec![Capability::ShellExecConfirmed],
+                mode: ExecutionMode::ConfirmEachAction,
+                expires_at: None,
+                policy_name: None,
+            },
+        }
+    }
+
+    /// The combined registry exposes the read tools plus the exec tool.
+    #[test]
+    fn agent_registry_includes_exec_tool() {
+        let names: Vec<_> = agent_tool_registry()
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect();
+        assert!(names.contains(&"exec_command".to_string()));
+        assert!(names.contains(&"read_system_info".to_string()));
+    }
+
+    /// A read-only seam (no exec parts) rejects a mutating call.
+    #[tokio::test]
+    async fn exec_disabled_rejects() {
+        let seam = DirectToolSeam::new(
+            Arc::new(LocalDeviceAgent::new()),
+            Arc::new(RegexRedactor::new()),
+            "agent-loop",
+        );
+        let out = seam
+            .confirm_and_exec(&exec_call(), &exec_ctx())
+            .await
+            .unwrap();
+        assert!(matches!(out, ExecOutcome::Rejected { .. }));
+    }
+
+    /// Approve → run → Executed with the result text.
+    #[tokio::test]
+    async fn exec_approved_runs() {
+        let seam = seam_with_exec(confirm_mutating(), DirectApproval::Approved, RunKind::Ok);
+        match seam
+            .confirm_and_exec(&exec_call(), &exec_ctx())
+            .await
+            .unwrap()
+        {
+            ExecOutcome::Executed(out) => assert!(out.content.contains("exit_code")),
+            other => panic!("expected Executed, got {other:?}"),
+        }
+    }
+
+    /// A blocked command is rejected before any approval.
+    #[tokio::test]
+    async fn exec_blocked_rejected() {
+        let seam = seam_with_exec(blocked(), DirectApproval::Approved, RunKind::Ok);
+        let out = seam
+            .confirm_and_exec(&exec_call(), &exec_ctx())
+            .await
+            .unwrap();
+        assert!(matches!(out, ExecOutcome::Rejected { .. }));
+    }
+
+    /// A rejected approval yields Rejected; a timeout yields ApprovalTimeout.
+    #[tokio::test]
+    async fn exec_rejected_and_timeout() {
+        let rejected = seam_with_exec(confirm_mutating(), DirectApproval::Rejected, RunKind::Ok);
+        assert!(matches!(
+            rejected
+                .confirm_and_exec(&exec_call(), &exec_ctx())
+                .await
+                .unwrap(),
+            ExecOutcome::Rejected { .. }
+        ));
+        let timed = seam_with_exec(confirm_mutating(), DirectApproval::TimedOut, RunKind::Ok);
+        assert!(matches!(
+            timed
+                .confirm_and_exec(&exec_call(), &exec_ctx())
+                .await
+                .unwrap(),
+            ExecOutcome::ApprovalTimeout
+        ));
+    }
+
+    /// An unknown run outcome reports Unknown (the loop closes the conversation).
+    #[tokio::test]
+    async fn exec_unknown_outcome() {
+        let seam = seam_with_exec(
+            confirm_mutating(),
+            DirectApproval::Approved,
+            RunKind::Unknown,
+        );
+        match seam
+            .confirm_and_exec(&exec_call(), &exec_ctx())
+            .await
+            .unwrap()
+        {
+            ExecOutcome::Unknown(id) => {
+                assert!(id.exec_request_id.starts_with("exec_"));
+                assert_eq!(id.work_id, 0);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
     }
 }
