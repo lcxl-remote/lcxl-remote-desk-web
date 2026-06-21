@@ -24,6 +24,7 @@ import { useDeskExec } from "./use-desk-exec"
 import { useDeskInput } from "./use-desk-input"
 import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from "./fullscreen-keyboard"
+import { useBeforeUnloadConfirm } from "./use-before-unload-confirm"
 import { useDeskClipboard } from "./use-desk-clipboard"
 import { useDeskWhiteboard } from "./use-desk-whiteboard"
 import { useCursorSync } from "./use-cursor-sync"
@@ -188,6 +189,9 @@ export default function DeskSession() {
         lastMessage,
         sendMessage
     });
+
+    // Guard against accidentally closing/reloading an active session.
+    useBeforeUnloadConfirm(isRTCConnected);
 
     // AI diagnose stream: sends `Diagnose` and aggregates `DiagnoseEvent`
     // frames off the same signaling channel.
