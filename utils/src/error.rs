@@ -95,6 +95,12 @@ impl DeskErrorCode {
     /// draft set — never silently narrowed). Distinct from a stale approval.
     /// Carried in `RestResponse.code`, never an HTTP status.
     pub const FLEET_APPROVAL_FORBIDDEN: DeskErrorCode = DeskErrorCode(19);
+    /// A device lookup in the owner-scoped personal API found no live device with
+    /// the given id owned by the requesting user. Returned uniformly whether the
+    /// device does not exist, was soft-deleted, or belongs to another owner, so a
+    /// personal user cannot probe other owners' device ids. Carried in
+    /// `RestResponse.code`, never an HTTP status.
+    pub const DEVICE_NOT_FOUND: DeskErrorCode = DeskErrorCode(20);
 
     pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
     pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
