@@ -209,6 +209,31 @@ impl DirectAgentRuntime {
         )
         .await;
     }
+
+    /// Run one terminal-copilot turn, streaming `TerminalCopilotEvent` frames to
+    /// `sink`. Reuses this runtime's read-only seams (model + local read tools +
+    /// session) but with the copilot system prompt, the copilot read-tool subset,
+    /// and the tighter copilot step budget; the exec tool is never exposed.
+    pub async fn run_copilot(
+        &self,
+        request_id: &str,
+        ask: desk_agent_protocol::terminal_copilot::TerminalCopilotAsk,
+        authz: Option<&AuthorizationBlock>,
+        connection_id: Option<String>,
+        sink: &mut super::terminal_copilot::CopilotTurnSink,
+    ) {
+        super::terminal_copilot::run_copilot_turn(
+            self.session.as_ref(),
+            self.model.as_ref(),
+            self.tools.as_ref(),
+            request_id,
+            ask,
+            authz,
+            connection_id,
+            sink,
+        )
+        .await;
+    }
 }
 
 /// Whether the execution mode permits the mutating exec tool to be exposed (it is

@@ -37,7 +37,9 @@ use desk_agent_protocol::exec::{
     ResolveExecData,
 };
 use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
-use desk_agent_protocol::terminal_copilot::TerminalCopilotEvent;
+use desk_agent_protocol::terminal_copilot::TerminalCopilotAsk;
+
+use crate::diagnose::terminal_copilot::CopilotTurnSink;
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode, OperationInput,
@@ -1967,75 +1969,96 @@ fn emit_diagnose_event(ctx: &RouterContext, model: &SignalingModel, event: Diagn
     send_diagnose_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
 }
 
-/// Serialize a [`TerminalCopilotEvent`] into a notification-style
-/// `TerminalCopilotEvent` signaling frame and broadcast it back to the asking
-/// control end. Mirrors [`send_diagnose_frame`] (`response_state = None`).
-fn send_terminal_copilot_frame(
-    outbound_tx: &broadcast::Sender<String>,
-    to_connection_id: Option<String>,
-    event: TerminalCopilotEvent,
-) {
-    let request_id = event.request_id.clone();
-    let data = match serde_json::to_value(&event) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!(
-                "[router] failed to serialise TerminalCopilotEvent: {e} (request_id={request_id})"
-            );
-            return;
+/// Whether the AI model gateway is not ready (the operator opt-in). Returns
+/// `Some(error)` describing why when unready, mirroring the `Diagnose` readiness
+/// gate: a manager-proxy gateway needs the manager URL + token; a direct gateway
+/// needs the local model / base URL / API key.
+async fn ai_gateway_unready(ctx: &RouterContext) -> Option<AgentError> {
+    let ai_model = ctx.settings.read().await.ai_model.clone();
+    if ai_model.gateway_mode == GatewayMode::ManagerProxy {
+        let (manager_url, manager_token) = {
+            let s = ctx.settings.read().await;
+            (
+                s.system.manager_url.clone(),
+                s.system.manager_api_token.clone(),
+            )
+        };
+        let proxy_ready = manager_url.as_deref().is_some_and(|u| !u.is_empty())
+            && manager_token.as_deref().is_some_and(|t| !t.is_empty());
+        if !proxy_ready {
+            return Some(agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                "manager-proxied model gateway requires a configured manager URL and token",
+                false,
+                true,
+            ));
         }
-    };
-    let frame = SignalingModel::new(
-        &request_id,
-        SignalingType::TerminalCopilotEvent,
-        None,
-        to_connection_id,
-        Some(data),
-        // Notification, not a one-shot response.
-        None,
-    );
-    match serde_json::to_string(&frame) {
-        Ok(text) => {
-            let _ = outbound_tx.send(text);
-        }
-        Err(e) => log::warn!(
-            "[router] failed to serialise TerminalCopilotEvent frame: {e} (request_id={request_id})"
-        ),
+    } else if !ai_model.is_configured() {
+        return Some(agent_error(
+            AgentErrorKind::UnsupportedCapability,
+            "AI model gateway is not configured; set the model, base URL, and API key in AI \
+             model settings",
+            false,
+            true,
+        ));
     }
+    None
 }
 
-fn emit_terminal_copilot_event(
-    ctx: &RouterContext,
-    model: &SignalingModel,
-    event: TerminalCopilotEvent,
-) {
-    send_terminal_copilot_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
-}
-
-/// Route a control-end `TerminalCopilotAsk`. The daemon-side copilot
-/// orchestrator (model call + redaction + streaming) is injected only in the
-/// runtimes that own it; until then — and in ServiceDaemon mode, which never
-/// runs it — this replies with a terminal `TerminalCopilotEvent::error`
-/// carrying `FEATURE_UNAVAILABLE`, exactly like `Diagnose` without an
-/// orchestrator. The control end keeps treating frames as a stream.
+/// Route a control-end `TerminalCopilotAsk`: readiness gate → parse → run the
+/// daemon-side copilot over the shared agentic runtime, streaming
+/// `TerminalCopilotEvent` frames back. The runtime is injected only where an
+/// in-process worker can read locally (Default / DeskServer); in ServiceDaemon
+/// mode it is `None` and the ask replies feature-unavailable. All failures
+/// surface as a terminal `TerminalCopilotEvent::error` so the control end keeps
+/// treating frames as a stream.
 async fn handle_terminal_copilot_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    emit_terminal_copilot_event(
-        ctx,
-        model,
-        TerminalCopilotEvent::error(
-            &model.request_id,
-            0,
-            agent_error(
-                AgentErrorKind::UnsupportedCapability,
-                "terminal copilot is not available in this mode",
+    let mut sink = CopilotTurnSink::new(
+        ctx.outbound_tx.clone(),
+        model.from_connection_id.clone(),
+        model.request_id.clone(),
+    );
+
+    if let Some(err) = ai_gateway_unready(ctx).await {
+        sink.emit_error(err);
+        return Ok(());
+    }
+
+    let Some(runtime) = ctx.diagnose_agent.clone() else {
+        sink.emit_error(agent_error(
+            AgentErrorKind::UnsupportedCapability,
+            "terminal copilot is not available in this mode",
+            false,
+            true,
+        ));
+        return Ok(());
+    };
+
+    let ask = match model.get_data::<TerminalCopilotAsk>() {
+        Ok(a) => a,
+        Err(e) => {
+            sink.emit_error(agent_error(
+                AgentErrorKind::InvalidInput,
+                &format!("bad TerminalCopilotAsk payload: {e}"),
                 false,
                 true,
-            ),
-        ),
-    );
+            ));
+            return Ok(());
+        }
+    };
+
+    runtime
+        .run_copilot(
+            &model.request_id,
+            ask,
+            ctx.inbound_authz.as_ref(),
+            model.from_connection_id.clone(),
+            &mut sink,
+        )
+        .await;
     Ok(())
 }
 
