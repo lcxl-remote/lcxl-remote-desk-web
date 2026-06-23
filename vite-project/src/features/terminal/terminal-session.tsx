@@ -7,7 +7,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links"
 import "@xterm/xterm/css/xterm.css"
 import { useTranslation } from "react-i18next"
 import { Loader2, TerminalSquare, ArrowLeft } from "lucide-react"
-import { Sparkles } from "lucide-react"
+import { Sparkles, WandSparkles } from "lucide-react"
 import { useListTerminal } from "@/services/hooks/terminalController/useListTerminal"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -16,6 +16,11 @@ import { v4 } from "uuid"
 import { useDeskSignaling } from "../desk/use-desk-signaling"
 import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
 import { TerminalCopilotPanel } from "./terminal-copilot-panel"
+import {
+    useTerminalComplete,
+    pickLocalGhost,
+    type TerminalCompletionContext,
+} from "./use-terminal-complete"
 
 // Max bytes of recent terminal scrollback kept as a non-authoritative copilot
 // prompt hint (the server re-redacts and re-caps it). Bounded so the ring buffer
@@ -47,10 +52,23 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
     // submitted command line, all fed to the copilot as non-authoritative hints.
     const { subscribe, sendMessage } = useDeskSignaling(connectionId)
     const copilot = useTerminalCopilot({ connectionId, subscribe, sendMessage })
+    const complete = useTerminalComplete({ connectionId, subscribe, sendMessage })
     const [showCopilot, setShowCopilot] = useState(false)
     const recentOutputRef = useRef<string>("")
     const lastCommandRef = useRef<string>("")
     const inputLineRef = useRef<string>("")
+
+    // AI command completion (ghost text). A local toggle lets the operator silence
+    // it; when on, the layered logic is L1 instant (recent-command history) plus a
+    // debounced L2 AI ask. The accepted suffix is filled (never auto-run).
+    const [completionEnabled, setCompletionEnabled] = useState(true)
+    const completionEnabledRef = useRef(completionEnabled)
+    completionEnabledRef.current = completionEnabled
+    const historyRef = useRef<string[]>([])
+    const currentPrefixRef = useRef<string>("")
+    const [ghost, setGhost] = useState<{ suffix: string; note: string; source: 'ai' | 'history' } | null>(null)
+    const ghostRef = useRef(ghost)
+    ghostRef.current = ghost
 
     // Inject text into the shell input WITHOUT a trailing Enter — equivalent to the
     // operator typing it; they press Enter themselves. The AI path never runs a
@@ -87,6 +105,66 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
     const askCopilot = useCallback((mode: TerminalCopilotMode, question: string) => {
         copilot.ask({ mode, question: question || undefined, context: buildContext(mode) })
     }, [copilot, buildContext])
+
+    // The (non-authoritative) environment hint for a completion ask.
+    const completeContext = useCallback((): TerminalCompletionContext => {
+        const shell = (command.split(",")[0] || "").split(/[\\/]/).pop() || command
+        const isWindows = /cmd|powershell|pwsh/i.test(shell)
+        return {
+            os: isWindows ? "windows" : "linux",
+            shell,
+            recent_output: recentOutputRef.current.slice(-COPILOT_RECENT_OUTPUT_LIMIT),
+        }
+    }, [command])
+
+    // Called whenever the live input line changes. Drives the layered completion:
+    // an instant L1 suggestion from recent-command history, plus a debounced L2 AI
+    // ask. A settled line (Enter) clears the ghost and records the command.
+    const onInputChanged = useCallback((line: string, settled: boolean) => {
+        currentPrefixRef.current = line
+        if (settled) {
+            if (line) historyRef.current = [...historyRef.current.slice(-99), line]
+            setGhost(null)
+            complete.clear()
+            return
+        }
+        if (!completionEnabledRef.current || !line) {
+            setGhost(null)
+            complete.clear()
+            return
+        }
+        // L1: instant, zero-latency history match.
+        const local = pickLocalGhost(line, historyRef.current)
+        setGhost(local ? { suffix: local, note: '', source: 'history' } : null)
+        // L2: debounced AI ask (its result upgrades the ghost when it lands).
+        complete.requestCompletion(line, completeContext())
+    }, [complete, completeContext])
+    const onInputChangedRef = useRef(onInputChanged)
+    onInputChangedRef.current = onInputChanged
+
+    // Accept the current ghost: fill its suffix (no Enter — suggest-only) and fold
+    // it into the tracked input line so the next keystroke continues from there.
+    const acceptGhost = useCallback(() => {
+        const g = ghostRef.current
+        if (!g) return false
+        fillCommand(g.suffix)
+        inputLineRef.current += g.suffix
+        currentPrefixRef.current = inputLineRef.current
+        setGhost(null)
+        complete.clear()
+        return true
+    }, [fillCommand, complete])
+    const acceptGhostRef = useRef(acceptGhost)
+    acceptGhostRef.current = acceptGhost
+
+    // When an AI result lands for the prefix still in the input, upgrade the ghost
+    // from the L1 history guess to the (richer) AI suggestion.
+    useEffect(() => {
+        if (!completionEnabledRef.current) return
+        if (complete.best && complete.completionPrefix === currentPrefixRef.current) {
+            setGhost({ suffix: complete.best.completion, note: complete.best.note, source: 'ai' })
+        }
+    }, [complete.best, complete.completionPrefix])
 
     useEffect(() => {
         if (!terminalRef.current || !connectionId) return
@@ -246,18 +324,36 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                     // Track the last submitted command line (a non-authoritative copilot
                     // hint). A CR/LF settles the current line; backspace pops; printable
                     // characters accumulate. Control sequences are otherwise ignored.
+                    let settled = false
                     for (const ch of data) {
                         if (ch === '\r' || ch === '\n') {
                             const line = inputLineRef.current.trim()
                             if (line) lastCommandRef.current = line
                             inputLineRef.current = ''
+                            settled = true
                         } else if (ch === '\x7f' || ch === '\b') {
                             inputLineRef.current = inputLineRef.current.slice(0, -1)
                         } else if (ch >= ' ') {
                             inputLineRef.current += ch
                         }
                     }
+                    // Drive the layered command completion off the live input line.
+                    onInputChangedRef.current(
+                        settled ? lastCommandRef.current : inputLineRef.current,
+                        settled,
+                    )
                 }
+            })
+
+            // Capture Tab to accept the current ghost completion (filling its suffix
+            // without a trailing Enter). With no ghost, Tab passes through to the PTY
+            // so native shell completion still works.
+            term.attachCustomKeyEventHandler((e) => {
+                if (e.type === 'keydown' && e.key === 'Tab' && ghostRef.current) {
+                    acceptGhostRef.current()
+                    return false
+                }
+                return true
             })
 
             const sendResize = (size: { cols: number, rows: number }) => {
@@ -322,6 +418,24 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                     <Button
                         variant="secondary"
                         size="sm"
+                        className={`transition-opacity ${completionEnabled ? 'opacity-90' : 'opacity-40'} hover:opacity-100`}
+                        onClick={() => {
+                            setCompletionEnabled((v) => {
+                                if (v) {
+                                    setGhost(null)
+                                    complete.clear()
+                                }
+                                return !v
+                            })
+                        }}
+                        title={t('pages.deskTerminal.completion.toggleHint', 'AI command completion — press Tab to accept the ghost text')}
+                    >
+                        <WandSparkles className="h-4 w-4 mr-2" />
+                        {t('pages.deskTerminal.completion.title', 'AI Completion')}
+                    </Button>
+                    <Button
+                        variant="secondary"
+                        size="sm"
                         className="opacity-50 hover:opacity-100 transition-opacity"
                         onClick={() => setShowCopilot((v) => !v)}
                     >
@@ -351,6 +465,21 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                     <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white flex items-center gap-2 pointer-events-none">
                         <Loader2 className="h-6 w-6 animate-spin" />
                         <span>Connecting...</span>
+                    </div>
+                )}
+                {completionEnabled && ghost && (
+                    <div className="absolute bottom-2 left-4 right-4 z-10 flex items-center gap-2 rounded bg-black/60 px-3 py-1.5 text-xs text-gray-300 pointer-events-none">
+                        <WandSparkles className="h-3.5 w-3.5 shrink-0 text-sky-400" />
+                        <span className="font-mono text-gray-500 truncate">
+                            {currentPrefixRef.current}
+                            <span className="text-sky-300">{ghost.suffix}</span>
+                        </span>
+                        {ghost.note && (
+                            <span className="truncate text-gray-400">— {ghost.note}</span>
+                        )}
+                        <span className="ml-auto shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] text-gray-400">
+                            {t('pages.deskTerminal.completion.acceptHint', 'Tab')}
+                        </span>
                     </div>
                 )}
             </div>

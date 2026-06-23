@@ -51,5 +51,10 @@ export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK = 617;
 export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT = 618;
 export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL = 619;
 
+// AI command completion: a non-streaming ask + single result. Mirror
+// `SignalingType::TerminalComplete{Ask,Result}` (620/621).
+export const SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_ASK = 620;
+export const SIGNALING_TYPE_CODE_TERMINAL_COMPLETE_RESULT = 621;
+
 export const SIGNALING_TYPE_CODE_ERROR = 10000000;
 export const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 10000001;
