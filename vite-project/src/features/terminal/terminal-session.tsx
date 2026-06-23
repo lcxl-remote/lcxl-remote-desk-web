@@ -19,6 +19,7 @@ import { TerminalCopilotPanel } from "./terminal-copilot-panel"
 import {
     useTerminalComplete,
     pickLocalGhost,
+    commonCommandsFor,
     type TerminalCompletionContext,
 } from "./use-terminal-complete"
 
@@ -133,12 +134,13 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
             complete.clear()
             return
         }
-        // L1: instant, zero-latency history match.
-        const local = pickLocalGhost(line, historyRef.current)
+        // L1: instant, zero-latency history match, then the known-command corpus.
+        const shell = (command.split(",")[0] || "").split(/[\\/]/).pop() || command
+        const local = pickLocalGhost(line, historyRef.current, commonCommandsFor(shell))
         setGhost(local ? { suffix: local, note: '', source: 'history' } : null)
         // L2: debounced AI ask (its result upgrades the ghost when it lands).
         complete.requestCompletion(line, completeContext())
-    }, [complete, completeContext])
+    }, [complete, completeContext, command])
     const onInputChangedRef = useRef(onInputChanged)
     onInputChangedRef.current = onInputChanged
 

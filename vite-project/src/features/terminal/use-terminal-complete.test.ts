@@ -3,6 +3,7 @@ import { renderHook, act } from '@testing-library/react';
 import {
     useTerminalComplete,
     pickLocalGhost,
+    commonCommandsFor,
     type TerminalCompleteResult,
     type TerminalCompletionContext,
 } from './use-terminal-complete';
@@ -64,6 +65,21 @@ describe('pickLocalGhost', () => {
         expect(pickLocalGhost('ls -la', ['ls -la'])).toBeNull();
         expect(pickLocalGhost('cat', ['ls -la'])).toBeNull();
         expect(pickLocalGhost('', ['ls -la'])).toBeNull();
+    });
+    it('falls back to the known-command corpus when history has no match', () => {
+        const known = commonCommandsFor('bash');
+        // No history match, but the corpus extends "systemctl ".
+        expect(pickLocalGhost('systemctl resta', [], known)).toBe('rt ');
+    });
+    it('prefers a history match over the known-command corpus', () => {
+        const known = commonCommandsFor('bash');
+        expect(pickLocalGhost('systemctl ', ['systemctl daemon-reload'], known)).toBe(
+            'daemon-reload',
+        );
+    });
+    it('commonCommandsFor is shell-family aware', () => {
+        expect(commonCommandsFor('pwsh').some((c) => c.startsWith('Get-Service'))).toBe(true);
+        expect(commonCommandsFor('bash').some((c) => c.startsWith('systemctl'))).toBe(true);
     });
 });
 

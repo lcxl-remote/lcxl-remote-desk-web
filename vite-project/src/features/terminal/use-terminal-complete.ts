@@ -35,22 +35,54 @@ export type TerminalCompleteResult = {
     error?: AgentError | null;
 };
 
-/**
- * Pick the L1 instant (non-AI, zero-latency) ghost completion for `prefix` from
- * recent command history: the most-recent history entry that strictly extends the
- * prefix, returned as the suffix. Pure so it is unit-testable and so the component
- * can show a suggestion before the AI round-trip lands.
- */
-export function pickLocalGhost(prefix: string, history: readonly string[]): string | null {
-    if (!prefix) return null;
-    // Most-recent first; a history entry must extend (not equal) the prefix.
-    for (let i = history.length - 1; i >= 0; i -= 1) {
-        const cmd = history[i];
+// L1 known-command corpus: common command lines offered as an instant suggestion
+// when nothing in the session history matches. Kept small and shell-family aware
+// (the remote re-verifies anyway — this is only a zero-latency UI hint).
+const POSIX_KNOWN_COMMANDS: readonly string[] = [
+    'systemctl status ', 'systemctl restart ', 'systemctl start ', 'systemctl stop ',
+    'journalctl -u ', 'journalctl -xe', 'docker ps', 'docker logs ', 'docker compose up -d',
+    'git status', 'git log --oneline', 'git pull', 'git push', 'git diff',
+    'ls -la', 'ps aux', 'df -h', 'free -h', 'tail -f ', 'grep -rn ', 'kill -9 ',
+    'cd ', 'cat ', 'chmod +x ', 'curl -s ', 'netstat -ltnp', 'ss -ltnp',
+];
+const WINDOWS_KNOWN_COMMANDS: readonly string[] = [
+    'Get-Service ', 'Restart-Service ', 'Stop-Service ', 'Start-Service ',
+    'Get-Process ', 'Stop-Process -Name ', 'Get-ChildItem ', 'Get-Content ',
+    'Get-EventLog -LogName ', 'Test-NetConnection ', 'Get-NetTCPConnection',
+    'ipconfig /all', 'tasklist', 'netstat -ano', 'cd ',
+];
+
+/** The L1 known-command corpus for a shell family (best-effort, OS-aware). */
+export function commonCommandsFor(shell: string): readonly string[] {
+    return /cmd|powershell|pwsh/i.test(shell) ? WINDOWS_KNOWN_COMMANDS : POSIX_KNOWN_COMMANDS;
+}
+
+/** First entry in `pool` that strictly extends `prefix`, returned as the suffix. */
+function firstExtension(prefix: string, pool: readonly string[]): string | null {
+    for (let i = pool.length - 1; i >= 0; i -= 1) {
+        const cmd = pool[i];
         if (cmd.length > prefix.length && cmd.startsWith(prefix)) {
             return cmd.slice(prefix.length);
         }
     }
     return null;
+}
+
+/**
+ * Pick the L1 instant (non-AI, zero-latency) ghost completion for `prefix`. The
+ * most-recent matching session-history entry wins; failing that, the known-command
+ * corpus is consulted. Returns the suffix (the ghost text), or null. Pure so it is
+ * unit-testable and so the component can show a suggestion before the AI round-trip
+ * lands.
+ */
+export function pickLocalGhost(
+    prefix: string,
+    history: readonly string[],
+    known: readonly string[] = [],
+): string | null {
+    if (!prefix) return null;
+    // Session history is the strongest local signal (most-recent first).
+    return firstExtension(prefix, history) ?? firstExtension(prefix, known);
 }
 
 /** A candidate is showable as ghost text only when the server did not block it. */
