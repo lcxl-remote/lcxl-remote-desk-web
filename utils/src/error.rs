@@ -99,6 +99,53 @@ impl DeskErrorCode {
     pub const NOT_ALLOW_DELETE_FILE: DeskErrorCode = DeskErrorCode(21);
     pub const FILE_CHANGED: DeskErrorCode = DeskErrorCode(22);
 
+    // ---- Login / registration anti-abuse (auth hardening) ----
+    /// Authentication failed. Returned uniformly for every credential-rejection
+    /// cause — unknown username, wrong password, or an account that is not active
+    /// — so the response leaks nothing about which accounts exist or their state.
+    /// The login path equalizes its work (a dummy password verify on the failure
+    /// branch) so timing does not distinguish these cases either. Carried in
+    /// `RestResponse.code`, never an HTTP status.
+    pub const ILLEGAL_CREDENTIALS: DeskErrorCode = DeskErrorCode(30);
+    /// The target account or client IP is temporarily locked after too many
+    /// failed login attempts. The lock has a TTL and (for the username dimension)
+    /// can be cleared by an administrator. Carried in `RestResponse.code`, never
+    /// an HTTP status.
+    pub const ACCOUNT_LOCKED: DeskErrorCode = DeskErrorCode(31);
+    /// A rate limit was exceeded (e.g. registration attempts per IP, or
+    /// verification-email resends per address). The caller should slow down and
+    /// retry later. Carried in `RestResponse.code`, never an HTTP status.
+    pub const TOO_MANY_ATTEMPTS: DeskErrorCode = DeskErrorCode(32);
+    /// A human-verification (CAPTCHA) challenge is now required before the request
+    /// can proceed — typically after the login failure count crosses the soft
+    /// threshold. The client should render the challenge and resubmit with a
+    /// token. Carried in `RestResponse.code`, never an HTTP status.
+    pub const CAPTCHA_REQUIRED: DeskErrorCode = DeskErrorCode(33);
+    /// A supplied human-verification token was missing, malformed, or rejected by
+    /// the verifier (including fail-closed when the verifier is unreachable).
+    /// Carried in `RestResponse.code`, never an HTTP status.
+    pub const CAPTCHA_FAILED: DeskErrorCode = DeskErrorCode(34);
+    /// The account exists but its email address has not been verified, so the
+    /// requested action is refused. Surfaced only by the explicit verification /
+    /// resend flows; the ordinary login path stays generic (`ILLEGAL_CREDENTIALS`)
+    /// to avoid account-state enumeration. Carried in `RestResponse.code`, never
+    /// an HTTP status.
+    pub const EMAIL_NOT_VERIFIED: DeskErrorCode = DeskErrorCode(35);
+    /// Registration was refused because the (canonicalized) email or username is
+    /// already taken. Returned with generic wording so it cannot be used to probe
+    /// which addresses are registered. Carried in `RestResponse.code`, never an
+    /// HTTP status.
+    pub const EMAIL_ALREADY_REGISTERED: DeskErrorCode = DeskErrorCode(36);
+    /// The supplied password did not meet the configured strength policy (length,
+    /// character classes, upper bound). Carried in `RestResponse.code`, never an
+    /// HTTP status.
+    pub const WEAK_PASSWORD: DeskErrorCode = DeskErrorCode(37);
+    /// A single-use token (email verification or password reset) was invalid,
+    /// already consumed, or expired. Returned uniformly for all three so it
+    /// reveals nothing about token existence. Carried in `RestResponse.code`,
+    /// never an HTTP status.
+    pub const INVALID_OR_EXPIRED_TOKEN: DeskErrorCode = DeskErrorCode(38);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
@@ -252,5 +299,42 @@ mod tests {
         assert_eq!(sorted.len(), codes.len(), "fleet codes must be distinct");
         // Distinct from the adjacent NO_VISIBLE_TARGETS contract value.
         assert!(!codes.contains(&DeskErrorCode::NO_VISIBLE_TARGETS.code()));
+    }
+
+    /// Lock the numeric wire values of the login/registration anti-abuse codes.
+    /// The manager returns them in `RestResponse.code` and the console branches on
+    /// each (e.g. render a CAPTCHA on `CAPTCHA_REQUIRED`, show a lockout notice on
+    /// `ACCOUNT_LOCKED`), so the values are a contract and must not drift. They
+    /// must also be mutually distinct and not collide with the surrounding
+    /// assignments.
+    #[test]
+    fn auth_anti_abuse_codes_are_stable_and_distinct() {
+        assert_eq!(DeskErrorCode::ILLEGAL_CREDENTIALS.code(), 30);
+        assert_eq!(DeskErrorCode::ACCOUNT_LOCKED.code(), 31);
+        assert_eq!(DeskErrorCode::TOO_MANY_ATTEMPTS.code(), 32);
+        assert_eq!(DeskErrorCode::CAPTCHA_REQUIRED.code(), 33);
+        assert_eq!(DeskErrorCode::CAPTCHA_FAILED.code(), 34);
+        assert_eq!(DeskErrorCode::EMAIL_NOT_VERIFIED.code(), 35);
+        assert_eq!(DeskErrorCode::EMAIL_ALREADY_REGISTERED.code(), 36);
+        assert_eq!(DeskErrorCode::WEAK_PASSWORD.code(), 37);
+        assert_eq!(DeskErrorCode::INVALID_OR_EXPIRED_TOKEN.code(), 38);
+        let codes = [
+            DeskErrorCode::ILLEGAL_CREDENTIALS.code(),
+            DeskErrorCode::ACCOUNT_LOCKED.code(),
+            DeskErrorCode::TOO_MANY_ATTEMPTS.code(),
+            DeskErrorCode::CAPTCHA_REQUIRED.code(),
+            DeskErrorCode::CAPTCHA_FAILED.code(),
+            DeskErrorCode::EMAIL_NOT_VERIFIED.code(),
+            DeskErrorCode::EMAIL_ALREADY_REGISTERED.code(),
+            DeskErrorCode::WEAK_PASSWORD.code(),
+            DeskErrorCode::INVALID_OR_EXPIRED_TOKEN.code(),
+        ];
+        let mut sorted = codes.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "auth codes must be distinct");
+        // Distinct from neighbouring contract values on both sides of the block.
+        assert!(!codes.contains(&DeskErrorCode::FILE_CHANGED.code()));
+        assert!(!codes.contains(&DeskErrorCode::ACTION_NEED_RETRY.code()));
     }
 }
