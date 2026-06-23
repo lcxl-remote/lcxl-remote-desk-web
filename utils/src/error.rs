@@ -146,6 +146,12 @@ impl DeskErrorCode {
     /// never an HTTP status.
     pub const INVALID_OR_EXPIRED_TOKEN: DeskErrorCode = DeskErrorCode(38);
 
+    /// A request was throttled by a per-subject quota (e.g. too many terminal
+    /// copilot asks in the window). Carried in `RestResponse.code` / streamed in a
+    /// terminal AI error event, never an HTTP status; the client backs off and
+    /// retries.
+    pub const RATE_LIMITED: DeskErrorCode = DeskErrorCode(39);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
