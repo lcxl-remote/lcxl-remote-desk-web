@@ -41,6 +41,7 @@ pub mod seam;
 pub mod selection;
 pub mod session;
 pub mod stream;
+pub mod terminal_complete;
 pub mod terminal_copilot;
 pub mod trim;
 
