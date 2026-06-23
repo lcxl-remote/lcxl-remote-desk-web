@@ -38,6 +38,7 @@ pub mod exec;
 pub mod exec_policy;
 pub mod model_proxy;
 pub mod remote_tool;
+pub mod terminal_copilot;
 
 use crate::exec::{CommandClassification, ExecDecision, ExecEffect};
 

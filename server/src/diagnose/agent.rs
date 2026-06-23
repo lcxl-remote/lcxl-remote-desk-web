@@ -798,6 +798,7 @@ mod tests {
             response_format: ResponseFormatSpec::None,
             system_prompt: desk_diagnose_core::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: desk_diagnose_core::DEFAULT_MAX_CONTEXT_BYTES,
+            max_steps_per_turn: desk_diagnose_core::MAX_STEPS_PER_TURN,
             clock: &clock,
             heartbeat: None,
         };

@@ -267,6 +267,7 @@ fn deps<'a>(
         response_format: ResponseFormatSpec::None,
         system_prompt: build_agentic_system_message(None),
         max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
+        max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
         clock,
         heartbeat: None,
     }

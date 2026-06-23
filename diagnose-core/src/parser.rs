@@ -67,7 +67,7 @@ fn degraded(content: &str) -> Diagnosis {
 /// Extract the outermost `{...}` JSON object from a response that may carry
 /// surrounding prose or code fences. Returns `None` if no balanced object is
 /// found.
-fn extract_json_object(content: &str) -> Option<&str> {
+pub(crate) fn extract_json_object(content: &str) -> Option<&str> {
     let start = content.find('{')?;
     // Walk from the first `{` tracking brace depth, ignoring braces inside
     // strings, to find the matching close.
@@ -102,7 +102,7 @@ fn extract_json_object(content: &str) -> Option<&str> {
 }
 
 /// Truncate a string to at most `max` bytes without splitting a UTF-8 char.
-fn truncate_on_char_boundary(s: &str, max: usize) -> String {
+pub(crate) fn truncate_on_char_boundary(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }

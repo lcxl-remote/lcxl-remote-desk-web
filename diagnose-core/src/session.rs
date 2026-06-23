@@ -316,9 +316,12 @@ impl PersistedAgentSession {
         add_usage(&mut self.lifetime_tokens, usage);
     }
 
-    /// Whether the per-turn step budget is exhausted (circuit breaker).
-    pub fn turn_step_budget_exhausted(&self) -> bool {
-        self.current_turn_steps >= crate::MAX_STEPS_PER_TURN
+    /// Whether the per-turn step budget is exhausted (circuit breaker). The bound
+    /// is supplied by the caller (via `LoopDeps`) so different runtimes can tune
+    /// it — diagnose uses [`crate::MAX_STEPS_PER_TURN`], the latency-sensitive
+    /// terminal copilot uses a tighter bound.
+    pub fn turn_step_budget_exhausted(&self, max_steps_per_turn: u32) -> bool {
+        self.current_turn_steps >= max_steps_per_turn
     }
 
     /// Settle the turn machine at the end of a turn. Only the turn machine is
@@ -785,13 +788,13 @@ mod tests {
     fn step_counting_and_budget() {
         let mut s = session();
         for _ in 0..crate::MAX_STEPS_PER_TURN {
-            assert!(!s.turn_step_budget_exhausted());
+            assert!(!s.turn_step_budget_exhausted(crate::MAX_STEPS_PER_TURN));
             s.record_step(TokenUsage {
                 input_tokens: Some(10),
                 output_tokens: Some(2),
             });
         }
-        assert!(s.turn_step_budget_exhausted());
+        assert!(s.turn_step_budget_exhausted(crate::MAX_STEPS_PER_TURN));
         assert_eq!(s.current_turn_steps, crate::MAX_STEPS_PER_TURN);
         assert_eq!(
             s.current_turn_tokens.input_tokens,

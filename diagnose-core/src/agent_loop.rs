@@ -84,6 +84,10 @@ pub struct LoopDeps<'a> {
     /// Byte budget for the conversation history sent to the model (§ trimming).
     /// The system prompt is prepended on top of this and is not counted against it.
     pub max_context_bytes: usize,
+    /// Per-turn model→tool step budget (circuit breaker). Diagnose passes
+    /// [`crate::MAX_STEPS_PER_TURN`]; the latency-sensitive terminal copilot
+    /// passes a tighter bound.
+    pub max_steps_per_turn: u32,
     /// Wall-clock source (RFC3339); the core stays free of a time dependency.
     pub clock: &'a dyn Fn() -> String,
     /// Optional background lease renewer. After the turn is claimed the loop starts
@@ -154,7 +158,7 @@ async fn run_inner(
     let mut same_tool: HashMap<String, u32> = HashMap::new();
 
     loop {
-        if session.turn_step_budget_exhausted() {
+        if session.turn_step_budget_exhausted(deps.max_steps_per_turn) {
             return Ok(LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget));
         }
 
@@ -564,6 +568,7 @@ mod tests {
             response_format: ResponseFormatSpec::None,
             system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
+            max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
             clock,
             heartbeat: None,
         }
@@ -739,6 +744,59 @@ mod tests {
             s.as_ref().unwrap().current_turn_steps,
             crate::MAX_STEPS_PER_TURN
         );
+    }
+
+    /// A tighter per-turn budget (the terminal copilot uses 2) circuit-breaks
+    /// sooner than the diagnose default, proving `LoopDeps.max_steps_per_turn`
+    /// is honored per call.
+    #[tokio::test]
+    async fn tight_step_budget_circuit_breaks_at_two() {
+        const COPILOT_MAX_STEPS: u32 = 2;
+        let sess = MemSession::default();
+        let names = ["sysinfo", "logs", "ports"];
+        let turns: std::collections::VecDeque<_> = (0..COPILOT_MAX_STEPS + 5)
+            .map(|i| tool_use(&format!("c{i}"), names[i as usize % names.len()]))
+            .collect();
+        let model = ScriptModel {
+            turns: RefCell::new(turns),
+            requests: Rc::new(RefCell::new(vec![])),
+        };
+        let tools = RecordingTools {
+            calls: Rc::new(RefCell::new(vec![])),
+            reply: "x".into(),
+        };
+        let reg = vec![
+            read_tool("sysinfo", Capability::SystemInfo),
+            read_tool("logs", Capability::LogRecent),
+            read_tool("ports", Capability::NetworkPorts),
+        ];
+        let mut params = claim();
+        params.current_pdp_scope = AgentScope {
+            granted: vec![
+                Capability::SystemInfo,
+                Capability::LogRecent,
+                Capability::NetworkPorts,
+            ],
+            mode: ExecutionMode::ReadOnly,
+            expires_at: None,
+            policy_name: None,
+        };
+        let clock = || "t".to_string();
+        let mut sink = Collector(Rc::new(RefCell::new(String::new())));
+        let user = ChatMessage::text("u", ChatRole::User, "q");
+        let deps = LoopDeps {
+            max_steps_per_turn: COPILOT_MAX_STEPS,
+            ..deps(&sess, &model, &tools, &reg, &clock)
+        };
+        let outcome = run_agent_turn(&deps, params, user, &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            LoopOutcome::CircuitBreak(CircuitBreakReason::StepBudget)
+        );
+        let s = sess.inner.borrow();
+        assert_eq!(s.as_ref().unwrap().current_turn_steps, COPILOT_MAX_STEPS);
     }
 
     /// Repeatedly calling the *same* tool trips the same-tool cap before the step
@@ -1085,6 +1143,7 @@ mod tests {
             response_format: ResponseFormatSpec::None,
             system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
+            max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
             clock,
             heartbeat: None,
         }
@@ -1303,6 +1362,7 @@ mod tests {
             response_format: ResponseFormatSpec::None,
             system_prompt: crate::agentic_prompt::build_agentic_system_message(None),
             max_context_bytes: crate::DEFAULT_MAX_CONTEXT_BYTES,
+            max_steps_per_turn: crate::MAX_STEPS_PER_TURN,
             clock: &clock,
             heartbeat: None,
         };

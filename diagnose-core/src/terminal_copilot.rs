@@ -1,0 +1,300 @@
+//! Terminal AI copilot: model-agnostic prompt assembly, response parsing, and
+//! the server-authoritative per-suggestion execution decision.
+//!
+//! Shared by the web portable runtime and the manager central orchestrator so
+//! the two can never drift. Pure logic: it builds the prompt, parses the model's
+//! final JSON answer, and — crucially — computes each suggestion's `risk` /
+//! `decision` itself via the shared [`crate::exec_classify`] classifier. The
+//! model's own output never carries those fields, so a prompt-injected model
+//! cannot mark a command as safe to run.
+
+use desk_agent_protocol::terminal_copilot::{
+    CommandSuggestion, TerminalCopilotAnswer, TerminalCopilotAsk, TerminalCopilotMode,
+};
+use desk_agent_protocol::{ExecInput, ExecTarget};
+use serde::Deserialize;
+
+use crate::chat::{ChatMessage, ChatRole};
+use crate::exec_classify::classify_command;
+use crate::parser::{ParseOutcome, extract_json_object, truncate_on_char_boundary};
+use crate::read_tools::read_tool_registry;
+use crate::registry::RegisteredTool;
+
+/// Per-turn step budget for the copilot's read-only evidence gathering. Tighter
+/// than diagnose ([`crate::MAX_STEPS_PER_TURN`]) because the terminal is
+/// interactive and latency-sensitive.
+pub const COPILOT_MAX_STEPS_PER_TURN: u32 = 2;
+
+/// Max bytes of recent terminal output forwarded to the model (after the runtime
+/// has redacted it). Caps prompt size / latency; the runtime redacts first.
+pub const MAX_RECENT_OUTPUT_BYTES: usize = 4_096;
+
+/// Degraded-answer cap: how much raw model text to keep as the explanation when
+/// the structured JSON parse fails.
+const MAX_DEGRADED_EXPLANATION_BYTES: usize = 4_000;
+
+/// The read-only tools the copilot may call to gather evidence: a deliberately
+/// small subset (system info + process list). For any fact outside these the
+/// model is instructed to *suggest* a read-only diagnostic command rather than
+/// run it.
+pub fn copilot_read_tools() -> Vec<RegisteredTool> {
+    const ALLOWED: [&str; 2] = ["read_system_info", "read_process_list"];
+    read_tool_registry()
+        .into_iter()
+        .filter(|t| ALLOWED.contains(&t.spec.name.as_str()))
+        .collect()
+}
+
+/// Build the copilot system prompt for `mode`. Not persisted in the conversation
+/// (re-prepended on every model call, like the diagnose agentic prompt).
+pub fn build_copilot_system_message(mode: TerminalCopilotMode) -> ChatMessage {
+    let task = match mode {
+        TerminalCopilotMode::HowTo => {
+            "The operator described what they want to do in their terminal. \
+             Propose the command(s) that accomplish it."
+        }
+        TerminalCopilotMode::ExplainError => {
+            "The operator hit an error in their terminal. Explain the root cause, \
+             then propose the command(s) that fix it."
+        }
+    };
+    let body = format!(
+        "You are a terminal assistant embedded in a remote shell session.\n\
+         {task}\n\n\
+         Rules:\n\
+         - You only advise. You never execute anything; the operator alone decides \
+         whether to run a suggestion. Never claim a command has already been run.\n\
+         - You may call the read-only tools (read_system_info, read_process_list) a \
+         couple of times to check facts. If the fact you need is not available from \
+         those tools, do NOT guess — propose a read-only diagnostic command as a \
+         suggestion for the operator to run.\n\
+         - Use the operator's OS and shell (given in the request). Keep commands \
+         minimal; avoid destructive operations.\n\n\
+         Final answer: reply with a SINGLE JSON object and nothing else:\n\
+         {{\"explanation_md\": \"<markdown>\", \"suggestions\": \
+         [{{\"command\": \"...\", \"shell\": \"bash|pwsh|cmd|...\", \"cwd\": null, \
+         \"note\": \"<one line: what it does>\"}}]}}\n\
+         Do not include risk or approval fields — the server computes those. \
+         `suggestions` may be empty when no command is appropriate."
+    );
+    ChatMessage::text("copilot-system", ChatRole::System, body)
+}
+
+/// Build the user turn from the ask: the (non-authoritative) environment hints
+/// plus the question or error passage, with recent output length-capped. The
+/// runtime must redact `context` before calling this.
+pub fn build_copilot_user_message(ask: &TerminalCopilotAsk) -> ChatMessage {
+    let ctx = &ask.context;
+    let mut body = String::new();
+    body.push_str(&format!("OS: {}\nShell: {}\n", ctx.os, ctx.shell));
+    if let Some(cwd) = &ctx.cwd {
+        body.push_str(&format!("CWD: {cwd}\n"));
+    }
+    if let Some(last) = &ctx.last_command {
+        body.push_str(&format!("Last command: {last}\n"));
+    }
+    match ask.mode {
+        TerminalCopilotMode::HowTo => {
+            let q = ask.question.as_deref().unwrap_or("").trim();
+            body.push_str(&format!("\nRequest: {q}\n"));
+        }
+        TerminalCopilotMode::ExplainError => {
+            if let Some(err) = ctx.error_text.as_deref() {
+                let err = truncate_on_char_boundary(err.trim(), MAX_RECENT_OUTPUT_BYTES);
+                body.push_str(&format!("\nError:\n{err}\n"));
+            }
+        }
+    }
+    let recent = truncate_on_char_boundary(ctx.recent_output.trim(), MAX_RECENT_OUTPUT_BYTES);
+    if !recent.is_empty() {
+        body.push_str(&format!("\nRecent terminal output:\n{recent}\n"));
+    }
+    ChatMessage::text("copilot-user", ChatRole::User, body)
+}
+
+/// The model's raw final answer, before the server stamps risk / decision. The
+/// suggestion shape deliberately omits `risk` / `decision`, so a model cannot
+/// self-report them — the classifier computes them in [`finalize_suggestion`].
+#[derive(Deserialize)]
+struct RawAnswer {
+    #[serde(default)]
+    explanation_md: String,
+    #[serde(default)]
+    suggestions: Vec<RawSuggestion>,
+}
+
+#[derive(Deserialize)]
+struct RawSuggestion {
+    command: String,
+    #[serde(default)]
+    shell: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    note: String,
+}
+
+/// Parse the model's final answer into a [`TerminalCopilotAnswer`], computing the
+/// server-authoritative `risk` / `decision` for each suggestion via the shared
+/// classifier. Degrades to an explanation-only answer (no suggestions) when the
+/// JSON is malformed, so the operator still sees the model's text.
+///
+/// `default_shell` is the operator's shell, used when the model omits one.
+pub fn parse_copilot_answer(
+    content: &str,
+    default_shell: &str,
+) -> (TerminalCopilotAnswer, ParseOutcome) {
+    match extract_json_object(content).and_then(|j| serde_json::from_str::<RawAnswer>(j).ok()) {
+        Some(raw) => {
+            let suggestions = raw
+                .suggestions
+                .into_iter()
+                .filter(|s| !s.command.trim().is_empty())
+                .map(|s| finalize_suggestion(s, default_shell))
+                .collect();
+            (
+                TerminalCopilotAnswer {
+                    explanation_md: raw.explanation_md,
+                    suggestions,
+                },
+                ParseOutcome::Structured,
+            )
+        }
+        None => (
+            TerminalCopilotAnswer {
+                explanation_md: truncate_on_char_boundary(
+                    content.trim(),
+                    MAX_DEGRADED_EXPLANATION_BYTES,
+                ),
+                suggestions: Vec::new(),
+            },
+            ParseOutcome::Degraded,
+        ),
+    }
+}
+
+/// Stamp the server-authoritative `risk` / `decision` onto one model suggestion.
+fn finalize_suggestion(raw: RawSuggestion, default_shell: &str) -> CommandSuggestion {
+    let shell = if raw.shell.trim().is_empty() {
+        default_shell.to_string()
+    } else {
+        raw.shell
+    };
+    let input = ExecInput {
+        target: ExecTarget::Shell {
+            shell: shell.clone(),
+        },
+        command: raw.command.clone(),
+        cwd: raw.cwd.clone(),
+        timeout_ms: 0,
+        max_stdout_bytes: 0,
+        max_stderr_bytes: 0,
+    };
+    let classification = classify_command(&input).classification;
+    CommandSuggestion {
+        command: raw.command,
+        shell,
+        cwd: raw.cwd,
+        note: raw.note,
+        risk: classification.risk,
+        decision: classification.decision,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desk_agent_protocol::RiskLevel;
+    use desk_agent_protocol::exec::ExecDecision;
+    use desk_agent_protocol::terminal_copilot::TerminalContext;
+
+    fn ask(mode: TerminalCopilotMode) -> TerminalCopilotAsk {
+        TerminalCopilotAsk {
+            conversation_id: None,
+            mode,
+            question: Some("free port 8080".into()),
+            context: TerminalContext {
+                os: "linux".into(),
+                shell: "bash".into(),
+                cwd: Some("/srv".into()),
+                recent_output: "bind: address already in use".into(),
+                last_command: Some("./server".into()),
+                error_text: Some("address already in use".into()),
+            },
+        }
+    }
+
+    #[test]
+    fn system_prompt_differs_by_mode_and_states_constraints() {
+        let howto = build_copilot_system_message(TerminalCopilotMode::HowTo).text;
+        let explain = build_copilot_system_message(TerminalCopilotMode::ExplainError).text;
+        assert!(howto.contains("Propose the command"));
+        assert!(explain.contains("root cause"));
+        for p in [howto, explain] {
+            assert!(p.contains("never execute"));
+            assert!(p.contains("SINGLE JSON object"));
+        }
+    }
+
+    #[test]
+    fn user_message_caps_recent_output() {
+        let mut a = ask(TerminalCopilotMode::HowTo);
+        a.context.recent_output = "x".repeat(MAX_RECENT_OUTPUT_BYTES * 2);
+        let msg = build_copilot_user_message(&a);
+        assert!(msg.text.contains("OS: linux"));
+        assert!(msg.text.contains("Request: free port 8080"));
+        // The forwarded recent output is capped (plus the small fixed preamble).
+        assert!(msg.text.len() < MAX_RECENT_OUTPUT_BYTES + 512);
+    }
+
+    #[test]
+    fn read_tool_subset_is_exactly_two() {
+        let names: Vec<String> = copilot_read_tools()
+            .into_iter()
+            .map(|t| t.spec.name)
+            .collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"read_system_info".to_string()));
+        assert!(names.contains(&"read_process_list".to_string()));
+    }
+
+    #[test]
+    fn structured_answer_classifies_each_suggestion() {
+        let content = r#"Here you go:
+        {"explanation_md": "List the listener.",
+         "suggestions": [{"command": "ss -ltnp sport = :8080", "shell": "bash", "cwd": null, "note": "list listener"}]}"#;
+        let (answer, outcome) = parse_copilot_answer(content, "bash");
+        assert_eq!(outcome, ParseOutcome::Structured);
+        assert_eq!(answer.explanation_md, "List the listener.");
+        assert_eq!(answer.suggestions.len(), 1);
+        // An off-template read command is suggest-only (not AI-executable).
+        assert_eq!(answer.suggestions[0].decision, ExecDecision::NotExecutable);
+    }
+
+    #[test]
+    fn blocked_command_is_classified_blocked_not_self_reported() {
+        // The model tries to self-report a benign decision; the server ignores it
+        // and the blocklist classifier wins.
+        let content = r#"{"explanation_md": "x",
+            "suggestions": [{"command": "cat /etc/shadow", "shell": "bash", "note": "read", "decision": "confirm_required", "risk": "low"}]}"#;
+        let (answer, outcome) = parse_copilot_answer(content, "bash");
+        assert_eq!(outcome, ParseOutcome::Structured);
+        assert_eq!(answer.suggestions[0].decision, ExecDecision::Blocked);
+        assert_eq!(answer.suggestions[0].risk, RiskLevel::Blocked);
+    }
+
+    #[test]
+    fn empty_command_suggestions_are_dropped() {
+        let content = r#"{"explanation_md": "x", "suggestions": [{"command": "   ", "shell": "bash", "note": "n"}]}"#;
+        let (answer, _) = parse_copilot_answer(content, "bash");
+        assert!(answer.suggestions.is_empty());
+    }
+
+    #[test]
+    fn malformed_json_degrades_to_explanation_only() {
+        let (answer, outcome) = parse_copilot_answer("sorry, no JSON here", "bash");
+        assert_eq!(outcome, ParseOutcome::Degraded);
+        assert_eq!(answer.explanation_md, "sorry, no JSON here");
+        assert!(answer.suggestions.is_empty());
+    }
+}

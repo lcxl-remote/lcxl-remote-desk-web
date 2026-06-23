@@ -40,6 +40,7 @@ pub mod seam;
 pub mod selection;
 pub mod session;
 pub mod stream;
+pub mod terminal_copilot;
 pub mod trim;
 
 /// Default model context budget when `max_context_bytes` is unset (128 KB).
