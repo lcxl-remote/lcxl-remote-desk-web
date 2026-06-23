@@ -14,18 +14,16 @@
 //! advice the operator runs themselves.
 
 use desk_agent_protocol::authz::AuthorizationBlock;
-use desk_agent_protocol::terminal_copilot::{
-    TerminalCopilotAnswer, TerminalCopilotAsk, TerminalCopilotEvent,
-};
+use desk_agent_protocol::terminal_copilot::{TerminalCopilotAsk, TerminalCopilotEvent};
 use desk_agent_protocol::{AgentError, AgentErrorKind, AgentScope, Capability, ExecutionMode};
 use desk_diagnose_core::agent_loop::{LoopDeps, LoopOutcome, run_agent_turn};
 use desk_diagnose_core::conversation_key::derive_conversation_key;
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::registry::RegisteredTool;
-use desk_diagnose_core::seam::{ClaimTurnParams, ModelSeam, SessionSeam, ToolSeam, TurnSink};
+use desk_diagnose_core::seam::{ClaimTurnParams, ModelSeam, SessionSeam, ToolSeam};
 use desk_diagnose_core::terminal_copilot::{
-    COPILOT_MAX_STEPS_PER_TURN, build_copilot_system_message, build_copilot_user_message,
-    copilot_read_tools, parse_copilot_answer,
+    COPILOT_MAX_STEPS_PER_TURN, CopilotFrameSink, CopilotStreamSink, build_copilot_system_message,
+    build_copilot_user_message, copilot_read_tools, parse_copilot_answer,
 };
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
 use tokio::sync::broadcast;
@@ -36,41 +34,17 @@ use super::redaction::{Redactor, RegexRedactor};
 /// remote-signaling links (no manager-resolved user).
 const COPILOT_ACTOR: &str = "local-operator";
 
-/// Streams `TerminalCopilotEvent` frames to the asking control end and bridges
-/// the agent loop's tool lifecycle. Raw model text is intentionally not streamed
-/// (the final answer is a single JSON object); only read-tool progress
-/// (`ToolStarted`) and the terminal `Final` / `Error` frames are emitted.
-pub struct CopilotTurnSink {
+/// Forwards each [`TerminalCopilotEvent`] the shared [`CopilotStreamSink`] emits
+/// to the asking control end: it serializes the notification-style frame
+/// (`response_state = None`) and broadcasts it over the daemon's outbound lane.
+pub struct SignalingCopilotFrames {
     outbound_tx: broadcast::Sender<String>,
     to_connection_id: Option<String>,
-    request_id: String,
-    seq: u32,
 }
 
-impl CopilotTurnSink {
-    pub fn new(
-        outbound_tx: broadcast::Sender<String>,
-        to_connection_id: Option<String>,
-        request_id: String,
-    ) -> Self {
-        Self {
-            outbound_tx,
-            to_connection_id,
-            request_id,
-            seq: 0,
-        }
-    }
-
-    fn next_seq(&mut self) -> u32 {
-        let s = self.seq;
-        self.seq += 1;
-        s
-    }
-
-    /// Serialize a notification-style `TerminalCopilotEvent` frame and broadcast
-    /// it back to the asking control end (`response_state = None`).
-    fn send(&self, event: &TerminalCopilotEvent) {
-        let data = match serde_json::to_value(event) {
+impl CopilotFrameSink for SignalingCopilotFrames {
+    fn emit(&self, event: TerminalCopilotEvent) {
+        let data = match serde_json::to_value(&event) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("[copilot] failed to serialise TerminalCopilotEvent: {e}");
@@ -92,34 +66,27 @@ impl CopilotTurnSink {
             Err(e) => log::warn!("[copilot] failed to serialise TerminalCopilotEvent frame: {e}"),
         }
     }
-
-    /// Emit a terminal `Error` frame.
-    pub fn emit_error(&mut self, error: AgentError) {
-        let seq = self.next_seq();
-        let event = TerminalCopilotEvent::error(self.request_id.clone(), seq, error);
-        self.send(&event);
-    }
-
-    /// Emit the terminal `Final` frame carrying the structured answer.
-    fn emit_final(&mut self, answer: TerminalCopilotAnswer) {
-        let seq = self.next_seq();
-        let event = TerminalCopilotEvent::final_answer(self.request_id.clone(), seq, answer);
-        self.send(&event);
-    }
 }
 
-impl TurnSink for CopilotTurnSink {
-    fn on_text_delta(&mut self, _delta: &str) {
-        // The final answer is a single JSON object; streaming its raw fragments
-        // is not useful, so partial text is dropped (tool progress + the parsed
-        // Final frame carry the visible progress).
-    }
+/// The daemon's copilot stream sink: the shared lifecycle→frame mapping wired to
+/// the signaling outbound lane. The frame mapping itself lives in
+/// [`desk_diagnose_core::terminal_copilot`] so it cannot drift from the manager.
+pub type CopilotTurnSink = CopilotStreamSink<SignalingCopilotFrames>;
 
-    fn on_tool_started(&mut self, tool_name: &str, _call_id: &str) {
-        let seq = self.next_seq();
-        let event = TerminalCopilotEvent::tool_started(self.request_id.clone(), seq, tool_name);
-        self.send(&event);
-    }
+/// Build a [`CopilotTurnSink`] that streams a single request's frames back to the
+/// asking control end (`to_connection_id`).
+pub fn copilot_signaling_sink(
+    outbound_tx: broadcast::Sender<String>,
+    to_connection_id: Option<String>,
+    request_id: String,
+) -> CopilotTurnSink {
+    CopilotStreamSink::new(
+        SignalingCopilotFrames {
+            outbound_tx,
+            to_connection_id,
+        },
+        request_id,
+    )
 }
 
 /// Drive one copilot turn over the given read-only seams, streaming frames to
@@ -302,7 +269,7 @@ mod tests {
         TerminalContext, TerminalCopilotEventKind, TerminalCopilotMode,
     };
     use desk_diagnose_core::chat::{ChatRole, ModelTurn, StopReason, ToolCall};
-    use desk_diagnose_core::seam::{ModelRequest, ToolRunOutput};
+    use desk_diagnose_core::seam::{ModelRequest, ToolRunOutput, TurnSink};
     use std::sync::Mutex;
 
     /// A model that captures the last user message it was sent (to assert
@@ -384,7 +351,7 @@ mod tests {
         let tools = NoTools;
         let session = InMemorySessionSeam::new();
         let (tx, mut rx) = broadcast::channel(32);
-        let mut sink = CopilotTurnSink::new(tx, Some("conn-1".into()), "req-1".into());
+        let mut sink = copilot_signaling_sink(tx, Some("conn-1".into()), "req-1".into());
 
         run_copilot_turn(
             &session,

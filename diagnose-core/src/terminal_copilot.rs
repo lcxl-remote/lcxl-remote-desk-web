@@ -9,9 +9,10 @@
 //! cannot mark a command as safe to run.
 
 use desk_agent_protocol::terminal_copilot::{
-    CommandSuggestion, TerminalCopilotAnswer, TerminalCopilotAsk, TerminalCopilotMode,
+    CommandSuggestion, TerminalCopilotAnswer, TerminalCopilotAsk, TerminalCopilotEvent,
+    TerminalCopilotMode,
 };
-use desk_agent_protocol::{ExecInput, ExecTarget};
+use desk_agent_protocol::{AgentError, ExecInput, ExecTarget};
 use serde::Deserialize;
 
 use crate::chat::{ChatMessage, ChatRole};
@@ -19,6 +20,7 @@ use crate::exec_classify::classify_command;
 use crate::parser::{ParseOutcome, extract_json_object, truncate_on_char_boundary};
 use crate::read_tools::read_tool_registry;
 use crate::registry::RegisteredTool;
+use crate::seam::TurnSink;
 
 /// Per-turn step budget for the copilot's read-only evidence gathering. Tighter
 /// than diagnose ([`crate::MAX_STEPS_PER_TURN`]) because the terminal is
@@ -201,12 +203,116 @@ fn finalize_suggestion(raw: RawSuggestion, default_shell: &str) -> CommandSugges
     }
 }
 
+/// Emits assembled [`TerminalCopilotEvent`] frames over a runtime's outbound
+/// channel. The web portable runtime serializes each into a signaling frame and
+/// broadcasts it; the manager forwards each over its cross-instance stream. A
+/// blanket impl covers any `Fn(TerminalCopilotEvent)`, so a runtime passes a
+/// closure that forwards to its own sink.
+pub trait CopilotFrameSink {
+    fn emit(&self, event: TerminalCopilotEvent);
+}
+
+impl<F: Fn(TerminalCopilotEvent)> CopilotFrameSink for F {
+    fn emit(&self, event: TerminalCopilotEvent) {
+        self(event)
+    }
+}
+
+/// A [`TurnSink`] that maps the agentic loop's lifecycle onto
+/// [`TerminalCopilotEvent`] frames with a monotonic `seq`, forwarding each to a
+/// [`CopilotFrameSink`]. Shared by both runtimes so they can never drift on frame
+/// shape, sequencing, or terminal semantics.
+///
+/// Raw model text is intentionally **not** streamed: the final answer is a single
+/// JSON object, so partial fragments are useless. Only read-tool progress
+/// (`ToolStarted`) and the terminal `Final` / `Error` frames are emitted. A
+/// `terminated` latch guarantees at most one terminal frame per request.
+pub struct CopilotStreamSink<S> {
+    sink: S,
+    request_id: String,
+    seq: u32,
+    terminated: bool,
+}
+
+impl<S: CopilotFrameSink> CopilotStreamSink<S> {
+    /// Build a sink streaming one copilot request's frames to `sink`.
+    pub fn new(sink: S, request_id: impl Into<String>) -> Self {
+        Self {
+            sink,
+            request_id: request_id.into(),
+            seq: 0,
+            terminated: false,
+        }
+    }
+
+    fn next_seq(&mut self) -> u32 {
+        let s = self.seq;
+        self.seq += 1;
+        s
+    }
+
+    /// Emit the terminal `Final` frame carrying the structured answer, unless a
+    /// terminal frame was already sent.
+    pub fn emit_final(&mut self, answer: TerminalCopilotAnswer) {
+        if self.terminated {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink.emit(TerminalCopilotEvent::final_answer(
+            self.request_id.clone(),
+            seq,
+            answer,
+        ));
+        self.terminated = true;
+    }
+
+    /// Emit a terminal `Error` frame, unless a terminal frame was already sent.
+    pub fn emit_error(&mut self, error: AgentError) {
+        if self.terminated {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink.emit(TerminalCopilotEvent::error(
+            self.request_id.clone(),
+            seq,
+            error,
+        ));
+        self.terminated = true;
+    }
+
+    /// Whether a terminal frame (final or error) has been emitted.
+    pub fn is_terminated(&self) -> bool {
+        self.terminated
+    }
+}
+
+impl<S: CopilotFrameSink> TurnSink for CopilotStreamSink<S> {
+    fn on_text_delta(&mut self, _delta: &str) {
+        // The final answer is a single JSON object; streaming its raw fragments
+        // is not useful, so provisional text is dropped.
+    }
+
+    fn on_tool_started(&mut self, tool_name: &str, _call_id: &str) {
+        if self.terminated {
+            return;
+        }
+        let seq = self.next_seq();
+        self.sink.emit(TerminalCopilotEvent::tool_started(
+            self.request_id.clone(),
+            seq,
+            tool_name,
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use desk_agent_protocol::RiskLevel;
     use desk_agent_protocol::exec::ExecDecision;
-    use desk_agent_protocol::terminal_copilot::TerminalContext;
+    use desk_agent_protocol::terminal_copilot::{TerminalContext, TerminalCopilotEventKind};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn ask(mode: TerminalCopilotMode) -> TerminalCopilotAsk {
         TerminalCopilotAsk {
@@ -296,5 +402,84 @@ mod tests {
         assert_eq!(outcome, ParseOutcome::Degraded);
         assert_eq!(answer.explanation_md, "sorry, no JSON here");
         assert!(answer.suggestions.is_empty());
+    }
+
+    /// A recording frame sink: a closure pushing each frame into a shared buffer.
+    fn recorder() -> (
+        Rc<RefCell<Vec<TerminalCopilotEvent>>>,
+        impl Fn(TerminalCopilotEvent),
+    ) {
+        let store = Rc::new(RefCell::new(Vec::new()));
+        let s = store.clone();
+        (store, move |e| s.borrow_mut().push(e))
+    }
+
+    /// A read-tool turn maps to ToolStarted → Final with a gapless monotonic seq,
+    /// the right kind on each frame, and the terminated latch set after Final.
+    #[test]
+    fn stream_sink_maps_tool_then_final_in_order() {
+        let (store, sink) = recorder();
+        let mut s = CopilotStreamSink::new(sink, "req-1");
+        s.on_tool_started("read_system_info", "c1");
+        s.emit_final(TerminalCopilotAnswer {
+            explanation_md: "done".into(),
+            suggestions: Vec::new(),
+        });
+
+        let ev = store.borrow();
+        let kinds: Vec<_> = ev.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TerminalCopilotEventKind::ToolStarted,
+                TerminalCopilotEventKind::Final,
+            ]
+        );
+        assert_eq!(ev.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(ev.iter().all(|e| e.request_id == "req-1"));
+        assert_eq!(ev[0].tool_name.as_deref(), Some("read_system_info"));
+        assert!(ev[1].is_terminal());
+        assert!(s.is_terminated());
+    }
+
+    /// Once a terminal frame is emitted, every later frame is suppressed — exactly
+    /// one terminal per request.
+    #[test]
+    fn stream_sink_latches_after_terminal() {
+        let (store, sink) = recorder();
+        let mut s = CopilotStreamSink::new(sink, "r");
+        s.emit_final(TerminalCopilotAnswer {
+            explanation_md: "a".into(),
+            suggestions: Vec::new(),
+        });
+        // All of these are dropped by the latch.
+        s.emit_error(AgentError {
+            kind: desk_agent_protocol::AgentErrorKind::Internal,
+            message: "late".into(),
+            retryable: false,
+            safe_for_model: true,
+        });
+        s.on_tool_started("t", "c");
+        let ev = store.borrow();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].kind, TerminalCopilotEventKind::Final);
+    }
+
+    /// A turn that fails before answering emits a single terminal `Error`.
+    #[test]
+    fn stream_sink_error_is_terminal() {
+        let (store, sink) = recorder();
+        let mut s = CopilotStreamSink::new(sink, "r");
+        s.emit_error(AgentError {
+            kind: desk_agent_protocol::AgentErrorKind::SessionUnavailable,
+            message: "busy".into(),
+            retryable: true,
+            safe_for_model: true,
+        });
+        let ev = store.borrow();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].kind, TerminalCopilotEventKind::Error);
+        assert!(ev[0].is_terminal());
+        assert!(s.is_terminated());
     }
 }

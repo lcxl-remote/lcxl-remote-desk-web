@@ -39,7 +39,7 @@ use desk_agent_protocol::exec::{
 use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
 use desk_agent_protocol::terminal_copilot::TerminalCopilotAsk;
 
-use crate::diagnose::terminal_copilot::CopilotTurnSink;
+use crate::diagnose::terminal_copilot::copilot_signaling_sink;
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode, OperationInput,
@@ -2016,7 +2016,7 @@ async fn handle_terminal_copilot_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let mut sink = CopilotTurnSink::new(
+    let mut sink = copilot_signaling_sink(
         ctx.outbound_tx.clone(),
         model.from_connection_id.clone(),
         model.request_id.clone(),
