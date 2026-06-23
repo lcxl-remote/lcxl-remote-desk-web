@@ -846,6 +846,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::AgentResponse
             | SignalingType::DiagnoseEvent
             | SignalingType::TerminalCopilotEvent
+            | SignalingType::TerminalCompleteResult
             | SignalingType::ExecPreview
             | SignalingType::ExecResult => {
                 // Generic forwarding
@@ -884,6 +885,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             | SignalingType::DiagnoseCancel
             | SignalingType::TerminalCopilotAsk
             | SignalingType::TerminalCopilotCancel
+            | SignalingType::TerminalCompleteAsk
             | SignalingType::ConfirmExec
             | SignalingType::ResolveExec => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
@@ -1077,6 +1079,23 @@ mod tests {
         let parsed: SignalingType =
             serde_json::from_str("23").expect("deserialize 23 -> ConnectionRemoved");
         assert!(matches!(parsed, SignalingType::ConnectionRemoved));
+    }
+
+    /// The terminal command-completion discriminants must stay stable: a browser
+    /// and a manager / host on mismatched builds would otherwise desync, with the
+    /// frame silently collapsing to `SignalingType::Unknown`. The ask (620) routes
+    /// through the AI authorizer branch and the result (621) through the plain
+    /// host → control relay branch, exactly like the copilot ask/event pair.
+    #[test]
+    fn terminal_complete_signaling_discriminants_are_stable() {
+        assert_eq!(SignalingType::TerminalCompleteAsk as i32, 620);
+        assert_eq!(SignalingType::TerminalCompleteResult as i32, 621);
+        assert_eq!(
+            serde_json::to_string(&SignalingType::TerminalCompleteAsk).unwrap(),
+            "620"
+        );
+        let parsed: SignalingType = serde_json::from_str("621").unwrap();
+        assert!(matches!(parsed, SignalingType::TerminalCompleteResult));
     }
 
     /// Empty map (no `Server`-type peers around) must skip the

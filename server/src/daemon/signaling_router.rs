@@ -162,6 +162,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::AgentResponse
         | SignalingType::DiagnoseEvent
         | SignalingType::TerminalCopilotEvent
+        | SignalingType::TerminalCompleteResult
         | SignalingType::ExecPreview
         | SignalingType::ExecResult => RouteOwnership::Daemon,
 
@@ -182,6 +183,12 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         SignalingType::TerminalCopilotAsk | SignalingType::TerminalCopilotCancel => {
             RouteOwnership::Daemon
         }
+
+        // In-terminal AI command completion: control end → daemon. Like the
+        // copilot, the completion turn runs daemon-side (a single tool-free model
+        // call + redaction) in Default / DeskServer, so it is handled inline
+        // rather than forwarded over IPC.
+        SignalingType::TerminalCompleteAsk => RouteOwnership::Daemon,
 
         // AI confirmed-execution: control end → daemon. The approval state
         // machine (classify → preview → approve/reject → dispatch) lives
@@ -606,6 +613,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // TerminalCopilotEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
         | SignalingType::TerminalCopilotEvent
+        // TerminalCompleteResult only flows host → control end; an inbound copy
+        // is a protocol error — swallow it.
+        | SignalingType::TerminalCompleteResult
         // ExecPreview / ExecResult only flow host → control end; an inbound
         // copy is a protocol error — swallow it.
         | SignalingType::ExecPreview
@@ -665,6 +675,11 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // Copilot dismissal: a UI-side action with no orchestrator state branch
         // yet; recorded as a no-op cancellation, like `DiagnoseCancel`.
         SignalingType::TerminalCopilotCancel => Ok(()),
+        // In-terminal AI command completion: run the daemon-side single-shot
+        // completion (Default / DeskServer) or reply with an error result
+        // (ServiceDaemon, where the runtime is not injected). Answers with one
+        // `TerminalCompleteResult` frame back to the control end.
+        SignalingType::TerminalCompleteAsk => handle_terminal_complete_inbound(ctx, model).await,
         // AI confirmed-execution: classify the command, store an immutable
         // pending approval, and stream an `ExecPreview` back (Default /
         // DeskServer) or reply `UnsupportedCapability` (ServiceDaemon).
@@ -2059,6 +2074,66 @@ async fn handle_terminal_copilot_inbound(
             &mut sink,
         )
         .await;
+    Ok(())
+}
+
+/// Route a control-end `TerminalCompleteAsk`: readiness gate → parse → run the
+/// daemon-side single-shot completion, answering with one `TerminalCompleteResult`
+/// frame. The runtime is injected only where an in-process worker can read locally
+/// (Default / DeskServer); in ServiceDaemon mode it is `None` and the ask answers
+/// with a feature-unavailable error result. All failures surface as a
+/// `TerminalCompleteResult` carrying an `error`, so the control end always gets one
+/// response per ask.
+async fn handle_terminal_complete_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    use desk_agent_protocol::terminal_complete::{TerminalCompleteAsk, TerminalCompleteResult};
+
+    let reply = |result: &TerminalCompleteResult| {
+        crate::diagnose::terminal_complete::send_completion_result(
+            &ctx.outbound_tx,
+            model.from_connection_id.clone(),
+            result,
+        );
+    };
+
+    if let Some(err) = ai_gateway_unready(ctx).await {
+        reply(&TerminalCompleteResult::failed(&model.request_id, err));
+        return Ok(());
+    }
+
+    let Some(runtime) = ctx.diagnose_agent.clone() else {
+        reply(&TerminalCompleteResult::failed(
+            &model.request_id,
+            agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                "terminal command completion is not available in this mode",
+                false,
+                true,
+            ),
+        ));
+        return Ok(());
+    };
+
+    let ask = match model.get_data::<TerminalCompleteAsk>() {
+        Ok(a) => a,
+        Err(e) => {
+            reply(&TerminalCompleteResult::failed(
+                &model.request_id,
+                agent_error(
+                    AgentErrorKind::InvalidInput,
+                    &format!("bad TerminalCompleteAsk payload: {e}"),
+                    false,
+                    true,
+                ),
+            ));
+            return Ok(());
+        }
+    };
+
+    let result = runtime.run_completion(&model.request_id, ask).await;
+    reply(&result);
     Ok(())
 }
 
@@ -5373,6 +5448,21 @@ mod tests {
         );
         assert_eq!(
             classify(SignalingType::TerminalCopilotCancel),
+            RouteOwnership::Daemon
+        );
+    }
+
+    /// classify: the command-completion frames are daemon-owned. The ask drives
+    /// the daemon-side single-shot completion; the result is daemon-emitted toward
+    /// the control end and a stray inbound copy is swallowed.
+    #[test]
+    fn classify_terminal_complete_frames_are_daemon_owned() {
+        assert_eq!(
+            classify(SignalingType::TerminalCompleteAsk),
+            RouteOwnership::Daemon
+        );
+        assert_eq!(
+            classify(SignalingType::TerminalCompleteResult),
             RouteOwnership::Daemon
         );
     }

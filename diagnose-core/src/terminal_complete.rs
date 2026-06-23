@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::chat::{ChatMessage, ChatRole};
 use crate::exec_classify::classify_command;
 use crate::parser::{extract_json_object, truncate_on_char_boundary};
+use crate::redaction::Redactor;
 
 /// Max command-line candidates kept from one completion turn. Ghost-text shows the
 /// best one inline; the rest back a cycle-through affordance.
@@ -80,6 +81,46 @@ pub fn build_completion_user_message(ask: &TerminalCompleteAsk) -> ChatMessage {
     let prefix = tail_bytes(&ask.prefix, MAX_PREFIX_BYTES);
     body.push_str(&format!("\nPrefix to complete:\n{prefix}\n"));
     ChatMessage::text("complete-user", ChatRole::User, body)
+}
+
+/// Outcome of redacting a completion ask before any model dial. Shared by both
+/// runtimes so the fail-closed / decline policy can never drift.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompletionRedaction {
+    /// The ask was cleaned in place and is safe to send to the model.
+    Ready,
+    /// The typed prefix carried content the redactor would scrub. Because the
+    /// prefix is echoed verbatim into the ghost text, scrubbing it would either
+    /// leak the secret to the model or mis-attach the suffix — so the turn is
+    /// declined with no candidates (no error: the operator just gets no ghost
+    /// text for that keystroke).
+    DeclineSensitivePrefix,
+    /// The redactor itself failed; the turn must abort fail-closed (the
+    /// content-free reason is carried for logging).
+    Failed(String),
+}
+
+/// Redact a completion ask fail-closed before any model dial.
+///
+/// `recent_output` is scrubbed in place. The `prefix` is then checked: if
+/// redacting it would change it, the prefix carries sensitive content and the
+/// turn is declined ([`CompletionRedaction::DeclineSensitivePrefix`]) rather than
+/// dialled — the prefix must reach the model verbatim (it is the suffix anchor),
+/// so a sensitive prefix is never sent at all. Any redactor error aborts
+/// ([`CompletionRedaction::Failed`]).
+pub fn redact_completion_ask(
+    redactor: &dyn Redactor,
+    ask: &mut TerminalCompleteAsk,
+) -> CompletionRedaction {
+    match redactor.redact(&ask.context.recent_output) {
+        Ok(r) => ask.context.recent_output = r.text,
+        Err(e) => return CompletionRedaction::Failed(e.reason),
+    }
+    match redactor.redact(&ask.prefix) {
+        Ok(r) if r.text == ask.prefix => CompletionRedaction::Ready,
+        Ok(_) => CompletionRedaction::DeclineSensitivePrefix,
+        Err(e) => CompletionRedaction::Failed(e.reason),
+    }
 }
 
 /// The model's raw completion list. The candidate shape carries no `risk` /
@@ -399,6 +440,27 @@ mod tests {
             key(None, "u", "d", "linux", "bash", "p"),
             key(Some(""), "u", "d", "linux", "bash", "p"),
         );
+    }
+
+    #[test]
+    fn redaction_scrubs_recent_output_and_keeps_clean_prefix() {
+        use crate::redaction::RegexRedactor;
+        let mut a = ask("systemctl ");
+        a.context.recent_output = "AWS key AKIAIOSFODNN7EXAMPLE here".into();
+        let outcome = redact_completion_ask(&RegexRedactor::new(), &mut a);
+        assert_eq!(outcome, CompletionRedaction::Ready);
+        assert!(!a.context.recent_output.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert_eq!(a.prefix, "systemctl ");
+    }
+
+    #[test]
+    fn redaction_declines_a_sensitive_prefix_instead_of_dialling() {
+        use crate::redaction::RegexRedactor;
+        // A secret in the prefix itself: completing it would either leak it to the
+        // model or mis-attach the suffix, so the turn is declined (no candidates).
+        let mut a = ask("aws configure set secret AKIAIOSFODNN7EXAMPLE");
+        let outcome = redact_completion_ask(&RegexRedactor::new(), &mut a);
+        assert_eq!(outcome, CompletionRedaction::DeclineSensitivePrefix);
     }
 
     #[test]

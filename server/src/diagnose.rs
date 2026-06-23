@@ -25,6 +25,7 @@ pub mod model;
 pub mod redaction;
 pub mod remote_read;
 pub mod selection;
+pub mod terminal_complete;
 pub mod terminal_copilot;
 
 #[cfg(test)]

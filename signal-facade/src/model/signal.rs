@@ -303,6 +303,22 @@ pub enum SignalingType {
     #[wincode(tag = 619)]
     TerminalCopilotCancel = 619,
 
+    /// In-terminal AI command completion request (control end → host / manager).
+    /// Carries `desk_agent_protocol::terminal_complete::TerminalCompleteAsk` as
+    /// signaling_data. Like `TerminalCopilotAsk`, it is a manager-owned AI control
+    /// frame: in the manager the control authorizer runs it centrally; in the
+    /// signal server (no authorizer) it relays to the host that completes it. The
+    /// target device rides the outer `to_connection_id`, not the payload.
+    #[wincode(tag = 620)]
+    TerminalCompleteAsk = 620,
+    /// In-terminal AI command completion response (host / manager → control end).
+    /// Carries `desk_agent_protocol::terminal_complete::TerminalCompleteResult`.
+    /// Non-streaming (one response per ask); the `response_state = None`
+    /// notification lane keeps it off the one-shot callback map, and the control
+    /// end discards a result whose `request_id` is no longer the active one.
+    #[wincode(tag = 621)]
+    TerminalCompleteResult = 621,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,

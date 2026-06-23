@@ -234,6 +234,18 @@ impl DirectAgentRuntime {
         )
         .await;
     }
+
+    /// Run one command-completion turn, returning the single
+    /// [`TerminalCompleteResult`] the caller streams back. Reuses this runtime's
+    /// model seam with a tool-free, non-agentic single call (completion is
+    /// latency-sensitive); the context is redacted fail-closed before the dial.
+    pub async fn run_completion(
+        &self,
+        request_id: &str,
+        ask: desk_agent_protocol::terminal_complete::TerminalCompleteAsk,
+    ) -> desk_agent_protocol::terminal_complete::TerminalCompleteResult {
+        super::terminal_complete::run_completion_turn(self.model.as_ref(), request_id, ask).await
+    }
 }
 
 /// Whether the execution mode permits the mutating exec tool to be exposed (it is
