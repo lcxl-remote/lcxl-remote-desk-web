@@ -7,11 +7,20 @@ import { WebLinksAddon } from "@xterm/addon-web-links"
 import "@xterm/xterm/css/xterm.css"
 import { useTranslation } from "react-i18next"
 import { Loader2, TerminalSquare, ArrowLeft } from "lucide-react"
+import { Sparkles } from "lucide-react"
 import { useListTerminal } from "@/services/hooks/terminalController/useListTerminal"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
 import { v4 } from "uuid"
+import { useDeskSignaling } from "../desk/use-desk-signaling"
+import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
+import { TerminalCopilotPanel } from "./terminal-copilot-panel"
+
+// Max bytes of recent terminal scrollback kept as a non-authoritative copilot
+// prompt hint (the server re-redacts and re-caps it). Bounded so the ring buffer
+// never grows without limit on a chatty session.
+const COPILOT_RECENT_OUTPUT_LIMIT = 8_192
 
 // Legacy Signaling Constants
 const SIGNALING_TYPE_CODE_REPLY = 10011
@@ -23,6 +32,7 @@ const SIGNALING_TYPE_CODE_HEARTBEAT = 1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
 function TerminalView({ connectionId, command, onClose }: { connectionId: string; command: string; onClose: () => void }) {
+    const { t } = useTranslation()
     const terminalRef = useRef<HTMLDivElement>(null)
     const [isConnected, setIsConnected] = useState(false)
     const xtermRef = useRef<Terminal | null>(null)
@@ -31,6 +41,52 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
     const resizeObserverRef = useRef<ResizeObserver | null>(null)
     const terminalStarted = useRef<boolean>(false)
     const heartbeatTimerRef = useRef<number | null>(null)
+
+    // Copilot: a control-plane signaling connection (separate from the terminal
+    // I/O WS above) plus a bounded ring buffer of recent output and the last
+    // submitted command line, all fed to the copilot as non-authoritative hints.
+    const { subscribe, sendMessage } = useDeskSignaling(connectionId)
+    const copilot = useTerminalCopilot({ connectionId, subscribe, sendMessage })
+    const [showCopilot, setShowCopilot] = useState(false)
+    const recentOutputRef = useRef<string>("")
+    const lastCommandRef = useRef<string>("")
+    const inputLineRef = useRef<string>("")
+
+    // Inject text into the shell input WITHOUT a trailing Enter — equivalent to the
+    // operator typing it; they press Enter themselves. The AI path never runs a
+    // command automatically (suggest-only invariant).
+    const fillCommand = useCallback((text: string) => {
+        const ws = socketRef.current
+        if (ws && ws.readyState === WebSocket.OPEN && terminalStarted.current) {
+            ws.send(JSON.stringify({
+                request_id: v4(),
+                signaling_type: SIGNALING_TYPE_CODE_DATA,
+                to_connection_id: connectionId,
+                signaling_data: { content: text },
+            }))
+        }
+        xtermRef.current?.focus()
+    }, [connectionId])
+
+    // Derive the (non-authoritative) shell/os hint from the selected command.
+    const buildContext = useCallback((mode: TerminalCopilotMode): TerminalContext => {
+        const shell = (command.split(",")[0] || "").split(/[\\/]/).pop() || command
+        const isWindows = /cmd|powershell|pwsh/i.test(shell)
+        const recent = recentOutputRef.current.slice(-COPILOT_RECENT_OUTPUT_LIMIT)
+        return {
+            os: isWindows ? "windows" : "linux",
+            shell,
+            recent_output: recent,
+            last_command: lastCommandRef.current || undefined,
+            // In explain mode the recent scrollback IS the error passage the
+            // operator is asking about; the server caps it again.
+            error_text: mode === "explain_error" ? recent : undefined,
+        }
+    }, [command])
+
+    const askCopilot = useCallback((mode: TerminalCopilotMode, question: string) => {
+        copilot.ask({ mode, question: question || undefined, context: buildContext(mode) })
+    }, [copilot, buildContext])
 
     useEffect(() => {
         if (!terminalRef.current || !connectionId) return
@@ -120,7 +176,13 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                             try {
                                 const msg = JSON.parse(event.data)
                                 if (msg.signaling_type === SIGNALING_TYPE_CODE_REPLY) {
-                                    term.write(msg.signaling_data.content)
+                                    const content = msg.signaling_data.content
+                                    term.write(content)
+                                    // Tap a bounded ring buffer of recent output for the copilot hint.
+                                    if (typeof content === 'string') {
+                                        recentOutputRef.current = (recentOutputRef.current + content)
+                                            .slice(-COPILOT_RECENT_OUTPUT_LIMIT)
+                                    }
                                 } else if (msg.signaling_type === SIGNALING_TYPE_CODE_TERMINAL_STARTED) {
                                     console.log("terminal started")
                                     terminalStarted.current = true
@@ -181,6 +243,20 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                         signaling_data: { content: data },
                     };
                     socketRef.current.send(JSON.stringify(signal));
+                    // Track the last submitted command line (a non-authoritative copilot
+                    // hint). A CR/LF settles the current line; backspace pops; printable
+                    // characters accumulate. Control sequences are otherwise ignored.
+                    for (const ch of data) {
+                        if (ch === '\r' || ch === '\n') {
+                            const line = inputLineRef.current.trim()
+                            if (line) lastCommandRef.current = line
+                            inputLineRef.current = ''
+                        } else if (ch === '\x7f' || ch === '\b') {
+                            inputLineRef.current = inputLineRef.current.slice(0, -1)
+                        } else if (ch >= ' ') {
+                            inputLineRef.current += ch
+                        }
+                    }
                 }
             })
 
@@ -240,32 +316,52 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
     }, [connectionId, command, onClose])
 
     return (
-        <div className="h-full w-full flex flex-col bg-[#1e1e1e] overflow-hidden relative">
-            <div className="absolute top-2 right-4 z-10 flex gap-2">
-                <Button
-                    variant="secondary"
-                    size="sm"
-                    className="opacity-50 hover:opacity-100 transition-opacity"
-                    onClick={() => {
-                        if (socketRef.current) {
-                            socketRef.current.close()
-                        } else {
-                            onClose()
-                        }
-                    }}
-                >
-                    <TerminalSquare className="h-4 w-4 mr-2" />
-                    Switch Shell
-                </Button>
-            </div>
-            <div className="flex-1 w-full p-2 overflow-hidden relative">
-                <div className="absolute inset-2 overflow-hidden" ref={terminalRef} />
-            </div>
-            {!isConnected && (
-                <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white flex items-center gap-2 pointer-events-none">
-                    <Loader2 className="h-6 w-6 animate-spin" />
-                    <span>Connecting...</span>
+        <div className="h-full w-full flex bg-[#1e1e1e] overflow-hidden">
+            <div className="relative flex-1 flex flex-col overflow-hidden">
+                <div className="absolute top-2 right-4 z-10 flex gap-2">
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        className="opacity-50 hover:opacity-100 transition-opacity"
+                        onClick={() => setShowCopilot((v) => !v)}
+                    >
+                        <Sparkles className="h-4 w-4 mr-2" />
+                        {t('pages.deskTerminal.copilot.title', 'Terminal Copilot')}
+                    </Button>
+                    <Button
+                        variant="secondary"
+                        size="sm"
+                        className="opacity-50 hover:opacity-100 transition-opacity"
+                        onClick={() => {
+                            if (socketRef.current) {
+                                socketRef.current.close()
+                            } else {
+                                onClose()
+                            }
+                        }}
+                    >
+                        <TerminalSquare className="h-4 w-4 mr-2" />
+                        Switch Shell
+                    </Button>
                 </div>
+                <div className="flex-1 w-full p-2 overflow-hidden relative">
+                    <div className="absolute inset-2 overflow-hidden" ref={terminalRef} />
+                </div>
+                {!isConnected && (
+                    <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-white flex items-center gap-2 pointer-events-none">
+                        <Loader2 className="h-6 w-6 animate-spin" />
+                        <span>Connecting...</span>
+                    </div>
+                )}
+            </div>
+            {showCopilot && (
+                <TerminalCopilotPanel
+                    state={copilot.state}
+                    onAsk={askCopilot}
+                    onReset={copilot.reset}
+                    onClose={() => setShowCopilot(false)}
+                    onFill={fillCommand}
+                />
             )}
         </div>
     )

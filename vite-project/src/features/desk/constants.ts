@@ -44,5 +44,12 @@ export const SIGNALING_TYPE_CODE_EXEC_PREVIEW = 606;
 export const SIGNALING_TYPE_CODE_RESOLVE_EXEC = 607;
 export const SIGNALING_TYPE_CODE_EXEC_RESULT = 609;
 
+// Terminal AI copilot: the ask (control end → server), the notification-style
+// event stream (server → control end), and a cancel. Mirror
+// `SignalingType::TerminalCopilot{Ask,Event,Cancel}` (617/618/619).
+export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK = 617;
+export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_EVENT = 618;
+export const SIGNALING_TYPE_CODE_TERMINAL_COPILOT_CANCEL = 619;
+
 export const SIGNALING_TYPE_CODE_ERROR = 10000000;
 export const SIGNALING_TYPE_CODE_UNKNOWN_TYPE = 10000001;
