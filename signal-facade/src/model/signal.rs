@@ -283,6 +283,26 @@ pub enum SignalingType {
     #[wincode(tag = 616)]
     RemoteToolResponse = 616,
 
+    /// In-terminal AI copilot request (control end → host / manager). Carries
+    /// `desk_agent_protocol::terminal_copilot::TerminalCopilotAsk` as
+    /// signaling_data. Like `Diagnose`, it is a manager-owned AI control frame:
+    /// in the manager the control authorizer runs it centrally; in the signal
+    /// server (no authorizer) it relays to the host that runs the copilot. The
+    /// target device rides the outer `to_connection_id`, not the payload.
+    #[wincode(tag = 617)]
+    TerminalCopilotAsk = 617,
+    /// In-terminal AI copilot streamed event (host / manager → control end).
+    /// Carries `desk_agent_protocol::terminal_copilot::TerminalCopilotEvent`.
+    /// Notification-style (`response_state = None`) so multiple frames reach the
+    /// control end instead of being consumed by the one-shot callback map.
+    #[wincode(tag = 618)]
+    TerminalCopilotEvent = 618,
+    /// In-terminal AI copilot cancellation (control end → host / manager). Sent
+    /// when the operator dismisses an in-flight copilot turn; the message
+    /// `request_id` correlates the cancelled turn. Routed like `DiagnoseCancel`.
+    #[wincode(tag = 619)]
+    TerminalCopilotCancel = 619,
+
     /// Error
     #[wincode(tag = -1)]
     Error = -1,

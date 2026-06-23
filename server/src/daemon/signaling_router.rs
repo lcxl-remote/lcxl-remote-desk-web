@@ -37,6 +37,7 @@ use desk_agent_protocol::exec::{
     ResolveExecData,
 };
 use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
+use desk_agent_protocol::terminal_copilot::TerminalCopilotEvent;
 use desk_agent_protocol::{
     ActorRef, ActorType, AgentEnvelope, AgentError, AgentErrorKind, AgentOperation, AgentOutcome,
     AgentRequestData, AgentScope, CallerRef, CallerType, Capability, ExecutionMode, OperationInput,
@@ -158,6 +159,7 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         | SignalingType::TerminalClosed
         | SignalingType::AgentResponse
         | SignalingType::DiagnoseEvent
+        | SignalingType::TerminalCopilotEvent
         | SignalingType::ExecPreview
         | SignalingType::ExecResult => RouteOwnership::Daemon,
 
@@ -169,6 +171,15 @@ pub fn classify(signaling_type: SignalingType) -> RouteOwnership {
         // DiagnoseCancel is the handoff notification — handled inline against
         // the daemon's orchestrator (audit only), like `Diagnose`.
         SignalingType::Diagnose | SignalingType::DiagnoseCancel => RouteOwnership::Daemon,
+
+        // In-terminal AI copilot: control end → daemon. Like `Diagnose`, the
+        // copilot orchestrator runs daemon-side (model call + redaction +
+        // streaming) in Default / DeskServer, so this is handled inline rather
+        // than forwarded over IPC. `TerminalCopilotCancel` dismisses an in-flight
+        // turn, handled inline like `DiagnoseCancel`.
+        SignalingType::TerminalCopilotAsk | SignalingType::TerminalCopilotCancel => {
+            RouteOwnership::Daemon
+        }
 
         // AI confirmed-execution: control end → daemon. The approval state
         // machine (classify → preview → approve/reject → dispatch) lives
@@ -590,6 +601,9 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // DiagnoseEvent only flows host → control end (streamed); an
         // inbound copy is a protocol error — swallow it.
         | SignalingType::DiagnoseEvent
+        // TerminalCopilotEvent only flows host → control end (streamed); an
+        // inbound copy is a protocol error — swallow it.
+        | SignalingType::TerminalCopilotEvent
         // ExecPreview / ExecResult only flow host → control end; an inbound
         // copy is a protocol error — swallow it.
         | SignalingType::ExecPreview
@@ -641,6 +655,14 @@ pub async fn route(model: &SignalingModel, ctx: &RouterContext) -> Result<(), Ro
         // state branch. The daemon only records an `ai.task.cancelled` audit so
         // the handoff is auditable; no `DiagnoseEvent` is streamed back.
         SignalingType::DiagnoseCancel => handle_diagnose_cancel_inbound(ctx, model).await,
+        // In-terminal AI copilot: run the daemon-side orchestrator (Default /
+        // DeskServer) or reply `FEATURE_UNAVAILABLE` (ServiceDaemon, where the
+        // orchestrator is not injected). Streams `TerminalCopilotEvent` frames
+        // back to the control end.
+        SignalingType::TerminalCopilotAsk => handle_terminal_copilot_inbound(ctx, model).await,
+        // Copilot dismissal: a UI-side action with no orchestrator state branch
+        // yet; recorded as a no-op cancellation, like `DiagnoseCancel`.
+        SignalingType::TerminalCopilotCancel => Ok(()),
         // AI confirmed-execution: classify the command, store an immutable
         // pending approval, and stream an `ExecPreview` back (Default /
         // DeskServer) or reply `UnsupportedCapability` (ServiceDaemon).
@@ -1943,6 +1965,78 @@ fn send_diagnose_frame(
 /// orchestrator runs (disabled gate / unsupported mode / bad payload).
 fn emit_diagnose_event(ctx: &RouterContext, model: &SignalingModel, event: DiagnoseEvent) {
     send_diagnose_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
+}
+
+/// Serialize a [`TerminalCopilotEvent`] into a notification-style
+/// `TerminalCopilotEvent` signaling frame and broadcast it back to the asking
+/// control end. Mirrors [`send_diagnose_frame`] (`response_state = None`).
+fn send_terminal_copilot_frame(
+    outbound_tx: &broadcast::Sender<String>,
+    to_connection_id: Option<String>,
+    event: TerminalCopilotEvent,
+) {
+    let request_id = event.request_id.clone();
+    let data = match serde_json::to_value(&event) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!(
+                "[router] failed to serialise TerminalCopilotEvent: {e} (request_id={request_id})"
+            );
+            return;
+        }
+    };
+    let frame = SignalingModel::new(
+        &request_id,
+        SignalingType::TerminalCopilotEvent,
+        None,
+        to_connection_id,
+        Some(data),
+        // Notification, not a one-shot response.
+        None,
+    );
+    match serde_json::to_string(&frame) {
+        Ok(text) => {
+            let _ = outbound_tx.send(text);
+        }
+        Err(e) => log::warn!(
+            "[router] failed to serialise TerminalCopilotEvent frame: {e} (request_id={request_id})"
+        ),
+    }
+}
+
+fn emit_terminal_copilot_event(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+    event: TerminalCopilotEvent,
+) {
+    send_terminal_copilot_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
+}
+
+/// Route a control-end `TerminalCopilotAsk`. The daemon-side copilot
+/// orchestrator (model call + redaction + streaming) is injected only in the
+/// runtimes that own it; until then — and in ServiceDaemon mode, which never
+/// runs it — this replies with a terminal `TerminalCopilotEvent::error`
+/// carrying `FEATURE_UNAVAILABLE`, exactly like `Diagnose` without an
+/// orchestrator. The control end keeps treating frames as a stream.
+async fn handle_terminal_copilot_inbound(
+    ctx: &RouterContext,
+    model: &SignalingModel,
+) -> Result<(), RouterError> {
+    emit_terminal_copilot_event(
+        ctx,
+        model,
+        TerminalCopilotEvent::error(
+            &model.request_id,
+            0,
+            agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                "terminal copilot is not available in this mode",
+                false,
+                true,
+            ),
+        ),
+    );
+    Ok(())
 }
 
 /// Route a control-end `Diagnose`: feature gate → mode gate → parse → run the
@@ -5236,6 +5330,26 @@ mod tests {
         // The handoff notification is handled inline by the daemon too.
         assert_eq!(
             classify(SignalingType::DiagnoseCancel),
+            RouteOwnership::Daemon
+        );
+    }
+
+    /// classify: the terminal-copilot frames are daemon-owned, mirroring the
+    /// diagnose pair. The ask drives the daemon-side copilot; the event is
+    /// daemon-emitted toward the control end and a stray inbound copy is
+    /// swallowed; the cancel is handled inline.
+    #[test]
+    fn classify_terminal_copilot_frames_are_daemon_owned() {
+        assert_eq!(
+            classify(SignalingType::TerminalCopilotAsk),
+            RouteOwnership::Daemon
+        );
+        assert_eq!(
+            classify(SignalingType::TerminalCopilotEvent),
+            RouteOwnership::Daemon
+        );
+        assert_eq!(
+            classify(SignalingType::TerminalCopilotCancel),
             RouteOwnership::Daemon
         );
     }

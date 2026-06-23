@@ -845,6 +845,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             // authorization injection on the reply path).
             | SignalingType::AgentResponse
             | SignalingType::DiagnoseEvent
+            | SignalingType::TerminalCopilotEvent
             | SignalingType::ExecPreview
             | SignalingType::ExecResult => {
                 // Generic forwarding
@@ -881,6 +882,8 @@ impl<U: SignalingUser> SignalingHandler<U> {
             SignalingType::AgentRequest
             | SignalingType::Diagnose
             | SignalingType::DiagnoseCancel
+            | SignalingType::TerminalCopilotAsk
+            | SignalingType::TerminalCopilotCancel
             | SignalingType::ConfirmExec
             | SignalingType::ResolveExec => {
                 let to_forward = if let Some(authorizer) = self.control_authorizer.clone() {
