@@ -158,6 +158,18 @@ impl DeskErrorCode {
     /// retries.
     pub const RATE_LIMITED: DeskErrorCode = DeskErrorCode(39);
 
+    // ---- Organization (multi-tenant) ----
+    /// An organization-scoped request referenced an org the caller cannot access:
+    /// the org does not exist, was soft-deleted, or the caller is not a member.
+    /// Returned uniformly for all three so a non-member cannot probe which org ids
+    /// exist. Carried in `RestResponse.code`, never an HTTP status.
+    pub const ORG_NOT_FOUND: DeskErrorCode = DeskErrorCode(40);
+    /// The caller is a member of the organization but lacks the in-org role
+    /// required for the action (e.g. a plain member attempting an org-admin write,
+    /// or demoting/removing the last remaining owner). Carried in
+    /// `RestResponse.code`, never an HTTP status.
+    pub const ORG_PERMISSION_ERROR: DeskErrorCode = DeskErrorCode(41);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
@@ -347,6 +359,23 @@ mod tests {
         assert_eq!(sorted.len(), codes.len(), "auth codes must be distinct");
         // Distinct from neighbouring contract values on both sides of the block.
         assert!(!codes.contains(&DeskErrorCode::FILE_CHANGED.code()));
+        assert!(!codes.contains(&DeskErrorCode::ACTION_NEED_RETRY.code()));
+    }
+
+    /// Lock the numeric wire values of the organization codes. The manager returns
+    /// them in `RestResponse.code` and the console branches on each, so the values
+    /// are a contract and must stay distinct from the surrounding anti-abuse block.
+    #[test]
+    fn org_codes_are_stable_and_distinct() {
+        assert_eq!(DeskErrorCode::ORG_NOT_FOUND.code(), 40);
+        assert_eq!(DeskErrorCode::ORG_PERMISSION_ERROR.code(), 41);
+        let codes = [
+            DeskErrorCode::ORG_NOT_FOUND.code(),
+            DeskErrorCode::ORG_PERMISSION_ERROR.code(),
+        ];
+        assert_ne!(codes[0], codes[1], "org codes must be distinct");
+        // Distinct from the adjacent anti-abuse block and the next contract value.
+        assert!(!codes.contains(&DeskErrorCode::RATE_LIMITED.code()));
         assert!(!codes.contains(&DeskErrorCode::ACTION_NEED_RETRY.code()));
     }
 }
