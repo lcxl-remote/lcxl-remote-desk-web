@@ -727,4 +727,24 @@ export default {
   'pages.virtualDisplay.error.preconditionFailed': 'Driver is not staged; install it first.',
   'pages.virtualDisplay.error.fileNotFound': 'Driver files not found next to the server binary.',
   'pages.virtualDisplay.error.generic': 'Operation failed.',
+  // Remote desk session controls.
+  'pages.desk.closeStats': 'Close',
+  'pages.desk.enterText': 'Enter text...',
+  'pages.desk.syncing': 'Syncing clipboard...',
+  'pages.desk.waylandControlMode': 'Wayland Control Mode',
+  // Remote terminal session.
+  'pages.deskTerminal.connect': 'Connect',
+  'pages.deskTerminal.selectShell': 'Select a shell to start the session',
+  'pages.deskTerminal.title': 'Terminal Session',
+  // Backend capture/control diagnostics panel.
+  'pages.system.settings.backendDiagnostics': 'Backend Diagnostics',
+  'pages.system.settings.backendDiagnostics.description': 'Wayland/X11 capture and control runtime status.',
+  'pages.system.settings.backendDiagnostics.inputError': 'Input Backend Error',
+  'pages.system.settings.backendDiagnostics.portalError': 'Portal Error',
+  'pages.user.settings.title': 'User Settings',
+  // Privacy-mode overlay shown on the controlled host.
+  'client.privateScreen.title': 'Remote Desktop Privacy Mode',
+  'client.privateScreen.description': 'This screen is being controlled remotely.\nLocal input is blocked.',
+  'client.privateScreen.hotkeyHint': 'Press the hotkey above to exit privacy mode',
+  'common.unknownError': 'Unknown error',
 };

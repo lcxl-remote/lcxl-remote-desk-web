@@ -32,9 +32,9 @@ export default function DeskDashboard() {
     if (!connection) {
         return (
             <div className="flex flex-col items-center justify-center h-[50vh] space-y-4">
-                <h2 className="text-2xl font-semibold">{t('pages.deskDashboard.notFound', 'Desk Not Found')}</h2>
-                <p className="text-muted-foreground">{t('pages.deskDashboard.notFoundDesc', 'The desk you are looking for does not exist or is offline.')}</p>
-                <Button onClick={() => navigate('/desk/list')}>{t('pages.deskDashboard.backToList', 'Back to List')}</Button>
+                <h2 className="text-2xl font-semibold">{t('pages.deskDashboard.notFound')}</h2>
+                <p className="text-muted-foreground">{t('pages.deskDashboard.notFoundDesc')}</p>
+                <Button onClick={() => navigate('/desk/list')}>{t('pages.deskDashboard.backToList')}</Button>
             </div>
         )
     }
@@ -50,12 +50,12 @@ export default function DeskDashboard() {
                     <div>
                         <div className="flex items-center gap-2">
                             <h2 className="text-3xl font-bold tracking-tight">
-                                {connection.version_info?.display_name || t('pages.deskDashboard.unnamedConnection', 'Unnamed Connection')}
+                                {connection.version_info?.display_name || t('pages.deskDashboard.unnamedConnection')}
                             </h2>
-                            <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.deskDashboard.online', 'Online')}</Badge>
+                            <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.deskDashboard.online')}</Badge>
                         </div>
                         <p className="text-muted-foreground">
-                            {t('pages.deskDashboard.connectionId', 'Connection ID: ')}{connection.connection_id}
+                            {t('pages.deskDashboard.connectionId')}{connection.connection_id}
                         </p>
                     </div>
                 </div>
@@ -65,54 +65,54 @@ export default function DeskDashboard() {
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 <Card>
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                        <CardTitle className="text-sm font-medium">{t('pages.deskDashboard.ipAddress', 'IP Address')}</CardTitle>
+                        <CardTitle className="text-sm font-medium">{t('pages.deskDashboard.ipAddress')}</CardTitle>
                         <Globe className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{connection.ip || t('pages.deskDashboard.unknown', 'Unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.ip || t('pages.deskDashboard.unknown')}</div>
                     </CardContent>
                 </Card>
                 <Card>
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                        <CardTitle className="text-sm font-medium">{t('pages.deskDashboard.os', 'OS')}</CardTitle>
+                        <CardTitle className="text-sm font-medium">{t('pages.deskDashboard.os')}</CardTitle>
                         <Server className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{connection.version_info?.operation_system || t('pages.deskDashboard.unknown', 'Unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.version_info?.operation_system || t('pages.deskDashboard.unknown')}</div>
                     </CardContent>
                 </Card>
                 <Card>
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                        <CardTitle className="text-sm font-medium">{t('pages.deskDashboard.deskType', 'Desk Type')}</CardTitle>
+                        <CardTitle className="text-sm font-medium">{t('pages.deskDashboard.deskType')}</CardTitle>
                         <Monitor className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">{connection.version_info?.remote_desk_type || t('pages.deskDashboard.unknown', 'Unknown')}</div>
+                        <div className="text-2xl font-bold">{connection.version_info?.remote_desk_type || t('pages.deskDashboard.unknown')}</div>
                     </CardContent>
                 </Card>
             </div>
 
             {/* Quick Actions */}
             <div>
-                <h3 className="text-xl font-semibold mb-4">{t('pages.deskDashboard.features', 'Features')}</h3>
+                <h3 className="text-xl font-semibold mb-4">{t('pages.deskDashboard.features')}</h3>
                 <div className="grid gap-6 md:grid-cols-3">
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer flex flex-col" onClick={() => navigate(`/desk/${deskId}/control`)}>
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <Monitor className="h-5 w-5 text-blue-500" />
-                                {t('pages.deskDashboard.remoteDesktop', 'Remote Desktop')}
+                                {t('pages.deskDashboard.remoteDesktop')}
                             </CardTitle>
-                            <CardDescription>{t('pages.deskDashboard.remoteControlDesc', 'Full desktop remote access via WebRTC')}</CardDescription>
+                            <CardDescription>{t('pages.deskDashboard.remoteControlDesc')}</CardDescription>
                         </CardHeader>
                         <CardContent className="flex-1">
                             <ul className="text-sm text-muted-foreground space-y-2">
-                                <li>• {t('pages.deskDashboard.remoteControlFeature1', 'High performance screen sharing')}</li>
-                                <li>• {t('pages.deskDashboard.remoteControlFeature2', 'Keyboard & Mouse control')}</li>
-                                <li>• {t('pages.deskDashboard.remoteControlFeature3', 'Clipboard sync')}</li>
+                                <li>• {t('pages.deskDashboard.remoteControlFeature1')}</li>
+                                <li>• {t('pages.deskDashboard.remoteControlFeature2')}</li>
+                                <li>• {t('pages.deskDashboard.remoteControlFeature3')}</li>
                             </ul>
                         </CardContent>
                         <CardFooter>
-                            <Button className="w-full">{t('pages.deskDashboard.connect', 'Connect')}</Button>
+                            <Button className="w-full">{t('pages.deskDashboard.connect')}</Button>
                         </CardFooter>
                     </Card>
 
@@ -120,19 +120,19 @@ export default function DeskDashboard() {
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <TerminalIcon className="h-5 w-5 text-green-500" />
-                                {t('pages.deskDashboard.terminal', 'Terminal')}
+                                {t('pages.deskDashboard.terminal')}
                             </CardTitle>
-                            <CardDescription>{t('pages.deskDashboard.terminalDesc', 'Direct command line interface')}</CardDescription>
+                            <CardDescription>{t('pages.deskDashboard.terminalDesc')}</CardDescription>
                         </CardHeader>
                         <CardContent className="flex-1">
                             <ul className="text-sm text-muted-foreground space-y-2">
-                                <li>• {t('pages.deskDashboard.terminalFeature1', 'Multiple shell support')}</li>
-                                <li>• {t('pages.deskDashboard.terminalFeature2', 'Native bash/powershell')}</li>
-                                <li>• {t('pages.deskDashboard.terminalFeature3', 'Secure WebSocket connection')}</li>
+                                <li>• {t('pages.deskDashboard.terminalFeature1')}</li>
+                                <li>• {t('pages.deskDashboard.terminalFeature2')}</li>
+                                <li>• {t('pages.deskDashboard.terminalFeature3')}</li>
                             </ul>
                         </CardContent>
                         <CardFooter>
-                            <Button className="w-full" variant="secondary">{t('pages.deskDashboard.openTerminal', 'Open Terminal')}</Button>
+                            <Button className="w-full" variant="secondary">{t('pages.deskDashboard.openTerminal')}</Button>
                         </CardFooter>
                     </Card>
 
@@ -140,19 +140,19 @@ export default function DeskDashboard() {
                         <CardHeader>
                             <CardTitle className="flex items-center gap-2">
                                 <Folder className="h-5 w-5 text-yellow-500" />
-                                {t('pages.deskDashboard.fileManagement', 'File Management')}
+                                {t('pages.deskDashboard.fileManagement')}
                             </CardTitle>
-                            <CardDescription>{t('pages.deskDashboard.fileManagerDesc', 'Browse and manage remote files')}</CardDescription>
+                            <CardDescription>{t('pages.deskDashboard.fileManagerDesc')}</CardDescription>
                         </CardHeader>
                         <CardContent className="flex-1">
                             <ul className="text-sm text-muted-foreground space-y-2">
-                                <li>• {t('pages.deskDashboard.fileManagerFeature1', 'Upload & Download')}</li>
-                                <li>• {t('pages.deskDashboard.fileManagerFeature2', 'Create/Delete files')}</li>
-                                <li>• {t('pages.deskDashboard.fileManagerFeature3', 'Real-time updates')}</li>
+                                <li>• {t('pages.deskDashboard.fileManagerFeature1')}</li>
+                                <li>• {t('pages.deskDashboard.fileManagerFeature2')}</li>
+                                <li>• {t('pages.deskDashboard.fileManagerFeature3')}</li>
                             </ul>
                         </CardContent>
                         <CardFooter>
-                            <Button className="w-full" variant="secondary">{t('pages.deskDashboard.browseFiles', 'Browse Files')}</Button>
+                            <Button className="w-full" variant="secondary">{t('pages.deskDashboard.browseFiles')}</Button>
                         </CardFooter>
                     </Card>
                 </div>

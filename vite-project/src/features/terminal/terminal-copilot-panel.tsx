@@ -80,20 +80,19 @@ function SuggestionRow({ suggestion, onFill }: SuggestionRowProps) {
                     <Ban className="h-3.5 w-3.5" />
                     {t(
                         'pages.deskTerminal.copilot.blockedHint',
-                        'Blocked by policy — cannot be run.',
                     )}
                 </div>
             ) : (
                 <div className="mt-2 flex gap-2">
                     <Button size="sm" variant="secondary" onClick={() => onFill(suggestion.command)}>
                         <CornerDownLeft className="mr-1 h-3.5 w-3.5" />
-                        {t('pages.deskTerminal.copilot.fill', 'Fill')}
+                        {t('pages.deskTerminal.copilot.fill')}
                     </Button>
                     <Button size="sm" variant="ghost" onClick={copy}>
                         <ClipboardCopy className="mr-1 h-3.5 w-3.5" />
                         {copied
-                            ? t('pages.deskTerminal.copilot.copied', 'Copied')
-                            : t('pages.deskTerminal.copilot.copy', 'Copy')}
+                            ? t('pages.deskTerminal.copilot.copied')
+                            : t('pages.deskTerminal.copilot.copy')}
                     </Button>
                 </div>
             )}
@@ -140,7 +139,7 @@ export function TerminalCopilotPanel({
             <div className="flex items-center justify-between border-b border-border px-3 py-2">
                 <div className="flex items-center gap-2 font-medium">
                     <Sparkles className="h-4 w-4 text-primary" />
-                    {t('pages.deskTerminal.copilot.title', 'Terminal Copilot')}
+                    {t('pages.deskTerminal.copilot.title')}
                 </div>
                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>
                     <X className="h-4 w-4" />
@@ -154,14 +153,14 @@ export function TerminalCopilotPanel({
                         variant={mode === 'how_to' ? 'default' : 'outline'}
                         onClick={() => setMode('how_to')}
                     >
-                        {t('pages.deskTerminal.copilot.modeHowTo', 'How to')}
+                        {t('pages.deskTerminal.copilot.modeHowTo')}
                     </Button>
                     <Button
                         size="sm"
                         variant={mode === 'explain_error' ? 'default' : 'outline'}
                         onClick={() => setMode('explain_error')}
                     >
-                        {t('pages.deskTerminal.copilot.modeExplain', 'Explain error')}
+                        {t('pages.deskTerminal.copilot.modeExplain')}
                     </Button>
                 </div>
                 {mode === 'how_to' ? (
@@ -169,7 +168,6 @@ export function TerminalCopilotPanel({
                         className="min-h-16 w-full resize-none rounded-md border border-input bg-background px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         placeholder={t(
                             'pages.deskTerminal.copilot.askPlaceholder',
-                            'Describe what you want to do…',
                         )}
                         value={question}
                         onChange={(e) => setQuestion(e.target.value)}
@@ -181,18 +179,17 @@ export function TerminalCopilotPanel({
                     <p className="text-xs text-muted-foreground">
                         {t(
                             'pages.deskTerminal.copilot.explainHint',
-                            'Explain the most recent error in the terminal and suggest a fix.',
                         )}
                     </p>
                 )}
                 <div className="mt-2 flex gap-2">
                     <Button size="sm" onClick={submit} disabled={running}>
                         {running && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
-                        {t('pages.deskTerminal.copilot.ask', 'Ask')}
+                        {t('pages.deskTerminal.copilot.ask')}
                     </Button>
                     {(state.phase === 'done' || state.phase === 'error' || running) && (
                         <Button size="sm" variant="ghost" onClick={onReset}>
-                            {t('pages.deskTerminal.copilot.reset', 'Clear')}
+                            {t('pages.deskTerminal.copilot.reset')}
                         </Button>
                     )}
                 </div>
@@ -207,7 +204,7 @@ export function TerminalCopilotPanel({
                                 className="flex items-center gap-1 text-xs text-muted-foreground"
                             >
                                 <Wrench className="h-3.5 w-3.5" />
-                                {t('pages.deskTerminal.copilot.toolRan', 'Checked {{name}}', {
+                                {t('pages.deskTerminal.copilot.toolRan', {
                                     name: tool.name,
                                 })}
                             </div>
@@ -242,7 +239,6 @@ export function TerminalCopilotPanel({
                             <p className="text-xs text-muted-foreground">
                                 {t(
                                     'pages.deskTerminal.copilot.noSuggestions',
-                                    'No command suggested.',
                                 )}
                             </p>
                         )}

@@ -252,7 +252,7 @@ export default function DeskSession() {
             subscribe,
             isRTCConnected,
             changeDisplaySettingsType: SIGNALING_TYPE_CODE_CHANGE_DISPLAY_SETTINGS,
-            translate: (key, fallback) => t(key, fallback),
+            translate: (key) => t(key),
         });
 
     // Adaptive quality state
@@ -587,10 +587,9 @@ export default function DeskSession() {
         if (!isWebRtcAvailable()) {
             toast({
                 variant: "destructive",
-                title: t("pages.desk.webrtcUnavailableTitle", "WebRTC unavailable"),
+                title: t("pages.desk.webrtcUnavailableTitle"),
                 description: t(
                     "pages.desk.webrtcUnavailableDesc",
-                    "This client's built-in browser does not support WebRTC. Please open the web console in a standard browser such as Chrome to connect.",
                 ),
             });
             return;
@@ -857,7 +856,7 @@ export default function DeskSession() {
                 onAdaptiveBitrateChange={setAdaptiveBitrateEnabled}
             />
             <div className="flex items-center justify-between border-b p-4">
-                <h2 className="text-lg font-semibold">{t('pages.desk.title', 'Remote Desk')} - {deskId}</h2>
+                <h2 className="text-lg font-semibold">{t('pages.desk.title')} - {deskId}</h2>
                 <div className="flex items-center gap-4">
                     {hasControl && (
                         <div className="text-sm font-medium text-blue-500">Controlling</div>
@@ -899,7 +898,7 @@ export default function DeskSession() {
                             <div className="absolute top-5 left-1/2 -translate-x-1/2 z-[60] flex max-w-[92%] items-center gap-3 rounded-xl border border-amber-300/70 bg-amber-500/95 px-5 py-3 text-sm font-semibold text-amber-950 shadow-2xl shadow-black/40 ring-1 ring-black/20 backdrop-blur-md animate-in fade-in slide-in-from-top-4 zoom-in-95 duration-300">
                                 <AlertTriangle className="h-6 w-6 shrink-0 animate-pulse" />
                                 <span className="leading-snug">
-                                    {t('pages.desk.escHintFullscreen', 'Pressing Esc exits fullscreen and is not sent to the host. Use the keyboard shortcut menu to send Esc.')}
+                                    {t('pages.desk.escHintFullscreen')}
                                 </span>
                             </div>
                         )}
@@ -948,7 +947,7 @@ export default function DeskSession() {
                                     name="textInput"
                                     autoFocus
                                     className="w-48 h-8 text-foreground"
-                                    placeholder={t('pages.desk.enterText', 'Enter text...')}
+                                    placeholder={t('pages.desk.enterText')}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') {
                                             if (e.currentTarget.value.trim()) {
@@ -983,9 +982,9 @@ export default function DeskSession() {
                                 <span className="artText">LCXL Remote Desk</span>
                                 {!initData && (
                                     <p className="mt-3 text-sm text-white/80">
-                                        {t('pages.desk.initializingCapture', 'Initializing remote capture...')}
+                                        {t('pages.desk.initializingCapture')}
                                         <br />
-                                        {t('pages.desk.waitingPermission', 'Waiting for host authorization dialog.')}
+                                        {t('pages.desk.waitingPermission')}
                                     </p>
                                 )}
                             </div>
@@ -995,12 +994,12 @@ export default function DeskSession() {
                             <div className="absolute top-4 left-4 z-50 bg-black/60 text-white p-3 rounded-lg text-xs font-mono backdrop-blur-md border border-white/20 select-none min-w-[260px] max-h-[80vh] overflow-y-auto">
                                 <div className="flex justify-between items-center mb-2 pb-1 border-b border-white/15">
                                     <div className="text-sm font-bold text-white/90">
-                                        {t('pages.desk.statsPanel.title', 'Remote Desk Metrics')}
+                                        {t('pages.desk.statsPanel.title')}
                                     </div>
                                     <button 
                                         onClick={() => setShowStats(false)} 
                                         className="text-gray-400 hover:text-white transition-colors"
-                                        aria-label={t('pages.desk.closeStats', 'Close')}
+                                        aria-label={t('pages.desk.closeStats')}
                                     >
                                         <XSquare className="w-4 h-4" />
                                     </button>
@@ -1008,41 +1007,41 @@ export default function DeskSession() {
 
                                 {/* Network section — what was the original "Network Stats" panel. */}
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.fps', 'FPS')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.fps')}:</span>
                                     <span className="font-bold text-green-400">{rtcStats.fps}</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.resolution', 'Resolution')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.resolution')}:</span>
                                     <span className="font-bold text-white">{rtcStats.width}x{rtcStats.height}</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.bitrate', 'Bitrate')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.bitrate')}:</span>
                                     <span className="font-bold text-blue-400">{rtcStats.bitrate} kbps</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.videoCodec', 'Video Codec')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.videoCodec')}:</span>
                                     <span className="font-bold text-purple-400">{rtcStats.videoCodec || 'Unknown'}</span>
                                 </div>
                                 {rtcStats.audioCodec && (
                                     <div className="flex justify-between gap-4 mb-1">
-                                        <span className="text-gray-400">{t('pages.desk.statsPanel.audioCodec', 'Audio Codec')}:</span>
+                                        <span className="text-gray-400">{t('pages.desk.statsPanel.audioCodec')}:</span>
                                         <span className="font-bold text-purple-400">{rtcStats.audioCodec}</span>
                                     </div>
                                 )}
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.latency', 'Latency')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.latency')}:</span>
                                     <span className={`font-bold ${rtcStats.rtt > 150 ? 'text-red-400' : rtcStats.rtt > 80 ? 'text-yellow-400' : 'text-green-400'}`}>
                                         {rtcStats.rtt} ms
                                     </span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.packetLoss', 'Packet Loss')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.packetLoss')}:</span>
                                     <span className={`font-bold ${rtcStats.packetLoss > 5 ? 'text-red-400' : rtcStats.packetLoss > 1 ? 'text-yellow-400' : 'text-green-400'}`}>
                                         {rtcStats.packetLoss}%
                                     </span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.network', 'Network')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.network')}:</span>
                                     <span className="font-bold text-orange-400 uppercase">
                                         {rtcStats.networkType || 'Unknown'}
                                     </span>
@@ -1050,14 +1049,14 @@ export default function DeskSession() {
 
                                 {/* Video frame section — derived from RTCInboundRtpStreamStats. */}
                                 <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.frameSection', 'Video Frames')}
+                                    {t('pages.desk.statsPanel.frameSection')}
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDecoded', 'Frames Decoded')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDecoded')}:</span>
                                     <span className="font-bold text-white">{rtcStats.framesDecoded} (+{rtcStats.framesDecodedDelta})</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.keyFrames', 'I Frames')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.keyFrames')}:</span>
                                     {/* High keyframe rate = encoder churn / frequent PLI / wasted bandwidth.
                                         Highlight when more than ~1 IDR/s (the symptom we just hunted in the broadcast-lag bug). */}
                                     <span className={`font-bold ${rtcStats.keyFramesDelta > 1 ? 'text-red-400' : 'text-yellow-300'}`}>
@@ -1065,7 +1064,7 @@ export default function DeskSession() {
                                     </span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pFrames', 'P Frames')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pFrames')}:</span>
                                     <span className="font-bold text-white">{rtcStats.pFramesDecoded}</span>
                                 </div>
                                 {/* webrtc-rs 0.17.x's VP9 RTP packetizer hard-codes the
@@ -1080,32 +1079,32 @@ export default function DeskSession() {
                                     confusing operators on other codecs. */}
                                 {rtcStats.videoCodec === 'VP9' && (
                                     <div className="text-[10px] italic text-gray-500 mt-0.5 leading-tight">
-                                        {t('pages.desk.statsPanel.vp9FrameTypeHint', 'VP9 RTP packetizer does not tag P frames; the browser counts every frame as an I frame. Encoder-side GOP is unaffected.')}
+                                        {t('pages.desk.statsPanel.vp9FrameTypeHint')}
                                     </div>
                                 )}
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDropped', 'Frames Dropped')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.framesDropped')}:</span>
                                     <span className={`font-bold ${rtcStats.framesDropped > 0 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.framesDropped}</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.avgQp', 'Avg QP')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.avgQp')}:</span>
                                     {/* `null` means the browser doesn't report `qpSum` for this
                                         codec/decoder path. Common on Chromium with H.264
                                         hardware decoding (NVDEC / QuickSync) — not a bug, just
                                         a metric that isn't available. */}
                                     <span className={`font-bold ${rtcStats.avgQp === null ? 'text-gray-500 italic' : 'text-white'}`}>
                                         {rtcStats.avgQp === null
-                                            ? t('pages.desk.statsPanel.avgQpUnavailable', 'N/A (hw decode)')
+                                            ? t('pages.desk.statsPanel.avgQpUnavailable')
                                             : rtcStats.avgQp}
                                     </span>
                                 </div>
 
                                 {/* RTCP feedback — receiver-initiated requests for keyframes / NACK / FIR. */}
                                 <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.feedbackSection', 'RTCP Feedback')}
+                                    {t('pages.desk.statsPanel.feedbackSection')}
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pliCount', 'PLI Sent')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.pliCount')}:</span>
                                     {/* PLI rate > 0 every sample window means the browser is repeatedly
                                         asking for keyframes — e.g. heavy packet loss or decoder reset. */}
                                     <span className={`font-bold ${rtcStats.pliDelta > 0 ? 'text-red-400' : 'text-white'}`}>
@@ -1113,11 +1112,11 @@ export default function DeskSession() {
                                     </span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.nackCount', 'NACK Sent')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.nackCount')}:</span>
                                     <span className="font-bold text-white">{rtcStats.nackCount}</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.firCount', 'FIR Sent')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.firCount')}:</span>
                                     <span className="font-bold text-white">{rtcStats.firCount}</span>
                                 </div>
 
@@ -1128,10 +1127,10 @@ export default function DeskSession() {
                                     `rtcStats` updates, so the values are fresh without an
                                     extra setState. */}
                                 <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.encoderSection', 'Encoder Quality')}
+                                    {t('pages.desk.statsPanel.encoderSection')}
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.currentQuality', 'Current Quality')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.currentQuality')}:</span>
                                     {/* video_quality is QP-style: 0-63, lower is sharper.
                                         Mirror the same colour buckets as Avg QP so the two are visually comparable. */}
                                     <span className={`font-bold ${
@@ -1145,7 +1144,7 @@ export default function DeskSession() {
                                     </span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.qualityAdjustments', 'Adaptive Adjustments')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.qualityAdjustments')}:</span>
                                     {/* If the count grows by more than ~1/min the controller is
                                         thrashing. Highlight when adaptive is even on so the user
                                         can tell at a glance whether the toggle has any effect. */}
@@ -1159,7 +1158,7 @@ export default function DeskSession() {
                                     </span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.lastAdjustedAgo', 'Last Adjusted')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.lastAdjustedAgo')}:</span>
                                     <span className="font-bold text-white">
                                         {qualityAdjustmentCountRef.current === 0
                                             ? '-'
@@ -1169,18 +1168,18 @@ export default function DeskSession() {
 
                                 {/* Playback quality — perceived smoothness signals. */}
                                 <div className="text-xs font-bold text-white/80 mt-3 mb-1 pt-2 border-t border-white/15">
-                                    {t('pages.desk.statsPanel.qualitySection', 'Playback Quality')}
+                                    {t('pages.desk.statsPanel.qualitySection')}
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.freezeCount', 'Freeze Count')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.freezeCount')}:</span>
                                     <span className={`font-bold ${rtcStats.freezeCount > 0 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.freezeCount}</span>
                                 </div>
                                 <div className="flex justify-between gap-4 mb-1">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.totalFreezeDuration', 'Total Freeze Duration')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.totalFreezeDuration')}:</span>
                                     <span className="font-bold text-white">{rtcStats.totalFreezesDurationMs} ms</span>
                                 </div>
                                 <div className="flex justify-between gap-4">
-                                    <span className="text-gray-400">{t('pages.desk.statsPanel.jitter', 'Jitter')}:</span>
+                                    <span className="text-gray-400">{t('pages.desk.statsPanel.jitter')}:</span>
                                     <span className={`font-bold ${rtcStats.jitterMs > 50 ? 'text-yellow-300' : 'text-white'}`}>{rtcStats.jitterMs} ms</span>
                                 </div>
                                 {/* RFC 3550 interarrival jitter is an EWMA over packet interarrival
@@ -1191,7 +1190,7 @@ export default function DeskSession() {
                                     Surface this so operators don't mistake it for a real network
                                     fault. */}
                                 <div className="text-[10px] italic text-gray-500 mt-0.5 leading-tight">
-                                    {t('pages.desk.statsPanel.jitterHint', 'Static desktop drops to ~1 fps; RFC 3550 jitter is unreliable at low packet rates')}
+                                    {t('pages.desk.statsPanel.jitterHint')}
                                 </div>
                             </div>
                         )}
@@ -1205,7 +1204,7 @@ export default function DeskSession() {
                         {isWaitingApproval && (
                             <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-black/80 text-white px-6 py-4 rounded-lg shadow-2xl backdrop-blur-md border border-white/10 flex flex-col items-center gap-4 animate-in fade-in slide-in-from-bottom-4">
                                 <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
-                                <span className="text-lg font-medium">{t('pages.desk.waitingPermission', 'Waiting for host authorization dialog.')}</span>
+                                <span className="text-lg font-medium">{t('pages.desk.waitingPermission')}</span>
                             </div>
                         )}
 
@@ -1232,7 +1231,7 @@ export default function DeskSession() {
                         {transferStatus !== 'idle' && transferStatus !== 'error' && (
                             <div className="absolute top-16 right-4 z-[60] bg-black/80 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md border border-white/10 flex items-center gap-2 animate-in fade-in slide-in-from-top-4">
                                 <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                                <span>{transferProgress ? `${t('pages.desk.syncing', 'Syncing clipboard...')} ${transferProgress}%` : t('pages.desk.syncing', 'Syncing clipboard...')}</span>
+                                <span>{transferProgress ? `${t('pages.desk.syncing')} ${transferProgress}%` : t('pages.desk.syncing')}</span>
                             </div>
                         )}
 
@@ -1267,7 +1266,6 @@ export default function DeskSession() {
                                         <span>
                                             {t(
                                                 "pages.desk.resolutionUpdating",
-                                                "Updating resolution {{w}}×{{h}}…",
                                                 {
                                                     w: resolutionToast.targetW,
                                                     h: resolutionToast.targetH,
@@ -1282,7 +1280,6 @@ export default function DeskSession() {
                                         <span>
                                             {t(
                                                 "pages.desk.resolutionApplied",
-                                                "Applied {{w}}×{{h}}",
                                                 {
                                                     w: resolutionToast.appliedW,
                                                     h: resolutionToast.appliedH,
@@ -1297,7 +1294,6 @@ export default function DeskSession() {
                                         <span>
                                             {t(
                                                 "pages.desk.resolutionFailed",
-                                                "Update failed: {{reason}}",
                                                 { reason: resolutionToast.reason },
                                             )}
                                         </span>
@@ -1343,7 +1339,7 @@ export default function DeskSession() {
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            <p>{isWaitingApproval ? t('pages.desk.waitingPermission', 'Waiting for host authorization dialog.') : hasControl ? t('pages.desk.exitControl', 'Exit Control') : t('pages.desk.requestControl', 'Request Control')}</p>
+                                            <p>{isWaitingApproval ? t('pages.desk.waitingPermission') : hasControl ? t('pages.desk.exitControl') : t('pages.desk.requestControl')}</p>
                                         </TooltipContent>
                                     </Tooltip>
 
@@ -1358,7 +1354,7 @@ export default function DeskSession() {
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            <p>{isFullscreen ? t('pages.desk.exitFullscreen', 'Exit Fullscreen') : t('pages.desk.fullscreen', 'Fullscreen')}</p>
+                                            <p>{isFullscreen ? t('pages.desk.exitFullscreen') : t('pages.desk.fullscreen')}</p>
                                         </TooltipContent>
                                     </Tooltip>
 
@@ -1373,7 +1369,7 @@ export default function DeskSession() {
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            <p>{t('pages.desk.settings', 'Settings')}</p>
+                                            <p>{t('pages.desk.settings')}</p>
                                         </TooltipContent>
                                     </Tooltip>
 
@@ -1388,7 +1384,7 @@ export default function DeskSession() {
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            <p>{showStats ? t('pages.desk.hideStats', 'Hide Network Stats') : t('pages.desk.showStats', 'Show Network Stats')}</p>
+                                            <p>{showStats ? t('pages.desk.hideStats') : t('pages.desk.showStats')}</p>
                                         </TooltipContent>
                                     </Tooltip>
 
@@ -1426,7 +1422,7 @@ export default function DeskSession() {
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            <p>{showDiagnose ? t('pages.desk.diagnose.hidePanel', 'Hide AI Diagnose') : t('pages.desk.diagnose.showPanel', 'AI Diagnose')}</p>
+                                            <p>{showDiagnose ? t('pages.desk.diagnose.hidePanel') : t('pages.desk.diagnose.showPanel')}</p>
                                         </TooltipContent>
                                     </Tooltip>
 
@@ -1442,7 +1438,7 @@ export default function DeskSession() {
                                                 </Button>
                                             </TooltipTrigger>
                                             <TooltipContent>
-                                                <p>{isPrivateScreen ? t('pages.desk.disablePrivateScreen', 'Disable Privacy Screen') : t('pages.desk.enablePrivateScreen', 'Enable Privacy Screen')}</p>
+                                                <p>{isPrivateScreen ? t('pages.desk.disablePrivateScreen') : t('pages.desk.enablePrivateScreen')}</p>
                                             </TooltipContent>
                                         </Tooltip>
                                     )}
@@ -1467,7 +1463,7 @@ export default function DeskSession() {
                                                 </Button>
                                             </TooltipTrigger>
                                             <TooltipContent>
-                                                <p>{clipboardEnabled ? t('pages.desk.disableClipboardSync', 'Disable Clipboard Sync') : t('pages.desk.enableClipboardSync', 'Enable Clipboard Sync')} {!window.isSecureContext ? t('pages.desk.clipboardHttpsRequired', '(HTTPS Required)') : ''}</p>
+                                                <p>{clipboardEnabled ? t('pages.desk.disableClipboardSync') : t('pages.desk.enableClipboardSync')} {!window.isSecureContext ? t('pages.desk.clipboardHttpsRequired') : ''}</p>
                                             </TooltipContent>
                                         </Tooltip>
                                     )}
@@ -1485,7 +1481,7 @@ export default function DeskSession() {
                                                         key={shortcut.id}
                                                         onClick={() => sendKeyboardEvents(shortcut.events)}
                                                     >
-                                                        {t(shortcut.labelKey, shortcut.labelFallback)}
+                                                        {t(shortcut.labelKey)}
                                                     </DropdownMenuItem>
                                                 ))}
                                             </DropdownMenuContent>
@@ -1506,8 +1502,8 @@ export default function DeskSession() {
                                         </TooltipTrigger>
                                         <TooltipContent>
                                             <p>{whiteboard.canActivate
-                                                ? (whiteboard.isActive ? t('pages.desk.closeWhiteboard', 'Close Whiteboard') : t('pages.desk.openWhiteboard', 'Open Whiteboard'))
-                                                : t('pages.desk.whiteboardUnavailable', 'Whiteboard requires Tauri on remote')}
+                                                ? (whiteboard.isActive ? t('pages.desk.closeWhiteboard') : t('pages.desk.openWhiteboard'))
+                                                : t('pages.desk.whiteboardUnavailable')}
                                             </p>
                                         </TooltipContent>
                                     </Tooltip>
@@ -1526,7 +1522,7 @@ export default function DeskSession() {
                                         <TooltipContent>
                                             <p>{microphone.micError
                                                 ? microphone.micError
-                                                : (microphone.isMicActive ? t('pages.desk.stopMic', 'Stop Microphone') : t('pages.desk.startMic', 'Start Microphone'))
+                                                : (microphone.isMicActive ? t('pages.desk.stopMic') : t('pages.desk.startMic'))
                                             }</p>
                                         </TooltipContent>
                                     </Tooltip>
@@ -1565,7 +1561,7 @@ export default function DeskSession() {
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            <p>{t('pages.desk.disconnect', 'Disconnect')}</p>
+                                            <p>{t('pages.desk.disconnect')}</p>
                                         </TooltipContent>
                                     </Tooltip>
                                     </div>

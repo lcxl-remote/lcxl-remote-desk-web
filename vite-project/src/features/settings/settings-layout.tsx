@@ -16,7 +16,7 @@ export function SettingsLayout() {
                     <Button variant="ghost" size="sm" className="gap-2" asChild>
                         <Link to="/system">
                             <ArrowLeft className="h-4 w-4" />
-                            {t('pages.settings.backToOverview', '返回设置概览')}
+                            {t('pages.settings.backToOverview')}
                         </Link>
                     </Button>
                 </div>

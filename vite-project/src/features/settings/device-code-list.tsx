@@ -74,33 +74,33 @@ export function DeviceCodeList() {
                 }
             })
             toast({
-                title: t('pages.deviceCodeList.generateSuccess', 'Generated successfully')
+                title: t('pages.deviceCodeList.generateSuccess')
             })
             setIsCreateOpen(false)
             refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
-                title: t('pages.deviceCodeList.generateFailed', 'Generate failed'),
+                title: t('pages.deviceCodeList.generateFailed'),
                 description: (error as Error).message
             })
         }
     }
 
     const handleDelete = async (id: number) => {
-        if (!confirm(t('pages.deviceCodeList.deleteConfirm.description', 'Are you sure you want to delete this device code?'))) return
+        if (!confirm(t('pages.deviceCodeList.deleteConfirm.description'))) return
 
         try {
             await deleteDeviceCode({ id })
             toast({
-                title: t('pages.deviceCodeList.deleteSuccess', 'Deleted successfully')
+                title: t('pages.deviceCodeList.deleteSuccess')
             })
             setSelectedIds(prev => prev.filter(i => i !== id))
             refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
-                title: t('pages.deviceCodeList.deleteFailed', 'Delete failed'),
+                title: t('pages.deviceCodeList.deleteFailed'),
                 description: (error as Error).message
             })
         }
@@ -126,14 +126,14 @@ export function DeviceCodeList() {
                 }
             })
             toast({
-                title: t('pages.deviceCodeList.updateSuccess', 'Updated successfully')
+                title: t('pages.deviceCodeList.updateSuccess')
             })
             setEditItem(null)
             refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
-                title: t('pages.deviceCodeList.updateFailed', 'Update failed'),
+                title: t('pages.deviceCodeList.updateFailed'),
                 description: (error as Error).message
             })
         }
@@ -141,19 +141,19 @@ export function DeviceCodeList() {
 
     const handleBatchDelete = async () => {
         if (!selectedIds.length) return;
-        if (!confirm(t('pages.deviceCodeList.batchDeleteConfirm', 'Are you sure you want to delete selected device codes?'))) return;
+        if (!confirm(t('pages.deviceCodeList.batchDeleteConfirm'))) return;
 
         try {
             await batchDeleteDeviceCodes({ data: { ids: selectedIds } })
             toast({
-                title: t('pages.deviceCodeList.deleteSuccess', 'Deleted successfully')
+                title: t('pages.deviceCodeList.deleteSuccess')
             })
             setSelectedIds([])
             refetch()
         } catch (error) {
             toast({
                 variant: 'destructive',
-                title: t('pages.deviceCodeList.deleteFailed', 'Delete failed'),
+                title: t('pages.deviceCodeList.deleteFailed'),
                 description: (error as Error).message
             })
         }
@@ -163,32 +163,32 @@ export function DeviceCodeList() {
         <div className="container mx-auto max-w-5xl py-8">
             <div className="mb-8 flex items-center justify-between">
                 <div>
-                    <h1 className="text-3xl font-bold tracking-tight">{t('pages.deviceCodeList.title', 'Device Code Management')}</h1>
+                    <h1 className="text-3xl font-bold tracking-tight">{t('pages.deviceCodeList.title')}</h1>
                     <p className="text-muted-foreground">
-                        {t('pages.deviceCodeList.description', 'Manage temporary connection codes for server access')}
+                        {t('pages.deviceCodeList.description')}
                     </p>
                 </div>
                 <div className="flex gap-2 items-center">
                     {selectedIds.length > 0 && (
                         <Button variant="destructive" onClick={handleBatchDelete} disabled={isBatchDeleting}>
                             {isBatchDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
-                            {t('pages.deviceCodeList.batchDelete', 'Delete Selected')} ({selectedIds.length})
+                            {t('pages.deviceCodeList.batchDelete')} ({selectedIds.length})
                         </Button>
                     )}
                     <Button variant="outline" onClick={() => refetch()}>
                         <RefreshCw className="mr-2 h-4 w-4" />
-                        {t('common.refresh', 'Refresh')}
+                        {t('common.refresh')}
                     </Button>
                     <Button onClick={handleOpenCreate} disabled={isCreating}>
                         {isCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-                        {t('pages.deviceCodeList.generate', 'Generate New Code')}
+                        {t('pages.deviceCodeList.generate')}
                     </Button>
                 </div>
             </div>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.deviceCodeList.title", "Device Code Management")}</CardTitle>
+                    <CardTitle>{t("pages.deviceCodeList.title")}</CardTitle>
                 </CardHeader>
                 <CardContent>
                     {isLoading ? (
@@ -213,11 +213,11 @@ export function DeviceCodeList() {
                                             />
                                         </TableHead>
                                         <TableHead>ID</TableHead>
-                                        <TableHead>{t('pages.deviceCodeList.column.clientId', 'Client ID')}</TableHead>
-                                        <TableHead>{t('pages.deviceCodeList.column.deviceCode', 'Device Code')}</TableHead>
-                                        <TableHead>{t('pages.deviceCodeList.column.createdAt', 'Created At')}</TableHead>
-                                        <TableHead>{t('pages.deviceCodeList.column.updatedAt', 'Updated At')}</TableHead>
-                                        <TableHead className="text-right">{t('common.actions', 'Actions')}</TableHead>
+                                        <TableHead>{t('pages.deviceCodeList.column.clientId')}</TableHead>
+                                        <TableHead>{t('pages.deviceCodeList.column.deviceCode')}</TableHead>
+                                        <TableHead>{t('pages.deviceCodeList.column.createdAt')}</TableHead>
+                                        <TableHead>{t('pages.deviceCodeList.column.updatedAt')}</TableHead>
+                                        <TableHead className="text-right">{t('common.actions')}</TableHead>
                                     </TableRow>
                                 </TableHeader>
                                 <TableBody>
@@ -249,11 +249,11 @@ export function DeviceCodeList() {
                                                     {item.deviceCode}
                                                     {item.isOnline ? (
                                                         <Badge variant="default" className="ml-2 bg-green-500 hover:bg-green-600">
-                                                            {t('pages.deviceCodeList.status.online', 'Online')}
+                                                            {t('pages.deviceCodeList.status.online')}
                                                         </Badge>
                                                     ) : (
                                                         <Badge variant="secondary" className="ml-2">
-                                                            {t('pages.deviceCodeList.status.offline', 'Offline')}
+                                                            {t('pages.deviceCodeList.status.offline')}
                                                         </Badge>
                                                     )}
                                                 </TableCell>
@@ -280,15 +280,15 @@ export function DeviceCodeList() {
             <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>{t('pages.deviceCodeList.createModal.title', 'Create New Device Code')}</DialogTitle>
+                        <DialogTitle>{t('pages.deviceCodeList.createModal.title')}</DialogTitle>
                         <DialogDescription>
-                            {t('pages.deviceCodeList.createModal.description', 'Please enter Client ID and Device Code.')}
+                            {t('pages.deviceCodeList.createModal.description')}
                         </DialogDescription>
                     </DialogHeader>
                     <div className="grid gap-4 py-4">
                         <div className="grid grid-cols-4 items-center gap-4">
                             <Label htmlFor="clientId" className="text-right">
-                                {t('pages.deviceCodeList.column.clientId', 'Client ID')}
+                                {t('pages.deviceCodeList.column.clientId')}
                             </Label>
                             <Input
                                 id="clientId"
@@ -299,7 +299,7 @@ export function DeviceCodeList() {
                         </div>
                         <div className="grid grid-cols-4 items-center gap-4">
                             <Label htmlFor="deviceCode" className="text-right">
-                                {t('pages.deviceCodeList.column.deviceCode', 'Device Code')}
+                                {t('pages.deviceCodeList.column.deviceCode')}
                             </Label>
                             <Input
                                 id="deviceCode"
@@ -310,10 +310,10 @@ export function DeviceCodeList() {
                         </div>
                     </div>
                     <DialogFooter>
-                        <Button variant="outline" onClick={() => setIsCreateOpen(false)}>{t('common.cancel', 'Cancel')}</Button>
+                        <Button variant="outline" onClick={() => setIsCreateOpen(false)}>{t('common.cancel')}</Button>
                         <Button onClick={submitCreate} disabled={isCreating || !createForm.clientId || !createForm.deviceCode}>
                             {isCreating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                            {t('common.save', 'Save')}
+                            {t('common.save')}
                         </Button>
                     </DialogFooter>
                 </DialogContent>
@@ -322,15 +322,15 @@ export function DeviceCodeList() {
             <Dialog open={!!editItem} onOpenChange={(open) => !open && setEditItem(null)}>
                 <DialogContent>
                     <DialogHeader>
-                        <DialogTitle>{t('pages.deviceCodeList.editModal.title', 'Edit Device Code')}</DialogTitle>
+                        <DialogTitle>{t('pages.deviceCodeList.editModal.title')}</DialogTitle>
                         <DialogDescription>
-                            {t('pages.deviceCodeList.editModal.description', 'Update the device code for this client.')}
+                            {t('pages.deviceCodeList.editModal.description')}
                         </DialogDescription>
                     </DialogHeader>
                     <div className="grid gap-4 py-4">
                         <div className="grid grid-cols-4 items-center gap-4">
                             <Label htmlFor="editClientId" className="text-right">
-                                {t('pages.deviceCodeList.column.clientId', 'Client ID')}
+                                {t('pages.deviceCodeList.column.clientId')}
                             </Label>
                             <Input
                                 id="editClientId"
@@ -341,7 +341,7 @@ export function DeviceCodeList() {
                         </div>
                         <div className="grid grid-cols-4 items-center gap-4">
                             <Label htmlFor="editDeviceCode" className="text-right">
-                                {t('pages.deviceCodeList.column.deviceCode', 'Device Code')}
+                                {t('pages.deviceCodeList.column.deviceCode')}
                             </Label>
                             <Input
                                 id="editDeviceCode"
@@ -352,9 +352,9 @@ export function DeviceCodeList() {
                         </div>
                     </div>
                     <DialogFooter>
-                        <Button variant="outline" onClick={() => setEditItem(null)}>{t('common.cancel', 'Cancel')}</Button>
+                        <Button variant="outline" onClick={() => setEditItem(null)}>{t('common.cancel')}</Button>
                         <Button onClick={submitEdit} disabled={!editForm.deviceCode}>
-                            {t('common.save', 'Save')}
+                            {t('common.save')}
                         </Button>
                     </DialogFooter>
                 </DialogContent>

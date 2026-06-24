@@ -85,11 +85,9 @@ export function useCursorSync(
             toast({
                 title: t(
                     'pages.desk.remoteCursorActive.title',
-                    'Remote cursor visible in frame',
                 ),
                 description: t(
                     'pages.desk.remoteCursorActive.description',
-                    'Display driver limitation: the OS cursor is baked into the remote video, so you may see two cursors. The local one stays responsive.',
                 ),
                 duration: 5000,
             });

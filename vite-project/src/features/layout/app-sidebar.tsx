@@ -198,7 +198,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                     </Avatar>
                                     <div className="grid flex-1 text-left text-sm leading-tight">
                                         <span className="truncate font-semibold">{user?.name || "User"}</span>
-                                        <span className="truncate text-xs">{user?.access === "admin" ? t('pages.appSidebar.role.admin', 'Administrator') : t('pages.appSidebar.role.deviceUser', 'Device User')}</span>
+                                        <span className="truncate text-xs">{user?.access === "admin" ? t('pages.appSidebar.role.admin') : t('pages.appSidebar.role.deviceUser')}</span>
                                     </div>
                                     <ChevronDown className="ml-auto size-4" />
                                 </SidebarMenuButton>
@@ -217,7 +217,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                         </Avatar>
                                         <div className="grid flex-1 text-left text-sm leading-tight">
                                             <span className="truncate font-semibold">{user?.name || "User"}</span>
-                                            <span className="truncate text-xs">{user?.access === "admin" ? t('pages.appSidebar.role.admin', 'Administrator') : t('pages.appSidebar.role.deviceUser', 'Device User')}</span>
+                                            <span className="truncate text-xs">{user?.access === "admin" ? t('pages.appSidebar.role.admin') : t('pages.appSidebar.role.deviceUser')}</span>
                                         </div>
                                     </div>
                                 </DropdownMenuLabel>
@@ -226,13 +226,13 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                                     <DropdownMenuItem asChild>
                                         <Link to="/user/settings" className="w-full cursor-pointer">
                                             <Settings className="mr-2 h-4 w-4" />
-                                            {t('menu.account.settings', 'Account Settings')}
+                                            {t('menu.account.settings')}
                                         </Link>
                                     </DropdownMenuItem>
                                 )}
                                 <DropdownMenuItem onClick={handleLogout} className="cursor-pointer">
                                     <LogOut className="mr-2 h-4 w-4" />
-                                    {t('menu.account.logout', 'Log out')}
+                                    {t('menu.account.logout')}
                                 </DropdownMenuItem>
                             </DropdownMenuContent>
                         </DropdownMenu>

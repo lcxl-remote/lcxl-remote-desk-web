@@ -1,14 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 
-// Mock i18n so tests don't need the real provider; t() echoes the
-// default message which the component code always passes alongside
-// every key.
-vi.mock("react-i18next", () => ({
-    useTranslation: () => ({
-        t: (_key: string, fallback?: string) => fallback ?? _key,
-    }),
-}))
+// i18n: real en-US locale so assertions match what users see.
+vi.mock("react-i18next", () => import("@/test-utils/i18n-mock").then((m) => m.reactI18nextMock()))
 
 // Mock the generated server-info hook so the page renders in
 // "service-daemon mode with admin" without exercising TanStack Query.

@@ -36,32 +36,29 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
             const body = await resp.json().catch(() => null)
             if (body?.code === 0) {
                 toast({
-                    title: t("pages.system.settings.success", "Success"),
+                    title: t("pages.system.settings.success"),
                     description: t(
                         "pages.system.settings.serviceManagement.uninstallSuccess",
-                        "Service uninstall request submitted. Please wait a few seconds.",
                     ),
                 })
                 onOpenChange(false)
             } else {
                 toast({
                     variant: "destructive",
-                    title: t("pages.system.settings.error", "Error"),
+                    title: t("pages.system.settings.error"),
                     description:
                         body?.message ??
                         t(
                             "pages.system.settings.serviceManagement.uninstallError",
-                            "Failed to uninstall service.",
                         ),
                 })
             }
         } catch (e) {
             toast({
                 variant: "destructive",
-                title: t("pages.system.settings.error", "Error"),
+                title: t("pages.system.settings.error"),
                 description: t(
                     "pages.system.settings.serviceManagement.uninstallError",
-                    "Failed to uninstall service.",
                 ),
             })
         } finally {
@@ -76,13 +73,11 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
                     <DialogTitle>
                         {t(
                             "pages.system.settings.serviceManagement.uninstallDialog.title",
-                            "Uninstall service?",
                         )}
                     </DialogTitle>
                     <DialogDescription>
                         {t(
                             "pages.system.settings.serviceManagement.uninstallDialog.description",
-                            "This will stop the service and remove every installed copy of the LcxlVirtualDisplay IDD driver.",
                         )}
                     </DialogDescription>
                 </DialogHeader>
@@ -94,7 +89,6 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
                     >
                         {t(
                             "pages.system.settings.serviceManagement.uninstallDialog.cancel",
-                            "Cancel",
                         )}
                     </Button>
                     <Button
@@ -104,7 +98,6 @@ export function ServiceUninstallDialog(props: ServiceUninstallDialogProps) {
                     >
                         {t(
                             "pages.system.settings.serviceManagement.uninstallDialog.confirm",
-                            "Uninstall",
                         )}
                     </Button>
                 </DialogFooter>

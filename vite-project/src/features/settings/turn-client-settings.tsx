@@ -53,14 +53,14 @@ export function TurnClientSettingsPage() {
             } as TurnClientSettings;
             await updateTurnClientSettings({ data: payload })
             toast({
-                title: t('pages.system.settings.success', 'Success'),
-                description: t('pages.turnClient.settings.updateSucceedMessage', "TURN Client settings updated successfully"),
+                title: t('pages.system.settings.success'),
+                description: t('pages.turnClient.settings.updateSucceedMessage'),
             })
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t('pages.system.settings.error', 'Error'),
-                description: t('pages.turnClient.settings.updateFailedMessage', "Failed to update TURN Client settings"),
+                title: t('pages.system.settings.error'),
+                description: t('pages.turnClient.settings.updateFailedMessage'),
             })
         }
     }
@@ -76,16 +76,16 @@ export function TurnClientSettingsPage() {
     return (
         <div className="container mx-auto max-w-4xl py-8">
             <div className="mb-8">
-                <h1 className="text-3xl font-bold tracking-tight">{t('pages.turnClient.settings.title', 'TURN Client Settings')}</h1>
+                <h1 className="text-3xl font-bold tracking-tight">{t('pages.turnClient.settings.title')}</h1>
                 <p className="text-muted-foreground">
-                    {t('pages.turnClient.settings.description', 'Manage TURN/STUN traversal mode for this server node.')}
+                    {t('pages.turnClient.settings.description')}
                 </p>
             </div>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.turnClient.settings.configuration", "Relay Configuration")}</CardTitle>
-                    <CardDescription>{t("pages.turnClient.settings.configuration.description", "Update the relay strategy to connect through complex NAT environments.")}</CardDescription>
+                    <CardTitle>{t("pages.turnClient.settings.configuration")}</CardTitle>
+                    <CardDescription>{t("pages.turnClient.settings.configuration.description")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <Form {...form}>
@@ -97,7 +97,7 @@ export function TurnClientSettingsPage() {
                                     name="traversal_mode"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.turnClient.settings.traversalMode", "Traversal Mode")}</FormLabel>
+                                            <FormLabel>{t("pages.turnClient.settings.traversalMode")}</FormLabel>
                                             <Select onValueChange={field.onChange} value={field.value}>
                                                 <FormControl>
                                                     <SelectTrigger>
@@ -111,7 +111,7 @@ export function TurnClientSettingsPage() {
                                                 </SelectContent>
                                             </Select>
                                             <FormDescription>
-                                                {t("pages.turnClient.settings.traversalModeDesc", "Determine how the desktop traffic is relayed to the remote client. TURN provides reliable connection over complex NAT. STUN allows direct P2P. None prevents NAT traversal.")}
+                                                {t("pages.turnClient.settings.traversalModeDesc")}
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
@@ -122,7 +122,7 @@ export function TurnClientSettingsPage() {
                             <div className="flex justify-end">
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t('common.save', 'Save')}
+                                    {t('common.save')}
                                 </Button>
                             </div>
                         </form>

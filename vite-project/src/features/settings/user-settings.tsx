@@ -31,11 +31,11 @@ export function UserSettings() {
     const { mutateAsync: changePassword, isPending } = useChangePassword()
 
     const passwordSchema = useMemo(() => z.object({
-        old_password: z.string().min(1, t("pages.user.settings.oldPasswordRequired", "Current password is required")),
-        new_password: z.string().min(8, t("pages.user.settings.newPasswordMinLength", "New password must be at least 8 characters long")),
-        confirm_password: z.string().min(1, t("pages.user.settings.confirmPasswordRequired", "Please confirm your new password")),
+        old_password: z.string().min(1, t("pages.user.settings.oldPasswordRequired")),
+        new_password: z.string().min(8, t("pages.user.settings.newPasswordMinLength")),
+        confirm_password: z.string().min(1, t("pages.user.settings.confirmPasswordRequired")),
     }).refine((data) => data.new_password === data.confirm_password, {
-        message: t("pages.account.settings.passwordNotMatch", "Passwords do not match"),
+        message: t("pages.account.settings.passwordNotMatch"),
         path: ["confirm_password"],
     }), [t])
 
@@ -58,15 +58,15 @@ export function UserSettings() {
                 }
             })
             toast({
-                title: t('pages.user.settings.success', 'Success'),
-                description: t('pages.user.settings.passwordChanged', "Password changed successfully"),
+                title: t('pages.user.settings.success'),
+                description: t('pages.user.settings.passwordChanged'),
             })
             form.reset()
         } catch (error: any) {
             toast({
                 variant: "destructive",
-                title: t('pages.user.settings.error', 'Error'),
-                description: error?.response?.data?.message || t('pages.user.settings.changePasswordFailed', "Failed to change password"),
+                title: t('pages.user.settings.error'),
+                description: error?.response?.data?.message || t('pages.user.settings.changePasswordFailed'),
             })
         }
     }
@@ -74,16 +74,16 @@ export function UserSettings() {
     return (
         <div className="container mx-auto max-w-2xl py-8">
             <div className="mb-8">
-                <h1 className="text-3xl font-bold tracking-tight">{t('pages.user.settings.title', 'User Settings')}</h1>
+                <h1 className="text-3xl font-bold tracking-tight">{t('pages.user.settings.title')}</h1>
                 <p className="text-muted-foreground">
-                    {t('pages.user.settings.description', 'Manage your account security and preferences')}
+                    {t('pages.user.settings.description')}
                 </p>
             </div>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.user.settings.formTitle", "Change Password")}</CardTitle>
-                    <CardDescription>{t("pages.user.settings.formDescription", "Update your account password. You will need to use your new password on your next login.")}</CardDescription>
+                    <CardTitle>{t("pages.user.settings.formTitle")}</CardTitle>
+                    <CardDescription>{t("pages.user.settings.formDescription")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <Form {...form}>
@@ -93,7 +93,7 @@ export function UserSettings() {
                                 name="old_password"
                                 render={({ field }) => (
                                     <FormItem>
-                                        <FormLabel>{t("pages.user.settings.currentPassword", "Current Password")}</FormLabel>
+                                        <FormLabel>{t("pages.user.settings.currentPassword")}</FormLabel>
                                         <FormControl>
                                             <Input type="password" {...field} />
                                         </FormControl>
@@ -107,7 +107,7 @@ export function UserSettings() {
                                 name="new_password"
                                 render={({ field }) => (
                                     <FormItem>
-                                        <FormLabel>{t("pages.user.settings.newPassword", "New Password")}</FormLabel>
+                                        <FormLabel>{t("pages.user.settings.newPassword")}</FormLabel>
                                         <FormControl>
                                             <Input type="password" {...field} />
                                         </FormControl>
@@ -121,7 +121,7 @@ export function UserSettings() {
                                 name="confirm_password"
                                 render={({ field }) => (
                                     <FormItem>
-                                        <FormLabel>{t("pages.user.settings.confirmPassword", "Confirm New Password")}</FormLabel>
+                                        <FormLabel>{t("pages.user.settings.confirmPassword")}</FormLabel>
                                         <FormControl>
                                             <Input type="password" {...field} />
                                         </FormControl>
@@ -133,7 +133,7 @@ export function UserSettings() {
                             <div className="flex justify-end pt-4">
                                 <Button type="submit" disabled={isPending}>
                                     {isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <KeyRound className="mr-2 h-4 w-4" />}
-                                    {t('pages.user.settings.updatePassword', 'Update Password')}
+                                    {t('pages.user.settings.updatePassword')}
                                 </Button>
                             </div>
                         </form>

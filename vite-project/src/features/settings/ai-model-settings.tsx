@@ -125,14 +125,14 @@ export function AiModelSettings() {
             form.setValue("api_key", "")
             form.setValue("clear_api_key", false)
             toast({
-                title: t("pages.system.settings.success", "Success"),
-                description: t("pages.aiModel.settings.updateSucceedMessage", "AI model settings updated successfully"),
+                title: t("pages.system.settings.success"),
+                description: t("pages.aiModel.settings.updateSucceedMessage"),
             })
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t("pages.system.settings.error", "Error"),
-                description: t("pages.aiModel.settings.updateFailedMessage", "Failed to update AI model settings"),
+                title: t("pages.system.settings.error"),
+                description: t("pages.aiModel.settings.updateFailedMessage"),
             })
         }
     }
@@ -149,25 +149,24 @@ export function AiModelSettings() {
             if (res?.success) {
                 const data = res.data
                 toast({
-                    title: t("pages.aiModel.settings.validateSucceedTitle", "Validation succeeded"),
+                    title: t("pages.aiModel.settings.validateSucceedTitle"),
                     description: t(
                         "pages.aiModel.settings.validateSucceedMessage",
-                        "The gateway answered. Provider: {{provider}}, model: {{model}}.",
                         { provider: data?.provider ?? "", model: data?.model ?? "" },
                     ),
                 })
             } else {
                 toast({
                     variant: "destructive",
-                    title: t("pages.aiModel.settings.validateFailedTitle", "Validation failed"),
-                    description: res?.message || t("pages.aiModel.settings.validateFailedMessage", "The gateway rejected the request."),
+                    title: t("pages.aiModel.settings.validateFailedTitle"),
+                    description: res?.message || t("pages.aiModel.settings.validateFailedMessage"),
                 })
             }
         } catch {
             toast({
                 variant: "destructive",
-                title: t("pages.aiModel.settings.validateFailedTitle", "Validation failed"),
-                description: t("pages.aiModel.settings.validateFailedMessage", "The gateway rejected the request."),
+                title: t("pages.aiModel.settings.validateFailedTitle"),
+                description: t("pages.aiModel.settings.validateFailedMessage"),
             })
         }
     }
@@ -201,14 +200,14 @@ export function AiModelSettings() {
         try {
             await updatePolicy({ data: payload })
             toast({
-                title: t("pages.system.settings.success", "Success"),
-                description: t("pages.collectionPolicy.updateSucceedMessage", "Collection policy updated successfully"),
+                title: t("pages.system.settings.success"),
+                description: t("pages.collectionPolicy.updateSucceedMessage"),
             })
         } catch {
             toast({
                 variant: "destructive",
-                title: t("pages.system.settings.error", "Error"),
-                description: t("pages.collectionPolicy.updateFailedMessage", "Failed to update collection policy"),
+                title: t("pages.system.settings.error"),
+                description: t("pages.collectionPolicy.updateFailedMessage"),
             })
         }
     }
@@ -224,20 +223,20 @@ export function AiModelSettings() {
     return (
         <div className="container mx-auto max-w-4xl py-8">
             <div className="mb-8">
-                <h1 className="text-3xl font-bold tracking-tight">{t("pages.aiModel.settings.title", "AI Model")}</h1>
+                <h1 className="text-3xl font-bold tracking-tight">{t("pages.aiModel.settings.title")}</h1>
                 <p className="text-muted-foreground">
-                    {t("pages.aiModel.settings.description", "Configure the AI model gateway used for diagnosis.")}
+                    {t("pages.aiModel.settings.description")}
                 </p>
                 <p className="mt-2 text-sm text-amber-600 dark:text-amber-500">
-                    {t("pages.aiModel.settings.tlsHint", "When this host connects to a manager, strongly prefer wss:// behind a TLS reverse proxy so evidence in transit cannot be read by other applications on the network.")}
+                    {t("pages.aiModel.settings.tlsHint")}
                 </p>
             </div>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.aiModel.settings.gateway", "Model Gateway")}</CardTitle>
+                    <CardTitle>{t("pages.aiModel.settings.gateway")}</CardTitle>
                     <CardDescription>
-                        {t("pages.aiModel.settings.gateway.description", "OpenAI-compatible chat-completions endpoint.")}
+                        {t("pages.aiModel.settings.gateway.description")}
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -249,7 +248,7 @@ export function AiModelSettings() {
                                     name="provider"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.aiModel.settings.provider", "Provider")}</FormLabel>
+                                            <FormLabel>{t("pages.aiModel.settings.provider")}</FormLabel>
                                             <Select
                                                 key={field.value || "provider-empty"}
                                                 onValueChange={field.onChange}
@@ -261,12 +260,12 @@ export function AiModelSettings() {
                                                     </SelectTrigger>
                                                 </FormControl>
                                                 <SelectContent>
-                                                    <SelectItem value="openai-compatible">{t("pages.aiModel.settings.provider.openaiCompatible", "OpenAI-compatible")}</SelectItem>
-                                                    <SelectItem value="anthropic">{t("pages.aiModel.settings.provider.anthropic", "Anthropic")}</SelectItem>
+                                                    <SelectItem value="openai-compatible">{t("pages.aiModel.settings.provider.openaiCompatible")}</SelectItem>
+                                                    <SelectItem value="anthropic">{t("pages.aiModel.settings.provider.anthropic")}</SelectItem>
                                                 </SelectContent>
                                             </Select>
                                             <FormDescription>
-                                                {t("pages.aiModel.settings.provider.description", "Selects the wire protocol (adapter). OpenAI-compatible uses /chat/completions; Anthropic uses the Messages API.")}
+                                                {t("pages.aiModel.settings.provider.description")}
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
@@ -277,7 +276,7 @@ export function AiModelSettings() {
                                     name="model"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.aiModel.settings.model", "Model")}</FormLabel>
+                                            <FormLabel>{t("pages.aiModel.settings.model")}</FormLabel>
                                             <FormControl>
                                                 <Input placeholder="gpt-4o-mini" {...field} />
                                             </FormControl>
@@ -294,7 +293,7 @@ export function AiModelSettings() {
                                     const isAnthropic = form.watch("provider") === "anthropic"
                                     return (
                                         <FormItem>
-                                            <FormLabel>{t("pages.aiModel.settings.baseUrl", "Base URL")}</FormLabel>
+                                            <FormLabel>{t("pages.aiModel.settings.baseUrl")}</FormLabel>
                                             <FormControl>
                                                 <Input
                                                     placeholder={isAnthropic ? "https://api.anthropic.com" : "https://api.openai.com/v1"}
@@ -303,8 +302,8 @@ export function AiModelSettings() {
                                             </FormControl>
                                             <FormDescription>
                                                 {isAnthropic
-                                                    ? t("pages.aiModel.settings.baseUrl.anthropic", "Host root only (e.g. https://api.anthropic.com); the /v1/messages path is appended automatically.")
-                                                    : t("pages.aiModel.settings.baseUrl.openai", "Include the version path (e.g. https://api.openai.com/v1); /chat/completions is appended automatically.")}
+                                                    ? t("pages.aiModel.settings.baseUrl.anthropic")
+                                                    : t("pages.aiModel.settings.baseUrl.openai")}
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
@@ -317,22 +316,22 @@ export function AiModelSettings() {
                                 name="api_key"
                                 render={({ field }) => (
                                     <FormItem>
-                                        <FormLabel>{t("pages.aiModel.settings.apiKey", "API Key")}</FormLabel>
+                                        <FormLabel>{t("pages.aiModel.settings.apiKey")}</FormLabel>
                                         <FormControl>
                                             <Input
                                                 type="password"
                                                 autoComplete="off"
                                                 placeholder={
                                                     apiKeySet
-                                                        ? t("pages.aiModel.settings.apiKeySet", "Configured — leave blank to keep")
-                                                        : t("pages.aiModel.settings.apiKeyUnset", "Not configured")
+                                                        ? t("pages.aiModel.settings.apiKeySet")
+                                                        : t("pages.aiModel.settings.apiKeyUnset")
                                                 }
                                                 disabled={form.watch("clear_api_key")}
                                                 {...field}
                                             />
                                         </FormControl>
                                         <FormDescription>
-                                            {t("pages.aiModel.settings.apiKey.description", "Write-only. Stored server-side and never returned.")}
+                                            {t("pages.aiModel.settings.apiKey.description")}
                                         </FormDescription>
                                         <FormMessage />
                                     </FormItem>
@@ -346,9 +345,9 @@ export function AiModelSettings() {
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
                                             <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.aiModel.settings.clearApiKey", "Clear stored key")}</FormLabel>
+                                                <FormLabel>{t("pages.aiModel.settings.clearApiKey")}</FormLabel>
                                                 <FormDescription>
-                                                    {t("pages.aiModel.settings.clearApiKey.description", "Remove the stored API key on save.")}
+                                                    {t("pages.aiModel.settings.clearApiKey.description")}
                                                 </FormDescription>
                                             </div>
                                             <FormControl>
@@ -365,7 +364,7 @@ export function AiModelSettings() {
                                     name="response_format"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.aiModel.settings.responseFormat", "Output Format")}</FormLabel>
+                                            <FormLabel>{t("pages.aiModel.settings.responseFormat")}</FormLabel>
                                             <Select
                                                 key={field.value || "response-format-empty"}
                                                 onValueChange={field.onChange}
@@ -377,13 +376,13 @@ export function AiModelSettings() {
                                                     </SelectTrigger>
                                                 </FormControl>
                                                 <SelectContent>
-                                                    <SelectItem value="none">{t("pages.aiModel.settings.responseFormat.none", "None (free text)")}</SelectItem>
-                                                    <SelectItem value="json_object">{t("pages.aiModel.settings.responseFormat.jsonObject", "JSON object")}</SelectItem>
-                                                    <SelectItem value="json_schema">{t("pages.aiModel.settings.responseFormat.jsonSchema", "JSON schema (strict)")}</SelectItem>
+                                                    <SelectItem value="none">{t("pages.aiModel.settings.responseFormat.none")}</SelectItem>
+                                                    <SelectItem value="json_object">{t("pages.aiModel.settings.responseFormat.jsonObject")}</SelectItem>
+                                                    <SelectItem value="json_schema">{t("pages.aiModel.settings.responseFormat.jsonSchema")}</SelectItem>
                                                 </SelectContent>
                                             </Select>
                                             <FormDescription>
-                                                {t("pages.aiModel.settings.responseFormat.description", "How the gateway is asked to constrain output. json_schema only helps if the gateway enforces it.")}
+                                                {t("pages.aiModel.settings.responseFormat.description")}
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
@@ -394,7 +393,7 @@ export function AiModelSettings() {
                                     name="max_context_bytes"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.aiModel.settings.maxContextBytes", "Max Context (bytes)")}</FormLabel>
+                                            <FormLabel>{t("pages.aiModel.settings.maxContextBytes")}</FormLabel>
                                             <FormControl>
                                                 <Input
                                                     key={`max-context-${field.value ?? "empty"}`}
@@ -405,7 +404,7 @@ export function AiModelSettings() {
                                                 />
                                             </FormControl>
                                             <FormDescription>
-                                                {t("pages.aiModel.settings.maxContextBytes.description", "0 uses the default budget (128 KB).")}
+                                                {t("pages.aiModel.settings.maxContextBytes.description")}
                                             </FormDescription>
                                             <FormMessage />
                                         </FormItem>
@@ -416,11 +415,11 @@ export function AiModelSettings() {
                             <div className="flex justify-end gap-2">
                                 <Button type="button" variant="outline" onClick={onValidate} disabled={isValidating || isUpdating}>
                                     {isValidating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
-                                    {t("pages.aiModel.settings.validate", "Validate")}
+                                    {t("pages.aiModel.settings.validate")}
                                 </Button>
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t("pages.system.settings.save", "Save Settings")}
+                                    {t("pages.system.settings.save")}
                                 </Button>
                             </div>
                         </form>
@@ -430,9 +429,9 @@ export function AiModelSettings() {
 
             <Card className="mt-6">
                 <CardHeader>
-                    <CardTitle>{t("pages.collectionPolicy.title", "Evidence Collection Policy")}</CardTitle>
+                    <CardTitle>{t("pages.collectionPolicy.title")}</CardTitle>
                     <CardDescription>
-                        {t("pages.collectionPolicy.description", "Controls what evidence may leave this host for an AI model. Applied locally on every collection, regardless of who requests it — this host has the final say.")}
+                        {t("pages.collectionPolicy.description")}
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -444,9 +443,9 @@ export function AiModelSettings() {
                                 render={({ field }) => (
                                     <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
                                         <div className="space-y-0.5">
-                                            <FormLabel>{t("pages.collectionPolicy.allowLogs", "Allow logs")}</FormLabel>
+                                            <FormLabel>{t("pages.collectionPolicy.allowLogs")}</FormLabel>
                                             <FormDescription>
-                                                {t("pages.collectionPolicy.allowLogs.description", "Include recent logs / container logs in the evidence (redacted).")}
+                                                {t("pages.collectionPolicy.allowLogs.description")}
                                             </FormDescription>
                                         </div>
                                         <FormControl>
@@ -461,9 +460,9 @@ export function AiModelSettings() {
                                 render={({ field }) => (
                                     <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
                                         <div className="space-y-0.5">
-                                            <FormLabel>{t("pages.collectionPolicy.allowScreen", "Allow screenshot")}</FormLabel>
+                                            <FormLabel>{t("pages.collectionPolicy.allowScreen")}</FormLabel>
                                             <FormDescription>
-                                                {t("pages.collectionPolicy.allowScreen.description", "Allow attaching a screenshot when the user opts in.")}
+                                                {t("pages.collectionPolicy.allowScreen.description")}
                                             </FormDescription>
                                         </div>
                                         <FormControl>
@@ -475,7 +474,7 @@ export function AiModelSettings() {
                             <div className="flex justify-end">
                                 <Button type="submit" disabled={isPolicyUpdating}>
                                     {isPolicyUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t("pages.system.settings.save", "Save Settings")}
+                                    {t("pages.system.settings.save")}
                                 </Button>
                             </div>
                         </form>

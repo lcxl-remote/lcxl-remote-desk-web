@@ -430,10 +430,10 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                                 return !v
                             })
                         }}
-                        title={t('pages.deskTerminal.completion.toggleHint', 'AI command completion — press Tab to accept the ghost text')}
+                        title={t('pages.deskTerminal.completion.toggleHint')}
                     >
                         <WandSparkles className="h-4 w-4 mr-2" />
-                        {t('pages.deskTerminal.completion.title', 'AI Completion')}
+                        {t('pages.deskTerminal.completion.title')}
                     </Button>
                     <Button
                         variant="secondary"
@@ -442,7 +442,7 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                         onClick={() => setShowCopilot((v) => !v)}
                     >
                         <Sparkles className="h-4 w-4 mr-2" />
-                        {t('pages.deskTerminal.copilot.title', 'Terminal Copilot')}
+                        {t('pages.deskTerminal.copilot.title')}
                     </Button>
                     <Button
                         variant="secondary"
@@ -480,7 +480,7 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                             <span className="truncate text-gray-400">— {ghost.note}</span>
                         )}
                         <span className="ml-auto shrink-0 rounded border border-gray-600 px-1.5 py-0.5 text-[10px] text-gray-400">
-                            {t('pages.deskTerminal.completion.acceptHint', 'Tab')}
+                            {t('pages.deskTerminal.completion.acceptHint')}
                         </span>
                     </div>
                 )}
@@ -539,10 +539,10 @@ export default function TerminalSession() {
                 <CardHeader>
                     <CardTitle className="flex items-center gap-2">
                         <TerminalSquare className="h-6 w-6" />
-                        {t('pages.deskTerminal.title', 'Terminal Session')}
+                        {t('pages.deskTerminal.title')}
                     </CardTitle>
                     <CardDescription>
-                        {t('pages.deskTerminal.selectShell', 'Select a shell to start the session')}
+                        {t('pages.deskTerminal.selectShell')}
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-4">
@@ -576,7 +576,7 @@ export default function TerminalSession() {
                             // State update handles it
                         }}
                     >
-                        {t('pages.deskTerminal.connect', 'Connect')}
+                        {t('pages.deskTerminal.connect')}
                     </Button>
                 </CardContent>
             </Card>

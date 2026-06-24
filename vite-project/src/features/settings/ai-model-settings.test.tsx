@@ -1,17 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 
-// i18n: t() echoes the fallback the component always provides, interpolating
-// any {{name}} placeholders from the options object (like i18next does).
-vi.mock("react-i18next", () => ({
-    useTranslation: () => ({
-        t: (_key: string, fallback?: string, opts?: Record<string, unknown>) => {
-            const template = fallback ?? _key
-            if (!opts) return template
-            return template.replace(/\{\{(\w+)\}\}/g, (_m, name) => String(opts[name] ?? ""))
-        },
-    }),
-}))
+// i18n: real en-US locale, interpolating {{name}} placeholders like i18next.
+vi.mock("react-i18next", () => import("@/test-utils/i18n-mock").then((m) => m.reactI18nextMock()))
 
 vi.mock("@/hooks/use-toast", () => ({
     useToast: () => ({ toast: h.toast }),

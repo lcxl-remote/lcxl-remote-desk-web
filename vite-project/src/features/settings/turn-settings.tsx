@@ -97,14 +97,14 @@ export function TurnSettings() {
             } as TurnSettings;
             await updateTurnSettings({ data: payload })
             toast({
-                title: t('pages.system.settings.success', 'Success'),
-                description: t('pages.turn.settings.updateSucceedMessage', "TURN settings updated successfully"),
+                title: t('pages.system.settings.success'),
+                description: t('pages.turn.settings.updateSucceedMessage'),
             })
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t('pages.system.settings.error', 'Error'),
-                description: t('pages.turn.settings.updateFailedMessage', "Failed to update TURN settings"),
+                title: t('pages.system.settings.error'),
+                description: t('pages.turn.settings.updateFailedMessage'),
             })
         }
     }
@@ -113,14 +113,14 @@ export function TurnSettings() {
         try {
             await regenerateSecret()
             toast({
-                title: t('pages.system.settings.success', 'Success'),
-                description: t('pages.system.settings.regenerateSecretSuccess', "TURN secret updated, please restart the server."),
+                title: t('pages.system.settings.success'),
+                description: t('pages.system.settings.regenerateSecretSuccess'),
             })
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t('pages.system.settings.error', 'Error'),
-                description: t('pages.system.settings.regenerateSecretError', "Failed to regenerate TURN secret"),
+                title: t('pages.system.settings.error'),
+                description: t('pages.system.settings.regenerateSecretError'),
             })
         }
     }
@@ -136,23 +136,23 @@ export function TurnSettings() {
     return (
         <div className="container mx-auto max-w-4xl py-8">
             <div className="mb-8">
-                <h1 className="text-3xl font-bold tracking-tight">{t('pages.turn.settings.title', 'TURN Settings')}</h1>
+                <h1 className="text-3xl font-bold tracking-tight">{t('pages.turn.settings.title')}</h1>
                 <p className="text-muted-foreground">
-                    {t('pages.turn.settings.description', 'Manage TURN/STUN server configuration')}
+                    {t('pages.turn.settings.description')}
                 </p>
             </div>
 
             <Alert variant="default" className="mb-6 border-amber-500/50 bg-amber-500/10 text-amber-600 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-500">
-                <AlertTitle>{t("pages.system.settings.alert.message", "Warning")}</AlertTitle>
+                <AlertTitle>{t("pages.system.settings.alert.message")}</AlertTitle>
                 <AlertDescription>
-                    {t("pages.system.settings.alert.description", "Modifying these settings may affect remote connections and require a restart to take full effect.")}
+                    {t("pages.system.settings.alert.description")}
                 </AlertDescription>
             </Alert>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.turn.settings.configuration", "Configuration")}</CardTitle>
-                    <CardDescription>{t("pages.turn.settings.configuration.description", "Update the TURN server properties.")}</CardDescription>
+                    <CardTitle>{t("pages.turn.settings.configuration")}</CardTitle>
+                    <CardDescription>{t("pages.turn.settings.configuration.description")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <Form {...form}>
@@ -164,7 +164,7 @@ export function TurnSettings() {
                                     name="realm"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.turn.settings.realm", "Realm")}</FormLabel>
+                                            <FormLabel>{t("pages.turn.settings.realm")}</FormLabel>
                                             <FormControl>
                                                 <Input {...field} />
                                             </FormControl>
@@ -180,7 +180,7 @@ export function TurnSettings() {
                                     name="relay_min_port"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.turn.settings.relayMinPort", "Relay Min Port")}</FormLabel>
+                                            <FormLabel>{t("pages.turn.settings.relayMinPort")}</FormLabel>
                                             <FormControl>
                                                 <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))} />
                                             </FormControl>
@@ -193,7 +193,7 @@ export function TurnSettings() {
                                     name="relay_max_port"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.turn.settings.relayMaxPort", "Relay Max Port")}</FormLabel>
+                                            <FormLabel>{t("pages.turn.settings.relayMaxPort")}</FormLabel>
                                             <FormControl>
                                                 <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))} />
                                             </FormControl>
@@ -210,7 +210,7 @@ export function TurnSettings() {
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.turn.settings.enableStun", "Enable STUN")}</FormLabel>
+                                                <FormLabel>{t("pages.turn.settings.enableStun")}</FormLabel>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value} onCheckedChange={field.onChange} />
@@ -225,7 +225,7 @@ export function TurnSettings() {
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.turn.settings.enableTurn", "Enable TURN")}</FormLabel>
+                                                <FormLabel>{t("pages.turn.settings.enableTurn")}</FormLabel>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value} onCheckedChange={field.onChange} />
@@ -237,7 +237,7 @@ export function TurnSettings() {
 
                             <div className="space-y-4">
                                 <div className="flex items-center justify-between">
-                                    <h3 className="text-lg font-medium">{t("pages.turn.settings.interfaces", "Interfaces")}</h3>
+                                    <h3 className="text-lg font-medium">{t("pages.turn.settings.interfaces")}</h3>
                                     <Button
                                         type="button"
                                         variant="outline"
@@ -245,12 +245,12 @@ export function TurnSettings() {
                                         onClick={() => append({ transport: "udp", listen: "0.0.0.0:3478", external: "" })}
                                     >
                                         <Plus className="mr-2 h-4 w-4" />
-                                        {t("pages.turn.settings.addInterface", "Add Interface")}
+                                        {t("pages.turn.settings.addInterface")}
                                     </Button>
                                 </div>
                                 {fields.length === 0 && (
                                     <p className="text-sm text-muted-foreground italic">
-                                        {t("pages.turn.settings.noInterfaces", "No interfaces configured.")}
+                                        {t("pages.turn.settings.noInterfaces")}
                                     </p>
                                 )}
                                 {fields.map((field, index) => (
@@ -260,7 +260,7 @@ export function TurnSettings() {
                                             name={`interfaces.${index}.transport`}
                                             render={({ field }) => (
                                                 <FormItem>
-                                                    <FormLabel>{t("pages.turn.settings.transport", "Transport")}</FormLabel>
+                                                    <FormLabel>{t("pages.turn.settings.transport")}</FormLabel>
                                                     <Select onValueChange={field.onChange} value={field.value}>
                                                         <FormControl>
                                                             <SelectTrigger>
@@ -281,7 +281,7 @@ export function TurnSettings() {
                                             name={`interfaces.${index}.listen`}
                                             render={({ field }) => (
                                                 <FormItem>
-                                                    <FormLabel>{t("pages.turn.settings.listen", "Listen Address")}</FormLabel>
+                                                    <FormLabel>{t("pages.turn.settings.listen")}</FormLabel>
                                                     <FormControl>
                                                         <Input {...field} placeholder="0.0.0.0:3478" />
                                                     </FormControl>
@@ -294,7 +294,7 @@ export function TurnSettings() {
                                             name={`interfaces.${index}.external`}
                                             render={({ field }) => (
                                                 <FormItem>
-                                                    <FormLabel>{t("pages.turn.settings.external", "External Address")}</FormLabel>
+                                                    <FormLabel>{t("pages.turn.settings.external")}</FormLabel>
                                                     <FormControl>
                                                         <Input {...field} placeholder="1.2.3.4:3478" />
                                                     </FormControl>
@@ -318,7 +318,7 @@ export function TurnSettings() {
                             <div className="flex justify-end">
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t('pages.turn.settings.save', 'Save Settings')}
+                                    {t('pages.turn.settings.save')}
                                 </Button>
                             </div>
                         </form>
@@ -330,34 +330,34 @@ export function TurnSettings() {
                 <CardHeader>
                     <div className="flex items-center gap-2">
                         <ShieldCheck className="h-5 w-5 text-destructive" />
-                        <CardTitle>{t("pages.system.settings.turnSecurity", "TURN Security")}</CardTitle>
+                        <CardTitle>{t("pages.system.settings.turnSecurity")}</CardTitle>
                     </div>
                     <CardDescription>
-                        {t("pages.system.settings.turnSecurity.description", "Manage TURN server security credentials.")}
+                        {t("pages.system.settings.turnSecurity.description")}
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
                     <p className="text-sm text-muted-foreground">
-                        {t("pages.system.settings.regenerateSecretDescription", "Regenerating the secret will invalidate existing TURN sessions and requires a server restart to take effect.")}
+                        {t("pages.system.settings.regenerateSecretDescription")}
                     </p>
                     <AlertDialog>
                         <AlertDialogTrigger asChild>
                             <Button variant="outline" className="text-destructive hover:bg-destructive/10" disabled={isRegenerating}>
                                 {isRegenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-                                {t("pages.system.settings.regenerateSecret", "Regenerate TURN Secret")}
+                                {t("pages.system.settings.regenerateSecret")}
                             </Button>
                         </AlertDialogTrigger>
                         <AlertDialogContent>
                             <AlertDialogHeader>
-                                <AlertDialogTitle>{t("pages.system.settings.regenerateSecretConfirm", "Are you sure?")}</AlertDialogTitle>
+                                <AlertDialogTitle>{t("pages.system.settings.regenerateSecretConfirm")}</AlertDialogTitle>
                                 <AlertDialogDescription>
-                                    {t("pages.system.settings.regenerateSecretDescription", "This action will update the internal TURN secret. All active TURN connections will eventually fail and a server restart is REQUIRED for the new secret to take effect.")}
+                                    {t("pages.system.settings.regenerateSecretDescription")}
                                 </AlertDialogDescription>
                             </AlertDialogHeader>
                             <AlertDialogFooter>
-                                <AlertDialogCancel>{t("common.cancel", "Cancel")}</AlertDialogCancel>
+                                <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
                                 <AlertDialogAction onClick={onRegenerateSecret} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-                                    {t("common.confirm", "Confirm")}
+                                    {t("common.confirm")}
                                 </AlertDialogAction>
                             </AlertDialogFooter>
                         </AlertDialogContent>

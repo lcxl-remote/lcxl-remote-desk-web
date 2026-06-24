@@ -72,14 +72,14 @@ export function LogSettings() {
         try {
             await updateSettings({ data: values })
             toast({
-                title: t('pages.system.settings.success', 'Success'),
-                description: t('pages.log.settings.updateSucceedMessage', "Log settings updated successfully"),
+                title: t('pages.system.settings.success'),
+                description: t('pages.log.settings.updateSucceedMessage'),
             })
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t('pages.system.settings.error', 'Error'),
-                description: t('pages.log.settings.updateFailedMessage', "Failed to update log settings"),
+                title: t('pages.system.settings.error'),
+                description: t('pages.log.settings.updateFailedMessage'),
             })
         }
     }
@@ -95,16 +95,16 @@ export function LogSettings() {
     return (
         <div className="container mx-auto max-w-4xl py-8">
             <div className="mb-8">
-                <h1 className="text-3xl font-bold tracking-tight">{t('pages.log.settings.title', 'Log Settings')}</h1>
+                <h1 className="text-3xl font-bold tracking-tight">{t('pages.log.settings.title')}</h1>
                 <p className="text-muted-foreground">
-                    {t('pages.log.settings.description', 'Manage application log levels, formatting, and automatic cleanup rules.')}
+                    {t('pages.log.settings.description')}
                 </p>
             </div>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.log.settings.configuration", "Log Configuration")}</CardTitle>
-                    <CardDescription>{t("pages.log.settings.configuration.description", "Update log parameters.")}</CardDescription>
+                    <CardTitle>{t("pages.log.settings.configuration")}</CardTitle>
+                    <CardDescription>{t("pages.log.settings.configuration.description")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <Form {...form}>
@@ -116,7 +116,7 @@ export function LogSettings() {
                                     name="log_level"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.system.settings.logLevel", "Log Level")}</FormLabel>
+                                            <FormLabel>{t("pages.system.settings.logLevel")}</FormLabel>
                                             {/* Radix Select + RHF reset can miss value updates; re-mount to reflect initial data */}
                                             <Select
                                                 key={field.value || "log-level-empty"}
@@ -143,14 +143,14 @@ export function LogSettings() {
                             </div>
 
                             <div className="rounded-md border p-4 space-y-4">
-                                <h3 className="text-sm font-medium">{t("pages.system.settings.logCleanup.title", "Log Cleanup")}</h3>
+                                <h3 className="text-sm font-medium">{t("pages.system.settings.logCleanup.title")}</h3>
                                 <div className="grid gap-6 md:grid-cols-3">
                                     <FormField
                                         control={form.control}
                                         name="log_retention_days"
                                         render={({ field }) => (
                                             <FormItem>
-                                                <FormLabel>{t("pages.system.settings.logCleanup.logRetentionDays", "Retention Days")}</FormLabel>
+                                                <FormLabel>{t("pages.system.settings.logCleanup.logRetentionDays")}</FormLabel>
                                                 <FormControl>
                                                     <Input
                                                         key={`log-retention-${field.value ?? "empty"}`}
@@ -169,7 +169,7 @@ export function LogSettings() {
                                         name="log_cleanup_threshold_percent"
                                         render={({ field }) => (
                                             <FormItem>
-                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupThresholdPercent", "Disk Threshold (%)")}</FormLabel>
+                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupThresholdPercent")}</FormLabel>
                                                 <FormControl>
                                                     <Input
                                                         key={`log-threshold-${field.value ?? "empty"}`}
@@ -188,7 +188,7 @@ export function LogSettings() {
                                         name="log_cleanup_interval_hours"
                                         render={({ field }) => (
                                             <FormItem>
-                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupIntervalHours", "Cleanup Interval (Hours)")}</FormLabel>
+                                                <FormLabel>{t("pages.system.settings.logCleanup.logCleanupIntervalHours")}</FormLabel>
                                                 <FormControl>
                                                     <Input
                                                         key={`log-interval-${field.value ?? "empty"}`}
@@ -212,8 +212,8 @@ export function LogSettings() {
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.system.settings.traceback", "Enable Traceback")}</FormLabel>
-                                                <FormDescription>{t("pages.system.settings.traceback.description", "Record detailed crash stack traces for bug reports.")}</FormDescription>
+                                                <FormLabel>{t("pages.system.settings.traceback")}</FormLabel>
+                                                <FormDescription>{t("pages.system.settings.traceback.description")}</FormDescription>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value} onCheckedChange={field.onChange} />
@@ -226,7 +226,7 @@ export function LogSettings() {
                             <div className="flex justify-end">
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t('pages.system.settings.save', 'Save Settings')}
+                                    {t('pages.system.settings.save')}
                                 </Button>
                             </div>
                         </form>

@@ -7,12 +7,13 @@ import {
     type ResolutionEchoMessage,
     useResolutionToast,
 } from "./use-resolution-toast";
+import enUS from "@/locales/en-US";
 
 const CHANGE_DISPLAY_SETTINGS = 205;
 
-// Identity translator: each test reads back the fallback strings so
-// they double as documentation for what shows in the toast.
-const tr = (_key: string, fallback: string) => fallback;
+// Translator backed by the real en-US locale so each test's asserted
+// toast text matches what users actually see.
+const tr = (key: string) => (enUS as Record<string, string>)[key] ?? key;
 
 function makeApplied(reqId: string, w: number, h: number): ResolutionEchoMessage {
     return {
@@ -212,7 +213,7 @@ describe("useResolutionToast", () => {
     /**
      * Regression for React error #185 (Maximum update depth exceeded).
      * The `desk-session` parent passes `translate` as an inline arrow
-     * `(k, f) => t(k, f)` rebuilt on every render. When the hook's
+     * `(k) => t(k)` rebuilt on every render. When the hook's
      * effect listed `translate` in its dep array, every parent render
      * re-ran the signaling effect; once a 205 echo had landed and
      * `latestReqIdRef` matched, each re-run produced a fresh
@@ -226,12 +227,12 @@ describe("useResolutionToast", () => {
      * re-invoke the translator.
      */
     it("ignores translate prop identity changes after an echo has settled", () => {
-        const t1 = vi.fn((_key: string, fallback: string) => fallback);
-        const t2 = vi.fn((_key: string, fallback: string) => fallback);
+        const t1 = vi.fn((key: string) => tr(key));
+        const t2 = vi.fn((key: string) => tr(key));
         const { subscribe, emit } = makeSignalingHarness();
         type Props = {
             isRTCConnected: boolean;
-            translate: (k: string, f: string) => string;
+            translate: (k: string) => string;
         };
         const { result, rerender } = renderHook(
             (p: Props) =>

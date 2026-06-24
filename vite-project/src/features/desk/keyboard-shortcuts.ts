@@ -41,33 +41,31 @@ export type KeyboardShortcut = {
     id: string;
     /** i18n key for the menu label. */
     labelKey: string;
-    /** Fallback label if the i18n key is missing. */
-    labelFallback: string;
     /** Ordered synthetic key events sent to the host. */
     events: SyntheticKeyEvent[];
 };
 
 const WINDOWS_SHORTCUTS: KeyboardShortcut[] = [
-    { id: "ctrlAltDel", labelKey: "pages.desk.shortcut.ctrlAltDel", labelFallback: "Ctrl + Alt + Del", events: chord(VK.CTRL, VK.ALT, VK.DEL) },
-    { id: "taskManager", labelKey: "pages.desk.shortcut.taskManager", labelFallback: "Ctrl + Shift + Esc (Task Manager)", events: chord(VK.CTRL, VK.SHIFT, VK.ESC) },
-    { id: "altF4", labelKey: "pages.desk.shortcut.altF4", labelFallback: "Alt + F4 (Close Window)", events: chord(VK.ALT, VK.F4) },
-    { id: "altTab", labelKey: "pages.desk.shortcut.altTab", labelFallback: "Alt + Tab (Switch Window)", events: chord(VK.ALT, VK.TAB) },
-    { id: "winKey", labelKey: "pages.desk.shortcut.winKey", labelFallback: "Windows Key", events: chord(VK.META) },
-    { id: "winD", labelKey: "pages.desk.shortcut.winD", labelFallback: "Win + D (Show Desktop)", events: chord(VK.META, VK.D) },
-    { id: "winE", labelKey: "pages.desk.shortcut.winE", labelFallback: "Win + E (File Explorer)", events: chord(VK.META, VK.E) },
-    { id: "winR", labelKey: "pages.desk.shortcut.winR", labelFallback: "Win + R (Run)", events: chord(VK.META, VK.R) },
-    { id: "winL", labelKey: "pages.desk.shortcut.winL", labelFallback: "Win + L (Lock)", events: chord(VK.META, VK.L) },
+    { id: "ctrlAltDel", labelKey: "pages.desk.shortcut.ctrlAltDel", events: chord(VK.CTRL, VK.ALT, VK.DEL) },
+    { id: "taskManager", labelKey: "pages.desk.shortcut.taskManager", events: chord(VK.CTRL, VK.SHIFT, VK.ESC) },
+    { id: "altF4", labelKey: "pages.desk.shortcut.altF4", events: chord(VK.ALT, VK.F4) },
+    { id: "altTab", labelKey: "pages.desk.shortcut.altTab", events: chord(VK.ALT, VK.TAB) },
+    { id: "winKey", labelKey: "pages.desk.shortcut.winKey", events: chord(VK.META) },
+    { id: "winD", labelKey: "pages.desk.shortcut.winD", events: chord(VK.META, VK.D) },
+    { id: "winE", labelKey: "pages.desk.shortcut.winE", events: chord(VK.META, VK.E) },
+    { id: "winR", labelKey: "pages.desk.shortcut.winR", events: chord(VK.META, VK.R) },
+    { id: "winL", labelKey: "pages.desk.shortcut.winL", events: chord(VK.META, VK.L) },
 ];
 
 const MACOS_SHORTCUTS: KeyboardShortcut[] = [
-    { id: "forceQuit", labelKey: "pages.desk.shortcut.forceQuit", labelFallback: "⌘ + ⌥ + Esc (Force Quit)", events: chord(VK.META, VK.ALT, VK.ESC) },
-    { id: "lockScreen", labelKey: "pages.desk.shortcut.lockScreen", labelFallback: "⌘ + ⌃ + Q (Lock Screen)", events: chord(VK.META, VK.CTRL, VK.Q) },
-    { id: "spotlight", labelKey: "pages.desk.shortcut.spotlight", labelFallback: "⌘ + Space (Spotlight)", events: chord(VK.META, VK.SPACE) },
-    { id: "switchApp", labelKey: "pages.desk.shortcut.switchApp", labelFallback: "⌘ + Tab (Switch App)", events: chord(VK.META, VK.TAB) },
-    { id: "missionControl", labelKey: "pages.desk.shortcut.missionControl", labelFallback: "⌃ + ↑ (Mission Control)", events: chord(VK.CTRL, VK.UP) },
-    { id: "screenshot", labelKey: "pages.desk.shortcut.screenshot", labelFallback: "⌘ + ⇧ + 4 (Screenshot)", events: chord(VK.META, VK.SHIFT, VK.DIGIT4) },
-    { id: "closeWindow", labelKey: "pages.desk.shortcut.closeWindow", labelFallback: "⌘ + W (Close Window)", events: chord(VK.META, VK.W) },
-    { id: "quitApp", labelKey: "pages.desk.shortcut.quitApp", labelFallback: "⌘ + Q (Quit App)", events: chord(VK.META, VK.Q) },
+    { id: "forceQuit", labelKey: "pages.desk.shortcut.forceQuit", events: chord(VK.META, VK.ALT, VK.ESC) },
+    { id: "lockScreen", labelKey: "pages.desk.shortcut.lockScreen", events: chord(VK.META, VK.CTRL, VK.Q) },
+    { id: "spotlight", labelKey: "pages.desk.shortcut.spotlight", events: chord(VK.META, VK.SPACE) },
+    { id: "switchApp", labelKey: "pages.desk.shortcut.switchApp", events: chord(VK.META, VK.TAB) },
+    { id: "missionControl", labelKey: "pages.desk.shortcut.missionControl", events: chord(VK.CTRL, VK.UP) },
+    { id: "screenshot", labelKey: "pages.desk.shortcut.screenshot", events: chord(VK.META, VK.SHIFT, VK.DIGIT4) },
+    { id: "closeWindow", labelKey: "pages.desk.shortcut.closeWindow", events: chord(VK.META, VK.W) },
+    { id: "quitApp", labelKey: "pages.desk.shortcut.quitApp", events: chord(VK.META, VK.Q) },
 ];
 
 // Sending a bare Escape to the host. Offered as an explicit menu entry only
@@ -76,7 +74,6 @@ const MACOS_SHORTCUTS: KeyboardShortcut[] = [
 const ESCAPE_SHORTCUT: KeyboardShortcut = {
     id: "escape",
     labelKey: "pages.desk.shortcut.escape",
-    labelFallback: "Esc",
     events: chord(VK.ESC),
 };
 

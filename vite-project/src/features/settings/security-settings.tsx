@@ -96,14 +96,14 @@ export function SecuritySettings() {
             form.reset(values)
             await queryClient.invalidateQueries({ queryKey: querySecuritySettingsQueryKey() })
             toast({
-                title: t('pages.system.security.success', 'Success'),
-                description: t('pages.system.security.updateSucceedMessage', "Security settings updated successfully"),
+                title: t('pages.system.security.success'),
+                description: t('pages.system.security.updateSucceedMessage'),
             })
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t('pages.system.security.error', 'Error'),
-                description: t('pages.system.security.updateFailedMessage', "Failed to update security settings"),
+                title: t('pages.system.security.error'),
+                description: t('pages.system.security.updateFailedMessage'),
             })
         }
     }
@@ -117,28 +117,28 @@ export function SecuritySettings() {
     }
 
     const permissionItems = [
-        { name: "allow_remote_control", label: t("security.permission.remoteControl", "Remote Control"), desc: t("pages.system.security.remoteControlDesc", "Allow remote control of desktop") },
-        { name: "allow_clipboard_sync", label: t("security.permission.clipboardSync", "Clipboard Sync"), desc: t("pages.system.security.clipboardSyncDesc", "Allow synchronization of clipboard content") },
-        { name: "allow_private_screen", label: t("security.permission.privateScreen", "Private Screen"), desc: t("pages.system.security.privateScreenDesc", "Allow enabling privacy screen mode") },
-        { name: "allow_whiteboard", label: t("security.permission.whiteboard", "Whiteboard"), desc: t("pages.system.security.whiteboardDesc", "Allow remote drawing on screen") },
-        { name: "allow_terminal", label: t("security.permission.terminal", "Terminal Access"), desc: t("pages.system.security.terminalDesc", "Allow access to the remote terminal") },
-        { name: "allow_file_browse", label: t("security.permission.fileBrowse", "File Browse"), desc: t("pages.system.security.fileBrowseDesc", "Allow listing and deleting files") },
-        { name: "allow_file_transfer", label: t("security.permission.fileTransfer", "File Transfer"), desc: t("pages.system.security.fileTransferDesc", "Allow uploading and downloading files") },
+        { name: "allow_remote_control", label: t("security.permission.remoteControl"), desc: t("pages.system.security.remoteControlDesc") },
+        { name: "allow_clipboard_sync", label: t("security.permission.clipboardSync"), desc: t("pages.system.security.clipboardSyncDesc") },
+        { name: "allow_private_screen", label: t("security.permission.privateScreen"), desc: t("pages.system.security.privateScreenDesc") },
+        { name: "allow_whiteboard", label: t("security.permission.whiteboard"), desc: t("pages.system.security.whiteboardDesc") },
+        { name: "allow_terminal", label: t("security.permission.terminal"), desc: t("pages.system.security.terminalDesc") },
+        { name: "allow_file_browse", label: t("security.permission.fileBrowse"), desc: t("pages.system.security.fileBrowseDesc") },
+        { name: "allow_file_transfer", label: t("security.permission.fileTransfer"), desc: t("pages.system.security.fileTransferDesc") },
     ]
 
     return (
         <div className="container mx-auto max-w-4xl py-8">
             <div className="mb-8">
-                <h1 className="text-3xl font-bold tracking-tight">{t('pages.system.security.title', 'Security Settings')}</h1>
+                <h1 className="text-3xl font-bold tracking-tight">{t('pages.system.security.title')}</h1>
                 <p className="text-muted-foreground">
-                    {t('pages.system.security.description', 'Manage remote connection permissions and approval behaviors')}
+                    {t('pages.system.security.description')}
                 </p>
             </div>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.system.security.permissions", "Connection Permissions")}</CardTitle>
-                    <CardDescription>{t("pages.system.security.permissions.description", "If set to Prompt, users will be asked for permission if a graphical interface is available. Otherwise, requests will be denied.")}</CardDescription>
+                    <CardTitle>{t("pages.system.security.permissions")}</CardTitle>
+                    <CardDescription>{t("pages.system.security.permissions.description")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <Form {...form}>
@@ -172,9 +172,9 @@ export function SecuritySettings() {
                                                             </SelectTrigger>
                                                         </FormControl>
                                                         <SelectContent>
-                                                            <SelectItem value="prompt">{t("security.select.prompt", "Ask every time")}</SelectItem>
-                                                            <SelectItem value="allow">{t("security.select.allow", "Always allow")}</SelectItem>
-                                                            <SelectItem value="deny">{t("security.select.deny", "Always deny")}</SelectItem>
+                                                            <SelectItem value="prompt">{t("security.select.prompt")}</SelectItem>
+                                                            <SelectItem value="allow">{t("security.select.allow")}</SelectItem>
+                                                            <SelectItem value="deny">{t("security.select.deny")}</SelectItem>
                                                         </SelectContent>
                                                     </Select>
                                                 </div>
@@ -185,16 +185,16 @@ export function SecuritySettings() {
                             </div>
 
                             <div className="space-y-4 pt-4 border-t">
-                                <h3 className="text-lg font-medium">{t("pages.system.security.behavior", "Approval Behavior")}</h3>
+                                <h3 className="text-lg font-medium">{t("pages.system.security.behavior")}</h3>
                                 <FormField
                                     control={form.control}
                                     name="approval_timeout"
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg border p-4">
                                             <div className="space-y-0.5">
-                                                <FormLabel className="text-base">{t("security.permission.approvalTimeout", "Approval Timeout")}</FormLabel>
+                                                <FormLabel className="text-base">{t("security.permission.approvalTimeout")}</FormLabel>
                                                 <FormDescription>
-                                                    {t("pages.system.security.approvalTimeoutDesc", "Automatically deny the request if no action is taken within the specified time.")}
+                                                    {t("pages.system.security.approvalTimeoutDesc")}
                                                 </FormDescription>
                                             </div>
                                             <div className="w-48 ml-4">
@@ -212,7 +212,7 @@ export function SecuritySettings() {
                                                         </SelectTrigger>
                                                     </FormControl>
                                                     <SelectContent>
-                                                        <SelectItem value="0">{t("security.timeout.never", "Never")}</SelectItem>
+                                                        <SelectItem value="0">{t("security.timeout.never")}</SelectItem>
                                                         <SelectItem value="10">10s</SelectItem>
                                                         <SelectItem value="30">30s</SelectItem>
                                                         <SelectItem value="60">1m</SelectItem>
@@ -229,7 +229,7 @@ export function SecuritySettings() {
                             <div className="flex justify-end pt-4">
                                 <Button type="submit" disabled={!form.formState.isDirty || isUpdating} className="w-full sm:w-auto">
                                     {isUpdating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                    {t("pages.system.security.save", "Save Changes")}
+                                    {t("pages.system.security.save")}
                                 </Button>
                             </div>
                         </form>

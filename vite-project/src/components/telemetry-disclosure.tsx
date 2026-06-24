@@ -18,7 +18,7 @@ export function TelemetryDisclosure() {
                 >
                     <Info className="h-3 w-3" />
                     <span className="text-xs font-medium">
-                        {t("pages.init.telemetry.learnMore", "Learn more")}
+                        {t("pages.init.telemetry.learnMore")}
                     </span>
                 </button>
             </PopoverTrigger>
@@ -26,20 +26,20 @@ export function TelemetryDisclosure() {
                 <div className="space-y-3">
                     <h4 className="font-semibold text-sm leading-none flex items-center gap-2">
                         <Info className="h-4 w-4 text-primary" />
-                        {t("pages.init.telemetry.disclosure.title", "Data Collection Disclosure")}
+                        {t("pages.init.telemetry.disclosure.title")}
                     </h4>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                        {t("pages.init.telemetry.disclosure.description", "To continuously improve your experience, we collect the following anonymous information:")}
+                        {t("pages.init.telemetry.disclosure.description")}
                     </p>
                     <ul className="text-xs space-y-2 list-disc pl-4 text-slate-700 dark:text-slate-300">
-                        <li>{t("pages.init.telemetry.disclosure.item.serviceInfo", "Service Info (Name, Version, Build Number)")}</li>
-                        <li>{t("pages.init.telemetry.disclosure.item.osInfo", "OS Info (Name, Version)")}</li>
-                        <li>{t("pages.init.telemetry.disclosure.item.hostInfo", "Host Info (Name, CPU Count, Total Memory)")}</li>
-                        <li>{t("pages.init.telemetry.disclosure.item.clientId", "Unique Client ID")}</li>
+                        <li>{t("pages.init.telemetry.disclosure.item.serviceInfo")}</li>
+                        <li>{t("pages.init.telemetry.disclosure.item.osInfo")}</li>
+                        <li>{t("pages.init.telemetry.disclosure.item.hostInfo")}</li>
+                        <li>{t("pages.init.telemetry.disclosure.item.clientId")}</li>
                     </ul>
                     <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
                         <p className="text-[10px] text-muted-foreground leading-tight italic">
-                            {t("pages.init.telemetry.disclosure.footnote", "All data is transmitted via secure channels and does not include any sensitive personal information or your remote connection content.")}
+                            {t("pages.init.telemetry.disclosure.footnote")}
                         </p>
                     </div>
                 </div>

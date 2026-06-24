@@ -39,7 +39,7 @@ export default function DeskList() {
     return (
         <div className="space-y-4">
             <div className="flex items-center justify-between">
-                <h2 className="text-3xl font-bold tracking-tight">{t('menu.desk', 'Desk List')}</h2>
+                <h2 className="text-3xl font-bold tracking-tight">{t('menu.desk')}</h2>
                 <div className="flex items-center gap-2">
                     <Button variant="outline" size="icon" onClick={() => refetch()}>
                         <RefreshCw className="h-4 w-4" />
@@ -50,7 +50,7 @@ export default function DeskList() {
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                 {connections?.length === 0 && (
                     <div className="col-span-full text-center text-muted-foreground py-10">
-                        {t('pages.deskList.empty', 'No connections found')}
+                        {t('pages.deskList.empty')}
                     </div>
                 )}
                 {connections?.map((connection: any) => (
@@ -58,8 +58,8 @@ export default function DeskList() {
                         <CardHeader className="flex flex-row items-start bg-muted/50">
                             <div className="grid gap-0.5">
                                 <CardTitle className="group flex items-center gap-2 text-lg">
-                                    {connection.version_info?.display_name || t('pages.deskList.unnamedConnection', 'Unnamed Connection')}
-                                    <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.searchTable.nameStatus.online', 'Online')}</Badge>
+                                    {connection.version_info?.display_name || t('pages.deskList.unnamedConnection')}
+                                    <Badge variant="default" className="bg-green-500 hover:bg-green-600">{t('pages.searchTable.nameStatus.online')}</Badge>
                                 </CardTitle>
                                 <CardDescription>
                                     {connection.version_info?.operation_system} - {connection.version_info?.remote_desk_type}
@@ -68,26 +68,26 @@ export default function DeskList() {
                         </CardHeader>
                         <CardContent className="p-6 text-sm">
                             <div className="grid gap-3">
-                                <div className="font-semibold">{t('pages.searchTable.detail', 'Details')}</div>
+                                <div className="font-semibold">{t('pages.searchTable.detail')}</div>
                                 <ul className="grid gap-3">
                                     <li className="flex items-center justify-between">
-                                        <span className="text-muted-foreground">{t('pages.deskList.connectionId', 'Connection ID')}</span>
+                                        <span className="text-muted-foreground">{t('pages.deskList.connectionId')}</span>
                                         <span className="font-mono text-xs">{connection.connection_id}</span>
                                     </li>
                                     <li className="flex items-center justify-between">
-                                        <span className="text-muted-foreground">{t('pages.deskList.ip', 'IP')}</span>
-                                        <span>{connection.ip || t('pages.desk.unknown', 'Unknown')}</span>
+                                        <span className="text-muted-foreground">{t('pages.deskList.ip')}</span>
+                                        <span>{connection.ip || t('pages.desk.unknown')}</span>
                                     </li>
                                     <li className="flex items-center justify-between">
-                                        <span className="text-muted-foreground">{t('pages.deskList.platform', 'Platform')}</span>
-                                        <span>{connection.version_info?.operation_system || t('pages.desk.unknown', 'Unknown')}</span>
+                                        <span className="text-muted-foreground">{t('pages.deskList.platform')}</span>
+                                        <span>{connection.version_info?.operation_system || t('pages.desk.unknown')}</span>
                                     </li>
                                 </ul>
                             </div>
                         </CardContent>
                         <CardFooter className="flex flex-row items-center justify-end border-t bg-muted/50 px-6 py-3">
                             <Button size="sm" onClick={() => handleConnect(connection.connection_id)}>
-                                <Power className="mr-2 h-4 w-4" /> {t('pages.deskList.connect', 'Connect')}
+                                <Power className="mr-2 h-4 w-4" /> {t('pages.deskList.connect')}
                             </Button>
                         </CardFooter>
                     </Card>

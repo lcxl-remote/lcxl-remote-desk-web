@@ -95,7 +95,7 @@ function ExecRow({
                 onClick={() => exec.requestPreview(index, command)}
             >
                 <Play className="mr-1 h-3 w-3" />
-                {t("pages.desk.diagnose.exec.execute", "Execute")}
+                {t("pages.desk.diagnose.exec.execute")}
             </Button>
         )
     }
@@ -104,7 +104,7 @@ function ExecRow({
         return (
             <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                {t("pages.desk.diagnose.exec.classifying", "Checking command...")}
+                {t("pages.desk.diagnose.exec.classifying")}
             </div>
         )
     }
@@ -114,14 +114,14 @@ function ExecRow({
         return (
             <div className="mt-2 flex flex-col gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
                 <div className="text-xs font-semibold text-amber-200">
-                    {t("pages.desk.diagnose.exec.confirmTitle", "Confirm execution")}
+                    {t("pages.desk.diagnose.exec.confirmTitle")}
                 </div>
                 <div className="text-xs text-white/80">{p.impact}</div>
                 {p.policy_note && (
                     <div className="text-[10px] text-white/50">{p.policy_note}</div>
                 )}
                 <div className="text-[10px] text-white/50">
-                    {t("pages.desk.diagnose.exec.timeout", "Timeout")}: {Math.round(p.timeout_ms / 1000)}s
+                    {t("pages.desk.diagnose.exec.timeout")}: {Math.round(p.timeout_ms / 1000)}s
                 </div>
                 <div className="mt-1 flex gap-2">
                     <Button
@@ -130,7 +130,7 @@ function ExecRow({
                         onClick={() => exec.approve(index)}
                     >
                         <Check className="mr-1 h-3 w-3" />
-                        {t("pages.desk.diagnose.exec.approve", "Approve & run")}
+                        {t("pages.desk.diagnose.exec.approve")}
                     </Button>
                     <Button
                         size="sm"
@@ -139,7 +139,7 @@ function ExecRow({
                         onClick={() => exec.reject(index)}
                     >
                         <Ban className="mr-1 h-3 w-3" />
-                        {t("pages.desk.diagnose.exec.reject", "Reject")}
+                        {t("pages.desk.diagnose.exec.reject")}
                     </Button>
                 </div>
             </div>
@@ -150,7 +150,7 @@ function ExecRow({
         return (
             <div className="mt-2 flex items-center gap-2 text-xs text-blue-300">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                {t("pages.desk.diagnose.exec.running", "Running...")}
+                {t("pages.desk.diagnose.exec.running")}
             </div>
         )
     }
@@ -169,7 +169,7 @@ function ExecRow({
                                 : "bg-red-500/20 text-red-300 border-red-500/40"
                         }
                     >
-                        {t("pages.desk.diagnose.exec.exit", "Exit")} {o.exit_code}
+                        {t("pages.desk.diagnose.exec.exit")} {o.exit_code}
                     </Badge>
                     <span className="text-[10px] text-white/40">{o.duration_ms}ms</span>
                 </div>
@@ -191,7 +191,7 @@ function ExecRow({
                     className="h-6 self-end text-[10px]"
                     onClick={() => exec.dismiss(index)}
                 >
-                    {t("pages.desk.diagnose.exec.dismiss", "Dismiss")}
+                    {t("pages.desk.diagnose.exec.dismiss")}
                 </Button>
             </div>
         )
@@ -202,7 +202,7 @@ function ExecRow({
         <div className="mt-2 flex flex-col gap-1 rounded-md border border-red-500/30 bg-red-500/10 p-2">
             <div className="flex items-start gap-1 text-xs text-red-300">
                 <Ban className="mt-0.5 h-3 w-3 shrink-0" />
-                <span>{entry.error ?? t("pages.desk.diagnose.exec.notExecutable", "Not executable")}</span>
+                <span>{entry.error ?? t("pages.desk.diagnose.exec.notExecutable")}</span>
             </div>
             <Button
                 size="sm"
@@ -210,7 +210,7 @@ function ExecRow({
                 className="h-6 self-end text-[10px]"
                 onClick={() => exec.dismiss(index)}
             >
-                {t("pages.desk.diagnose.exec.dismiss", "Dismiss")}
+                {t("pages.desk.diagnose.exec.dismiss")}
             </Button>
         </div>
     )
@@ -241,7 +241,7 @@ function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
     return (
         <section className="flex flex-col gap-1.5">
             <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                {t("pages.desk.diagnose.toolActivity", "Tool activity")}
+                {t("pages.desk.diagnose.toolActivity")}
             </h3>
             <ul className="flex flex-col gap-1">
                 {tools.map((tool) => (
@@ -254,7 +254,7 @@ function ToolTimeline({ tools }: { tools: ToolActivity[] }) {
                         <span className="truncate font-mono">{tool.name}</span>
                         {tool.status === "awaiting_approval" && (
                             <span className="text-amber-300">
-                                {t("pages.desk.diagnose.toolAwaiting", "awaiting approval")}
+                                {t("pages.desk.diagnose.toolAwaiting")}
                             </span>
                         )}
                     </li>
@@ -286,7 +286,7 @@ function AgenticExecApproval({
         <section className="flex flex-col gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2">
             <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-amber-200">
-                    {t("pages.desk.diagnose.exec.agenticTitle", "The AI wants to run a command")}
+                    {t("pages.desk.diagnose.exec.agenticTitle")}
                 </span>
                 <Badge variant="outline" className={riskClass(preview.risk)}>
                     {t(`pages.desk.diagnose.risk.${preview.risk}`, preview.risk)}
@@ -304,7 +304,7 @@ function AgenticExecApproval({
                 <div className="text-[10px] text-white/50">{preview.policy_note}</div>
             )}
             <div className="text-[10px] text-white/50">
-                {t("pages.desk.diagnose.exec.timeout", "Timeout")}:{" "}
+                {t("pages.desk.diagnose.exec.timeout")}:{" "}
                 {Math.round(preview.timeout_ms / 1000)}s
             </div>
             <div className="mt-1 flex gap-2">
@@ -314,7 +314,7 @@ function AgenticExecApproval({
                     onClick={onApprove}
                 >
                     <Check className="mr-1 h-3 w-3" />
-                    {t("pages.desk.diagnose.exec.approve", "Approve & run")}
+                    {t("pages.desk.diagnose.exec.approve")}
                 </Button>
                 <Button
                     size="sm"
@@ -323,7 +323,7 @@ function AgenticExecApproval({
                     onClick={onReject}
                 >
                     <Ban className="mr-1 h-3 w-3" />
-                    {t("pages.desk.diagnose.exec.reject", "Reject")}
+                    {t("pages.desk.diagnose.exec.reject")}
                 </Button>
             </div>
         </section>
@@ -359,7 +359,6 @@ function ConversationHistory({ turns }: { turns: DiagnoseHistoryTurn[] }) {
                             {reply ||
                                 t(
                                     "pages.desk.diagnose.handedOff",
-                                    "Handed off to a human operator.",
                                 )}
                         </div>
                     </div>
@@ -386,7 +385,7 @@ function FollowUpComposer({ onSubmit }: { onSubmit: (question: string) => void }
     return (
         <div className="flex flex-col gap-2 border-t border-white/10 pt-3">
             <label className="text-xs text-gray-400">
-                {t("pages.desk.diagnose.followUpLabel", "Ask a follow-up")}
+                {t("pages.desk.diagnose.followUpLabel")}
             </label>
             <textarea
                 value={text}
@@ -395,11 +394,10 @@ function FollowUpComposer({ onSubmit }: { onSubmit: (question: string) => void }
                 className="w-full resize-none rounded-md border border-white/15 bg-white/5 p-2 text-sm text-white outline-none focus:border-white/40"
                 placeholder={t(
                     "pages.desk.diagnose.followUpPlaceholder",
-                    "Ask a follow-up question…",
                 )}
             />
             <Button size="sm" className="w-full" disabled={!text.trim()} onClick={send}>
-                {t("pages.desk.diagnose.followUpSubmit", "Send follow-up")}
+                {t("pages.desk.diagnose.followUpSubmit")}
             </Button>
         </div>
     )
@@ -421,9 +419,9 @@ export function DiagnosePanel({
     const [includeScreen, setIncludeScreen] = useState(false)
 
     const presets: string[] = [
-        t("pages.desk.diagnose.presetCpu", "Why is CPU usage so high?"),
-        t("pages.desk.diagnose.presetPort", "Which process is holding the port I need?"),
-        t("pages.desk.diagnose.presetContainer", "Why does my container fail to start?"),
+        t("pages.desk.diagnose.presetCpu"),
+        t("pages.desk.diagnose.presetPort"),
+        t("pages.desk.diagnose.presetContainer"),
     ]
 
     const submit = (q: string) => {
@@ -442,13 +440,13 @@ export function DiagnosePanel({
     const statusLabel = (phase: string | null): string => {
         switch (phase) {
             case "collecting":
-                return t("pages.desk.diagnose.statusCollecting", "Collecting evidence...")
+                return t("pages.desk.diagnose.statusCollecting")
             case "redacting":
-                return t("pages.desk.diagnose.statusRedacting", "Redacting sensitive data...")
+                return t("pages.desk.diagnose.statusRedacting")
             case "modeling":
-                return t("pages.desk.diagnose.statusModeling", "Analyzing with the model...")
+                return t("pages.desk.diagnose.statusModeling")
             default:
-                return phase ?? t("pages.desk.diagnose.statusRunning", "Working...")
+                return phase ?? t("pages.desk.diagnose.statusRunning")
         }
     }
 
@@ -463,12 +461,12 @@ export function DiagnosePanel({
             <div className="flex items-center justify-between border-b border-white/15 px-4 py-3">
                 <div className="flex items-center gap-2 text-sm font-bold text-white/90">
                     <Stethoscope className="h-4 w-4" style={{ stroke: "url(#ai-rainbow-gradient)" }} />
-                    {t("pages.desk.diagnose.title", "AI Diagnose")}
+                    {t("pages.desk.diagnose.title")}
                 </div>
                 <button
                     onClick={onClose}
                     className="text-gray-400 transition-colors hover:text-white"
-                    aria-label={t("pages.desk.diagnose.close", "Close")}
+                    aria-label={t("pages.desk.diagnose.close")}
                 >
                     <X className="h-4 w-4" />
                 </button>
@@ -488,7 +486,7 @@ export function DiagnosePanel({
                 {state.phase === "idle" && (
                     <div className="flex flex-col gap-3">
                         <label className="text-xs text-gray-400">
-                            {t("pages.desk.diagnose.questionLabel", "Describe the problem")}
+                            {t("pages.desk.diagnose.questionLabel")}
                         </label>
                         <textarea
                             value={question}
@@ -497,13 +495,12 @@ export function DiagnosePanel({
                             className="w-full resize-none rounded-md border border-white/15 bg-white/5 p-2 text-sm text-white outline-none focus:border-white/40"
                             placeholder={t(
                                 "pages.desk.diagnose.questionPlaceholder",
-                                "e.g. The app is slow and unresponsive",
                             )}
                         />
 
                         <div className="flex flex-col gap-1">
                             <span className="text-xs text-gray-400">
-                                {t("pages.desk.diagnose.presets", "Common questions")}
+                                {t("pages.desk.diagnose.presets")}
                             </span>
                             <div className="flex flex-col gap-1">
                                 {presets.map((p) => (
@@ -525,7 +522,7 @@ export function DiagnosePanel({
                                 onChange={(e) => setIncludeScreen(e.target.checked)}
                                 className="h-3.5 w-3.5"
                             />
-                            {t("pages.desk.diagnose.includeScreen", "Include a screenshot")}
+                            {t("pages.desk.diagnose.includeScreen")}
                         </label>
 
                         <Button
@@ -534,7 +531,7 @@ export function DiagnosePanel({
                             disabled={!question.trim()}
                             onClick={() => submit(question)}
                         >
-                            {t("pages.desk.diagnose.submit", "Start diagnosis")}
+                            {t("pages.desk.diagnose.submit")}
                         </Button>
                     </div>
                 )}
@@ -564,7 +561,6 @@ export function DiagnosePanel({
                                 <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                                 {t(
                                     "pages.desk.diagnose.connectionLost",
-                                    "Connection lost — results may not arrive. Start a new diagnosis.",
                                 )}
                             </div>
                         )}
@@ -593,7 +589,7 @@ export function DiagnosePanel({
                                 <section className="flex flex-col gap-2">
                                     <div className="flex items-center justify-between">
                                         <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                                            {t("pages.desk.diagnose.summary", "Summary")}
+                                            {t("pages.desk.diagnose.summary")}
                                         </h3>
                                         <Badge
                                             variant="outline"
@@ -614,7 +610,7 @@ export function DiagnosePanel({
                                 {result.findings.length > 0 && (
                                     <section className="flex flex-col gap-2">
                                         <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                                            {t("pages.desk.diagnose.findings", "Evidence")}
+                                            {t("pages.desk.diagnose.findings")}
                                         </h3>
                                         {result.findings.map((f, i) => (
                                             <div
@@ -650,7 +646,6 @@ export function DiagnosePanel({
                                         <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
                                             {t(
                                                 "pages.desk.diagnose.commands",
-                                                "Suggested commands",
                                             )}
                                         </h3>
                                         {result.commands.map((c, i) => (
@@ -692,11 +687,9 @@ export function DiagnosePanel({
                                             {exec
                                                 ? t(
                                                       "pages.desk.diagnose.execNote",
-                                                      "Only whitelisted commands can run, and only after you approve each one.",
                                                   )
                                                 : t(
                                                       "pages.desk.diagnose.suggestOnly",
-                                                      "Suggestions only — nothing is executed.",
                                                   )}
                                         </p>
                                     </section>
@@ -706,7 +699,7 @@ export function DiagnosePanel({
                                 {result.next_steps.length > 0 && (
                                     <section className="flex flex-col gap-2">
                                         <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                                            {t("pages.desk.diagnose.nextSteps", "Next steps")}
+                                            {t("pages.desk.diagnose.nextSteps")}
                                         </h3>
                                         <ul className="list-disc pl-5 text-xs text-white/80">
                                             {result.next_steps.map((s, i) => (
@@ -720,7 +713,7 @@ export function DiagnosePanel({
                                 {result.missing_info.length > 0 && (
                                     <section className="flex flex-col gap-2">
                                         <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                                            {t("pages.desk.diagnose.missingInfo", "Missing info")}
+                                            {t("pages.desk.diagnose.missingInfo")}
                                         </h3>
                                         <ul className="list-disc pl-5 text-xs text-white/60">
                                             {result.missing_info.map((s, i) => (
@@ -734,7 +727,7 @@ export function DiagnosePanel({
                                 {result.collected.length > 0 && (
                                     <section className="flex flex-col gap-2">
                                         <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                                            {t("pages.desk.diagnose.collected", "Data collected")}
+                                            {t("pages.desk.diagnose.collected")}
                                         </h3>
                                         <div className="flex flex-wrap gap-1">
                                             {result.collected.map((cap) => (
@@ -756,7 +749,7 @@ export function DiagnosePanel({
                                 <ToolTimeline tools={state.tools} />
                                 <section className="flex flex-col gap-2">
                                     <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-                                        {t("pages.desk.diagnose.answer", "Answer")}
+                                        {t("pages.desk.diagnose.answer")}
                                     </h3>
                                     <p className="whitespace-pre-wrap text-sm text-white/90">
                                         {state.answer || streamingSummary}
@@ -775,7 +768,6 @@ export function DiagnosePanel({
                                     <p className="text-sm text-white/60">
                                         {t(
                                             "pages.desk.diagnose.handedOff",
-                                            "Handed off to a human operator.",
                                         )}
                                     </p>
                                 )}
@@ -797,12 +789,12 @@ export function DiagnosePanel({
                         onClick={onHandoff}
                     >
                         <UserCog className="mr-1 h-3.5 w-3.5" />
-                        {t("pages.desk.diagnose.handoff", "Hand off to human")}
+                        {t("pages.desk.diagnose.handoff")}
                     </Button>
                 )}
                 {state.phase !== "idle" && (
                     <Button size="sm" variant="ghost" className="flex-1" onClick={onReset}>
-                        {t("pages.desk.diagnose.newDiagnosis", "New diagnosis")}
+                        {t("pages.desk.diagnose.newDiagnosis")}
                     </Button>
                 )}
             </div>

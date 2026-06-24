@@ -307,14 +307,14 @@ export function DeskConfigDialog({
         <Dialog open={open} onOpenChange={onOpenChange}>
             <DialogContent className="sm:max-w-[425px] max-h-[90vh] overflow-y-auto" onInteractOutside={handleInteractOutside}>
                 <DialogHeader>
-                    <DialogTitle>{t('pages.desk.deskConfig', 'Remote Desk Configuration')}</DialogTitle>
+                    <DialogTitle>{t('pages.desk.deskConfig')}</DialogTitle>
                 </DialogHeader>
                 {initData?.is_admin === false && (
                     <Alert variant="destructive">
                         <AlertTriangle className="h-4 w-4" />
-                        <AlertTitle>{t('pages.system.settings.alert.message', 'Warning')}</AlertTitle>
+                        <AlertTitle>{t('pages.system.settings.alert.message')}</AlertTitle>
                         <AlertDescription>
-                            {t('pages.desk.adminPrivilegeWarning', 'The remote server is not running with administrative/root privileges. Some operations may be restricted.')}
+                            {t('pages.desk.adminPrivilegeWarning')}
                         </AlertDescription>
                     </Alert>
                 )}
@@ -322,9 +322,9 @@ export function DeskConfigDialog({
                     <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-4">
                         <Tabs defaultValue="display" className="w-full">
                             <TabsList className="grid w-full grid-cols-3">
-                                <TabsTrigger value="display">{t('pages.desk.display', 'Display')}</TabsTrigger>
-                                <TabsTrigger value="audio">{t('pages.desk.audio', 'Audio')}</TabsTrigger>
-                                <TabsTrigger value="advanced">{t('pages.desk.advanced', 'Advanced')}</TabsTrigger>
+                                <TabsTrigger value="display">{t('pages.desk.display')}</TabsTrigger>
+                                <TabsTrigger value="audio">{t('pages.desk.audio')}</TabsTrigger>
+                                <TabsTrigger value="advanced">{t('pages.desk.advanced')}</TabsTrigger>
                             </TabsList>
 
                             {/* --- DISPLAY TAB --- */}
@@ -334,7 +334,7 @@ export function DeskConfigDialog({
                                     name="image_capture"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t('pages.desk.screenCaptureMode', 'Screen Capture Mode')}</FormLabel>
+                                            <FormLabel>{t('pages.desk.screenCaptureMode')}</FormLabel>
                                             {/* Radix Select + RHF reset can miss value updates; re-mount to reflect initial data */}
                                             {(() => {
                                                 const currentValue = field.value || ""
@@ -362,7 +362,7 @@ export function DeskConfigDialog({
                                             >
                                                 <FormControl>
                                                     <SelectTrigger>
-                                                        <SelectValue placeholder={t('pages.desk.screenCaptureModePlaceholder', 'Select Capture Mode')} />
+                                                        <SelectValue placeholder={t('pages.desk.screenCaptureModePlaceholder')} />
                                                     </SelectTrigger>
                                                 </FormControl>
                                                 <SelectContent>
@@ -384,12 +384,11 @@ export function DeskConfigDialog({
                                     <Alert>
                                         <AlertTriangle className="h-4 w-4" />
                                         <AlertTitle>
-                                            {t("pages.desk.dxgiVideoBlackBarWarning.title", "DXGI capture limitation")}
+                                            {t("pages.desk.dxgiVideoBlackBarWarning.title")}
                                         </AlertTitle>
                                         <AlertDescription>
                                             {t(
-                                                "pages.desk.dxgiVideoBlackBarWarning.body",
-                                                "DXGI captures DWM's framebuffer. Browser-decoded video uses a hardware overlay surface that DXGI cannot read, so brief black bars may flash while playing video. Switch to WGC for correct video capture."
+                                                "pages.desk.dxgiVideoBlackBarWarning.body"
                                             )}
                                         </AlertDescription>
                                     </Alert>
@@ -401,13 +400,11 @@ export function DeskConfigDialog({
                                         <AlertTitle>
                                             {t(
                                                 "pages.desk.noDisplayWarning.title",
-                                                "No display detected on the remote host",
                                             )}
                                         </AlertTitle>
                                         <AlertDescription>
                                             {t(
                                                 "pages.desk.noDisplayWarning.body",
-                                                "The remote host reported no capturable display for this mode (it may be headless, the session disconnected, or all monitors detached). Reconnect a monitor / remote session or enable the virtual display, then reopen this dialog. Connecting is disabled until a display is available.",
                                             )}
                                         </AlertDescription>
                                     </Alert>
@@ -421,13 +418,11 @@ export function DeskConfigDialog({
                                                 <AlertTitle>
                                                     {t(
                                                         "pages.desk.displayDeviceStaleWarning.title",
-                                                        "Previously selected display is unavailable",
                                                     )}
                                                 </AlertTitle>
                                                 <AlertDescription>
                                                     {t(
                                                         "pages.desk.displayDeviceStaleWarning.body",
-                                                        "The display {{name}} you picked last time is no longer enumerated. We prefilled the primary monitor; pick a different one if needed.",
                                                         { name: staleSavedDeviceName },
                                                     )}
                                                 </AlertDescription>
@@ -447,7 +442,6 @@ export function DeskConfigDialog({
                                                 <p className="text-xs text-muted-foreground">
                                                     {t(
                                                         "pages.desk.virtualDisplayHint",
-                                                        "Only the virtual display supports adaptive resolution",
                                                     )}
                                                 </p>
                                             )}
@@ -457,18 +451,16 @@ export function DeskConfigDialog({
                                             rules={{
                                                 required: t(
                                                     "pages.desk.displayDeviceRequired",
-                                                    "Please pick a display before connecting.",
                                                 ),
                                                 validate: (value: string | undefined) =>
                                                     (value !== undefined && value !== "") ||
                                                     t(
                                                         "pages.desk.displayDeviceRequired",
-                                                        "Please pick a display before connecting.",
                                                     ),
                                             }}
                                             render={({ field }) => (
                                                 <FormItem>
-                                                    <FormLabel>{t('pages.desk.displayDevice', 'Display Device')}</FormLabel>
+                                                    <FormLabel>{t('pages.desk.displayDevice')}</FormLabel>
                                                     {(() => {
                                                         const currentValue = field.value ?? ""
                                                         return (
@@ -482,7 +474,7 @@ export function DeskConfigDialog({
                                                     >
                                                         <FormControl>
                                                             <SelectTrigger>
-                                                                <SelectValue placeholder={t('pages.desk.displayDevicePlaceholder', 'Select Device')} />
+                                                                <SelectValue placeholder={t('pages.desk.displayDevicePlaceholder')} />
                                                             </SelectTrigger>
                                                         </FormControl>
                                                         <SelectContent>
@@ -507,7 +499,6 @@ export function DeskConfigDialog({
                                                                             <span className="mr-2 inline-flex items-center rounded-md bg-blue-500/15 px-1.5 py-0.5 text-xs font-medium text-blue-500">
                                                                                 {t(
                                                                                     "pages.desk.virtualDisplayBadge",
-                                                                                    "Virtual",
                                                                                 )}
                                                                             </span>
                                                                         )}
@@ -539,7 +530,7 @@ export function DeskConfigDialog({
                                             </FormControl>
                                             <div className="space-y-1 leading-none">
                                                 <FormLabel>
-                                                    {t('pages.desk.showRemoteMouse', 'Show Remote Mouse')}
+                                                    {t('pages.desk.showRemoteMouse')}
                                                 </FormLabel>
                                             </div>
                                         </FormItem>
@@ -568,13 +559,12 @@ export function DeskConfigDialog({
                                                 </FormControl>
                                                 <div className="space-y-1 leading-none">
                                                     <FormLabel>
-                                                        {t('pages.desk.adaptiveResolution', 'Adaptive Resolution')}
+                                                        {t('pages.desk.adaptiveResolution')}
                                                     </FormLabel>
                                                     {!canEnable && (
                                                         <p className="text-xs text-muted-foreground">
                                                             {t(
                                                                 'pages.desk.adaptiveResolutionVirtualOnly',
-                                                                'Available only when the virtual display is selected',
                                                             )}
                                                         </p>
                                                     )}
@@ -590,7 +580,7 @@ export function DeskConfigDialog({
                                     render={({ field }) => (
                                         <FormItem className="pt-2">
                                             <FormLabel className="flex justify-between">
-                                                <span>{t('pages.desk.remoteResolutionScale', 'Resolution Scale')}</span>
+                                                <span>{t('pages.desk.remoteResolutionScale')}</span>
                                                 <span className="text-muted-foreground">{field.value}%</span>
                                             </FormLabel>
                                             <FormControl>
@@ -624,7 +614,7 @@ export function DeskConfigDialog({
                                             </FormControl>
                                             <div className="space-y-1 leading-none">
                                                 <FormLabel>
-                                                    {t('pages.desk.captureAudio', 'Capture Audio')}
+                                                    {t('pages.desk.captureAudio')}
                                                 </FormLabel>
                                             </div>
                                         </FormItem>
@@ -638,7 +628,7 @@ export function DeskConfigDialog({
                                             name="audio_capture"
                                             render={({ field }) => (
                                                 <FormItem>
-                                                    <FormLabel>{t('pages.desk.audioCaptureMode', 'Audio Capture Mode')}</FormLabel>
+                                                    <FormLabel>{t('pages.desk.audioCaptureMode')}</FormLabel>
                                                     {(() => {
                                                         const currentValue = field.value || ""
                                                         return (
@@ -649,7 +639,7 @@ export function DeskConfigDialog({
                                                     >
                                                         <FormControl>
                                                             <SelectTrigger>
-                                                                <SelectValue placeholder={t('pages.desk.audioCaptureModePlaceholder', 'Select Audio Mode')} />
+                                                                <SelectValue placeholder={t('pages.desk.audioCaptureModePlaceholder')} />
                                                             </SelectTrigger>
                                                         </FormControl>
                                                         <SelectContent>
@@ -675,7 +665,7 @@ export function DeskConfigDialog({
                                                     const stringValue = field.value ? JSON.stringify(field.value) : "";
                                                     return (
                                                         <FormItem>
-                                                            <FormLabel>{t('pages.desk.audioDevice', 'Audio Device')}</FormLabel>
+                                                            <FormLabel>{t('pages.desk.audioDevice')}</FormLabel>
                                                             {(() => (
                                                             <Select
                                                                 onValueChange={(val) => {
@@ -688,7 +678,7 @@ export function DeskConfigDialog({
                                                             >
                                                                 <FormControl>
                                                                     <SelectTrigger>
-                                                                        <SelectValue placeholder={t('pages.desk.audioDevicePlaceholder', 'Select Audio Device')} />
+                                                                        <SelectValue placeholder={t('pages.desk.audioDevicePlaceholder')} />
                                                                     </SelectTrigger>
                                                                 </FormControl>
                                                                 <SelectContent>
@@ -727,7 +717,7 @@ export function DeskConfigDialog({
                                             name="audio_encoder"
                                             render={({ field }) => (
                                                 <FormItem>
-                                                    <FormLabel>{t('pages.desk.audioEncoder', 'Audio Encoder')}</FormLabel>
+                                                    <FormLabel>{t('pages.desk.audioEncoder')}</FormLabel>
                                                     {(() => {
                                                         const currentValue = field.value || "auto"
                                                         return (
@@ -738,11 +728,11 @@ export function DeskConfigDialog({
                                                     >
                                                         <FormControl>
                                                             <SelectTrigger>
-                                                                <SelectValue placeholder={t('pages.desk.autoBackendControl', 'Auto')} />
+                                                                <SelectValue placeholder={t('pages.desk.autoBackendControl')} />
                                                             </SelectTrigger>
                                                         </FormControl>
                                                         <SelectContent>
-                                                            <SelectItem value="auto">{t('pages.desk.autoBackendControl', 'Auto')}</SelectItem>
+                                                            <SelectItem value="auto">{t('pages.desk.autoBackendControl')}</SelectItem>
                                                             {initData?.audio_encoder_list?.map((encoder) => (
                                                                 <SelectItem key={encoder} value={encoder}>
                                                                     {encoder}
@@ -767,7 +757,7 @@ export function DeskConfigDialog({
                                     name="video_encoder"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t('pages.desk.videoEncoder', 'Video Encoder')}</FormLabel>
+                                            <FormLabel>{t('pages.desk.videoEncoder')}</FormLabel>
                                             {(() => {
                                                 const currentValue = field.value || "auto"
                                                 return (
@@ -778,11 +768,11 @@ export function DeskConfigDialog({
                                             >
                                                 <FormControl>
                                                     <SelectTrigger>
-                                                        <SelectValue placeholder={t('pages.desk.autoBackendControl', 'Auto')} />
+                                                        <SelectValue placeholder={t('pages.desk.autoBackendControl')} />
                                                     </SelectTrigger>
                                                 </FormControl>
                                                 <SelectContent>
-                                                    <SelectItem value="auto">{t('pages.desk.autoBackendControl', 'Auto')}</SelectItem>
+                                                    <SelectItem value="auto">{t('pages.desk.autoBackendControl')}</SelectItem>
                                                     {initData?.video_encoder_list?.map((encoder) => (
                                                         <SelectItem key={encoder} value={encoder}>
                                                             {encoder}
@@ -802,7 +792,7 @@ export function DeskConfigDialog({
                                     name="wayland_control_mode"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t('pages.desk.waylandControlMode', 'Wayland Control Mode')}</FormLabel>
+                                            <FormLabel>{t('pages.desk.waylandControlMode')}</FormLabel>
                                             {(() => {
                                                 const currentValue = field.value || "auto"
                                                 return (
@@ -813,11 +803,11 @@ export function DeskConfigDialog({
                                             >
                                                 <FormControl>
                                                     <SelectTrigger>
-                                                        <SelectValue placeholder={t('pages.desk.autoBackendControl', 'Auto')} />
+                                                        <SelectValue placeholder={t('pages.desk.autoBackendControl')} />
                                                     </SelectTrigger>
                                                 </FormControl>
                                                 <SelectContent>
-                                                    <SelectItem value="auto">{t('pages.desk.autoBackendControl', 'Auto')}</SelectItem>
+                                                    <SelectItem value="auto">{t('pages.desk.autoBackendControl')}</SelectItem>
                                                     <SelectItem value="portal">portal</SelectItem>
                                                     <SelectItem value="uinput">uinput</SelectItem>
                                                     <SelectItem value="none">none</SelectItem>
@@ -836,7 +826,7 @@ export function DeskConfigDialog({
                                     render={({ field }) => (
                                         <FormItem className="pt-2">
                                             <FormLabel className="flex justify-between">
-                                                <span>{t('pages.desk.videoQuality', 'Video Quality')} ({t('pages.desk.videoQualityDescription', '0-63, lower is better')})</span>
+                                                <span>{t('pages.desk.videoQuality')} ({t('pages.desk.videoQualityDescription')})</span>
                                                 <span className="text-muted-foreground">{field.value}</span>
                                             </FormLabel>
                                             <FormControl>
@@ -877,12 +867,11 @@ export function DeskConfigDialog({
                                     />
                                     <div className="space-y-1 leading-none">
                                         <Label htmlFor="adaptive-quality-toggle">
-                                            {t('pages.desk.adaptiveQuality', 'Adaptive Video Quality')}
+                                            {t('pages.desk.adaptiveQuality')}
                                         </Label>
                                         <p className="text-xs text-muted-foreground">
                                             {t(
-                                                'pages.desk.adaptiveQualityDescription',
-                                                'Auto-tune video quality based on packet loss and RTT'
+                                                'pages.desk.adaptiveQualityDescription'
                                             )}
                                         </p>
                                     </div>
@@ -910,12 +899,11 @@ export function DeskConfigDialog({
                                     />
                                     <div className="space-y-1 leading-none">
                                         <Label htmlFor="adaptive-bitrate-toggle">
-                                            {t('pages.desk.adaptiveBitrateCap', 'Adaptive Bitrate Cap')}
+                                            {t('pages.desk.adaptiveBitrateCap')}
                                         </Label>
                                         <p className="text-xs text-muted-foreground">
                                             {t(
-                                                'pages.desk.adaptiveBitrateCapDescription',
-                                                'Cap encoder bitrate spikes to the measured network capacity (quality is unaffected)'
+                                                'pages.desk.adaptiveBitrateCapDescription'
                                             )}
                                         </p>
                                     </div>
@@ -926,12 +914,12 @@ export function DeskConfigDialog({
                                     name="video_fps"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t('pages.desk.maxFps', 'Max FPS')}</FormLabel>
+                                            <FormLabel>{t('pages.desk.maxFps')}</FormLabel>
                                             <FormControl>
                                                 <Input
                                                     type="number"
                                                     min={1}
-                                                    placeholder={t('pages.desk.autoBackendControl', 'Auto')}
+                                                    placeholder={t('pages.desk.autoBackendControl')}
                                                     {...field}
                                                     value={field.value ?? ""}
                                                     onChange={(e) => {
@@ -963,12 +951,11 @@ export function DeskConfigDialog({
                                             </FormControl>
                                             <div className="space-y-1 leading-none">
                                                 <FormLabel>
-                                                    {t('pages.desk.enableDirtyRect', 'Enable Dirty Rect Optimisation')}
+                                                    {t('pages.desk.enableDirtyRect')}
                                                 </FormLabel>
                                                 <p className="text-xs text-muted-foreground">
                                                     {t(
-                                                        'pages.desk.enableDirtyRectDescription',
-                                                        'Only re-encode changed regions of the screen. Turn off if you see transient black bars during animations.'
+                                                        'pages.desk.enableDirtyRectDescription'
                                                     )}
                                                 </p>
                                             </div>
@@ -980,10 +967,10 @@ export function DeskConfigDialog({
 
                         <DialogFooter className="pt-4">
                             <Button type="button" variant="outline" onClick={onCancel}>
-                                {t('pages.desk.close', 'Cancel')}
+                                {t('pages.desk.close')}
                             </Button>
                             <Button type="submit" disabled={noDisplaysForMode}>
-                                {t('pages.desk.connect', 'Connect')}
+                                {t('pages.desk.connect')}
                             </Button>
                         </DialogFooter>
                     </form>

@@ -36,10 +36,10 @@ export default function PrivateScreenPage() {
                         <Lock className="h-16 w-16 text-slate-100/90 drop-shadow-lg" />
                     </div>
                     <CardTitle className="text-2xl font-bold tracking-wide text-white drop-shadow-sm">
-                        {t('client.privateScreen.title', '远程桌面隐私模式')}
+                        {t('client.privateScreen.title')}
                     </CardTitle>
                     <CardDescription className="text-slate-100/70 text-base leading-relaxed whitespace-pre-line px-4">
-                        {t('client.privateScreen.description', '此屏幕正在被远程控制。\n本地输入已被拦截。')}
+                        {t('client.privateScreen.description')}
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="pt-6 pb-8">
@@ -47,7 +47,7 @@ export default function PrivateScreenPage() {
                         Ctrl + Alt + L
                     </div>
                     <p className="mt-4 text-sm text-slate-100/50">
-                        {t('client.privateScreen.hotkeyHint', '按上方快捷键退出隐私模式')}
+                        {t('client.privateScreen.hotkeyHint')}
                     </p>
                 </CardContent>
             </Card>

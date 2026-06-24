@@ -72,35 +72,35 @@ function DriverBadge({ status }: { status: DriverStatus | null }) {
     if (!status) {
         return (
             <Badge variant="outline">
-                {t("pages.virtualDisplay.driver.badge.loading", "Loading…")}
+                {t("pages.virtualDisplay.driver.badge.loading")}
             </Badge>
         )
     }
     if (!status.files_available) {
         return (
             <Badge variant="destructive">
-                {t("pages.virtualDisplay.driver.badge.filesMissing", "Driver files missing")}
+                {t("pages.virtualDisplay.driver.badge.filesMissing")}
             </Badge>
         )
     }
     if (status.installed === null) {
         return (
             <Badge variant="outline">
-                {t("pages.virtualDisplay.driver.badge.unknown", "Status unknown")}
+                {t("pages.virtualDisplay.driver.badge.unknown")}
             </Badge>
         )
     }
     if (status.installed === false) {
         return (
             <Badge variant="secondary">
-                {t("pages.virtualDisplay.driver.badge.notInstalled", "Not installed")}
+                {t("pages.virtualDisplay.driver.badge.notInstalled")}
             </Badge>
         )
     }
     const oems = status.installed_oem_infs ?? []
     return (
         <Badge variant="default">
-            {t("pages.virtualDisplay.driver.badge.installed", "Installed")}
+            {t("pages.virtualDisplay.driver.badge.installed")}
             {oems.length > 0 ? ` (${oems.join(", ")})` : ""}
         </Badge>
     )
@@ -200,17 +200,16 @@ export function VirtualDisplaySettings() {
             const body = await resp.json()
             if (body?.code === 0) {
                 toast({
-                    title: t("pages.system.settings.success", "Success"),
+                    title: t("pages.system.settings.success"),
                     description: t(
                         "pages.virtualDisplay.driver.installSuccess",
-                        "Driver installed.",
                     ),
                 })
                 setStatus(body.data as DriverStatus)
             } else {
                 toast({
                     variant: "destructive",
-                    title: t("pages.system.settings.error", "Error"),
+                    title: t("pages.system.settings.error"),
                     description: errorMessage(body?.code, body?.message, t),
                 })
             }
@@ -228,10 +227,9 @@ export function VirtualDisplaySettings() {
             const body = await resp.json()
             if (body?.code === 0) {
                 toast({
-                    title: t("pages.system.settings.success", "Success"),
+                    title: t("pages.system.settings.success"),
                     description: t(
                         "pages.virtualDisplay.driver.uninstallSuccess",
-                        "Driver uninstalled.",
                     ),
                 })
                 setStatus(body.data as DriverStatus)
@@ -244,7 +242,7 @@ export function VirtualDisplaySettings() {
             } else {
                 toast({
                     variant: "destructive",
-                    title: t("pages.system.settings.error", "Error"),
+                    title: t("pages.system.settings.error"),
                     description: errorMessage(body?.code, body?.message, t),
                 })
             }
@@ -276,16 +274,15 @@ export function VirtualDisplaySettings() {
                 setSettings(body.data as VirtualDisplaySettings)
                 setSettingsLoadFailed(false)
                 toast({
-                    title: t("pages.system.settings.success", "Success"),
+                    title: t("pages.system.settings.success"),
                     description: t(
                         "pages.virtualDisplay.enabled.saved",
-                        "Virtual display preference saved.",
                     ),
                 })
             } else {
                 toast({
                     variant: "destructive",
-                    title: t("pages.system.settings.error", "Error"),
+                    title: t("pages.system.settings.error"),
                     description: errorMessage(body?.code, body?.message, t),
                 })
             }
@@ -325,12 +322,11 @@ export function VirtualDisplaySettings() {
         <div className="container mx-auto max-w-4xl py-8 space-y-6">
             <div>
                 <h1 className="text-3xl font-bold tracking-tight">
-                    {t("pages.virtualDisplay.title", "Virtual Display")}
+                    {t("pages.virtualDisplay.title")}
                 </h1>
                 <p className="text-muted-foreground">
                     {t(
                         "pages.virtualDisplay.description",
-                        "Manage the Windows IDD virtual display driver and toggle whether the daemon creates a virtual monitor at startup.",
                     )}
                 </p>
             </div>
@@ -339,12 +335,11 @@ export function VirtualDisplaySettings() {
                 <CardHeader className="flex flex-row items-start justify-between gap-2">
                     <div>
                         <CardTitle>
-                            {t("pages.virtualDisplay.driver.title", "Driver status")}
+                            {t("pages.virtualDisplay.driver.title")}
                         </CardTitle>
                         <CardDescription>
                             {t(
                                 "pages.virtualDisplay.driver.description",
-                                "The LcxlVirtualDisplay IDD driver must be staged before the virtual display can be enabled.",
                             )}
                         </CardDescription>
                     </div>
@@ -364,7 +359,7 @@ export function VirtualDisplaySettings() {
                 <CardContent className="space-y-4">
                     <div className="flex items-center justify-between">
                         <span className="text-sm font-medium">
-                            {t("pages.virtualDisplay.driver.statusLabel", "Status")}
+                            {t("pages.virtualDisplay.driver.statusLabel")}
                         </span>
                         <DriverBadge status={status} />
                     </div>
@@ -373,7 +368,6 @@ export function VirtualDisplaySettings() {
                         <Label htmlFor="vdd-files-dir">
                             {t(
                                 "pages.virtualDisplay.driver.filesDirLabel",
-                                "Driver files directory",
                             )}
                         </Label>
                         <Input
@@ -382,7 +376,6 @@ export function VirtualDisplaySettings() {
                             value={status?.files_dir ?? ""}
                             placeholder={t(
                                 "pages.virtualDisplay.driver.filesDirUnknown",
-                                "Unknown",
                             )}
                         />
                     </div>
@@ -392,18 +385,15 @@ export function VirtualDisplaySettings() {
                             <AlertTitle>
                                 {t(
                                     "pages.virtualDisplay.driver.cannotModifyTitle",
-                                    "Driver changes not permitted",
                                 )}
                             </AlertTitle>
                             <AlertDescription>
                                 {isServiceDaemon
                                     ? t(
                                           "pages.virtualDisplay.driver.cannotModifyDaemon",
-                                          "Daemon refused the request — check the daemon log.",
                                       )
                                     : t(
                                           "pages.virtualDisplay.driver.cannotModifyDefault",
-                                          "In portable mode, install/uninstall the IDD driver via the \"Install Service\" flow; uninstalling the service force-removes the driver.",
                                       )}
                             </AlertDescription>
                         </Alert>
@@ -414,13 +404,11 @@ export function VirtualDisplaySettings() {
                             <AlertTitle>
                                 {t(
                                     "pages.virtualDisplay.driver.filesMissingTitle",
-                                    "Driver files missing",
                                 )}
                             </AlertTitle>
                             <AlertDescription>
                                 {t(
                                     "pages.virtualDisplay.driver.filesMissingDescription",
-                                    "Place the LcxlVirtualDisplay driver files under <exe_dir>/drivers/LcxlVirtualDisplay/ and refresh.",
                                 )}
                             </AlertDescription>
                         </Alert>
@@ -431,13 +419,11 @@ export function VirtualDisplaySettings() {
                             <AlertTitle>
                                 {t(
                                     "pages.virtualDisplay.driver.unknownTitle",
-                                    "Driver status unknown",
                                 )}
                             </AlertTitle>
                             <AlertDescription>
                                 {t(
                                     "pages.virtualDisplay.driver.unknownDescription",
-                                    "Could not query Get-WindowsDriver or pnputil. Retry the status check, ideally as an administrator.",
                                 )}
                             </AlertDescription>
                         </Alert>
@@ -454,7 +440,7 @@ export function VirtualDisplaySettings() {
                                 status?.installed === null
                             }
                         >
-                            {t("pages.virtualDisplay.driver.installButton", "Install driver")}
+                            {t("pages.virtualDisplay.driver.installButton")}
                         </Button>
                         <Button
                             variant="destructive"
@@ -467,7 +453,6 @@ export function VirtualDisplaySettings() {
                         >
                             {t(
                                 "pages.virtualDisplay.driver.uninstallButton",
-                                "Uninstall driver",
                             )}
                         </Button>
                     </div>
@@ -477,12 +462,11 @@ export function VirtualDisplaySettings() {
             <Card>
                 <CardHeader>
                     <CardTitle>
-                        {t("pages.virtualDisplay.enabled.title", "Enable virtual display")}
+                        {t("pages.virtualDisplay.enabled.title")}
                     </CardTitle>
                     <CardDescription>
                         {t(
                             "pages.virtualDisplay.enabled.description",
-                            "When enabled, the daemon will create the IDD virtual monitor on startup.",
                         )}
                     </CardDescription>
                 </CardHeader>
@@ -492,13 +476,11 @@ export function VirtualDisplaySettings() {
                             <AlertTitle>
                                 {t(
                                     "pages.virtualDisplay.enabled.notDaemonTitle",
-                                    "Only effective in service-daemon mode",
                                 )}
                             </AlertTitle>
                             <AlertDescription>
                                 {t(
                                     "pages.virtualDisplay.enabled.notDaemonDescription",
-                                    "The flag is saved but only acted on when running as the Windows service.",
                                 )}
                             </AlertDescription>
                         </Alert>
@@ -508,14 +490,12 @@ export function VirtualDisplaySettings() {
                             <AlertTitle>
                                 {t(
                                     "pages.virtualDisplay.loadFailedTitle",
-                                    "Failed to load settings",
                                 )}
                             </AlertTitle>
                             <AlertDescription className="flex items-center justify-between gap-2">
                                 <span>
                                     {t(
                                         "pages.virtualDisplay.loadFailedDescription",
-                                        "Could not retrieve the current configuration — saving is disabled to avoid overwriting unknown values.",
                                     )}
                                 </span>
                                 <Button
@@ -524,7 +504,7 @@ export function VirtualDisplaySettings() {
                                     onClick={loadSettings}
                                     disabled={settingsLoading}
                                 >
-                                    {t("pages.virtualDisplay.loadFailedRetry", "Retry")}
+                                    {t("pages.virtualDisplay.loadFailedRetry")}
                                 </Button>
                             </AlertDescription>
                         </Alert>
@@ -534,23 +514,19 @@ export function VirtualDisplaySettings() {
                             <Label htmlFor="vdd-enabled" className="font-medium">
                                 {t(
                                     "pages.virtualDisplay.enabled.switchLabel",
-                                    "Create virtual monitor on startup",
                                 )}
                             </Label>
                             <p className="text-xs text-muted-foreground">
                                 {status?.installed === null
                                     ? t(
                                           "pages.virtualDisplay.enabled.helperUnknown",
-                                          "Driver status unknown — refresh and retry.",
                                       )
                                     : status?.installed === false
                                       ? t(
                                             "pages.virtualDisplay.enabled.helperNotInstalled",
-                                            "Driver is not installed; install it first.",
                                         )
                                       : t(
                                             "pages.virtualDisplay.enabled.helperReady",
-                                            "Driver is installed; this flag controls whether the daemon brings the monitor up.",
                                         )}
                             </p>
                         </div>
@@ -574,7 +550,6 @@ export function VirtualDisplaySettings() {
                         >
                             {t(
                                 "pages.system.settings.serviceManagement.uninstall",
-                                "Uninstall service",
                             )}
                         </Button>
                     )}
@@ -584,12 +559,11 @@ export function VirtualDisplaySettings() {
             <Card>
                 <CardHeader>
                     <CardTitle>
-                        {t("pages.virtualDisplay.exclusive.title", "Exclusive mode")}
+                        {t("pages.virtualDisplay.exclusive.title")}
                     </CardTitle>
                     <CardDescription>
                         {t(
                             "pages.virtualDisplay.exclusive.description",
-                            "When the remote peer acquires control, detach all physical displays so Windows migrates windows onto the virtual one. Restores automatically on release / disconnect.",
                         )}
                     </CardDescription>
                 </CardHeader>
@@ -599,13 +573,11 @@ export function VirtualDisplaySettings() {
                             <AlertTitle>
                                 {t(
                                     "pages.virtualDisplay.exclusive.notDaemonTitle",
-                                    "Only effective in service-daemon mode",
                                 )}
                             </AlertTitle>
                             <AlertDescription>
                                 {t(
                                     "pages.virtualDisplay.exclusive.notDaemonDescription",
-                                    "The setting is saved but only acted on when running as the Windows service.",
                                 )}
                             </AlertDescription>
                         </Alert>
@@ -615,13 +587,11 @@ export function VirtualDisplaySettings() {
                             <Label htmlFor="vdd-exclusive" className="font-medium">
                                 {t(
                                     "pages.virtualDisplay.exclusive.toggleLabel",
-                                    "Enable exclusive mode",
                                 )}
                             </Label>
                             <p className="text-xs text-muted-foreground">
                                 {t(
                                     "pages.virtualDisplay.exclusive.toggleHelper",
-                                    "Requires virtual display to be enabled first",
                                 )}
                             </p>
                         </div>
@@ -636,7 +606,6 @@ export function VirtualDisplaySettings() {
                         <Label htmlFor="vdd-prompt-ms">
                             {t(
                                 "pages.virtualDisplay.exclusive.promptMsLabel",
-                                "Pre-switch prompt duration (ms)",
                             )}
                         </Label>
                         <Input
@@ -653,7 +622,6 @@ export function VirtualDisplaySettings() {
                         <p className="text-xs text-muted-foreground">
                             {t(
                                 "pages.virtualDisplay.exclusive.promptMsHelper",
-                                "0 – 60000 ms (0 = skip prompt)",
                             )}
                         </p>
                     </div>
@@ -677,22 +645,19 @@ function errorMessage(
         case 4:
             return t(
                 "pages.virtualDisplay.error.permissionError",
-                "Administrator permission required.",
             )
         case 8:
             return t(
                 "pages.virtualDisplay.error.preconditionFailed",
-                "Driver is not staged; install it first.",
             )
         case 11:
             return t(
                 "pages.virtualDisplay.error.fileNotFound",
-                "Driver files not found next to the server binary.",
             )
         default:
             return (
                 fallback ??
-                t("pages.virtualDisplay.error.generic", "Operation failed.")
+                t("pages.virtualDisplay.error.generic")
             )
     }
 }

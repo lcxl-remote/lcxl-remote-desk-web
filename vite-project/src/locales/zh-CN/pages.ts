@@ -725,4 +725,24 @@ export default {
   'pages.virtualDisplay.error.preconditionFailed': '驱动尚未安装，请先安装驱动。',
   'pages.virtualDisplay.error.fileNotFound': '未在服务端二进制目录下找到驱动文件。',
   'pages.virtualDisplay.error.generic': '操作失败。',
+  // Remote desk session controls.
+  'pages.desk.closeStats': '关闭',
+  'pages.desk.enterText': '输入文本...',
+  'pages.desk.syncing': '正在同步剪贴板...',
+  'pages.desk.waylandControlMode': 'Wayland 控制模式',
+  // Remote terminal session.
+  'pages.deskTerminal.connect': '连接',
+  'pages.deskTerminal.selectShell': '选择一个 shell 以开始会话',
+  'pages.deskTerminal.title': '终端会话',
+  // Backend capture/control diagnostics panel.
+  'pages.system.settings.backendDiagnostics': '后端诊断',
+  'pages.system.settings.backendDiagnostics.description': 'Wayland/X11 采集与控制的运行时状态。',
+  'pages.system.settings.backendDiagnostics.inputError': '输入后端错误',
+  'pages.system.settings.backendDiagnostics.portalError': 'Portal 错误',
+  'pages.user.settings.title': '用户设置',
+  // Privacy-mode overlay shown on the controlled host.
+  'client.privateScreen.title': '远程桌面隐私模式',
+  'client.privateScreen.description': '此屏幕正在被远程控制。\n本地输入已被拦截。',
+  'client.privateScreen.hotkeyHint': '按上方快捷键退出隐私模式',
+  'common.unknownError': '未知错误',
 };

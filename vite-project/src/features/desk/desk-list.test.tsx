@@ -2,12 +2,8 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-// i18n: t() echoes the fallback the component always provides.
-vi.mock("react-i18next", () => ({
-    useTranslation: () => ({
-        t: (_key: string, fallback?: string) => fallback ?? _key,
-    }),
-}));
+// i18n: real en-US locale so assertions match what users see.
+vi.mock("react-i18next", () => import("@/test-utils/i18n-mock").then((m) => m.reactI18nextMock()));
 
 // Mutable connection list for the mocked query hook.
 const h = vi.hoisted(() => ({

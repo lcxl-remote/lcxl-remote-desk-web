@@ -88,41 +88,37 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
             const code = body?.code
             if (code === 0) {
                 toast({
-                    title: t("pages.system.settings.success", "Success"),
+                    title: t("pages.system.settings.success"),
                     description: t(
                         "pages.system.settings.serviceManagement.installSuccess",
-                        "Service install request submitted. Please wait a few seconds.",
                     ),
                 })
                 onOpenChange(false)
             } else if (code === 5) {
                 toast({
                     variant: "destructive",
-                    title: t("pages.system.settings.error", "Error"),
+                    title: t("pages.system.settings.error"),
                     description: t(
                         "pages.layout.serviceBanner.installDialog.invalidPath",
-                        "Install path contains forbidden characters (\" or control chars).",
                     ),
                 })
             } else {
                 toast({
                     variant: "destructive",
-                    title: t("pages.system.settings.error", "Error"),
+                    title: t("pages.system.settings.error"),
                     description:
                         body?.message ??
                         t(
                             "pages.system.settings.serviceManagement.installError",
-                            "Failed to install service.",
                         ),
                 })
             }
         } catch (e) {
             toast({
                 variant: "destructive",
-                title: t("pages.system.settings.error", "Error"),
+                title: t("pages.system.settings.error"),
                 description: t(
                     "pages.system.settings.serviceManagement.installError",
-                    "Failed to install service.",
                 ),
             })
         } finally {
@@ -138,7 +134,6 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                     <DialogDescription>
                         {t(
                             "pages.layout.serviceBanner.installDialog.description",
-                            "Install lcxl-remote-desk as a Windows service to enable unattended access.",
                         )}
                     </DialogDescription>
                 </DialogHeader>
@@ -164,23 +159,19 @@ export function ServiceInstallDialog(props: ServiceInstallDialogProps) {
                             <Label htmlFor="install-idd" className="text-sm">
                                 {t(
                                     "pages.layout.serviceBanner.installDialog.installIddDriver",
-                                    "Also install the IDD virtual display driver",
                                 )}
                             </Label>
                             <p className="text-xs text-muted-foreground">
                                 {statusLoading
                                     ? t(
                                           "pages.layout.serviceBanner.installDialog.iddDriverChecking",
-                                          "Checking driver files…",
                                       )
                                     : filesAvailable
                                       ? t(
                                             "pages.layout.serviceBanner.installDialog.iddDriverAvailable",
-                                            "Driver files found next to the server binary.",
                                         )
                                       : t(
                                             "pages.layout.serviceBanner.installDialog.iddDriverFilesMissing",
-                                            "Driver files not found next to the server binary; this option is disabled.",
                                         )}
                             </p>
                         </div>

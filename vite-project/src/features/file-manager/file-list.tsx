@@ -93,8 +93,8 @@ export default function FileList() {
     useEffect(() => {
         if (isError) {
             toast({
-                title: t('pages.fileManager.error', 'Error'),
-                description: error instanceof Error ? error.message : t('common.unknownError', 'Unknown error'),
+                title: t('pages.fileManager.error'),
+                description: error instanceof Error ? error.message : t('common.unknownError'),
                 variant: 'destructive',
             })
         }
@@ -188,7 +188,7 @@ export default function FileList() {
         }, {
             onSuccess: () => {
                 toast({
-                    title: t('pages.fileManager.deleteSuccess', 'Deleted successfully'),
+                    title: t('pages.fileManager.deleteSuccess'),
                     variant: 'default',
                 })
                 refetch()
@@ -198,8 +198,8 @@ export default function FileList() {
             },
             onError: (err: any) => {
                 toast({
-                    title: t('pages.fileManager.deleteFailed', 'Delete failed'),
-                    description: err?.message || t('common.unknownError', 'Unknown error'),
+                    title: t('pages.fileManager.deleteFailed'),
+                    description: err?.message || t('common.unknownError'),
                     variant: 'destructive',
                 })
             }
@@ -241,7 +241,7 @@ export default function FileList() {
         <div className="space-y-4 h-full flex flex-col">
             <div className="flex items-center justify-between px-4 py-2 border-b">
                 <div className="flex items-center gap-2 overflow-hidden">
-                    <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${connectionId}`)} title={t('pages.fileManager.backToDashboard', 'Back to Dashboard')}>
+                    <Button variant="outline" size="icon" onClick={() => navigate(`/desk/${connectionId}`)} title={t('pages.fileManager.backToDashboard')}>
                         <ArrowLeft className="h-4 w-4" />
                     </Button>
                     <Button variant="ghost" size="icon" onClick={() => handleNavigate("")}>
@@ -251,7 +251,7 @@ export default function FileList() {
                         <BreadcrumbList>
                             <BreadcrumbItem>
                                 <BreadcrumbPage className="font-mono text-sm">
-                                    {currentPath || t('pages.fileManager.myComputer', 'My Computer')}
+                                    {currentPath || t('pages.fileManager.myComputer')}
                                 </BreadcrumbPage>
                             </BreadcrumbItem>
                         </BreadcrumbList>
@@ -266,7 +266,7 @@ export default function FileList() {
                     </Button>
                     <Button variant="outline" size="sm" onClick={handleUploadClick}>
                         <Upload className="h-4 w-4 mr-1" />
-                        {t('pages.fileManager.upload', 'Upload')}
+                        {t('pages.fileManager.upload')}
                     </Button>
                     <input
                         ref={fileInputRef}
@@ -291,9 +291,9 @@ export default function FileList() {
                                         {transfer.direction === 'download' ? '↓' : '↑'}
                                         {' '}
                                         {transfer.status === 'transferring' && `${transfer.progress}%`}
-                                        {transfer.status === 'connecting' && t('pages.fileManager.connecting', 'Connecting...')}
-                                        {transfer.status === 'completed' && t('pages.fileManager.completed', 'Completed')}
-                                        {transfer.status === 'error' && (transfer.errorMessage || t('pages.fileManager.error', 'Error'))}
+                                        {transfer.status === 'connecting' && t('pages.fileManager.connecting')}
+                                        {transfer.status === 'completed' && t('pages.fileManager.completed')}
+                                        {transfer.status === 'error' && (transfer.errorMessage || t('pages.fileManager.error'))}
                                     </span>
                                 </div>
                                 {(transfer.status === 'transferring' || transfer.status === 'connecting') && (
@@ -303,7 +303,7 @@ export default function FileList() {
                                     <div className="flex items-center gap-2 mt-0.5 text-xs text-muted-foreground">
                                         <span>{formatBytes(transfer.speed)}/s</span>
                                         <span>
-                                            {t('pages.fileManager.remaining', 'ETA')}{' '}
+                                            {t('pages.fileManager.remaining')}{' '}
                                             {formatRemainingTime(Math.max(0, transfer.remainingSeconds))}
                                         </span>
                                     </div>
@@ -325,7 +325,7 @@ export default function FileList() {
                                         cancelTransfer(transfer.transferId);
                                     }
                                 }}
-                                title={t('pages.fileManager.cancel', 'Cancel')}
+                                title={t('pages.fileManager.cancel')}
                             >
                                 <X className="h-3 w-3" />
                             </Button>
@@ -356,17 +356,17 @@ export default function FileList() {
                         <TableHeader>
                             <TableRow>
                                 <TableHead className="w-[50px]"></TableHead>
-                                <TableHead>{t('common.name', 'Name')}</TableHead>
-                                <TableHead className="w-[100px]">{t('common.size', 'Size')}</TableHead>
-                                <TableHead className="w-[150px]">{t('common.modified', 'Modified')}</TableHead>
-                                <TableHead className="w-[80px]">{t('common.actions', 'Actions')}</TableHead>
+                                <TableHead>{t('common.name')}</TableHead>
+                                <TableHead className="w-[100px]">{t('common.size')}</TableHead>
+                                <TableHead className="w-[150px]">{t('common.modified')}</TableHead>
+                                <TableHead className="w-[80px]">{t('common.actions')}</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
                             {files.length === 0 && (
                                 <TableRow>
                                     <TableCell colSpan={5} className="text-center h-24 text-muted-foreground">
-                                        {t('common.empty', 'Empty directory')}
+                                        {t('common.empty')}
                                     </TableCell>
                                 </TableRow>
                             )}
@@ -393,7 +393,7 @@ export default function FileList() {
                                                 size="icon"
                                                 className="h-7 w-7"
                                                 onClick={(e) => handleDownload(e, file)}
-                                                title={t('pages.fileManager.download', 'Download')}
+                                                title={t('pages.fileManager.download')}
                                             >
                                                 <Download className="h-3.5 w-3.5" />
                                             </Button>
@@ -404,7 +404,7 @@ export default function FileList() {
                                                 size="icon"
                                                 className="h-7 w-7 text-red-500 hover:text-red-700 hover:bg-red-50"
                                                 onClick={(e) => handleDeleteClick(e, file)}
-                                                title={t('pages.fileManager.delete', 'Delete')}
+                                                title={t('pages.fileManager.delete')}
                                                 disabled={deleteMutation.isPending}
                                             >
                                                 {deleteMutation.isPending && fileToDelete?.path === file.path ? (
@@ -425,7 +425,7 @@ export default function FileList() {
             {totalPages > 1 && (
                 <div className="flex items-center justify-between px-4 py-2 border-t">
                     <span className="text-sm text-muted-foreground">
-                        {t('pages.fileManager.totalItems', '{count} items', { count: totalCount })}
+                        {t('pages.fileManager.totalItems', { count: totalCount })}
                     </span>
                     <div className="flex items-center gap-2">
                         <Button
@@ -456,9 +456,9 @@ export default function FileList() {
             <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
                 <AlertDialogContent>
                     <AlertDialogHeader>
-                        <AlertDialogTitle>{t('pages.fileManager.deleteConfirm.title', 'Confirm Deletion')}</AlertDialogTitle>
+                        <AlertDialogTitle>{t('pages.fileManager.deleteConfirm.title')}</AlertDialogTitle>
                         <AlertDialogDescription>
-                            {t('pages.fileManager.deleteConfirm.description', 'Are you sure you want to delete this file/directory?')}
+                            {t('pages.fileManager.deleteConfirm.description')}
                             <br />
                             <span className="font-mono text-xs break-all mt-2 block p-2 bg-muted rounded">
                                 {fileToDelete?.path}
@@ -472,13 +472,13 @@ export default function FileList() {
                             onCheckedChange={(checked) => setIsPermanentDelete(!!checked)}
                         />
                         <Label htmlFor="permanent-delete" className="text-sm font-medium leading-none cursor-pointer">
-                            {t('pages.fileManager.deletePermanently', 'Delete Permanently')}
+                            {t('pages.fileManager.deletePermanently')}
                         </Label>
                     </div>
                     <AlertDialogFooter>
-                        <AlertDialogCancel>{t('common.cancel', 'Cancel')}</AlertDialogCancel>
+                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
                         <AlertDialogAction onClick={confirmDelete} className={isPermanentDelete ? "bg-red-600 hover:bg-red-700" : ""}>
-                            {t('common.confirm', 'Confirm')}
+                            {t('common.confirm')}
                         </AlertDialogAction>
                     </AlertDialogFooter>
                 </AlertDialogContent>
@@ -488,16 +488,16 @@ export default function FileList() {
                 <AlertDialogContent>
                     <AlertDialogHeader>
                         <AlertDialogTitle className="text-red-600 text-lg font-bold">
-                            {t('pages.fileManager.deleteDoubleConfirm.title', 'Final Confirmation')}
+                            {t('pages.fileManager.deleteDoubleConfirm.title')}
                         </AlertDialogTitle>
                         <AlertDialogDescription>
-                            {t('pages.fileManager.deleteDoubleConfirm.description', 'This operation is irreversible. Are you absolutely sure?')}
+                            {t('pages.fileManager.deleteDoubleConfirm.description')}
                         </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
-                        <AlertDialogCancel>{t('common.cancel', 'Cancel')}</AlertDialogCancel>
+                        <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
                         <AlertDialogAction onClick={executeDelete} className="bg-red-600 hover:bg-red-700">
-                            {t('common.confirm', 'Confirm')}
+                            {t('common.confirm')}
                         </AlertDialogAction>
                     </AlertDialogFooter>
                 </AlertDialogContent>

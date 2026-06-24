@@ -54,7 +54,7 @@ describe('getKeyboardShortcuts', () => {
             expect(new Set(ids).size).toBe(ids.length);
             for (const s of shortcuts) {
                 expect(s.labelKey).toMatch(/^pages\.desk\.shortcut\./);
-                expect(s.labelFallback.length).toBeGreaterThan(0);
+                expect(s.events.length).toBeGreaterThan(0);
             }
         }
     });

@@ -48,7 +48,7 @@ export interface UseResolutionToastParams {
     /** Numeric `SignalingType::ChangeDisplaySettings` discriminant (205). */
     changeDisplaySettingsType: number;
     /** Caller-supplied i18n hook so the hook has no React-i18next dependency for tests. */
-    translate: (key: string, fallback: string) => string;
+    translate: (key: string) => string;
     /**
      * Watchdog window for the `updating` phase. If no matching echo
      * arrives within this many ms, the toast transitions to
@@ -126,7 +126,7 @@ export function useResolutionToast(
 
     /**
      * Latest-callback-in-ref for `translate`. The desk-session caller
-     * builds the translator as an inline arrow `(k, f) => t(k, f)` on
+     * builds the translator as an inline arrow `(k) => t(k)` on
      * every render, so the prop's identity changes ~1 Hz (rtcStats
      * setState pulse). If the effects below listed `translate`
      * directly in their deps, every render would re-subscribe them; the
@@ -192,10 +192,7 @@ export function useResolutionToast(
                 watchdogRef.current = null;
                 setResolutionToast({
                     phase: "failed",
-                    reason: translateRef.current(
-                        "pages.desk.resolutionTimeout",
-                        "No reply within timeout",
-                    ),
+                    reason: translateRef.current("pages.desk.resolutionTimeout"),
                 });
                 armAutoClear(failureAutoClearMs);
             }, watchdogMs);
@@ -239,10 +236,7 @@ export function useResolutionToast(
                     phase: "failed",
                     reason:
                         message.response_state?.message ??
-                        translateRef.current(
-                            "pages.desk.resolutionFailed",
-                            "Update failed",
-                        ),
+                        translateRef.current("pages.desk.resolutionFailed"),
                 });
                 armAutoClear(failureAutoClearMs);
             }

@@ -4,14 +4,9 @@ import { DiagnosePanel } from "./diagnose-panel";
 import type { DiagnoseState } from "./use-desk-diagnose";
 import type { ExecEntry } from "./use-desk-exec";
 
-// i18n: t() echoes the fallback the component always provides; i18n.language is
-// the tag forwarded to onStart so the AI answers in the UI language.
-vi.mock("react-i18next", () => ({
-    useTranslation: () => ({
-        t: (_key: string, fallback?: string) => fallback ?? _key,
-        i18n: { language: "en-US" },
-    }),
-}));
+// i18n: real en-US locale; i18n.language is the tag forwarded to onStart so the
+// AI answers in the UI language.
+vi.mock("react-i18next", () => import("@/test-utils/i18n-mock").then((m) => m.reactI18nextMock()));
 
 const baseState: DiagnoseState = {
     phase: "idle",

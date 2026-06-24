@@ -34,17 +34,17 @@ export default function InitPage() {
 
     const formSchema = z.object({
         username: z.string().min(3, {
-            message: t("pages.init.username.min", "Username must be at least 3 characters"),
+            message: t("pages.init.username.min"),
         }),
         password: z.string().min(6, {
-            message: t("pages.init.password.min", "Password must be at least 6 characters"),
+            message: t("pages.init.password.min"),
         }),
         confirmPassword: z.string().min(1, {
-            message: t("pages.init.confirmPassword.required", "Confirm password is required"),
+            message: t("pages.init.confirmPassword.required"),
         }),
         telemetryConsent: z.boolean().default(true),
     }).refine((data) => data.password === data.confirmPassword, {
-        message: t("pages.init.confirmPassword.match", "Passwords don't match"),
+        message: t("pages.init.confirmPassword.match"),
         path: ["confirmPassword"],
     });
 
@@ -79,14 +79,14 @@ export default function InitPage() {
             queryClient.removeQueries({ queryKey: queryServerInfoQueryKey() })
 
             toast({
-                title: t("pages.init.success", "System initialized successfully"),
+                title: t("pages.init.success"),
             })
             navigate("/")
 
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t("pages.init.failure", "System initialization failed"),
+                title: t("pages.init.failure"),
                 description: (error as Error).message,
             })
         }
@@ -107,20 +107,20 @@ export default function InitPage() {
                         </div>
                     </div>
                     <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-white drop-shadow-sm sm:text-5xl">
-                        {t('pages.init.welcome', 'Welcome to LCXL Remote Desk')}
+                        {t('pages.init.welcome')}
                     </h1>
                     <p className="text-lg text-slate-600 dark:text-white/80 font-medium">
-                        {t('pages.init.subWelcome', 'Secure, fast, and cross-platform remote desktop solution')}
+                        {t('pages.init.subWelcome')}
                     </p>
                 </div>
 
                 <Card className="w-full max-w-[450px] shadow-2xl bg-white/95 backdrop-blur-md dark:bg-slate-950/95 border-none">
                     <CardHeader className="space-y-1 text-center pb-2">
                         <CardTitle className="text-2xl font-bold text-primary">
-                            {t('pages.init.title', 'System Initialization')}
+                            {t('pages.init.title')}
                         </CardTitle>
                         <CardDescription className="text-sm">
-                            {t('pages.init.description', 'Please configure your admin account for the first time')}
+                            {t('pages.init.description')}
                         </CardDescription>
                     </CardHeader>
                     <CardContent className="pt-4">
@@ -135,7 +135,7 @@ export default function InitPage() {
                                                 <FormControl>
                                                     <div className="relative group">
                                                         <User className="absolute left-3 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
-                                                        <Input placeholder={t('pages.init.username.placeholder', 'Admin Username')} className="pl-9 h-11 bg-slate-50/50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 transition-all focus:ring-2 focus:ring-primary/20" {...field} />
+                                                        <Input placeholder={t('pages.init.username.placeholder')} className="pl-9 h-11 bg-slate-50/50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 transition-all focus:ring-2 focus:ring-primary/20" {...field} />
                                                     </div>
                                                 </FormControl>
                                                 <FormMessage className="text-xs" />
@@ -151,7 +151,7 @@ export default function InitPage() {
                                                     <FormControl>
                                                         <div className="relative group">
                                                             <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
-                                                            <Input type="password" placeholder={t('pages.init.password.placeholder', 'Admin Password')} className="pl-9 h-11 bg-slate-50/50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 transition-all focus:ring-2 focus:ring-primary/20" {...field} />
+                                                            <Input type="password" placeholder={t('pages.init.password.placeholder')} className="pl-9 h-11 bg-slate-50/50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 transition-all focus:ring-2 focus:ring-primary/20" {...field} />
                                                         </div>
                                                     </FormControl>
                                                     <FormMessage className="text-xs" />
@@ -166,7 +166,7 @@ export default function InitPage() {
                                                     <FormControl>
                                                         <div className="relative group">
                                                             <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
-                                                            <Input type="password" placeholder={t('pages.init.confirmPassword.placeholder', 'Confirm Password')} className="pl-9 h-11 bg-slate-50/50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 transition-all focus:ring-2 focus:ring-primary/20" {...field} />
+                                                            <Input type="password" placeholder={t('pages.init.confirmPassword.placeholder')} className="pl-9 h-11 bg-slate-50/50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 transition-all focus:ring-2 focus:ring-primary/20" {...field} />
                                                         </div>
                                                     </FormControl>
                                                     <FormMessage className="text-xs" />
@@ -190,11 +190,11 @@ export default function InitPage() {
                                             </FormControl>
                                             <div className="space-y-1 leading-none">
                                                 <FormLabel className="text-sm font-semibold cursor-pointer">
-                                                    {t('pages.init.telemetry.label', 'Enable Telemetry')}
+                                                    {t('pages.init.telemetry.label')}
                                                 </FormLabel>
                                                 <div className="flex items-center gap-2">
                                                     <FormDescription className="text-xs leading-relaxed">
-                                                        {t('pages.init.telemetry.description', 'Send anonymous usage data to help improve this product')}
+                                                        {t('pages.init.telemetry.description')}
                                                     </FormDescription>
                                                     <TelemetryDisclosure />
                                                 </div>
@@ -207,10 +207,10 @@ export default function InitPage() {
                                     {form.formState.isSubmitting ? (
                                         <>
                                             <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                                            {t('pages.init.submitting', 'Initializing...')}
+                                            {t('pages.init.submitting')}
                                         </>
                                     ) : (
-                                        t('pages.init.submit', 'Initialize System')
+                                        t('pages.init.submit')
                                     )}
                                 </Button>
                             </form>

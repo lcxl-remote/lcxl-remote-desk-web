@@ -182,13 +182,13 @@ export default function SecurityApprovalPage() {
                     <div className="flex items-center gap-3">
                         <ShieldAlert className="h-7 w-7 text-amber-500" />
                         <CardTitle>
-                            {t("security.dialog.title", "Security Approval Required")}
+                            {t("security.dialog.title")}
                         </CardTitle>
                     </div>
                     <CardDescription>
-                        {t("security.dialog.description", "A controller with ID ")}
+                        {t("security.dialog.description")}
                         <strong className="text-primary">{fromConnectionId}</strong>
-                        {t("security.dialog.description2", " is requesting permission to:")}
+                        {t("security.dialog.description2")}
                     </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -198,20 +198,19 @@ export default function SecurityApprovalPage() {
 
                     {ackState === "pending" && (
                         <p className="text-sm text-muted-foreground">
-                            {t("security.dialog.connecting", "Connecting…")}
+                            {t("security.dialog.connecting")}
                         </p>
                     )}
                     {ackState === "failed" && (
                         <p className="text-sm text-destructive">
                             {t(
                                 "security.dialog.notReady",
-                                "The system is not ready (you may be signed out). This request will be denied automatically.",
                             )}
                         </p>
                     )}
                     {submitError && (
                         <p className="text-sm text-destructive">
-                            {t("security.dialog.submitError", "Failed to submit. Please try again.")}
+                            {t("security.dialog.submitError")}
                         </p>
                     )}
 
@@ -226,7 +225,7 @@ export default function SecurityApprovalPage() {
                             htmlFor="remember-choice"
                             className="cursor-pointer text-sm font-medium leading-none"
                         >
-                            {t("security.dialog.rememberChoice", "Remember my choice")}
+                            {t("security.dialog.rememberChoice")}
                         </label>
                     </div>
 
@@ -236,14 +235,14 @@ export default function SecurityApprovalPage() {
                             disabled={notReady || submitting}
                             onClick={() => submit(false)}
                         >
-                            {t("security.dialog.deny", "Deny")}
+                            {t("security.dialog.deny")}
                             {timeLeft !== null && ` (${timeLeft}s)`}
                         </Button>
                         <Button
                             disabled={notReady || submitting}
                             onClick={() => submit(true)}
                         >
-                            {t("security.dialog.allow", "Allow")}
+                            {t("security.dialog.allow")}
                         </Button>
                     </div>
                 </CardContent>

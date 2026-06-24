@@ -90,14 +90,14 @@ export function SystemSettings() {
         try {
             await updateSettings({ data: values })
             toast({
-                title: t('pages.system.settings.success', 'Success'),
-                description: t('pages.system.settings.updateSucceedMessage', "System settings updated successfully"),
+                title: t('pages.system.settings.success'),
+                description: t('pages.system.settings.updateSucceedMessage'),
             })
         } catch (error) {
             toast({
                 variant: "destructive",
-                title: t('pages.system.settings.error', 'Error'),
-                description: t('pages.system.settings.updateFailedMessage', "Failed to update system settings"),
+                title: t('pages.system.settings.error'),
+                description: t('pages.system.settings.updateFailedMessage'),
             })
         }
     }
@@ -113,23 +113,23 @@ export function SystemSettings() {
     return (
         <div className="container mx-auto max-w-4xl py-8">
             <div className="mb-8">
-                <h1 className="text-3xl font-bold tracking-tight">{t('pages.system.settings.title', 'System Settings')}</h1>
+                <h1 className="text-3xl font-bold tracking-tight">{t('pages.system.settings.title')}</h1>
                 <p className="text-muted-foreground">
-                    {t('pages.system.settings.description', 'Manage global device configuration and server settings')}
+                    {t('pages.system.settings.description')}
                 </p>
             </div>
 
             <Alert variant="default" className="mb-6 border-amber-500/50 bg-amber-500/10 text-amber-600 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-500">
-                <AlertTitle>{t("pages.system.settings.alert.message", "Warning")}</AlertTitle>
+                <AlertTitle>{t("pages.system.settings.alert.message")}</AlertTitle>
                 <AlertDescription>
-                    {t("pages.system.settings.alert.description", "Modifying these settings may affect remote connections and require a restart to take full effect.")}
+                    {t("pages.system.settings.alert.description")}
                 </AlertDescription>
             </Alert>
 
             <Card>
                 <CardHeader>
-                    <CardTitle>{t("pages.system.settings.configuration", "Configuration")}</CardTitle>
-                    <CardDescription>{t("pages.system.settings.configuration.description", "Update the server properties.")}</CardDescription>
+                    <CardTitle>{t("pages.system.settings.configuration")}</CardTitle>
+                    <CardDescription>{t("pages.system.settings.configuration.description")}</CardDescription>
                 </CardHeader>
                 <CardContent>
                     <Form {...form}>
@@ -141,7 +141,7 @@ export function SystemSettings() {
                                     name="port"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.system.settings.port", "Listen Port")}</FormLabel>
+                                            <FormLabel>{t("pages.system.settings.port")}</FormLabel>
                                             <FormControl>
                                                 <Input type="number" {...field} onChange={e => field.onChange(e.target.value === '' ? 0 : Number(e.target.value))} />
                                             </FormControl>
@@ -155,7 +155,7 @@ export function SystemSettings() {
                                     name="listen_addr_ipv4"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.system.settings.listenAddrIpv4", "IPv4 Listen Address")}</FormLabel>
+                                            <FormLabel>{t("pages.system.settings.listenAddrIpv4")}</FormLabel>
                                             <FormControl>
                                                 <Input {...field} placeholder="0.0.0.0" />
                                             </FormControl>
@@ -169,7 +169,7 @@ export function SystemSettings() {
                                     name="listen_addr_ipv6"
                                     render={({ field }) => (
                                         <FormItem>
-                                            <FormLabel>{t("pages.system.settings.listenAddrIpv6", "IPv6 Listen Address")}</FormLabel>
+                                            <FormLabel>{t("pages.system.settings.listenAddrIpv6")}</FormLabel>
                                             <FormControl>
                                                 <Input {...field} placeholder="::" />
                                             </FormControl>
@@ -185,11 +185,11 @@ export function SystemSettings() {
                                             name="signaling_url"
                                             render={({ field }) => (
                                                 <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.signalingUrl", "Remote Signaling Server URL")}</FormLabel>
+                                                    <FormLabel>{t("pages.system.settings.signalingUrl")}</FormLabel>
                                                     <FormControl>
                                                         <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://127.0.0.1:8081/api/desk/signaling" />
                                                     </FormControl>
-                                                    <FormDescription>{t("pages.system.settings.signalingUrl.description", "Leave blank to only use the built-in signaling server.")}</FormDescription>
+                                                    <FormDescription>{t("pages.system.settings.signalingUrl.description")}</FormDescription>
                                                     <FormMessage />
                                                 </FormItem>
                                             )}
@@ -199,7 +199,7 @@ export function SystemSettings() {
                                             name="signaling_token"
                                             render={({ field }) => (
                                                 <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.signalingToken", "Signaling Access Token")}</FormLabel>
+                                                    <FormLabel>{t("pages.system.settings.signalingToken")}</FormLabel>
                                                     <FormControl>
                                                         <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Node access token for remote signaling..." />
                                                     </FormControl>
@@ -212,11 +212,11 @@ export function SystemSettings() {
                                             name="manager_url"
                                             render={({ field }) => (
                                                 <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.managerUrl", "Manager Server URL")}</FormLabel>
+                                                    <FormLabel>{t("pages.system.settings.managerUrl")}</FormLabel>
                                                     <FormControl>
                                                         <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://manager.example.com/api/desk/signaling" />
                                                     </FormControl>
-                                                    <FormDescription>{t("pages.system.settings.managerUrl.description", "If using a central manager server, enter its signaling URL here.")}</FormDescription>
+                                                    <FormDescription>{t("pages.system.settings.managerUrl.description")}</FormDescription>
                                                     <FormMessage />
                                                 </FormItem>
                                             )}
@@ -226,7 +226,7 @@ export function SystemSettings() {
                                             name="manager_api_token"
                                             render={({ field }) => (
                                                 <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.managerApiToken", "Manager API Token")}</FormLabel>
+                                                    <FormLabel>{t("pages.system.settings.managerApiToken")}</FormLabel>
                                                     <FormControl>
                                                         <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Access token for the manager server..." />
                                                     </FormControl>
@@ -246,7 +246,7 @@ export function SystemSettings() {
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.system.settings.enableIpv6", "Enable IPv6")}</FormLabel>
+                                                <FormLabel>{t("pages.system.settings.enableIpv6")}</FormLabel>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value} onCheckedChange={field.onChange} />
@@ -262,10 +262,10 @@ export function SystemSettings() {
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
                                                 <FormLabel className="flex items-center gap-2">
-                                                    {t("pages.system.settings.telemetry_consent", "Telemetry Consent")}
+                                                    {t("pages.system.settings.telemetry_consent")}
                                                     <TelemetryDisclosure />
                                                 </FormLabel>
-                                                <FormDescription>{t("pages.system.settings.telemetry_consent.tooltip", "Help improve our product by sending anonymous usage data.")}</FormDescription>
+                                                <FormDescription>{t("pages.system.settings.telemetry_consent.tooltip")}</FormDescription>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />
@@ -280,8 +280,8 @@ export function SystemSettings() {
                                     render={({ field }) => (
                                         <FormItem className="flex flex-row items-center justify-between rounded-lg p-3 shadow-sm">
                                             <div className="space-y-0.5">
-                                                <FormLabel>{t("pages.system.settings.auto_start", "Auto-Start at Login")}</FormLabel>
-                                                <FormDescription>{t("pages.system.settings.auto_start.tooltip", "Automatically start the application in the background when you log in to the OS.")}</FormDescription>
+                                                <FormLabel>{t("pages.system.settings.auto_start")}</FormLabel>
+                                                <FormDescription>{t("pages.system.settings.auto_start.tooltip")}</FormDescription>
                                             </div>
                                             <FormControl>
                                                 <Switch checked={field.value ?? false} onCheckedChange={field.onChange} />
@@ -294,7 +294,7 @@ export function SystemSettings() {
                             <div className="flex justify-end">
                                 <Button type="submit" disabled={isUpdating}>
                                     {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                                    {t('pages.system.settings.save', 'Save Settings')}
+                                    {t('pages.system.settings.save')}
                                 </Button>
                             </div>
                         </form>
@@ -305,17 +305,17 @@ export function SystemSettings() {
             {(serverInfo?.startup_mode === "default" || serverInfo?.startup_mode === "service-daemon") && serverInfo.server_binary_available && (
                 <Card className="mt-6 border-amber-500/50 bg-amber-500/10 dark:border-amber-500/30 dark:bg-amber-500/10">
                     <CardHeader>
-                        <CardTitle>{t("pages.system.settings.serviceManagement.title", "Windows Service")}</CardTitle>
-                        <CardDescription>{t("pages.system.settings.serviceManagement.description", "Manage the background system service for unattended access.")}</CardDescription>
+                        <CardTitle>{t("pages.system.settings.serviceManagement.title")}</CardTitle>
+                        <CardDescription>{t("pages.system.settings.serviceManagement.description")}</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
                         <div className="flex items-center justify-between">
                             <div>
-                                <h4 className="text-sm font-medium">{t("pages.system.settings.serviceManagement.status", "Service Status")}</h4>
+                                <h4 className="text-sm font-medium">{t("pages.system.settings.serviceManagement.status")}</h4>
                                 <p className="text-sm text-muted-foreground">
                                     {serverInfo.service_installed 
-                                        ? t("pages.system.settings.serviceManagement.installed", "Installed and running") 
-                                        : t("pages.system.settings.serviceManagement.notInstalled", "Not installed")}
+                                        ? t("pages.system.settings.serviceManagement.installed") 
+                                        : t("pages.system.settings.serviceManagement.notInstalled")}
                                 </p>
                             </div>
                             {serverInfo.service_installed ? (
@@ -323,11 +323,11 @@ export function SystemSettings() {
                                     variant="destructive"
                                     onClick={() => setUninstallDialogOpen(true)}
                                 >
-                                    {t("pages.system.settings.serviceManagement.uninstall", "Uninstall Service")}
+                                    {t("pages.system.settings.serviceManagement.uninstall")}
                                 </Button>
                             ) : (
                                 <Button onClick={() => setInstallDialogOpen(true)}>
-                                    {t("pages.layout.serviceBanner.installButton", "Install Service")}
+                                    {t("pages.layout.serviceBanner.installButton")}
                                 </Button>
                             )}
                         </div>
@@ -347,8 +347,8 @@ export function SystemSettings() {
 
             <Card className="mt-6">
                 <CardHeader>
-                    <CardTitle>{t("pages.system.settings.backendDiagnostics", "Backend Diagnostics")}</CardTitle>
-                    <CardDescription>{t("pages.system.settings.backendDiagnostics.description", "Wayland/X11 capture and control runtime status.")}</CardDescription>
+                    <CardTitle>{t("pages.system.settings.backendDiagnostics")}</CardTitle>
+                    <CardDescription>{t("pages.system.settings.backendDiagnostics.description")}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2 text-sm">
                     <div><span className="font-medium">OS:</span> {backendInfo?.os ?? "-"}</div>
@@ -360,13 +360,13 @@ export function SystemSettings() {
                     <div><span className="font-medium">Portal Available:</span> {backendInfo?.portal_available === undefined ? "-" : String(backendInfo.portal_available)}</div>
                     {backendInfo?.input_backend_error && (
                         <Alert variant="destructive" className="mt-2">
-                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.inputError", "Input Backend Error")}</AlertTitle>
+                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.inputError")}</AlertTitle>
                             <AlertDescription>{backendInfo.input_backend_error}</AlertDescription>
                         </Alert>
                     )}
                     {backendInfo?.portal_error && (
                         <Alert variant="destructive" className="mt-2">
-                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.portalError", "Portal Error")}</AlertTitle>
+                            <AlertTitle>{t("pages.system.settings.backendDiagnostics.portalError")}</AlertTitle>
                             <AlertDescription>{backendInfo.portal_error}</AlertDescription>
                         </Alert>
                     )}

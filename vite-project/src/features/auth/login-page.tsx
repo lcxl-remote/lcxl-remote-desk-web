@@ -66,7 +66,7 @@ export default function LoginPage() {
                 const response = await axios.post(`/api/login/tauri?token=${encodeURIComponent(token)}`)
                 if (response.data?.status === "ok") {
                     toast({
-                        title: t("pages.login.success", "Login successful"),
+                        title: t("pages.login.success"),
                     })
                     await fetchUserInfo()
 
@@ -118,7 +118,7 @@ export default function LoginPage() {
             // Kubb generated client returns the data directly
             if (response && response.status === 'ok') {
                 toast({
-                    title: t("pages.login.success", "Login successful"),
+                    title: t("pages.login.success"),
                 })
                 await fetchUserInfo()
 
@@ -135,7 +135,7 @@ export default function LoginPage() {
             } else {
                 toast({
                     variant: "destructive",
-                    title: t("pages.login.failure", "Login failed"),
+                    title: t("pages.login.failure"),
                     description: "Login failed with status: " + (response?.status || 'unknown'),
                 })
             }
@@ -148,12 +148,12 @@ export default function LoginPage() {
             }
 
             if (values.type === "device_code" && error?.response?.status === 403) {
-                errorMsg = t("pages.login.deviceCode.offline", "Device is offline or device code is invalid");
+                errorMsg = t("pages.login.deviceCode.offline");
             }
 
             toast({
                 variant: "destructive",
-                title: t("pages.login.failure", "Login failed"),
+                title: t("pages.login.failure"),
                 description: errorMsg,
             })
         }
@@ -172,7 +172,7 @@ export default function LoginPage() {
                     </div>
                     <CardTitle className="text-2xl font-bold">LCXL Web Remote Desk</CardTitle>
                     <CardDescription>
-                        {t('pages.layouts.userLayout.title', 'Remote Desktop Management System')}
+                        {t('pages.layouts.userLayout.title')}
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -182,8 +182,8 @@ export default function LoginPage() {
                     }} className="w-full">
                         {serverInfo && serverInfo.startup_mode !== "desk_server" && (
                             <TabsList className="grid w-full grid-cols-2 mb-4">
-                                <TabsTrigger value="account">{t('pages.login.accountLogin.tab', 'Account Login')}</TabsTrigger>
-                                <TabsTrigger value="device_code">{t('pages.login.deviceCode.tab', 'Device Code Login')}</TabsTrigger>
+                                <TabsTrigger value="account">{t('pages.login.accountLogin.tab')}</TabsTrigger>
+                                <TabsTrigger value="device_code">{t('pages.login.deviceCode.tab')}</TabsTrigger>
                             </TabsList>
                         )}
                         <TabsContent value="account">
@@ -197,7 +197,7 @@ export default function LoginPage() {
                                                 <FormControl>
                                                     <div className="relative">
                                                         <User className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                                                        <Input placeholder={t('pages.login.username.placeholder', 'Username')} className="pl-9" {...field} />
+                                                        <Input placeholder={t('pages.login.username.placeholder')} className="pl-9" {...field} />
                                                     </div>
                                                 </FormControl>
                                                 <FormMessage />
@@ -212,7 +212,7 @@ export default function LoginPage() {
                                                 <FormControl>
                                                     <div className="relative">
                                                         <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                                                        <Input type="password" placeholder={t('pages.login.password.placeholder', 'Password')} className="pl-9" {...field} />
+                                                        <Input type="password" placeholder={t('pages.login.password.placeholder')} className="pl-9" {...field} />
                                                     </div>
                                                 </FormControl>
                                                 <FormMessage />
@@ -221,7 +221,7 @@ export default function LoginPage() {
                                     />
                                     <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
                                         {form.formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                        {t('pages.login.submit', 'Login')}
+                                        {t('pages.login.submit')}
                                     </Button>
                                 </form>
                             </Form>
@@ -238,7 +238,7 @@ export default function LoginPage() {
                                                     <div className="relative">
                                                         <Lock className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                                                         <Input
-                                                            placeholder={t('pages.login.deviceCode.placeholder', '6-digit Device Code')}
+                                                            placeholder={t('pages.login.deviceCode.placeholder')}
                                                             className="pl-9"
                                                             maxLength={6}
                                                             {...field}
@@ -255,7 +255,7 @@ export default function LoginPage() {
                                     />
                                     <Button type="submit" className="w-full" disabled={form.formState.isSubmitting}>
                                         {form.formState.isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                        {t('pages.login.submit', 'Login')}
+                                        {t('pages.login.submit')}
                                     </Button>
                                 </form>
                             </Form>
