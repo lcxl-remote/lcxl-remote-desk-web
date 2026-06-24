@@ -2588,10 +2588,13 @@ async fn handle_confirm_exec_inbound(
             );
             return Ok(());
         }
-        // On the manager link the policy decision's execution mode replaces the
-        // local config mode (fleet PDP); otherwise the local mode applies.
+        // On the manager link the policy decision's execution mode applies, but
+        // the locally configured mode is an upper bound: the device owner's local
+        // setting can narrow a manager-issued authorization, never widen it (a
+        // SuggestOnly / ReadOnly local config caps a broad central grant). Off the
+        // manager link the local mode applies directly.
         match &ctx.inbound_authz {
-            Some(authz) => authz.scope.mode,
+            Some(authz) => authz.scope.mode.restrict_to(s.ai_model.execution_mode),
             None => s.ai_model.execution_mode,
         }
     };
@@ -7245,5 +7248,80 @@ mod tests {
             AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability),
             AgentOutcome::Ok(_) => panic!("exec must be rejected on the agent-request plane"),
         }
+    }
+
+    /// On a manager link the local `execution_mode` is an upper bound on the
+    /// authorization mode: a `SuggestOnly` local config caps a broad
+    /// `ConfirmEachAction` grant, so an otherwise-executable confirmed command
+    /// comes back non-executable. Without the `restrict_to` clamp the manager
+    /// mode would replace the local one and the command would be executable.
+    #[tokio::test]
+    async fn confirm_exec_local_mode_caps_manager_authorization() {
+        use desk_agent_protocol::authz::{
+            AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthzActor, AuthzDevice,
+        };
+        use desk_agent_protocol::{ExecInput, ExecTarget, RiskLevel};
+
+        let (mut ctx, mut rx) = make_ctx_with_rx();
+        ctx.exec_supported = true;
+        configure_ai_model(&ctx).await;
+        // Local config: AI may only suggest, never execute.
+        ctx.settings.write().await.ai_model.execution_mode = ExecutionMode::SuggestOnly;
+        // Manager authorization grants a far broader mode.
+        ctx.inbound_authz = Some(AuthorizationBlock {
+            version: AUTHORIZATION_BLOCK_VERSION,
+            scope: AgentScope {
+                granted: Vec::new(),
+                mode: ExecutionMode::ConfirmEachAction,
+                expires_at: None,
+                policy_name: None,
+            },
+            orchestrator_grants: Vec::new(),
+            max_risk: RiskLevel::Critical,
+            actor: AuthzActor { user_id: Some(1) },
+            device: AuthzDevice { device_id: Some(1) },
+            request_id: "r-exec".to_string(),
+            session_id: None,
+            expires_at: None,
+            issuer: "test".to_string(),
+            audience: "test".to_string(),
+            signature: None,
+        });
+
+        let data = ConfirmExecData {
+            operation: AgentOperation {
+                risk_hint: None,
+                input: OperationInput::Exec(ExecInput {
+                    target: ExecTarget::Shell {
+                        shell: "powershell".to_string(),
+                    },
+                    // A whitelisted, ConfirmRequired command (would be executable
+                    // under ConfirmEachAction).
+                    command: "Get-Service -Name Spooler".to_string(),
+                    cwd: None,
+                    timeout_ms: 0,
+                    max_stdout_bytes: 0,
+                    max_stderr_bytes: 0,
+                }),
+            },
+            reason: None,
+        };
+        let model = SignalingModel::new(
+            "r-exec",
+            SignalingType::ConfirmExec,
+            Some("conn-1".to_string()),
+            None,
+            Some(serde_json::to_value(data).unwrap()),
+            None,
+        );
+        handle_confirm_exec_inbound(&ctx, &model).await.unwrap();
+
+        let preview = read_response(&mut rx)
+            .get_data::<ExecPreview>()
+            .expect("ExecPreview");
+        assert!(
+            !preview.executable,
+            "local SuggestOnly must cap the manager ConfirmEachAction grant"
+        );
     }
 }

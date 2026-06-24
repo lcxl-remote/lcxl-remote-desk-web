@@ -234,6 +234,36 @@ pub enum ExecutionMode {
     Automated,
 }
 
+impl ExecutionMode {
+    /// Executable breadth as an explicit rank: how much the mode lets the model
+    /// actually run, from none (`SuggestOnly`) to unattended (`Automated`). Kept
+    /// as a private helper rather than a derived `Ord` so reordering the variants
+    /// cannot silently change the ceiling semantics below.
+    fn breadth_rank(self) -> u8 {
+        match self {
+            ExecutionMode::SuggestOnly => 0,
+            ExecutionMode::ReadOnly => 1,
+            ExecutionMode::ConfirmEachAction => 2,
+            ExecutionMode::SessionApproved => 3,
+            ExecutionMode::Automated => 4,
+        }
+    }
+
+    /// Clamp this mode so it permits no more execution than `ceiling` does,
+    /// returning the stricter (narrower breadth) of the two. Used to make a
+    /// locally configured `execution_mode` an upper bound on a manager-issued
+    /// authorization mode: the result is always `⊆ self` and `⊆ ceiling`, so a
+    /// remote policy can narrow but never widen what runs on the device.
+    #[must_use]
+    pub fn restrict_to(self, ceiling: ExecutionMode) -> ExecutionMode {
+        if ceiling.breadth_rank() < self.breadth_rank() {
+            ceiling
+        } else {
+            self
+        }
+    }
+}
+
 /// Risk ordering is monotone in declaration order (`Low < … < Blocked`), so
 /// the policy engine can express "require confirmation at or above threshold"
 /// with a plain comparison.
@@ -844,6 +874,37 @@ pub trait DeviceAgent: Send + Sync {
 mod tests {
     use super::*;
     use wincode::config::{Configuration, PREALLOCATION_SIZE_LIMIT_DISABLED};
+
+    #[test]
+    fn restrict_to_clamps_to_the_stricter_mode() {
+        use ExecutionMode::*;
+        let modes = [
+            SuggestOnly,
+            ReadOnly,
+            ConfirmEachAction,
+            SessionApproved,
+            Automated,
+        ];
+        // The full breadth lattice: restrict_to returns the narrower of the two,
+        // and is symmetric. Indices match `breadth_rank`.
+        for (i, &a) in modes.iter().enumerate() {
+            for (j, &b) in modes.iter().enumerate() {
+                let expected = modes[i.min(j)];
+                assert_eq!(a.restrict_to(b), expected, "{a:?}.restrict_to({b:?})");
+                assert_eq!(b.restrict_to(a), expected, "{b:?}.restrict_to({a:?})");
+            }
+        }
+        // Spot-check the security-critical rows: a SuggestOnly / ReadOnly local
+        // ceiling caps a broad manager authorization.
+        assert_eq!(ConfirmEachAction.restrict_to(SuggestOnly), SuggestOnly);
+        assert_eq!(Automated.restrict_to(ReadOnly), ReadOnly);
+        assert_eq!(
+            SessionApproved.restrict_to(ConfirmEachAction),
+            ConfirmEachAction
+        );
+        // A looser ceiling is a no-op.
+        assert_eq!(ReadOnly.restrict_to(Automated), ReadOnly);
+    }
 
     /// Locally constructed wincode config matching the IPC transport's
     /// (unbounded, preallocation limit disabled). Deliberately built here
