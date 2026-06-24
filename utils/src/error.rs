@@ -169,6 +169,19 @@ impl DeskErrorCode {
     /// or demoting/removing the last remaining owner). Carried in
     /// `RestResponse.code`, never an HTTP status.
     pub const ORG_PERMISSION_ERROR: DeskErrorCode = DeskErrorCode(41);
+    /// An org admin tried to invite a user id that does not reference an existing
+    /// user. Carried in `RestResponse.code`, never an HTTP status.
+    pub const USER_NOT_FOUND: DeskErrorCode = DeskErrorCode(42);
+    /// An accept/decline referenced no pending invite for the caller in that org
+    /// (never invited, already responded, or revoked). Also returned to an org
+    /// admin revoking a non-existent invite. Carried in `RestResponse.code`.
+    pub const INVITE_NOT_FOUND: DeskErrorCode = DeskErrorCode(43);
+    /// An invite targets a user who is already a member of the organization.
+    /// Carried in `RestResponse.code`, never an HTTP status.
+    pub const ALREADY_ORG_MEMBER: DeskErrorCode = DeskErrorCode(44);
+    /// An invite already exists and is pending for this `(org, user)` pair.
+    /// Carried in `RestResponse.code`, never an HTTP status.
+    pub const INVITE_ALREADY_PENDING: DeskErrorCode = DeskErrorCode(45);
 
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
