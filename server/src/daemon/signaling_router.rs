@@ -1906,7 +1906,6 @@ fn server_actor() -> ActorRef {
     ActorRef {
         actor_type: ActorType::System,
         actor_id: "local-operator".to_string(),
-        tenant_id: None,
     }
 }
 

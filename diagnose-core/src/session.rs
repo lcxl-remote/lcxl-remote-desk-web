@@ -11,7 +11,7 @@
 //! [`PersistedAgentSession`] is the whole thing serialized: the manager stores it
 //! in Redis/DB and replays it across instances and restarts, so it is `serde` and
 //! carries a `version` for optimistic concurrency. The Direct runtime keeps the
-//! same struct in memory. The persistent **subject** (tenant / actor / device /
+//! same struct in memory. The persistent **subject** (actor / device /
 //! policy revision / scope) is validated on every follow-up turn and never
 //! rebound on reconnect; the **turn routing** fields (connection / request /
 //! turn id) are transient and rebind each turn.
@@ -135,8 +135,6 @@ pub struct PersistedAgentSession {
     pub conversation: Vec<crate::chat::ChatMessage>,
 
     // ---- Persistent security subject (validated each follow-up; never rebinds) ----
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tenant_id: Option<String>,
     pub actor_id: String,
     pub device_id: String,
     /// Authorization anchor. A change is detected at turn boundaries (recompute)
@@ -195,17 +193,14 @@ pub enum TurnClaimError {
 /// Why a follow-up turn was refused at the subject check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubjectMismatch {
-    Tenant,
     Actor,
     Device,
 }
 
 impl PersistedAgentSession {
     /// Start a brand-new session bound to a subject, with a turn-boundary scope.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         conversation_id: impl Into<String>,
-        tenant_id: Option<String>,
         actor_id: impl Into<String>,
         device_id: impl Into<String>,
         policy_revision: i64,
@@ -215,7 +210,6 @@ impl PersistedAgentSession {
         Self {
             conversation_id: conversation_id.into(),
             conversation: Vec::new(),
-            tenant_id,
             actor_id: actor_id.into(),
             device_id: device_id.into(),
             policy_revision,
@@ -239,15 +233,7 @@ impl PersistedAgentSession {
 
     /// Validate that a follow-up turn comes from the same subject. The connection
     /// id is **not** part of the subject (a reconnect must be able to continue).
-    pub fn check_subject(
-        &self,
-        tenant_id: Option<&str>,
-        actor_id: &str,
-        device_id: &str,
-    ) -> Result<(), SubjectMismatch> {
-        if self.tenant_id.as_deref() != tenant_id {
-            return Err(SubjectMismatch::Tenant);
-        }
+    pub fn check_subject(&self, actor_id: &str, device_id: &str) -> Result<(), SubjectMismatch> {
         if self.actor_id != actor_id {
             return Err(SubjectMismatch::Actor);
         }
@@ -606,7 +592,6 @@ mod tests {
     fn session() -> PersistedAgentSession {
         PersistedAgentSession::new(
             "conv-1",
-            Some("tenant-a".into()),
             "actor-1",
             "device-1",
             7,
@@ -728,24 +713,17 @@ mod tests {
     }
 
     /// The subject check ignores the connection id (reconnect can continue) but
-    /// rejects a different tenant / actor / device.
+    /// rejects a different actor / device.
     #[test]
     fn subject_check_ignores_connection_but_pins_identity() {
         let s = session();
-        assert!(
-            s.check_subject(Some("tenant-a"), "actor-1", "device-1")
-                .is_ok()
-        );
+        assert!(s.check_subject("actor-1", "device-1").is_ok());
         assert_eq!(
-            s.check_subject(Some("tenant-b"), "actor-1", "device-1"),
-            Err(SubjectMismatch::Tenant)
-        );
-        assert_eq!(
-            s.check_subject(Some("tenant-a"), "actor-9", "device-1"),
+            s.check_subject("actor-9", "device-1"),
             Err(SubjectMismatch::Actor)
         );
         assert_eq!(
-            s.check_subject(Some("tenant-a"), "actor-1", "device-9"),
+            s.check_subject("actor-1", "device-9"),
             Err(SubjectMismatch::Device)
         );
     }

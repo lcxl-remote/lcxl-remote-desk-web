@@ -127,7 +127,6 @@ pub struct AuditEvent {
     pub approval_id: Option<String>,
 
     // ---- subject (all server-authoritative, read from the envelope) ----
-    pub tenant_id: Option<String>,
     pub actor_id: String,
     pub device_id: String,
     pub session_id: Option<String>,
@@ -176,7 +175,6 @@ impl AuditEvent {
             task_id: envelope.parent_task_id.as_ref().map(|t| t.0.clone()),
             policy_name: envelope.scope.policy_name.clone(),
             approval_id: envelope.audit.approval_id.clone(),
-            tenant_id: envelope.actor.tenant_id.clone(),
             actor_id: envelope.actor.actor_id.clone(),
             device_id: envelope.target.device_id.clone(),
             session_id: envelope.target.session_id.clone(),
@@ -299,8 +297,8 @@ impl AuditEvent {
     /// Base for orchestrator **task-level** events (model / redaction / cancel).
     /// These are correlated by `request_id` rather than a per-capability
     /// [`AgentEnvelope`], so the subject fields the envelope would supply
-    /// (actor / device / tenant) default empty here; M4 enriches them when the
-    /// policy engine carries identity through the orchestrator.
+    /// (actor / device) default empty here; they are enriched when the policy
+    /// engine carries identity through the orchestrator.
     fn task_scoped(
         event_id: String,
         created_at: String,
@@ -409,8 +407,8 @@ impl AuditEvent {
     /// server-minted `exec_request_id` (which threads the whole confirm →
     /// approve → execute → complete lifecycle), stored in the `request_id`
     /// column so a replay filters one execution by a single key. Subject fields
-    /// (actor / device / tenant) default empty on the single-machine path, like
-    /// the orchestrator task-scoped events.
+    /// (actor / device) default empty on the single-machine path, like the
+    /// orchestrator task-scoped events.
     fn exec_scoped(
         event_id: String,
         created_at: String,
@@ -747,7 +745,6 @@ mod tests {
             actor: ActorRef {
                 actor_type: ActorType::System,
                 actor_id: "local-operator".into(),
-                tenant_id: Some("tenant_1".into()),
             },
             caller: CallerRef {
                 caller_type: CallerType::Human,
@@ -790,7 +787,6 @@ mod tests {
         assert_eq!(e.task_id.as_deref(), Some("task_7"));
         assert_eq!(e.policy_name.as_deref(), Some("policy_x"));
         assert_eq!(e.approval_id.as_deref(), Some("appr_1"));
-        assert_eq!(e.tenant_id.as_deref(), Some("tenant_1"));
         assert_eq!(e.actor_id, "local-operator");
         assert_eq!(e.device_id, "dev_9");
         assert_eq!(e.session_id.as_deref(), Some("sess_3"));

@@ -120,11 +120,10 @@ pub async fn run_copilot_turn(
     let default_shell = ask.context.shell.clone();
     let registry = copilot_read_tools();
     let scope = copilot_read_scope(&registry, authz);
-    let (actor_id, device_id, tenant_id) = subject_for(authz);
+    let (actor_id, device_id) = subject_for(authz);
 
     let turn_id = format!("{request_id}-t0");
     let conversation_key = derive_conversation_key(
-        tenant_id.as_deref(),
         &actor_id,
         &device_id,
         ask.conversation_id.as_deref(),
@@ -149,7 +148,6 @@ pub async fn run_copilot_turn(
     };
     let claim = ClaimTurnParams {
         conversation_id: conversation_key,
-        tenant_id,
         actor_id,
         device_id,
         policy_revision: 0,
@@ -209,7 +207,7 @@ fn copilot_read_scope(
 
 /// Resolve the session subject from the manager authorization, falling back to a
 /// stable local identity on single-machine / remote-signaling links.
-fn subject_for(authz: Option<&AuthorizationBlock>) -> (String, String, Option<String>) {
+fn subject_for(authz: Option<&AuthorizationBlock>) -> (String, String) {
     match authz {
         Some(a) => (
             a.actor
@@ -220,9 +218,8 @@ fn subject_for(authz: Option<&AuthorizationBlock>) -> (String, String, Option<St
                 .device_id
                 .map(|id| format!("device:{id}"))
                 .unwrap_or_else(|| "local".to_string()),
-            None,
         ),
-        None => (COPILOT_ACTOR.to_string(), "local".to_string(), None),
+        None => (COPILOT_ACTOR.to_string(), "local".to_string()),
     }
 }
 

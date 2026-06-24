@@ -3059,7 +3059,6 @@ mod tests {
             actor: ActorRef {
                 actor_type: ActorType::User,
                 actor_id: "user-1".to_string(),
-                tenant_id: None,
             },
             caller: CallerRef {
                 caller_type: CallerType::Human,

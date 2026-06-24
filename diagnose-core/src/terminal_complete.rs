@@ -240,14 +240,13 @@ fn absorb_field(hasher: &mut Sha256, field: &[u8]) {
 /// Derive the subject- and environment-namespaced completion cache key.
 ///
 /// The cache is the cross-instance store for completion results; this key folds in
-/// the trusted subject (`tenant` / `actor` / `device`) **and** the environment the
-/// completion is specific to (`os` / `shell`) **and** the typed `prefix`, all
-/// length-prefixed. Two different subjects (or OS / shell / prefix) therefore never
-/// share an entry, so a cached completion derived from one operator's session can
-/// never leak into another's (security item: cross-tenant cache isolation). The
-/// result is a lowercase hex SHA-256 digest, safe to use as a Redis key segment.
+/// the trusted subject (`actor` / `device`) **and** the environment the completion
+/// is specific to (`os` / `shell`) **and** the typed `prefix`, all length-prefixed.
+/// Two different subjects (or OS / shell / prefix) therefore never share an entry,
+/// so a cached completion derived from one operator's session can never leak into
+/// another's (security item: cross-subject cache isolation). The result is a
+/// lowercase hex SHA-256 digest, safe to use as a Redis key segment.
 pub fn derive_completion_cache_key(
-    tenant_id: Option<&str>,
     actor_id: &str,
     device_id: &str,
     os: &str,
@@ -255,14 +254,6 @@ pub fn derive_completion_cache_key(
     prefix: &str,
 ) -> String {
     let mut hasher = Sha256::new();
-    // Tenant is optional: a presence byte distinguishes `None` from `Some("")`.
-    match tenant_id {
-        Some(t) => {
-            hasher.update([1u8]);
-            absorb_field(&mut hasher, t.as_bytes());
-        }
-        None => hasher.update([0u8]),
-    }
     absorb_field(&mut hasher, actor_id.as_bytes());
     absorb_field(&mut hasher, device_id.as_bytes());
     absorb_field(&mut hasher, os.as_bytes());
@@ -388,58 +379,27 @@ mod tests {
         assert!(got[0].risk < RiskLevel::Blocked);
     }
 
-    fn key(
-        tenant: Option<&str>,
-        actor: &str,
-        device: &str,
-        os: &str,
-        shell: &str,
-        prefix: &str,
-    ) -> String {
-        derive_completion_cache_key(tenant, actor, device, os, shell, prefix)
+    fn key(actor: &str, device: &str, os: &str, shell: &str, prefix: &str) -> String {
+        derive_completion_cache_key(actor, device, os, shell, prefix)
     }
 
     #[test]
     fn cache_key_is_stable_hex_sha256() {
-        let a = key(Some("t"), "u", "d", "linux", "bash", "ls -");
-        assert_eq!(a, key(Some("t"), "u", "d", "linux", "bash", "ls -"));
+        let a = key("u", "d", "linux", "bash", "ls -");
+        assert_eq!(a, key("u", "d", "linux", "bash", "ls -"));
         assert_eq!(a.len(), 64);
     }
 
     #[test]
     fn cache_key_isolates_subject_and_environment() {
-        let base = key(Some("t"), "actorA", "dev1", "linux", "bash", "ls -");
-        // Different actor / device / tenant never share a cache entry.
-        assert_ne!(
-            base,
-            key(Some("t"), "actorB", "dev1", "linux", "bash", "ls -")
-        );
-        assert_ne!(
-            base,
-            key(Some("t"), "actorA", "dev2", "linux", "bash", "ls -")
-        );
-        assert_ne!(
-            base,
-            key(Some("u"), "actorA", "dev1", "linux", "bash", "ls -")
-        );
+        let base = key("actorA", "dev1", "linux", "bash", "ls -");
+        // Different actor / device never share a cache entry.
+        assert_ne!(base, key("actorB", "dev1", "linux", "bash", "ls -"));
+        assert_ne!(base, key("actorA", "dev2", "linux", "bash", "ls -"));
         // Different OS / shell / prefix never alias.
-        assert_ne!(
-            base,
-            key(Some("t"), "actorA", "dev1", "windows", "bash", "ls -")
-        );
-        assert_ne!(
-            base,
-            key(Some("t"), "actorA", "dev1", "linux", "pwsh", "ls -")
-        );
-        assert_ne!(
-            base,
-            key(Some("t"), "actorA", "dev1", "linux", "bash", "ls")
-        );
-        // `None` tenant differs from `Some("")`.
-        assert_ne!(
-            key(None, "u", "d", "linux", "bash", "p"),
-            key(Some(""), "u", "d", "linux", "bash", "p"),
-        );
+        assert_ne!(base, key("actorA", "dev1", "windows", "bash", "ls -"));
+        assert_ne!(base, key("actorA", "dev1", "linux", "pwsh", "ls -"));
+        assert_ne!(base, key("actorA", "dev1", "linux", "bash", "ls"));
     }
 
     #[test]
@@ -467,8 +427,8 @@ mod tests {
     fn cache_key_length_prefix_prevents_field_aliasing() {
         // Without length prefixing, ("ab","c") and ("a","bc") could collide.
         assert_ne!(
-            key(Some("t"), "ab", "c", "linux", "bash", "p"),
-            key(Some("t"), "a", "bc", "linux", "bash", "p"),
+            key("ab", "c", "linux", "bash", "p"),
+            key("a", "bc", "linux", "bash", "p"),
         );
     }
 }

@@ -192,7 +192,7 @@ impl DirectAgentRuntime {
             scope.granted.push(Capability::ShellExecConfirmed);
             scope.mode = execution_mode;
         }
-        let (actor_id, device_id, tenant_id) = subject_for(authz);
+        let (actor_id, device_id) = subject_for(authz);
         run_direct_agent_turn(
             self.session.as_ref(),
             self.model.as_ref(),
@@ -203,7 +203,6 @@ impl DirectAgentRuntime {
             scope,
             actor_id,
             device_id,
-            tenant_id,
             connection_id,
             sink,
         )
@@ -288,7 +287,7 @@ fn direct_read_scope(
 
 /// Resolve the session subject from the manager authorization, falling back to a
 /// stable local identity on single-machine / remote-signaling links.
-fn subject_for(authz: Option<&AuthorizationBlock>) -> (String, String, Option<String>) {
+fn subject_for(authz: Option<&AuthorizationBlock>) -> (String, String) {
     match authz {
         Some(a) => (
             a.actor
@@ -299,9 +298,8 @@ fn subject_for(authz: Option<&AuthorizationBlock>) -> (String, String, Option<St
                 .device_id
                 .map(|id| format!("device:{id}"))
                 .unwrap_or_else(|| "local".to_string()),
-            None,
         ),
-        None => (DIRECT_AGENT_ACTOR.to_string(), "local".to_string(), None),
+        None => (DIRECT_AGENT_ACTOR.to_string(), "local".to_string()),
     }
 }
 
@@ -320,7 +318,6 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
     scope: AgentScope,
     actor_id: String,
     device_id: String,
-    tenant_id: Option<String>,
     connection_id: Option<String>,
     sink: S,
 ) {
@@ -332,7 +329,6 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
     // intent. A reused (valid) id continues the same session; absent/malformed
     // falls back to the per-request id (a fresh single-question conversation).
     let conversation_key = derive_conversation_key(
-        tenant_id.as_deref(),
         &actor_id,
         &device_id,
         request.conversation_id.as_deref(),
@@ -360,7 +356,6 @@ pub async fn run_direct_agent_turn<S: DiagnoseFrameSink>(
     };
     let claim = ClaimTurnParams {
         conversation_id: conversation_key,
-        tenant_id,
         actor_id,
         device_id,
         // No durable policy revision on the Direct runtime; the scope is computed
@@ -532,13 +527,12 @@ mod tests {
     /// fallback identity.
     #[test]
     fn subject_resolution() {
-        let (actor, device, tenant) = subject_for(None);
+        let (actor, device) = subject_for(None);
         assert_eq!(actor, "local-operator");
         assert_eq!(device, "local");
-        assert!(tenant.is_none());
 
         let block = authz(vec![Capability::SystemInfo]);
-        let (actor, device, _) = subject_for(Some(&block));
+        let (actor, device) = subject_for(Some(&block));
         assert_eq!(actor, "user:7");
         assert_eq!(device, "device:9");
     }

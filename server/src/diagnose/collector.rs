@@ -98,7 +98,6 @@ fn build_collect_envelope(
         actor: ActorRef {
             actor_type: ActorType::System,
             actor_id: "diagnose-orchestrator".into(),
-            tenant_id: None,
         },
         // A human operator drove the diagnosis; no model is the caller of the
         // raw collection step (matches the daemon's direct-read precedent).

@@ -276,7 +276,6 @@ fn build_read_envelope(cap: Capability, input: OperationInput) -> AgentEnvelope 
         actor: ActorRef {
             actor_type: ActorType::System,
             actor_id: "mcp-server".into(),
-            tenant_id: None,
         },
         caller: CallerRef {
             caller_type: CallerType::Human,

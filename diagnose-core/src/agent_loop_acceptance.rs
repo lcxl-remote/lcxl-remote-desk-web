@@ -73,7 +73,6 @@ impl SessionSeam for MemSession {
         let mut session = slot.take().unwrap_or_else(|| {
             PersistedAgentSession::new(
                 params.conversation_id.clone(),
-                params.tenant_id.clone(),
                 params.actor_id.clone(),
                 params.device_id.clone(),
                 params.policy_revision,
@@ -213,7 +212,6 @@ fn exec_scope() -> AgentScope {
 fn claim(scope: AgentScope) -> ClaimTurnParams {
     ClaimTurnParams {
         conversation_id: "conv".into(),
-        tenant_id: None,
         actor_id: "actor".into(),
         device_id: "device".into(),
         policy_revision: 1,

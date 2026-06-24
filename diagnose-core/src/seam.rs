@@ -209,7 +209,6 @@ pub trait ToolSeam {
 #[derive(Debug, Clone)]
 pub struct ClaimTurnParams {
     pub conversation_id: String,
-    pub tenant_id: Option<String>,
     pub actor_id: String,
     pub device_id: String,
     pub policy_revision: i64,

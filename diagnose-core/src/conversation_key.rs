@@ -6,10 +6,10 @@
 //! value as a storage key directly: a client could otherwise pre-create or
 //! collide with another subject's conversation by guessing the id. Instead the
 //! server derives a **subject-namespaced** key by hashing the trusted subject
-//! (`tenant` / `actor` / `device`, all server-injected) together with the
-//! validated client id. Two different subjects supplying the same client id land
-//! on different keys, so cross-subject preemption is impossible at the source
-//! (the per-session `check_subject` guard remains as defence in depth).
+//! (`actor` / `device`, both server-injected) together with the validated client
+//! id. Two different subjects supplying the same client id land on different
+//! keys, so cross-subject preemption is impossible at the source (the per-session
+//! `check_subject` guard remains as defence in depth).
 //!
 //! An absent / empty / malformed client id falls back to the per-request id, so
 //! such a request transparently starts a fresh single-question conversation.
@@ -47,7 +47,6 @@ fn absorb_field(hasher: &mut Sha256, field: &[u8]) {
 /// come from the server's trusted context. The result is a lowercase hex
 /// SHA-256 digest.
 pub fn derive_conversation_key(
-    tenant_id: Option<&str>,
     actor_id: &str,
     device_id: &str,
     client_conversation_id: Option<&str>,
@@ -59,14 +58,6 @@ pub fn derive_conversation_key(
         .unwrap_or(fallback_request_id);
 
     let mut hasher = Sha256::new();
-    // Tenant is optional: a presence byte distinguishes `None` from `Some("")`.
-    match tenant_id {
-        Some(t) => {
-            hasher.update([1u8]);
-            absorb_field(&mut hasher, t.as_bytes());
-        }
-        None => hasher.update([0u8]),
-    }
     absorb_field(&mut hasher, actor_id.as_bytes());
     absorb_field(&mut hasher, device_id.as_bytes());
     absorb_field(&mut hasher, client.as_bytes());
@@ -84,13 +75,8 @@ pub fn derive_conversation_key(
 mod tests {
     use super::*;
 
-    fn key(
-        tenant: Option<&str>,
-        actor: &str,
-        device: &str,
-        client: Option<&str>,
-    ) -> String {
-        derive_conversation_key(tenant, actor, device, client, "req-fallback")
+    fn key(actor: &str, device: &str, client: Option<&str>) -> String {
+        derive_conversation_key(actor, device, client, "req-fallback")
     }
 
     #[test]
@@ -100,63 +86,52 @@ mod tests {
         assert!(!is_valid_client_conversation_id("has space"));
         assert!(!is_valid_client_conversation_id("dots.not.allowed"));
         assert!(!is_valid_client_conversation_id("slash/x"));
-        assert!(is_valid_client_conversation_id(&"a".repeat(MAX_CONVERSATION_ID_LEN)));
-        assert!(!is_valid_client_conversation_id(&"a".repeat(MAX_CONVERSATION_ID_LEN + 1)));
+        assert!(is_valid_client_conversation_id(
+            &"a".repeat(MAX_CONVERSATION_ID_LEN)
+        ));
+        assert!(!is_valid_client_conversation_id(
+            &"a".repeat(MAX_CONVERSATION_ID_LEN + 1)
+        ));
     }
 
     #[test]
     fn same_inputs_are_stable() {
-        assert_eq!(
-            key(Some("t"), "a", "d", Some("cv-1")),
-            key(Some("t"), "a", "d", Some("cv-1")),
-        );
+        assert_eq!(key("a", "d", Some("cv-1")), key("a", "d", Some("cv-1")));
         // Hex SHA-256 is 64 chars.
-        assert_eq!(key(None, "a", "d", Some("cv-1")).len(), 64);
+        assert_eq!(key("a", "d", Some("cv-1")).len(), 64);
     }
 
     #[test]
     fn distinct_subjects_with_same_client_id_do_not_collide() {
-        let base = key(Some("t"), "actorA", "dev1", Some("shared"));
-        assert_ne!(base, key(Some("t"), "actorB", "dev1", Some("shared")));
-        assert_ne!(base, key(Some("t"), "actorA", "dev2", Some("shared")));
-        assert_ne!(base, key(Some("u"), "actorA", "dev1", Some("shared")));
-        // `None` tenant differs from `Some("")` tenant.
-        assert_ne!(
-            key(None, "a", "d", Some("cv")),
-            key(Some(""), "a", "d", Some("cv")),
-        );
+        let base = key("actorA", "dev1", Some("shared"));
+        assert_ne!(base, key("actorB", "dev1", Some("shared")));
+        assert_ne!(base, key("actorA", "dev2", Some("shared")));
     }
 
     #[test]
     fn length_prefix_prevents_field_boundary_aliasing() {
         // Without length prefixing, ("ab","c") and ("a","bc") could collide.
-        assert_ne!(
-            key(Some("t"), "ab", "c", Some("cv")),
-            key(Some("t"), "a", "bc", Some("cv")),
-        );
+        assert_ne!(key("ab", "c", Some("cv")), key("a", "bc", Some("cv")));
     }
 
     #[test]
     fn invalid_or_empty_client_id_falls_back_to_request_id() {
         // Empty, malformed, and absent all collapse onto the fallback request id,
         // which is what a fresh single-question conversation keys on.
-        let fallback = key(Some("t"), "a", "d", None);
-        assert_eq!(key(Some("t"), "a", "d", Some("")), fallback);
-        assert_eq!(key(Some("t"), "a", "d", Some("  ")), fallback);
-        assert_eq!(key(Some("t"), "a", "d", Some("bad id!")), fallback);
+        let fallback = key("a", "d", None);
+        assert_eq!(key("a", "d", Some("")), fallback);
+        assert_eq!(key("a", "d", Some("  ")), fallback);
+        assert_eq!(key("a", "d", Some("bad id!")), fallback);
         assert_eq!(
-            key(Some("t"), "a", "d", Some(&"x".repeat(MAX_CONVERSATION_ID_LEN + 1))),
+            key("a", "d", Some(&"x".repeat(MAX_CONVERSATION_ID_LEN + 1))),
             fallback,
         );
         // A valid client id does NOT collapse onto the fallback.
-        assert_ne!(key(Some("t"), "a", "d", Some("cv-1")), fallback);
+        assert_ne!(key("a", "d", Some("cv-1")), fallback);
     }
 
     #[test]
     fn surrounding_whitespace_is_trimmed_before_use() {
-        assert_eq!(
-            key(Some("t"), "a", "d", Some("  cv-1  ")),
-            key(Some("t"), "a", "d", Some("cv-1")),
-        );
+        assert_eq!(key("a", "d", Some("  cv-1  ")), key("a", "d", Some("cv-1")));
     }
 }

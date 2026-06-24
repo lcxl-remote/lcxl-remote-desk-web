@@ -424,7 +424,6 @@ mod tests {
             let mut session = slot.take().unwrap_or_else(|| {
                 PersistedAgentSession::new(
                     params.conversation_id.clone(),
-                    params.tenant_id.clone(),
                     params.actor_id.clone(),
                     params.device_id.clone(),
                     params.policy_revision,
@@ -514,7 +513,6 @@ mod tests {
     fn claim() -> ClaimTurnParams {
         ClaimTurnParams {
             conversation_id: "conv".into(),
-            tenant_id: None,
             actor_id: "actor".into(),
             device_id: "device".into(),
             policy_revision: 1,
@@ -886,8 +884,7 @@ mod tests {
         // Busy: pre-seed a Running session.
         let sess = MemSession::default();
         {
-            let mut s =
-                PersistedAgentSession::new("conv", None, "actor", "device", 1, scope(), "t");
+            let mut s = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t");
             s.begin_turn("prior", None, None, 1, scope(), "t").unwrap();
             *sess.inner.borrow_mut() = Some(s);
         }
@@ -1010,8 +1007,7 @@ mod tests {
     async fn trims_history_to_budget() {
         let sess = MemSession::default();
         {
-            let mut s =
-                PersistedAgentSession::new("conv", None, "actor", "device", 1, scope(), "t");
+            let mut s = PersistedAgentSession::new("conv", "actor", "device", 1, scope(), "t");
             s.conversation.push(ChatMessage::text(
                 "old1",
                 ChatRole::User,

@@ -141,7 +141,6 @@ mod tests {
             actor: ActorRef {
                 actor_type: ActorType::User,
                 actor_id: "actor-1".into(),
-                tenant_id: None,
             },
             caller: CallerRef {
                 caller_type: CallerType::AiModel,

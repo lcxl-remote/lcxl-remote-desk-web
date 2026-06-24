@@ -32,8 +32,8 @@ pub mod audit;
 pub mod authz;
 pub mod command_template;
 pub mod diagnose;
-pub mod evidence;
 pub mod edge_exec;
+pub mod evidence;
 pub mod exec;
 pub mod exec_policy;
 pub mod model_proxy;
@@ -130,7 +130,6 @@ pub struct TargetRef {
 pub struct ActorRef {
     pub actor_type: ActorType,
     pub actor_id: String,
-    pub tenant_id: Option<String>,
 }
 
 #[derive(
@@ -868,7 +867,6 @@ mod tests {
             actor: ActorRef {
                 actor_type: ActorType::User,
                 actor_id: "user_1".into(),
-                tenant_id: Some("tenant_1".into()),
             },
             caller: CallerRef {
                 caller_type: CallerType::AiModel,

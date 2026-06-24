@@ -303,7 +303,6 @@ impl DirectToolSeam {
             actor: ActorRef {
                 actor_type: ActorType::System,
                 actor_id: self.actor_id.clone(),
-                tenant_id: None,
             },
             caller: CallerRef {
                 caller_type: CallerType::Human,
@@ -590,17 +589,12 @@ impl SessionSeam for InMemorySessionSeam {
             Some(existing) => {
                 existing
                     .session
-                    .check_subject(
-                        params.tenant_id.as_deref(),
-                        &params.actor_id,
-                        &params.device_id,
-                    )
+                    .check_subject(&params.actor_id, &params.device_id)
                     .map_err(ClaimError::Subject)?;
                 existing.session.clone()
             }
             None => PersistedAgentSession::new(
                 params.conversation_id.clone(),
-                params.tenant_id.clone(),
                 params.actor_id.clone(),
                 params.device_id.clone(),
                 params.policy_revision,
@@ -804,7 +798,6 @@ mod tests {
         };
         let claim = ClaimTurnParams {
             conversation_id: "conv-1".into(),
-            tenant_id: None,
             actor_id: "actor".into(),
             device_id: "device".into(),
             policy_revision: 1,
@@ -853,7 +846,6 @@ mod tests {
     fn claim_params(conv: &str) -> ClaimTurnParams {
         ClaimTurnParams {
             conversation_id: conv.into(),
-            tenant_id: None,
             actor_id: "actor".into(),
             device_id: "device".into(),
             policy_revision: 1,
