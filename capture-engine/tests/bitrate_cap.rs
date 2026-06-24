@@ -9,12 +9,15 @@
 
 use desk_capture_engine::model::image_capture::{ImageInfo, ImageType};
 use desk_capture_engine::model::video_encoder::VideoEncoder;
+#[cfg(av1_supported)]
 use desk_capture_engine::video_encoder::av1_encoder::Av1Encoder;
 use desk_capture_engine::video_encoder::h264_encoder::H264Encoder;
 use desk_capture_engine::video_encoder::vpx_encoder::VpxEncoder;
 use desk_capture_engine::video_encoder::x264_encoder::X264Encoder;
+#[cfg(av1_supported)]
+use desk_signal_facade::model::desk_settings::Av1EncoderSettings;
 use desk_signal_facade::model::desk_settings::{
-    Av1EncoderSettings, H264EncoderSettings, VpxEncoderSettings, X264EncoderSettings,
+    H264EncoderSettings, VpxEncoderSettings, X264EncoderSettings,
 };
 use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
 
@@ -198,6 +201,7 @@ fn openh264_cap_cycle() {
     assert_cap_cycle(&mut encoder, "openh264");
 }
 
+#[cfg(av1_supported)]
 #[test]
 fn av1_reports_unsupported() {
     let mut encoder = Av1Encoder::new(Av1EncoderSettings::default(), &test_display_info())

@@ -25,7 +25,6 @@ yuv = { workspace = true }
 x264 = { workspace = true }
 openh264 = { workspace = true }
 openh264-sys2 = { workspace = true }
-shiguredo_svt_av1 = { workspace = true }
 
 opusic-c = { workspace = true }
 
@@ -69,10 +68,18 @@ objc2-foundation = { workspace = true }
 core-graphics = { workspace = true }
 core-audio-types = { workspace = true }
 
+# SVT-AV1 ships only prebuilt binaries (no source build is enabled), covering a
+# fixed target matrix: Linux x86_64/aarch64, macOS arm64, Windows x86_64. On any
+# other target (notably macOS x86_64) the crate's build script panics, so the
+# dependency — and the AV1 encoder built on it — is gated to that matrix. The
+# `av1_supported` cfg emitted by build.rs mirrors this expression for the code.
+[target.'cfg(any(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")), all(target_os = "macos", target_arch = "aarch64"), all(target_os = "windows", target_arch = "x86_64")))'.dependencies]
+shiguredo_svt_av1 = { workspace = true }
+
 [dev-dependencies]
 hound = { workspace = true }
 tempfile = { workspace = true }
 rtp = { workspace = true }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)', 'cfg(av1_supported)'] }

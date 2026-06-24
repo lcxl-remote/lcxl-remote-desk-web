@@ -1,3 +1,4 @@
+#[cfg(av1_supported)]
 pub mod av1_encoder;
 pub mod encoder_utils;
 pub mod h264_encoder;

@@ -3,12 +3,13 @@ use std::str::FromStr;
 use desk_signal_facade::model::{desk_settings::DeskSettings, image_capture::DisplayInfo};
 use strum::IntoEnumIterator;
 
+#[cfg(av1_supported)]
+use crate::video_encoder::av1_encoder::Av1Encoder;
 use crate::{
     error::CaptureError,
     model::video_encoder::{VideoEncoder, VideoEncoderType, VideoEncoderTypeHelper},
     video_encoder::{
-        av1_encoder::Av1Encoder, h264_encoder::H264Encoder, vpx_encoder::VpxEncoder,
-        x264_encoder::X264Encoder,
+        h264_encoder::H264Encoder, vpx_encoder::VpxEncoder, x264_encoder::X264Encoder,
     },
 };
 
@@ -56,16 +57,33 @@ pub fn create_video_encoder(
             desk_setting.get_vp9_encoder_settings(),
             display_info,
         )?),
-        VideoEncoderType::AV1 => Box::new(Av1Encoder::new(
-            desk_setting.get_av1_encoder_settings(),
-            display_info,
-        )?),
+        VideoEncoderType::AV1 => {
+            #[cfg(av1_supported)]
+            {
+                Box::new(Av1Encoder::new(
+                    desk_setting.get_av1_encoder_settings(),
+                    display_info,
+                )?)
+            }
+            // SVT-AV1 has no prebuilt binary for this target, so the encoder is
+            // compiled out. The variant still exists for codec negotiation, but
+            // it cannot be instantiated here.
+            #[cfg(not(av1_supported))]
+            {
+                return Err(CaptureError::AnyhowError(anyhow::anyhow!(
+                    "AV1 encoding is not supported on this platform"
+                )));
+            }
+        }
     };
     Ok(encoder)
 }
 
 pub fn list_video_encoder() -> Vec<String> {
     VideoEncoderType::iter()
+        // AV1 is omitted where SVT-AV1 has no prebuilt binary (the encoder is
+        // compiled out), so the browser is never offered an unusable codec.
+        .filter(|x| cfg!(av1_supported) || !matches!(x, VideoEncoderType::AV1))
         .map(|x| Into::<&'static str>::into(x).to_string())
         .collect()
 }
