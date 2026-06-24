@@ -42,7 +42,25 @@ impl Av1Encoder {
         enc.low_latency = true;
         enc.bitrate = 0; // 0 = use quantizer mode (CQ)
 
-        let cfg = Config::new().with_encoder_config(enc).with_threads(0);
+        // Real-time remote desktop produces frames on demand. The speed preset
+        // leaves `rdo_lookahead_frames` at 10, so rav1e holds back a deep window
+        // before it emits a packet (see `needs_more_fi_lookahead`). When the
+        // screen changes slowly that buffered tail stalls output for several
+        // seconds. rav1e requires this be >= 1, so pin it to the minimum to keep
+        // the emit latency as short as the codec allows.
+        enc.speed_settings.rdo_lookahead_frames = 1;
+
+        // Unlike libvpx / x264, rav1e is a pure-Rust software encoder with no
+        // built-in threading unless asked. `with_threads(0)` creates no pool and
+        // a single tile, so a 1080p frame is encoded serially on one core. Split
+        // the frame into tiles and give rav1e a matching thread pool so tiles
+        // encode in parallel.
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        enc.tiles = threads;
+
+        let cfg = Config::new().with_encoder_config(enc).with_threads(threads);
         let ctx: Context<u8> = cfg.new_context().map_err(|e| {
             CaptureError::AnyhowError(anyhow::anyhow!("rav1e context creation failed: {:?}", e))
         })?;
@@ -138,5 +156,89 @@ impl VideoEncoder for Av1Encoder {
 
     fn request_keyframe(&mut self) {
         // Fallback for AV1 since we recreate the encoder in signaling.rs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::image_capture::{ImageInfo, ImageType};
+    use desk_signal_facade::model::image_capture::{DisplayInfo, DisplayRect};
+
+    struct StubBgraImage {
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+    }
+
+    impl StubBgraImage {
+        fn new(width: u32, height: u32) -> Self {
+            Self {
+                width,
+                height,
+                data: vec![0x80u8; (width as usize) * (height as usize) * 4],
+            }
+        }
+    }
+
+    impl ImageInfo for StubBgraImage {
+        fn get_type(&self) -> ImageType {
+            ImageType::BGRA
+        }
+        fn get_data(&self) -> &[u8] {
+            &self.data
+        }
+        fn get_width(&self) -> u32 {
+            self.width
+        }
+        fn get_height(&self) -> u32 {
+            self.height
+        }
+    }
+
+    fn display_info(width: i32, height: i32) -> DisplayInfo {
+        DisplayInfo {
+            desktop_coordinates: DisplayRect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Regression: the speed-10 preset sets `rdo_lookahead_frames = 10`, which
+    /// makes rav1e hold back roughly a dozen frames before it emits the first
+    /// packet (empirically the 13th frame). On a remote desktop that produces
+    /// frames on demand, that buffered tail shows up as multi-second latency.
+    /// Pinning the lookahead to its minimum (1) shrinks the warm-up to a handful
+    /// of frames (empirically the 5th). This test feeds identical frames one at
+    /// a time and asserts a packet appears within the first five — which would
+    /// not hold under the default preset's deep lookahead.
+    #[test]
+    fn emits_packet_within_a_few_frames_low_latency_lookahead() {
+        let setting = Av1EncoderSettings {
+            quality: 100,
+            speed: 10,
+        };
+        let mut encoder =
+            Av1Encoder::new(setting, &display_info(128, 128)).expect("create av1 encoder");
+
+        let frame = StubBgraImage::new(128, 128);
+        let mut total = 0usize;
+        let mut saw_keyframe = false;
+        for _ in 0..5 {
+            let nals = encoder.encode(&frame, false).expect("encode frame");
+            saw_keyframe |= nals.iter().any(|n| n.is_keyframe);
+            total += nals.len();
+        }
+
+        assert!(
+            total > 0,
+            "a packet must be emitted within five frames; the default preset's \
+             deep lookahead would have stalled output well past this point"
+        );
+        assert!(saw_keyframe, "the first emitted packet must be a keyframe");
     }
 }
