@@ -180,23 +180,31 @@ export type AudioDevice = {
 };
 
 /**
- * @description AV1 encoder settings (rav1e)
+ * @description AV1 encoder settings (SVT-AV1)
 */
 export type Av1EncoderSettings = {
     /**
-     * @description Quality (Quantizer), 0-255, default is 100. Lower is better quality.
+     * @description CRF (constant rate factor), 0-63, default is 35. Lower is better quality.
      * @minLength 0
-     * @default 100
+     * @default 35
      * @type integer | undefined, int32
     */
-    quality?: number;
+    crf?: number;
     /**
-     * @description Speed preset, 0-10, default is 10 (fastest). Lower is better quality but slower.
+     * @description SVT-AV1 preset, 0-13, default is 12. Higher is faster (lower quality).
      * @minLength 0
-     * @default 10
+     * @default 12
      * @type integer | undefined, int32
     */
-    speed?: number;
+    preset?: number;
+    /**
+     * @description Real-time low-delay (RTC) mode. Default true for remote desktop so the
+encoder emits a packet per input frame instead of buffering a deep
+look-ahead window.
+     * @default true
+     * @type boolean | undefined
+    */
+    rtc?: boolean;
 };
 
 /**
