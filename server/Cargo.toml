@@ -85,7 +85,6 @@ mime = { workspace = true }
 yuv = { workspace = true }
 x264 = { workspace = true }
 openh264 = { workspace = true }
-rav1e = { workspace = true }
 
 opusic-c = { workspace = true }
 

@@ -2,7 +2,7 @@
 //!
 //! Covers the `VideoEncoder::set_bitrate_cap` contract: x264 / VP8 /
 //! VP9 / OpenH264 apply and clear a cap without being rebuilt and keep
-//! encoding afterwards; AV1 (rav1e) reports the capability as
+//! encoding afterwards; AV1 (SVT-AV1) reports the capability as
 //! unsupported. Rate behaviour itself (output shrinking under a tight
 //! cap) is validated manually end-to-end, not asserted here, to keep
 //! these tests deterministic across codecs and platforms.
@@ -204,6 +204,6 @@ fn av1_reports_unsupported() {
         .expect("av1 build failed");
     assert!(
         !encoder.set_bitrate_cap(Some(500)),
-        "rav1e has no runtime reconfig; set_bitrate_cap must report unsupported"
+        "SVT-AV1 CRF mode has no runtime bitrate reconfig; set_bitrate_cap must report unsupported"
     );
 }

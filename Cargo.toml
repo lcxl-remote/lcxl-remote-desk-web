@@ -140,7 +140,7 @@ openh264 = "0.9.3"
 # bitrate setter, so capture-engine calls SetOption(ENCODER_OPTION_BITRATE)
 # through Encoder::raw_api().
 openh264-sys2 = "0.9.6"
-rav1e = "0.8"
+shiguredo_svt_av1 = "2026.1.0"
 vpx-encode = { git = "https://github.com/lcxl/vpx-encode.git", tag = "v0.8.0", features = [
     "vp9",
 ] }

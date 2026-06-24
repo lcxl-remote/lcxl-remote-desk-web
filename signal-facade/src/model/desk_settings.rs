@@ -88,7 +88,7 @@ impl Default for VpxEncoderSettings {
     }
 }
 
-/// AV1 encoder settings (rav1e)
+/// AV1 encoder settings (SVT-AV1)
 #[derive(
     Clone,
     Debug,
@@ -101,17 +101,22 @@ impl Default for VpxEncoderSettings {
 )]
 #[serde(default)]
 pub struct Av1EncoderSettings {
-    /// Quality (Quantizer), 0-255, default is 100. Lower is better quality.
-    pub quality: u32,
-    /// Speed preset, 0-10, default is 10 (fastest). Lower is better quality but slower.
-    pub speed: u32,
+    /// CRF (constant rate factor), 0-63, default is 35. Lower is better quality.
+    pub crf: u32,
+    /// SVT-AV1 preset, 0-13, default is 12. Higher is faster (lower quality).
+    pub preset: u32,
+    /// Real-time low-delay (RTC) mode. Default true for remote desktop so the
+    /// encoder emits a packet per input frame instead of buffering a deep
+    /// look-ahead window.
+    pub rtc: bool,
 }
 
 impl Default for Av1EncoderSettings {
     fn default() -> Self {
         Self {
-            quality: 100,
-            speed: 10, // 远程桌面场景需要最快速度
+            crf: 35,
+            preset: 12, // remote desktop needs the fast end of the preset range
+            rtc: true,
         }
     }
 }
@@ -381,10 +386,11 @@ impl DeskSettings {
         if let Some(ref av1_encoder) = self.av1_encoder {
             return av1_encoder.clone();
         }
-        // use video_quality to create a default av1 encoder settings
-        // video_quality: 0-63 (lower is better) -> rav1e quantizer: 0-255 (lower is better)
+        // use video_quality to create a default av1 encoder settings.
+        // Both video_quality and SVT-AV1 CRF are 0-63 (lower is better), so the
+        // knob maps onto `crf` directly with no interpolation.
         Av1EncoderSettings {
-            quality: (self.video_quality as f64 / 63.0 * 255.0).clamp(0.0, 255.0) as u32,
+            crf: self.video_quality.min(63),
             ..Default::default()
         }
     }
@@ -469,6 +475,52 @@ mod tests {
         let h264_hit_cap = settings.get_h264_encoder_settings(&display_info);
         assert_eq!(h264_hit_cap.bps, 100_000_000);
     }
+
+    #[test]
+    fn av1_settings_defaults_are_real_time_oriented() {
+        let s = Av1EncoderSettings::default();
+        assert_eq!(s.crf, 35);
+        assert_eq!(s.preset, 12);
+        assert!(
+            s.rtc,
+            "remote desktop AV1 must default to RTC low-delay mode"
+        );
+    }
+
+    #[test]
+    fn get_av1_encoder_settings_maps_video_quality_to_crf_directly() {
+        let with_quality = |video_quality: u32| DeskSettings {
+            video_quality,
+            ..Default::default()
+        };
+
+        // video_quality and CRF share the 0-63 range, so the mapping is identity.
+        let lo = with_quality(0).get_av1_encoder_settings();
+        assert_eq!(lo.crf, 0);
+        assert_eq!(lo.preset, Av1EncoderSettings::default().preset);
+        assert!(lo.rtc);
+
+        assert_eq!(with_quality(63).get_av1_encoder_settings().crf, 63);
+
+        // Out-of-range video_quality is clamped to the CRF ceiling.
+        assert_eq!(with_quality(1000).get_av1_encoder_settings().crf, 63);
+    }
+
+    #[test]
+    fn get_av1_encoder_settings_prefers_explicit_settings() {
+        let settings = DeskSettings {
+            av1_encoder: Some(Av1EncoderSettings {
+                crf: 20,
+                preset: 6,
+                rtc: false,
+            }),
+            ..Default::default()
+        };
+        let got = settings.get_av1_encoder_settings();
+        assert_eq!(got.crf, 20);
+        assert_eq!(got.preset, 6);
+        assert!(!got.rtc);
+    }
 }
 
 #[cfg(test)]
@@ -528,8 +580,9 @@ mod wincode_tests {
                 application: "Voip".to_string(),
             }),
             av1_encoder: Some(Av1EncoderSettings {
-                quality: 100,
-                speed: 8,
+                crf: 40,
+                preset: 8,
+                rtc: false,
             }),
             private_screen: PrivateScreenSettings {
                 image_path: Some(r"C:\private.png".to_string()),

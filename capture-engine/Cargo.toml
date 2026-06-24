@@ -25,7 +25,7 @@ yuv = { workspace = true }
 x264 = { workspace = true }
 openh264 = { workspace = true }
 openh264-sys2 = { workspace = true }
-rav1e =  { workspace = true }
+shiguredo_svt_av1 = { workspace = true }
 
 opusic-c = { workspace = true }
 
@@ -72,6 +72,7 @@ core-audio-types = { workspace = true }
 [dev-dependencies]
 hound = { workspace = true }
 tempfile = { workspace = true }
+rtp = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
