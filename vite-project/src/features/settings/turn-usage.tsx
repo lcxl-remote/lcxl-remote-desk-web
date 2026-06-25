@@ -1,24 +1,9 @@
 import { useTranslation } from 'react-i18next';
-import { useQuery } from '@tanstack/react-query';
 import { Network } from 'lucide-react';
 
-import { axiosInstance } from '@/lib/kubb-client';
+import { useGetTurnUsage } from '@/services/hooks/turnUsageController/useGetTurnUsage';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { TurnUsageChart, type TurnUsageRow } from '@/features/settings/turn-usage-chart';
-
-/** One per-device usage bucket from `GET /api/turn/usage` (camelCase body). */
-interface TurnUsageItem {
-    deviceCode: string;
-    hourBucket: string;
-    receivedBytes: number;
-    sentBytes: number;
-    receivedPkts: number;
-    sentPkts: number;
-}
-
-interface TurnUsageResponse {
-    data?: { items?: TurnUsageItem[] };
-}
 
 /**
  * Local per-device TURN usage view for the portable/signal server. Collect-only
@@ -27,13 +12,7 @@ interface TurnUsageResponse {
  */
 export function TurnUsagePage() {
     const { t } = useTranslation();
-    const { data, isLoading, error } = useQuery({
-        queryKey: ['turn-usage'],
-        queryFn: async () => {
-            const res = await axiosInstance.get<TurnUsageResponse>('/api/turn/usage');
-            return res.data;
-        },
-    });
+    const { data, isLoading, error } = useGetTurnUsage();
 
     const items = data?.data?.items ?? [];
     const rows: TurnUsageRow[] = items.map((item) => ({

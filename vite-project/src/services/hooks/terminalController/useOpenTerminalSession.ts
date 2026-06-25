@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { openTerminalSession } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const openTerminalSessionQueryKey = (connection_id: OpenTerminalSessionPathParams["connection_id"] | undefined, params: OpenTerminalSessionQueryParams) => [{ url: '/api/desk/terminal/:connection_id', params: {connection_id:connection_id} }, ...(params ? [params] : [])] as const
 

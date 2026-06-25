@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { openSignalingHandle } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const openSignalingHandleQueryKey = (api_version: OpenSignalingHandlePathParams["api_version"] | undefined, build_number: OpenSignalingHandlePathParams["build_number"] | undefined, commit_hash: OpenSignalingHandlePathParams["commit_hash"] | undefined, remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"] | undefined, operation_system: OpenSignalingHandlePathParams["operation_system"] | undefined, display_name: OpenSignalingHandlePathParams["display_name"] | undefined, client_id: OpenSignalingHandlePathParams["client_id"] | undefined, token: OpenSignalingHandlePathParams["token"] | undefined) => [{ url: '/api/desk/signaling' }] as const
 

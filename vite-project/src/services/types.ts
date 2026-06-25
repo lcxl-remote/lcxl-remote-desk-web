@@ -134,6 +134,37 @@ export type AiModelSettingsUpdate = {
     response_format?: (null | ResponseFormatMode);
 };
 
+/**
+ * @description The outcome of a successful AI model gateway validation. On success the probe\nconfirms the gateway is reachable, the credentials are accepted, and the model\nanswered; these fields echo which provider / model responded.
+*/
+export type AiModelValidation = {
+    /**
+     * @description The wire adapter that was used.
+     * @type string
+    */
+    adapter: string;
+    /**
+     * @description Prompt tokens the gateway reported, if any.
+     * @type integer,null, int64
+    */
+    input_tokens?: number | null;
+    /**
+     * @description The model that answered the probe.
+     * @type string
+    */
+    model: string;
+    /**
+     * @description Completion tokens the gateway reported, if any.
+     * @type integer,null, int64
+    */
+    output_tokens?: number | null;
+    /**
+     * @description The provider whose adapter answered (e.g. `openai-compatible`).
+     * @type string
+    */
+    provider: string;
+};
+
 export type ApprovalAckParams = {
     /**
      * @type string
@@ -198,9 +229,7 @@ export type Av1EncoderSettings = {
     */
     preset?: number;
     /**
-     * @description Real-time low-delay (RTC) mode. Default true for remote desktop so the
-encoder emits a packet per input frame instead of buffering a deep
-look-ahead window.
+     * @description Real-time low-delay (RTC) mode. Default true for remote desktop so the\nencoder emits a packet per input frame instead of buffering a deep\nlook-ahead window.
      * @default true
      * @type boolean | undefined
     */
@@ -1683,6 +1712,52 @@ export type RestResponseAiModelSettingsPublic = {
     success: boolean;
 };
 
+export type RestResponseAiModelValidation = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description The outcome of a successful AI model gateway validation. On success the probe\nconfirms the gateway is reachable, the credentials are accepted, and the model\nanswered; these fields echo which provider / model responded.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The wire adapter that was used.
+         * @type string
+        */
+        adapter: string;
+        /**
+         * @description Prompt tokens the gateway reported, if any.
+         * @type integer,null, int64
+        */
+        input_tokens?: number | null;
+        /**
+         * @description The model that answered the probe.
+         * @type string
+        */
+        model: string;
+        /**
+         * @description Completion tokens the gateway reported, if any.
+         * @type integer,null, int64
+        */
+        output_tokens?: number | null;
+        /**
+         * @description The provider whose adapter answered (e.g. `openai-compatible`).
+         * @type string
+        */
+        provider: string;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseBackendInfo = {
     /**
      * @type integer, int32
@@ -2332,6 +2407,60 @@ export type RestResponseTurnSettings = {
         static_credentials?: {
             [key: string]: string;
         };
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+/**
+ * @description One per-device hourly usage row, projected for the frontend chart.
+*/
+export type TurnUsageItem = {
+    /**
+     * @type string
+    */
+    deviceCode: string;
+    /**
+     * @type string
+    */
+    hourBucket: string;
+    /**
+     * @type integer, int64
+    */
+    receivedBytes: number;
+    /**
+     * @type integer, int64
+    */
+    receivedPkts: number;
+    /**
+     * @type integer, int64
+    */
+    sentBytes: number;
+    /**
+     * @type integer, int64
+    */
+    sentPkts: number;
+};
+
+export type RestResponseTurnUsageResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        items: TurnUsageItem[];
     };
     /**
      * @type string,null
@@ -3025,6 +3154,13 @@ export type TurnSettings = {
     };
 };
 
+export type TurnUsageResult = {
+    /**
+     * @type array
+    */
+    items: TurnUsageItem[];
+};
+
 export type UserResponeCurrentUser = {
     /**
      * @type object
@@ -3573,80 +3709,9 @@ export type UpdateAiModelSettingsMutation = {
     Errors: any;
 };
 
-export type AiModelValidation = {
-    /**
-     * @description The wire adapter that was used.
-     * @type string
-    */
-    adapter: string;
-    /**
-     * @description Prompt tokens the gateway reported, if any.
-     * @type integer,null, int64
-    */
-    input_tokens?: number | null;
-    /**
-     * @description The model that answered the probe.
-     * @type string
-    */
-    model: string;
-    /**
-     * @description Completion tokens the gateway reported, if any.
-     * @type integer,null, int64
-    */
-    output_tokens?: number | null;
-    /**
-     * @description The provider whose adapter answered (e.g. `openai-compatible`).
-     * @type string
-    */
-    provider: string;
-};
-
-export type RestResponseAiModelValidation = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @description The outcome of a successful AI model gateway validation. On success the probe\nconfirms the gateway is reachable, the credentials are accepted, and the model\nanswered; these fields echo which provider / model responded.
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @description The wire adapter that was used.
-         * @type string
-        */
-        adapter: string;
-        /**
-         * @description Prompt tokens the gateway reported, if any.
-         * @type integer,null, int64
-        */
-        input_tokens?: number | null;
-        /**
-         * @description The model that answered the probe.
-         * @type string
-        */
-        model: string;
-        /**
-         * @description Completion tokens the gateway reported, if any.
-         * @type integer,null, int64
-        */
-        output_tokens?: number | null;
-        /**
-         * @description The provider whose adapter answered (e.g. `openai-compatible`).
-         * @type string
-        */
-        provider: string;
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
+/**
+ * @description Validation result. On success `data` carries the answering provider / model; on a gateway rejection the failure `message` carries the gateway\'s own reason.
+*/
 export type ValidateAiModelSettings200 = RestResponseAiModelValidation;
 
 export type ValidateAiModelSettingsMutationResponse = ValidateAiModelSettings200;
@@ -4210,6 +4275,30 @@ export type GetTurnSessionStatisticsQuery = {
     Response: GetTurnSessionStatistics200;
     QueryParams: GetTurnSessionStatisticsQueryParams;
     Errors: GetTurnSessionStatistics404;
+};
+
+export type GetTurnUsageQueryParams = {
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+};
+
+/**
+ * @description Per-device hourly TURN usage
+*/
+export type GetTurnUsage200 = RestResponseTurnUsageResult;
+
+export type GetTurnUsageQueryResponse = GetTurnUsage200;
+
+export type GetTurnUsageQuery = {
+    Response: GetTurnUsage200;
+    QueryParams: GetTurnUsageQueryParams;
+    Errors: any;
 };
 
 /**

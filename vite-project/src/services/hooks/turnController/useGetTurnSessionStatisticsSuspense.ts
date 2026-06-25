@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, UseSuspenseQueryOptions, UseSuspenseQueryResult } from "@tanstack/react-query";
-import type { GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404 } from "../../types.ts";
-import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 import { getTurnSessionStatistics } from "../../clients.ts";
+import { queryOptions, useSuspenseQuery } from "@tanstack/react-query";
 
 export const getTurnSessionStatisticsSuspenseQueryKey = (params: GetTurnSessionStatisticsQueryParams) => [{ url: '/api/turn/session/statistics' }, ...(params ? [params] : [])] as const
 

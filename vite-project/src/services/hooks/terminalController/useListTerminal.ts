@@ -3,11 +3,11 @@
 * Do not edit manually.
 */
 
+import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from "@tanstack/react-query";
-import type { ListTerminalQueryResponse, ListTerminalPathParams } from "../../types.ts";
-import { queryOptions, useQuery } from "@tanstack/react-query";
 import { listTerminal } from "../../clients.ts";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 
 export const listTerminalQueryKey = (connection_id: ListTerminalPathParams["connection_id"] | undefined) => [{ url: '/api/desk/terminals/:connection_id', params: {connection_id:connection_id} }] as const
 
