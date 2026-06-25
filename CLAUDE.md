@@ -4,7 +4,7 @@
 
 ## 项目概述
 
-`lcxl-remote-desk` 是一个 **AI 原生（AI-Native）** 的开源 WebRTC 远程桌面解决方案。后端使用 Rust (Actix-Web)，前端使用 React + TypeScript (Vite)。除了浏览器远程控制，它还内置了一个**只读的设备诊断 AI Agent**（模型无关：OpenAI 兼容 / Anthropic），并能以一个**只读 MCP 服务**把设备的只读能力开放给外部 AI 助手。`server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`)、会话工作进程模式 (`session-worker`)，以及只读 MCP stdio 模式 (`mcp-stdio`)。
+`lcxl-remote-desk` 是一个 **AI 原生（AI-Native）** 的开源 WebRTC 远程桌面解决方案，把 AI 当作与浏览器并列的一等控制端。后端使用 Rust (Actix-Web)，前端使用 React + TypeScript (Vite)。除了浏览器远程控制，它还内置了一个**只读的设备诊断 AI Agent**（模型无关：OpenAI 兼容 / Anthropic），并能以一个**只读 MCP 服务**把设备的只读能力开放给外部 AI 助手。`server` 二进制文件支持多种运行模式：完整模式 (`default`)、仅信令模式 (`signaling`)、仅被控端模式 (`desk-server`)、系统服务守护进程模式 (`service-daemon`)、会话工作进程模式 (`session-worker`)，以及只读 MCP stdio 模式 (`mcp-stdio`)。
 
 ## 构建与运行
 

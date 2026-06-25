@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-LCXL Remote Desk Web 是一款基于 WebRTC 的高性能远程桌面。除了基础的浏览器远程控制外，它还内置了系统诊断 AI，能够读取设备当前状态进行排障，并通过只读 [MCP](https://modelcontextprotocol.io/) 服务将这些能力开放给外部 AI 助手。项目对 AI 层的设计以安全为首要考量：服务端统一管理权限，模型默认仅提供操作建议，数据在上传前强制脱敏（脱敏失败会直接阻断请求），且每次调用均留存审计记录。后端采用 Rust 编写，前端基于 React + Vite + Tailwind CSS 构建。
+LCXL Remote Desk Web 是一款 **AI 原生（AI-Native）** 的开源高性能远程桌面：它把 AI 视为与浏览器**并列的一等控制端**——既能用浏览器远程控制，也内置只读的设备诊断 AI Agent 读取设备状态进行排障，并通过只读 [MCP](https://modelcontextprotocol.io/) 服务把设备能力开放给外部 AI 助手。AI 层以安全为第一原则：服务端统一裁决权限，模型默认仅提供操作建议，数据在上传前强制脱敏（脱敏失败直接阻断请求），每次调用均留存审计记录，API 密钥仅驻留服务端。底层基于 WebRTC（AV1 / H.264 / VP8 / VP9 软硬编码 + Opus 音频），后端采用 Rust 编写，前端基于 React + Vite + Tailwind CSS 构建。
 
 > [!WARNING]
 > **免责声明**：本项目目前处于早期开发阶段，代码库可能存在不稳定性、未修复的漏洞或功能不完整。
