@@ -357,6 +357,14 @@ impl AnthropicSseAccumulator {
                 if let Some(output) = usage["output_tokens"].as_i64() {
                     self.usage.output_tokens = Some(output);
                 }
+                // Anthropic's `input_tokens` already excludes cache, so cache
+                // read/write map straight through.
+                if let Some(read) = usage["cache_read_input_tokens"].as_i64() {
+                    self.usage.cache_read_tokens = Some(read);
+                }
+                if let Some(write) = usage["cache_creation_input_tokens"].as_i64() {
+                    self.usage.cache_write_tokens = Some(write);
+                }
             }
             Some("message_delta") => {
                 // The cumulative output token count and the stop reason land here.
@@ -435,6 +443,18 @@ data: {\"type\":\"message_stop\"}\n\n";
         assert_eq!(deltas, vec!["Hello", " world"]);
         assert_eq!(resp.usage.input_tokens, Some(25));
         assert_eq!(resp.usage.output_tokens, Some(7));
+    }
+
+    /// Cache read/write tokens come from `message_start.usage` and map straight
+    /// through (Anthropic's `input_tokens` already excludes cache).
+    #[test]
+    fn parses_cache_tokens() {
+        let stream = b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":25,\"output_tokens\":1,\"cache_read_input_tokens\":40,\"cache_creation_input_tokens\":12}}}\n\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n";
+        let (resp, _) = collect(&[stream]);
+        assert_eq!(resp.usage.input_tokens, Some(25));
+        assert_eq!(resp.usage.cache_read_tokens, Some(40));
+        assert_eq!(resp.usage.cache_write_tokens, Some(12));
     }
 
     /// Byte boundaries that split a `data:` line mid-way are reassembled.

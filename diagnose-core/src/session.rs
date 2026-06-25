@@ -770,6 +770,7 @@ mod tests {
             s.record_step(TokenUsage {
                 input_tokens: Some(10),
                 output_tokens: Some(2),
+                ..Default::default()
             });
         }
         assert!(s.turn_step_budget_exhausted(crate::MAX_STEPS_PER_TURN));

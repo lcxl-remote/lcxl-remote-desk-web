@@ -197,10 +197,23 @@ pub enum StopReason {
 }
 
 /// Token accounting reported by the gateway.
+///
+/// `input_tokens` is the non-cached prompt tokens only: for OpenAI-compatible
+/// providers the cached portion (`prompt_tokens_details.cached_tokens`) is
+/// subtracted out so it is not double-counted against `cache_read_tokens`;
+/// Anthropic's `input_tokens` already excludes cache, so it maps as-is. Cache
+/// read and write are billed at very different rates, so they are tracked as
+/// two separate classes rather than folded into `input_tokens`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// Cached prompt tokens read back (OpenAI `cached_tokens` /
+    /// Anthropic `cache_read_input_tokens`); billed at a steep discount.
+    pub cache_read_tokens: Option<i64>,
+    /// Tokens written into the cache (Anthropic `cache_creation_input_tokens`);
+    /// no OpenAI-compatible equivalent, so it stays `None` there.
+    pub cache_write_tokens: Option<i64>,
 }
 
 /// The result of one model turn, normalized across providers: the assistant's
@@ -475,6 +488,7 @@ mod tests {
             usage: TokenUsage {
                 input_tokens: Some(10),
                 output_tokens: Some(2),
+                ..Default::default()
             },
         };
         let back: ModelTurn = serde_json::from_str(&serde_json::to_string(&turn).unwrap()).unwrap();

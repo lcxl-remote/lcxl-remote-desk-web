@@ -54,6 +54,7 @@ export default {
   'menu.settings.system': '系统设置',
   'menu.settings.turn': 'TURN 设置',
   'menu.settings.turnUsage': 'TURN 流量统计',
+  'menu.settings.modelUsage': 'AI Token 用量',
   'menu.settings.turnClient': 'TURN 客户端设置',
   'menu.settings.log': '日志设置',
   'menu.settings.security': '安全设置',

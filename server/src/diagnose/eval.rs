@@ -108,6 +108,7 @@ impl ReplayAdapter {
             usage: TokenUsage {
                 input_tokens: Some(1024),
                 output_tokens: Some(96),
+                ..Default::default()
             },
             seen: Mutex::new(None),
         })

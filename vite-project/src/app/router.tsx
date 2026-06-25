@@ -15,6 +15,7 @@ import RequireAuth from '@/features/auth/require-auth';
 import { SystemSettings } from '@/features/settings/system-settings';
 import { TurnSettings } from '@/features/settings/turn-settings';
 import { TurnUsagePage } from '@/features/settings/turn-usage';
+import { ModelUsagePage } from '@/features/settings/model-usage';
 import { TurnClientSettingsPage } from '@/features/settings/turn-client-settings';
 import { LogSettings } from '@/features/settings/log-settings';
 import { SecuritySettings } from '@/features/settings/security-settings';
@@ -101,6 +102,10 @@ export const router = createBrowserRouter([
                     {
                         path: 'turn-usage',
                         element: <TurnUsagePage />,
+                    },
+                    {
+                        path: 'model-usage',
+                        element: <ModelUsagePage />,
                     },
                     {
                         path: 'turn-client',

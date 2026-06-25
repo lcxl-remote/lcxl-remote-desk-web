@@ -136,6 +136,7 @@ pub async fn run_local_api(
                         include_signaling: true,
                         include_file_device_code: true,
                         include_turn: false,
+                        include_model_usage: true,
                     },
                 )
             })

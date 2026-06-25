@@ -1560,6 +1560,47 @@ export type LoginResult = {
 };
 
 /**
+ * @description One per-model hourly usage row, projected for the frontend chart.
+*/
+export type ModelUsageItem = {
+    /**
+     * @type integer, int64
+    */
+    cacheReadTokens: number;
+    /**
+     * @type integer, int64
+    */
+    cacheWriteTokens: number;
+    /**
+     * @type string
+    */
+    hourBucket: string;
+    /**
+     * @type integer, int64
+    */
+    inputTokens: number;
+    /**
+     * @type string
+    */
+    modelName: string;
+    /**
+     * @type integer, int64
+    */
+    outputTokens: number;
+    /**
+     * @type integer, int64
+    */
+    requestCount: number;
+};
+
+export type ModelUsageResult = {
+    /**
+     * @type array
+    */
+    items: ModelUsageItem[];
+};
+
+/**
  * @description Mouse event data structure\nhttps://developer.mozilla.org/zh-CN/docs/Web/API/MouseEvent
 */
 export type MouseEventData = {
@@ -1911,6 +1952,30 @@ export type RestResponseLogSettings = {
          * @type boolean | undefined
         */
         traceback?: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseModelUsageResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type array
+        */
+        items: ModelUsageItem[];
     };
     /**
      * @type string,null
@@ -4115,6 +4180,30 @@ export type LoginTauriMutation = {
     Response: LoginTauri200;
     QueryParams: LoginTauriQueryParams;
     Errors: LoginTauri403;
+};
+
+export type GetModelUsageQueryParams = {
+    /**
+     * @type string,null
+    */
+    from?: string | null;
+    /**
+     * @type string,null
+    */
+    to?: string | null;
+};
+
+/**
+ * @description Per-model hourly token usage
+*/
+export type GetModelUsage200 = RestResponseModelUsageResult;
+
+export type GetModelUsageQueryResponse = GetModelUsage200;
+
+export type GetModelUsageQuery = {
+    Response: GetModelUsage200;
+    QueryParams: GetModelUsageQueryParams;
+    Errors: any;
 };
 
 /**

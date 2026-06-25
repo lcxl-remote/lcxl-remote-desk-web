@@ -296,7 +296,14 @@ impl SseAccumulator {
             self.finish_reason = Some(reason.to_string());
         }
         if let Some(usage) = value.get("usage").filter(|u| u.is_object()) {
-            self.usage.input_tokens = usage["prompt_tokens"].as_i64();
+            // OpenAI `prompt_tokens` includes cached tokens; subtract them so
+            // `input_tokens` is non-cached only (clamped >=0). Absent
+            // `prompt_tokens` is not back-derived from cached.
+            let cached = usage["prompt_tokens_details"]["cached_tokens"].as_i64();
+            self.usage.cache_read_tokens = cached;
+            self.usage.input_tokens = usage["prompt_tokens"]
+                .as_i64()
+                .map(|p| (p - cached.unwrap_or(0).max(0)).max(0));
             self.usage.output_tokens = usage["completion_tokens"].as_i64();
         }
     }
@@ -382,6 +389,27 @@ data: [DONE]\n\n";
         assert_eq!(deltas, vec!["Hello", " world"]);
         assert_eq!(resp.usage.input_tokens, Some(12));
         assert_eq!(resp.usage.output_tokens, Some(3));
+    }
+
+    /// Cached tokens are split out of `prompt_tokens` into `cache_read`, clamped
+    /// to >=0, and not back-derived when `prompt_tokens` is absent.
+    #[test]
+    fn parses_cache_tokens_and_clamps() {
+        let stream = b"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":30}}}\n\ndata: [DONE]\n\n";
+        let (resp, _) = collect(&[stream]);
+        assert_eq!(resp.usage.input_tokens, Some(70));
+        assert_eq!(resp.usage.cache_read_tokens, Some(30));
+        assert_eq!(resp.usage.cache_write_tokens, None);
+
+        // cached > prompt clamps input to 0, never negative.
+        let over = b"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":50}}}\n\ndata: [DONE]\n\n";
+        assert_eq!(collect(&[over]).0.usage.input_tokens, Some(0));
+
+        // No prompt_tokens: input stays None.
+        let nop = b"data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":40}}}\n\ndata: [DONE]\n\n";
+        let (resp, _) = collect(&[nop]);
+        assert_eq!(resp.usage.input_tokens, None);
+        assert_eq!(resp.usage.cache_read_tokens, Some(40));
     }
 
     /// Byte boundaries that split a `data:` line mid-way are reassembled.

@@ -366,9 +366,38 @@ impl DiagnoseModel for ModelBackedDiagnoseModel {
                     duration_ms,
                 ))
                 .await;
+            record_local_token_usage(&caller, &response.usage).await;
         }
 
         Ok(diagnosis)
+    }
+}
+
+/// Fold one completed Direct-path model call's token usage into the local
+/// collect-only rollup (`desk_signal::ai_usage`), keyed by model name.
+///
+/// This is a signal-role capability: the local sqlite rollup exists in
+/// `default` / `signaling` modes but not in a pure `desk-server` process, where
+/// it simply no-ops. Fail-open — a write error never affects the diagnosis. Not
+/// called in ManagerProxy mode (the manager owns billing there).
+async fn record_local_token_usage(caller: &CallerRef, usage: &TokenUsage) {
+    let Some(model_name) = caller.model_name.as_deref() else {
+        return;
+    };
+    let Some(db) = desk_signal::db::try_get_db() else {
+        return; // no local signal DB (pure desk-server) — collect-only no-op
+    };
+    let delta = desk_signal::ai_usage::AiUsageDelta {
+        model_name: model_name.to_string(),
+        input_tokens: usage.input_tokens.unwrap_or(0),
+        output_tokens: usage.output_tokens.unwrap_or(0),
+        cache_read_tokens: usage.cache_read_tokens.unwrap_or(0),
+        cache_write_tokens: usage.cache_write_tokens.unwrap_or(0),
+        request_count: 1,
+    };
+    let bucket = desk_signal::ai_usage::truncate_to_hour(chrono::Utc::now());
+    if let Err(e) = desk_signal::ai_usage::upsert_ai_usage(db, bucket, &delta).await {
+        log::warn!("[ai-usage] local rollup upsert failed: {e}");
     }
 }
 
@@ -691,6 +720,7 @@ mod tests {
             usage: TokenUsage {
                 input_tokens: Some(1200),
                 output_tokens: Some(80),
+                ..Default::default()
             },
             seen: Mutex::new(None),
         });

@@ -1,3 +1,4 @@
+pub mod ai_usage;
 pub mod controller;
 pub mod db;
 pub mod entity;

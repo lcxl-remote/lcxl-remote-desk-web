@@ -54,6 +54,7 @@ export default {
   'menu.settings.system': 'System Settings',
   'menu.settings.turn': 'Turn Settings',
   'menu.settings.turnUsage': 'TURN Usage',
+  'menu.settings.modelUsage': 'AI Token Usage',
   'menu.settings.turnClient': 'Turn Client Settings',
   'menu.settings.log': 'Log Settings',
   'menu.settings.security': 'Security Settings',

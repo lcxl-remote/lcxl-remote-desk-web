@@ -65,6 +65,7 @@ use actix_web::{
 use clap::Parser as _;
 use desk_signal::{
     controller::{
+        ai_usage::get_model_usage,
         connection::list_connections,
         device_code::{
             batch_delete_device_codes, create_device_code, delete_device_code, list_device_codes,
@@ -124,6 +125,9 @@ pub struct ApiSurfaceOpts {
     pub include_file_device_code: bool,
     /// Register the `/api/turn/*` management scope.
     pub include_turn: bool,
+    /// Register the `/api/model/usage` collect-only token-usage view (modes with
+    /// a local signal DB: `Default` / `Signaling`).
+    pub include_model_usage: bool,
 }
 
 /// Single source of truth for the desk-server HTTP API surface: every
@@ -219,6 +223,11 @@ pub fn configure_api_surface(
                             .service(get_turn_usage),
                     );
                 }
+            })
+            .configure(move |cfg| {
+                if opts.include_model_usage {
+                    cfg.service(utoipa_actix_web::scope("/model").service(get_model_usage));
+                }
             }),
     );
 }
@@ -259,6 +268,7 @@ pub fn build_openapi() -> utoipa::openapi::OpenApi {
                     include_signaling: true,
                     include_file_device_code: true,
                     include_turn: true,
+                    include_model_usage: true,
                 },
             )
         })
@@ -584,6 +594,10 @@ pub async fn run_with_hub(
                 StartupMode::Default | StartupMode::Signaling
             ),
             include_turn: turn_api_state.is_some(),
+            include_model_usage: matches!(
+                startup_mode,
+                StartupMode::Default | StartupMode::Signaling
+            ),
         };
         App::new()
             .into_utoipa_app()
@@ -866,6 +880,7 @@ mod tests {
                             include_signaling: true,
                             include_file_device_code: true,
                             include_turn: false,
+                            include_model_usage: true,
                         },
                     )
                 })
@@ -966,6 +981,7 @@ mod tests {
                         include_signaling: true,
                         include_file_device_code: true,
                         include_turn: false,
+                        include_model_usage: true,
                     },
                 )
             })
@@ -1051,6 +1067,7 @@ mod tests {
                             include_signaling: true,
                             include_file_device_code: true,
                             include_turn: false,
+                            include_model_usage: true,
                         },
                     )
                 })

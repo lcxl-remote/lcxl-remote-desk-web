@@ -24,6 +24,8 @@ export type { ListFilesSuspenseQueryKey } from "./fileController/useListFilesSus
 export type { QueryLogSettingsQueryKey } from "./logController/useQueryLogSettings.ts";
 export type { QueryLogSettingsSuspenseQueryKey } from "./logController/useQueryLogSettingsSuspense.ts";
 export type { UpdateLogSettingsMutationKey } from "./logController/useUpdateLogSettings.ts";
+export type { GetModelUsageQueryKey } from "./modelUsageController/useGetModelUsage.ts";
+export type { GetModelUsageSuspenseQueryKey } from "./modelUsageController/useGetModelUsageSuspense.ts";
 export type { AckSecurityApprovalMutationKey } from "./securityController/useAckSecurityApproval.ts";
 export type { QuerySecuritySettingsQueryKey } from "./securityController/useQuerySecuritySettings.ts";
 export type { QuerySecuritySettingsSuspenseQueryKey } from "./securityController/useQuerySecuritySettingsSuspense.ts";
@@ -155,6 +157,12 @@ export { useQueryLogSettingsSuspense } from "./logController/useQueryLogSettings
 export { updateLogSettingsMutationKey } from "./logController/useUpdateLogSettings.ts";
 export { updateLogSettingsMutationOptions } from "./logController/useUpdateLogSettings.ts";
 export { useUpdateLogSettings } from "./logController/useUpdateLogSettings.ts";
+export { getModelUsageQueryKey } from "./modelUsageController/useGetModelUsage.ts";
+export { getModelUsageQueryOptions } from "./modelUsageController/useGetModelUsage.ts";
+export { useGetModelUsage } from "./modelUsageController/useGetModelUsage.ts";
+export { getModelUsageSuspenseQueryKey } from "./modelUsageController/useGetModelUsageSuspense.ts";
+export { getModelUsageSuspenseQueryOptions } from "./modelUsageController/useGetModelUsageSuspense.ts";
+export { useGetModelUsageSuspense } from "./modelUsageController/useGetModelUsageSuspense.ts";
 export { ackSecurityApprovalMutationKey } from "./securityController/useAckSecurityApproval.ts";
 export { ackSecurityApprovalMutationOptions } from "./securityController/useAckSecurityApproval.ts";
 export { useAckSecurityApproval } from "./securityController/useAckSecurityApproval.ts";

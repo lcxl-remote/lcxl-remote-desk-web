@@ -53,3 +53,12 @@ pub async fn init_db(config_dir: &str) -> Result<&'static DatabaseConnection, De
 pub fn get_db() -> &'static DatabaseConnection {
     DB_CONN.get().expect("Database connection not initialized")
 }
+
+/// Get the database connection if it has been initialized, else `None`.
+///
+/// Used by collect-only telemetry that runs in any server mode: the signal DB
+/// exists in `default` / `signaling` modes but not in a pure `desk-server`
+/// process, where the telemetry simply no-ops rather than panicking.
+pub fn try_get_db() -> Option<&'static DatabaseConnection> {
+    DB_CONN.get()
+}
