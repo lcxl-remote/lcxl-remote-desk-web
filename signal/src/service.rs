@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use actix_web::web;
 use actix_ws::{AggregatedMessageStream, Session};
 use desk_server_user::model::CurrentUser;
@@ -59,6 +61,29 @@ impl DeviceCodeService for SignalDeviceCodeService {
     }
 }
 
+/// Removes a `connection_id → device_code` binding from the usage map when the
+/// signaling connection ends, regardless of how `handle_signaling` returns.
+struct ConnectionDeviceGuard {
+    map: Arc<crate::turn_usage::ConnectionDeviceMap>,
+    connection_id: String,
+}
+
+impl Drop for ConnectionDeviceGuard {
+    fn drop(&mut self) {
+        let map = self.map.clone();
+        let connection_id = self.connection_id.clone();
+        // The map is async-locked; hop onto the runtime to remove the entry.
+        // Best-effort: a missed removal only leaves a stale entry that the next
+        // collector pass tolerates (it resolves by lookup, not by liveness).
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                map.write().await.remove(&connection_id);
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_signaling(
     client_version_info: VersionInfo,
     stream: AggregatedMessageStream,
@@ -67,6 +92,7 @@ pub async fn handle_signaling(
     user: CurrentUser,
     ip: Option<String>,
     turn: Option<TurnSettings>,
+    conn_device_map: Option<Arc<crate::turn_usage::ConnectionDeviceMap>>,
 ) -> Result<(), DeskSignalError> {
     log::info!("Handling signaling");
     let random_uuid = Uuid::new_v4();
@@ -83,6 +109,22 @@ pub async fn handle_signaling(
         }
     } else {
         None
+    };
+
+    // Publish the connection's device binding before the handler enters the
+    // connection map (so the TURN usage collector can resolve bytes the moment
+    // the peer can be reached). The guard removes it when the connection ends.
+    let _device_guard = match (&conn_device_map, &device_code) {
+        (Some(map), Some(code)) => {
+            map.write()
+                .await
+                .insert(connection_id.clone(), code.clone());
+            Some(ConnectionDeviceGuard {
+                map: map.clone(),
+                connection_id: connection_id.clone(),
+            })
+        }
+        _ => None,
     };
 
     // Signal server is not the fleet policy decision point; it carries an

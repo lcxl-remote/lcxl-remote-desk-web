@@ -47,6 +47,7 @@ utoipa-rapidoc = { workspace = true }
 utoipa-scalar = { workspace = true }
 
 chrono = { workspace = true }
+sea-orm = { workspace = true }
 bollard = { workspace = true }
 
 serde = { workspace = true }

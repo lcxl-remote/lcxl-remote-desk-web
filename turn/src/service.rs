@@ -50,6 +50,8 @@ impl Conn for TrackedUdpConn {
             let session = stats.sessions.entry(addr).or_default();
             session.received_bytes += n;
             session.received_pkts += 1;
+
+            stats.record_recv(addr, n);
         }
 
         Ok((n, addr))
@@ -71,6 +73,8 @@ impl Conn for TrackedUdpConn {
             let session = stats.sessions.entry(target).or_default();
             session.send_bytes += n;
             session.send_pkts += 1;
+
+            stats.record_send(target, n);
         }
 
         Ok(n)
@@ -97,6 +101,7 @@ impl Conn for TrackedUdpConn {
 pub async fn startup_turn_server<A>(
     settings: TurnSettings,
     auth_handler: Arc<A>,
+    statistics: Arc<RwLock<Statistics>>,
 ) -> Result<Arc<TurnApiState>, DeskTurnError>
 where
     A: AuthHandler + Send + Sync + 'static,
@@ -104,7 +109,6 @@ where
     log::info!("Starting turn server with realm {:?}", settings.realm);
 
     let mut conn_configs = vec![];
-    let statistics = Arc::new(RwLock::new(Statistics::default()));
 
     for iface in &settings.interfaces {
         if iface.transport == TurnTransport::UDP {

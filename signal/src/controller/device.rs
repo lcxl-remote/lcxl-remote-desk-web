@@ -25,6 +25,7 @@ pub async fn open_device_signaling_handle(
     _session: Session,
     stream: web::Payload,
     turn_api_state: Option<web::Data<TurnApiState>>,
+    conn_device_map: Option<web::Data<crate::turn_usage::ConnectionDeviceMap>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let version_info = query.0.clone();
 
@@ -79,6 +80,7 @@ pub async fn open_device_signaling_handle(
             virtual_user,
             ip,
             turn_settings,
+            conn_device_map.map(|d| d.into_inner()),
         )
         .await;
         if let Err(e) = result {

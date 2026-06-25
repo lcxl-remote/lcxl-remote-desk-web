@@ -73,6 +73,7 @@ use desk_signal::{
         files::{delete_file, list_files},
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
+        turn_usage::get_turn_usage,
     },
     model::SharedConnectionMap,
 };
@@ -214,7 +215,8 @@ pub fn configure_api_surface(
                             .service(get_turn_session)
                             .service(get_turn_session_statistics)
                             .service(delete_turn_session)
-                            .service(get_turn_metrics),
+                            .service(get_turn_metrics)
+                            .service(get_turn_usage),
                     );
                 }
             }),
@@ -450,6 +452,16 @@ pub async fn run_with_hub(
 
     let connection_map = web::Data::new(SharedConnectionMap::from(BTreeMap::new()));
 
+    // Shared TURN byte-accounting state and the live connection→device binding
+    // map, both created here so the auth handler, the TURN runtime, the periodic
+    // usage collector, and the signaling handlers all share one instance. The
+    // portable server is single-process, so these are purely node-local.
+    let turn_statistics = Arc::new(std::sync::RwLock::new(
+        desk_turn::model::Statistics::default(),
+    ));
+    let conn_device_map: web::Data<desk_signal::turn_usage::ConnectionDeviceMap> =
+        web::Data::new(desk_signal::turn_usage::ConnectionDeviceMap::default());
+
     //start turn server if mode is Default or Signaling
     let turn_api_state =
         if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
@@ -462,9 +474,19 @@ pub async fn run_with_hub(
             let auth_handler = Arc::new(TurnAuthHandler::new(
                 turn_settings.clone(),
                 connection_map.clone(),
+                turn_statistics.clone(),
             ));
-            match startup_turn_server(turn_settings, auth_handler).await {
-                Ok(s) => Some(web::Data::from(s)),
+            match startup_turn_server(turn_settings, auth_handler, turn_statistics.clone()).await {
+                Ok(s) => {
+                    // Collect per-device TURN usage into the local sqlite rollup
+                    // for as long as the server runs.
+                    let collector = crate::service::turn_usage_collector::TurnUsageCollector::new(
+                        turn_statistics.clone(),
+                        conn_device_map.clone().into_inner(),
+                    );
+                    tokio::spawn(collector.run());
+                    Some(web::Data::from(s))
+                }
                 Err(e) => {
                     error!("Failed to start turn server: {}", e);
                     None
@@ -600,6 +622,7 @@ pub async fn run_with_hub(
             .app_data(shared_settings_data.clone())
             .app_data(tauri_login_token.clone())
             .app_data(connection_map.clone())
+            .app_data(conn_device_map.clone())
             .app_data(host_control_hub_data.clone())
             .app_data(validator_data.clone())
             .configure(|cfg| {

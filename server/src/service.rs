@@ -8,4 +8,5 @@ pub mod keyboard_event;
 pub mod mouse_event;
 pub mod signaling;
 pub mod terminal;
+pub mod turn_usage_collector;
 pub mod whiteboard_event;

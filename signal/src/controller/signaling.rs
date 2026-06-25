@@ -20,6 +20,7 @@ pub const TAG: &str = "Signaling";
     ),
 )]
 #[get("/api/desk/signaling")]
+#[allow(clippy::too_many_arguments)]
 pub async fn open_signaling_handle(
     req: HttpRequest,
     query: Option<web::Query<VersionInfo>>,
@@ -28,6 +29,7 @@ pub async fn open_signaling_handle(
     stream: web::Payload,
     turn_api_state: Option<web::Data<TurnApiState>>,
     validator_opt: Option<web::Data<Arc<dyn NodeTokenValidator>>>,
+    conn_device_map: Option<web::Data<crate::turn_usage::ConnectionDeviceMap>>,
 ) -> Result<HttpResponse, actix_web::Error> {
     info!("Incoming signaling request: {} {}", req.method(), req.uri());
 
@@ -99,6 +101,7 @@ pub async fn open_signaling_handle(
             user,
             ip,
             turn_settings,
+            conn_device_map.map(|d| d.into_inner()),
         )
         .await;
         if let Err(e) = result {

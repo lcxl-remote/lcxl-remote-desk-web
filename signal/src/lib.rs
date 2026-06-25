@@ -5,4 +5,5 @@ pub mod error;
 pub mod migration;
 pub mod model;
 pub mod service;
+pub mod turn_usage;
 pub mod version;

@@ -25,6 +25,58 @@ pub struct TurnApiState {
 pub struct Statistics {
     pub global: TurnSessionStatistics,
     pub sessions: HashMap<std::net::SocketAddr, TurnSessionStatistics>,
+    /// Per-connection cumulative counters, keyed by the signaling
+    /// `connection_id` resolved at TURN auth time. This is the dimension a
+    /// usage flusher diffs and persists; it is independent of `SocketAddr`
+    /// (which drifts with NAT rebinding).
+    pub by_connection: HashMap<String, TurnSessionStatistics>,
+    /// Maps a TURN client's source address to its `connection_id`, populated by
+    /// the auth handler. `TrackedUdpConn` consults this to fold per-address
+    /// bytes into `by_connection`.
+    addr_to_conn: HashMap<std::net::SocketAddr, String>,
+}
+
+impl Statistics {
+    /// Bind a TURN client's `src_addr` to its `connection_id` (called at auth
+    /// time). Last-writer-wins so that NAT rebinding / address reuse rebinds the
+    /// address to whichever connection most recently authenticated from it.
+    pub fn record_binding(&mut self, src_addr: std::net::SocketAddr, connection_id: &str) {
+        self.addr_to_conn
+            .insert(src_addr, connection_id.to_string());
+    }
+
+    /// Independent-clone snapshot of the per-connection cumulative counters, for
+    /// a flusher to diff against its own baseline without holding the lock.
+    pub fn snapshot_by_connection(&self) -> HashMap<String, TurnSessionStatistics> {
+        self.by_connection.clone()
+    }
+
+    /// The `connection_id` currently bound to `addr`, if any. Primarily for
+    /// diagnostics and tests asserting the auth handler bound the right key.
+    pub fn connection_of(&self, addr: &std::net::SocketAddr) -> Option<&str> {
+        self.addr_to_conn.get(addr).map(String::as_str)
+    }
+
+    /// Fold a received-direction sample into `by_connection` when `addr` has a
+    /// known binding. The per-address / global counters are updated by the
+    /// caller; this only handles the connection dimension.
+    pub fn record_recv(&mut self, addr: std::net::SocketAddr, bytes: usize) {
+        if let Some(conn_id) = self.addr_to_conn.get(&addr) {
+            let entry = self.by_connection.entry(conn_id.clone()).or_default();
+            entry.received_bytes += bytes;
+            entry.received_pkts += 1;
+        }
+    }
+
+    /// Fold a sent-direction sample into `by_connection` when `target` has a
+    /// known binding.
+    pub fn record_send(&mut self, target: std::net::SocketAddr, bytes: usize) {
+        if let Some(conn_id) = self.addr_to_conn.get(&target) {
+            let entry = self.by_connection.entry(conn_id.clone()).or_default();
+            entry.send_bytes += bytes;
+            entry.send_pkts += 1;
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, ToSchema)]
@@ -171,6 +223,74 @@ impl TurnSettings {
 }
 
 #[cfg(test)]
+mod statistics_tests {
+    use super::*;
+
+    fn addr(port: u16) -> std::net::SocketAddr {
+        std::net::SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    #[test]
+    fn bound_addr_folds_into_by_connection() {
+        let mut stats = Statistics::default();
+        stats.record_binding(addr(1000), "conn-a");
+
+        stats.record_recv(addr(1000), 100);
+        stats.record_send(addr(1000), 40);
+
+        let conn = stats.by_connection.get("conn-a").expect("connection entry");
+        assert_eq!(conn.received_bytes, 100);
+        assert_eq!(conn.received_pkts, 1);
+        assert_eq!(conn.send_bytes, 40);
+        assert_eq!(conn.send_pkts, 1);
+    }
+
+    #[test]
+    fn unbound_addr_does_not_touch_by_connection() {
+        let mut stats = Statistics::default();
+        stats.record_recv(addr(2000), 100);
+        stats.record_send(addr(2000), 40);
+        assert!(stats.by_connection.is_empty());
+    }
+
+    #[test]
+    fn addr_reuse_is_last_writer_wins() {
+        let mut stats = Statistics::default();
+        stats.record_binding(addr(3000), "conn-old");
+        stats.record_recv(addr(3000), 10);
+        // Same address rebinds to a new connection (NAT reuse).
+        stats.record_binding(addr(3000), "conn-new");
+        stats.record_recv(addr(3000), 50);
+
+        assert_eq!(
+            stats.by_connection.get("conn-old").unwrap().received_bytes,
+            10
+        );
+        assert_eq!(
+            stats.by_connection.get("conn-new").unwrap().received_bytes,
+            50
+        );
+    }
+
+    #[test]
+    fn snapshot_is_independent_clone() {
+        let mut stats = Statistics::default();
+        stats.record_binding(addr(4000), "conn-x");
+        stats.record_recv(addr(4000), 25);
+
+        let snap = stats.snapshot_by_connection();
+        // Mutating the live stats must not change the snapshot.
+        stats.record_recv(addr(4000), 75);
+
+        assert_eq!(snap.get("conn-x").unwrap().received_bytes, 25);
+        assert_eq!(
+            stats.by_connection.get("conn-x").unwrap().received_bytes,
+            100
+        );
+    }
+}
+
+#[cfg(test)]
 mod rest_ice_server_tests {
     use super::*;
 
@@ -193,7 +313,11 @@ mod rest_ice_server_tests {
 
     #[test]
     fn none_without_secret_or_interface() {
-        assert!(settings(None, true).get_rest_ice_servers("host-1", 60).is_none());
+        assert!(
+            settings(None, true)
+                .get_rest_ice_servers("host-1", 60)
+                .is_none()
+        );
         assert!(
             settings(Some("s"), false)
                 .get_rest_ice_servers("host-1", 60)
@@ -209,7 +333,14 @@ mod rest_ice_server_tests {
         assert_eq!(ice.urls, vec!["turn:192.168.50.5:3478?transport=udp"]);
         // username = "{expiration}:host-1"
         assert!(ice.username.ends_with(":host-1"));
-        assert!(ice.username.split(':').next().unwrap().parse::<u64>().is_ok());
+        assert!(
+            ice.username
+                .split(':')
+                .next()
+                .unwrap()
+                .parse::<u64>()
+                .is_ok()
+        );
     }
 }
 
