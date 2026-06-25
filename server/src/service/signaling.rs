@@ -455,16 +455,7 @@ impl DeskSession {
                     .get_data::<desk_signal_facade::model::system_settings::RemoteSystemSettings>()?;
                 {
                     let mut settings = self.settings.write().await;
-                    settings.system.enable_ipv6 = remote_settings.enable_ipv6;
-                    settings.system.port = remote_settings.port;
-                    settings.system.listen_addr_ipv4 = remote_settings.listen_addr_ipv4;
-                    settings.system.listen_addr_ipv6 = remote_settings.listen_addr_ipv6;
-                    settings.system.locale = remote_settings.locale;
-                    settings.system.signaling_url = remote_settings.signaling_url;
-                    settings.system.signaling_token = remote_settings.signaling_token;
-                    settings.system.manager_url = remote_settings.manager_url;
-                    settings.system.auto_start = remote_settings.auto_start;
-                    settings.system.manager_api_token = remote_settings.manager_api_token;
+                    apply_remote_system_settings(&mut settings.system, remote_settings);
                     settings.save()?;
                 }
                 self.session
@@ -512,6 +503,71 @@ pub fn should_short_circuit_control(asked: bool, currently_accepted: bool) -> bo
 /// it was previously denied.
 pub fn should_short_circuit_clipboard(asked: bool, currently_accepted: bool) -> bool {
     asked && currently_accepted
+}
+
+/// Apply a manager-pushed `RemoteSystemSettings` onto the local `SystemSettings`.
+///
+/// `auto_start` is intentionally NOT copied: it is node-local OS state (a
+/// LaunchAgent on macOS, an OS-service / login entry elsewhere) and may only be
+/// changed via this node's own `/settings` endpoint, never pushed from a remote
+/// manager — otherwise a manager-wide settings update could silently toggle a
+/// host's unattended auto-start. The protocol field is left untouched; we simply
+/// don't act on it here.
+fn apply_remote_system_settings(
+    system: &mut crate::model::settings::SystemSettings,
+    remote: desk_signal_facade::model::system_settings::RemoteSystemSettings,
+) {
+    system.enable_ipv6 = remote.enable_ipv6;
+    system.port = remote.port;
+    system.listen_addr_ipv4 = remote.listen_addr_ipv4;
+    system.listen_addr_ipv6 = remote.listen_addr_ipv6;
+    system.locale = remote.locale;
+    system.signaling_url = remote.signaling_url;
+    system.signaling_token = remote.signaling_token;
+    system.manager_url = remote.manager_url;
+    system.manager_api_token = remote.manager_api_token;
+}
+
+#[cfg(test)]
+mod apply_remote_settings_tests {
+    // SystemSettings has a private field, so cross-module struct-literal init is
+    // impossible; the tests build via Default then assign the public fields.
+    #![allow(clippy::field_reassign_with_default)]
+    use super::*;
+    use crate::model::settings::SystemSettings;
+    use desk_signal_facade::model::system_settings::RemoteSystemSettings;
+
+    /// A manager push updates the regular fields but must NOT change the
+    /// node-local `auto_start`, whichever way it was set locally.
+    #[test]
+    fn remote_update_preserves_local_auto_start() {
+        for local in [Some(true), Some(false), None] {
+            let mut system = SystemSettings::default();
+            system.auto_start = local;
+            system.port = 1;
+            let remote = RemoteSystemSettings {
+                enable_ipv6: true,
+                port: 9090,
+                listen_addr_ipv4: "1.2.3.4".to_string(),
+                listen_addr_ipv6: "::1".to_string(),
+                locale: Some("zh-CN".to_string()),
+                signaling_url: Some("ws://s".to_string()),
+                signaling_token: Some("tok".to_string()),
+                manager_url: Some("ws://m".to_string()),
+                // Even if the manager sends a flipped auto_start, it is ignored.
+                auto_start: Some(!local.unwrap_or(false)),
+                manager_api_token: Some("mtok".to_string()),
+            };
+
+            apply_remote_system_settings(&mut system, remote);
+
+            // Regular field applied...
+            assert_eq!(system.port, 9090);
+            assert_eq!(system.manager_url.as_deref(), Some("ws://m"));
+            // ...but auto_start untouched.
+            assert_eq!(system.auto_start, local);
+        }
+    }
 }
 
 #[cfg(test)]

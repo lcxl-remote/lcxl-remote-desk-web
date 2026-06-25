@@ -4,6 +4,12 @@ pub mod diagnose;
 pub mod error;
 pub mod exec;
 pub mod host_control;
+#[cfg(target_os = "macos")]
+pub mod macos_agent;
+#[cfg(target_os = "macos")]
+pub mod macos_autologin;
+#[cfg(target_os = "macos")]
+pub mod macos_permissions;
 pub mod mcp;
 pub mod model;
 pub mod openapi;
@@ -23,7 +29,7 @@ use std::{
 
 use crate::{
     controller::{
-        info::{query_backend_info, query_server_info, query_sysinfo},
+        info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
         init::init_system,
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
         service_mgmt::{install_service, uninstall_service},
@@ -197,6 +203,7 @@ pub fn configure_api_surface(
                     .service(open_terminal_session)
                     .service(query_sysinfo)
                     .service(query_backend_info)
+                    .service(query_macos_autologin)
                     .service(query_virtual_display_settings)
                     .service(update_virtual_display_settings)
                     .configure(move |cfg| {

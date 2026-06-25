@@ -51,6 +51,66 @@ impl SystemInfo {
     }
 }
 
+/// Background auto-start (macOS LaunchAgent) state. macOS-specific; `None` on
+/// other platforms, which use the OS-service install path instead. This is
+/// deliberately separate from `service_installed` (a Windows-service signal
+/// consumed elsewhere in the console) so the two never alias.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, ToSchema)]
+pub struct BackgroundStart {
+    /// The LaunchAgent plist exists — the single source of truth for the macOS
+    /// `auto_start` flag.
+    pub configured: bool,
+    /// launchd currently has the agent loaded in this GUI session. `false` right
+    /// after enabling is normal: it takes effect at the next login/restart.
+    pub loaded: bool,
+    /// The executable the plist points at still exists on disk.
+    pub path_valid: bool,
+}
+
+/// macOS TCC permission grants. macOS-specific; `None` on other platforms.
+/// Two independent fields because screen capture and input injection each need
+/// their own grant — they cannot be folded into a single privilege bool.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, ToSchema)]
+pub struct MacosPermissions {
+    /// Screen Recording grant (`CGPreflightScreenCaptureAccess`).
+    pub screen_recording: bool,
+    /// Accessibility / synthetic input grant (`AXIsProcessTrusted`).
+    pub accessibility: bool,
+}
+
+/// macOS automatic-login helper state, surfaced to the settings page.
+///
+/// Automatic login is the unattended fallback on macOS (pre-login capture is
+/// blocked by Apple). The app never handles the plaintext password — it only
+/// reports read-only state and hands the user a guided deep link plus a
+/// copy-paste command that prompts for the password interactively. `supported`
+/// is `false` on every non-macOS platform (the whole struct is then inert), so
+/// the wire shape stays identical across platforms.
+#[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
+pub struct MacosAutologin {
+    /// Whether this platform is macOS (the only place the helper applies).
+    pub supported: bool,
+    /// FileVault is active. When true, macOS disables automatic login entirely
+    /// and it cannot be bypassed — the UI must surface this and stop.
+    pub filevault_enabled: bool,
+    /// Automatic login is currently configured (a user is set).
+    pub configured: bool,
+    /// The user automatic login is set to, if any.
+    pub autologin_user: Option<String>,
+    /// Whether automatic login can be enabled right now
+    /// (`supported && !filevault_enabled`). Purely a convenience for the UI.
+    pub available: bool,
+    /// Current login user, used to pre-fill the manual command. `$USER` of the
+    /// resident app process.
+    pub current_user: Option<String>,
+    /// Copy-paste command that enables automatic login for `current_user`
+    /// (placeholder `<user>` when unknown). Uses `-password -` so `sysadminctl`
+    /// prompts for the password interactively; the app never sees it.
+    pub enable_command: String,
+    /// Copy-paste command that turns automatic login back off. Takes no password.
+    pub disable_command: String,
+}
+
 /// Server information
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
 pub struct ServerInfo {
@@ -71,6 +131,10 @@ pub struct ServerInfo {
     pub server_binary_available: bool,
     /// Default installation directory proposed to the user when installing the service.
     pub default_install_path: String,
+    /// macOS background auto-start (LaunchAgent) state; `None` on non-macOS.
+    pub background_start: Option<BackgroundStart>,
+    /// macOS TCC permission grants; `None` on non-macOS.
+    pub macos_permissions: Option<MacosPermissions>,
 }
 
 /// Runtime backend diagnostics

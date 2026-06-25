@@ -6,7 +6,7 @@ use crate::{
     TauriIsAdminOverride,
     error::DeskError,
     model::{
-        info::{BackendInfo, ServerInfo, SystemInfo},
+        info::{BackendInfo, MacosAutologin, ServerInfo, SystemInfo},
         settings::{SharedSettings, StartupMode},
     },
 };
@@ -93,6 +93,23 @@ pub async fn query_server_info(
     let server_binary_available = server_binary_available();
     let default_install_path = crate::daemon::windows_service::default_install_dir();
 
+    // macOS uses a LaunchAgent (not the OS-service path), so it reports
+    // background_start + TCC grants instead; other platforms leave both None.
+    #[cfg(target_os = "macos")]
+    let (background_start, macos_permissions) = {
+        let s = crate::macos_agent::status();
+        (
+            Some(crate::model::info::BackgroundStart {
+                configured: s.configured,
+                loaded: s.loaded,
+                path_valid: s.path_valid,
+            }),
+            Some(crate::macos_permissions::probe()),
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (background_start, macos_permissions) = (None, None);
+
     let info = ServerInfo {
         startup_mode,
         api_version: SERVER_API_VERSION,
@@ -101,9 +118,66 @@ pub async fn query_server_info(
         is_admin,
         server_binary_available,
         default_install_path,
+        background_start,
+        macos_permissions,
     };
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))
+}
+
+#[utoipa::path(
+    tag = TAG,
+    summary = "Get macOS automatic-login helper status",
+    responses(
+        (status = 200, description = "Get macOS automatic-login status successfully", body=RestResponse<MacosAutologin>),
+    ),
+)]
+#[get("/macos/autologin")]
+pub async fn query_macos_autologin() -> Result<HttpResponse, DeskError> {
+    // Read-only probe. On macOS this shells out to two fast, non-mutating
+    // diagnostic commands (`fdesetup isactive`, `sysadminctl -autologin status`);
+    // it is settings-page-only (low frequency), mirroring the synchronous probe
+    // already done in `query_server_info`.
+    let info = macos_autologin_status();
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(info)))
+}
+
+/// Build the [`MacosAutologin`] DTO. The app never handles the plaintext
+/// password: it reports read-only state and emits guided commands whose
+/// `-password -` makes `sysadminctl` prompt for the password interactively.
+#[cfg(target_os = "macos")]
+fn macos_autologin_status() -> MacosAutologin {
+    let status = crate::macos_autologin::probe();
+    let current_user = std::env::var("USER").ok().filter(|u| !u.is_empty());
+    // Pre-fill the manual command with the live user when known, else a visible
+    // placeholder the user can edit before running it.
+    let username_for_cmd = current_user.clone().unwrap_or_else(|| "<user>".to_string());
+    MacosAutologin {
+        supported: true,
+        filevault_enabled: status.filevault_enabled,
+        configured: status.autologin_user.is_some(),
+        available: !status.filevault_enabled,
+        autologin_user: status.autologin_user,
+        current_user,
+        enable_command: crate::macos_autologin::build_enable_command(&username_for_cmd),
+        disable_command: crate::macos_autologin::disable_command().to_string(),
+    }
+}
+
+/// Non-macOS platforms have no automatic-login helper; report it as unsupported
+/// so the wire shape stays identical while the UI hides the card.
+#[cfg(not(target_os = "macos"))]
+fn macos_autologin_status() -> MacosAutologin {
+    MacosAutologin {
+        supported: false,
+        filevault_enabled: false,
+        configured: false,
+        autologin_user: None,
+        available: false,
+        current_user: None,
+        enable_command: String::new(),
+        disable_command: String::new(),
+    }
 }
 
 /// Check whether the `lcxl-remote-desk-server` binary is available for service

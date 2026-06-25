@@ -1,5 +1,7 @@
 mod error;
 mod ipc_client;
+#[cfg(target_os = "macos")]
+mod macos_relocate;
 mod platform;
 mod private_screen;
 mod security_approval;
@@ -14,7 +16,10 @@ use std::sync::{
 static IS_EXITING: AtomicBool = AtomicBool::new(false);
 
 use clap::Parser as _;
-use lcxl_remote_desk_server::model::settings::{Args, Settings, StartupMode};
+use lcxl_remote_desk_server::model::settings::{Args, Settings};
+// StartupMode only gates the (non-macOS) elevate tray item.
+#[cfg(not(target_os = "macos"))]
+use lcxl_remote_desk_server::model::settings::StartupMode;
 use private_screen::PrivateScreenManager;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use whiteboard::WhiteboardManager;
@@ -40,6 +45,14 @@ fn build_tauri_context() -> tauri::Context {
 
 pub fn run() -> Result<(), DeskTauriError> {
     let args = Args::parse();
+
+    // Before anything that depends on a stable bundle path (TCC prompts,
+    // auto-start), offer to move into /Applications on a foreground launch. A
+    // hidden (auto-start) launch is already guarded to /Applications, so skip it.
+    #[cfg(target_os = "macos")]
+    if !args.hidden {
+        macos_relocate::maybe_offer_relocate();
+    }
 
     if desk_utils::permission::is_service_running(SERVICE_NAME) {
         log::info!("ServiceDaemon is running — launching as service shell (no embedded server)");
@@ -368,7 +381,7 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         let mut cmd = std::process::Command::new("pkexec");
         cmd.arg(&sidecar);
@@ -391,6 +404,21 @@ fn handle_service_op(op: lcxl_remote_desk_server::ServiceOp) {
         if let Err(e) = cmd.status() {
             log::error!("Service op failed: {e}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS does not use the OS-service install path. Unattended auto-start
+        // is a per-user LaunchAgent managed entirely through this node's
+        // /settings `auto_start` endpoint (server `macos_agent`); there is no
+        // privileged service to install here. Keeping this a no-op preserves a
+        // single management entry and avoids two code paths racing on the same
+        // plist. The frontend also hides the service install/uninstall UI on
+        // macOS, so this is not expected to be reached.
+        let _ = (&sidecar, &op);
+        log::warn!(
+            "Service op requested on macOS; ignored (auto-start is managed via the LaunchAgent)"
+        );
     }
 }
 
@@ -599,6 +627,7 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
             let host_control_hub =
                 std::sync::Arc::new(lcxl_remote_desk_server::host_control::HostControlHub::new_local());
 
+            #[cfg(not(target_os = "macos"))]
             let startup_mode = settings.args.startup_mode.clone();
             let server_settings = settings.clone();
             let hub_for_server = host_control_hub.clone();
@@ -666,11 +695,20 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
 
             let mut menu_items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&show_i];
 
-            let is_admin = desk_utils::permission::is_admin();
-            let is_signaling = startup_mode == StartupMode::Signaling;
+            // macOS has no UAC / integrity-level model: capabilities are gated by
+            // TCC (per-app/per-user, orthogonal to uid — even root can't bypass
+            // it), and capture / injection / user file-management need no root.
+            // Relaunching as root via osascript would actually DROP the app's TCC
+            // grants. So there is no "Elevate Privileges" item on macOS.
+            #[cfg(not(target_os = "macos"))]
             let elevate_i = MenuItem::with_id(app, "elevate", "Elevate Privileges (提升权限)", true, None::<&str>).unwrap();
-            if !is_admin && !is_signaling {
-                menu_items.push(&elevate_i);
+            #[cfg(not(target_os = "macos"))]
+            {
+                let is_admin = desk_utils::permission::is_admin();
+                let is_signaling = startup_mode == StartupMode::Signaling;
+                if !is_admin && !is_signaling {
+                    menu_items.push(&elevate_i);
+                }
             }
 
             menu_items.push(&quit_i);
@@ -694,46 +732,47 @@ pub fn run_tauri_app(settings: &Settings) -> Result<(), DeskTauriError> {
                             }
                         }
                         "elevate" => {
-                            let curr_exe = std::env::current_exe().unwrap();
-                            #[cfg(target_os = "windows")]
+                            // No elevate item exists on macOS (TCC, not root,
+                            // gates capability), so this arm is a no-op there.
+                            // Windows uses ShellExecute runas; Linux uses pkexec.
+                            #[cfg(not(target_os = "macos"))]
                             {
-                                use windows::Win32::UI::Shell::ShellExecuteW;
-                                use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
-                                use windows::core::PCWSTR;
-                                use std::os::windows::ffi::OsStrExt;
+                                let curr_exe = std::env::current_exe().unwrap();
+                                #[cfg(target_os = "windows")]
+                                {
+                                    use windows::Win32::UI::Shell::ShellExecuteW;
+                                    use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+                                    use windows::core::PCWSTR;
+                                    use std::os::windows::ffi::OsStrExt;
 
-                                let mut path: Vec<u16> = curr_exe.as_os_str().encode_wide().collect();
-                                path.push(0);
-                                let mut operation: Vec<u16> = "runas".encode_utf16().collect();
-                                operation.push(0);
+                                    let mut path: Vec<u16> = curr_exe.as_os_str().encode_wide().collect();
+                                    path.push(0);
+                                    let mut operation: Vec<u16> = "runas".encode_utf16().collect();
+                                    operation.push(0);
 
-                                unsafe {
-                                    ShellExecuteW(
-                                        None,
-                                        PCWSTR(operation.as_ptr()),
-                                        PCWSTR(path.as_ptr()),
-                                        None,
-                                        None,
-                                        SW_SHOW,
-                                    );
+                                    unsafe {
+                                        ShellExecuteW(
+                                            None,
+                                            PCWSTR(operation.as_ptr()),
+                                            PCWSTR(path.as_ptr()),
+                                            None,
+                                            None,
+                                            SW_SHOW,
+                                        );
+                                    }
+                                    std::process::exit(0);
                                 }
-                                std::process::exit(0);
-                            }
 
-                            #[cfg(any(target_os = "linux", target_os = "macos"))]
-                            {
-                                let cmd = if cfg!(target_os = "macos") {
-                                    format!("osascript -e 'do shell script \"{}\" with administrator privileges'", curr_exe.display())
-                                } else {
-                                    format!("pkexec \"{}\"", curr_exe.display())
-                                };
-
-                                std::process::Command::new("sh")
-                                    .arg("-c")
-                                    .arg(cmd)
-                                    .spawn()
-                                    .ok();
-                                std::process::exit(0);
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let cmd = format!("pkexec \"{}\"", curr_exe.display());
+                                    std::process::Command::new("sh")
+                                        .arg("-c")
+                                        .arg(cmd)
+                                        .spawn()
+                                        .ok();
+                                    std::process::exit(0);
+                                }
                             }
                         }
                         _ => {}

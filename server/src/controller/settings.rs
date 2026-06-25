@@ -39,7 +39,15 @@ pub struct TelemetryConsent {
 #[get("/settings")]
 pub async fn query_settings(settings: web::Data<SharedSettings>) -> Result<HttpResponse, AWError> {
     let settings = settings.read().await;
-    let system_settings = settings.system.clone();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut system_settings = settings.system.clone();
+    // On macOS the LaunchAgent plist is the single source of truth for
+    // auto_start: derive it here so the console reflects the real OS state even
+    // if a prior save raced or failed, instead of trusting the persisted flag.
+    #[cfg(target_os = "macos")]
+    {
+        system_settings.auto_start = Some(crate::macos_agent::is_configured());
+    }
     info!(
         "Query settings successfully, settings: {:?}",
         system_settings
@@ -63,11 +71,22 @@ pub async fn update_settings(
     let mut params = requst_json.into_inner();
     let mut settings = settings.write().await;
 
-    // Check auto_start flag and update system registry/startup folder if needed
-    if let Some(auto_start_enable) = params.auto_start
-        && let Err(e) = update_auto_start_status(auto_start_enable)
-    {
-        log::error!("Failed to update auto start status: {:?}", e);
+    // Apply the auto-start change to the OS first. On macOS the LaunchAgent is
+    // the single source of truth, so a failure must surface as a business error
+    // and must NOT fall through to persisting an inconsistent flag. (Windows /
+    // Linux keep the prior behavior via the same call; config_file_path is only
+    // consumed on macOS to write an absolute --config-file-path into the plist.)
+    if let Some(auto_start_enable) = params.auto_start {
+        let config_file_path = settings.args.config_file_path.clone();
+        if let Err(e) =
+            update_auto_start_status(auto_start_enable, std::path::Path::new(&config_file_path))
+        {
+            log::error!("Failed to update auto start status: {:?}", e);
+            return Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+                DeskErrorCode::AUTO_START_ERROR,
+                e.to_string(),
+            )));
+        }
     }
 
     // The console form omits the auto-generated internal fields; carry them over
@@ -684,5 +703,53 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = test::read_body_json(resp).await;
         assert_eq!(body["data"].as_bool(), Some(false));
+    }
+
+    // macOS auto_start is single-source-of-truth: derived from the LaunchAgent
+    // plist on read, and OS-applied (not persisted) on write.
+    // SystemSettings/Settings have private fields, so these build via Default
+    // then assign the public fields under test.
+    #[cfg(target_os = "macos")]
+    #[actix_web::test]
+    #[allow(clippy::field_reassign_with_default)]
+    async fn query_settings_derives_auto_start_from_launchagent() {
+        // A stale persisted `true` must be overridden by the real plist state.
+        let mut s = Settings::default();
+        s.system.auto_start = Some(true);
+        let shared = web::Data::new(SharedSettings::from(s));
+        let app = test::init_service(App::new().app_data(shared).service(query_settings)).await;
+
+        let req = test::TestRequest::get().uri("/settings").to_request();
+        let body: RestResponse<SystemSettings> = test::call_and_read_body_json(&app, req).await;
+        // The returned value equals the plist-derived state, not the persisted
+        // flag (which would differ in a clean env where no plist exists).
+        assert_eq!(
+            body.data.unwrap().auto_start,
+            Some(crate::macos_agent::is_configured())
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[actix_web::test]
+    #[allow(clippy::field_reassign_with_default)]
+    async fn update_settings_enable_auto_start_outside_app_dir_fails_without_persisting() {
+        // The test binary is not inside /Applications, so enabling auto-start
+        // must fail the app-dir guard, return a business error (HTTP 200 + a
+        // non-success body code), and must NOT fall through to persisting.
+        let shared = web::Data::new(SharedSettings::from(Settings::default()));
+        let app = test::init_service(App::new().app_data(shared).service(update_settings)).await;
+
+        let mut payload = SystemSettings::default();
+        payload.auto_start = Some(true);
+        let req = test::TestRequest::post()
+            .uri("/settings")
+            .set_json(&payload)
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        // Business errors are HTTP 200 with the error in the body code.
+        assert_eq!(resp.status(), 200);
+        let body: RestResponse<()> = test::read_body_json(resp).await;
+        assert!(!body.success);
+        assert_eq!(body.code, DeskErrorCode::AUTO_START_ERROR.code());
     }
 }
