@@ -3,18 +3,20 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save } from "lucide-react"
+import { Loader2, Save, Copy, ExternalLink } from "lucide-react"
 
 import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { useQueryBackendInfo } from "@/services/hooks/systemController/useQueryBackendInfo"
+import { useQueryMacosAutologin } from "@/services/hooks/systemController/useQueryMacosAutologin"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
+import { Badge } from "@/components/ui/badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { useToast } from "@/hooks/use-toast"
 import { TelemetryDisclosure } from "@/components/telemetry-disclosure"
@@ -50,6 +52,10 @@ export function SystemSettings() {
 
     const serverInfo = serverInfoResp?.data
     const backendInfo = backendInfoResp?.data
+
+    // macOS-only fields (`background_start` / `macos_permissions`) are `null`
+    // on every other platform, so their presence is the platform signal.
+    const isMac = serverInfo?.background_start != null
 
     const form = useForm<SystemSettingsFormValues>({
         resolver: zodResolver(systemSettingsSchema),
@@ -302,7 +308,7 @@ export function SystemSettings() {
                 </CardContent>
             </Card>
 
-            {(serverInfo?.startup_mode === "default" || serverInfo?.startup_mode === "service-daemon") && serverInfo.server_binary_available && (
+            {!isMac && (serverInfo?.startup_mode === "default" || serverInfo?.startup_mode === "service-daemon") && serverInfo.server_binary_available && (
                 <Card className="mt-6 border-amber-500/50 bg-amber-500/10 dark:border-amber-500/30 dark:bg-amber-500/10">
                     <CardHeader>
                         <CardTitle>{t("pages.system.settings.serviceManagement.title")}</CardTitle>
@@ -344,6 +350,65 @@ export function SystemSettings() {
                 open={uninstallDialogOpen}
                 onOpenChange={setUninstallDialogOpen}
             />
+
+            {isMac && serverInfo && (
+                <Card className="mt-6">
+                    <CardHeader>
+                        <CardTitle>{t("pages.system.settings.macos.title")}</CardTitle>
+                        <CardDescription>{t("pages.system.settings.macos.description")}</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-6">
+                        <div className="space-y-2">
+                            <h4 className="text-sm font-medium">{t("pages.system.settings.macos.backgroundStart.label")}</h4>
+                            <div className="flex items-center gap-2">
+                                {!serverInfo.background_start?.configured ? (
+                                    <Badge variant="secondary">{t("pages.system.settings.macos.backgroundStart.disabled")}</Badge>
+                                ) : serverInfo.background_start.loaded ? (
+                                    <Badge variant="default">{t("pages.system.settings.macos.backgroundStart.running")}</Badge>
+                                ) : (
+                                    <Badge variant="outline">{t("pages.system.settings.macos.backgroundStart.configuredPending")}</Badge>
+                                )}
+                            </div>
+                            {serverInfo.background_start?.configured && !serverInfo.background_start.path_valid && (
+                                <Alert variant="destructive">
+                                    <AlertTitle>{t("pages.system.settings.macos.backgroundStart.pathInvalidTitle")}</AlertTitle>
+                                    <AlertDescription>{t("pages.system.settings.macos.backgroundStart.pathInvalid")}</AlertDescription>
+                                </Alert>
+                            )}
+                        </div>
+
+                        <div className="space-y-3">
+                            <h4 className="text-sm font-medium">{t("pages.system.settings.macos.permissions.label")}</h4>
+                            <div className="flex items-center justify-between">
+                                <div className="space-y-0.5">
+                                    <p className="text-sm font-medium">{t("pages.system.settings.macos.permissions.screenRecording")}</p>
+                                    {!serverInfo.macos_permissions?.screen_recording && (
+                                        <p className="text-xs text-muted-foreground">{t("pages.system.settings.macos.permissions.grant")}</p>
+                                    )}
+                                </div>
+                                {serverInfo.macos_permissions?.screen_recording ? (
+                                    <Badge variant="default">{t("pages.system.settings.macos.permissions.granted")}</Badge>
+                                ) : (
+                                    <Badge variant="destructive">{t("pages.system.settings.macos.permissions.notGranted")}</Badge>
+                                )}
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <div className="space-y-0.5">
+                                    <p className="text-sm font-medium">{t("pages.system.settings.macos.permissions.accessibility")}</p>
+                                    {!serverInfo.macos_permissions?.accessibility && (
+                                        <p className="text-xs text-muted-foreground">{t("pages.system.settings.macos.permissions.grant")}</p>
+                                    )}
+                                </div>
+                                {serverInfo.macos_permissions?.accessibility ? (
+                                    <Badge variant="default">{t("pages.system.settings.macos.permissions.granted")}</Badge>
+                                ) : (
+                                    <Badge variant="destructive">{t("pages.system.settings.macos.permissions.notGranted")}</Badge>
+                                )}
+                            </div>
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
 
             <Card className="mt-6">
                 <CardHeader>

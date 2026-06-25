@@ -30,6 +30,13 @@ function ServiceInstallBanner() {
     const serverInfo = serverInfoResp?.data
     const [dialogOpen, setDialogOpen] = React.useState(false)
 
+    // macOS has no OS-service / UAC concept (background auto-start is a
+    // LaunchAgent). The `background_start` field is only present on macOS,
+    // so its presence is the platform signal for hiding this banner.
+    if (serverInfo?.background_start != null) {
+        return null
+    }
+
     // Show only in default (portable) mode when service is not installed
     if (!serverInfo || serverInfo.startup_mode !== "default" || serverInfo.service_installed !== false) {
         return null

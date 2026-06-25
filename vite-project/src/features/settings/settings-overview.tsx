@@ -15,6 +15,9 @@ export function SettingsOverview() {
 
     const isDeskServer = serverInfo.startup_mode === "desk_server" || serverInfo.startup_mode === "desk-server";
     const isSignaling = serverInfo.startup_mode === "signaling";
+    // macOS-only ServerInfo field; non-null only on macOS. The IDD virtual
+    // display is Windows-only, so its entry is hidden on macOS.
+    const isMac = serverInfo.background_start != null;
 
     return (
         <div className="flex flex-col gap-8 p-6 max-w-6xl mx-auto w-full">
@@ -146,19 +149,21 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
-                        <Link to="/system/virtual-display" className="block outline-none">
-                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
-                                <CardHeader>
-                                    <div className="flex items-center gap-2">
-                                        <Monitor className="h-5 w-5 text-primary" />
-                                        <CardTitle className="text-lg">{t('menu.settings.virtualDisplay')}</CardTitle>
-                                    </div>
-                                    <CardDescription className="mt-2 line-clamp-2">
-                                        {t('pages.virtualDisplay.description')}
-                                    </CardDescription>
-                                </CardHeader>
-                            </Card>
-                        </Link>
+                        {!isMac && (
+                            <Link to="/system/virtual-display" className="block outline-none">
+                                <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                    <CardHeader>
+                                        <div className="flex items-center gap-2">
+                                            <Monitor className="h-5 w-5 text-primary" />
+                                            <CardTitle className="text-lg">{t('menu.settings.virtualDisplay')}</CardTitle>
+                                        </div>
+                                        <CardDescription className="mt-2 line-clamp-2">
+                                            {t('pages.virtualDisplay.description')}
+                                        </CardDescription>
+                                    </CardHeader>
+                                </Card>
+                            </Link>
+                        )}
                         <Link to="/system/ai-model" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>

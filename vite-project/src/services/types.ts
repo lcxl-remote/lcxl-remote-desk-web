@@ -293,6 +293,27 @@ export type BackendInfo = {
 };
 
 /**
+ * @description Background auto-start (macOS LaunchAgent) state. macOS-specific; `None` on\nother platforms, which use the OS-service install path instead. This is\ndeliberately separate from `service_installed` (a Windows-service signal\nconsumed elsewhere in the console) so the two never alias.
+*/
+export type BackgroundStart = {
+    /**
+     * @description The LaunchAgent plist exists — the single source of truth for the macOS\n`auto_start` flag.
+     * @type boolean
+    */
+    configured: boolean;
+    /**
+     * @description launchd currently has the agent loaded in this GUI session. `false` right\nafter enabling is normal: it takes effect at the next login/restart.
+     * @type boolean
+    */
+    loaded: boolean;
+    /**
+     * @description The executable the plist points at still exists on disk.
+     * @type boolean
+    */
+    path_valid: boolean;
+};
+
+/**
  * @description Persisted edge collection policy. Mirrors the runtime\n[`desk_diagnose_core::selection::CollectionPolicy`] gate, read live at\ncollection time.
 */
 export type CollectionPolicySettings = {
@@ -1560,6 +1581,68 @@ export type LoginResult = {
 };
 
 /**
+ * @description macOS automatic-login helper state, surfaced to the settings page.\n\nAutomatic login is the unattended fallback on macOS (pre-login capture is\nblocked by Apple). The app never handles the plaintext password — it only\nreports read-only state and hands the user a guided deep link plus a\ncopy-paste command that prompts for the password interactively. `supported`\nis `false` on every non-macOS platform (the whole struct is then inert), so\nthe wire shape stays identical across platforms.
+*/
+export type MacosAutologin = {
+    /**
+     * @description The user automatic login is set to, if any.
+     * @type string,null
+    */
+    autologin_user?: string | null;
+    /**
+     * @description Whether automatic login can be enabled right now\n(`supported && !filevault_enabled`). Purely a convenience for the UI.
+     * @type boolean
+    */
+    available: boolean;
+    /**
+     * @description Automatic login is currently configured (a user is set).
+     * @type boolean
+    */
+    configured: boolean;
+    /**
+     * @description Current login user, used to pre-fill the manual command. `$USER` of the\nresident app process.
+     * @type string,null
+    */
+    current_user?: string | null;
+    /**
+     * @description Copy-paste command that turns automatic login back off. Takes no password.
+     * @type string
+    */
+    disable_command: string;
+    /**
+     * @description Copy-paste command that enables automatic login for `current_user`\n(placeholder `<user>` when unknown). Uses `-password -` so `sysadminctl`\nprompts for the password interactively; the app never sees it.
+     * @type string
+    */
+    enable_command: string;
+    /**
+     * @description FileVault is active. When true, macOS disables automatic login entirely\nand it cannot be bypassed — the UI must surface this and stop.
+     * @type boolean
+    */
+    filevault_enabled: boolean;
+    /**
+     * @description Whether this platform is macOS (the only place the helper applies).
+     * @type boolean
+    */
+    supported: boolean;
+};
+
+/**
+ * @description macOS TCC permission grants. macOS-specific; `None` on other platforms.\nTwo independent fields because screen capture and input injection each need\ntheir own grant — they cannot be folded into a single privilege bool.
+*/
+export type MacosPermissions = {
+    /**
+     * @description Accessibility / synthetic input grant (`AXIsProcessTrusted`).
+     * @type boolean
+    */
+    accessibility: boolean;
+    /**
+     * @description Screen Recording grant (`CGPreflightScreenCaptureAccess`).
+     * @type boolean
+    */
+    screen_recording: boolean;
+};
+
+/**
  * @description One per-model hourly usage row, projected for the frontend chart.
 */
 export type ModelUsageItem = {
@@ -1963,6 +2046,67 @@ export type RestResponseLogSettings = {
     success: boolean;
 };
 
+export type RestResponseMacosAutologin = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description macOS automatic-login helper state, surfaced to the settings page.\n\nAutomatic login is the unattended fallback on macOS (pre-login capture is\nblocked by Apple). The app never handles the plaintext password — it only\nreports read-only state and hands the user a guided deep link plus a\ncopy-paste command that prompts for the password interactively. `supported`\nis `false` on every non-macOS platform (the whole struct is then inert), so\nthe wire shape stays identical across platforms.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description The user automatic login is set to, if any.
+         * @type string,null
+        */
+        autologin_user?: string | null;
+        /**
+         * @description Whether automatic login can be enabled right now\n(`supported && !filevault_enabled`). Purely a convenience for the UI.
+         * @type boolean
+        */
+        available: boolean;
+        /**
+         * @description Automatic login is currently configured (a user is set).
+         * @type boolean
+        */
+        configured: boolean;
+        /**
+         * @description Current login user, used to pre-fill the manual command. `$USER` of the\nresident app process.
+         * @type string,null
+        */
+        current_user?: string | null;
+        /**
+         * @description Copy-paste command that turns automatic login back off. Takes no password.
+         * @type string
+        */
+        disable_command: string;
+        /**
+         * @description Copy-paste command that enables automatic login for `current_user`\n(placeholder `<user>` when unknown). Uses `-password -` so `sysadminctl`\nprompts for the password interactively; the app never sees it.
+         * @type string
+        */
+        enable_command: string;
+        /**
+         * @description FileVault is active. When true, macOS disables automatic login entirely\nand it cannot be bypassed — the UI must surface this and stop.
+         * @type boolean
+        */
+        filevault_enabled: boolean;
+        /**
+         * @description Whether this platform is macOS (the only place the helper applies).
+         * @type boolean
+        */
+        supported: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
 export type RestResponseModelUsageResult = {
     /**
      * @type integer, int32
@@ -2064,6 +2208,7 @@ export type RestResponseServerInfo = {
          * @type integer, int32
         */
         api_version: number;
+        background_start?: (null | BackgroundStart);
         /**
          * @description Default installation directory proposed to the user when installing the service.
          * @type string
@@ -2079,6 +2224,7 @@ export type RestResponseServerInfo = {
          * @type boolean
         */
         is_admin: boolean;
+        macos_permissions?: (null | MacosPermissions);
         /**
          * @description Whether the server binary is available for service installation.\nTrue when lcxl-remote-desk-server(.exe) exists alongside the current\nexecutable (both binaries share the same target directory in dev and\nthe same install directory in production).
          * @type boolean
@@ -2732,6 +2878,7 @@ export type ServerInfo = {
      * @type integer, int32
     */
     api_version: number;
+    background_start?: (null | BackgroundStart);
     /**
      * @description Default installation directory proposed to the user when installing the service.
      * @type string
@@ -2747,6 +2894,7 @@ export type ServerInfo = {
      * @type boolean
     */
     is_admin: boolean;
+    macos_permissions?: (null | MacosPermissions);
     /**
      * @description Whether the server binary is available for service installation.\nTrue when lcxl-remote-desk-server(.exe) exists alongside the current\nexecutable (both binaries share the same target directory in dev and\nthe same install directory in production).
      * @type boolean
@@ -3660,6 +3808,18 @@ export type ListFilesQueryResponse = ListFiles200;
 export type ListFilesQuery = {
     Response: ListFiles200;
     QueryParams: ListFilesQueryParams;
+    Errors: any;
+};
+
+/**
+ * @description Get macOS automatic-login status successfully
+*/
+export type QueryMacosAutologin200 = RestResponseMacosAutologin;
+
+export type QueryMacosAutologinQueryResponse = QueryMacosAutologin200;
+
+export type QueryMacosAutologinQuery = {
+    Response: QueryMacosAutologin200;
     Errors: any;
 };
 
