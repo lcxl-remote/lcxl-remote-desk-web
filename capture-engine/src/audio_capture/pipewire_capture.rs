@@ -504,6 +504,9 @@ mod tests {
         });
     }
 
+    // Requires a live PipeWire daemon; blocks waiting on real audio frames, so
+    // it hangs in headless / CI environments. Run explicitly with `--ignored`.
+    #[ignore = "requires a live PipeWire daemon"]
     #[test]
     fn test_pipewire_loop() -> Result<(), CaptureError> {
         initialize();
@@ -534,6 +537,9 @@ mod tests {
         Ok(())
     }
 
+    // Requires a live PipeWire daemon; blocks waiting on real audio frames, so
+    // it hangs in headless / CI environments. Run explicitly with `--ignored`.
+    #[ignore = "requires a live PipeWire daemon"]
     #[test]
     fn test_pipewire_capture() -> Result<(), CaptureError> {
         initialize();
