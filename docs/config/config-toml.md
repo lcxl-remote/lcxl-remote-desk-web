@@ -8,6 +8,11 @@ Server settings are managed via `conf/config.toml`. The config file path can be 
 - `port` — server listening port.
 - `listen_addr_ipv4` — IPv4 listening address.
 - `listen_addr_ipv6` — IPv6 listening address.
+- `signaling_url` — URL of a standalone signaling server to connect out to (leave empty to use only the embedded signaling server).
+- `signaling_token` — node access token for the remote signaling server (passed as `?token=` on the signaling WebSocket).
+- `manager_url` — URL of an enterprise manager's signaling endpoint to connect out to.
+- `manager_api_token` — access token for the manager (passed as `?token=` on the manager signaling WebSocket).
+- `local_signaling_token` — auto-generated, persisted token used by the local desk server (and other hosts) to authenticate with the co-located signaling server. Do not set by hand; it is a credential and is masked in logs.
 
 ## Log `[log]`
 

@@ -8,6 +8,11 @@
 - `port`——服务端监听端口。
 - `listen_addr_ipv4`——IPv4 监听地址。
 - `listen_addr_ipv6`——IPv6 监听地址。
+- `signaling_url`——要连接的独立信令服务器地址（留空则仅使用内置信令服务器）。
+- `signaling_token`——远程信令服务器的节点接入令牌（以 `?token=` 附在信令 WebSocket 上）。
+- `manager_url`——要连接的企业版 manager 信令地址。
+- `manager_api_token`——manager 的接入令牌（以 `?token=` 附在 manager 信令 WebSocket 上）。
+- `local_signaling_token`——自动生成并持久化的令牌，供本地 desk server（及其他被控端）与同机信令服务器鉴权。请勿手动设置；它是凭据，日志中已脱敏。
 
 ## 日志 `[log]`
 
