@@ -4,32 +4,42 @@ In addition to manual control, LCXL Remote Desk lets AI models **read and analyz
 
 ## How It Works
 
-When a user asks a question during a session (e.g. *"Why is this system slow?"*), the server orchestrates a strict pipeline:
+AI is orchestrated by the **central signaling server** (the "central brain"); the device is a **thin edge** that only provides read-only evidence on request. When a user asks a question during a session (e.g. *"Why is this system slow?"*), the central server drives a strict pipeline:
 
 ```mermaid
 graph LR
-    user[User question] --> orch[Server Orchestrator]
-    orch -->|read-only| evidence[Device Evidence]
-    evidence -->|Strict Redaction| model[AI Model]
+    user[User question] --> central[Central Signaling Brain]
+    central -->|CollectRequest| edge[Thin Edge Device]
+    edge -->|read-only collect| evidence[Device Evidence]
+    evidence -->|Strict Redaction<br/>on the edge| redacted[Redacted Evidence]
+    redacted -->|CollectResponse| central
+    central -->|call model| model[AI Model]
     model -->|stream| diag[Structured Diagnosis<br/>findings + suggested commands]
-    orch -.audit.-> audit[(Audit Trail)]
+    central -.audit.-> audit[(Audit Trail)]
 ```
 
-1. **Collect** read-only evidence (system info, processes, ports, logs, screenshots).
-2. **Redact** sensitive data locally — this step **fails closed**.
-3. **Call the model** (only after redaction succeeds).
-4. **Render** a structured diagnosis: findings + suggested commands.
+1. The central brain requests **read-only evidence** from the edge (system info, processes, ports, logs, screenshots).
+2. The edge **collects and redacts** the evidence locally — redaction **fails closed**, and raw screenshot bytes are stripped before anything leaves the host.
+3. The central brain **calls the model** (only after the edge's redaction succeeds).
+4. The central brain **renders** a structured diagnosis (findings + suggested commands) and streams it back to the browser.
 
 ## Key Properties
 
-- **Read-Only Data Collection** — gathers system info, processes, ports, logs, and screenshots.
-- **Model Agnostic** — compatible with both OpenAI-compatible and Anthropic endpoints.
-- **Suggest-Only Defaults** — the model proposes fixes; execution requires explicit user confirmation.
-- **Flexible Deployment** — diagnostic logic is centralized in the `desk-diagnose-core` crate. Nodes can act as evidence collectors that send redacted data to a central server for inference, enabling secure API-key management for fleet deployments.
+- **Thin Edge** — the device never runs model inference or holds provider credentials; it only collects and redacts evidence when the central brain asks.
+- **Read-Only Data Collection** — system info, processes, ports, logs, and screenshots, gated locally by the edge collection policy.
+- **Model Agnostic** — compatible with both OpenAI-compatible and Anthropic endpoints, configured centrally.
+- **Suggest-Only Defaults** — the model proposes fixes; execution requires explicit user confirmation, capped by each device's local execution ceiling.
+- **Shared Core** — the transport-neutral diagnostic logic lives in the `desk-diagnose-core` crate, reused by the central brain so behavior never drifts.
+
+::: tip DeskServer-only mode has no local brain
+A headless `desk-server` is a pure thin edge: it has **no embedded signaling server**, so it must be attached to a remote central server (signaling server or manager) to use AI features. The portable `default` mode embeds the signaling server in the same process, so it remains self-contained.
+:::
 
 ## Configuration
 
-Configure the provider, base URL, model, and API key from the management console. **API keys are strictly server-side secrets** — they are never returned to the browser, never written to logs, and never included in any public settings DTO.
+The **model provider** (provider, base URL, model, API key, output format, and the granted execution mode) is configured on the **central signaling server**. **API keys are strictly server-side secrets** — they are never returned to the browser, never written to logs, and never included in any public settings DTO.
+
+Each device additionally keeps two **local** controls in its own settings: an **execution ceiling** (the highest mode the AI may use on that device, which caps any central grant) and an **evidence collection policy** (`allow_logs` / `allow_screen`, the device's final say over what evidence may leave it).
 
 ## Security
 
