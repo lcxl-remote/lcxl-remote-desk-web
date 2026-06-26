@@ -3,20 +3,17 @@
 //!
 //! This crate carries only the MCP protocol layer (tool whitelist, schemas,
 //! dispatch) on top of the official Rust SDK [`rmcp`] over a stdio transport. It
-//! depends solely on [`desk_agent_protocol`]; the concrete read agent and the
-//! diagnose orchestrator are injected by `lcxl-remote-desk-server` through the
-//! [`ReadContextProvider`] / [`DiagnoseProvider`] traits, so there is no
-//! dependency cycle (server → mcp-server → agent-protocol) and the trust-field
-//! injection / auditing stay server-side.
+//! depends solely on [`desk_agent_protocol`]; the concrete read agent is injected
+//! by `lcxl-remote-desk-server` through the [`ReadContextProvider`] trait, so
+//! there is no dependency cycle (server → mcp-server → agent-protocol) and the
+//! trust-field injection / auditing stay server-side.
 //!
 //! Security stance (codex protocol §14):
 //! - The tool set is a **static whitelist** of read-only tools. No exec / write
-//!   / control tool exists — it cannot be reached because it is not defined.
-//! - `lcxl_diagnose` runs through [`DiagnoseProvider`], whose signature carries
-//!   **no screenshot option**, so an MCP client structurally cannot pull a
-//!   screen capture through the diagnose path.
-//! - `lcxl_recent_logs` is refused unless the server policy permits log reads;
-//!   `lcxl_diagnose` is refused unless the model gateway is configured.
+//!   / control tool exists — it cannot be reached because it is not defined. AI
+//!   diagnosis is **not** an MCP tool: it is orchestrated by the central signaling
+//!   brain, so the MCP surface stays a pure read-only context provider.
+//! - `lcxl_recent_logs` is refused unless the server policy permits log reads.
 
 use std::sync::Arc;
 
@@ -34,7 +31,6 @@ use rmcp::transport::stdio;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use desk_agent_protocol::diagnose::Diagnosis;
 use desk_agent_protocol::{
     AgentError, ContextKind, LogRecentParams, LogSeverity, NetworkPortsParams, ProcessListParams,
     ReadContextOutput, SystemInfoParams,
@@ -48,19 +44,6 @@ pub trait ReadContextProvider: Send + Sync {
     async fn read(&self, kind: ContextKind) -> Result<ReadContextOutput, AgentError>;
 }
 
-/// Runs a one-shot (non-streaming) diagnosis and returns the final
-/// [`Diagnosis`]. The signature deliberately carries **no screenshot option** so
-/// an MCP client cannot request a screen capture; the implementation forces
-/// `include_screen = false` and audits the run.
-#[async_trait]
-pub trait DiagnoseProvider: Send + Sync {
-    async fn diagnose(
-        &self,
-        question: String,
-        locale: Option<String>,
-    ) -> Result<Diagnosis, AgentError>;
-}
-
 /// Tool name for the system-info read.
 pub const TOOL_SYSTEM_INFO: &str = "lcxl_system_info";
 /// Tool name for the process-list read.
@@ -69,32 +52,16 @@ pub const TOOL_PROCESS_LIST: &str = "lcxl_process_list";
 pub const TOOL_NETWORK_PORTS: &str = "lcxl_network_ports";
 /// Tool name for the recent-logs read (gated by the `allow_logs` policy).
 pub const TOOL_RECENT_LOGS: &str = "lcxl_recent_logs";
-/// Tool name for a one-shot diagnosis (gated by gateway configuration).
-pub const TOOL_DIAGNOSE: &str = "lcxl_diagnose";
 
 /// The complete, static set of exposed tool names. The list is fixed — there is
-/// deliberately no exec / write / control tool.
+/// deliberately no exec / write / control tool, and no AI diagnosis (that is
+/// orchestrated centrally, not exposed as an MCP tool).
 pub const TOOL_WHITELIST: &[&str] = &[
     TOOL_SYSTEM_INFO,
     TOOL_PROCESS_LIST,
     TOOL_NETWORK_PORTS,
     TOOL_RECENT_LOGS,
-    TOOL_DIAGNOSE,
 ];
-
-/// Whether `lcxl_diagnose` can run, mirroring the diagnose gate's precedence so
-/// the MCP path reports the same reason as the signaling / model layers
-/// (manager-proxy is checked before configuration, so it wins even without
-/// direct credentials).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiagnoseAvailability {
-    /// Diagnosis can run.
-    Available,
-    /// The model gateway is not configured (no model / base URL / API key).
-    NotConfigured,
-    /// A manager-proxied gateway is selected but not implemented yet.
-    ManagerProxyUnavailable,
-}
 
 /// Live policy gate, queried on **every** tool call so a permission change takes
 /// effect on the next call rather than only on a server restart. The server-side
@@ -103,33 +70,22 @@ pub enum DiagnoseAvailability {
 pub trait McpPolicy: Send + Sync {
     /// Whether log reads (`lcxl_recent_logs`) are permitted right now.
     async fn allow_logs(&self) -> bool;
-    /// Whether / why `lcxl_diagnose` may run right now.
-    async fn diagnose_availability(&self) -> DiagnoseAvailability;
 }
 
 /// The read-only MCP server handler.
 #[derive(Clone)]
 pub struct McpServer {
     reader: Arc<dyn ReadContextProvider>,
-    diagnose: Arc<dyn DiagnoseProvider>,
     policy: Arc<dyn McpPolicy>,
 }
 
 impl McpServer {
-    pub fn new(
-        reader: Arc<dyn ReadContextProvider>,
-        diagnose: Arc<dyn DiagnoseProvider>,
-        policy: Arc<dyn McpPolicy>,
-    ) -> Self {
-        Self {
-            reader,
-            diagnose,
-            policy,
-        }
+    pub fn new(reader: Arc<dyn ReadContextProvider>, policy: Arc<dyn McpPolicy>) -> Self {
+        Self { reader, policy }
     }
 
     /// The static tool definitions (whitelist + JSON input schemas). Always the
-    /// same five read-only tools regardless of policy; policy is enforced at call
+    /// same four read-only tools regardless of policy; policy is enforced at call
     /// time, not by hiding tools.
     pub fn tools() -> Vec<Tool> {
         vec![
@@ -177,23 +133,6 @@ impl McpServer {
                         "severity": {"type": "array", "items": {"type": "string",
                             "enum": ["error", "warning", "info", "debug"]}}
                     },
-                    "additionalProperties": false
-                }),
-            ),
-            tool(
-                TOOL_DIAGNOSE,
-                "Run a one-shot AI diagnosis from read-only evidence and return a \
-                 structured result. Never captures the screen. Refused unless the \
-                 model gateway is configured.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "question": {"type": "string",
-                            "description": "The problem to diagnose."},
-                        "locale": {"type": "string",
-                            "description": "BCP-47 language tag for the answer."}
-                    },
-                    "required": ["question"],
                     "additionalProperties": false
                 }),
             ),
@@ -249,29 +188,6 @@ impl McpServer {
                     severity,
                 }))
                 .await
-            }
-            TOOL_DIAGNOSE => {
-                match self.policy.diagnose_availability().await {
-                    // Manager-proxy precedence matches the model / router layers:
-                    // report "proxy not available" even when direct credentials
-                    // are absent, not the misleading "not configured".
-                    DiagnoseAvailability::ManagerProxyUnavailable => {
-                        return Ok(error_result(
-                            "manager-proxied model gateway is not available yet",
-                        ));
-                    }
-                    DiagnoseAvailability::NotConfigured => {
-                        return Ok(error_result(
-                            "the AI model gateway is not configured; diagnosis is unavailable",
-                        ));
-                    }
-                    DiagnoseAvailability::Available => {}
-                }
-                let a: DiagnoseArgs = parse_args(args)?;
-                Ok(match self.diagnose.diagnose(a.question, a.locale).await {
-                    Ok(d) => success_json(&d),
-                    Err(e) => error_result(e.message),
-                })
             }
             other => Err(McpError::invalid_params(
                 format!("unknown tool: {other}"),
@@ -395,13 +311,6 @@ struct RecentLogsArgs {
     severity: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct DiagnoseArgs {
-    question: String,
-    #[serde(default)]
-    locale: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,56 +332,29 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingDiagnose {
-        calls: Mutex<Vec<(String, Option<String>)>>,
-    }
-    #[async_trait]
-    impl DiagnoseProvider for RecordingDiagnose {
-        async fn diagnose(
-            &self,
-            question: String,
-            locale: Option<String>,
-        ) -> Result<Diagnosis, AgentError> {
-            self.calls.lock().unwrap().push((question, locale));
-            Ok(Diagnosis::default())
-        }
-    }
-
     /// Fixed policy for tests that do not exercise liveness.
     struct StaticPolicy {
         allow_logs: bool,
-        availability: DiagnoseAvailability,
     }
     #[async_trait]
     impl McpPolicy for StaticPolicy {
         async fn allow_logs(&self) -> bool {
             self.allow_logs
         }
-        async fn diagnose_availability(&self) -> DiagnoseAvailability {
-            self.availability
-        }
     }
 
-    fn server(
-        allow_logs: bool,
-        availability: DiagnoseAvailability,
-    ) -> (McpServer, Arc<RecordingReader>, Arc<RecordingDiagnose>) {
+    fn server(allow_logs: bool) -> (McpServer, Arc<RecordingReader>) {
         let reader = Arc::new(RecordingReader::default());
-        let diagnose = Arc::new(RecordingDiagnose::default());
-        let policy = Arc::new(StaticPolicy {
-            allow_logs,
-            availability,
-        });
-        let server = McpServer::new(reader.clone(), diagnose.clone(), policy);
-        (server, reader, diagnose)
+        let policy = Arc::new(StaticPolicy { allow_logs });
+        let server = McpServer::new(reader.clone(), policy);
+        (server, reader)
     }
 
     fn is_error(result: &CallToolResult) -> bool {
         result.is_error.unwrap_or(false)
     }
 
-    /// The advertised tool set is exactly the five read-only whitelist tools.
+    /// The advertised tool set is exactly the four read-only whitelist tools.
     #[test]
     fn tools_are_exactly_the_readonly_whitelist() {
         let names: Vec<String> = McpServer::tools()
@@ -480,7 +362,7 @@ mod tests {
             .map(|t| t.name.to_string())
             .collect();
         assert_eq!(names, TOOL_WHITELIST);
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 4);
     }
 
     /// No exec / write / control tool is exposed — the whitelist is read-only.
@@ -497,23 +379,37 @@ mod tests {
         }
     }
 
-    /// An unknown / non-whitelist tool is rejected without touching the providers.
+    /// An unknown / non-whitelist tool is rejected without touching the provider.
     #[tokio::test]
     async fn unknown_tool_is_rejected_without_touching_providers() {
-        let (server, reader, diagnose) = server(true, DiagnoseAvailability::Available);
+        let (server, reader) = server(true);
         let err = server
             .dispatch_tool("lcxl_exec", Map::new())
             .await
             .expect_err("unknown tool must be a protocol error");
         let _ = err;
         assert!(reader.calls.lock().unwrap().is_empty());
-        assert!(diagnose.calls.lock().unwrap().is_empty());
+    }
+
+    /// `lcxl_diagnose` is no longer an MCP tool (diagnosis is orchestrated
+    /// centrally): it is rejected as an unknown tool, never reaching the reader.
+    #[tokio::test]
+    async fn diagnose_is_not_an_mcp_tool() {
+        let (server, reader) = server(true);
+        let mut args = Map::new();
+        args.insert("question".into(), json!("why is the cpu high?"));
+        let err = server
+            .dispatch_tool("lcxl_diagnose", args)
+            .await
+            .expect_err("diagnose must be an unknown tool");
+        let _ = err;
+        assert!(reader.calls.lock().unwrap().is_empty());
     }
 
     /// A read tool dispatches to the reader with the right capability.
     #[tokio::test]
     async fn system_info_dispatches_to_reader() {
-        let (server, reader, _) = server(true, DiagnoseAvailability::Available);
+        let (server, reader) = server(true);
         let result = server
             .dispatch_tool(TOOL_SYSTEM_INFO, Map::new())
             .await
@@ -528,7 +424,7 @@ mod tests {
     /// is disabled by policy.
     #[tokio::test]
     async fn recent_logs_denied_when_logs_disabled() {
-        let (server, reader, _) = server(false, DiagnoseAvailability::Available);
+        let (server, reader) = server(false);
         let result = server
             .dispatch_tool(TOOL_RECENT_LOGS, Map::new())
             .await
@@ -554,16 +450,12 @@ mod tests {
             async fn allow_logs(&self) -> bool {
                 self.allow_logs.load(Ordering::SeqCst)
             }
-            async fn diagnose_availability(&self) -> DiagnoseAvailability {
-                DiagnoseAvailability::Available
-            }
         }
 
         let flag = Arc::new(AtomicBool::new(true));
         let reader = Arc::new(RecordingReader::default());
         let server = McpServer::new(
             reader.clone(),
-            Arc::new(RecordingDiagnose::default()),
             Arc::new(MutablePolicy {
                 allow_logs: flag.clone(),
             }),
@@ -588,7 +480,7 @@ mod tests {
     /// `lcxl_recent_logs` reaches the reader when log access is permitted.
     #[tokio::test]
     async fn recent_logs_allowed_when_enabled() {
-        let (server, reader, _) = server(true, DiagnoseAvailability::Available);
+        let (server, reader) = server(true);
         let result = server
             .dispatch_tool(TOOL_RECENT_LOGS, Map::new())
             .await
@@ -598,68 +490,5 @@ mod tests {
             reader.calls.lock().unwrap()[0],
             ContextKind::LogRecent(_)
         ));
-    }
-
-    /// `lcxl_diagnose` is refused (and the diagnose provider untouched) when the
-    /// model gateway is not configured.
-    #[tokio::test]
-    async fn diagnose_denied_when_not_configured() {
-        let (server, _, diagnose) = server(true, DiagnoseAvailability::NotConfigured);
-        let mut args = Map::new();
-        args.insert("question".into(), json!("why is the cpu high?"));
-        let result = server.dispatch_tool(TOOL_DIAGNOSE, args).await.unwrap();
-        assert!(is_error(&result));
-        assert!(
-            diagnose.calls.lock().unwrap().is_empty(),
-            "diagnose must not run"
-        );
-    }
-
-    /// With `manager_proxy` selected, `lcxl_diagnose` is refused with the proxy
-    /// message (not "not configured") and never reaches the provider — matching
-    /// the model / router precedence even without direct credentials.
-    #[tokio::test]
-    async fn diagnose_manager_proxy_takes_precedence_over_not_configured() {
-        let (server, _, diagnose) = server(true, DiagnoseAvailability::ManagerProxyUnavailable);
-        let mut args = Map::new();
-        args.insert("question".into(), json!("why is the cpu high?"));
-        let result = server.dispatch_tool(TOOL_DIAGNOSE, args).await.unwrap();
-        assert!(is_error(&result));
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(
-            json.contains("manager-proxied"),
-            "expected the proxy message, got: {json}"
-        );
-        assert!(
-            diagnose.calls.lock().unwrap().is_empty(),
-            "diagnose must not run"
-        );
-    }
-
-    /// `lcxl_diagnose` runs through the diagnose provider when configured. The
-    /// provider signature carries no screenshot option, so an MCP client cannot
-    /// request a screen capture through this path.
-    #[tokio::test]
-    async fn diagnose_runs_when_configured() {
-        let (server, _, diagnose) = server(true, DiagnoseAvailability::Available);
-        let mut args = Map::new();
-        args.insert("question".into(), json!("why is the cpu high?"));
-        args.insert("locale".into(), json!("zh-CN"));
-        let result = server.dispatch_tool(TOOL_DIAGNOSE, args).await.unwrap();
-        assert!(!is_error(&result));
-        let calls = diagnose.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "why is the cpu high?");
-        assert_eq!(calls[0].1.as_deref(), Some("zh-CN"));
-    }
-
-    /// `lcxl_diagnose` without the required `question` argument is an invalid-params
-    /// error and never reaches the provider.
-    #[tokio::test]
-    async fn diagnose_requires_question() {
-        let (server, _, diagnose) = server(true, DiagnoseAvailability::Available);
-        let err = server.dispatch_tool(TOOL_DIAGNOSE, Map::new()).await;
-        assert!(err.is_err(), "missing question must be invalid params");
-        assert!(diagnose.calls.lock().unwrap().is_empty());
     }
 }
