@@ -1209,6 +1209,74 @@ fn gate_authz_frame(
     AuthzGateOutcome::Pass(unwrapped, Some(wrapper.authz))
 }
 
+/// True for the trusted-central plumbing frames that drive an evidence
+/// collection or a remote read-tool call. Unlike the AI control frames these may
+/// arrive either bare or wrapped, so they get the optional-wrapper gate rather
+/// than [`gate_authz_frame`]'s require-wrapper rule.
+fn is_central_plumbing_frame(t: SignalingType) -> bool {
+    matches!(
+        t,
+        SignalingType::CollectRequest | SignalingType::RemoteToolRequest
+    )
+}
+
+/// Optional-wrapper gate for trusted-central plumbing (`CollectRequest` /
+/// `RemoteToolRequest`). The caller has already confirmed the trusted-central
+/// source. These frames may arrive either:
+///
+/// - **bare** — the legacy / enterprise-manager path emits the raw payload; the
+///   trusted-central link authentication is the trust anchor, so a bare frame
+///   passes through to the router unchanged; or
+/// - **wrapped** in an [`AuthorizedControlPayload`] — an OSS signal central brain
+///   stamps and wraps every frame. A wrapper is validated against the frame's
+///   `request_id`, this daemon's audience, and expiry (replay / misroute
+///   defense-in-depth), then unwrapped to its inner payload for the router.
+///
+/// A wrapper that fails validation is dropped (no denied-result protocol exists
+/// for these read-only frames; the central reaper times the pending entry out).
+fn gate_optional_central_wrapper(
+    model: SignalingModel,
+    expected_audience: &str,
+    now_rfc3339: &str,
+) -> AuthzGateOutcome {
+    let has_wrapper = model
+        .get_raw_data()
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .map(|o| o.contains_key("authz") && o.contains_key("inner"))
+        .unwrap_or(false);
+
+    if !has_wrapper {
+        return AuthzGateOutcome::Pass(model, None);
+    }
+
+    let raw = match model.get_raw_data().clone() {
+        Some(v) => v,
+        None => return AuthzGateOutcome::Drop("wrapper frame had no data".to_string()),
+    };
+    let wrapper: AuthorizedControlPayload<serde_json::Value> = match serde_json::from_value(raw) {
+        Ok(w) => w,
+        Err(e) => return AuthzGateOutcome::Drop(format!("malformed authz wrapper: {e}")),
+    };
+
+    if let Err(e) = wrapper
+        .authz
+        .validate(&model.request_id, expected_audience, now_rfc3339)
+    {
+        return AuthzGateOutcome::Drop(format!("authz wrapper rejected: {e:?}"));
+    }
+
+    let unwrapped = SignalingModel::new(
+        &model.request_id,
+        model.signaling_type,
+        model.from_connection_id.clone(),
+        model.to_connection_id.clone(),
+        Some(wrapper.inner),
+        model.response_state.clone(),
+    );
+    AuthzGateOutcome::Pass(unwrapped, Some(wrapper.authz))
+}
+
 /// Outcome of the dedicated `EdgeExecRequest` authorization gate. Unlike the
 /// generic [`gate_authz_frame`] (which drops a frame whose wrapper fails to
 /// validate), a fleet request from the trusted-central link that fails
@@ -1358,6 +1426,39 @@ async fn handle_inbound_signaling_text(
             }
             FleetExecGateOutcome::Drop(reason) => {
                 warn!("[Proxy] Dropping EdgeExecRequest: {reason}");
+            }
+        }
+        return;
+    }
+
+    // `CollectRequest` / `RemoteToolRequest` carry an optional authorization
+    // wrapper: bare from the enterprise-manager path, wrapped from an OSS signal
+    // central brain. Validate-and-unwrap when wrapped, pass through when bare.
+    // The router handlers parse the inner payload either way, so unwrapping here
+    // keeps them untouched.
+    if is_central_plumbing_frame(parsed.signaling_type) {
+        match gate_optional_central_wrapper(parsed, &expected_audience, &now) {
+            AuthzGateOutcome::Pass(unwrapped, authz) => {
+                let effective_ctx;
+                let ctx_ref = match authz {
+                    Some(block) => {
+                        effective_ctx = RouterContext {
+                            inbound_authz: Some(block),
+                            ..router_ctx.clone()
+                        };
+                        &effective_ctx
+                    }
+                    None => router_ctx,
+                };
+                if let Err(e) = signaling_router::route(&unwrapped, ctx_ref).await {
+                    warn!(
+                        "[Proxy] router handler failed for {:?}: {e}",
+                        unwrapped.signaling_type
+                    );
+                }
+            }
+            AuthzGateOutcome::Drop(reason) => {
+                warn!("[Proxy] Dropping central plumbing frame: {reason}");
             }
         }
         return;
@@ -1922,6 +2023,94 @@ mod tests {
         );
         assert!(matches!(
             gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev-1", NOW),
+            AuthzGateOutcome::Drop(_)
+        ));
+    }
+
+    // ====== Optional-wrapper gate for central plumbing frames ======
+
+    fn collect_request_value(request_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "request_id": request_id,
+            "request": { "question": "why slow?" },
+        })
+    }
+
+    fn bare_collect_model(request_id: &str) -> SignalingModel {
+        SignalingModel::new(
+            request_id,
+            SignalingType::CollectRequest,
+            None,
+            None,
+            Some(collect_request_value(request_id)),
+            None,
+        )
+    }
+
+    fn wrapped_collect_model(
+        frame_request_id: &str,
+        block_request_id: &str,
+        audience: &str,
+    ) -> SignalingModel {
+        let wrapper = serde_json::json!({
+            "inner": collect_request_value(frame_request_id),
+            "authz": serde_json::to_value(block(block_request_id, audience)).unwrap(),
+        });
+        SignalingModel::new(
+            frame_request_id,
+            SignalingType::CollectRequest,
+            None,
+            None,
+            Some(wrapper),
+            None,
+        )
+    }
+
+    #[test]
+    fn bare_central_plumbing_frame_passes_through() {
+        // The enterprise-manager path emits bare CollectRequest; the trusted-
+        // central link authentication is the trust anchor, so it passes through.
+        let model = bare_collect_model("r1");
+        match gate_optional_central_wrapper(model, "dev-1", NOW) {
+            AuthzGateOutcome::Pass(m, authz) => {
+                assert!(authz.is_none(), "bare frame carries no authz block");
+                let obj = m.get_raw_data().as_ref().unwrap().as_object().unwrap();
+                assert!(obj.contains_key("request"));
+            }
+            AuthzGateOutcome::Drop(reason) => panic!("bare frame must pass, dropped: {reason}"),
+        }
+    }
+
+    #[test]
+    fn wrapped_central_plumbing_frame_is_unwrapped_to_inner() {
+        let model = wrapped_collect_model("r1", "r1", "dev-1");
+        match gate_optional_central_wrapper(model, "dev-1", NOW) {
+            AuthzGateOutcome::Pass(m, authz) => {
+                assert!(authz.is_some(), "validated wrapper yields an authz block");
+                let obj = m.get_raw_data().as_ref().unwrap().as_object().unwrap();
+                // Inner CollectRequest is exposed bare to the router.
+                assert!(!obj.contains_key("authz"));
+                assert!(obj.contains_key("request"));
+            }
+            AuthzGateOutcome::Drop(reason) => panic!("expected unwrap, dropped: {reason}"),
+        }
+    }
+
+    #[test]
+    fn wrapped_central_plumbing_frame_wrong_audience_is_dropped() {
+        let model = wrapped_collect_model("r1", "r1", "dev-1");
+        assert!(matches!(
+            gate_optional_central_wrapper(model, "other-device", NOW),
+            AuthzGateOutcome::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn wrapped_central_plumbing_frame_request_id_mismatch_is_dropped() {
+        // The authz block's request_id differs from the frame's request_id.
+        let model = wrapped_collect_model("frame-req", "inner-req", "dev-1");
+        assert!(matches!(
+            gate_optional_central_wrapper(model, "dev-1", NOW),
             AuthzGateOutcome::Drop(_)
         ));
     }
