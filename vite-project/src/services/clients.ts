@@ -4,7 +4,7 @@
 */
 
 import fetch from "@/lib/kubb-client";
-import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, GetCurrentUserQueryResponse, GetCurrentUser401, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QueryMacosAutologinQueryResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiModelSettingsQueryResponse, UpdateAiModelSettingsMutationRequest, UpdateAiModelSettingsMutationResponse, ValidateAiModelSettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, GetModelUsageQueryResponse, GetModelUsageQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
+import type { AckSecurityApprovalMutationRequest, AckSecurityApprovalMutationResponse, BatchDeleteDeviceCodesMutationRequest, BatchDeleteDeviceCodesMutationResponse, ChangePasswordMutationRequest, ChangePasswordMutationResponse, ChangePassword403, GetCurrentUserQueryResponse, GetCurrentUser401, QueryBackendInfoQueryResponse, ListConnectionsQueryResponse, ListDeviceCodesQueryResponse, ListDeviceCodesQueryParams, CreateDeviceCodeMutationRequest, CreateDeviceCodeMutationResponse, UpdateDeviceCodeMutationRequest, UpdateDeviceCodeMutationResponse, UpdateDeviceCodePathParams, DeleteDeviceCodeMutationResponse, DeleteDeviceCodePathParams, DeleteFileMutationRequest, DeleteFileMutationResponse, DeleteFile400, ListFilesQueryResponse, ListFilesQueryParams, QueryMacosAutologinQueryResponse, QuerySecuritySettingsQueryResponse, UpdateSecuritySettingsMutationRequest, UpdateSecuritySettingsMutationResponse, SubmitSecurityApprovalMutationRequest, SubmitSecurityApprovalMutationResponse, QuerySettingsQueryResponse, UpdateSettingsMutationRequest, UpdateSettingsMutationResponse, QueryAiPolicySettingsQueryResponse, UpdateAiPolicySettingsMutationRequest, UpdateAiPolicySettingsMutationResponse, QueryCollectionPolicySettingsQueryResponse, UpdateCollectionPolicySettingsMutationRequest, UpdateCollectionPolicySettingsMutationResponse, QueryLogSettingsQueryResponse, UpdateLogSettingsMutationRequest, UpdateLogSettingsMutationResponse, QueryTurnSettingsQueryResponse, UpdateTurnSettingsMutationRequest, UpdateTurnSettingsMutationResponse, QueryTurnClientSettingsQueryResponse, UpdateTurnClientSettingsMutationRequest, UpdateTurnClientSettingsMutationResponse, RegenerateTurnSecretMutationResponse, QueryVirtualDisplaySettingsQueryResponse, UpdateVirtualDisplaySettingsMutationRequest, UpdateVirtualDisplaySettingsMutationResponse, OpenSignalingHandleQueryResponse, OpenSignalingHandlePathParams, QuerySysinfoQueryResponse, UpdateTelemetryConsentMutationRequest, UpdateTelemetryConsentMutationResponse, QueryTelemetryStatusQueryResponse, OpenTerminalSessionQueryResponse, OpenTerminalSessionPathParams, OpenTerminalSessionQueryParams, ListTerminalQueryResponse, ListTerminalPathParams, InitSystemMutationRequest, InitSystemMutationResponse, InitSystem403, LoginAccountMutationRequest, LoginAccountMutationResponse, LoginAccount403, GetCaptchaMutationRequest, GetCaptchaMutationResponse, GetCaptcha400, GetCaptcha501, LogoutAccountMutationResponse, LoginTauriMutationResponse, LoginTauriQueryParams, LoginTauri403, GetModelProviderQueryResponse, UpdateModelProviderMutationRequest, UpdateModelProviderMutationResponse, GetModelUsageQueryResponse, GetModelUsageQueryParams, QueryServerInfoQueryResponse, InstallServiceMutationRequest, InstallServiceMutationResponse, InstallService503, UninstallServiceMutationResponse, UninstallService503, CreateTokenMutationRequest, CreateTokenMutationResponse, GetTurnInfoQueryResponse, GetTurnMetricsQueryResponse, GetTurnMetrics417, GetTurnSessionQueryResponse, GetTurnSessionQueryParams, DeleteTurnSessionMutationResponse, DeleteTurnSessionQueryParams, DeleteTurnSession417, GetTurnSessionStatisticsQueryResponse, GetTurnSessionStatisticsQueryParams, GetTurnSessionStatistics404, GetTurnUsageQueryResponse, GetTurnUsageQueryParams, InstallDriverMutationResponse, QueryDriverStatusQueryResponse, UninstallDriverMutationResponse } from "./types.ts";
 import type { Client, RequestConfig, ResponseErrorConfig } from "@/lib/kubb-client";
 
 function getGetCurrentUserUrl() {
@@ -338,57 +338,39 @@ export async function updateSettings(data: UpdateSettingsMutationRequest, config
   return res.data
 }
 
-function getQueryAiModelSettingsUrl() {
-  const res = { method: 'GET', url: `/api/desk/settings/ai-model` as const }
+function getQueryAiPolicySettingsUrl() {
+  const res = { method: 'GET', url: `/api/desk/settings/ai-policy` as const }
   return res
 }
 
 /**
- * @summary Query AI model settings
- * {@link /api/desk/settings/ai-model}
+ * @summary Query the edge AI execution policy
+ * {@link /api/desk/settings/ai-policy}
  */
-export async function queryAiModelSettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function queryAiPolicySettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<QueryAiModelSettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryAiModelSettingsUrl().url.toString(), ... requestConfig })
+  const res = await request<QueryAiPolicySettingsQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getQueryAiPolicySettingsUrl().url.toString(), ... requestConfig })
   return res.data
 }
 
-function getUpdateAiModelSettingsUrl() {
-  const res = { method: 'POST', url: `/api/desk/settings/ai-model` as const }
+function getUpdateAiPolicySettingsUrl() {
+  const res = { method: 'POST', url: `/api/desk/settings/ai-policy` as const }
   return res
 }
 
 /**
- * @summary Update AI model settings
- * {@link /api/desk/settings/ai-model}
+ * @summary Update the edge AI execution policy
+ * {@link /api/desk/settings/ai-policy}
  */
-export async function updateAiModelSettings(data: UpdateAiModelSettingsMutationRequest, config: Partial<RequestConfig<UpdateAiModelSettingsMutationRequest>> & { client?: Client } = {}) {
+export async function updateAiPolicySettings(data: UpdateAiPolicySettingsMutationRequest, config: Partial<RequestConfig<UpdateAiPolicySettingsMutationRequest>> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
   const requestData = data
 
-  const res = await request<UpdateAiModelSettingsMutationResponse, ResponseErrorConfig<Error>, UpdateAiModelSettingsMutationRequest>({ method : "POST", url : getUpdateAiModelSettingsUrl().url.toString(), data : requestData, ... requestConfig })
-  return res.data
-}
-
-function getValidateAiModelSettingsUrl() {
-  const res = { method: 'POST', url: `/api/desk/settings/ai-model/validate` as const }
-  return res
-}
-
-/**
- * @summary Validate the configured AI model gateway
- * {@link /api/desk/settings/ai-model/validate}
- */
-export async function validateAiModelSettings(config: Partial<RequestConfig> & { client?: Client } = {}) {
-  const { client: request = fetch, ...requestConfig } = config
-
-
-
-  const res = await request<ValidateAiModelSettingsMutationResponse, ResponseErrorConfig<Error>, unknown>({ method : "POST", url : getValidateAiModelSettingsUrl().url.toString(), ... requestConfig })
+  const res = await request<UpdateAiPolicySettingsMutationResponse, ResponseErrorConfig<Error>, UpdateAiPolicySettingsMutationRequest>({ method : "POST", url : getUpdateAiPolicySettingsUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 
@@ -785,6 +767,42 @@ export async function loginTauri(params: LoginTauriQueryParams, config: Partial<
 
 
   const res = await request<LoginTauriMutationResponse, ResponseErrorConfig<LoginTauri403>, unknown>({ method : "POST", url : getLoginTauriUrl().url.toString(), params, ... requestConfig })
+  return res.data
+}
+
+function getGetModelProviderUrl() {
+  const res = { method: 'GET', url: `/api/model/provider` as const }
+  return res
+}
+
+/**
+ * @summary Query the masked model-provider configuration
+ * {@link /api/model/provider}
+ */
+export async function getModelProvider(config: Partial<RequestConfig> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+
+
+  const res = await request<GetModelProviderQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getGetModelProviderUrl().url.toString(), ... requestConfig })
+  return res.data
+}
+
+function getUpdateModelProviderUrl() {
+  const res = { method: 'POST', url: `/api/model/provider` as const }
+  return res
+}
+
+/**
+ * @summary Update the model-provider configuration
+ * {@link /api/model/provider}
+ */
+export async function updateModelProvider(data: UpdateModelProviderMutationRequest, config: Partial<RequestConfig<UpdateModelProviderMutationRequest>> & { client?: Client } = {}) {
+  const { client: request = fetch, ...requestConfig } = config
+
+  const requestData = data
+
+  const res = await request<UpdateModelProviderMutationResponse, ResponseErrorConfig<Error>, UpdateModelProviderMutationRequest>({ method : "POST", url : getUpdateModelProviderUrl().url.toString(), data : requestData, ... requestConfig })
   return res.data
 }
 

@@ -36,133 +36,21 @@ export type ExecutionModeEnumKey = (typeof executionModeEnum)[keyof typeof execu
 
 export type ExecutionMode = ExecutionModeEnumKey;
 
-export const gatewayModeEnum = {
-    direct: "direct",
-    manager_proxy: "manager_proxy"
-} as const;
-
-export type GatewayModeEnumKey = (typeof gatewayModeEnum)[keyof typeof gatewayModeEnum];
-
 /**
- * @description Where the model call is dialed from.
+ * @description Public view returned by `GET /api/desk/settings/ai-policy`. Carries no\nsecret (the policy never held one).
 */
-export type GatewayMode = GatewayModeEnumKey;
-
-export const responseFormatModeEnum = {
-    none: "none",
-    json_object: "json_object",
-    json_schema: "json_schema"
-} as const;
-
-export type ResponseFormatModeEnumKey = (typeof responseFormatModeEnum)[keyof typeof responseFormatModeEnum];
-
-/**
- * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).
-*/
-export type ResponseFormatMode = ResponseFormatModeEnumKey;
-
-/**
- * @description Masked public view returned by `GET /api/desk/settings/ai-model`.\n\nCarries no secret: only whether a key is configured (`api_key_set`).
-*/
-export type AiModelSettingsPublic = {
-    /**
-     * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
-     * @type boolean
-    */
-    api_key_set: boolean;
-    /**
-     * @type string,null
-    */
-    base_url?: string | null;
+export type AiExecutionPolicyPublic = {
     /**
      * @type string
     */
     execution_mode: ExecutionMode;
-    /**
-     * @description Where the model call is dialed from.
-     * @type string
-    */
-    gateway_mode: GatewayMode;
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    max_context_bytes?: number | null;
-    /**
-     * @type string,null
-    */
-    model?: string | null;
-    /**
-     * @type string,null
-    */
-    provider?: string | null;
-    /**
-     * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).
-     * @type string
-    */
-    response_format: ResponseFormatMode;
 };
 
 /**
- * @description Update body for `POST /api/desk/settings/ai-model`.\n\nEvery field is optional: `None` leaves the stored value unchanged. `api_key`\nis write-only with three-way semantics (see [`AiModelSettings::apply_update`]).
+ * @description Update body for `POST /api/desk/settings/ai-policy`.
 */
-export type AiModelSettingsUpdate = {
-    /**
-     * @description Write-only. `None` = leave unchanged; `Some(\"\")` = clear; `Some(x)` = set.
-     * @type string,null
-    */
-    api_key?: string | null;
-    /**
-     * @type string,null
-    */
-    base_url?: string | null;
+export type AiExecutionPolicyUpdate = {
     execution_mode?: (null | ExecutionMode);
-    gateway_mode?: (null | GatewayMode);
-    /**
-     * @minLength 0
-     * @type integer,null, int64
-    */
-    max_context_bytes?: number | null;
-    /**
-     * @type string,null
-    */
-    model?: string | null;
-    /**
-     * @type string,null
-    */
-    provider?: string | null;
-    response_format?: (null | ResponseFormatMode);
-};
-
-/**
- * @description The outcome of a successful AI model gateway validation. On success the probe\nconfirms the gateway is reachable, the credentials are accepted, and the model\nanswered; these fields echo which provider / model responded.
-*/
-export type AiModelValidation = {
-    /**
-     * @description The wire adapter that was used.
-     * @type string
-    */
-    adapter: string;
-    /**
-     * @description Prompt tokens the gateway reported, if any.
-     * @type integer,null, int64
-    */
-    input_tokens?: number | null;
-    /**
-     * @description The model that answered the probe.
-     * @type string
-    */
-    model: string;
-    /**
-     * @description Completion tokens the gateway reported, if any.
-     * @type integer,null, int64
-    */
-    output_tokens?: number | null;
-    /**
-     * @description The provider whose adapter answered (e.g. `openai-compatible`).
-     * @type string
-    */
-    provider: string;
 };
 
 export type ApprovalAckParams = {
@@ -1663,6 +1551,86 @@ export type MacosPermissions = {
     screen_recording: boolean;
 };
 
+export const responseFormatModeEnum = {
+    none: "none",
+    json_object: "json_object",
+    json_schema: "json_schema"
+} as const;
+
+export type ResponseFormatModeEnumKey = (typeof responseFormatModeEnum)[keyof typeof responseFormatModeEnum];
+
+/**
+ * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. This is a signal-local copy of the\nedge\'s enum (the two crates keep separate implementations of the same shape).
+*/
+export type ResponseFormatMode = ResponseFormatModeEnumKey;
+
+/**
+ * @description Masked public view returned by the provider-config query endpoint. Carries no\nsecret: only whether a key is configured (`api_key_set`).
+*/
+export type ModelProviderPublic = {
+    /**
+     * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
+     * @type boolean
+    */
+    api_key_set: boolean;
+    /**
+     * @type string,null
+    */
+    base_url?: string | null;
+    /**
+     * @type string
+    */
+    execution_mode: ExecutionMode;
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    max_context_bytes?: number | null;
+    /**
+     * @type string,null
+    */
+    model?: string | null;
+    /**
+     * @type string,null
+    */
+    provider?: string | null;
+    /**
+     * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. This is a signal-local copy of the\nedge\'s enum (the two crates keep separate implementations of the same shape).
+     * @type string
+    */
+    response_format: ResponseFormatMode;
+};
+
+/**
+ * @description Update body for the provider-config update endpoint.\n\nEvery field is optional: `None` leaves the stored value unchanged. `api_key`\nis write-only with three-way semantics (see [`ModelProviderConfig::apply_update`]).
+*/
+export type ModelProviderUpdate = {
+    /**
+     * @description Write-only. `None` = leave unchanged; `Some(\"\")` = clear; `Some(x)` = set.
+     * @type string,null
+    */
+    api_key?: string | null;
+    /**
+     * @type string,null
+    */
+    base_url?: string | null;
+    execution_mode?: (null | ExecutionMode);
+    /**
+     * @minLength 0
+     * @type integer,null, int64
+    */
+    max_context_bytes?: number | null;
+    /**
+     * @type string,null
+    */
+    model?: string | null;
+    /**
+     * @type string,null
+    */
+    provider?: string | null;
+    response_format?: (null | ResponseFormatMode);
+};
+
 /**
  * @description One per-model hourly usage row, projected for the frontend chart.
 */
@@ -1800,98 +1768,20 @@ export type RequestRemoteModel = {
     ice_servers?: LcxlRTCIceServer[];
 };
 
-export type RestResponseAiModelSettingsPublic = {
+export type RestResponseAiExecutionPolicyPublic = {
     /**
      * @type integer, int32
     */
     code: number;
     /**
-     * @description Masked public view returned by `GET /api/desk/settings/ai-model`.\n\nCarries no secret: only whether a key is configured (`api_key_set`).
+     * @description Public view returned by `GET /api/desk/settings/ai-policy`. Carries no\nsecret (the policy never held one).
      * @type object | undefined
     */
     data?: {
-        /**
-         * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
-         * @type boolean
-        */
-        api_key_set: boolean;
-        /**
-         * @type string,null
-        */
-        base_url?: string | null;
         /**
          * @type string
         */
         execution_mode: ExecutionMode;
-        /**
-         * @description Where the model call is dialed from.
-         * @type string
-        */
-        gateway_mode: GatewayMode;
-        /**
-         * @minLength 0
-         * @type integer,null, int64
-        */
-        max_context_bytes?: number | null;
-        /**
-         * @type string,null
-        */
-        model?: string | null;
-        /**
-         * @type string,null
-        */
-        provider?: string | null;
-        /**
-         * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. Pick `json_schema` only when the\ngateway is known to *enforce* it (some gateways silently ignore unknown\n`response_format` types; others reject the request).
-         * @type string
-        */
-        response_format: ResponseFormatMode;
-    };
-    /**
-     * @type string,null
-    */
-    message?: string | null;
-    /**
-     * @type boolean
-    */
-    success: boolean;
-};
-
-export type RestResponseAiModelValidation = {
-    /**
-     * @type integer, int32
-    */
-    code: number;
-    /**
-     * @description The outcome of a successful AI model gateway validation. On success the probe\nconfirms the gateway is reachable, the credentials are accepted, and the model\nanswered; these fields echo which provider / model responded.
-     * @type object | undefined
-    */
-    data?: {
-        /**
-         * @description The wire adapter that was used.
-         * @type string
-        */
-        adapter: string;
-        /**
-         * @description Prompt tokens the gateway reported, if any.
-         * @type integer,null, int64
-        */
-        input_tokens?: number | null;
-        /**
-         * @description The model that answered the probe.
-         * @type string
-        */
-        model: string;
-        /**
-         * @description Completion tokens the gateway reported, if any.
-         * @type integer,null, int64
-        */
-        output_tokens?: number | null;
-        /**
-         * @description The provider whose adapter answered (e.g. `openai-compatible`).
-         * @type string
-        */
-        provider: string;
     };
     /**
      * @type string,null
@@ -2142,6 +2032,58 @@ export type RestResponseMacosAutologin = {
          * @type boolean
         */
         supported: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseModelProviderPublic = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Masked public view returned by the provider-config query endpoint. Carries no\nsecret: only whether a key is configured (`api_key_set`).
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @description Whether a non-empty API key is configured. The key itself is never\nreturned.
+         * @type boolean
+        */
+        api_key_set: boolean;
+        /**
+         * @type string,null
+        */
+        base_url?: string | null;
+        /**
+         * @type string
+        */
+        execution_mode: ExecutionMode;
+        /**
+         * @minLength 0
+         * @type integer,null, int64
+        */
+        max_context_bytes?: number | null;
+        /**
+         * @type string,null
+        */
+        model?: string | null;
+        /**
+         * @type string,null
+        */
+        provider?: string | null;
+        /**
+         * @description How the model gateway is asked to constrain its output format.\n\nThe diagnosis parser degrades gracefully regardless of this setting, so it is\npurely an enforcement hint to the gateway. This is a signal-local copy of the\nedge\'s enum (the two crates keep separate implementations of the same shape).
+         * @type string
+        */
+        response_format: ResponseFormatMode;
     };
     /**
      * @type string,null
@@ -3954,41 +3896,29 @@ export type UpdateSettingsMutation = {
 };
 
 /**
- * @description Query AI model settings successfully
+ * @description Query AI execution policy successfully
 */
-export type QueryAiModelSettings200 = RestResponseAiModelSettingsPublic;
+export type QueryAiPolicySettings200 = RestResponseAiExecutionPolicyPublic;
 
-export type QueryAiModelSettingsQueryResponse = QueryAiModelSettings200;
+export type QueryAiPolicySettingsQueryResponse = QueryAiPolicySettings200;
 
-export type QueryAiModelSettingsQuery = {
-    Response: QueryAiModelSettings200;
+export type QueryAiPolicySettingsQuery = {
+    Response: QueryAiPolicySettings200;
     Errors: any;
 };
 
 /**
- * @description Update AI model settings successfully
+ * @description Update AI execution policy successfully
 */
-export type UpdateAiModelSettings200 = any;
+export type UpdateAiPolicySettings200 = any;
 
-export type UpdateAiModelSettingsMutationRequest = AiModelSettingsUpdate;
+export type UpdateAiPolicySettingsMutationRequest = AiExecutionPolicyUpdate;
 
-export type UpdateAiModelSettingsMutationResponse = UpdateAiModelSettings200;
+export type UpdateAiPolicySettingsMutationResponse = UpdateAiPolicySettings200;
 
-export type UpdateAiModelSettingsMutation = {
-    Response: UpdateAiModelSettings200;
-    Request: UpdateAiModelSettingsMutationRequest;
-    Errors: any;
-};
-
-/**
- * @description Validation result. On success `data` carries the answering provider / model; on a gateway rejection the failure `message` carries the gateway\'s own reason.
-*/
-export type ValidateAiModelSettings200 = RestResponseAiModelValidation;
-
-export type ValidateAiModelSettingsMutationResponse = ValidateAiModelSettings200;
-
-export type ValidateAiModelSettingsMutation = {
-    Response: ValidateAiModelSettings200;
+export type UpdateAiPolicySettingsMutation = {
+    Response: UpdateAiPolicySettings200;
+    Request: UpdateAiPolicySettingsMutationRequest;
     Errors: any;
 };
 
@@ -4386,6 +4316,33 @@ export type LoginTauriMutation = {
     Response: LoginTauri200;
     QueryParams: LoginTauriQueryParams;
     Errors: LoginTauri403;
+};
+
+/**
+ * @description Masked provider config (never carries the api_key)
+*/
+export type GetModelProvider200 = RestResponseModelProviderPublic;
+
+export type GetModelProviderQueryResponse = GetModelProvider200;
+
+export type GetModelProviderQuery = {
+    Response: GetModelProvider200;
+    Errors: any;
+};
+
+/**
+ * @description Updated masked provider config
+*/
+export type UpdateModelProvider200 = RestResponseModelProviderPublic;
+
+export type UpdateModelProviderMutationRequest = ModelProviderUpdate;
+
+export type UpdateModelProviderMutationResponse = UpdateModelProvider200;
+
+export type UpdateModelProviderMutation = {
+    Response: UpdateModelProvider200;
+    Request: UpdateModelProviderMutationRequest;
+    Errors: any;
 };
 
 export type GetModelUsageQueryParams = {

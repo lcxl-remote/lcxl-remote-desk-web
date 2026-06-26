@@ -3,14 +3,15 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save, ShieldCheck } from "lucide-react"
+import { Loader2, Save } from "lucide-react"
 
-import { useQueryAiModelSettings } from "@/services/hooks/aiModelController/useQueryAiModelSettings"
-import { useUpdateAiModelSettings } from "@/services/hooks/aiModelController/useUpdateAiModelSettings"
-import { useValidateAiModelSettings } from "@/services/hooks/aiModelController/useValidateAiModelSettings"
+import { useGetModelProvider } from "@/services/hooks/modelProviderController/useGetModelProvider"
+import { useUpdateModelProvider } from "@/services/hooks/modelProviderController/useUpdateModelProvider"
+import { useQueryAiPolicySettings } from "@/services/hooks/aiModelController/useQueryAiPolicySettings"
+import { useUpdateAiPolicySettings } from "@/services/hooks/aiModelController/useUpdateAiPolicySettings"
 import { useQueryCollectionPolicySettings } from "@/services/hooks/aiModelController/useQueryCollectionPolicySettings"
 import { useUpdateCollectionPolicySettings } from "@/services/hooks/aiModelController/useUpdateCollectionPolicySettings"
-import type { AiModelSettingsUpdate, CollectionPolicySettingsUpdate } from "@/services/types"
+import type { ModelProviderUpdate, AiExecutionPolicyUpdate, CollectionPolicySettingsUpdate } from "@/services/types"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -26,7 +27,12 @@ const RESPONSE_FORMATS = ["none", "json_object", "json_schema"] as const
 // OpenAI and any OpenAI-compatible gateway; "anthropic" uses the Messages API.
 const PROVIDERS = ["openai-compatible", "anthropic"] as const
 
-const aiModelSettingsSchema = z.object({
+// The execution modes the confirm-execute flow supports. `session_approved` /
+// `automated` are frozen in the protocol but not selectable yet (the backend
+// rejects them), so they are intentionally omitted here.
+const EXECUTION_MODES = ["suggest_only", "read_only", "confirm_each_action"] as const
+
+const providerSchema = z.object({
     provider: z.enum(PROVIDERS),
     model: z.string(),
     base_url: z.string(),
@@ -34,9 +40,16 @@ const aiModelSettingsSchema = z.object({
     clear_api_key: z.boolean(),
     max_context_bytes: z.number().min(0),
     response_format: z.enum(RESPONSE_FORMATS),
+    execution_mode: z.enum(EXECUTION_MODES),
 })
 
-type AiModelSettingsFormValues = z.infer<typeof aiModelSettingsSchema>
+type ProviderFormValues = z.infer<typeof providerSchema>
+
+const policySchema = z.object({
+    execution_mode: z.enum(EXECUTION_MODES),
+})
+
+type PolicyFormValues = z.infer<typeof policySchema>
 
 const collectionPolicySchema = z.object({
     allow_screen: z.boolean(),
@@ -45,19 +58,39 @@ const collectionPolicySchema = z.object({
 
 type CollectionPolicyFormValues = z.infer<typeof collectionPolicySchema>
 
+// Render an execution-mode <SelectItem> set with localized labels. Shared by the
+// central grant and the local ceiling selectors.
+function ExecutionModeItems() {
+    const { t } = useTranslation()
+    return (
+        <>
+            <SelectItem value="suggest_only">{t("pages.executionMode.suggestOnly")}</SelectItem>
+            <SelectItem value="read_only">{t("pages.executionMode.readOnly")}</SelectItem>
+            <SelectItem value="confirm_each_action">{t("pages.executionMode.confirmEachAction")}</SelectItem>
+        </>
+    )
+}
+
+function normalizeExecutionMode(mode: string | undefined): (typeof EXECUTION_MODES)[number] {
+    return EXECUTION_MODES.includes(mode as (typeof EXECUTION_MODES)[number])
+        ? (mode as (typeof EXECUTION_MODES)[number])
+        : "suggest_only"
+}
+
 export function AiModelSettings() {
     const { t } = useTranslation()
     const { toast } = useToast()
 
-    const { data: settingsResponse, isLoading } = useQueryAiModelSettings()
-    const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateAiModelSettings()
-    const { mutateAsync: validateSettings, isPending: isValidating } = useValidateAiModelSettings()
+    // Model provider lives on the central signaling brain. In portable mode the
+    // signaling server is embedded in this process, so the same origin serves it.
+    const { data: providerResponse, isLoading } = useGetModelProvider()
+    const { mutateAsync: updateProvider, isPending: isProviderUpdating } = useUpdateModelProvider()
 
     // Whether a key is already stored (the value itself is never returned).
     const [apiKeySet, setApiKeySet] = useState(false)
 
-    const form = useForm<AiModelSettingsFormValues>({
-        resolver: zodResolver(aiModelSettingsSchema),
+    const form = useForm<ProviderFormValues>({
+        resolver: zodResolver(providerSchema),
         defaultValues: {
             provider: "openai-compatible",
             model: "",
@@ -66,14 +99,15 @@ export function AiModelSettings() {
             clear_api_key: false,
             max_context_bytes: 0,
             response_format: "json_object",
+            execution_mode: "suggest_only",
         },
     })
 
     const didHydrateRef = useRef(false)
     useEffect(() => {
-        if (settingsResponse?.data && !isLoading && !didHydrateRef.current) {
+        if (providerResponse?.data && !isLoading && !didHydrateRef.current) {
             didHydrateRef.current = true
-            const data = settingsResponse.data
+            const data = providerResponse.data
             setApiKeySet(data.api_key_set)
             const rf = RESPONSE_FORMATS.includes(data.response_format as (typeof RESPONSE_FORMATS)[number])
                 ? (data.response_format as (typeof RESPONSE_FORMATS)[number])
@@ -93,11 +127,12 @@ export function AiModelSettings() {
                 clear_api_key: false,
                 max_context_bytes: data.max_context_bytes ?? 0,
                 response_format: rf,
+                execution_mode: normalizeExecutionMode(data.execution_mode),
             })
         }
-    }, [settingsResponse?.data, isLoading, form])
+    }, [providerResponse?.data, isLoading, form])
 
-    const onSubmit = async (values: AiModelSettingsFormValues) => {
+    const onSubmit = async (values: ProviderFormValues) => {
         // api_key is write-only: clearing wins, then a typed value sets it, and
         // an empty field leaves the stored key unchanged (omit it).
         let api_key: string | undefined
@@ -107,18 +142,19 @@ export function AiModelSettings() {
             api_key = values.api_key
         }
 
-        const payload: AiModelSettingsUpdate = {
+        const payload: ModelProviderUpdate = {
             provider: values.provider,
             model: values.model,
             base_url: values.base_url,
             // 0 means "use the default budget" — leave the stored value unchanged.
             max_context_bytes: values.max_context_bytes > 0 ? values.max_context_bytes : undefined,
             response_format: values.response_format,
+            execution_mode: values.execution_mode,
             api_key,
         }
 
         try {
-            await updateSettings({ data: payload })
+            await updateProvider({ data: payload })
             // Reflect the new key state and reset the transient secret inputs.
             if (values.clear_api_key) setApiKeySet(false)
             else if (api_key) setApiKeySet(true)
@@ -128,7 +164,7 @@ export function AiModelSettings() {
                 title: t("pages.system.settings.success"),
                 description: t("pages.aiModel.settings.updateSucceedMessage"),
             })
-        } catch (error) {
+        } catch {
             toast({
                 variant: "destructive",
                 title: t("pages.system.settings.error"),
@@ -137,68 +173,70 @@ export function AiModelSettings() {
         }
     }
 
-    // Validate the *saved* gateway config by sending a minimal probe request
-    // server-side. The api_key stays on the server (it is never returned to the
-    // browser), so the operator saves first, then validates. The endpoint always
-    // returns HTTP 200; success/failure rides in the RestResponse body, and on a
-    // gateway rejection `message` carries the gateway's own reason (e.g. a 400
-    // with the offending field) so the operator can fix the configuration.
-    const onValidate = async () => {
-        try {
-            const res = await validateSettings()
-            if (res?.success) {
-                const data = res.data
-                toast({
-                    title: t("pages.aiModel.settings.validateSucceedTitle"),
-                    description: t(
-                        "pages.aiModel.settings.validateSucceedMessage",
-                        { provider: data?.provider ?? "", model: data?.model ?? "" },
-                    ),
-                })
-            } else {
-                toast({
-                    variant: "destructive",
-                    title: t("pages.aiModel.settings.validateFailedTitle"),
-                    description: res?.message || t("pages.aiModel.settings.validateFailedMessage"),
-                })
-            }
-        } catch {
-            toast({
-                variant: "destructive",
-                title: t("pages.aiModel.settings.validateFailedTitle"),
-                description: t("pages.aiModel.settings.validateFailedMessage"),
-            })
-        }
-    }
+    // Local execution ceiling: the device owner's cap on AI actions. The effective
+    // mode is the more restrictive of the central grant and this ceiling, so a
+    // confirmed action needs both set above suggest-only.
+    const { data: policyResponse, isLoading: isPolicyLoading } = useQueryAiPolicySettings()
+    const { mutateAsync: updatePolicy, isPending: isPolicyUpdating } = useUpdateAiPolicySettings()
 
-    // Collection policy: a separate edge-side gate (allow_logs / allow_screen),
-    // independent of the model gateway. The host always applies it locally.
-    const { data: policyResponse, isLoading: isPolicyLoading } = useQueryCollectionPolicySettings()
-    const { mutateAsync: updatePolicy, isPending: isPolicyUpdating } = useUpdateCollectionPolicySettings()
-
-    const policyForm = useForm<CollectionPolicyFormValues>({
-        resolver: zodResolver(collectionPolicySchema),
-        defaultValues: { allow_screen: false, allow_logs: false },
+    const policyForm = useForm<PolicyFormValues>({
+        resolver: zodResolver(policySchema),
+        defaultValues: { execution_mode: "suggest_only" },
     })
 
     const didHydratePolicyRef = useRef(false)
     useEffect(() => {
         if (policyResponse?.data && !isPolicyLoading && !didHydratePolicyRef.current) {
             didHydratePolicyRef.current = true
-            policyForm.reset({
-                allow_screen: policyResponse.data.allow_screen ?? false,
-                allow_logs: policyResponse.data.allow_logs ?? false,
-            })
+            policyForm.reset({ execution_mode: normalizeExecutionMode(policyResponse.data.execution_mode) })
         }
     }, [policyResponse?.data, isPolicyLoading, policyForm])
 
-    const onSubmitPolicy = async (values: CollectionPolicyFormValues) => {
+    const onSubmitPolicy = async (values: PolicyFormValues) => {
+        const payload: AiExecutionPolicyUpdate = { execution_mode: values.execution_mode }
+        try {
+            await updatePolicy({ data: payload })
+            toast({
+                title: t("pages.system.settings.success"),
+                description: t("pages.aiPolicy.updateSucceedMessage"),
+            })
+        } catch {
+            toast({
+                variant: "destructive",
+                title: t("pages.system.settings.error"),
+                description: t("pages.aiPolicy.updateFailedMessage"),
+            })
+        }
+    }
+
+    // Collection policy: a separate edge-side gate (allow_logs / allow_screen),
+    // independent of the execution mode. The host always applies it locally.
+    const { data: collectionResponse, isLoading: isCollectionLoading } = useQueryCollectionPolicySettings()
+    const { mutateAsync: updateCollection, isPending: isCollectionUpdating } = useUpdateCollectionPolicySettings()
+
+    const collectionForm = useForm<CollectionPolicyFormValues>({
+        resolver: zodResolver(collectionPolicySchema),
+        defaultValues: { allow_screen: false, allow_logs: false },
+    })
+
+    const didHydrateCollectionRef = useRef(false)
+    useEffect(() => {
+        if (collectionResponse?.data && !isCollectionLoading && !didHydrateCollectionRef.current) {
+            didHydrateCollectionRef.current = true
+            collectionForm.reset({
+                allow_screen: collectionResponse.data.allow_screen ?? false,
+                allow_logs: collectionResponse.data.allow_logs ?? false,
+            })
+        }
+    }, [collectionResponse?.data, isCollectionLoading, collectionForm])
+
+    const onSubmitCollection = async (values: CollectionPolicyFormValues) => {
         const payload: CollectionPolicySettingsUpdate = {
             allow_screen: values.allow_screen,
             allow_logs: values.allow_logs,
         }
         try {
-            await updatePolicy({ data: payload })
+            await updateCollection({ data: payload })
             toast({
                 title: t("pages.system.settings.success"),
                 description: t("pages.collectionPolicy.updateSucceedMessage"),
@@ -412,13 +450,85 @@ export function AiModelSettings() {
                                 />
                             </div>
 
-                            <div className="flex justify-end gap-2">
-                                <Button type="button" variant="outline" onClick={onValidate} disabled={isValidating || isUpdating}>
-                                    {isValidating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
-                                    {t("pages.aiModel.settings.validate")}
+                            <FormField
+                                control={form.control}
+                                name="execution_mode"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>{t("pages.aiModel.settings.executionMode")}</FormLabel>
+                                        <Select
+                                            key={field.value || "execution-mode-empty"}
+                                            onValueChange={field.onChange}
+                                            defaultValue={field.value}
+                                        >
+                                            <FormControl>
+                                                <SelectTrigger>
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                            </FormControl>
+                                            <SelectContent>
+                                                <ExecutionModeItems />
+                                            </SelectContent>
+                                        </Select>
+                                        <FormDescription>
+                                            {t("pages.aiModel.settings.executionMode.description")}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+
+                            <div className="flex justify-end">
+                                <Button type="submit" disabled={isProviderUpdating}>
+                                    {isProviderUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                    {t("pages.system.settings.save")}
                                 </Button>
-                                <Button type="submit" disabled={isUpdating}>
-                                    {isUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                            </div>
+                        </form>
+                    </Form>
+                </CardContent>
+            </Card>
+
+            <Card className="mt-6">
+                <CardHeader>
+                    <CardTitle>{t("pages.aiPolicy.title")}</CardTitle>
+                    <CardDescription>
+                        {t("pages.aiPolicy.description")}
+                    </CardDescription>
+                </CardHeader>
+                <CardContent>
+                    <Form {...policyForm}>
+                        <form onSubmit={policyForm.handleSubmit(onSubmitPolicy)} className="space-y-4">
+                            <FormField
+                                control={policyForm.control}
+                                name="execution_mode"
+                                render={({ field }) => (
+                                    <FormItem>
+                                        <FormLabel>{t("pages.aiPolicy.executionMode")}</FormLabel>
+                                        <Select
+                                            key={field.value || "ceiling-empty"}
+                                            onValueChange={field.onChange}
+                                            defaultValue={field.value}
+                                        >
+                                            <FormControl>
+                                                <SelectTrigger>
+                                                    <SelectValue />
+                                                </SelectTrigger>
+                                            </FormControl>
+                                            <SelectContent>
+                                                <ExecutionModeItems />
+                                            </SelectContent>
+                                        </Select>
+                                        <FormDescription>
+                                            {t("pages.aiPolicy.executionMode.description")}
+                                        </FormDescription>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}
+                            />
+                            <div className="flex justify-end">
+                                <Button type="submit" disabled={isPolicyUpdating}>
+                                    {isPolicyUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save")}
                                 </Button>
                             </div>
@@ -435,10 +545,10 @@ export function AiModelSettings() {
                     </CardDescription>
                 </CardHeader>
                 <CardContent>
-                    <Form {...policyForm}>
-                        <form onSubmit={policyForm.handleSubmit(onSubmitPolicy)} className="space-y-4">
+                    <Form {...collectionForm}>
+                        <form onSubmit={collectionForm.handleSubmit(onSubmitCollection)} className="space-y-4">
                             <FormField
-                                control={policyForm.control}
+                                control={collectionForm.control}
                                 name="allow_logs"
                                 render={({ field }) => (
                                     <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
@@ -455,7 +565,7 @@ export function AiModelSettings() {
                                 )}
                             />
                             <FormField
-                                control={policyForm.control}
+                                control={collectionForm.control}
                                 name="allow_screen"
                                 render={({ field }) => (
                                     <FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-sm">
@@ -472,8 +582,8 @@ export function AiModelSettings() {
                                 )}
                             />
                             <div className="flex justify-end">
-                                <Button type="submit" disabled={isPolicyUpdating}>
-                                    {isPolicyUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                                <Button type="submit" disabled={isCollectionUpdating}>
+                                    {isCollectionUpdating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                                     {t("pages.system.settings.save")}
                                 </Button>
                             </div>
