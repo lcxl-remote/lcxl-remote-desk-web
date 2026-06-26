@@ -1,5 +1,6 @@
 pub mod ai_usage;
 pub mod collect_pending;
+pub mod control_authorizer;
 pub mod controller;
 pub mod db;
 pub mod entity;
