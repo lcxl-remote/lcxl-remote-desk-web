@@ -1859,6 +1859,93 @@ mod tests {
         }
     }
 
+    // A ConfirmExec carrying the operator-promoted copilot command, wrapped by the
+    // central brain exactly as `control_authorizer::build_wrapper_outcome` emits
+    // it. Source-gating it proves the terminal copilot exec path is reachable on
+    // the same trusted-central links as diagnose exec, and unreachable elsewhere.
+    fn wrapped_confirm_exec_model(request_id: &str, audience: &str) -> SignalingModel {
+        use desk_agent_protocol::exec::ConfirmExecData;
+        use desk_agent_protocol::{AgentOperation, ExecInput, ExecTarget, OperationInput};
+        let wrapper = AuthorizedControlPayload {
+            inner: ConfirmExecData {
+                operation: AgentOperation {
+                    risk_hint: None,
+                    input: OperationInput::Exec(ExecInput {
+                        target: ExecTarget::Shell {
+                            shell: "bash".to_string(),
+                        },
+                        command: "systemctl status nginx".to_string(),
+                        cwd: Some("/srv".to_string()),
+                        timeout_ms: 0,
+                        max_stdout_bytes: 0,
+                        max_stderr_bytes: 0,
+                    }),
+                },
+                reason: Some("operator promoted a copilot suggestion".to_string()),
+            },
+            authz: block(request_id, audience),
+        };
+        SignalingModel::new(
+            request_id,
+            SignalingType::ConfirmExec,
+            Some("browser-conn".to_string()),
+            Some("server-conn".to_string()),
+            Some(serde_json::to_value(&wrapper).unwrap()),
+            None,
+        )
+    }
+
+    #[test]
+    fn wrapped_confirm_exec_from_trusted_central_is_unwrapped_to_router() {
+        // The end-to-end inbound path for an operator-promoted copilot exec on a
+        // trusted-central link: the wrapper validates, is stripped, and the bare
+        // ConfirmExec plus its authorization block flow on to the router (which
+        // re-classifies the command before any preview).
+        let model = wrapped_confirm_exec_model("ce-1", "dev-1");
+        match gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev-1", NOW) {
+            AuthzGateOutcome::Pass(unwrapped, Some(authz)) => {
+                assert_eq!(unwrapped.signaling_type, SignalingType::ConfirmExec);
+                // Unwrapped: the inner ConfirmExecData is now the frame data.
+                let inner = unwrapped
+                    .get_data::<desk_agent_protocol::exec::ConfirmExecData>()
+                    .expect("inner ConfirmExecData");
+                assert_eq!(
+                    inner.reason.as_deref(),
+                    Some("operator promoted a copilot suggestion")
+                );
+                assert_eq!(authz.request_id, "ce-1");
+                assert_eq!(authz.audience, "dev-1");
+            }
+            AuthzGateOutcome::Pass(_, None) => {
+                panic!("trusted-central wrapper must carry its validated authz block")
+            }
+            AuthzGateOutcome::Drop(reason) => {
+                panic!("trusted-central wrapped ConfirmExec must pass, dropped: {reason}")
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_confirm_exec_from_non_central_source_is_dropped() {
+        // The same wrapped ConfirmExec arriving over a bare remote-signaling (or
+        // local) upstream is dropped at the source gate — a non-central relay can
+        // never inject an authorization wrapper. This is why copilot exec (like
+        // diagnose exec) is only reachable on trusted-central links.
+        for source in [
+            InboundSignalingSource::RemoteSignaling,
+            InboundSignalingSource::Local,
+        ] {
+            let model = wrapped_confirm_exec_model("ce-1", "dev-1");
+            assert!(
+                matches!(
+                    gate_authz_frame(model, source, "dev-1", NOW),
+                    AuthzGateOutcome::Drop(_)
+                ),
+                "wrapped ConfirmExec from {source:?} must be dropped"
+            );
+        }
+    }
+
     // ====== EdgeExecRequest dedicated gate ======
 
     fn fleet_exec_plan() -> desk_agent_protocol::exec::ExecPlan {

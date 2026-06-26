@@ -443,6 +443,36 @@ mod tests {
         )
     }
 
+    fn confirm_exec_model(request_id: &str, to: Option<&str>) -> SignalingModel {
+        use desk_agent_protocol::exec::ConfirmExecData;
+        use desk_agent_protocol::{AgentOperation, ExecInput, ExecTarget, OperationInput};
+        let data = serde_json::to_value(ConfirmExecData {
+            operation: AgentOperation {
+                risk_hint: None,
+                input: OperationInput::Exec(ExecInput {
+                    target: ExecTarget::Shell {
+                        shell: "bash".to_string(),
+                    },
+                    command: "systemctl status nginx".to_string(),
+                    cwd: Some("/srv".to_string()),
+                    timeout_ms: 0,
+                    max_stdout_bytes: 0,
+                    max_stderr_bytes: 0,
+                }),
+            },
+            reason: Some("operator promoted a copilot suggestion".to_string()),
+        })
+        .unwrap();
+        SignalingModel::new(
+            request_id,
+            SignalingType::ConfirmExec,
+            Some("browser-1".to_string()),
+            to.map(str::to_string),
+            Some(data),
+            None,
+        )
+    }
+
     #[test]
     fn evidence_capabilities_are_the_nine_reads() {
         let caps = evidence_capabilities();
@@ -565,6 +595,58 @@ mod tests {
                 .authz
                 .validate("req-1", "other-device", "2026-01-01T00:00:00Z")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn confirm_exec_frame_is_wrapped_for_relay() {
+        // The operator-promoted copilot exec frame (ConfirmExec) is wrapped by the
+        // central brain exactly like AgentRequest: the inner ConfirmExecData
+        // survives verbatim (command + cwd preserved) and the stamped block binds
+        // to the resolved audience + request id so the edge can validate it.
+        use desk_agent_protocol::exec::ConfirmExecData;
+        use desk_agent_protocol::{ExecTarget, OperationInput};
+        let model = confirm_exec_model("req-9", Some("edge-1"));
+        let (scope, grants, max_risk) = single_account_decision(ExecutionMode::ConfirmEachAction);
+        // The single-account PDP grants the confirmed-exec capability, so the relay
+        // is authorized to carry an exec frame at all.
+        assert!(scope.granted.contains(&Capability::ShellExecConfirmed));
+        let frame = match build_wrapper_outcome(
+            &model,
+            scope,
+            grants,
+            max_risk,
+            SINGLE_ACCOUNT_USER_ID,
+            "edge-1".to_string(),
+            "signal".to_string(),
+            "2999-01-01T00:00:00Z".to_string(),
+        ) {
+            ControlFrameOutcome::Forward(frame) => frame,
+            _ => panic!("expected a wrapped Forward outcome"),
+        };
+        assert_eq!(frame.signaling_type, SignalingType::ConfirmExec);
+        assert_eq!(frame.request_id, "req-9");
+        assert_eq!(frame.to_connection_id.as_deref(), Some("edge-1"));
+        let wrapper: AuthorizedControlPayload<ConfirmExecData> =
+            serde_json::from_value(frame.get_raw_data().clone().unwrap()).unwrap();
+        assert_eq!(wrapper.authz.actor.user_id, Some(SINGLE_ACCOUNT_USER_ID));
+        assert_eq!(wrapper.authz.audience, "edge-1");
+        assert_eq!(wrapper.authz.request_id, "req-9");
+        // The exact command and working directory the operator chose ride through
+        // unchanged; the edge re-classifies them server-side.
+        match wrapper.inner.operation.input {
+            OperationInput::Exec(exec) => {
+                assert_eq!(exec.command, "systemctl status nginx");
+                assert_eq!(exec.cwd.as_deref(), Some("/srv"));
+                assert!(matches!(exec.target, ExecTarget::Shell { shell } if shell == "bash"));
+            }
+            _ => panic!("expected an exec operation"),
+        }
+        assert!(
+            wrapper
+                .authz
+                .validate("req-9", "edge-1", "2026-01-01T00:00:00Z")
+                .is_ok()
         );
     }
 
