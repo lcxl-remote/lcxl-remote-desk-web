@@ -34,3 +34,9 @@ chrono = { workspace = true }
 rand = { workspace = true }
 
 turn = { workspace = true }
+
+# Outbound model-provider HTTP (the central brain dials the configured provider).
+awc = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+async-trait = { workspace = true }
