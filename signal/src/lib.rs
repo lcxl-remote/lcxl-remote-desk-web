@@ -5,6 +5,7 @@ pub mod entity;
 pub mod error;
 pub mod migration;
 pub mod model;
+pub mod model_provider;
 pub mod service;
 pub mod turn_usage;
 pub mod version;
