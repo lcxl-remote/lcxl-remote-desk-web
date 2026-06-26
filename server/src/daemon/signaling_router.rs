@@ -29,7 +29,7 @@ use actix_web::web;
 use desk_agent_protocol::audit::{AuditEvent, AuditSink};
 use desk_agent_protocol::diagnose::{
     COLLECT_CHUNK_PAYLOAD_LIMIT, CollectRequest, CollectResponse, CollectResponseError,
-    DiagnoseEvent, DiagnoseRequestData,
+    DiagnoseEvent,
 };
 use desk_agent_protocol::edge_exec::{EdgeExecDisposition, EdgeExecResultPayload};
 use desk_agent_protocol::exec::{
@@ -2136,219 +2136,34 @@ async fn handle_terminal_complete_inbound(
     Ok(())
 }
 
-/// Route a control-end `Diagnose`: feature gate → mode gate → parse → run the
-/// daemon-side orchestrator, streaming `DiagnoseEvent` frames back. All failures
-/// surface as a terminal `DiagnoseEvent::error` (never `SignalingResponseState`,
-/// so the control end keeps treating frames as a stream).
+/// Route a control-end `Diagnose`. AI diagnosis is orchestrated by the central
+/// signaling brain (signal / manager): the control end sends `Diagnose` to the
+/// central server, which drives the model and pulls read-only evidence from this
+/// host through a `CollectRequest` (served by `handle_collect_request_inbound`).
+/// This host therefore never runs a browser-facing diagnosis locally. If a
+/// `Diagnose` frame still reaches the edge router (a link without a central
+/// brain), reply with one terminal `DiagnoseEvent::error` (notification-style,
+/// never a one-shot response) so the control end stops treating frames as an
+/// in-progress stream.
 async fn handle_diagnose_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    let ai_model = ctx.settings.read().await.ai_model.clone();
-
-    // Gateway readiness gate (the operator opt-in). The manager proxy holds the
-    // provider credentials, so it is "configured" once the manager URL + token
-    // are set (the orchestrator dials the proxy with them); a direct gateway
-    // instead needs the local model / base URL / API key. Until ready the read
-    // collectors stay dark and the control end is told to configure.
-    if ai_model.gateway_mode == GatewayMode::ManagerProxy {
-        let (manager_url, manager_token) = {
-            let s = ctx.settings.read().await;
-            (
-                s.system.manager_url.clone(),
-                s.system.manager_api_token.clone(),
-            )
-        };
-        let proxy_ready = manager_url.as_deref().is_some_and(|u| !u.is_empty())
-            && manager_token.as_deref().is_some_and(|t| !t.is_empty());
-        if !proxy_ready {
-            emit_diagnose_event(
-                ctx,
-                model,
-                DiagnoseEvent::error(
-                    &model.request_id,
-                    0,
-                    agent_error(
-                        AgentErrorKind::UnsupportedCapability,
-                        "manager-proxied model gateway requires a configured manager URL and token",
-                        false,
-                        true,
-                    ),
-                ),
-            );
-            return Ok(());
-        }
-    } else if !ai_model.is_configured() {
-        emit_diagnose_event(
-            ctx,
-            model,
-            DiagnoseEvent::error(
-                &model.request_id,
-                0,
-                agent_error(
-                    AgentErrorKind::UnsupportedCapability,
-                    "AI model gateway is not configured; set the model, base URL, \
-                     and API key in AI model settings",
-                    false,
-                    true,
-                ),
+    emit_diagnose_event(
+        ctx,
+        model,
+        DiagnoseEvent::error(
+            &model.request_id,
+            0,
+            agent_error(
+                AgentErrorKind::UnsupportedCapability,
+                "AI diagnosis is handled by the central signaling server; this host only \
+                 serves evidence collection",
+                false,
+                true,
             ),
-        );
-        return Ok(());
-    }
-
-    // Fleet PDP gate (manager link): diagnosis requires the orchestrator grant
-    // `ai.diagnose` plus at least one granted evidence capability, decided
-    // before any model call (and before the orchestrator-availability check) so
-    // an unauthorized request never incurs model cost or a success audit.
-    // Without a manager authorization (single-machine / remote-signaling) the
-    // local gates apply.
-    if let Some(authz) = &ctx.inbound_authz {
-        let has_diagnose = authz.orchestrator_grants.iter().any(|g| g == "ai.diagnose");
-        if !has_diagnose || authz.scope.granted.is_empty() {
-            emit_diagnose_event(
-                ctx,
-                model,
-                DiagnoseEvent::error(
-                    &model.request_id,
-                    0,
-                    agent_error(
-                        AgentErrorKind::PermissionDenied,
-                        "AI diagnosis is not permitted by policy",
-                        false,
-                        false,
-                    ),
-                ),
-            );
-            return Ok(());
-        }
-    }
-
-    // The agentic runtime is only injected where an in-process worker can read
-    // locally (Default / DeskServer). ServiceDaemon leaves it `None`: diagnose
-    // over the cross-process collection path is a later additive step.
-    let Some(agent_runtime) = ctx.diagnose_agent.clone() else {
-        emit_diagnose_event(
-            ctx,
-            model,
-            DiagnoseEvent::error(
-                &model.request_id,
-                0,
-                agent_error(
-                    AgentErrorKind::UnsupportedCapability,
-                    "AI diagnosis is not available in this mode",
-                    false,
-                    true,
-                ),
-            ),
-        );
-        return Ok(());
-    };
-
-    let request = match model.get_data::<DiagnoseRequestData>() {
-        Ok(d) => d,
-        Err(e) => {
-            emit_diagnose_event(
-                ctx,
-                model,
-                DiagnoseEvent::error(
-                    &model.request_id,
-                    0,
-                    agent_error(
-                        AgentErrorKind::InvalidInput,
-                        &format!("bad Diagnose payload: {e}"),
-                        false,
-                        true,
-                    ),
-                ),
-            );
-            return Ok(());
-        }
-    };
-
-    // Reject a duplicate in-flight `request_id`. One diagnosis owns its
-    // request_id until it completes or is cancelled. A second `Diagnose` for an
-    // id already running would overwrite the tracked handle (dropping a
-    // `JoinHandle` does not abort the task), and the first task's self-removal
-    // could then delete the second's registration — corrupting cancel and
-    // interleaving two streams on the same id. The runtime is single-threaded,
-    // so this check and the insert below are not interleaved by another handler.
-    if ctx
-        .diagnose_tasks
-        .lock()
-        .expect("diagnose tasks lock")
-        .contains_key(&model.request_id)
-    {
-        emit_diagnose_event(
-            ctx,
-            model,
-            DiagnoseEvent::error(
-                &model.request_id,
-                0,
-                agent_error(
-                    AgentErrorKind::InvalidInput,
-                    "a diagnosis with this request_id is already in progress",
-                    false,
-                    true,
-                ),
-            ),
-        );
-        return Ok(());
-    }
-
-    // Run the diagnosis on a detached task so this inbound handler returns
-    // immediately. The proxy's WS select loop awaits the inbound handler in one
-    // arm and writes outbound frames in another; if we awaited `run` here, the
-    // outbound arm would not be polled until the (long) model call finished, so
-    // every status / partial / final frame would buffer and flush in a burst at
-    // the end — defeating streaming and the first-token metric. Spawning lets the
-    // loop forward each frame as the orchestrator emits it. The task is `!Send`
-    // (the model uses awc), so it runs on actix's single-threaded runtime via
-    // `rt::spawn` (`spawn_local`) — the same arbiter the proxy loop runs on.
-    let outbound_tx = ctx.outbound_tx.clone();
-    let to_connection_id = model.from_connection_id.clone();
-    // The control connection the turn runs for: where the agentic exec approval
-    // preview (`ExecPreview`) is routed back to, threaded into the loop's
-    // `ExecContext`. Cloned out before the frame-sink closure takes the original.
-    let exec_connection_id = to_connection_id.clone();
-    let request_id = model.request_id.clone();
-    let tasks = ctx.diagnose_tasks.clone();
-    // The manager authorization (if any) rode into this handler on the context;
-    // capture it so the agentic scope can be intersected with the PDP grant.
-    let authz = ctx.inbound_authz.clone();
-    let handle = actix_web::rt::spawn(async move {
-        // The agentic loop streams its tool/turn lifecycle to the bridge, which
-        // emits `DiagnoseEvent` frames over the connection's outbound channel.
-        let frame_sink = move |event: DiagnoseEvent| {
-            send_diagnose_frame(&outbound_tx, to_connection_id.clone(), event);
-        };
-        agent_runtime
-            .run(
-                &request_id,
-                request,
-                authz.as_ref(),
-                exec_connection_id,
-                frame_sink,
-            )
-            .await;
-        // Drop our own registry entry on natural completion so a later cancel is
-        // a harmless no-op.
-        tasks
-            .lock()
-            .expect("diagnose tasks lock")
-            .remove(&request_id);
-    });
-    // Register the handle so a later `DiagnoseCancel` can abort it. The current
-    // runtime is single-threaded (`spawn_local`) and there is no `.await` between
-    // the spawn above and here, so the task cannot have run yet — but guard
-    // against it anyway: if the task already finished (its self-removal then ran
-    // as a no-op before this point), skip registration so no stale handle leaks.
-    if !handle.is_finished() {
-        ctx.diagnose_tasks
-            .lock()
-            .expect("diagnose tasks lock")
-            .insert(model.request_id.clone(), handle);
-    }
+        ),
+    );
     Ok(())
 }
 
@@ -5403,7 +5218,7 @@ mod tests {
 
     // ---- Diagnose routing ----
 
-    use desk_agent_protocol::diagnose::DiagnoseEventKind;
+    use desk_agent_protocol::diagnose::{DiagnoseEventKind, DiagnoseRequestData};
 
     fn diagnose_model(raw: serde_json::Value) -> SignalingModel {
         SignalingModel::new(
@@ -5589,11 +5404,15 @@ mod tests {
         );
     }
 
-    /// Unconfigured by default: a Diagnose request is gated before the
-    /// orchestrator, emitting a single terminal `DiagnoseEvent::error`
-    /// (notification-style) that tells the control end to configure the gateway.
+    /// AI diagnosis is centralized: a `Diagnose` frame that reaches the edge
+    /// router (a link without a central signaling brain) is answered with one
+    /// terminal `DiagnoseEvent::error` (notification-style, not a one-shot
+    /// response) telling the control end the central server owns diagnosis. The
+    /// edge only serves evidence collection (`CollectRequest`); it never runs a
+    /// browser-facing diagnosis locally, so there is no gateway / PDP / agentic
+    /// path to drive here.
     #[tokio::test]
-    async fn diagnose_unconfigured_emits_error() {
+    async fn diagnose_at_edge_replies_centralized_unavailable() {
         let (ctx, mut rx) = make_ctx_with_rx();
         let raw = serde_json::to_value(DiagnoseRequestData {
             question: "why?".into(),
@@ -5614,265 +5433,7 @@ mod tests {
         assert_eq!(event.kind, DiagnoseEventKind::Error);
         let err = event.error.unwrap();
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
-        assert!(err.message.contains("not configured"));
-    }
-
-    /// Configured but no orchestrator injected (ServiceDaemon-like): the diagnose
-    /// route reports the feature unavailable in this mode.
-    #[tokio::test]
-    async fn diagnose_without_orchestrator_emits_unavailable() {
-        let (ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        // make_ctx leaves diagnose_orchestrator = None (ServiceDaemon-like).
-        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-        let event = read_response(&mut rx)
-            .get_data::<DiagnoseEvent>()
-            .expect("DiagnoseEvent");
-        assert_eq!(event.kind, DiagnoseEventKind::Error);
-        let err = event.error.unwrap();
-        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
-        assert!(err.message.contains("not available in this mode"));
-    }
-
-    /// `gateway_mode = manager_proxy` without a manager URL / token is refused by
-    /// the readiness gate with the proxy-specific message (it does not require
-    /// the direct provider credentials, which the proxy would supply).
-    #[tokio::test]
-    async fn diagnose_manager_proxy_without_manager_config_emits_error() {
-        let (ctx, mut rx) = make_ctx_with_rx();
-        {
-            // Manager-proxy selected, but no manager URL / token set.
-            let mut s = ctx.settings.write().await;
-            s.ai_model.gateway_mode = GatewayMode::ManagerProxy;
-        }
-        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-        let event = read_response(&mut rx)
-            .get_data::<DiagnoseEvent>()
-            .expect("DiagnoseEvent");
-        assert_eq!(event.kind, DiagnoseEventKind::Error);
-        let err = event.error.unwrap();
-        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
-        assert!(
-            err.message.contains("manager URL and token"),
-            "expected the proxy-config message, got: {}",
-            err.message
-        );
-    }
-
-    /// `gateway_mode = manager_proxy` with the manager URL + token configured
-    /// passes the readiness gate (no longer the old "not available yet"
-    /// placeholder). With no orchestrator injected it then reports the
-    /// mode-unavailable error — proving the request reaches the orchestrator
-    /// step instead of being hard-rejected up front.
-    #[tokio::test]
-    async fn diagnose_manager_proxy_configured_passes_readiness_gate() {
-        let (ctx, mut rx) = make_ctx_with_rx();
-        {
-            let mut s = ctx.settings.write().await;
-            s.ai_model.gateway_mode = GatewayMode::ManagerProxy;
-            s.system.manager_url = Some("ws://manager.example/api/desk/signaling".to_string());
-            s.system.manager_api_token = Some("tok".to_string());
-        }
-        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-        let event = read_response(&mut rx)
-            .get_data::<DiagnoseEvent>()
-            .expect("DiagnoseEvent");
-        assert_eq!(event.kind, DiagnoseEventKind::Error);
-        let err = event.error.unwrap();
-        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
-        assert!(
-            err.message.contains("not available in this mode"),
-            "expected to pass the readiness gate and hit the orchestrator gate, got: {}",
-            err.message
-        );
-    }
-
-    /// A diagnosis that completes naturally must leave no entry in the task
-    /// registry — the detached task removes itself, and registration is skipped
-    /// if it already finished, so no stale handle leaks.
-    #[actix_web::test]
-    async fn diagnose_immediate_completion_leaves_no_stale_task() {
-        use crate::diagnose::direct_runtime::DirectAgentRuntime;
-        use desk_diagnose_core::chat::{ModelTurn, StopReason};
-        let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        ctx.diagnose_agent = Some(Arc::new(DirectAgentRuntime::for_test(
-            vec![ModelTurn {
-                text: "all good".into(),
-                stop_reason: StopReason::EndTurn,
-                ..Default::default()
-            }],
-            ctx.settings.clone().into_inner(),
-        )));
-        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-
-        // Let the detached task run to completion (it emits a terminal frame and
-        // then removes its own registry entry).
-        for _ in 0..1000 {
-            let drained = std::iter::from_fn(|| rx.try_recv().ok()).count();
-            let _ = drained;
-            if ctx.diagnose_tasks.lock().unwrap().is_empty() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            ctx.diagnose_tasks.lock().unwrap().is_empty(),
-            "completed diagnosis must not leave a stale task handle"
-        );
-    }
-
-    /// A second `Diagnose` for a `request_id` that is already in flight is
-    /// rejected with `InvalidInput`, and the original tracked task is left intact
-    /// (not overwritten), so a later cancel still targets the right run.
-    #[actix_web::test]
-    async fn diagnose_duplicate_request_id_is_rejected() {
-        use crate::diagnose::direct_runtime::DirectAgentRuntime;
-        let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        // The agent runtime must be present so the request passes the
-        // availability gate and reaches the duplicate-id check (the scripted
-        // turns are never consumed — the duplicate is rejected first).
-        ctx.diagnose_agent = Some(Arc::new(DirectAgentRuntime::for_test(
-            vec![],
-            ctx.settings.clone().into_inner(),
-        )));
-
-        // Pre-register an in-flight task under the model's request_id so the next
-        // Diagnose for the same id sees a live entry.
-        let pending = actix_web::rt::spawn(async { std::future::pending::<()>().await });
-        let request_id = diagnose_model(serde_json::Value::Null).request_id.clone();
-        ctx.diagnose_tasks
-            .lock()
-            .unwrap()
-            .insert(request_id.clone(), pending);
-
-        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-
-        let event = read_response(&mut rx)
-            .get_data::<DiagnoseEvent>()
-            .expect("DiagnoseEvent");
-        assert_eq!(event.kind, DiagnoseEventKind::Error);
-        assert_eq!(event.error.unwrap().kind, AgentErrorKind::InvalidInput);
-        // The original entry is intact (the duplicate did not overwrite it).
-        let tasks = ctx.diagnose_tasks.lock().unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert!(tasks.get(&request_id).is_some_and(|h| !h.is_finished()));
-    }
-
-    /// Configured + agent runtime present (Default / DeskServer-like): the agentic
-    /// diagnosis streams a sequence of frames ending in exactly one terminal
-    /// `Answer`, and **every** frame is notification-style (`response_state =
-    /// None`) so the control end is not collapsed to a single response by the
-    /// signaling one-shot callback.
-    ///
-    /// `handle_diagnose_inbound` runs the loop on a detached `rt::spawn` task (so
-    /// the proxy loop can forward frames as they stream), hence `#[actix_web::test]`
-    /// for the local-task runtime and a yield loop to let the spawned task emit
-    /// before draining.
-    #[actix_web::test]
-    async fn diagnose_with_agent_streams_notification_frames() {
-        use crate::diagnose::direct_runtime::DirectAgentRuntime;
-        use desk_diagnose_core::chat::{ModelTurn, StopReason, ToolCall};
-        let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        // A read-tool turn then an answer → TurnStarted, ToolStarted, ToolFinished,
-        // Answer (a multi-frame notification stream).
-        ctx.diagnose_agent = Some(Arc::new(DirectAgentRuntime::for_test(
-            vec![
-                ModelTurn {
-                    stop_reason: StopReason::ToolUse,
-                    tool_calls: vec![ToolCall {
-                        id: "c1".into(),
-                        name: "read_system_info".into(),
-                        arguments_json: "{}".into(),
-                    }],
-                    ..Default::default()
-                },
-                ModelTurn {
-                    text: "the host is healthy".into(),
-                    stop_reason: StopReason::EndTurn,
-                    ..Default::default()
-                },
-            ],
-            ctx.settings.clone().into_inner(),
-        )));
-        let raw = serde_json::to_value(DiagnoseRequestData {
-            question: "why is cpu high?".into(),
-            include_screen: false,
-            context_kinds: vec![],
-            locale: None,
-            conversation_id: None,
-        })
-        .unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-
-        // The run is detached: yield to the runtime so the spawned task emits its
-        // frames, draining until the terminal frame arrives (bounded so a stuck
-        // task fails the test rather than hanging it).
-        let mut frames = Vec::new();
-        for _ in 0..1000 {
-            while let Ok(text) = rx.try_recv() {
-                let m: SignalingModel = serde_json::from_str(&text).expect("valid JSON frame");
-                let ev = m
-                    .get_data::<DiagnoseEvent>()
-                    .expect("DiagnoseEvent payload");
-                frames.push((m, ev));
-            }
-            if frames.last().map(|(_, e)| e.is_terminal()).unwrap_or(false) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-
-        // A multi-frame stream arrived (turn started + tool lifecycle + answer).
-        assert!(
-            frames.len() >= 3,
-            "expected a streamed sequence, got {}",
-            frames.len()
-        );
-        // Exactly one terminal frame, and it is the last, and it is the agentic
-        // `Answer`.
-        assert_eq!(
-            frames.iter().filter(|(_, e)| e.is_terminal()).count(),
-            1,
-            "exactly one terminal frame"
-        );
-        assert_eq!(frames.last().unwrap().1.kind, DiagnoseEventKind::Answer);
-        assert_eq!(
-            frames.first().unwrap().1.kind,
-            DiagnoseEventKind::TurnStarted
-        );
-        // Every frame is a notification-style DiagnoseEvent.
-        for (m, _) in &frames {
-            assert_eq!(m.signaling_type, SignalingType::DiagnoseEvent);
-            assert!(
-                m.response_state.is_none(),
-                "diagnose frames must not be one-shot responses"
-            );
-        }
-        // seq is monotonic on the wire.
-        let seqs: Vec<_> = frames.iter().map(|(_, e)| e.seq).collect();
-        let mut sorted = seqs.clone();
-        sorted.sort_unstable();
-        assert_eq!(seqs, sorted, "frames arrive in seq order");
+        assert!(err.message.contains("central signaling server"));
     }
 
     fn diagnose_cancel_model() -> SignalingModel {
@@ -6134,51 +5695,6 @@ mod tests {
             AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::PermissionDenied),
             other => panic!("unexpected outcome: {other:?}"),
         }
-    }
-
-    /// Diagnose without the `ai.diagnose` orchestrator grant is refused before
-    /// any model call (and before the orchestrator-availability check).
-    #[tokio::test]
-    async fn diagnose_denied_without_ai_diagnose_grant() {
-        let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        ctx.inbound_authz = Some(authz_block(
-            vec![Capability::ProcessList],
-            vec![], // no ai.diagnose
-            ExecutionMode::ReadOnly,
-            desk_agent_protocol::RiskLevel::Low,
-        ));
-        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-        let event = read_response(&mut rx)
-            .get_data::<DiagnoseEvent>()
-            .expect("DiagnoseEvent");
-        assert_eq!(event.kind, DiagnoseEventKind::Error);
-        assert_eq!(event.error.unwrap().kind, AgentErrorKind::PermissionDenied);
-    }
-
-    /// Diagnose with `ai.diagnose` but zero granted evidence capabilities is
-    /// also refused (an empty-evidence model call is pointless).
-    #[tokio::test]
-    async fn diagnose_denied_with_ai_diagnose_but_no_evidence() {
-        let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        ctx.inbound_authz = Some(authz_block(
-            vec![], // no evidence capability
-            vec!["ai.diagnose"],
-            ExecutionMode::ReadOnly,
-            desk_agent_protocol::RiskLevel::Low,
-        ));
-        let raw = serde_json::to_value(DiagnoseRequestData::default()).unwrap();
-        handle_diagnose_inbound(&ctx, &diagnose_model(raw))
-            .await
-            .unwrap();
-        let event = read_response(&mut rx)
-            .get_data::<DiagnoseEvent>()
-            .expect("DiagnoseEvent");
-        assert_eq!(event.error.unwrap().kind, AgentErrorKind::PermissionDenied);
     }
 
     /// ConfirmExec for a command classified above the policy `max_risk` is
