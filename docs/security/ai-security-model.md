@@ -14,6 +14,8 @@ The capability protocol describes **what can be done to a device**, independent 
 
 The default execution mode is **suggest-only**: the model can propose commands but cannot execute them. Higher-risk actions require explicit, **server-mediated confirmation**. The granted mode is set centrally, and each device further caps it with a **local execution ceiling** — the effective mode is the more restrictive of the two, so a device can narrow a central grant but never widen it.
 
+Both the **AI diagnosis panel** and the **terminal AI copilot** share one sealed confirmation chain. The copilot itself stays suggest-only — it never executes anything on its own. For a `confirm_required` suggestion, the operator may explicitly **promote it to execution**: that click relays the exact command to the host, which **re-classifies it server-side** (a control plane's self-reported decision is never trusted), mints the `exec_request_id`, and returns a preview the operator must **approve** before anything runs. Execution is gated by the same **local execution ceiling** — left at suggest-only it is off, so the Run action returns a non-executable preview that guides the owner to raise the ceiling first. Raising it opens confirmed execution for every AI surface on that device (diagnosis and copilot alike), not the copilot alone.
+
 ## Redaction Fails Closed
 
 The pipeline runs **collect → redact → model → render**. Collection and redaction happen on the **edge device**; the model call happens **centrally**. If redaction fails, the edge returns an error and the central brain aborts **before** the model is called. Evidence (with raw screenshot bytes stripped) is always redacted before it leaves the host or reaches the model.
