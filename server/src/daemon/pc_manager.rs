@@ -2789,6 +2789,35 @@ pub async fn handle_require_control(
         (s.accept_control, s.accept_clipboard_sync)
     };
 
+    // Releasing control (accept = false) is never a privileged action and must
+    // never prompt the host. The browser sends RequireControl{accept=false} when
+    // the user clicks "cancel control"; routing that through the approval path
+    // would pop a spurious authorization dialog on the host just as the
+    // controller is walking away (and, with allow_remote_control = None, block on
+    // the UI-readiness probe). Short-circuit straight to the release reply.
+    if !control_data.accept {
+        {
+            let ctx = ctx.read().await;
+            let mut s = ctx.signaling_state.write().await;
+            s.accept_control = false;
+            s.accept_clipboard_sync = false;
+        }
+        log::info!("[pc_manager] {from_connection_id}: release (CloseControl)");
+        send_response::<()>(
+            outbound,
+            &model.request_id,
+            SignalingType::CloseControl,
+            from_connection_id,
+            None,
+        )?;
+        return Ok(ControlOutcome {
+            connection_id: from_connection_id.to_string(),
+            accept_control: false,
+            changed: currently_has_control,
+        });
+    }
+
+    // From here on the browser is requesting a grant (accept = true).
     let allow_control = settings.read().await.security.allow_remote_control;
     let allow_clipboard = settings.read().await.security.allow_clipboard_sync;
 
@@ -2859,36 +2888,25 @@ pub async fn handle_require_control(
     {
         let ctx = ctx.read().await;
         let mut s = ctx.signaling_state.write().await;
-        if control_data.accept {
-            s.accept_control = true;
-            s.accept_clipboard_sync = clipboard_approved;
-            log::info!(
-                "[pc_manager] {from_connection_id}: AcceptControl \
-                 (accept_control=true, accept_clipboard_sync={clipboard_approved})"
-            );
-        } else {
-            s.accept_control = false;
-            s.accept_clipboard_sync = false;
-            log::info!("[pc_manager] {from_connection_id}: release (CloseControl)");
-        }
+        s.accept_control = true;
+        s.accept_clipboard_sync = clipboard_approved;
+        log::info!(
+            "[pc_manager] {from_connection_id}: AcceptControl \
+             (accept_control=true, accept_clipboard_sync={clipboard_approved})"
+        );
     }
 
-    let reply_type = if control_data.accept {
-        SignalingType::AcceptControl
-    } else {
-        SignalingType::CloseControl
-    };
     send_response::<()>(
         outbound,
         &model.request_id,
-        reply_type,
+        SignalingType::AcceptControl,
         from_connection_id,
         None,
     )?;
     Ok(ControlOutcome {
         connection_id: from_connection_id.to_string(),
-        accept_control: control_data.accept,
-        changed: control_data.accept != currently_has_control,
+        accept_control: true,
+        changed: !currently_has_control,
     })
 }
 
@@ -6005,6 +6023,63 @@ mod tests {
         handle_require_control(&registry, &outbound_tx, &settings, &hub, &model)
             .await
             .expect("handle ok");
+
+        let text = outbound_rx.recv().await.expect("CloseControl reply");
+        let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
+        assert_eq!(
+            reply.signaling_type,
+            SignalingType::CloseControl,
+            "expected CloseControl, got {:?}",
+            reply.signaling_type,
+        );
+        let s = ctx.read().await.signaling_state.read().await.clone();
+        assert!(!s.accept_control, "accept_control must go false on release");
+        assert!(
+            !s.accept_clipboard_sync,
+            "accept_clipboard_sync must go false on release"
+        );
+    }
+
+    /// Regression: releasing control must NEVER prompt the host, even when
+    /// `allow_remote_control = None` (the default "ask" mode). The browser sends
+    /// RequireControl{accept=false} when the user clicks "cancel control"; if the
+    /// release path consulted the approval hub it would pop a spurious
+    /// authorization dialog and block on the UI-readiness probe with no Tauri
+    /// shell connected. Asserting it resolves well under the probe timeout proves
+    /// the hub was never consulted.
+    #[tokio::test]
+    async fn handle_require_control_release_does_not_prompt_when_ask_mode() {
+        let registry = PcRegistry::new();
+        let (outbound_tx, mut outbound_rx) = broadcast::channel::<String>(8);
+        // None = "ask the user" — the path that previously triggered the dialog.
+        let settings = settings_with_security(None, None);
+        let hub = Arc::new(HostControlHub::new_local());
+
+        let request_remote = RequestRemoteModel {
+            ice_servers: vec![],
+        };
+        let ctx = registry
+            .create_for_request_remote("conn-ask-release", &request_remote, &*settings.read().await)
+            .await
+            .expect("seed pc");
+        {
+            let ctx_read = ctx.read().await;
+            let mut s = ctx_read.signaling_state.write().await;
+            s.accept_control = true;
+            s.accept_clipboard_sync = true;
+        }
+
+        let model = require_control_model("conn-ask-release", false, false);
+        // Must resolve promptly: the real UI-readiness probe is 10s, so a 1s
+        // budget fails loudly if the release ever routes through the hub.
+        let model_ref = &model;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle_require_control(&registry, &outbound_tx, &settings, &hub, model_ref),
+        )
+        .await
+        .expect("release must not block on the approval hub")
+        .expect("handle ok");
 
         let text = outbound_rx.recv().await.expect("CloseControl reply");
         let reply: SignalingModel = serde_json::from_str(&text).expect("decode");
