@@ -2675,6 +2675,8 @@ dependencies = [
  "bytes",
  "bytestring",
  "chrono",
+ "desk-agent-protocol",
+ "desk-diagnose-core",
  "desk-server-user",
  "desk-server-version",
  "desk-signal-facade",
