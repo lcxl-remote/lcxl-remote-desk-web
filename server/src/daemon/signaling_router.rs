@@ -2061,12 +2061,11 @@ async fn handle_diagnose_inbound(
 }
 
 /// Route a control-end `DiagnoseCancel` (handoff to a human). The message
-/// `request_id` is the cancelled diagnosis's id. A cancel can only follow a
-/// diagnosis that already started (which required a configured gateway), so it
-/// needs no separate gate: when the orchestrator is available the daemon records
-/// an `ai.task.cancelled` audit, otherwise it is a no-op. No `DiagnoseEvent` is
-/// streamed back — the control end already closed the panel and retains the
-/// evidence locally.
+/// `request_id` is the cancelled diagnosis's id. AI diagnosis is orchestrated by
+/// the central signaling brain, which owns the run lifecycle and audit trail, so
+/// on the edge this only aborts any locally tracked task handle (defensive) and
+/// is otherwise a no-op. No `DiagnoseEvent` is streamed back — the control end
+/// already closed the panel and retains the evidence locally.
 async fn handle_diagnose_cancel_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
@@ -2080,9 +2079,6 @@ async fn handle_diagnose_cancel_inbound(
         .remove(&model.request_id)
     {
         handle.abort();
-    }
-    if let Some(orchestrator) = ctx.diagnose_orchestrator.clone() {
-        orchestrator.audit_cancellation(&model.request_id).await;
     }
     Ok(())
 }
@@ -5242,8 +5238,6 @@ mod tests {
         Arc::new(DiagnoseOrchestrator::new(
             collector,
             Arc::new(crate::diagnose::redaction::RegexRedactor::new()),
-            Arc::new(crate::diagnose::StubDiagnoseModel),
-            Arc::new(crate::worker::agent::audit_sink::LogAuditSink),
         ))
     }
 
@@ -5396,48 +5390,6 @@ mod tests {
             None,
             None,
         )
-    }
-
-    /// Recording audit sink usable from the router test module.
-    #[derive(Clone, Default)]
-    struct CancelAuditSink {
-        events: Arc<std::sync::Mutex<Vec<desk_agent_protocol::audit::AuditEvent>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl desk_agent_protocol::audit::AuditSink for CancelAuditSink {
-        async fn record(&self, event: desk_agent_protocol::audit::AuditEvent) {
-            self.events.lock().unwrap().push(event);
-        }
-    }
-
-    /// Handoff ("转人工") with an orchestrator present records exactly one
-    /// `ai.task.cancelled` audit correlated to the cancelled diagnosis, and
-    /// streams nothing back to the control end.
-    #[tokio::test]
-    async fn diagnose_cancel_records_audit_and_streams_nothing() {
-        use crate::diagnose::redaction::RegexRedactor;
-        use crate::diagnose::{DiagnoseOrchestrator, NoopContextCollector, StubDiagnoseModel};
-        let (mut ctx, mut rx) = make_ctx_with_rx();
-        // Cancel does not gate on gateway config; only the orchestrator matters.
-        let audit = CancelAuditSink::default();
-        ctx.diagnose_orchestrator = Some(Arc::new(DiagnoseOrchestrator::new(
-            Arc::new(NoopContextCollector),
-            Arc::new(RegexRedactor::new()),
-            Arc::new(StubDiagnoseModel),
-            Arc::new(audit.clone()),
-        )));
-
-        handle_diagnose_cancel_inbound(&ctx, &diagnose_cancel_model())
-            .await
-            .unwrap();
-
-        // No frame streamed back — handoff is UI-side.
-        assert!(rx.try_recv().is_err(), "cancel must not stream any frame");
-        let events = audit.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "ai.task.cancelled");
-        assert_eq!(events[0].request_id, "req-diag-1");
     }
 
     /// A cancel aborts the in-flight orchestrator task (start-over / handoff) so

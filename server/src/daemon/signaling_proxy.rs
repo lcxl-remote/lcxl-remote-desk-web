@@ -4,7 +4,6 @@ use super::virtual_display::VirtualDisplaySupervisor;
 use super::worker_manager::{WorkerManager, WorkerMessageReceiver};
 use crate::diagnose::DiagnoseOrchestrator;
 use crate::diagnose::collector::AgentContextCollector;
-use crate::diagnose::model::{ModelBackedDiagnoseModel, ProviderAdapterSelector};
 use crate::diagnose::redaction::RegexRedactor;
 use crate::host_control::HostControlHub;
 use crate::model::settings::{SharedSettings, StartupMode};
@@ -61,26 +60,18 @@ pub async fn run_signaling_proxy(
         _ => {
             let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
             let agent = Arc::new(
-                LocalDeviceAgent::with_settings(settings.clone().into_inner())
-                    .with_audit(audit.clone()),
+                LocalDeviceAgent::with_settings(settings.clone().into_inner()).with_audit(audit),
             );
             let collector = Arc::new(AgentContextCollector::new(
                 agent.clone(),
                 settings.clone().into_inner(),
             ));
-            // The orchestrator's local model is unused on this host (diagnosis is
-            // central); it is wired only to serve `collect_for_remote`, which runs
-            // the collect + fail-closed redact phases and never dials the model.
-            let model = Arc::new(ModelBackedDiagnoseModel::new(
-                Arc::new(ProviderAdapterSelector),
-                settings.clone().into_inner(),
-                audit.clone(),
-            ));
+            // The orchestrator only serves `collect_for_remote`: it runs the
+            // collect + fail-closed redact phases and never dials a model
+            // (diagnosis is orchestrated centrally).
             let orchestrator = Arc::new(DiagnoseOrchestrator::new(
                 collector,
                 Arc::new(RegexRedactor::new()),
-                model,
-                audit,
             ));
             // Serves a central read-tool call (§8.3) against the same in-process
             // agent, redacting fail-closed.

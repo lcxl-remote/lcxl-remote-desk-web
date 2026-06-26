@@ -1,5 +1,4 @@
 use actix_web::{Error as AWError, HttpResponse, get, post, web};
-use desk_agent_protocol::AgentErrorKind;
 use desk_utils::{error::DeskErrorCode, rest::RestResponse};
 use log::info;
 
@@ -165,37 +164,15 @@ pub struct AiModelValidation {
 )]
 #[post("/settings/ai-model/validate")]
 pub async fn validate_ai_model_settings(
-    settings: web::Data<SharedSettings>,
+    _settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, AWError> {
-    match crate::diagnose::model::probe_gateway(settings.get_ref()).await {
-        Ok(probe) => {
-            // No request/response content is logged — only that it succeeded and
-            // which adapter answered.
-            info!("AI model validation succeeded (adapter={})", probe.adapter);
-            Ok(
-                HttpResponse::Ok().json(RestResponse::succeed_with_data(AiModelValidation {
-                    provider: probe.provider,
-                    model: probe.model,
-                    adapter: probe.adapter,
-                    input_tokens: probe.input_tokens,
-                    output_tokens: probe.output_tokens,
-                })),
-            )
-        }
-        Err(e) => {
-            // The error carries the gateway's own reason (now including its
-            // response body); surface it so the operator can fix the config. An
-            // unconfigured / unready gateway is a precondition failure; anything
-            // else (transport / status / parse) is a system-level error. The
-            // message is the gateway's error text and never contains the api_key.
-            log::warn!("AI model validation failed: {}", e.message);
-            let code = match e.kind {
-                AgentErrorKind::UnsupportedCapability => DeskErrorCode::PRECONDITION_FAILED,
-                _ => DeskErrorCode::SYSTEM_ERROR,
-            };
-            Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(code, e.message)))
-        }
-    }
+    // AI model configuration is owned by the central signaling brain; the edge no
+    // longer holds provider credentials to probe, so validation must happen where
+    // the provider is configured (the central server's model provider settings).
+    Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
+        DeskErrorCode::PRECONDITION_FAILED,
+        "AI model is configured on the central signaling server; validate it there".to_string(),
+    )))
 }
 
 #[utoipa::path(
