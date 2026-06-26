@@ -3,6 +3,7 @@ pub mod collect_pending;
 pub mod control_authorizer;
 pub mod controller;
 pub mod db;
+pub mod diagnose_orchestrator;
 pub mod entity;
 pub mod error;
 pub mod migration;

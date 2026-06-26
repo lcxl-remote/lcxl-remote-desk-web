@@ -26,6 +26,7 @@ use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthorizedControlPayload, AuthzActor,
     AuthzDevice,
 };
+use desk_agent_protocol::diagnose::DiagnoseRequestData;
 use desk_agent_protocol::{AgentScope, Capability, ExecutionMode, RiskLevel};
 use desk_signal_facade::model::auth_context::{AuthContext, AuthKind};
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
@@ -41,6 +42,11 @@ use crate::model_provider;
 /// every authenticated operator is the one account, so a fixed id stamps the
 /// `actor` for audit attribution and exec ownership.
 pub const SINGLE_ACCOUNT_USER_ID: i32 = 1;
+
+/// The single account's synthetic token id. OSS signal validates node tokens
+/// without a per-token registry row, so a fixed id tags the token-authenticated
+/// (`Server`) connections in the auth context.
+pub const SINGLE_ACCOUNT_TOKEN_ID: i32 = 1;
 
 /// Validity window of an injected authorization block (seconds). Matches the
 /// manager's `AUTHZ_TTL_SECS`; doubles as the wrapper replay window the edge
@@ -319,17 +325,44 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                         expires_at,
                     )
                 }
-                // Centrally-orchestrated frames: signal runs these itself (drives
-                // the model and fetches read-only evidence on demand) rather than
-                // relaying. The orchestration is wired separately; until then the
+                // Diagnose is orchestrated centrally: signal pushes a
+                // `CollectRequest` to the resolved edge, reassembles the evidence,
+                // dials the model, and streams the result back — never relaying the
+                // question to the edge. The orchestration uses signal's own
+                // provider credentials, so the relay wrapper / audience are not
+                // used on this path.
+                SignalingType::Diagnose => {
+                    let request = match model.get_data::<DiagnoseRequestData>() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return ControlFrameOutcome::Reject {
+                                code: DeskErrorCode::INVALID_PARAMS,
+                                message: format!("invalid Diagnose payload: {e}"),
+                            };
+                        }
+                    };
+                    let browser_connection_id = actor.model.connection_id.clone();
+                    crate::diagnose_orchestrator::start_diagnosis(
+                        connection_map,
+                        &self.collect_pending,
+                        &model.request_id,
+                        &to_id,
+                        &browser_connection_id,
+                        request,
+                    )
+                    .await;
+                    ControlFrameOutcome::Handled
+                }
+                // The terminal copilot / completion are centrally orchestrated too;
+                // their central drivers are wired separately, so until then the
                 // frame is refused rather than silently relayed to an edge that no
                 // longer runs local AI.
-                SignalingType::Diagnose
-                | SignalingType::TerminalCopilotAsk
-                | SignalingType::TerminalCompleteAsk => ControlFrameOutcome::Reject {
-                    code: DeskErrorCode::FEATURE_UNAVAILABLE,
-                    message: "central AI orchestration is not configured".to_string(),
-                },
+                SignalingType::TerminalCopilotAsk | SignalingType::TerminalCompleteAsk => {
+                    ControlFrameOutcome::Reject {
+                        code: DeskErrorCode::FEATURE_UNAVAILABLE,
+                        message: "central AI orchestration is not configured".to_string(),
+                    }
+                }
                 // The relay branch only routes the frame types above through the
                 // authorizer; any other type here is a routing bug.
                 other => ControlFrameOutcome::Reject {
@@ -344,7 +377,6 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use desk_agent_protocol::diagnose::DiagnoseRequestData;
 
     fn diagnose_model(request_id: &str, to: Option<&str>) -> SignalingModel {
         let data = serde_json::to_value(DiagnoseRequestData {

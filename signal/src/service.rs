@@ -127,10 +127,34 @@ pub async fn handle_signaling(
         _ => None,
     };
 
-    // Signal server is not the fleet policy decision point; it carries an
-    // anonymous auth context tagged only with the connection's reported type.
-    let auth_context = desk_signal_facade::model::auth_context::AuthContext::anonymous(
-        client_version_info.remote_desk_type,
+    // Signal is the OSS single-account central brain: it resolves the connection's
+    // identity so its control-frame authorizer can stamp a trusted actor/target.
+    // Roles are already server-adjudicated upstream (a `Server` only via a valid
+    // node token; everything else via the session cookie), so the auth kind
+    // follows the adjudicated type: a `Server` is token-authenticated (the target
+    // device), everything else is the cookie-authenticated single account.
+    use desk_signal_facade::model::auth_context::AuthContext;
+    let auth_context = match client_version_info.remote_desk_type {
+        RemoteDeskTypeEnum::Server => AuthContext::token_auth(
+            crate::control_authorizer::SINGLE_ACCOUNT_USER_ID,
+            crate::control_authorizer::SINGLE_ACCOUNT_TOKEN_ID,
+            RemoteDeskTypeEnum::Server,
+        ),
+        other => AuthContext::cookie(crate::control_authorizer::SINGLE_ACCOUNT_USER_ID, other),
+    };
+
+    // The central-brain injection points: a single-account policy decision point
+    // that authorizes/orchestrates the control-end AI frames, and a collect
+    // observer that feeds inbound evidence responses back into the diagnosis. Both
+    // share the process-global pending store (the portable signal is single-node).
+    let collect_pending = crate::diagnose_orchestrator::global_pending_store();
+    let control_authorizer =
+        std::sync::Arc::new(crate::control_authorizer::SignalControlAuthorizer::new(
+            crate::db::get_db().clone(),
+            collect_pending,
+        ));
+    let collect_observer = std::sync::Arc::new(
+        crate::diagnose_orchestrator::SignalCollectObserver::new(connection_map.clone()),
     );
 
     let mut handler = SignalingHandler::init(
@@ -145,7 +169,9 @@ pub async fn handle_signaling(
         auth_context,
         desk_server_version::SERVER_API_VERSION,
     )
-    .await?;
+    .await?
+    .with_control_authorizer(control_authorizer)
+    .with_collect_observer(collect_observer);
 
     handler.do_handle_signaling(stream).await?;
     Ok(())
