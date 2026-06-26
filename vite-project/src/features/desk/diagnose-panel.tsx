@@ -14,11 +14,11 @@ import {
     type ToolActivity,
     type ToolActivityStatus,
 } from "./use-desk-diagnose"
-import type { ExecEntry, ExecPreview } from "./use-desk-exec"
+import type { ExecEntry, ExecPreview, ExecRequestInput } from "../exec/use-confirm-exec"
 
 type ExecControls = {
     entries: Record<number, ExecEntry>
-    requestPreview: (rowIndex: number, command: SuggestedCommand) => void
+    requestPreview: (rowIndex: number, input: ExecRequestInput) => void
     approve: (rowIndex: number) => void
     reject: (rowIndex: number) => void
     dismiss: (rowIndex: number) => void
@@ -92,7 +92,15 @@ function ExecRow({
                 size="sm"
                 variant="secondary"
                 className="mt-2 h-7 w-full text-xs"
-                onClick={() => exec.requestPreview(index, command)}
+                onClick={() =>
+                    exec.requestPreview(index, {
+                        shell: command.shell,
+                        command: command.command,
+                        // A diagnosis carries no working directory.
+                        cwd: null,
+                        reason: command.purpose,
+                    })
+                }
             >
                 <Play className="mr-1 h-3 w-3" />
                 {t("pages.desk.diagnose.exec.execute")}

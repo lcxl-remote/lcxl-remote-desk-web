@@ -4,13 +4,26 @@ import {
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
     SIGNALING_TYPE_CODE_EXEC_RESULT,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
-} from './constants';
-import type { AgentError, RiskLevel, SuggestedCommand } from './use-desk-diagnose';
-import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
+} from '../desk/constants';
+import type { SignalingMessage, SignalingSubscriber } from '../desk/use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::exec`. These ride the ConfirmExec /
 // ExecPreview / ResolveExec / ExecResult signaling types as `signaling_data`;
 // like the diagnose types they are not part of the REST OpenAPI surface.
+//
+// This hook is feature-neutral: both the diagnose panel and the terminal copilot
+// drive the same sealed confirm-exec lifecycle through it. It does not depend on
+// any feature's suggestion shape — callers map their own suggestion into the
+// neutral `ExecRequestInput`.
+
+export type RiskLevel = 'low' | 'medium' | 'high' | 'critical' | 'blocked';
+
+export type AgentError = {
+    kind: string;
+    message: string;
+    retryable: boolean;
+    safe_for_model: boolean;
+};
 
 export type ExecPreview = {
     exec_request_id: string | null;
@@ -60,6 +73,19 @@ export type ExecEntry = {
     error: string | null;
 };
 
+/**
+ * A command to ask the host to classify and (on approval) run. Feature-neutral:
+ * the diagnose panel maps a `SuggestedCommand` here (with `cwd: null`, since a
+ * diagnosis carries no working directory), and the terminal copilot maps a
+ * `CommandSuggestion` here, preserving the suggestion's own `cwd`.
+ */
+export type ExecRequestInput = {
+    shell: string;
+    command: string;
+    cwd: string | null;
+    reason: string;
+};
+
 /** Decoded exec output from an outcome, or null if it was an error / non-exec. */
 function execOutputFromOutcome(outcome: ExecOutcome): ExecOutput | null {
     if (outcome.status !== 'ok') return null;
@@ -68,7 +94,7 @@ function execOutputFromOutcome(outcome: ExecOutcome): ExecOutput | null {
     return null;
 }
 
-type UseDeskExecProps = {
+type UseConfirmExecProps = {
     deskId: string | null;
     subscribe: (handler: SignalingSubscriber) => () => void;
     sendMessage: (
@@ -80,15 +106,16 @@ type UseDeskExecProps = {
 };
 
 /**
- * Drives confirmed execution of a suggested command over signaling: sends
- * ConfirmExec, tracks the ExecPreview, and on user approval sends ResolveExec
- * and backfills the ExecResult — all keyed by the command's index in the
- * diagnosis so each row shows its own state. The server is the source of truth:
- * it classifies, mints the `exec_request_id`, and only previews/executes
- * whitelist templates.
+ * Drives confirmed execution of a command over signaling: sends ConfirmExec,
+ * tracks the ExecPreview, and on user approval sends ResolveExec and backfills
+ * the ExecResult — all keyed by the caller's row index so each row shows its own
+ * state. The server is the source of truth: it classifies, mints the
+ * `exec_request_id`, and only previews/executes whitelist templates. The host
+ * re-runs classification on the relayed command, so a control-end-reported
+ * decision is never trusted.
  */
-export function useDeskExec({ deskId, subscribe, sendMessage }: UseDeskExecProps) {
-    // Keyed by command row index.
+export function useConfirmExec({ deskId, subscribe, sendMessage }: UseConfirmExecProps) {
+    // Keyed by the caller's row index.
     const [entries, setEntries] = useState<Record<number, ExecEntry>>({});
     // Map an in-flight ConfirmExec signaling request_id -> row index, so the
     // ExecPreview frame (correlated by that request_id) lands on the right row.
@@ -97,7 +124,7 @@ export function useDeskExec({ deskId, subscribe, sendMessage }: UseDeskExecProps
     const execIdToRow = useRef<Record<string, number>>({});
 
     const requestPreview = useCallback(
-        (rowIndex: number, command: SuggestedCommand) => {
+        (rowIndex: number, input: ExecRequestInput) => {
             if (!deskId) return;
             const data = {
                 operation: {
@@ -105,16 +132,16 @@ export function useDeskExec({ deskId, subscribe, sendMessage }: UseDeskExecProps
                     input: {
                         kind: 'exec',
                         params: {
-                            target: { type: 'shell', shell: command.shell },
-                            command: command.command,
-                            cwd: null,
+                            target: { type: 'shell', shell: input.shell },
+                            command: input.command,
+                            cwd: input.cwd,
                             timeout_ms: 0,
                             max_stdout_bytes: 0,
                             max_stderr_bytes: 0,
                         },
                     },
                 },
-                reason: command.purpose,
+                reason: input.reason,
             };
             const requestId = sendMessage(SIGNALING_TYPE_CODE_CONFIRM_EXEC, data, deskId);
             previewReqToRow.current[requestId] = rowIndex;

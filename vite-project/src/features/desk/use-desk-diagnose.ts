@@ -7,7 +7,7 @@ import {
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
-import type { ExecPreview } from './use-desk-exec';
+import type { ExecPreview } from '../exec/use-confirm-exec';
 import type { SignalingMessage, SignalingSubscriber } from './use-desk-signaling';
 
 // Wire types — mirror `desk_agent_protocol::diagnose`. These ride the

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { DiagnosePanel } from "./diagnose-panel";
 import type { DiagnoseState } from "./use-desk-diagnose";
-import type { ExecEntry } from "./use-desk-exec";
+import type { ExecEntry } from "../exec/use-confirm-exec";
 
 // i18n: real en-US locale; i18n.language is the tag forwarded to onStart so the
 // AI answers in the UI language.

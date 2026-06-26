@@ -21,7 +21,7 @@ import type { SignalingMessage } from "./use-desk-signaling"
 import { useDeskRTC } from "./use-desk-rtc"
 import { useDeskDiagnose } from "./use-desk-diagnose"
 import { DiagnosePanel } from "./diagnose-panel"
-import { useDeskExec } from "./use-desk-exec"
+import { useConfirmExec } from "../exec/use-confirm-exec"
 import { useDeskInput } from "./use-desk-input"
 import { getKeyboardShortcuts } from "./keyboard-shortcuts"
 import { lockEscapeKey, unlockKeyboard, isKeyboardLockSupported } from "./fullscreen-keyboard"
@@ -206,7 +206,7 @@ export default function DeskSession() {
 
     // Confirmed execution of a suggested command: ConfirmExec -> ExecPreview ->
     // ResolveExec -> ExecResult, keyed by command row.
-    const exec = useDeskExec({
+    const exec = useConfirmExec({
         deskId: deskId || null,
         subscribe,
         sendMessage,

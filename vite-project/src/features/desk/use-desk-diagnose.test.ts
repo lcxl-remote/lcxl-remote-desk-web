@@ -10,7 +10,7 @@ import {
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
 } from './constants';
-import type { ExecPreview } from './use-desk-exec';
+import type { ExecPreview } from '../exec/use-confirm-exec';
 
 // `sendMessage` returns the wire request_id; the hook keys its aggregation on
 // it. Fixed to "req-1" so test frames can target the active request.

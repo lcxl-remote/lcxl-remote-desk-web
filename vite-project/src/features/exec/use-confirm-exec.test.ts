@@ -1,15 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useDeskExec } from './use-desk-exec';
-import type { ExecPreview, ExecResultPayload } from './use-desk-exec';
-import type { SuggestedCommand } from './use-desk-diagnose';
-import type { SignalingMessage } from './use-desk-signaling';
+import { useConfirmExec } from './use-confirm-exec';
+import type { ExecPreview, ExecRequestInput, ExecResultPayload } from './use-confirm-exec';
+import type { SignalingMessage } from '../desk/use-desk-signaling';
 import {
     SIGNALING_TYPE_CODE_CONFIRM_EXEC,
     SIGNALING_TYPE_CODE_EXEC_PREVIEW,
     SIGNALING_TYPE_CODE_EXEC_RESULT,
     SIGNALING_TYPE_CODE_RESOLVE_EXEC,
-} from './constants';
+} from '../desk/constants';
 
 let nextId = 0;
 const sendMessage = vi.fn(() => `req-${++nextId}`);
@@ -19,12 +18,11 @@ beforeEach(() => {
     nextId = 0;
 });
 
-const command: SuggestedCommand = {
+const input: ExecRequestInput = {
     shell: 'powershell',
     command: 'Get-Service -Name Spooler',
-    purpose: 'Check the spooler',
-    risk: 'low',
-    requires_confirmation: true,
+    cwd: null,
+    reason: 'Check the spooler',
 };
 
 function previewFrame(requestId: string, preview: ExecPreview): SignalingMessage {
@@ -47,7 +45,7 @@ function executablePreview(): ExecPreview {
     return {
         exec_request_id: 'exec-1',
         shell: 'powershell',
-        command: command.command,
+        command: input.command,
         cwd: null,
         timeout_ms: 30000,
         risk: 'low',
@@ -71,17 +69,17 @@ function render() {
         };
     };
     const props = { deskId: 'desk-1', subscribe, sendMessage };
-    const hook = renderHook((p: typeof props) => useDeskExec(p), { initialProps: props });
+    const hook = renderHook((p: typeof props) => useConfirmExec(p), { initialProps: props });
     const feed = (msg: SignalingMessage) => {
         handlers.forEach((h) => h(msg));
     };
     return { hook, feed };
 }
 
-describe('useDeskExec', () => {
+describe('useConfirmExec', () => {
     it('sends ConfirmExec and tracks an executable preview', () => {
         const { hook, feed } = render();
-        act(() => hook.result.current.requestPreview(0, command));
+        act(() => hook.result.current.requestPreview(0, input));
         expect(sendMessage).toHaveBeenCalledWith(
             SIGNALING_TYPE_CODE_CONFIRM_EXEC,
             expect.anything(),
@@ -94,13 +92,24 @@ describe('useDeskExec', () => {
         expect(hook.result.current.entries[0].execRequestId).toBe('exec-1');
     });
 
+    it('forwards the suggestion cwd in the ConfirmExec payload', () => {
+        const { hook } = render();
+        act(() =>
+            hook.result.current.requestPreview(0, { ...input, cwd: '/var/log' }),
+        );
+        const payload = sendMessage.mock.calls[0][1] as {
+            operation: { input: { params: { cwd: string | null } } };
+        };
+        expect(payload.operation.input.params.cwd).toBe('/var/log');
+    });
+
     it('marks a non-executable (blocked) preview as an error with the reason', () => {
         const { hook, feed } = render();
-        act(() => hook.result.current.requestPreview(0, command));
+        act(() => hook.result.current.requestPreview(0, input));
         const preview: ExecPreview = {
             exec_request_id: null,
             shell: 'powershell',
-            command: command.command,
+            command: input.command,
             cwd: null,
             timeout_ms: 30000,
             risk: 'blocked',
@@ -115,9 +124,30 @@ describe('useDeskExec', () => {
         expect(hook.result.current.entries[0].error).toContain('download-and-execute');
     });
 
+    it('surfaces the policy_note when a preview is non-executable by mode', () => {
+        const { hook, feed } = render();
+        act(() => hook.result.current.requestPreview(0, input));
+        const preview: ExecPreview = {
+            exec_request_id: null,
+            shell: 'powershell',
+            command: input.command,
+            cwd: null,
+            timeout_ms: 0,
+            risk: 'low',
+            impact: 'Would read the spooler service status',
+            policy_note: 'AI command execution is disabled (suggest-only mode)',
+            requires_confirmation: false,
+            executable: false,
+            blocked_reason: null,
+        };
+        act(() => feed(previewFrame('req-1', preview)));
+        expect(hook.result.current.entries[0].phase).toBe('error');
+        expect(hook.result.current.entries[0].error).toContain('suggest-only');
+    });
+
     it('approves and backfills the result by exec_request_id', () => {
         const { hook, feed } = render();
-        act(() => hook.result.current.requestPreview(0, command));
+        act(() => hook.result.current.requestPreview(0, input));
         act(() => feed(previewFrame('req-1', executablePreview())));
 
         act(() => hook.result.current.approve(0));
@@ -157,7 +187,7 @@ describe('useDeskExec', () => {
 
     it('reject sends a reject decision and clears the entry', () => {
         const { hook, feed } = render();
-        act(() => hook.result.current.requestPreview(0, command));
+        act(() => hook.result.current.requestPreview(0, input));
         act(() => feed(previewFrame('req-1', executablePreview())));
         act(() => hook.result.current.reject(0));
         expect(sendMessage).toHaveBeenCalledWith(
@@ -170,7 +200,7 @@ describe('useDeskExec', () => {
 
     it('surfaces an execution error result', () => {
         const { hook, feed } = render();
-        act(() => hook.result.current.requestPreview(0, command));
+        act(() => hook.result.current.requestPreview(0, input));
         act(() => feed(previewFrame('req-1', executablePreview())));
         act(() => hook.result.current.approve(0));
         act(() =>
