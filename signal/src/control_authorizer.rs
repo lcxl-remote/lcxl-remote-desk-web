@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 
+use actix_web::web;
 use desk_agent_protocol::authz::{
     AUTHORIZATION_BLOCK_VERSION, AuthorizationBlock, AuthorizedControlPayload, AuthzActor,
     AuthzDevice,
@@ -210,14 +211,24 @@ pub struct SignalControlAuthorizer {
     /// collection here (diagnosis is orchestrated centrally; there is no
     /// diagnose task on the edge to relay a cancel to).
     collect_pending: Arc<CollectPendingStore>,
+    /// Connection map handle used to stream centrally-orchestrated terminal
+    /// copilot / completion results back to the asking browser. Held (not just
+    /// borrowed per call) so a spawned, `!Send` model dial can reach the browser
+    /// after `authorize` returns.
+    connection_map: web::Data<SharedConnectionMap>,
 }
 
 impl SignalControlAuthorizer {
-    pub fn new(db: DatabaseConnection, collect_pending: Arc<CollectPendingStore>) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        collect_pending: Arc<CollectPendingStore>,
+        connection_map: web::Data<SharedConnectionMap>,
+    ) -> Self {
         Self {
             db,
             issuer: "signal".to_string(),
             collect_pending,
+            connection_map,
         }
     }
 
@@ -353,15 +364,53 @@ impl ControlFrameAuthorizer for SignalControlAuthorizer {
                     .await;
                     ControlFrameOutcome::Handled
                 }
-                // The terminal copilot / completion are centrally orchestrated too;
-                // their central drivers are wired separately, so until then the
-                // frame is refused rather than silently relayed to an edge that no
-                // longer runs local AI.
-                SignalingType::TerminalCopilotAsk | SignalingType::TerminalCompleteAsk => {
-                    ControlFrameOutcome::Reject {
-                        code: DeskErrorCode::FEATURE_UNAVAILABLE,
-                        message: "central AI orchestration is not configured".to_string(),
-                    }
+                // The terminal copilot / completion run centrally too: signal
+                // dials its own model over the inline terminal context the browser
+                // supplied (no edge round-trip) and streams the result back. The
+                // dial is `!Send` and latency-sensitive, so it is spawned and the
+                // frame reported `Handled`. The relay wrapper / audience are not
+                // used on this path (the question is never relayed to the edge).
+                SignalingType::TerminalCompleteAsk => {
+                    let ask = match model
+                        .get_data::<desk_agent_protocol::terminal_complete::TerminalCompleteAsk>()
+                    {
+                        Ok(a) => a,
+                        Err(e) => {
+                            return ControlFrameOutcome::Reject {
+                                code: DeskErrorCode::INVALID_PARAMS,
+                                message: format!("invalid TerminalCompleteAsk payload: {e}"),
+                            };
+                        }
+                    };
+                    actix_web::rt::spawn(crate::terminal_orchestrator::run_completion(
+                        self.connection_map.clone(),
+                        self.db.clone(),
+                        model.request_id.clone(),
+                        actor.model.connection_id.clone(),
+                        ask,
+                    ));
+                    ControlFrameOutcome::Handled
+                }
+                SignalingType::TerminalCopilotAsk => {
+                    let ask = match model
+                        .get_data::<desk_agent_protocol::terminal_copilot::TerminalCopilotAsk>()
+                    {
+                        Ok(a) => a,
+                        Err(e) => {
+                            return ControlFrameOutcome::Reject {
+                                code: DeskErrorCode::INVALID_PARAMS,
+                                message: format!("invalid TerminalCopilotAsk payload: {e}"),
+                            };
+                        }
+                    };
+                    actix_web::rt::spawn(crate::terminal_orchestrator::run_copilot(
+                        self.connection_map.clone(),
+                        self.db.clone(),
+                        model.request_id.clone(),
+                        actor.model.connection_id.clone(),
+                        ask,
+                    ));
+                    ControlFrameOutcome::Handled
                 }
                 // The relay branch only routes the frame types above through the
                 // authorizer; any other type here is a routing bug.

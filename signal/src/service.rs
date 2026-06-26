@@ -152,6 +152,7 @@ pub async fn handle_signaling(
         std::sync::Arc::new(crate::control_authorizer::SignalControlAuthorizer::new(
             crate::db::get_db().clone(),
             collect_pending,
+            connection_map.clone(),
         ));
     let collect_observer = std::sync::Arc::new(
         crate::diagnose_orchestrator::SignalCollectObserver::new(connection_map.clone()),

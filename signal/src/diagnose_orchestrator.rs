@@ -214,8 +214,9 @@ fn response_format_spec(mode: ResponseFormatMode) -> ResponseFormatSpec {
 }
 
 /// Record one model call into the hourly usage rollup. Best-effort: a recording
-/// failure is logged, never surfaced to the diagnosis.
-async fn record_usage(
+/// failure is logged, never surfaced to the caller. Shared with the terminal
+/// orchestrator so every central model dial lands in the same rollup.
+pub(crate) async fn record_usage(
     db: &DatabaseConnection,
     model_name: &str,
     usage: &desk_diagnose_core::chat::TokenUsage,

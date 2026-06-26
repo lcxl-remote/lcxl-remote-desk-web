@@ -11,5 +11,6 @@ pub mod model;
 pub mod model_dial;
 pub mod model_provider;
 pub mod service;
+pub mod terminal_orchestrator;
 pub mod turn_usage;
 pub mod version;
