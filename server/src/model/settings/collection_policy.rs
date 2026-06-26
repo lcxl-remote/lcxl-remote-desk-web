@@ -4,9 +4,9 @@
 //! (this desk server) only provides read-only evidence on request. This policy
 //! is the edge's **final say** over what may leave the machine — it is applied
 //! locally on every collection regardless of who asked. It is deliberately
-//! separate from [`super::AiModelSettings`] (provider / model / key), which on a
-//! manager-attached edge is only meaningful for the self-contained `mcp-stdio`
-//! mode: a thin edge needs the gate but no model credentials.
+//! separate from [`super::AiExecutionPolicy`] (the local execution-mode ceiling):
+//! a thin edge needs the data-egress gate independently of the execution policy,
+//! and holds no model credentials at all (those live on the central brain).
 //!
 //! Both flags default to `false` (most restrictive / fail-closed), so a config
 //! written before this section existed — or one where the operator never opted

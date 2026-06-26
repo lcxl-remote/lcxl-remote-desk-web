@@ -35,13 +35,12 @@ use crate::{
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
         service_mgmt::{install_service, uninstall_service},
         settings::{
-            ack_security_approval, query_ai_model_settings, query_collection_policy_settings,
+            ack_security_approval, query_ai_policy_settings, query_collection_policy_settings,
             query_log_settings, query_security_settings, query_settings, query_telemetry_status,
             query_turn_client_settings, query_turn_settings, regenerate_turn_secret,
-            submit_security_approval, update_ai_model_settings, update_collection_policy_settings,
+            submit_security_approval, update_ai_policy_settings, update_collection_policy_settings,
             update_log_settings, update_security_settings, update_settings,
             update_telemetry_consent, update_turn_client_settings, update_turn_settings,
-            validate_ai_model_settings,
         },
         turn::{
             delete_turn_session, get_turn_info, get_turn_metrics, get_turn_session,
@@ -192,9 +191,8 @@ pub fn configure_api_surface(
                     .service(change_password)
                     .service(query_settings)
                     .service(update_settings)
-                    .service(query_ai_model_settings)
-                    .service(update_ai_model_settings)
-                    .service(validate_ai_model_settings)
+                    .service(query_ai_policy_settings)
+                    .service(update_ai_policy_settings)
                     .service(query_collection_policy_settings)
                     .service(update_collection_policy_settings)
                     .service(query_turn_settings)
@@ -965,13 +963,13 @@ mod tests {
         .await;
     }
 
-    /// Regression: AI model settings endpoint exposed at its real nested path
-    /// (`/api` → `/desk` → `/settings/ai-model`).
+    /// Regression: AI execution policy endpoint exposed at its real nested path
+    /// (`/api` → `/desk` → `/settings/ai-policy`).
     #[actix_web::test]
-    async fn daemon_surface_registers_ai_model_settings_endpoint() {
+    async fn daemon_surface_registers_ai_policy_settings_endpoint() {
         assert_daemon_routes_registered(&[
-            ("GET", "/api/desk/settings/ai-model"),
-            ("POST", "/api/desk/settings/ai-model"),
+            ("GET", "/api/desk/settings/ai-policy"),
+            ("POST", "/api/desk/settings/ai-policy"),
         ])
         .await;
     }

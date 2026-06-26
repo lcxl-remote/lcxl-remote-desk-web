@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::error::DeskError;
 
-mod ai_model;
+mod ai_policy;
 mod collection_policy;
 mod log_config;
 mod system;
@@ -21,7 +21,7 @@ mod turn_client;
 mod user;
 mod virtual_display;
 
-pub use ai_model::*;
+pub use ai_policy::*;
 pub use collection_policy::*;
 pub use log_config::*;
 pub use system::*;
@@ -54,16 +54,16 @@ pub struct Settings {
     /// Virtual display (Windows IDD) settings
     #[serde(default)]
     pub virtual_display: VirtualDisplaySettings,
-    /// AI model gateway settings. Top-level (not under `system`) so the model
-    /// `api_key` never reaches the legacy `/settings` response or
-    /// `RemoteSystemSettings`.
+    /// Edge-local AI execution policy: the local ceiling on how far a centrally
+    /// authorized AI action may go on this device. Model provider credentials
+    /// live on the central signaling brain, not here.
     #[serde(default)]
-    pub ai_model: AiModelSettings,
+    pub ai_policy: AiExecutionPolicy,
 
     /// Edge-side gate on what evidence may leave this host for an AI model
-    /// (`allow_logs` / `allow_screen`). Separate from `ai_model` so a thin edge
-    /// keeps the gate without holding model credentials; applied locally on every
-    /// collection. Default fail-closed (both `false`).
+    /// (`allow_logs` / `allow_screen`). Separate from `ai_policy` so a thin edge
+    /// keeps the data-egress gate independently of the execution ceiling; applied
+    /// locally on every collection. Default fail-closed (both `false`).
     #[serde(default)]
     pub collection_policy: CollectionPolicySettings,
 

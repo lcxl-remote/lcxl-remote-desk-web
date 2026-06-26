@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::host_control::{ApprovalResponse, HostControlHub};
 use crate::model::settings::{
-    AiModelSettingsPublic, AiModelSettingsUpdate, CollectionPolicySettings,
+    AiExecutionPolicyPublic, AiExecutionPolicyUpdate, CollectionPolicySettings,
     CollectionPolicySettingsUpdate, LogSettings, SharedSettings, SystemSettings,
     TurnClientSettings,
 };
@@ -101,78 +101,39 @@ pub async fn update_settings(
 
 #[utoipa::path(
     tag = "AiModel",
-    summary = "Query AI model settings",
+    summary = "Query the edge AI execution policy",
     responses(
-        (status = 200, description = "Query AI model settings successfully", body=RestResponse<AiModelSettingsPublic>),
+        (status = 200, description = "Query AI execution policy successfully", body=RestResponse<AiExecutionPolicyPublic>),
     ),
 )]
-#[get("/settings/ai-model")]
-pub async fn query_ai_model_settings(
+#[get("/settings/ai-policy")]
+pub async fn query_ai_policy_settings(
     settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, AWError> {
     let settings = settings.read().await;
-    // Masked view only: the api_key is never returned, only `api_key_set`.
-    let public = settings.ai_model.public_view();
+    let public = settings.ai_policy.public_view();
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(public)))
 }
 
 #[utoipa::path(
     tag = "AiModel",
-    summary = "Update AI model settings",
-    request_body(content = AiModelSettingsUpdate),
+    summary = "Update the edge AI execution policy",
+    request_body(content = AiExecutionPolicyUpdate),
     responses(
-        (status = 200, description = "Update AI model settings successfully"),
+        (status = 200, description = "Update AI execution policy successfully"),
     ),
 )]
-#[post("/settings/ai-model")]
-pub async fn update_ai_model_settings(
-    request_json: web::Json<AiModelSettingsUpdate>,
+#[post("/settings/ai-policy")]
+pub async fn update_ai_policy_settings(
+    request_json: web::Json<AiExecutionPolicyUpdate>,
     settings: web::Data<SharedSettings>,
 ) -> Result<HttpResponse, AWError> {
     let params = request_json.into_inner();
     let mut settings = settings.write().await;
-    settings.ai_model.apply_update(params);
+    settings.ai_policy.apply_update(params);
     settings.save()?;
-    // No content logged: the body carries the write-only api_key.
-    info!("Update AI model settings successfully");
+    info!("Update AI execution policy successfully");
     Ok(HttpResponse::Ok().finish())
-}
-
-/// The outcome of a successful AI model gateway validation. On success the probe
-/// confirms the gateway is reachable, the credentials are accepted, and the model
-/// answered; these fields echo which provider / model responded.
-#[derive(Serialize, Deserialize, ToSchema, Clone, Debug)]
-pub struct AiModelValidation {
-    /// The provider whose adapter answered (e.g. `openai-compatible`).
-    pub provider: String,
-    /// The model that answered the probe.
-    pub model: String,
-    /// The wire adapter that was used.
-    pub adapter: String,
-    /// Prompt tokens the gateway reported, if any.
-    pub input_tokens: Option<i64>,
-    /// Completion tokens the gateway reported, if any.
-    pub output_tokens: Option<i64>,
-}
-
-#[utoipa::path(
-    tag = "AiModel",
-    summary = "Validate the configured AI model gateway",
-    responses(
-        (status = 200, description = "Validation result. On success `data` carries the answering provider / model; on a gateway rejection the failure `message` carries the gateway's own reason.", body=RestResponse<AiModelValidation>),
-    ),
-)]
-#[post("/settings/ai-model/validate")]
-pub async fn validate_ai_model_settings(
-    _settings: web::Data<SharedSettings>,
-) -> Result<HttpResponse, AWError> {
-    // AI model configuration is owned by the central signaling brain; the edge no
-    // longer holds provider credentials to probe, so validation must happen where
-    // the provider is configured (the central server's model provider settings).
-    Ok(HttpResponse::Ok().json(RestResponse::<()>::failed(
-        DeskErrorCode::PRECONDITION_FAILED,
-        "AI model is configured on the central signaling server; validate it there".to_string(),
-    )))
 }
 
 #[utoipa::path(
@@ -530,48 +491,39 @@ mod tests {
     use crate::model::settings::Settings;
     use actix_web::{App, test};
 
-    fn settings_with_model_key(key: &str) -> Settings {
-        let mut s = Settings::default();
-        s.ai_model.provider = Some("openai-compatible".to_string());
-        s.ai_model.api_key = Some(key.to_string());
-        s
-    }
-
-    /// `GET /settings/ai-model` returns the masked view: `api_key_set` is true
-    /// but the key value never appears in the response body.
+    /// `GET /settings/ai-policy` returns the edge execution policy (the local
+    /// execution-mode ceiling). It carries no secret.
     #[actix_web::test]
-    async fn query_ai_model_settings_masks_the_key() {
-        let shared = web::Data::new(SharedSettings::from(settings_with_model_key("sk-leak-me")));
+    async fn query_ai_policy_settings_returns_execution_mode() {
+        let mut settings = Settings::default();
+        settings.ai_policy.execution_mode = desk_agent_protocol::ExecutionMode::ConfirmEachAction;
+        let shared = web::Data::new(SharedSettings::from(settings));
         let app = test::init_service(
             App::new()
                 .app_data(shared.clone())
-                .service(query_ai_model_settings),
+                .service(query_ai_policy_settings),
         )
         .await;
 
         let req = test::TestRequest::get()
-            .uri("/settings/ai-model")
+            .uri("/settings/ai-policy")
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(body["data"]["api_key_set"].as_bool(), Some(true));
-        // The masked view must not carry the secret nor an api_key field.
-        let raw = body.to_string();
-        assert!(
-            !raw.contains("sk-leak-me"),
-            "response leaked the key: {raw}"
+        assert_eq!(
+            body["data"]["execution_mode"].as_str(),
+            Some("confirm_each_action")
         );
-        assert!(
-            body["data"].get("api_key").is_none(),
-            "masked view must not carry an api_key field"
-        );
+        // The policy has no credential fields to leak.
+        assert!(body["data"].get("api_key").is_none());
+        assert!(body["data"].get("base_url").is_none());
     }
 
-    /// `POST /settings/ai-model` applies the update and persists it. The
-    /// write-only api_key is stored.
+    /// `POST /settings/ai-policy` applies the execution-mode update and persists
+    /// it; a not-yet-selectable mode is ignored.
     #[actix_web::test]
-    async fn update_ai_model_settings_applies_update() {
+    async fn update_ai_policy_settings_applies_update() {
         let mut settings = Settings::default();
         let tmp = std::env::temp_dir().join(format!("lrd-pr0-{}.toml", uuid::Uuid::new_v4()));
         settings.args.config_file_path = tmp.to_string_lossy().into_owned();
@@ -580,54 +532,25 @@ mod tests {
         let app = test::init_service(
             App::new()
                 .app_data(shared.clone())
-                .service(update_ai_model_settings),
+                .service(update_ai_policy_settings),
         )
         .await;
 
         let req = test::TestRequest::post()
-            .uri("/settings/ai-model")
-            .set_json(AiModelSettingsUpdate {
-                provider: Some("openai-compatible".to_string()),
-                api_key: Some("sk-new-key".to_string()),
-                ..Default::default()
+            .uri("/settings/ai-policy")
+            .set_json(AiExecutionPolicyUpdate {
+                execution_mode: Some(desk_agent_protocol::ExecutionMode::ConfirmEachAction),
             })
             .to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), 200);
 
         let stored = shared.read().await;
-        assert_eq!(stored.ai_model.api_key.as_deref(), Some("sk-new-key"));
         assert_eq!(
-            stored.ai_model.provider.as_deref(),
-            Some("openai-compatible")
+            stored.ai_policy.execution_mode,
+            desk_agent_protocol::ExecutionMode::ConfirmEachAction
         );
         let _ = std::fs::remove_file(&tmp);
-    }
-
-    /// `POST /settings/ai-model/validate` with an unconfigured gateway returns a
-    /// business failure (`PRECONDITION_FAILED`) and never touches the network.
-    #[actix_web::test]
-    async fn validate_ai_model_settings_unconfigured_is_precondition_failed() {
-        let shared = web::Data::new(SharedSettings::from(Settings::default()));
-        let app = test::init_service(
-            App::new()
-                .app_data(shared.clone())
-                .service(validate_ai_model_settings),
-        )
-        .await;
-
-        let req = test::TestRequest::post()
-            .uri("/settings/ai-model/validate")
-            .to_request();
-        let resp = test::call_service(&app, req).await;
-        // Business errors ride in the body, not the HTTP status.
-        assert_eq!(resp.status(), 200);
-        let body: serde_json::Value = test::read_body_json(resp).await;
-        assert_eq!(
-            body["code"].as_i64(),
-            Some(DeskErrorCode::PRECONDITION_FAILED.code() as i64)
-        );
-        assert_eq!(body["success"].as_bool(), Some(false));
     }
 
     fn hub_data(hub: Option<HostControlHub>) -> web::Data<Option<Arc<HostControlHub>>> {

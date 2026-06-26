@@ -2269,37 +2269,19 @@ async fn handle_confirm_exec_inbound(
         return Ok(());
     }
 
-    // Gate: the model gateway must be configured (the operator opt-in), like the
-    // diagnose / agent-request routes.
+    // The execution mode is the device owner's local ceiling on AI action.
+    // Provider credentials live on the central brain, so there is no local
+    // "gateway configured" gate here: confirmed execution is gated by worker
+    // support (above) and central authorization (the PDP checks below). On a
+    // central link the policy decision's mode applies but the local mode is an
+    // upper bound — the local setting can narrow a centrally issued authorization,
+    // never widen it (a SuggestOnly / ReadOnly local config caps a broad central
+    // grant). Off that link the local mode applies directly.
     let execution_mode = {
         let s = ctx.settings.read().await;
-        if !s.ai_model.is_configured() {
-            drop(s);
-            send_exec_preview(
-                &ctx.outbound_tx,
-                &request_id,
-                to,
-                non_executable_preview(
-                    shell,
-                    command,
-                    cwd,
-                    limits.timeout_ms,
-                    desk_agent_protocol::RiskLevel::High,
-                    "AI model gateway is not configured".to_string(),
-                    Some("set the model, base URL, and API key in AI model settings".to_string()),
-                    None,
-                ),
-            );
-            return Ok(());
-        }
-        // On the manager link the policy decision's execution mode applies, but
-        // the locally configured mode is an upper bound: the device owner's local
-        // setting can narrow a manager-issued authorization, never widen it (a
-        // SuggestOnly / ReadOnly local config caps a broad central grant). Off the
-        // manager link the local mode applies directly.
         match &ctx.inbound_authz {
-            Some(authz) => authz.scope.mode.restrict_to(s.ai_model.execution_mode),
-            None => s.ai_model.execution_mode,
+            Some(authz) => authz.scope.mode.restrict_to(s.ai_policy.execution_mode),
+            None => s.ai_policy.execution_mode,
         }
     };
 
@@ -3010,25 +2992,13 @@ async fn handle_agent_request_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    // The AI read collectors expose host data beyond the remote view, so they
-    // stay dark until the model gateway is configured (the operator opt-in). A
-    // control end that sends `AgentRequest` before that gets a structured
-    // `UnsupportedCapability` rather than any collection.
-    if !ctx.settings.read().await.ai_model.is_configured() {
-        emit_agent_error(
-            ctx,
-            model,
-            agent_error(
-                AgentErrorKind::UnsupportedCapability,
-                "AI model gateway is not configured; set the model, base URL, \
-                 and API key in AI model settings",
-                false,
-                true,
-            ),
-        );
-        return Ok(());
-    }
-
+    // The AI read collectors expose host data beyond the remote view, so what
+    // may leave this host is gated locally by the fail-closed collection policy
+    // (`allow_logs` / `allow_screen`) and centrally by the authorization scope
+    // below. Provider credentials live on the central brain, so there is no local
+    // "gateway configured" gate here: an `AgentRequest` arrives already
+    // authorized from the central link (or, off it, runs under the local read
+    // scope).
     let Some(raw) = model.get_raw_data().as_ref() else {
         emit_agent_error(
             ctx,
@@ -3324,15 +3294,6 @@ mod tests {
     fn read_response(rx: &mut broadcast::Receiver<String>) -> SignalingModel {
         let text = rx.try_recv().expect("expected outbound error response");
         serde_json::from_str::<SignalingModel>(&text).expect("response not valid JSON")
-    }
-
-    /// Configure the model gateway so the AI agent / diagnose routes pass their
-    /// "is the gateway configured" gate (the operator opt-in).
-    async fn configure_ai_model(ctx: &RouterContext) {
-        let mut s = ctx.settings.write().await;
-        s.ai_model.model = Some("test-model".to_string());
-        s.ai_model.base_url = Some("http://localhost:1/v1".to_string());
-        s.ai_model.api_key = Some("test-key".to_string());
     }
 
     fn make_change_display_settings_model(
@@ -4974,7 +4935,6 @@ mod tests {
     #[tokio::test]
     async fn agent_request_unknown_kind_emits_unsupported_outcome() {
         let (ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -4998,7 +4958,6 @@ mod tests {
     #[tokio::test]
     async fn agent_request_exec_is_unsupported_until_m2() {
         let (ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
         let raw = serde_json::json!({
             "operation": {
                 "input": {
@@ -5034,7 +4993,6 @@ mod tests {
             AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
         };
         let ctx = make_ctx();
-        configure_ai_model(&ctx).await;
         let (ipc_tx, mut ipc_rx) = tokio::sync::mpsc::unbounded_channel::<ServiceToWorker>();
         ctx.worker_mgr.install_active_for_test(ipc_tx).await;
 
@@ -5071,17 +5029,17 @@ mod tests {
         }
     }
 
-    /// With the model gateway unconfigured (the default), a valid read is gated
-    /// before any parsing / collection: the handler emits
-    /// `AgentResponse(AgentOutcome::Err(UnsupportedCapability))` and forwards
-    /// nothing.
+    /// Provider credentials live on the central brain, so the edge no longer
+    /// blocks AI reads on a local "gateway configured" gate. A valid read on a
+    /// host with no worker proceeds past authorization (default local read scope)
+    /// and reports `TargetOffline` — not the removed "not configured" rejection.
     #[tokio::test]
-    async fn agent_request_unconfigured_emits_unsupported() {
+    async fn agent_request_without_local_gateway_proceeds_to_authorization() {
         use desk_agent_protocol::{
             AgentOperation, ContextKind, OperationInput, ProcessListParams, ReadContextInput,
         };
         let (ctx, mut rx) = make_ctx_with_rx();
-        // ai_model defaults to unconfigured; do not configure it.
+        // Default settings: no local model config exists to configure anymore.
         let req = AgentRequestData {
             operation: AgentOperation {
                 risk_hint: None,
@@ -5096,10 +5054,7 @@ mod tests {
             .await
             .unwrap();
         match read_outcome(&mut rx) {
-            AgentOutcome::Err(e) => {
-                assert_eq!(e.kind, AgentErrorKind::UnsupportedCapability);
-                assert!(e.message.contains("not configured"));
-            }
+            AgentOutcome::Err(e) => assert_eq!(e.kind, AgentErrorKind::TargetOffline),
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
@@ -5491,13 +5446,12 @@ mod tests {
         SignalingModel::new("rc", t, Some(connection_id.to_string()), None, None, None)
     }
 
-    /// A ctx where confirmed execution is fully enabled (supported mode +
-    /// configured gateway + the given execution mode).
+    /// A ctx where confirmed execution is fully enabled (worker-supported mode +
+    /// the given local execution mode).
     async fn exec_enabled_ctx(mode: ExecutionMode) -> (RouterContext, broadcast::Receiver<String>) {
         let (mut ctx, rx) = make_ctx_with_rx();
         ctx.exec_supported = true;
-        configure_ai_model(&ctx).await;
-        ctx.settings.write().await.ai_model.execution_mode = mode;
+        ctx.settings.write().await.ai_policy.execution_mode = mode;
         (ctx, rx)
     }
 
@@ -5563,7 +5517,6 @@ mod tests {
     #[tokio::test]
     async fn injected_scope_authorizes_granted_capability() {
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
         ctx.inbound_authz = Some(authz_block(
             vec![Capability::ProcessList],
             vec![],
@@ -5584,7 +5537,6 @@ mod tests {
     #[tokio::test]
     async fn injected_empty_scope_denies_capability() {
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
         ctx.inbound_authz = Some(authz_block(
             vec![],
             vec![],
@@ -6308,10 +6260,10 @@ mod tests {
 
     #[tokio::test]
     async fn confirm_exec_unsupported_in_service_daemon_mode() {
-        // exec_supported = false (default), gateway configured.
+        // exec_supported = false (default): confirmed execution is unavailable
+        // in ServiceDaemon mode regardless of the local execution mode.
         let (mut ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        ctx.settings.write().await.ai_model.execution_mode = ExecutionMode::ConfirmEachAction;
+        ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::ConfirmEachAction;
         let _ = &mut ctx;
         handle_confirm_exec_inbound(&ctx, &confirm_exec_model("r1", "Get-Service -Name Spooler"))
             .await
@@ -6629,9 +6581,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_request_plane_permanently_rejects_exec() {
-        let (ctx, mut rx) = make_ctx_with_rx();
-        configure_ai_model(&ctx).await;
-        // Even with execution fully enabled, the raw AgentRequest plane refuses
+        let (ctx, mut rx) = make_ctx_with_rx(); // Even with execution fully enabled, the raw AgentRequest plane refuses
         // exec — it must go through the confirm flow.
         let input = desk_agent_protocol::ExecInput {
             target: desk_agent_protocol::ExecTarget::Shell {
@@ -6683,9 +6633,8 @@ mod tests {
 
         let (mut ctx, mut rx) = make_ctx_with_rx();
         ctx.exec_supported = true;
-        configure_ai_model(&ctx).await;
         // Local config: AI may only suggest, never execute.
-        ctx.settings.write().await.ai_model.execution_mode = ExecutionMode::SuggestOnly;
+        ctx.settings.write().await.ai_policy.execution_mode = ExecutionMode::SuggestOnly;
         // Manager authorization grants a far broader mode.
         ctx.inbound_authz = Some(AuthorizationBlock {
             version: AUTHORIZATION_BLOCK_VERSION,
