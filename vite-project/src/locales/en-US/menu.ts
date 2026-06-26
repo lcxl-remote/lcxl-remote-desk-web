@@ -60,7 +60,7 @@ export default {
   'menu.settings.security': 'Security Settings',
   'menu.settings.deviceCode': 'Device Codes',
   'menu.settings.virtualDisplay': 'Virtual Display',
-  'menu.settings.aiModel': 'AI Model',
+  'menu.settings.aiModel': 'AI Settings',
   'menu.settings.signalToken': 'Signal Access Token',
   'menu.settings.deskConnection': 'Outbound Connection',
   'menu.desk': 'Desk',

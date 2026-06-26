@@ -691,7 +691,7 @@ export default {
   'pages.system.settings.macos.permissions.grant': '请在「系统设置 > 隐私与安全性」中授权。',
 
   'pages.virtualDisplay.title': '虚拟显示器',
-  'pages.aiModel.settings.title': 'AI',
+  'pages.aiModel.settings.title': 'AI 设置',
   'pages.aiModel.settings.description': '配置 AI 模型提供方（由中心信令大脑持有）以及本设备的本地 AI 限制。',
   'pages.aiModel.settings.gateway': '模型提供方（中心）',
   'pages.aiModel.settings.gateway.description': '中心信令大脑用于诊断和 Agent 的模型。便携模式下信令服务器内嵌于本进程，即同一台机器。',

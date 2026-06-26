@@ -693,7 +693,7 @@ export default {
   'pages.system.settings.macos.permissions.grant': 'Please grant access under System Settings > Privacy & Security.',
 
   'pages.virtualDisplay.title': 'Virtual Display',
-  'pages.aiModel.settings.title': 'AI',
+  'pages.aiModel.settings.title': 'AI Settings',
   'pages.aiModel.settings.description': 'Configure the AI model provider (held by the central signaling brain) and this device\'s local AI limits.',
   'pages.aiModel.settings.gateway': 'Model Provider (central)',
   'pages.aiModel.settings.gateway.description': 'The model the central signaling brain dials for diagnosis and the agent. In portable mode the signaling server is embedded in this process, so this is the same machine.',
