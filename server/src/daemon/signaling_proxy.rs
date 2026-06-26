@@ -160,8 +160,8 @@ pub async fn run_signaling_proxy(
         // the manager for DB persistence; otherwise keep the local log sink.
         audit: audit_sink.clone(),
         diagnose_tasks: Default::default(),
-        // Per-call manager authorization is injected by the inbound dispatcher;
-        // the shared base context carries none.
+        // Per-call trusted-central authorization is injected by the inbound
+        // dispatcher; the shared base context carries none.
         inbound_authz: None,
         // Fleet exec correlation set, shared with the worker-message loop below so
         // a worker `ExecResult` for an in-flight fleet attempt is relayed to the
@@ -286,7 +286,7 @@ pub async fn run_signaling_proxy(
                         url,
                         token,
                         rx,
-                        InboundSignalingSource::Manager,
+                        InboundSignalingSource::TrustedCentral,
                     )
                     .await;
                 }
@@ -1087,8 +1087,8 @@ async fn maintain_proxy_connection(
 
 /// Which upstream link an inbound signaling frame arrived on. This is the
 /// daemon-side notion of "where did this frame come from", distinct from the
-/// manager-side `AuthContext` ("how did this connection authenticate"). Only the
-/// `Manager` link is a trusted policy-decision upstream that may inject an
+/// central-side `AuthContext` ("how did this connection authenticate"). Only the
+/// `TrustedCentral` link is a trusted policy-decision upstream that may inject an
 /// [`AuthorizedControlPayload`]; the local and remote-signaling links carry bare
 /// payloads gated by local config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1096,10 +1096,17 @@ pub enum InboundSignalingSource {
     /// The in-process / loopback signaling link (single-machine and the
     /// service-daemon's own API). No fleet PDP.
     Local,
-    /// A remote signaling server link. No fleet PDP.
+    /// A bare remote signaling relay link (WebRTC signaling only). This link is
+    /// NOT trusted as a central brain and must never be promoted to inject
+    /// authorization — doing so would let any relay signaling server gain
+    /// central-level injection rights.
     RemoteSignaling,
-    /// The manager link — the only trusted authorization-injecting upstream.
-    Manager,
+    /// The trusted central-brain link — the only authorization-injecting
+    /// upstream. Covers both the enterprise manager and an OSS signal acting as
+    /// the central brain; the edge classifies a link as trusted-central only
+    /// from the connection's authentication result (the central credential
+    /// slot), never from a bare relay.
+    TrustedCentral,
 }
 
 /// Outcome of the source-gated authorization check for one inbound frame.
@@ -1125,9 +1132,9 @@ fn is_ai_control_frame(t: SignalingType) -> bool {
 ///
 /// - Non-AI frames pass through untouched.
 /// - A wrapper (`AuthorizedControlPayload`) is only legitimate from the
-///   `Manager` link; on any other source it is dropped (a non-manager upstream
-///   must never inject authorization).
-/// - On the `Manager` link a wrapper is validated against the frame
+///   `TrustedCentral` link; on any other source it is dropped (a non-central
+///   upstream must never inject authorization).
+/// - On the `TrustedCentral` link a wrapper is validated against the frame
 ///   (`request_id`), this daemon's audience, and expiry; on success the inner
 ///   payload is unwrapped and forwarded. The carried decision is consumed by the
 ///   enforcement step (the policy-injection stage); here the mechanism only
@@ -1151,24 +1158,24 @@ fn gate_authz_frame(
         .unwrap_or(false);
 
     if !has_wrapper {
-        // The Manager link always wraps AI control frames (its PDP authorizes
-        // and wraps every one), so a bare AI control frame from the Manager
-        // source is illegitimate — forged or a relay fault — and is dropped
-        // rather than falling through to the local default scope, which would
-        // bypass the fleet policy. Local / remote-signaling links have no PDP
-        // and pass bare frames through to local-config gating.
-        if source == InboundSignalingSource::Manager {
+        // The trusted-central link always wraps AI control frames (its PDP
+        // authorizes and wraps every one), so a bare AI control frame from the
+        // trusted-central source is illegitimate — forged or a relay fault — and
+        // is dropped rather than falling through to the local default scope,
+        // which would bypass the central policy. Local / remote-signaling links
+        // have no PDP and pass bare frames through to local-config gating.
+        if source == InboundSignalingSource::TrustedCentral {
             return AuthzGateOutcome::Drop(
-                "bare AI control frame from Manager source (authorization wrapper required)"
+                "bare AI control frame from trusted-central source (authorization wrapper required)"
                     .to_string(),
             );
         }
         return AuthzGateOutcome::Pass(model, None);
     }
 
-    if source != InboundSignalingSource::Manager {
+    if source != InboundSignalingSource::TrustedCentral {
         return AuthzGateOutcome::Drop(format!(
-            "AI frame carried an authz wrapper from non-Manager source {source:?}"
+            "AI frame carried an authz wrapper from non-central source {source:?}"
         ));
     }
 
@@ -1190,7 +1197,7 @@ fn gate_authz_frame(
 
     // Validated: forward the inner payload as a bare frame plus the validated
     // authorization block, which the router threads into the AI handlers
-    // (scope / max_risk / orchestrator grants) to enforce the decision.
+    // (scope / max_risk / orchestrator grants) to enforce the central decision.
     let unwrapped = SignalingModel::new(
         &model.request_id,
         model.signaling_type,
@@ -1204,8 +1211,8 @@ fn gate_authz_frame(
 
 /// Outcome of the dedicated `EdgeExecRequest` authorization gate. Unlike the
 /// generic [`gate_authz_frame`] (which drops a frame whose wrapper fails to
-/// validate), a fleet request from the trusted Manager link that fails
-/// validation is answered with a synthesized denied result so the manager's
+/// validate), a fleet request from the trusted-central link that fails
+/// validation is answered with a synthesized denied result so the central
 /// pending entry resolves rather than hanging. Only a frame that cannot be
 /// correlated at all (no `request_id`) is dropped outright.
 #[derive(Debug)]
@@ -1214,14 +1221,14 @@ enum FleetExecGateOutcome {
     /// validated authorization block to thread into the router handler.
     Pass(SignalingModel, AuthorizationBlock),
     /// Trusted source but the request is unauthorized / malformed; answer the
-    /// manager with a `RejectedBeforeDispatch` carrying `reason`.
+    /// central brain with a `RejectedBeforeDispatch` carrying `reason`.
     Denied { request_id: String, reason: String },
     /// Uncorrelatable garbage; drop silently (no result can be attributed).
     Drop(String),
 }
 
-/// Dedicated authorization gate for `EdgeExecRequest` (manager → daemon). The
-/// caller has already confirmed the Manager source. Validates the
+/// Dedicated authorization gate for `EdgeExecRequest` (central → daemon). The
+/// caller has already confirmed the trusted-central source. Validates the
 /// `AuthorizedControlPayload<ExecPlan>` wrapper; on success unwraps the inner
 /// plan and returns the validated authorization block.
 fn gate_fleet_exec_frame(
@@ -1300,20 +1307,20 @@ async fn handle_inbound_signaling_text(
     };
 
     // Source gate: `CommandTemplateSync`, `CollectRequest`, `EdgeExecRequest`,
-    // and `RemoteToolRequest` are trusted manager→daemon plumbing. Accept them
-    // only from the Manager link; a Local / remote-signaling origin (no trusted
-    // PDP) must never inject operator templates, drive an evidence collection,
-    // dispatch a sealed execution plan, or drive a remote read.
+    // and `RemoteToolRequest` are trusted central→daemon plumbing. Accept them
+    // only from the trusted-central link; a Local / remote-signaling origin (no
+    // trusted PDP) must never inject operator templates, drive an evidence
+    // collection, dispatch a sealed execution plan, or drive a remote read.
     if matches!(
         parsed.signaling_type,
         SignalingType::CommandTemplateSync
             | SignalingType::CollectRequest
             | SignalingType::EdgeExecRequest
             | SignalingType::RemoteToolRequest
-    ) && source != InboundSignalingSource::Manager
+    ) && source != InboundSignalingSource::TrustedCentral
     {
         warn!(
-            "[Proxy] Dropping {:?} from non-Manager source {source:?}",
+            "[Proxy] Dropping {:?} from non-central source {source:?}",
             parsed.signaling_type
         );
         return;
@@ -1327,7 +1334,7 @@ async fn handle_inbound_signaling_text(
 
     // `EdgeExecRequest` uses a dedicated authorization gate: a trusted-but-
     // invalid request is answered with a synthesized denied result (so the
-    // manager's pending entry resolves) rather than silently dropped.
+    // central pending entry resolves) rather than silently dropped.
     if parsed.signaling_type == SignalingType::EdgeExecRequest {
         match gate_fleet_exec_frame(parsed, &expected_audience, &now) {
             FleetExecGateOutcome::Pass(unwrapped, block) => {
@@ -1364,7 +1371,7 @@ async fn handle_inbound_signaling_text(
         }
     };
 
-    // A validated manager authorization rides into the handlers via a per-call
+    // A validated central authorization rides into the handlers via a per-call
     // clone of the router context (cheap: the context is Arc-backed). This keeps
     // `route()` and the AI handler signatures untouched.
     let effective_ctx;
@@ -1527,11 +1534,11 @@ mod tests {
         serde_json::to_string(&model).unwrap()
     }
 
-    /// A `CommandTemplateSync` from a non-Manager source is dropped by the source
-    /// gate (the operator-template cache stays empty); from the Manager link it
-    /// is applied. This is the forged-sync rejection guarantee.
+    /// A `CommandTemplateSync` from a non-central source is dropped by the source
+    /// gate (the operator-template cache stays empty); from the trusted-central
+    /// link it is applied. This is the forged-sync rejection guarantee.
     #[tokio::test]
-    async fn command_template_sync_is_accepted_only_from_manager_source() {
+    async fn command_template_sync_is_accepted_only_from_trusted_central_source() {
         let (router_ctx, _out_tx) = make_router_ctx();
 
         // Local source: dropped.
@@ -1543,7 +1550,7 @@ mod tests {
         .await;
         assert_eq!(router_ctx.command_templates.len(), 0);
 
-        // Remote-signaling source: dropped (must not be mistaken for Manager).
+        // Remote-signaling source: dropped (a bare relay is never trusted-central).
         handle_inbound_signaling_text(
             command_template_sync_text(),
             &router_ctx,
@@ -1552,11 +1559,11 @@ mod tests {
         .await;
         assert_eq!(router_ctx.command_templates.len(), 0);
 
-        // Manager source: applied.
+        // Trusted-central source: applied.
         handle_inbound_signaling_text(
             command_template_sync_text(),
             &router_ctx,
-            InboundSignalingSource::Manager,
+            InboundSignalingSource::TrustedCentral,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
@@ -1595,11 +1602,11 @@ mod tests {
             serde_json::to_string(&model).unwrap()
         };
 
-        // v1 (no revision) from Manager: applied; cache revision stays None.
+        // v1 (no revision) from trusted central: applied; cache revision stays None.
         handle_inbound_signaling_text(
             make_text(1, None),
             &router_ctx,
-            InboundSignalingSource::Manager,
+            InboundSignalingSource::TrustedCentral,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
@@ -1609,7 +1616,7 @@ mod tests {
         handle_inbound_signaling_text(
             make_text(99, Some(5)),
             &router_ctx,
-            InboundSignalingSource::Manager,
+            InboundSignalingSource::TrustedCentral,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
@@ -1692,7 +1699,7 @@ mod tests {
             None,
         );
         assert!(matches!(
-            gate_authz_frame(model, InboundSignalingSource::Manager, "dev", NOW),
+            gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev", NOW),
             AuthzGateOutcome::Pass(_, _)
         ));
     }
@@ -1707,13 +1714,14 @@ mod tests {
     }
 
     #[test]
-    fn bare_ai_frame_from_manager_is_dropped() {
-        // The manager always wraps AI control frames, so a bare one on the
-        // Manager link is illegitimate and must be dropped rather than falling
-        // through to the local default scope (which would bypass fleet policy).
+    fn bare_ai_frame_from_trusted_central_is_dropped() {
+        // The central brain always wraps AI control frames, so a bare one on the
+        // trusted-central link is illegitimate and must be dropped rather than
+        // falling through to the local default scope (which would bypass central
+        // policy).
         let model = bare_diagnose_model("r1");
         assert!(matches!(
-            gate_authz_frame(model, InboundSignalingSource::Manager, "dev", NOW),
+            gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev", NOW),
             AuthzGateOutcome::Drop(_)
         ));
     }
@@ -1721,7 +1729,7 @@ mod tests {
     #[test]
     fn bare_ai_frame_passes_through_remote_signaling() {
         // Remote-signaling links have no PDP; bare frames still pass to local
-        // gating (no regression for non-manager fleets).
+        // gating (no regression for non-central relays).
         let model = bare_diagnose_model("r1");
         assert!(matches!(
             gate_authz_frame(model, InboundSignalingSource::RemoteSignaling, "dev", NOW),
@@ -1730,7 +1738,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_from_non_manager_source_is_dropped() {
+    fn wrapper_from_non_central_source_is_dropped() {
         for source in [
             InboundSignalingSource::Local,
             InboundSignalingSource::RemoteSignaling,
@@ -1800,7 +1808,7 @@ mod tests {
     #[test]
     fn fleet_gate_denies_an_audience_mismatch() {
         // Validation fails (wrong audience) → a denied result is synthesized so
-        // the manager's pending entry resolves, rather than a silent drop.
+        // the central pending entry resolves, rather than a silent drop.
         let model = wrapped_fleet_exec_model("a1", "dev-1");
         match gate_fleet_exec_frame(model, "other-device", NOW) {
             FleetExecGateOutcome::Denied { request_id, reason } => {
@@ -1843,9 +1851,9 @@ mod tests {
     }
 
     #[test]
-    fn valid_wrapper_from_manager_is_unwrapped_to_inner() {
+    fn valid_wrapper_from_trusted_central_is_unwrapped_to_inner() {
         let model = wrapped_diagnose_model("r1", "dev-1");
-        match gate_authz_frame(model, InboundSignalingSource::Manager, "dev-1", NOW) {
+        match gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev-1", NOW) {
             AuthzGateOutcome::Pass(m, _) => {
                 // The forwarded model carries the bare inner payload (no authz).
                 let obj = m.get_raw_data().as_ref().unwrap().as_object().unwrap();
@@ -1857,16 +1865,21 @@ mod tests {
     }
 
     #[test]
-    fn manager_wrapper_with_wrong_audience_is_dropped() {
+    fn central_wrapper_with_wrong_audience_is_dropped() {
         let model = wrapped_diagnose_model("r1", "dev-1");
         assert!(matches!(
-            gate_authz_frame(model, InboundSignalingSource::Manager, "other-device", NOW),
+            gate_authz_frame(
+                model,
+                InboundSignalingSource::TrustedCentral,
+                "other-device",
+                NOW
+            ),
             AuthzGateOutcome::Drop(_)
         ));
     }
 
     #[test]
-    fn manager_wrapper_expired_is_dropped() {
+    fn central_wrapper_expired_is_dropped() {
         let mut wrapper = AuthorizedControlPayload {
             inner: DiagnoseRequestData {
                 question: "q".to_string(),
@@ -1884,13 +1897,13 @@ mod tests {
             None,
         );
         assert!(matches!(
-            gate_authz_frame(model, InboundSignalingSource::Manager, "dev-1", NOW),
+            gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev-1", NOW),
             AuthzGateOutcome::Drop(_)
         ));
     }
 
     #[test]
-    fn manager_wrapper_request_id_mismatch_is_dropped() {
+    fn central_wrapper_request_id_mismatch_is_dropped() {
         // Frame request_id differs from the authz block's request_id.
         let wrapper = AuthorizedControlPayload {
             inner: DiagnoseRequestData {
@@ -1908,7 +1921,7 @@ mod tests {
             None,
         );
         assert!(matches!(
-            gate_authz_frame(model, InboundSignalingSource::Manager, "dev-1", NOW),
+            gate_authz_frame(model, InboundSignalingSource::TrustedCentral, "dev-1", NOW),
             AuthzGateOutcome::Drop(_)
         ));
     }
