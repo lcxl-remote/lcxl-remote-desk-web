@@ -385,6 +385,17 @@ export default {
   'pages.desk.diagnose.exec.exit': 'Exit',
   'pages.desk.diagnose.exec.dismiss': 'Dismiss',
   'pages.desk.diagnose.exec.notExecutable': 'Not executable',
+  // Neutral sealed-execution lifecycle labels, shared by the diagnose panel and
+  // the terminal copilot (see `features/exec/exec-lifecycle.tsx`).
+  'pages.exec.classifying': 'Checking command...',
+  'pages.exec.confirmTitle': 'Confirm execution',
+  'pages.exec.timeout': 'Timeout',
+  'pages.exec.approve': 'Approve & run',
+  'pages.exec.reject': 'Reject',
+  'pages.exec.running': 'Running...',
+  'pages.exec.exit': 'Exit',
+  'pages.exec.dismiss': 'Dismiss',
+  'pages.exec.notExecutable': 'Not executable',
   'pages.desk.diagnose.nextSteps': 'Next steps',
   'pages.desk.diagnose.missingInfo': 'Missing info',
   'pages.desk.diagnose.collected': 'Data collected',
@@ -537,6 +548,9 @@ export default {
   'pages.deskTerminal.copilot.fill': 'Fill',
   'pages.deskTerminal.copilot.copy': 'Copy',
   'pages.deskTerminal.copilot.copied': 'Copied',
+  'pages.deskTerminal.copilot.run': 'Run',
+  'pages.deskTerminal.copilot.execGuide':
+    'Raise this device\'s execution ceiling in AI settings to run AI-suggested commands.',
   'pages.deskTerminal.copilot.blockedHint': 'Blocked by policy — cannot be run.',
   'pages.deskTerminal.copilot.noSuggestions': 'No command suggested.',
   'pages.deskTerminal.copilot.toolRan': 'Checked {{name}}',

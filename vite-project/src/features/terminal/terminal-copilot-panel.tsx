@@ -9,6 +9,7 @@ import {
     ClipboardCopy,
     CornerDownLeft,
     Ban,
+    Play,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -18,6 +19,18 @@ import type {
     RiskLevel,
     TerminalCopilotMode,
 } from './use-terminal-copilot';
+import { ExecLifecycle } from '../exec/exec-lifecycle';
+import type { ExecEntry, ExecRequestInput } from '../exec/use-confirm-exec';
+
+/** Confirmed-execution controls, shared with the diagnose panel via
+ *  `useConfirmExec`. Omitted when the copilot is rendered suggest-only. */
+export type CopilotExecControls = {
+    entries: Record<number, ExecEntry>;
+    requestPreview: (rowIndex: number, input: ExecRequestInput) => void;
+    approve: (rowIndex: number) => void;
+    reject: (rowIndex: number) => void;
+    dismiss: (rowIndex: number) => void;
+};
 
 /** Map a suggested-command risk level to a badge colour (mirrors the diagnose
  *  panel so the two AI surfaces read consistently). */
@@ -35,8 +48,11 @@ function riskClass(risk: RiskLevel): string {
 }
 
 type SuggestionRowProps = {
+    index: number;
     suggestion: CommandSuggestion;
     onFill: (command: string) => void;
+    /** Confirmed-execution controls; omitted in suggest-only contexts. */
+    exec?: CopilotExecControls;
 };
 
 /**
@@ -44,13 +60,27 @@ type SuggestionRowProps = {
  * never a model-self-reported field (suggest-only invariant):
  * - `blocked`: shown as a hard-denied warning with no actions and no injection.
  * - `not_executable` / `confirm_required`: Fill (type it into the shell without a
- *   trailing Enter — the operator presses Enter themselves) and Copy. Neither is
- *   automatically executed through the AI path.
+ *   trailing Enter — the operator presses Enter themselves) and Copy.
+ * - `confirm_required` additionally offers Run, which the operator chooses to
+ *   promote the suggestion into the host's sealed confirm-exec chain (the host
+ *   re-classifies the command server-side and an explicit preview/approval is
+ *   still required). Run only appears when `exec` controls are wired and the
+ *   device's execution ceiling allows it; otherwise the host returns a
+ *   non-executable preview with guidance.
  */
-function SuggestionRow({ suggestion, onFill }: SuggestionRowProps) {
+function SuggestionRow({ index, suggestion, onFill, exec }: SuggestionRowProps) {
     const { t } = useTranslation();
     const [copied, setCopied] = useState(false);
     const blocked = suggestion.decision === 'blocked';
+    const canRun = !!exec && suggestion.decision === 'confirm_required';
+    const entry = exec?.entries[index];
+    // A non-executable preview that is not a hard block is typically the device
+    // execution ceiling being too low; guide the operator to raise it.
+    const modeBlocked =
+        entry?.phase === 'error' &&
+        !!entry.preview &&
+        !entry.preview.executable &&
+        !entry.preview.blocked_reason;
 
     const copy = async () => {
         try {
@@ -83,18 +113,54 @@ function SuggestionRow({ suggestion, onFill }: SuggestionRowProps) {
                     )}
                 </div>
             ) : (
-                <div className="mt-2 flex gap-2">
-                    <Button size="sm" variant="secondary" onClick={() => onFill(suggestion.command)}>
-                        <CornerDownLeft className="mr-1 h-3.5 w-3.5" />
-                        {t('pages.deskTerminal.copilot.fill')}
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={copy}>
-                        <ClipboardCopy className="mr-1 h-3.5 w-3.5" />
-                        {copied
-                            ? t('pages.deskTerminal.copilot.copied')
-                            : t('pages.deskTerminal.copilot.copy')}
-                    </Button>
-                </div>
+                <>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                        <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => onFill(suggestion.command)}
+                        >
+                            <CornerDownLeft className="mr-1 h-3.5 w-3.5" />
+                            {t('pages.deskTerminal.copilot.fill')}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={copy}>
+                            <ClipboardCopy className="mr-1 h-3.5 w-3.5" />
+                            {copied
+                                ? t('pages.deskTerminal.copilot.copied')
+                                : t('pages.deskTerminal.copilot.copy')}
+                        </Button>
+                        {canRun && !entry && (
+                            <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() =>
+                                    exec!.requestPreview(index, {
+                                        shell: suggestion.shell,
+                                        command: suggestion.command,
+                                        cwd: suggestion.cwd ?? null,
+                                        reason: suggestion.note,
+                                    })
+                                }
+                            >
+                                <Play className="mr-1 h-3.5 w-3.5" />
+                                {t('pages.deskTerminal.copilot.run')}
+                            </Button>
+                        )}
+                    </div>
+                    {exec && entry && (
+                        <ExecLifecycle
+                            entry={entry}
+                            onApprove={() => exec.approve(index)}
+                            onReject={() => exec.reject(index)}
+                            onDismiss={() => exec.dismiss(index)}
+                        />
+                    )}
+                    {modeBlocked && (
+                        <p className="mt-1 text-[10px] text-muted-foreground">
+                            {t('pages.deskTerminal.copilot.execGuide')}
+                        </p>
+                    )}
+                </>
             )}
         </div>
     );
@@ -107,6 +173,8 @@ export type TerminalCopilotPanelProps = {
     onClose: () => void;
     /** Inject the command into the shell input without a trailing Enter. */
     onFill: (command: string) => void;
+    /** Confirmed-execution controls; omitted in suggest-only contexts. */
+    exec?: CopilotExecControls;
 };
 
 /**
@@ -121,6 +189,7 @@ export function TerminalCopilotPanel({
     onReset,
     onClose,
     onFill,
+    exec,
 }: TerminalCopilotPanelProps) {
     const { t } = useTranslation();
     const [mode, setMode] = useState<TerminalCopilotMode>('how_to');
@@ -233,7 +302,13 @@ export function TerminalCopilotPanel({
                             </p>
                         )}
                         {state.answer.suggestions.map((s, i) => (
-                            <SuggestionRow key={i} suggestion={s} onFill={onFill} />
+                            <SuggestionRow
+                                key={i}
+                                index={i}
+                                suggestion={s}
+                                onFill={onFill}
+                                exec={exec}
+                            />
                         ))}
                         {state.answer.suggestions.length === 0 && (
                             <p className="text-xs text-muted-foreground">

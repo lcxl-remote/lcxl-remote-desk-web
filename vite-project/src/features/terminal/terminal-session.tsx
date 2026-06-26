@@ -16,6 +16,7 @@ import { v4 } from "uuid"
 import { useDeskSignaling } from "../desk/use-desk-signaling"
 import { useTerminalCopilot, type TerminalCopilotMode, type TerminalContext } from "./use-terminal-copilot"
 import { TerminalCopilotPanel } from "./terminal-copilot-panel"
+import { useConfirmExec } from "../exec/use-confirm-exec"
 import {
     useTerminalComplete,
     pickLocalGhost,
@@ -53,6 +54,11 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
     // submitted command line, all fed to the copilot as non-authoritative hints.
     const { subscribe, sendMessage } = useDeskSignaling(connectionId)
     const copilot = useTerminalCopilot({ connectionId, subscribe, sendMessage })
+    // Confirmed execution of an operator-promoted copilot suggestion: ConfirmExec
+    // -> ExecPreview -> ResolveExec -> ExecResult, keyed by suggestion index. The
+    // host re-classifies the command and gates it on the device execution ceiling;
+    // the browser only relays and renders.
+    const exec = useConfirmExec({ deskId: connectionId, subscribe, sendMessage })
     const complete = useTerminalComplete({ connectionId, subscribe, sendMessage })
     const [showCopilot, setShowCopilot] = useState(false)
     const recentOutputRef = useRef<string>("")
@@ -492,6 +498,7 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
                     onReset={copilot.reset}
                     onClose={() => setShowCopilot(false)}
                     onFill={fillCommand}
+                    exec={exec}
                 />
             )}
         </div>
