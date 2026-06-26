@@ -79,6 +79,7 @@ use desk_signal::{
             update_device_code,
         },
         files::{delete_file, list_files},
+        model_provider::{get_model_provider, update_model_provider},
         signaling::open_signaling_handle,
         terminal::{list_terminal, open_terminal_session},
         turn_usage::get_turn_usage,
@@ -132,8 +133,9 @@ pub struct ApiSurfaceOpts {
     pub include_file_device_code: bool,
     /// Register the `/api/turn/*` management scope.
     pub include_turn: bool,
-    /// Register the `/api/model/usage` collect-only token-usage view (modes with
-    /// a local signal DB: `Default` / `Signaling`).
+    /// Register the `/api/model/*` scope (the collect-only token-usage view plus
+    /// the central-brain model-provider config) — modes with a local signal DB:
+    /// `Default` / `Signaling`.
     pub include_model_usage: bool,
 }
 
@@ -243,7 +245,12 @@ pub fn configure_api_surface(
             })
             .configure(move |cfg| {
                 if opts.include_model_usage {
-                    cfg.service(utoipa_actix_web::scope("/model").service(get_model_usage));
+                    cfg.service(
+                        utoipa_actix_web::scope("/model")
+                            .service(get_model_usage)
+                            .service(get_model_provider)
+                            .service(update_model_provider),
+                    );
                 }
             }),
     );
