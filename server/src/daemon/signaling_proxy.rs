@@ -217,7 +217,7 @@ pub async fn run_signaling_proxy(
                     local_url,
                     local_token,
                     rx,
-                    InboundSignalingSource::Local,
+                    local_loopback_source(&startup_mode),
                 )
                 .await;
 
@@ -1109,6 +1109,22 @@ pub enum InboundSignalingSource {
     TrustedCentral,
 }
 
+/// Classify the daemon's local loopback signaling link by startup mode.
+///
+/// In portable `Default` mode the loopback reaches the **embedded signal acting
+/// as the central brain** — same process, single machine, authenticated by the
+/// local token — so the link is trusted-central: that signal pushes evidence
+/// collection (`CollectRequest`) and wrapped AI frames over it, which the edge
+/// must accept. In `ServiceDaemon` mode the loopback is the daemon's own internal
+/// API, not a central brain (the real central is remote, reached through the
+/// central credential slot), so it stays a plain `Local` link with no PDP.
+fn local_loopback_source(mode: &StartupMode) -> InboundSignalingSource {
+    match mode {
+        StartupMode::Default => InboundSignalingSource::TrustedCentral,
+        _ => InboundSignalingSource::Local,
+    }
+}
+
 /// Outcome of the source-gated authorization check for one inbound frame.
 enum AuthzGateOutcome {
     /// Forward this (possibly unwrapped) model to the router, carrying the
@@ -1502,6 +1518,24 @@ mod tests {
     use crate::host_control::HostControlHub;
     use crate::model::settings::{Settings, SharedSettings};
     use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
+
+    #[test]
+    fn local_loopback_is_trusted_central_only_in_portable_default() {
+        // Portable Default mode: the loopback reaches the embedded central-brain
+        // signal, so the link is trusted-central (it pushes CollectRequest /
+        // wrapped AI frames the edge must accept).
+        assert_eq!(
+            local_loopback_source(&StartupMode::Default),
+            InboundSignalingSource::TrustedCentral
+        );
+        // ServiceDaemon mode: the loopback is the daemon's own internal API, not a
+        // central brain — it stays a plain Local link (the real central is remote
+        // through the central credential slot, never the loopback).
+        assert_eq!(
+            local_loopback_source(&StartupMode::ServiceDaemon),
+            InboundSignalingSource::Local
+        );
+    }
 
     fn make_router_ctx() -> (RouterContext, broadcast::Sender<String>) {
         let (outbound_tx, _) = broadcast::channel::<String>(16);
