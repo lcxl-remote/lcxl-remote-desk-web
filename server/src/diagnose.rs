@@ -20,7 +20,6 @@
 pub mod agent;
 pub mod collector;
 pub mod direct_exec;
-pub mod direct_runtime;
 pub mod model;
 pub mod redaction;
 pub mod remote_read;

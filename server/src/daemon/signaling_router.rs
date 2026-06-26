@@ -37,7 +37,6 @@ use desk_agent_protocol::exec::{
     ResolveExecData,
 };
 use desk_agent_protocol::exec_policy::{ExecLimits, blocked_argv, build_exact_argv_draft};
-use desk_agent_protocol::terminal_copilot::TerminalCopilotAsk;
 
 use crate::diagnose::terminal_copilot::copilot_signaling_sink;
 use desk_agent_protocol::{
@@ -81,7 +80,7 @@ use crate::diagnose::DiagnoseOrchestrator;
 const VIRTUAL_DISPLAY_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
-use crate::model::settings::{GatewayMode, SharedSettings};
+use crate::model::settings::SharedSettings;
 
 /// Whether a given `SignalingType` is owned by the daemon (handled
 /// inline against the PC registry) or by the worker (forwarded over
@@ -341,16 +340,12 @@ pub struct RouterContext {
     /// `FEATURE_UNAVAILABLE` outside service mode.
     pub virtual_display: Option<Arc<VirtualDisplaySupervisor>>,
     /// `Some(...)` in modes with an in-process worker (Default / DeskServer),
-    /// where the daemon-side diagnose orchestrator collects locally. `None` in
-    /// ServiceDaemon mode (cross-process collection is a later additive step),
-    /// so the `Diagnose` route replies with a feature-unavailable error there.
+    /// where the host can collect read-only evidence locally. AI diagnosis is
+    /// orchestrated by the central signaling brain, so this serves the
+    /// remote-collect edge path (`collect_for_remote`): the central server pushes a
+    /// `CollectRequest` and this host streams the redacted evidence back. `None` in
+    /// ServiceDaemon mode, where a `CollectRequest` replies with a wholesale error.
     pub diagnose_orchestrator: Option<Arc<DiagnoseOrchestrator>>,
-    /// The agentic tool-calling runtime for `Diagnose`, present in the same modes
-    /// as `diagnose_orchestrator` (an in-process worker can read locally). When
-    /// present, `Diagnose` runs the agentic loop (the orchestrator is kept for the
-    /// remote-collect edge path and cancel audit); `None` in ServiceDaemon mode,
-    /// where `Diagnose` replies feature-unavailable.
-    pub diagnose_agent: Option<Arc<crate::diagnose::direct_runtime::DirectAgentRuntime>>,
     /// Serves a manager remote read tool call (§8.3) against the in-process device
     /// agent. Present in the same modes as `diagnose_orchestrator` (an in-process
     /// worker can read locally); `None` in ServiceDaemon, where a `RemoteToolRequest`
@@ -1983,49 +1978,13 @@ fn emit_diagnose_event(ctx: &RouterContext, model: &SignalingModel, event: Diagn
     send_diagnose_frame(&ctx.outbound_tx, model.from_connection_id.clone(), event);
 }
 
-/// Whether the AI model gateway is not ready (the operator opt-in). Returns
-/// `Some(error)` describing why when unready, mirroring the `Diagnose` readiness
-/// gate: a manager-proxy gateway needs the manager URL + token; a direct gateway
-/// needs the local model / base URL / API key.
-async fn ai_gateway_unready(ctx: &RouterContext) -> Option<AgentError> {
-    let ai_model = ctx.settings.read().await.ai_model.clone();
-    if ai_model.gateway_mode == GatewayMode::ManagerProxy {
-        let (manager_url, manager_token) = {
-            let s = ctx.settings.read().await;
-            (
-                s.system.manager_url.clone(),
-                s.system.manager_api_token.clone(),
-            )
-        };
-        let proxy_ready = manager_url.as_deref().is_some_and(|u| !u.is_empty())
-            && manager_token.as_deref().is_some_and(|t| !t.is_empty());
-        if !proxy_ready {
-            return Some(agent_error(
-                AgentErrorKind::UnsupportedCapability,
-                "manager-proxied model gateway requires a configured manager URL and token",
-                false,
-                true,
-            ));
-        }
-    } else if !ai_model.is_configured() {
-        return Some(agent_error(
-            AgentErrorKind::UnsupportedCapability,
-            "AI model gateway is not configured; set the model, base URL, and API key in AI \
-             model settings",
-            false,
-            true,
-        ));
-    }
-    None
-}
-
-/// Route a control-end `TerminalCopilotAsk`: readiness gate → parse → run the
-/// daemon-side copilot over the shared agentic runtime, streaming
-/// `TerminalCopilotEvent` frames back. The runtime is injected only where an
-/// in-process worker can read locally (Default / DeskServer); in ServiceDaemon
-/// mode it is `None` and the ask replies feature-unavailable. All failures
-/// surface as a terminal `TerminalCopilotEvent::error` so the control end keeps
-/// treating frames as a stream.
+/// Route a control-end `TerminalCopilotAsk`. The terminal copilot is orchestrated
+/// by the central signaling brain (signal / manager): the control end sends the
+/// ask — carrying the terminal context inline — to the central server, which dials
+/// the model and streams `TerminalCopilotEvent` frames back. This host runs no
+/// local copilot. If an ask still reaches the edge router (a link without a central
+/// brain), answer with one terminal `TerminalCopilotEvent::error` so the control
+/// end stops waiting on the stream.
 async fn handle_terminal_copilot_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
@@ -2035,104 +1994,38 @@ async fn handle_terminal_copilot_inbound(
         model.from_connection_id.clone(),
         model.request_id.clone(),
     );
-
-    if let Some(err) = ai_gateway_unready(ctx).await {
-        sink.emit_error(err);
-        return Ok(());
-    }
-
-    let Some(runtime) = ctx.diagnose_agent.clone() else {
-        sink.emit_error(agent_error(
-            AgentErrorKind::UnsupportedCapability,
-            "terminal copilot is not available in this mode",
-            false,
-            true,
-        ));
-        return Ok(());
-    };
-
-    let ask = match model.get_data::<TerminalCopilotAsk>() {
-        Ok(a) => a,
-        Err(e) => {
-            sink.emit_error(agent_error(
-                AgentErrorKind::InvalidInput,
-                &format!("bad TerminalCopilotAsk payload: {e}"),
-                false,
-                true,
-            ));
-            return Ok(());
-        }
-    };
-
-    runtime
-        .run_copilot(
-            &model.request_id,
-            ask,
-            ctx.inbound_authz.as_ref(),
-            model.from_connection_id.clone(),
-            &mut sink,
-        )
-        .await;
+    sink.emit_error(agent_error(
+        AgentErrorKind::UnsupportedCapability,
+        "the terminal copilot is handled by the central signaling server",
+        false,
+        true,
+    ));
     Ok(())
 }
 
-/// Route a control-end `TerminalCompleteAsk`: readiness gate → parse → run the
-/// daemon-side single-shot completion, answering with one `TerminalCompleteResult`
-/// frame. The runtime is injected only where an in-process worker can read locally
-/// (Default / DeskServer); in ServiceDaemon mode it is `None` and the ask answers
-/// with a feature-unavailable error result. All failures surface as a
-/// `TerminalCompleteResult` carrying an `error`, so the control end always gets one
-/// response per ask.
+/// Route a control-end `TerminalCompleteAsk`. Inline command completion is
+/// orchestrated centrally too: the central server dials the model over the inline
+/// terminal context the control end supplies; the edge runs none locally. If an
+/// ask still reaches the edge router, answer with one error `TerminalCompleteResult`
+/// so the control end always gets a response.
 async fn handle_terminal_complete_inbound(
     ctx: &RouterContext,
     model: &SignalingModel,
 ) -> Result<(), RouterError> {
-    use desk_agent_protocol::terminal_complete::{TerminalCompleteAsk, TerminalCompleteResult};
-
-    let reply = |result: &TerminalCompleteResult| {
-        crate::diagnose::terminal_complete::send_completion_result(
-            &ctx.outbound_tx,
-            model.from_connection_id.clone(),
-            result,
-        );
-    };
-
-    if let Some(err) = ai_gateway_unready(ctx).await {
-        reply(&TerminalCompleteResult::failed(&model.request_id, err));
-        return Ok(());
-    }
-
-    let Some(runtime) = ctx.diagnose_agent.clone() else {
-        reply(&TerminalCompleteResult::failed(
+    use desk_agent_protocol::terminal_complete::TerminalCompleteResult;
+    crate::diagnose::terminal_complete::send_completion_result(
+        &ctx.outbound_tx,
+        model.from_connection_id.clone(),
+        &TerminalCompleteResult::failed(
             &model.request_id,
             agent_error(
                 AgentErrorKind::UnsupportedCapability,
-                "terminal command completion is not available in this mode",
+                "terminal command completion is handled by the central signaling server",
                 false,
                 true,
             ),
-        ));
-        return Ok(());
-    };
-
-    let ask = match model.get_data::<TerminalCompleteAsk>() {
-        Ok(a) => a,
-        Err(e) => {
-            reply(&TerminalCompleteResult::failed(
-                &model.request_id,
-                agent_error(
-                    AgentErrorKind::InvalidInput,
-                    &format!("bad TerminalCompleteAsk payload: {e}"),
-                    false,
-                    true,
-                ),
-            ));
-            return Ok(());
-        }
-    };
-
-    let result = runtime.run_completion(&model.request_id, ask).await;
-    reply(&result);
+        ),
+    );
     Ok(())
 }
 
@@ -3365,7 +3258,6 @@ mod tests {
             worker_mgr,
             virtual_display: None,
             diagnose_orchestrator: None,
-            diagnose_agent: None,
             remote_read: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
@@ -5434,6 +5326,65 @@ mod tests {
         let err = event.error.unwrap();
         assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
         assert!(err.message.contains("central signaling server"));
+    }
+
+    /// The terminal copilot is centralized: a `TerminalCopilotAsk` reaching the
+    /// edge router is answered with one terminal `TerminalCopilotEvent::error`
+    /// pointing at the central server (the edge runs no local copilot).
+    #[tokio::test]
+    async fn terminal_copilot_at_edge_replies_centralized_unavailable() {
+        use desk_agent_protocol::terminal_copilot::{
+            TerminalCopilotEvent, TerminalCopilotEventKind,
+        };
+        let (ctx, mut rx) = make_ctx_with_rx();
+        let ask = SignalingModel::new(
+            "req-cop-1",
+            SignalingType::TerminalCopilotAsk,
+            Some("conn-1".to_string()),
+            None,
+            None,
+            None,
+        );
+        handle_terminal_copilot_inbound(&ctx, &ask).await.unwrap();
+        let frame = read_response(&mut rx);
+        assert_eq!(frame.signaling_type, SignalingType::TerminalCopilotEvent);
+        let event = frame
+            .get_data::<TerminalCopilotEvent>()
+            .expect("TerminalCopilotEvent");
+        assert_eq!(event.kind, TerminalCopilotEventKind::Error);
+        let err = event.error.unwrap();
+        assert_eq!(err.kind, AgentErrorKind::UnsupportedCapability);
+        assert!(err.message.contains("central signaling server"));
+    }
+
+    /// Inline command completion is centralized: a `TerminalCompleteAsk` reaching
+    /// the edge router is answered with one error `TerminalCompleteResult`.
+    #[tokio::test]
+    async fn terminal_complete_at_edge_replies_centralized_unavailable() {
+        use desk_agent_protocol::terminal_complete::TerminalCompleteResult;
+        let (ctx, mut rx) = make_ctx_with_rx();
+        let ask = SignalingModel::new(
+            "req-comp-1",
+            SignalingType::TerminalCompleteAsk,
+            Some("conn-1".to_string()),
+            None,
+            None,
+            None,
+        );
+        handle_terminal_complete_inbound(&ctx, &ask).await.unwrap();
+        let frame = read_response(&mut rx);
+        assert_eq!(frame.signaling_type, SignalingType::TerminalCompleteResult);
+        let result = frame
+            .get_data::<TerminalCompleteResult>()
+            .expect("TerminalCompleteResult");
+        assert!(result.is_error());
+        assert!(
+            result
+                .error
+                .unwrap()
+                .message
+                .contains("central signaling server")
+        );
     }
 
     fn diagnose_cancel_model() -> SignalingModel {

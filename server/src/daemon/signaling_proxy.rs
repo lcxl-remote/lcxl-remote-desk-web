@@ -50,67 +50,48 @@ pub async fn run_signaling_proxy(
     let agentic_exec = Arc::new(crate::daemon::agentic_exec::AgenticExecCoordinator::new());
 
     // The diagnose orchestrator runs daemon-side wherever an in-process worker
-    // can collect locally (Default / DeskServer). ServiceDaemon leaves it
-    // `None`, so `Diagnose` replies feature-unavailable until the cross-process
-    // collection path lands. Evidence is gathered through the in-process agent,
-    // scrubbed by the regex redactor, then sent to the configured model via the
-    // OpenAI-compatible adapter (which degrades to a not-configured diagnosis
-    // when no model is set).
-    // `Diagnose` runs the agentic tool-calling loop (`diagnose_agent`); the
-    // orchestrator is retained for the remote-collect edge path and cancel audit.
-    // Both share the one in-process device agent and exist in the same modes.
-    let (diagnose_orchestrator, diagnose_agent, remote_read) =
-        match settings.read().await.args.startup_mode {
-            StartupMode::ServiceDaemon => (None, None, None),
-            _ => {
-                let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
-                let agent = Arc::new(
-                    LocalDeviceAgent::with_settings(settings.clone().into_inner())
-                        .with_audit(audit.clone()),
-                );
-                let collector = Arc::new(AgentContextCollector::new(
-                    agent.clone(),
-                    settings.clone().into_inner(),
-                ));
-                // Resolve the adapter per diagnosis from the configured provider, so
-                // a runtime provider change takes effect on the next request.
-                let model = Arc::new(ModelBackedDiagnoseModel::new(
-                    Arc::new(ProviderAdapterSelector),
-                    settings.clone().into_inner(),
-                    audit.clone(),
-                ));
-                let orchestrator = Arc::new(DiagnoseOrchestrator::new(
-                    collector,
-                    Arc::new(RegexRedactor::new()),
-                    model,
-                    audit,
-                ));
-                // The agentic runtime with the mutating exec path wired: classify
-                // via the shared command templates, push an `ExecPreview` to the
-                // control connection and await `ResolveExec` + the worker's result
-                // through the shared coordinator, execute on the local worker.
-                let agent_runtime = Arc::new(
-                    crate::diagnose::direct_runtime::DirectAgentRuntime::new_with_exec(
-                        agent.clone(),
-                        settings.clone().into_inner(),
-                        crate::diagnose::direct_exec::DirectExecSupport {
-                            coordinator: agentic_exec.clone(),
-                            outbound_tx: outbound_tx.clone(),
-                            worker_mgr: worker_mgr.clone(),
-                            command_templates: command_templates.clone(),
-                        },
-                    ),
-                );
-                // Serves a manager remote read (§8.3) against the same in-process
-                // agent, redacting fail-closed.
-                let edge_read = Arc::new(crate::diagnose::remote_read::EdgeReadInvoker::new(
-                    agent,
-                    Arc::new(RegexRedactor::new()),
-                    settings.clone().into_inner(),
-                ));
-                (Some(orchestrator), Some(agent_runtime), Some(edge_read))
-            }
-        };
+    // can collect locally (Default / DeskServer); ServiceDaemon leaves it `None`.
+    // AI diagnosis is orchestrated by the central signaling brain, so this host
+    // only serves the remote-collect edge path: the central server pushes a
+    // `CollectRequest` and the orchestrator gathers evidence through the in-process
+    // agent and scrubs it with the regex redactor before streaming it back. The
+    // `EdgeReadInvoker` serves the central read-tool path against the same agent.
+    let (diagnose_orchestrator, remote_read) = match settings.read().await.args.startup_mode {
+        StartupMode::ServiceDaemon => (None, None),
+        _ => {
+            let audit: Arc<dyn AuditSink> = Arc::new(LogAuditSink);
+            let agent = Arc::new(
+                LocalDeviceAgent::with_settings(settings.clone().into_inner())
+                    .with_audit(audit.clone()),
+            );
+            let collector = Arc::new(AgentContextCollector::new(
+                agent.clone(),
+                settings.clone().into_inner(),
+            ));
+            // The orchestrator's local model is unused on this host (diagnosis is
+            // central); it is wired only to serve `collect_for_remote`, which runs
+            // the collect + fail-closed redact phases and never dials the model.
+            let model = Arc::new(ModelBackedDiagnoseModel::new(
+                Arc::new(ProviderAdapterSelector),
+                settings.clone().into_inner(),
+                audit.clone(),
+            ));
+            let orchestrator = Arc::new(DiagnoseOrchestrator::new(
+                collector,
+                Arc::new(RegexRedactor::new()),
+                model,
+                audit,
+            ));
+            // Serves a central read-tool call (§8.3) against the same in-process
+            // agent, redacting fail-closed.
+            let edge_read = Arc::new(crate::diagnose::remote_read::EdgeReadInvoker::new(
+                agent,
+                Arc::new(RegexRedactor::new()),
+                settings.clone().into_inner(),
+            ));
+            (Some(orchestrator), Some(edge_read))
+        }
+    };
 
     // Choose the audit sink once: report to the manager (DB persistence) when a
     // manager is configured, otherwise log locally. `RemoteAuditSink` still logs
@@ -147,7 +128,6 @@ pub async fn run_signaling_proxy(
         // ChangeDisplaySettings.
         virtual_display: virtual_display.clone(),
         diagnose_orchestrator: diagnose_orchestrator.clone(),
-        diagnose_agent: diagnose_agent.clone(),
         remote_read: remote_read.clone(),
         // Confirmed execution is available wherever an in-process worker can
         // execute (Default / DeskServer), gated like the diagnose orchestrator.
@@ -1551,7 +1531,6 @@ mod tests {
             worker_mgr,
             virtual_display: None,
             diagnose_orchestrator: None,
-            diagnose_agent: None,
             remote_read: None,
             exec_supported: false,
             exec_approvals: Arc::new(crate::daemon::exec_approval::PendingApprovalStore::new()),
