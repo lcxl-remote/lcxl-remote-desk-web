@@ -1,4 +1,5 @@
 pub mod ai_usage;
+pub mod collect_pending;
 pub mod controller;
 pub mod db;
 pub mod entity;

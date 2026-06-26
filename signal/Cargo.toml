@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 desk-utils = { workspace = true }
 desk-agent-protocol = { workspace = true }
+desk-diagnose-core = { workspace = true }
 desk-signal-facade = { workspace = true }
 desk-server-version = { workspace = true }
 desk-server-user = { workspace = true }
