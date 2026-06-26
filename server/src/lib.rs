@@ -29,6 +29,7 @@ use std::{
 
 use crate::{
     controller::{
+        api_token::create_token,
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
         init::init_system,
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
@@ -175,6 +176,15 @@ pub fn configure_api_surface(
             .service(query_virtual_display_driver_status)
             .service(install_virtual_display_driver)
             .service(uninstall_virtual_display_driver)
+            .configure(move |cfg| {
+                // Host signaling-token issuance is only meaningful where a
+                // co-located signaling server exists for the host to connect to
+                // (Default / Signaling / ServiceDaemon). A pure DeskServer has
+                // no embedded signaling route, so it never offers this endpoint.
+                if opts.include_signaling {
+                    cfg.service(create_token);
+                }
+            })
             .service(
                 utoipa_actix_web::scope("/desk")
                     .service(change_password)
@@ -528,7 +538,8 @@ pub async fn run_with_hub(
         let mut s = shared_settings_data.write().await;
         if s.system.local_signaling_token.is_none() {
             let token = uuid::Uuid::new_v4().to_string();
-            info!("Generated new local_signaling_token: {}", token);
+            // Never log the token value: it is a host signaling credential.
+            info!("Generated new local_signaling_token");
             s.system.local_signaling_token = Some(token);
             if let Err(e) = s.save() {
                 error!("Failed to save local_signaling_token: {}", e);

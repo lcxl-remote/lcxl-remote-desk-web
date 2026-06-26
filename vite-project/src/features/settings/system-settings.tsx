@@ -3,13 +3,14 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
 import { useTranslation } from "react-i18next"
-import { Loader2, Save, Copy, ExternalLink } from "lucide-react"
+import { Loader2, Save } from "lucide-react"
 
 import { useQuerySettings } from "@/services/hooks/settingsController/useQuerySettings"
 import { useUpdateSettings } from "@/services/hooks/settingsController/useUpdateSettings"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { useQueryBackendInfo } from "@/services/hooks/systemController/useQueryBackendInfo"
 import { useQueryMacosAutologin } from "@/services/hooks/systemController/useQueryMacosAutologin"
+import { mergeSystemSettings } from "@/features/settings/settings-payload"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -30,10 +31,6 @@ const systemSettingsSchema = z.object({
     auto_start: z.boolean().nullable(),
     listen_addr_ipv4: z.string().min(1, "IPv4 address is required"),
     listen_addr_ipv6: z.string(),
-    signaling_url: z.string().nullable(),
-    signaling_token: z.string().nullable(),
-    manager_url: z.string().nullable(),
-    manager_api_token: z.string().nullable(),
     port: z.number().min(1).max(65535),
 })
 
@@ -43,7 +40,7 @@ export function SystemSettings() {
     const { t } = useTranslation()
     const { toast } = useToast()
 
-    const { data: settingsResponse, isLoading } = useQuerySettings()
+    const { data: settingsResponse, isLoading, refetch: refetchSettings } = useQuerySettings()
     const { mutateAsync: updateSettings, isPending: isUpdating } = useUpdateSettings()
     const { data: serverInfoResp } = useQueryServerInfo()
     const { data: backendInfoResp } = useQueryBackendInfo()
@@ -65,10 +62,6 @@ export function SystemSettings() {
             auto_start: null,
             listen_addr_ipv4: "0.0.0.0",
             listen_addr_ipv6: "::",
-            signaling_url: null,
-            signaling_token: null,
-            manager_url: null,
-            manager_api_token: null,
             port: 8081,
         },
     })
@@ -83,10 +76,6 @@ export function SystemSettings() {
                 auto_start: data.auto_start ?? null,
                 listen_addr_ipv4: data.listen_addr_ipv4 || "0.0.0.0",
                 listen_addr_ipv6: data.listen_addr_ipv6 || "::",
-                signaling_url: data.signaling_url || null,
-                signaling_token: data.signaling_token || null,
-                manager_url: data.manager_url || null,
-                manager_api_token: data.manager_api_token || null,
                 port: data.port || 8081,
             })
         }
@@ -94,7 +83,16 @@ export function SystemSettings() {
 
     const onSubmit = async (values: SystemSettingsFormValues) => {
         try {
-            await updateSettings({ data: values })
+            // `update_settings` is a full-struct replace: the payload must carry
+            // EVERY SystemSettings field, not just the ones this page renders.
+            // Refetch the latest settings and merge this page's edits on top so
+            // fields owned by other pages (outbound connection, signal token)
+            // and config-only fields (worker_heartbeat_*, webrtc_ice_*) are not
+            // wiped. Refetching first also shrinks the lost-update window when a
+            // sibling settings page saved concurrently.
+            const fresh = await refetchSettings()
+            const base = fresh.data?.data ?? settingsResponse?.data ?? {}
+            await updateSettings({ data: mergeSystemSettings(base, values) })
             toast({
                 title: t('pages.system.settings.success'),
                 description: t('pages.system.settings.updateSucceedMessage'),
@@ -184,64 +182,6 @@ export function SystemSettings() {
                                     )}
                                 />
 
-                                {serverInfo?.startup_mode !== "signaling" && (
-                                    <>
-                                        <FormField
-                                            control={form.control}
-                                            name="signaling_url"
-                                            render={({ field }) => (
-                                                <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.signalingUrl")}</FormLabel>
-                                                    <FormControl>
-                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://127.0.0.1:8081/api/desk/signaling" />
-                                                    </FormControl>
-                                                    <FormDescription>{t("pages.system.settings.signalingUrl.description")}</FormDescription>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-                                        <FormField
-                                            control={form.control}
-                                            name="signaling_token"
-                                            render={({ field }) => (
-                                                <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.signalingToken")}</FormLabel>
-                                                    <FormControl>
-                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Node access token for remote signaling..." />
-                                                    </FormControl>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-                                        <FormField
-                                            control={form.control}
-                                            name="manager_url"
-                                            render={({ field }) => (
-                                                <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.managerUrl")}</FormLabel>
-                                                    <FormControl>
-                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="ws://manager.example.com/api/desk/signaling" />
-                                                    </FormControl>
-                                                    <FormDescription>{t("pages.system.settings.managerUrl.description")}</FormDescription>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-                                        <FormField
-                                            control={form.control}
-                                            name="manager_api_token"
-                                            render={({ field }) => (
-                                                <FormItem className="md:col-span-2">
-                                                    <FormLabel>{t("pages.system.settings.managerApiToken")}</FormLabel>
-                                                    <FormControl>
-                                                        <Input value={field.value ?? ''} onChange={e => field.onChange(e.target.value === '' ? null : e.target.value)} placeholder="Access token for the manager server..." />
-                                                    </FormControl>
-                                                    <FormMessage />
-                                                </FormItem>
-                                            )}
-                                        />
-                                    </>
-                                )}
                             </div>
 
                             <div className="space-y-4 rounded-md border p-4">

@@ -5,6 +5,7 @@ export type { QueryCollectionPolicySettingsSuspenseQueryKey } from "./aiModelCon
 export type { UpdateAiModelSettingsMutationKey } from "./aiModelController/useUpdateAiModelSettings.ts";
 export type { UpdateCollectionPolicySettingsMutationKey } from "./aiModelController/useUpdateCollectionPolicySettings.ts";
 export type { ValidateAiModelSettingsMutationKey } from "./aiModelController/useValidateAiModelSettings.ts";
+export type { CreateTokenMutationKey } from "./apiTokenController/useCreateToken.ts";
 export type { ChangePasswordMutationKey } from "./authController/useChangePassword.ts";
 export type { GetCaptchaMutationKey } from "./authController/useGetCaptcha.ts";
 export type { LoginAccountMutationKey } from "./authController/useLoginAccount.ts";
@@ -102,6 +103,9 @@ export { useUpdateCollectionPolicySettings } from "./aiModelController/useUpdate
 export { useValidateAiModelSettings } from "./aiModelController/useValidateAiModelSettings.ts";
 export { validateAiModelSettingsMutationKey } from "./aiModelController/useValidateAiModelSettings.ts";
 export { validateAiModelSettingsMutationOptions } from "./aiModelController/useValidateAiModelSettings.ts";
+export { createTokenMutationKey } from "./apiTokenController/useCreateToken.ts";
+export { createTokenMutationOptions } from "./apiTokenController/useCreateToken.ts";
+export { useCreateToken } from "./apiTokenController/useCreateToken.ts";
 export { changePasswordMutationKey } from "./authController/useChangePassword.ts";
 export { changePasswordMutationOptions } from "./authController/useChangePassword.ts";
 export { useChangePassword } from "./authController/useChangePassword.ts";

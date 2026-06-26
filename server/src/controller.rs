@@ -1,3 +1,4 @@
+pub mod api_token;
 pub mod info;
 pub mod init;
 pub mod login;

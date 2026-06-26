@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings, FileText, Server, Key, Shield, Network, Monitor, Bot, Activity } from "lucide-react";
+import { Settings, FileText, Server, Key, Shield, Network, Monitor, Bot, Activity, KeyRound, Link2 } from "lucide-react";
 
 export function SettingsOverview() {
     const { t } = useTranslation();
@@ -74,6 +74,19 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        <Link to="/system/signal-token" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <KeyRound className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('menu.settings.signalToken')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">
+                                        {t('pages.signalToken.description')}
+                                    </CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
                         <Link to="/system/device-codes" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
@@ -132,6 +145,19 @@ export function SettingsOverview() {
                                     </div>
                                     <CardDescription className="mt-2 line-clamp-2">
                                         {t('pages.turnClient.settings.description')}
+                                    </CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
+                        <Link to="/system/desk-connection" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <Link2 className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('menu.settings.deskConnection')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">
+                                        {t('pages.deskConnection.description')}
                                     </CardDescription>
                                 </CardHeader>
                             </Card>

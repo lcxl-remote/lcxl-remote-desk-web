@@ -73,7 +73,13 @@ pub struct Args {
 }
 
 /// System settings for the application. This struct is used to load and save settings from a configuration file.
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+// `Debug` is hand-written (not derived) so the secret fields
+// (`signaling_token` / `manager_api_token` / `local_signaling_token` /
+// `tauri_ipc_token` / `session_secret_key`) are masked. These are credentials
+// — `local_signaling_token` is now also a host signaling credential — so the
+// many `{:?}` log sites (query/update settings, sysinfo, startup) must never
+// leak the raw values.
+#[derive(Clone, Deserialize, Serialize, ToSchema)]
 #[serde(default)]
 pub struct SystemSettings {
     /// Enable IPv6 support
@@ -153,6 +159,68 @@ pub struct SystemSettings {
     /// Not surfaced in the settings UI yet — edit the config file
     /// directly or rely on the default.
     pub webrtc_ice_failed_timeout_secs: Option<u64>,
+}
+
+/// Render an `Option<String>` secret for `Debug`: keep the `Some`/`None`
+/// distinction (useful for diagnosing "is it set?") but never the value.
+fn redacted(value: &Option<String>) -> &'static str {
+    match value {
+        Some(_) => "Some(\"***\")",
+        None => "None",
+    }
+}
+
+impl std::fmt::Debug for SystemSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SystemSettings")
+            .field("enable_ipv6", &self.enable_ipv6)
+            .field("port", &self.port)
+            .field("listen_addr_ipv4", &self.listen_addr_ipv4)
+            .field("listen_addr_ipv6", &self.listen_addr_ipv6)
+            .field("locale", &self.locale)
+            .field("signaling_url", &self.signaling_url)
+            .field(
+                "signaling_token",
+                &format_args!("{}", redacted(&self.signaling_token)),
+            )
+            .field("manager_url", &self.manager_url)
+            .field("client_id", &self.client_id)
+            .field("telemetry_consent", &self.telemetry_consent)
+            .field("auto_start", &self.auto_start)
+            .field(
+                "manager_api_token",
+                &format_args!("{}", redacted(&self.manager_api_token)),
+            )
+            .field(
+                "local_signaling_token",
+                &format_args!("{}", redacted(&self.local_signaling_token)),
+            )
+            .field(
+                "tauri_ipc_token",
+                &format_args!("{}", redacted(&self.tauri_ipc_token)),
+            )
+            .field(
+                "session_secret_key",
+                &format_args!("{}", redacted(&self.session_secret_key)),
+            )
+            .field(
+                "worker_heartbeat_watchdog_enabled",
+                &self.worker_heartbeat_watchdog_enabled,
+            )
+            .field(
+                "worker_heartbeat_timeout_secs",
+                &self.worker_heartbeat_timeout_secs,
+            )
+            .field(
+                "webrtc_ice_disconnected_timeout_secs",
+                &self.webrtc_ice_disconnected_timeout_secs,
+            )
+            .field(
+                "webrtc_ice_failed_timeout_secs",
+                &self.webrtc_ice_failed_timeout_secs,
+            )
+            .finish()
+    }
 }
 
 impl SystemSettings {
@@ -281,5 +349,44 @@ mod tests {
         incoming.preserve_internal_fields(&previous);
 
         assert_eq!(incoming.client_id.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn debug_masks_secret_fields() {
+        let settings = SystemSettings {
+            signaling_token: Some("sig-secret".to_string()),
+            manager_api_token: Some("mgr-secret".to_string()),
+            local_signaling_token: Some("local-secret".to_string()),
+            tauri_ipc_token: Some("tauri-secret".to_string()),
+            session_secret_key: Some("session-secret".to_string()),
+            ..SystemSettings::default()
+        };
+
+        let rendered = format!("{:?}", settings);
+
+        // No raw secret value leaks through Debug (covers every {:?} log site).
+        for secret in [
+            "sig-secret",
+            "mgr-secret",
+            "local-secret",
+            "tauri-secret",
+            "session-secret",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "Debug output leaked secret `{secret}`: {rendered}"
+            );
+        }
+        // The Some/None distinction is preserved for diagnostics.
+        assert!(rendered.contains("local_signaling_token: Some(\"***\")"));
+        assert!(rendered.contains("session_secret_key: Some(\"***\")"));
+    }
+
+    #[test]
+    fn debug_renders_unset_secrets_as_none() {
+        let settings = SystemSettings::default();
+        let rendered = format!("{:?}", settings);
+        assert!(rendered.contains("local_signaling_token: None"));
+        assert!(rendered.contains("manager_api_token: None"));
     }
 }

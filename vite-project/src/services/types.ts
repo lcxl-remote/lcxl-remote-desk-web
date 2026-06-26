@@ -493,6 +493,27 @@ export type CpuInfo = {
     vendor_id: string;
 };
 
+/**
+ * @description Request body for issuing a host signaling token. Mirrors the manager\'s\n`POST /api/tokens` wire shape so a single mobile-client contract drives both\nends with no server-type probe. The open-source desk-server ignores `name`:\nit returns the static `local_signaling_token` rather than minting a\nper-name token in a database.
+*/
+export type CreateApiTokenParams = {
+    /**
+     * @description Token label. Accepted for wire parity with the manager; ignored here.
+     * @type string
+    */
+    name: string;
+};
+
+/**
+ * @description Issued host signaling token. Same shape as the manager response so the\nmobile client can reuse one `ApiTokenApi` against either backend.
+*/
+export type CreateApiTokenResult = {
+    /**
+     * @type string
+    */
+    token: string;
+};
+
 export type LabelKey = {
     /**
      * @type string,null
@@ -1975,6 +1996,31 @@ export type RestResponseCollectionPolicySettings = {
          * @type boolean | undefined
         */
         allow_screen?: boolean;
+    };
+    /**
+     * @type string,null
+    */
+    message?: string | null;
+    /**
+     * @type boolean
+    */
+    success: boolean;
+};
+
+export type RestResponseCreateApiTokenResult = {
+    /**
+     * @type integer, int32
+    */
+    code: number;
+    /**
+     * @description Issued host signaling token. Same shape as the manager response so the\nmobile client can reuse one `ApiTokenApi` against either backend.
+     * @type object | undefined
+    */
+    data?: {
+        /**
+         * @type string
+        */
+        token: string;
     };
     /**
      * @type string,null
@@ -4413,6 +4459,21 @@ export type UninstallServiceMutationResponse = UninstallService202;
 export type UninstallServiceMutation = {
     Response: UninstallService202;
     Errors: UninstallService503;
+};
+
+/**
+ * @description Issued token
+*/
+export type CreateToken200 = RestResponseCreateApiTokenResult;
+
+export type CreateTokenMutationRequest = CreateApiTokenParams;
+
+export type CreateTokenMutationResponse = CreateToken200;
+
+export type CreateTokenMutation = {
+    Response: CreateToken200;
+    Request: CreateTokenMutationRequest;
+    Errors: any;
 };
 
 /**

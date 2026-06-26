@@ -61,6 +61,8 @@ export default {
   'menu.settings.deviceCode': 'Device Codes',
   'menu.settings.virtualDisplay': 'Virtual Display',
   'menu.settings.aiModel': 'AI Model',
+  'menu.settings.signalToken': 'Signal Access Token',
+  'menu.settings.deskConnection': 'Outbound Connection',
   'menu.desk': 'Desk',
   'menu.desk.file-list': 'File List',
   'menu.desk.desk': "Desktop",
