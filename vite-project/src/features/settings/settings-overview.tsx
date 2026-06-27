@@ -113,6 +113,19 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
+                        <Link to="/system/ai-model" className="block outline-none">
+                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
+                                <CardHeader>
+                                    <div className="flex items-center gap-2">
+                                        <Bot className="h-5 w-5 text-primary" />
+                                        <CardTitle className="text-lg">{t('menu.settings.aiModel')}</CardTitle>
+                                    </div>
+                                    <CardDescription className="mt-2 line-clamp-2">
+                                        {t('pages.aiModel.settings.description')}
+                                    </CardDescription>
+                                </CardHeader>
+                            </Card>
+                        </Link>
                         <Link to="/system/model-usage" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
@@ -190,19 +203,6 @@ export function SettingsOverview() {
                                 </Card>
                             </Link>
                         )}
-                        <Link to="/system/ai-model" className="block outline-none">
-                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
-                                <CardHeader>
-                                    <div className="flex items-center gap-2">
-                                        <Bot className="h-5 w-5 text-primary" />
-                                        <CardTitle className="text-lg">{t('menu.settings.aiModel')}</CardTitle>
-                                    </div>
-                                    <CardDescription className="mt-2 line-clamp-2">
-                                        {t('pages.aiModel.settings.description')}
-                                    </CardDescription>
-                                </CardHeader>
-                            </Card>
-                        </Link>
                     </div>
                 </div>
             )}
