@@ -15,7 +15,10 @@ use tokio::{runtime::Handle, sync::RwLock};
 use crate::{
     error::DeskSignalFacadeError,
     model::{
-        connection::{ConnectionList, ConnectionModel, ConnectionState, SharedConnectionMap},
+        connection::{
+            ConnectionList, ConnectionModel, ConnectionState, FetchConnectionsScope,
+            SharedConnectionMap,
+        },
         signal::{
             ForwardSignalingSender, InitSignalingData, LcxlRTCIceServer, RemoteDeskTypeEnum,
             RequestRemoteModel, SignalingModel, SignalingType, SignalingUser, TurnProvider,
@@ -260,6 +263,32 @@ pub trait RemoteToolObserver: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
 }
 
+// ====== FetchConnectionsResolver trait ======
+
+/// Resolves a `FetchConnections` request into the connection list to return.
+///
+/// The signal server leaves this unset and the handler falls back to the local
+/// connection map (single instance, correct). The manager implements it to
+/// return a cluster-wide, presence-backed and scope-authorized list whose items
+/// carry `device_id` / `owner_node_id` — so a control end behind a load balancer
+/// sees every device regardless of which instance holds the desk-server socket.
+///
+/// `requester` is the asking connection (carries the trusted `AuthContext` used
+/// for scoped authorization); `scope` is the parsed request payload.
+pub trait FetchConnectionsResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        requester: &'a ConnectionState,
+        scope: FetchConnectionsScope,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Vec<ConnectionModel>, DeskSignalFacadeError>>
+                + Send
+                + 'a,
+        >,
+    >;
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -357,6 +386,11 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `Some` only in the manager (which feeds them into its remote-tool pending
     /// store); `None` elsewhere, where they are ignored.
     pub remote_tool_observer: Option<Arc<dyn RemoteToolObserver>>,
+    /// Resolver for `FetchConnections` requests. `Some` only in the manager
+    /// (which returns a cluster-wide, scope-authorized list from presence);
+    /// `None` in the signal server, where the handler falls back to the local
+    /// connection map.
+    pub fetch_connections_resolver: Option<Arc<dyn FetchConnectionsResolver>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -494,6 +528,12 @@ impl<U: SignalingUser> SignalingHandler<U> {
             connection_id: connection_id.clone(),
             version_info: client_version_info.clone(),
             ip,
+            // Multi-instance routing fields are resolved from the manager's
+            // presence registry (the `FetchConnectionsResolver` seam), not from
+            // the per-instance local connection map. The locally constructed
+            // model carries `None`; on the OSS signal server they stay `None`.
+            device_id: None,
+            owner_node_id: None,
         };
 
         let connection_state = ConnectionState {
@@ -519,6 +559,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             collect_observer: None,
             edge_exec_observer: None,
             remote_tool_observer: None,
+            fetch_connections_resolver: None,
         })
     }
 
@@ -557,6 +598,17 @@ impl<U: SignalingUser> SignalingHandler<U> {
     /// frames are ignored there.
     pub fn with_remote_tool_observer(mut self, observer: Arc<dyn RemoteToolObserver>) -> Self {
         self.remote_tool_observer = Some(observer);
+        self
+    }
+
+    /// Attach a cluster-wide `FetchConnections` resolver (the manager's
+    /// presence-backed, scope-authorized list). The signal server never calls
+    /// this, so `FetchConnections` falls back to the local connection map.
+    pub fn with_fetch_connections_resolver(
+        mut self,
+        resolver: Arc<dyn FetchConnectionsResolver>,
+    ) -> Self {
+        self.fetch_connections_resolver = Some(resolver);
         self
     }
 
@@ -643,7 +695,18 @@ impl<U: SignalingUser> SignalingHandler<U> {
                 self.connection_state.send_response(None, &response).await?;
             }
             SignalingType::FetchConnections => {
-                let connection_map = {
+                let connection_map = if let Some(resolver) = &self.fetch_connections_resolver {
+                    // Manager: cluster-wide, presence-backed, scope-authorized
+                    // list. The scope payload is optional and defaults to
+                    // personal.
+                    let scope = signaling_model.get_data_with_default::<FetchConnectionsScope>()?;
+                    let models = resolver.resolve(&self.connection_state, scope).await?;
+                    models
+                        .into_iter()
+                        .map(|model| (model.connection_id.clone(), model))
+                        .collect()
+                } else {
+                    // Signal server: single-instance local map.
                     let connection_map = self.connection_map.read().await;
                     connection_map
                         .iter()

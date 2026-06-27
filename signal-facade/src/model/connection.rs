@@ -14,6 +14,46 @@ pub struct ConnectionModel {
     pub ip: Option<String>,
     /// Version info of the connection
     pub version_info: VersionInfo,
+    /// Device primary key for multi-instance addressing. Filled by the manager
+    /// (whose presence registry is keyed by device id); `None` on the OSS
+    /// single-instance signal server, which has no device registry. Dual-target
+    /// field, not a backward-compat field: control ends address a manager device
+    /// by this id and an OSS connection by `connection_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// Owning manager instance node id for cross-instance routing. Filled by the
+    /// manager; `None` on the OSS signal server (single instance, no
+    /// cross-instance routing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_node_id: Option<String>,
+}
+
+/// Selector for which connections a `FetchConnections` request wants.
+///
+/// `Personal` returns the requester's own devices; `Org` returns the devices
+/// authorized to the named organization (manager only). The OSS single-instance
+/// signal server has no organization model and ignores the variant, returning
+/// its local connection map regardless.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionScope {
+    /// The requester's own devices (default).
+    #[default]
+    Personal,
+    /// Devices authorized to an organization (requires `org_id`).
+    Org,
+}
+
+/// Optional payload of a `FetchConnections` request. Absent payload defaults to
+/// personal scope. The OSS signal server ignores this (single instance, no org).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, ToSchema)]
+pub struct FetchConnectionsScope {
+    /// Which set of connections to return. Defaults to `Personal`.
+    #[serde(default)]
+    pub scope: ConnectionScope,
+    /// Organization id, required when `scope` is `Org`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
 }
 
 /// Connection list information
@@ -179,5 +219,89 @@ impl ForwardSignalingSender for ConnectionState {
                 DeskSignalFacadeError::custom_error(DeskErrorCode::TIMEOUT, &e.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::signal::RemoteDeskTypeEnum;
+
+    fn sample_version_info() -> VersionInfo {
+        VersionInfo {
+            api_version: 0,
+            build_number: 0,
+            commit_hash: String::new(),
+            remote_desk_type: RemoteDeskTypeEnum::Server,
+            operation_system: Default::default(),
+            display_name: None,
+            client_id: None,
+            token: None,
+        }
+    }
+
+    #[test]
+    fn connection_model_omits_multi_instance_fields_when_none() {
+        // OSS single-instance signal server leaves device_id/owner_node_id unset;
+        // they must not appear on the wire, so an OSS client never sees them.
+        let model = ConnectionModel {
+            connection_id: "c1".into(),
+            ip: None,
+            version_info: sample_version_info(),
+            device_id: None,
+            owner_node_id: None,
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("device_id"));
+        assert!(!json.contains("owner_node_id"));
+    }
+
+    #[test]
+    fn connection_model_round_trips_multi_instance_fields() {
+        // Manager fills both; they must survive serialize -> deserialize so a
+        // control end can address the device by id and route by owner node.
+        let model = ConnectionModel {
+            connection_id: "c1".into(),
+            ip: Some("203.0.113.4".into()),
+            version_info: sample_version_info(),
+            device_id: Some("42".into()),
+            owner_node_id: Some("node-a".into()),
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        let back: ConnectionModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.device_id.as_deref(), Some("42"));
+        assert_eq!(back.owner_node_id.as_deref(), Some("node-a"));
+    }
+
+    #[test]
+    fn connection_model_deserializes_without_multi_instance_fields() {
+        // A payload produced by the OSS signal server (no device fields) must
+        // still deserialize on a control end built against the dual-target model.
+        let vi = serde_json::to_string(&sample_version_info()).unwrap();
+        let json = format!(r#"{{"connection_id":"c1","ip":null,"version_info":{vi}}}"#);
+        let model: ConnectionModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(model.connection_id, "c1");
+        assert!(model.device_id.is_none());
+        assert!(model.owner_node_id.is_none());
+    }
+
+    #[test]
+    fn fetch_connections_scope_defaults_to_personal() {
+        assert_eq!(
+            FetchConnectionsScope::default().scope,
+            ConnectionScope::Personal
+        );
+        // Empty object also yields personal scope.
+        let parsed: FetchConnectionsScope = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.scope, ConnectionScope::Personal);
+        assert!(parsed.org_id.is_none());
+    }
+
+    #[test]
+    fn fetch_connections_scope_parses_org() {
+        let parsed: FetchConnectionsScope =
+            serde_json::from_str(r#"{"scope":"org","org_id":"org-7"}"#).unwrap();
+        assert_eq!(parsed.scope, ConnectionScope::Org);
+        assert_eq!(parsed.org_id.as_deref(), Some("org-7"));
     }
 }
