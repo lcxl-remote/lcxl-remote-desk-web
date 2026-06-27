@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { v4 } from 'uuid';
 import {
     SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
@@ -135,6 +136,7 @@ export function useTerminalCopilot({
     subscribe,
     sendMessage,
 }: UseTerminalCopilotProps) {
+    const { i18n } = useTranslation();
     const [state, setState] = useState<CopilotState>(INITIAL_STATE);
     const activeRequestRef = useRef<string | null>(null);
     const conversationIdRef = useRef<string | null>(null);
@@ -151,6 +153,9 @@ export function useTerminalCopilot({
                 conversation_id: conversationId,
                 mode: input.mode,
                 question: input.question,
+                // The server steers the answer language by the operator's UI
+                // locale; it is a non-authoritative hint, re-validated server-side.
+                locale: i18n.language,
                 context: input.context,
             };
             const requestId = sendMessage(
@@ -168,7 +173,7 @@ export function useTerminalCopilot({
                 mode: input.mode,
             });
         },
-        [connectionId, sendMessage],
+        [connectionId, sendMessage, i18n],
     );
 
     // Stop tracking the current run and clear the panel. If a run is still in

@@ -75,6 +75,11 @@ pub struct TerminalCopilotAsk {
     /// `HowTo`: the operator's natural-language request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
+    /// BCP-47 locale of the control end's UI (e.g. `zh-CN`), steering the
+    /// model's natural-language answer. Non-authoritative; absent leaves the
+    /// model's default language.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
     pub context: TerminalContext,
 }
 
@@ -284,6 +289,7 @@ mod tests {
             conversation_id: Some("c-1".into()),
             mode: TerminalCopilotMode::ExplainError,
             question: None,
+            locale: Some("zh-CN".into()),
             context: TerminalContext {
                 os: "linux".into(),
                 shell: "bash".into(),

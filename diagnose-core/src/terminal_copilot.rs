@@ -49,16 +49,31 @@ pub fn copilot_read_tools() -> Vec<RegisteredTool> {
 
 /// Build the copilot system prompt for `mode`. Not persisted in the conversation
 /// (re-prepended on every model call, like the diagnose agentic prompt).
-pub fn build_copilot_system_message(mode: TerminalCopilotMode) -> ChatMessage {
+///
+/// `locale` is the operator's UI language (BCP-47, e.g. `zh-CN`); when present it
+/// steers the answer's natural-language text. It only governs prose — commands,
+/// shell names, paths, and code identifiers stay verbatim.
+pub fn build_copilot_system_message(
+    mode: TerminalCopilotMode,
+    locale: Option<&str>,
+) -> ChatMessage {
     let task = match mode {
         TerminalCopilotMode::HowTo => {
             "The operator described what they want to do in their terminal. \
              Propose the command(s) that accomplish it."
         }
         TerminalCopilotMode::ExplainError => {
-            "The operator hit an error in their terminal. Explain the root cause, \
+            "The operator hit a problem in their terminal. Diagnose the root cause, \
              then propose the command(s) that fix it."
         }
+    };
+    let language_rule = match locale.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(locale) => format!(
+            "\n- Write all natural-language text (the explanation and each \
+             suggestion's note) in the operator's UI language (BCP-47 `{locale}`). \
+             Keep commands, shell names, paths, and code identifiers unchanged."
+        ),
+        None => String::new(),
     };
     let body = format!(
         "You are a terminal assistant embedded in a remote shell session.\n\
@@ -71,7 +86,7 @@ pub fn build_copilot_system_message(mode: TerminalCopilotMode) -> ChatMessage {
          those tools, do NOT guess — propose a read-only diagnostic command as a \
          suggestion for the operator to run.\n\
          - Use the operator's OS and shell (given in the request). Keep commands \
-         minimal; avoid destructive operations.\n\n\
+         minimal; avoid destructive operations.{language_rule}\n\n\
          Final answer: reply with a SINGLE JSON object and nothing else:\n\
          {{\"explanation_md\": \"<markdown>\", \"suggestions\": \
          [{{\"command\": \"...\", \"shell\": \"bash|pwsh|cmd|...\", \"cwd\": null, \
@@ -319,6 +334,7 @@ mod tests {
             conversation_id: None,
             mode,
             question: Some("free port 8080".into()),
+            locale: None,
             context: TerminalContext {
                 os: "linux".into(),
                 shell: "bash".into(),
@@ -332,14 +348,28 @@ mod tests {
 
     #[test]
     fn system_prompt_differs_by_mode_and_states_constraints() {
-        let howto = build_copilot_system_message(TerminalCopilotMode::HowTo).text;
-        let explain = build_copilot_system_message(TerminalCopilotMode::ExplainError).text;
+        let howto = build_copilot_system_message(TerminalCopilotMode::HowTo, None).text;
+        let explain = build_copilot_system_message(TerminalCopilotMode::ExplainError, None).text;
         assert!(howto.contains("Propose the command"));
         assert!(explain.contains("root cause"));
         for p in [howto, explain] {
             assert!(p.contains("never execute"));
             assert!(p.contains("SINGLE JSON object"));
         }
+    }
+
+    #[test]
+    fn system_prompt_injects_locale_language_rule_when_present() {
+        let neutral = build_copilot_system_message(TerminalCopilotMode::HowTo, None).text;
+        assert!(!neutral.contains("UI language"));
+        // A blank / whitespace locale is treated as absent.
+        let blank = build_copilot_system_message(TerminalCopilotMode::HowTo, Some("  ")).text;
+        assert!(!blank.contains("UI language"));
+        // A real locale steers the answer language and is echoed into the prompt.
+        let localized =
+            build_copilot_system_message(TerminalCopilotMode::ExplainError, Some("zh-CN")).text;
+        assert!(localized.contains("UI language"));
+        assert!(localized.contains("zh-CN"));
     }
 
     #[test]

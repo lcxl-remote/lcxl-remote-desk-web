@@ -190,7 +190,7 @@ async fn run_copilot_turn(
 
     let default_shell = ask.context.shell.clone();
     let messages = vec![
-        build_copilot_system_message(ask.mode),
+        build_copilot_system_message(ask.mode, ask.locale.as_deref()),
         build_copilot_user_message(&ask),
     ];
     match dial(db, messages).await {
@@ -265,6 +265,7 @@ mod tests {
             conversation_id: None,
             mode: TerminalCopilotMode::HowTo,
             question: Some("how do I check the service?".into()),
+            locale: None,
             context: TerminalContext {
                 os: "linux".into(),
                 shell: "bash".into(),
