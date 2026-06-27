@@ -94,10 +94,6 @@ use tracing_appender::non_blocking::WorkerGuard;
 
 use utoipa::OpenApi;
 use utoipa_actix_web::AppExt;
-use utoipa_rapidoc::RapiDoc;
-use utoipa_redoc::{Redoc, Servable as _};
-use utoipa_scalar::{Scalar, Servable as _};
-use utoipa_swagger_ui::SwaggerUi;
 
 rust_i18n::i18n!("locales");
 
@@ -686,13 +682,11 @@ pub async fn run_with_hub(
                 }
             })
             .configure(move |cfg| configure_api_surface(cfg, surface_opts))
-            .openapi_service(|mut api| {
-                api.merge(openapi::ExtraSchemas::openapi());
-                SwaggerUi::new("/swagger-ui/{_:.*}").url("/openapi.json", api)
-            })
-            .openapi_service(|api| Redoc::with_url("/redoc", api))
-            .openapi_service(|api| RapiDoc::with_url("/rapidoc", "/openapi.json", api))
-            .openapi_service(|api| Scalar::with_url("/scalar", api))
+            // The runtime OpenAPI / doc-UI endpoints (swagger-ui / redoc / rapidoc
+            // / scalar / openapi.json) are deliberately NOT served: the typed
+            // frontend client is generated offline via `dump-openapi`
+            // ([`build_openapi`]), so serving them at runtime would only add an
+            // unauthenticated public attack surface to a self-hosted server.
             .into_app()
             .wrap(
                 SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())

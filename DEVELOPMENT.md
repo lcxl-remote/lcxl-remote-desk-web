@@ -29,7 +29,7 @@ This document provides a comprehensive guide for the LCXL Remote Desk Web projec
 - **Session Management**: Actix-Session with Cookie
 - **Logging**: env_logger 0.11
 - **Configuration**: config 0.15 (TOML)
-- **API Documentation**: Utoipa 5 (Swagger, Redoc, RapiDoc, Scalar)
+- **API Documentation**: Utoipa 5 (OpenAPI spec generated offline via `dump-openapi`; no runtime doc UI)
 - **TURN Service**: turn 0.17
 - **Monitoring**: Prometheus 0.13.4
 
@@ -182,14 +182,14 @@ video_fps = 30               # Reduce FPS during development to save resources
 
 ## API Documentation
 
-Once the server is running, access documentation at:
+The server no longer serves runtime API docs (Swagger UI / ReDoc / RapiDoc /
+Scalar) or `/openapi.json`: those endpoints were unauthenticated and exposed the
+API surface on a public deployment, and the frontend client is generated offline
+anyway. Generate the spec locally with the offline subcommand:
 
-- **Swagger UI**: `http://localhost:8081/swagger-ui/`
-- **ReDoc**: `http://localhost:8081/redoc`
-- **RapiDoc**: `http://localhost:8081/rapidoc`
-- **Scalar**: `http://localhost:8081/scalar`
-
-API spec definition: `http://localhost:8081/openapi.json`
+```bash
+cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
+```
 
 ## CLI Arguments
 

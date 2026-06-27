@@ -40,11 +40,12 @@ log = { workspace = true }
 tokio = { workspace = true }
 
 utoipa = { workspace = true }
-utoipa-swagger-ui = { workspace = true }
+# `utoipa-actix-web` collects the OpenAPI spec from the registered routes; the
+# spec is dumped offline via `dump-openapi` to regenerate the frontend client.
+# The runtime doc-UI crates (swagger-ui / redoc / rapidoc / scalar) are
+# intentionally not depended on: their endpoints are not served, to avoid an
+# unauthenticated public attack surface on a self-hosted server.
 utoipa-actix-web = { workspace = true }
-utoipa-redoc = { workspace = true }
-utoipa-rapidoc = { workspace = true }
-utoipa-scalar = { workspace = true }
 
 chrono = { workspace = true }
 sea-orm = { workspace = true }

@@ -55,11 +55,11 @@ chrono = { version = "0.4", features = ["serde"] }
 
 utoipa = { version = "5", features = ["actix_extras", "chrono"] }
 utoipa_repr = "0.1"
-utoipa-swagger-ui = { version = "9", features = ["actix-web"] }
+# Collects the OpenAPI spec from registered routes for the offline `dump-openapi`
+# client generation. The runtime doc-UI crates (swagger-ui / redoc / rapidoc /
+# scalar) were removed: their endpoints are no longer served (offline generation
+# replaces them, and serving them is an unauthenticated public attack surface).
 utoipa-actix-web = "0.1"
-utoipa-redoc = { version = "6", features = ["actix-web"] }
-utoipa-rapidoc = { version = "6", features = ["actix-web"] }
-utoipa-scalar = { version = "0.3", features = ["actix-web"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

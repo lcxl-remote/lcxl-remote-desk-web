@@ -1,17 +1,16 @@
 # REST API
 
-后端 REST API 使用 [`utoipa`](https://github.com/juhaku/utoipa) 注解并暴露 OpenAPI 规范。交互式文档由运行中的 server 提供——它始终与构建保持一致。
+后端 REST API 使用 [`utoipa`](https://github.com/juhaku/utoipa) 注解，并从路由注册生成 OpenAPI 规范。
 
-## 交互式文档（server 运行时）
+## 运行时不再提供文档端点
 
-server 运行后，可在以下地址浏览 API：
+server **不再**在运行时提供交互式 API 文档或原始规范：Swagger UI / ReDoc / RapiDoc / Scalar 端点以及 `/openapi.json` 均已移除。它们无需鉴权，在公网自建部署上只会把 API 攻击面暴露给任何人——而前端客户端是**离线**生成的（见下文），运行时规范并无用途。
 
-- **Swagger UI**——`http://localhost:8081/swagger-ui/`
-- **ReDoc**——`http://localhost:8081/redoc`
-- **RapiDoc**——`http://localhost:8081/rapidoc`
-- **Scalar**——`http://localhost:8081/scalar`
+如需查看规范，用离线的 `dump-openapi` 子命令在本地生成：
 
-原始规范位于 `http://localhost:8081/openapi.json`。
+```bash
+cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
+```
 
 ## 重新生成前端客户端
 

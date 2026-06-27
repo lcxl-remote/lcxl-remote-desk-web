@@ -1,17 +1,16 @@
 # REST API
 
-The backend's REST API is annotated with [`utoipa`](https://github.com/juhaku/utoipa) and exposes an OpenAPI specification. The interactive documentation is served by the running server — it is always in sync with the build.
+The backend's REST API is annotated with [`utoipa`](https://github.com/juhaku/utoipa) and an OpenAPI specification is generated from the route registration.
 
-## Interactive Docs (server running)
+## No runtime docs endpoints
 
-Once the server is running, browse the API at:
+The server does **not** serve interactive API documentation or a raw spec at runtime: the Swagger UI / ReDoc / RapiDoc / Scalar endpoints and `/openapi.json` have been removed. They were unauthenticated and, on a public self-hosted deployment, would only expose the API surface to anyone — while the frontend client is generated **offline** (see below), so a runtime spec served no purpose.
 
-- **Swagger UI** — `http://localhost:8081/swagger-ui/`
-- **ReDoc** — `http://localhost:8081/redoc`
-- **RapiDoc** — `http://localhost:8081/rapidoc`
-- **Scalar** — `http://localhost:8081/scalar`
+To inspect the spec, generate it locally with the offline `dump-openapi` subcommand:
 
-The raw specification is available at `http://localhost:8081/openapi.json`.
+```bash
+cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
+```
 
 ## Regenerating the Frontend Client
 

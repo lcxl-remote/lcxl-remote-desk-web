@@ -36,9 +36,9 @@ sudo apt install -y build-essential pkg-config libssl-dev libasound2-dev \
   clang libclang-dev cmake libvpx-dev
 ```
 
-### API 文档 (服务器运行时)
+### API 文档 (离线生成)
 
-Swagger UI: `http://localhost:8081/swagger-ui/` | OpenAPI 规范: `http://localhost:8081/openapi.json`
+运行时**不再**提供 Swagger UI / ReDoc / RapiDoc / Scalar 与 `/openapi.json`（无鉴权、公网自建会暴露 API 攻击面，且前端客户端已走离线生成）。如需查看规范，用离线子命令本地生成：`cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json`。
 
 ## 模块概览
 

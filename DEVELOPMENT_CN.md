@@ -25,7 +25,7 @@
 - **会话管理**: Actix-Session with Cookie
 - **日志**: env_logger 0.11
 - **配置管理**: config 0.15 (TOML)
-- **API 文档**: Utoipa 5 (支持 Swagger, Redoc, RapiDoc, Scalar)
+- **API 文档**: Utoipa 5（OpenAPI 规范经 `dump-openapi` 离线生成；运行时不再提供文档 UI）
 - **TURN 服务**: turn 0.17
 - **Prometheus 监控**: Prometheus 0.13.4
 
@@ -253,14 +253,11 @@ video_fps = 30               # 开发时可降低帧率以减少资源消耗
 
 ### 访问 API 文档
 
-服务器启动后，可以通过以下 URL 访问 API 文档：
+服务器运行时**不再**提供 API 文档 UI（Swagger UI / ReDoc / RapiDoc / Scalar）和 `/openapi.json`：这些端点无需鉴权，公网部署会暴露 API 攻击面，且前端客户端已走离线生成。如需查看规范，用离线子命令在本地生成：
 
-- **Swagger UI**: <http://localhost:8081/swagger-ui/>
-- **ReDoc**: <http://localhost:8081/redoc>
-- **RapiDoc**: <http://localhost:8081/rapidoc>
-- **Scalar**: <http://localhost:8081/scalar>
-
-API 规范定义：<http://localhost:8081/openapi.json>
+```bash
+cargo run -p lcxl-remote-desk-server -- dump-openapi --out openapi.json
+```
 
 ### API 端点
 
