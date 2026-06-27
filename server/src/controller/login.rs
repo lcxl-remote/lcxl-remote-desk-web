@@ -46,11 +46,12 @@ pub async fn login_account(
     };
 
     if params.login_type == "device_code" {
-        let ip = req
-            .connection_info()
-            .realip_remote_addr()
-            .unwrap_or("unknown")
-            .to_string();
+        // Use the real TCP peer address, not `realip_remote_addr()`: the latter
+        // trusts a client-supplied `X-Forwarded-For` header, which an attacker can
+        // rotate to defeat the per-IP rate limit below. The peer address cannot be
+        // spoofed. (Behind a reverse proxy this collapses to the proxy IP, which
+        // only makes the anti-abuse limit stricter, never bypassable.)
+        let ip = rate_limit_client_ip(&req);
 
         let mut rate_limit = DEVICE_CODE_RATE_LIMIT.write().await;
         let now = Instant::now();
@@ -321,6 +322,15 @@ pub async fn login_tauri(
     Ok(HttpResponse::Ok().json(result))
 }
 
+/// Resolve the client IP for anti-abuse rate limiting from the real TCP peer
+/// address, deliberately ignoring `X-Forwarded-For`. A header-based source can be
+/// rotated by an attacker to evade a per-IP limit; the peer address cannot.
+fn rate_limit_client_ip(req: &actix_web::HttpRequest) -> String {
+    req.peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +343,18 @@ mod tests {
         web,
     };
     use std::env;
+
+    /// The rate-limit IP comes from the TCP peer address and must ignore a
+    /// spoofable `X-Forwarded-For` header.
+    #[test]
+    fn rate_limit_ip_uses_peer_addr_not_xff() {
+        let peer: std::net::SocketAddr = "9.9.9.9:40000".parse().unwrap();
+        let req = TestRequest::default()
+            .peer_addr(peer)
+            .insert_header(("X-Forwarded-For", "1.2.3.4"))
+            .to_http_request();
+        assert_eq!(rate_limit_client_ip(&req), "9.9.9.9");
+    }
 
     fn create_test_settings() -> SharedSettings {
         let mut settings = Settings::default();

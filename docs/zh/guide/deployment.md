@@ -58,3 +58,15 @@ server 内置信令、STUN 与 TURN。跨 NAT 连接时：
 ## 扩展进程布局
 
 对于多会话主机或采集安全界面，运行 [service-daemon 模式](/zh/guide/startup-modes)，或用 `--startup-mode signaling` 把信令服务单独拆出。
+
+## 公网部署加固
+
+把 server 暴露到公网时（通常置于终结 TLS 的反向代理之后），注意：
+
+- **`LRD_COOKIE_SECURE`**——控制会话 Cookie 的 `Secure` 属性。默认 `false`，以便本地 / 局域网 HTTP 访问保留会话。HTTPS 部署应设 `LRD_COOKIE_SECURE=true`，使 Cookie 仅经 HTTPS 发送。
+- **`LRD_PROVIDER_SSRF_MODE`**——防护中心大脑代用户拨号其配置的模型供应商 `base_url` 时的 SSRF（指向内网服务或云元数据端点）。取值：
+  - `relaxed`（默认）——允许 `http` 与私网 / 回环目标（本地模型网关，如 `http://localhost:11434`），但仍拒绝云元数据段。
+  - `strict`——仅 `https`；拒绝私网 / 回环 / CGNAT / ULA 与云元数据段；连接期再校验解析到的 IP（防 DNS 重绑定）。当不可信用户可配置供应商时使用。
+  - `off`——不校验（仅限特殊自建场景）。
+- **运行时不再提供 API 文档端点**（Swagger UI / ReDoc / RapiDoc / Scalar / `/openapi.json`）；用离线 `dump-openapi` 生成规范（见 [REST API 参考](/zh/reference/api)）。
+- 把 server 置于反向代理之后，由其终结 TLS、透传 `Host`，并为信令转发 WebSocket `Upgrade` 头。

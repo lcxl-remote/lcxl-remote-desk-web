@@ -3382,6 +3382,7 @@ mod tests {
                 SignalingType::StartTerminal,
                 serde_json::to_value(desk_signal_facade::model::terminal::StartTerminalSession {
                     command: "C:\\Windows\\System32\\cmd.exe".to_string(),
+                    device_id: None,
                 })
                 .unwrap(),
             ),
@@ -3482,6 +3483,7 @@ mod tests {
                     file_path: "C:\\old.txt".to_string(),
                     delete_permanently: Some(false),
                     connection_id: Some("conn-mgr".to_string()),
+                    device_id: None,
                 })
                 .unwrap(),
             ),
@@ -3533,6 +3535,7 @@ mod tests {
                         file_path: "C:\\old.txt".to_string(),
                         delete_permanently: Some(false),
                         connection_id: None,
+                        device_id: None,
                     })
                     .unwrap(),
                 ),

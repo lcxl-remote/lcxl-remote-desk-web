@@ -58,3 +58,15 @@ The server bundles signaling, STUN, and TURN. For connections across NATs:
 ## Scaling the Process Layout
 
 For multi-session hosts or capturing secure surfaces, run the [service-daemon mode](/guide/startup-modes), or split the signaling service out with `--startup-mode signaling`.
+
+## Public Deployment Hardening
+
+When exposing the server to the public internet (typically behind a TLS-terminating reverse proxy), note:
+
+- **`LRD_COOKIE_SECURE`** — controls the session cookie `Secure` attribute. It defaults to `false` so a local / LAN HTTP setup keeps its session. Set `LRD_COOKIE_SECURE=true` for an HTTPS deployment so the cookie is only ever sent over HTTPS.
+- **`LRD_PROVIDER_SSRF_MODE`** — guards the central brain's outbound dial to a user-configured model provider `base_url` against SSRF (an internal service or a cloud metadata endpoint). Values:
+  - `relaxed` (default) — allows `http` and private / loopback targets (local model gateways like `http://localhost:11434`) but still blocks the cloud-metadata ranges.
+  - `strict` — `https` only; rejects private / loopback / CGNAT / ULA and cloud-metadata ranges; re-validates the resolved IP at connect time (anti DNS-rebinding). Use this if untrusted users can configure the provider.
+  - `off` — no validation (only for unusual self-host setups).
+- **Runtime API docs endpoints are not served** (Swagger UI / ReDoc / RapiDoc / Scalar / `/openapi.json`); generate the spec offline with `dump-openapi` (see the [REST API reference](/reference/api)).
+- Put the server behind a reverse proxy that terminates TLS, passes through `Host`, and forwards the WebSocket `Upgrade` headers for signaling.

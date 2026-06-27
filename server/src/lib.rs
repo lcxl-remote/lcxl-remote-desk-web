@@ -276,6 +276,26 @@ pub fn api_json_config() -> web::JsonConfig {
 /// (no DB / Redis / HTTP / lock). Used by the `dump-openapi` CLI to regenerate
 /// the typed frontend client locally and in CI. Reuses the exact same
 /// registration the live servers serve, so the spec cannot drift.
+/// Whether the session cookie should carry the `Secure` attribute, read from the
+/// `LRD_COOKIE_SECURE` environment variable.
+///
+/// Defaults to `false` so the common local / LAN HTTP setup keeps working (a
+/// `Secure` cookie is dropped by the browser over plain HTTP, which would lose the
+/// session). A public deployment served over HTTPS (typically behind a TLS-
+/// terminating reverse proxy) should set `LRD_COOKIE_SECURE=true` so the cookie is
+/// only ever sent over HTTPS.
+pub fn cookie_secure_from_env() -> bool {
+    parse_cookie_secure(std::env::var("LRD_COOKIE_SECURE").ok().as_deref())
+}
+
+/// Parse the `LRD_COOKIE_SECURE` value, defaulting to `false` when absent or
+/// unrecognized. Split out from [`cookie_secure_from_env`] so it is unit-testable
+/// without mutating the process environment.
+fn parse_cookie_secure(raw: Option<&str>) -> bool {
+    raw.map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 pub fn build_openapi() -> utoipa::openapi::OpenApi {
     let (_app, mut api) = App::new()
         .into_utoipa_app()
@@ -690,7 +710,7 @@ pub async fn run_with_hub(
             .into_app()
             .wrap(
                 SessionMiddleware::builder(CookieSessionStore::default(), secret_key.clone())
-                    .cookie_secure(false)
+                    .cookie_secure(cookie_secure_from_env())
                     .build(),
             )
             .service(
@@ -774,6 +794,21 @@ fn resolve_bind_addrs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cookie_secure_defaults_off_and_parses_truthy() {
+        // Default (unset / blank / unrecognized) is false so local HTTP keeps its
+        // session cookie.
+        assert!(!parse_cookie_secure(None));
+        assert!(!parse_cookie_secure(Some("")));
+        assert!(!parse_cookie_secure(Some("nope")));
+        assert!(!parse_cookie_secure(Some("0")));
+        // Truthy values opt into Secure for an HTTPS deployment.
+        assert!(parse_cookie_secure(Some("1")));
+        assert!(parse_cookie_secure(Some("true")));
+        assert!(parse_cookie_secure(Some("TRUE")));
+        assert!(parse_cookie_secure(Some("yes")));
+    }
 
     #[test]
     fn windows_with_ipv6_binds_both_stacks() {
@@ -904,7 +939,7 @@ mod tests {
                 .into_app()
                 .wrap(
                     SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
-                        .cookie_secure(false)
+                        .cookie_secure(cookie_secure_from_env())
                         .build(),
                 ),
         )
@@ -1091,7 +1126,7 @@ mod tests {
                 .into_app()
                 .wrap(
                     SessionMiddleware::builder(CookieSessionStore::default(), secret_key)
-                        .cookie_secure(false)
+                        .cookie_secure(cookie_secure_from_env())
                         .build(),
                 ),
         )
