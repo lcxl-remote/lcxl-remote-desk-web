@@ -9,6 +9,7 @@ import { useTranslation } from "react-i18next"
 import { Loader2, TerminalSquare, ArrowLeft } from "lucide-react"
 import { Sparkles, WandSparkles } from "lucide-react"
 import { useListTerminal } from "@/services/hooks/terminalController/useListTerminal"
+import { useDeviceId } from "@/hooks/use-device-id"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Label } from "@/components/ui/label"
@@ -38,7 +39,7 @@ const SIGNALING_TYPE_CODE_TERMINAL_CLOSED = 10014
 const SIGNALING_TYPE_CODE_HEARTBEAT = 1
 const TERMINAL_HEARTBEAT_INTERVAL_MS = 30_000
 
-function TerminalView({ connectionId, command, onClose }: { connectionId: string; command: string; onClose: () => void }) {
+function TerminalView({ connectionId, deviceId, command, onClose }: { connectionId: string; deviceId?: string; command: string; onClose: () => void }) {
     const { t } = useTranslation()
     const terminalRef = useRef<HTMLDivElement>(null)
     const [isConnected, setIsConnected] = useState(false)
@@ -226,6 +227,10 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
             // If the user selected a JSON stringified array, we need to parse and join.
             // But let's handle the parsing in the parent.
             url.searchParams.append("command", command);
+            // device_id lets the enterprise manager route the WS to the instance
+            // owning the connection; the OSS signal leaves it unset and routes by
+            // the path connection_id (dual-target wire model).
+            if (deviceId) url.searchParams.append("device_id", deviceId);
 
             const connectWS = () => {
                 try {
@@ -417,7 +422,7 @@ function TerminalView({ connectionId, command, onClose }: { connectionId: string
             xtermRef.current = null
             term.dispose()
         }
-    }, [connectionId, command, onClose])
+    }, [connectionId, deviceId, command, onClose])
 
     return (
         <div className="h-full w-full flex bg-[#1e1e1e] overflow-hidden">
@@ -509,7 +514,11 @@ export default function TerminalSession() {
     const { id: connectionId } = useParams<{ id: string }>()
     const navigate = useNavigate()
     const { t } = useTranslation()
-    const { data: terminalList, isLoading } = useListTerminal(connectionId || '')
+    const deviceId = useDeviceId(connectionId)
+    const { data: terminalList, isLoading } = useListTerminal(
+        connectionId || '',
+        deviceId ? { device_id: deviceId } : undefined,
+    )
     const [selectedCommand, setSelectedCommand] = useState<string>("")
 
     const handleTerminalClose = useCallback(() => {
@@ -527,6 +536,7 @@ export default function TerminalSession() {
     if (selectedCommand && connectionId) {
         return <TerminalView
             connectionId={connectionId}
+            deviceId={deviceId}
             command={selectedCommand}
             onClose={handleTerminalClose}
         />

@@ -3,7 +3,7 @@ use actix_web::{HttpResponse, get, web};
 use crate::error::DeskSignalFacadeError;
 use crate::model::connection::SharedConnectionMap;
 use crate::model::signal::SignalingType;
-use crate::model::terminal::{ListTerminalPath, TerminalList};
+use crate::model::terminal::{ListTerminalPath, ListTerminalQuery, TerminalList};
 use crate::service::request_on_local_connection;
 
 pub const TAG: &str = "Terminal";
@@ -32,7 +32,7 @@ pub async fn list_terminal_core(
 #[utoipa::path(
     tag = TAG,
     summary = "List terminal commands on remote desk",
-    params(ListTerminalPath),
+    params(ListTerminalPath, ListTerminalQuery),
     responses(
         (status = 200, description = "Return terminal command list", body = TerminalList),
     ),
@@ -41,6 +41,10 @@ pub async fn list_terminal_core(
 pub async fn list_terminal(
     connection_map: web::Data<SharedConnectionMap>,
     path: web::Path<ListTerminalPath>,
+    // The OSS single-instance signal routes by `connection_id` and ignores
+    // `device_id`; the query param exists for dual-target API parity with the
+    // manager, whose own handler routes by it.
+    _query: web::Query<ListTerminalQuery>,
 ) -> Result<HttpResponse, DeskSignalFacadeError> {
     list_terminal_core(&connection_map, &path.connection_id).await
 }

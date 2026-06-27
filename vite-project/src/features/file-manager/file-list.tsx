@@ -35,6 +35,7 @@ import {
 import { Progress } from "@/components/ui/progress"
 import { useListFiles } from "@/services/hooks/fileController/useListFiles"
 import { useDeleteFile } from "@/services/hooks/fileController/useDeleteFile"
+import { useDeviceId } from "@/hooks/use-device-id"
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo"
 import { Skeleton } from "@/components/ui/skeleton"
 import { formatBytes } from "@/lib/utils"
@@ -63,8 +64,11 @@ export default function FileList() {
     const fileInputRef = useRef<HTMLInputElement>(null)
     const { toast } = useToast()
 
+    const deviceId = useDeviceId(connectionId)
+
     const { data, isLoading, refetch, isError, error } = useListFiles({
         connection_id: connectionId,
+        device_id: deviceId,
         path: currentPath,
         page_no: page as any,
         page_count: pageSize as any
@@ -182,6 +186,7 @@ export default function FileList() {
         deleteMutation.mutate({
             data: {
                 connection_id: connectionId,
+                device_id: deviceId,
                 file_path: fileToDelete.path,
                 delete_permanently: isPermanentDelete
             }

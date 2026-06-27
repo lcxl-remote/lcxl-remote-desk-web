@@ -327,10 +327,20 @@ export type ConnectionModel = {
     */
     connection_id: string;
     /**
+     * @description Device primary key for multi-instance addressing. Filled by the manager\n(whose presence registry is keyed by device id); `None` on the OSS\nsingle-instance signal server, which has no device registry. Dual-target\nfield, not a backward-compat field: control ends address a manager device\nby this id and an OSS connection by `connection_id`.
+     * @type string,null
+    */
+    device_id?: string | null;
+    /**
      * @description IP address of the connection
      * @type string,null
     */
     ip?: string | null;
+    /**
+     * @description Owning manager instance node id for cross-instance routing. Filled by the\nmanager; `None` on the OSS signal server (single instance, no\ncross-instance routing).
+     * @type string,null
+    */
+    owner_node_id?: string | null;
     /**
      * @description Version information for the API.
      * @type object
@@ -504,6 +514,11 @@ export type DeleteFileRequest = {
      * @type boolean,null
     */
     delete_permanently?: boolean | null;
+    /**
+     * @description Target device primary key (manager multi-instance addressing). See\n[`FileListParams::device_id`] for the dual-target rationale.
+     * @type string,null
+    */
+    device_id?: string | null;
     /**
      * @description The path of file to be deleted
      * @type string
@@ -3791,6 +3806,11 @@ export type ListFilesQueryParams = {
      * @type string,null
     */
     connection_id?: string | null;
+    /**
+     * @description Target device primary key (manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby `connection_id` (dual-target wire model).
+     * @type string,null
+    */
+    device_id?: string | null;
 };
 
 /**
@@ -4185,6 +4205,11 @@ export type OpenTerminalSessionQueryParams = {
      * @type string
     */
     command: string;
+    /**
+     * @description Target device primary key (manager multi-instance addressing). The manager\nroutes by this; the OSS single-instance signal leaves it `None` and routes\nby the path `connection_id` (dual-target wire model).
+     * @type string,null
+    */
+    device_id?: string | null;
 };
 
 /**
@@ -4209,6 +4234,14 @@ export type ListTerminalPathParams = {
     connection_id: string;
 };
 
+export type ListTerminalQueryParams = {
+    /**
+     * @description Target device primary key (manager multi-instance addressing); `None` on\nthe OSS single-instance signal.
+     * @type string,null
+    */
+    device_id?: string | null;
+};
+
 /**
  * @description Return terminal command list
 */
@@ -4219,6 +4252,7 @@ export type ListTerminalQueryResponse = ListTerminal200;
 export type ListTerminalQuery = {
     Response: ListTerminal200;
     PathParams: ListTerminalPathParams;
+    QueryParams: ListTerminalQueryParams;
     Errors: any;
 };
 

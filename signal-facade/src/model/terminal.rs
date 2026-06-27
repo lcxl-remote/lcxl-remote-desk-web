@@ -41,6 +41,18 @@ pub struct ListTerminalPath {
     pub connection_id: String,
 }
 
+/// List terminal query string. Carries the optional target device key so the
+/// enterprise manager can route the request to the instance owning the
+/// connection (multi-instance addressing). The OSS single-instance signal
+/// ignores it and routes by the path `connection_id` (dual-target wire model).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, IntoParams, ToSchema)]
+pub struct ListTerminalQuery {
+    /// Target device primary key (manager multi-instance addressing); `None` on
+    /// the OSS single-instance signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+}
+
 /// Start terminal query path
 #[derive(Clone, Debug, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct StartTerminalPath {
@@ -124,6 +136,19 @@ mod wincode_tests {
         let bytes = wincode::config::serialize(&original, config).expect("encode");
         let back: TerminalInputData = wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.content, original.content);
+    }
+
+    #[test]
+    fn list_terminal_query_parses_and_omits_device_id() {
+        // The manager routes by device_id; the OSS signal leaves it absent. The
+        // query must parse with it present and serialize without it when None so
+        // an OSS request carries no stray field (dual-target wire model).
+        let with_device: ListTerminalQuery = serde_json::from_str(r#"{"device_id":"42"}"#).unwrap();
+        assert_eq!(with_device.device_id.as_deref(), Some("42"));
+
+        let empty: ListTerminalQuery = serde_json::from_str("{}").unwrap();
+        assert!(empty.device_id.is_none());
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
     }
 
     #[test]
