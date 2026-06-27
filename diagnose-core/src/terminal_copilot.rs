@@ -87,10 +87,16 @@ pub fn build_copilot_system_message(
          suggestion for the operator to run.\n\
          - Use the operator's OS and shell (given in the request). Keep commands \
          minimal; avoid destructive operations.{language_rule}\n\n\
-         Final answer: reply with a SINGLE JSON object and nothing else:\n\
-         {{\"explanation_md\": \"<markdown>\", \"suggestions\": \
-         [{{\"command\": \"...\", \"shell\": \"bash|pwsh|cmd|...\", \"cwd\": null, \
-         \"note\": \"<one line: what it does>\"}}]}}\n\
+         Final answer — emit exactly two parts, in this order:\n\
+         1. Write your explanation as Markdown prose. This streams to the operator \
+         as you write it, so the human-readable answer goes here, not inside the \
+         JSON.\n\
+         2. Then append the command suggestions as a SINGLE fenced ```json code \
+         block, and output nothing after the closing fence:\n\
+         ```json\n\
+         {{\"suggestions\": [{{\"command\": \"...\", \"shell\": \"bash|pwsh|cmd|...\", \
+         \"cwd\": null, \"note\": \"<one line: what it does>\"}}]}}\n\
+         ```\n\
          Do not include risk or approval fields — the server computes those. \
          `suggestions` may be empty when no command is appropriate."
     );
@@ -153,40 +159,83 @@ struct RawSuggestion {
 
 /// Parse the model's final answer into a [`TerminalCopilotAnswer`], computing the
 /// server-authoritative `risk` / `decision` for each suggestion via the shared
-/// classifier. Degrades to an explanation-only answer (no suggestions) when the
-/// JSON is malformed, so the operator still sees the model's text.
+/// classifier.
+///
+/// The prompt asks the model to stream the explanation as Markdown prose and then
+/// append the suggestions in a trailing ```json fenced block. So the preferred
+/// shape is: the prose **before** the fence is the explanation (it is exactly what
+/// streamed to the operator), and the fenced JSON yields the suggestions. A model
+/// that ignores the fence and emits a bare JSON object still parses (legacy
+/// fallback). When neither shape is present the answer degrades to explanation-only
+/// (no suggestions), so the operator still sees the model's text.
 ///
 /// `default_shell` is the operator's shell, used when the model omits one.
 pub fn parse_copilot_answer(
     content: &str,
     default_shell: &str,
 ) -> (TerminalCopilotAnswer, ParseOutcome) {
-    match extract_json_object(content).and_then(|j| serde_json::from_str::<RawAnswer>(j).ok()) {
-        Some(raw) => {
-            let suggestions = raw
-                .suggestions
-                .into_iter()
-                .filter(|s| !s.command.trim().is_empty())
-                .map(|s| finalize_suggestion(s, default_shell))
-                .collect();
-            (
-                TerminalCopilotAnswer {
-                    explanation_md: raw.explanation_md,
-                    suggestions,
-                },
-                ParseOutcome::Structured,
-            )
-        }
-        None => (
-            TerminalCopilotAnswer {
-                explanation_md: truncate_on_char_boundary(
-                    content.trim(),
-                    MAX_DEGRADED_EXPLANATION_BYTES,
-                ),
-                suggestions: Vec::new(),
-            },
-            ParseOutcome::Degraded,
-        ),
+    // Preferred shape: streamed prose, then a trailing ```json block.
+    if let Some((prose, raw)) = parse_fenced_answer(content) {
+        let explanation = if prose.trim().is_empty() {
+            raw.explanation_md.trim()
+        } else {
+            prose.trim()
+        };
+        return (
+            build_answer(explanation, raw.suggestions, default_shell),
+            ParseOutcome::Structured,
+        );
+    }
+    // Legacy fallback: a bare JSON object anywhere in the text.
+    if let Some(raw) =
+        extract_json_object(content).and_then(|j| serde_json::from_str::<RawAnswer>(j).ok())
+    {
+        return (
+            build_answer(raw.explanation_md.trim(), raw.suggestions, default_shell),
+            ParseOutcome::Structured,
+        );
+    }
+    // Degrade: keep the raw text as the explanation so the operator still sees it.
+    (
+        TerminalCopilotAnswer {
+            explanation_md: truncate_on_char_boundary(
+                content.trim(),
+                MAX_DEGRADED_EXPLANATION_BYTES,
+            ),
+            suggestions: Vec::new(),
+        },
+        ParseOutcome::Degraded,
+    )
+}
+
+/// Locate the trailing ```json fenced block. Returns the prose before the fence
+/// and the parsed raw answer inside it, or `None` if no parseable fenced block is
+/// present. [`extract_json_object`] finds the balanced object that follows the
+/// fence marker, tolerating the trailing ``` and a stream that dropped the closing
+/// fence before the JSON object itself completed.
+fn parse_fenced_answer(content: &str) -> Option<(&str, RawAnswer)> {
+    let marker = content.rfind("```json")?;
+    let prose = &content[..marker];
+    let raw = extract_json_object(&content[marker..])
+        .and_then(|j| serde_json::from_str::<RawAnswer>(j).ok())?;
+    Some((prose, raw))
+}
+
+/// Assemble the answer, dropping empty-command suggestions and stamping the
+/// server-authoritative risk / decision on each. The explanation is length-capped.
+fn build_answer(
+    explanation: &str,
+    raws: Vec<RawSuggestion>,
+    default_shell: &str,
+) -> TerminalCopilotAnswer {
+    let suggestions = raws
+        .into_iter()
+        .filter(|s| !s.command.trim().is_empty())
+        .map(|s| finalize_suggestion(s, default_shell))
+        .collect();
+    TerminalCopilotAnswer {
+        explanation_md: truncate_on_char_boundary(explanation, MAX_DEGRADED_EXPLANATION_BYTES),
+        suggestions,
     }
 }
 
@@ -233,31 +282,69 @@ impl<F: Fn(TerminalCopilotEvent)> CopilotFrameSink for F {
     }
 }
 
+/// Byte length of the leading prose that is safe to stream: everything before the
+/// first ``` code fence. The copilot prompt asks for the explanation as prose
+/// followed by a single trailing ```json block, so the first fence marks the end
+/// of the human-readable answer. A trailing run of up to two backticks is held
+/// back, so a fence opener split across deltas is never streamed as prose.
+fn prose_prefix_len(s: &str) -> usize {
+    match s.find("```") {
+        Some(idx) => idx,
+        None => {
+            let trailing = s.bytes().rev().take_while(|&b| b == b'`').count().min(2);
+            s.len() - trailing
+        }
+    }
+}
+
 /// A [`TurnSink`] that maps the agentic loop's lifecycle onto
 /// [`TerminalCopilotEvent`] frames with a monotonic `seq`, forwarding each to a
 /// [`CopilotFrameSink`]. Shared by both runtimes so they can never drift on frame
 /// shape, sequencing, or terminal semantics.
 ///
-/// Raw model text is intentionally **not** streamed: the final answer is a single
-/// JSON object, so partial fragments are useless. Only read-tool progress
-/// (`ToolStarted`) and the terminal `Final` / `Error` frames are emitted. A
-/// `terminated` latch guarantees at most one terminal frame per request.
+/// Text streaming is opt-in via [`streaming_text`](Self::streaming_text). When
+/// off (the default), only read-tool progress (`ToolStarted`) and the terminal
+/// `Final` / `Error` frames are emitted — the agentic manager path keeps this, as
+/// its intermediate tool-deciding turns must not leak half-text. When on (the
+/// single-turn signal path), the explanation prose is forwarded as `Partial`
+/// frames as it arrives; the trailing ```json suggestions block is withheld (the
+/// `Final` frame carries the parsed, classified suggestions). A `terminated` latch
+/// guarantees at most one terminal frame per request.
 pub struct CopilotStreamSink<S> {
     sink: S,
     request_id: String,
     seq: u32,
     terminated: bool,
+    /// Whether to forward explanation prose as `Partial` frames (opt-in).
+    stream_text: bool,
+    /// Assembled assistant text so far (only tracked when `stream_text`).
+    text: String,
+    /// Byte length of `text` already emitted as prose, so each delta streams only
+    /// the new safe prefix.
+    emitted: usize,
 }
 
 impl<S: CopilotFrameSink> CopilotStreamSink<S> {
-    /// Build a sink streaming one copilot request's frames to `sink`.
+    /// Build a sink streaming one copilot request's frames to `sink`. Text
+    /// streaming is off by default; call [`streaming_text`](Self::streaming_text)
+    /// to enable explanation streaming.
     pub fn new(sink: S, request_id: impl Into<String>) -> Self {
         Self {
             sink,
             request_id: request_id.into(),
             seq: 0,
             terminated: false,
+            stream_text: false,
+            text: String::new(),
+            emitted: 0,
         }
+    }
+
+    /// Enable forwarding the explanation prose as `Partial` frames. Used by the
+    /// single-turn signal path, where the whole turn's text is the answer.
+    pub fn streaming_text(mut self) -> Self {
+        self.stream_text = true;
+        self
     }
 
     fn next_seq(&mut self) -> u32 {
@@ -302,9 +389,25 @@ impl<S: CopilotFrameSink> CopilotStreamSink<S> {
 }
 
 impl<S: CopilotFrameSink> TurnSink for CopilotStreamSink<S> {
-    fn on_text_delta(&mut self, _delta: &str) {
-        // The final answer is a single JSON object; streaming its raw fragments
-        // is not useful, so provisional text is dropped.
+    fn on_text_delta(&mut self, delta: &str) {
+        // Off by default (the agentic manager path); only the single-turn signal
+        // path opts in. The trailing ```json suggestions block is withheld — the
+        // `Final` frame carries the parsed, classified answer.
+        if !self.stream_text || self.terminated || delta.is_empty() {
+            return;
+        }
+        self.text.push_str(delta);
+        let safe = prose_prefix_len(&self.text);
+        if safe > self.emitted {
+            let fragment = self.text[self.emitted..safe].to_string();
+            self.emitted = safe;
+            let seq = self.next_seq();
+            self.sink.emit(TerminalCopilotEvent::partial(
+                self.request_id.clone(),
+                seq,
+                fragment,
+            ));
+        }
     }
 
     fn on_tool_started(&mut self, tool_name: &str, _call_id: &str) {
@@ -354,7 +457,9 @@ mod tests {
         assert!(explain.contains("root cause"));
         for p in [howto, explain] {
             assert!(p.contains("never execute"));
-            assert!(p.contains("SINGLE JSON object"));
+            // The answer is streamed prose followed by a trailing ```json block.
+            assert!(p.contains("Markdown prose"));
+            assert!(p.contains("```json"));
         }
     }
 
@@ -432,6 +537,120 @@ mod tests {
         assert_eq!(outcome, ParseOutcome::Degraded);
         assert_eq!(answer.explanation_md, "sorry, no JSON here");
         assert!(answer.suggestions.is_empty());
+    }
+
+    /// The preferred shape: streamed prose, then a trailing ```json block. The
+    /// prose is the explanation; the fenced JSON yields the (classified)
+    /// suggestions, even though it omits `explanation_md`.
+    #[test]
+    fn fenced_answer_takes_prose_as_explanation() {
+        let content = "Port 8080 is held by a stale listener.\n\nKill it:\n```json\n\
+            {\"suggestions\": [{\"command\": \"ss -ltnp sport = :8080\", \"shell\": \"bash\", \"note\": \"list listener\"}]}\n```";
+        let (answer, outcome) = parse_copilot_answer(content, "bash");
+        assert_eq!(outcome, ParseOutcome::Structured);
+        assert!(answer.explanation_md.starts_with("Port 8080 is held"));
+        // The fenced JSON block is not part of the explanation prose.
+        assert!(!answer.explanation_md.contains("```"));
+        assert!(!answer.explanation_md.contains("suggestions"));
+        assert_eq!(answer.suggestions.len(), 1);
+    }
+
+    /// A fenced block whose JSON also carries `explanation_md` but with no prose
+    /// before the fence falls back to the JSON's explanation.
+    #[test]
+    fn fenced_answer_without_prose_uses_json_explanation() {
+        let content = "```json\n{\"explanation_md\": \"from json\", \"suggestions\": []}\n```";
+        let (answer, outcome) = parse_copilot_answer(content, "bash");
+        assert_eq!(outcome, ParseOutcome::Structured);
+        assert_eq!(answer.explanation_md, "from json");
+        assert!(answer.suggestions.is_empty());
+    }
+
+    /// A stream truncated before the closing fence still parses, as long as the
+    /// JSON object itself is complete.
+    #[test]
+    fn fenced_answer_tolerates_missing_closing_fence() {
+        let content = "Here is the fix.\n```json\n\
+            {\"suggestions\": [{\"command\": \"ls\", \"shell\": \"bash\", \"note\": \"list\"}]}";
+        let (answer, outcome) = parse_copilot_answer(content, "bash");
+        assert_eq!(outcome, ParseOutcome::Structured);
+        assert_eq!(answer.explanation_md, "Here is the fix.");
+        assert_eq!(answer.suggestions.len(), 1);
+    }
+
+    /// Prose containing `{placeholder}` braces does not confuse the trailing-fence
+    /// extraction (the authoritative JSON is the fenced block, not the prose).
+    #[test]
+    fn fenced_answer_ignores_braces_in_prose() {
+        let content = "Set {VAR} then run it.\n```json\n{\"suggestions\": []}\n```";
+        let (answer, outcome) = parse_copilot_answer(content, "bash");
+        assert_eq!(outcome, ParseOutcome::Structured);
+        assert_eq!(answer.explanation_md, "Set {VAR} then run it.");
+        assert!(answer.suggestions.is_empty());
+    }
+
+    /// An empty ```json block has no object to parse and no bare object elsewhere,
+    /// so it degrades (the operator still sees the text).
+    #[test]
+    fn empty_fenced_block_degrades() {
+        let (answer, outcome) = parse_copilot_answer("no suggestions\n```json\n```", "bash");
+        assert_eq!(outcome, ParseOutcome::Degraded);
+        assert!(answer.suggestions.is_empty());
+        assert!(answer.explanation_md.contains("no suggestions"));
+    }
+
+    /// `prose_prefix_len` returns everything before the first fence, and holds back
+    /// a trailing partial-fence backtick run when no fence is present yet.
+    #[test]
+    fn prose_prefix_stops_at_fence_and_holds_partial_backticks() {
+        assert_eq!(prose_prefix_len("hello world"), "hello world".len());
+        assert_eq!(prose_prefix_len("hello ```json"), "hello ".len());
+        // A trailing run of up to two backticks (a fence opener mid-arrival) is
+        // withheld until the next delta resolves it.
+        assert_eq!(prose_prefix_len("hello ``"), "hello ".len());
+        assert_eq!(prose_prefix_len("hello `"), "hello ".len());
+    }
+
+    /// With text streaming enabled, prose is forwarded as `Partial` frames and the
+    /// trailing ```json block never leaks; the `Final` frame carries the answer.
+    #[test]
+    fn streaming_sink_forwards_prose_and_withholds_json_block() {
+        let (store, sink) = recorder();
+        let mut s = CopilotStreamSink::new(sink, "req-s").streaming_text();
+        s.on_text_delta("Free the ");
+        s.on_text_delta("port.\n");
+        s.on_text_delta("```json\n");
+        s.on_text_delta("{\"suggestions\": []}\n```");
+        s.emit_final(TerminalCopilotAnswer {
+            explanation_md: "Free the port.".into(),
+            suggestions: Vec::new(),
+        });
+
+        let ev = store.borrow();
+        let partials: String = ev
+            .iter()
+            .filter(|e| e.kind == TerminalCopilotEventKind::Partial)
+            .filter_map(|e| e.partial_text.clone())
+            .collect();
+        assert_eq!(partials, "Free the port.\n");
+        assert!(!partials.contains("```"));
+        assert!(!partials.contains("suggestions"));
+        // Monotonic seq across partials then the final frame.
+        let seqs: Vec<u32> = ev.iter().map(|e| e.seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(seqs, sorted);
+        assert_eq!(ev.last().unwrap().kind, TerminalCopilotEventKind::Final);
+    }
+
+    /// Text streaming is off by default, so the agentic manager path emits no
+    /// `Partial` frames even as deltas arrive.
+    #[test]
+    fn default_sink_drops_text_deltas() {
+        let (store, sink) = recorder();
+        let mut s = CopilotStreamSink::new(sink, "req-d");
+        s.on_text_delta("some streamed prose");
+        assert!(store.borrow().is_empty());
     }
 
     /// A recording frame sink: a closure pushing each frame into a shared buffer.

@@ -22,13 +22,14 @@ use desk_agent_protocol::{AgentError, AgentErrorKind};
 use desk_diagnose_core::chat::{ChatMessage, ModelTurn};
 use desk_diagnose_core::prompt::ResponseFormatSpec;
 use desk_diagnose_core::redaction::{Redactor, RegexRedactor};
-use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink};
+use desk_diagnose_core::seam::{ModelRequest, ModelSeam, NullTurnSink, TurnSink};
 use desk_diagnose_core::terminal_complete::{
     CompletionRedaction, build_completion_system_message, build_completion_user_message,
     parse_completions, redact_completion_ask,
 };
 use desk_diagnose_core::terminal_copilot::{
-    build_copilot_system_message, build_copilot_user_message, parse_copilot_answer,
+    CopilotFrameSink, CopilotStreamSink, build_copilot_system_message, build_copilot_user_message,
+    parse_copilot_answer,
 };
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
@@ -101,14 +102,14 @@ async fn send_to_browser<T: serde::Serialize>(
 async fn dial(
     db: &DatabaseConnection,
     messages: Vec<ChatMessage>,
+    sink: &mut dyn TurnSink,
 ) -> Result<ModelTurn, AgentError> {
     let config = model_provider::load(db)
         .await
         .map_err(|e| transport_error(format!("failed to load model provider config: {e}")))?;
     let seam = SignalModelSeam::from_config(&config)?;
     let request = ModelRequest::text_only(messages, ResponseFormatSpec::None);
-    let mut sink = NullTurnSink;
-    let turn = seam.call(request, &mut sink).await?;
+    let turn = seam.call(request, sink).await?;
     record_usage(db, config.model.as_deref().unwrap_or_default(), &turn.usage).await;
     Ok(turn)
 }
@@ -164,7 +165,9 @@ async fn run_completion_turn(
         build_completion_system_message(),
         build_completion_user_message(&ask),
     ];
-    match dial(db, messages).await {
+    // Completion has no progressive UI: the candidates render together, so the
+    // model text is not streamed.
+    match dial(db, messages, &mut NullTurnSink).await {
         Ok(turn) => {
             let completions = parse_completions(&turn.text, &prefix, &default_shell);
             TerminalCompleteResult::ok(request_id, completions)
@@ -175,17 +178,20 @@ async fn run_completion_turn(
 
 /// Run one copilot turn: redact fail-closed, make a single tool-free model call,
 /// and parse the structured answer (each proposed command stamped with the
-/// server-authoritative risk / decision). Returns the single terminal
-/// [`TerminalCopilotEvent`] — a `Final` answer or an `Error`.
+/// server-authoritative risk / decision). Streams the explanation prose as
+/// `Partial` frames through `sink` as the model writes it, then emits the terminal
+/// `Final` answer (or an `Error`). The trailing ```json suggestions block is
+/// withheld from the prose stream; the `Final` frame carries the parsed answer.
 async fn run_copilot_turn(
     db: &DatabaseConnection,
-    request_id: &str,
     mut ask: TerminalCopilotAsk,
-) -> TerminalCopilotEvent {
+    sink: &mut CopilotStreamSink<impl CopilotFrameSink>,
+) {
     let redactor = RegexRedactor::new();
     if let Err(reason) = redact_copilot_context(&redactor, &mut ask) {
         log::warn!("[copilot] redaction failed, aborting before model dial: {reason}");
-        return TerminalCopilotEvent::error(request_id, 0, redaction_failed_error());
+        sink.emit_error(redaction_failed_error());
+        return;
     }
 
     let default_shell = ask.context.shell.clone();
@@ -193,12 +199,12 @@ async fn run_copilot_turn(
         build_copilot_system_message(ask.mode, ask.locale.as_deref()),
         build_copilot_user_message(&ask),
     ];
-    match dial(db, messages).await {
+    match dial(db, messages, sink).await {
         Ok(turn) => {
             let (answer, _outcome) = parse_copilot_answer(&turn.text, &default_shell);
-            TerminalCopilotEvent::final_answer(request_id, 0, answer)
+            sink.emit_final(answer);
         }
-        Err(transport) => TerminalCopilotEvent::error(request_id, 0, transport),
+        Err(transport) => sink.emit_error(transport),
     }
 }
 
@@ -222,8 +228,13 @@ pub async fn run_completion(
     .await;
 }
 
-/// Drive a terminal copilot turn centrally and stream the terminal event to the
-/// browser. Spawned by the control-frame authorizer (the model dial is `!Send`).
+/// Drive a terminal copilot turn centrally and stream its events to the browser.
+/// Spawned by the control-frame authorizer (the model dial is `!Send`).
+///
+/// An ordered async forwarder (mirroring the manager copilot entry) decouples the
+/// synchronous stream sink from the async WebSocket send: the sink enqueues each
+/// frame and this drains them in order, so partial explanation frames stream to the
+/// browser as the model writes them without blocking the dial.
 pub async fn run_copilot(
     connection_map: web::Data<SharedConnectionMap>,
     db: DatabaseConnection,
@@ -231,22 +242,68 @@ pub async fn run_copilot(
     browser_connection_id: String,
     ask: TerminalCopilotAsk,
 ) {
-    let event = run_copilot_turn(&db, &request_id, ask).await;
-    send_to_browser(
-        connection_map.as_ref(),
-        &browser_connection_id,
-        &request_id,
-        SignalingType::TerminalCopilotEvent,
-        &event,
-    )
-    .await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TerminalCopilotEvent>();
+    let forward_map = connection_map.clone();
+    let forward_browser = browser_connection_id.clone();
+    let forwarder = actix_web::rt::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            send_to_browser(
+                forward_map.as_ref(),
+                &forward_browser,
+                &event.request_id,
+                SignalingType::TerminalCopilotEvent,
+                &event,
+            )
+            .await;
+        }
+    });
+    let frame_sink = move |event: TerminalCopilotEvent| {
+        // The forwarder owns delivery; a closed channel only means the browser is
+        // gone, which the turn need not react to.
+        let _ = tx.send(event);
+    };
+    let mut sink = CopilotStreamSink::new(frame_sink, request_id).streaming_text();
+
+    run_copilot_turn(&db, ask, &mut sink).await;
+
+    // Dropping the sink drops `tx`, ending the forwarder once it has flushed every
+    // queued frame.
+    drop(sink);
+    let _ = forwarder.await;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use desk_agent_protocol::terminal_complete::TerminalCompletionContext;
-    use desk_agent_protocol::terminal_copilot::{TerminalContext, TerminalCopilotMode};
+    use desk_agent_protocol::terminal_copilot::{
+        TerminalContext, TerminalCopilotEventKind, TerminalCopilotMode,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// A sqlite memory DB with just the model-provider table (empty → the default
+    /// config has no api_key, so the seam build fails closed).
+    async fn provider_db() -> DatabaseConnection {
+        use crate::entity::model_provider;
+        use sea_orm::{ConnectionTrait, Database, Schema};
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let schema = Schema::new(db.get_database_backend());
+        let stmt = schema.create_table_from_entity(model_provider::Entity);
+        db.execute(&stmt).await.unwrap();
+        db
+    }
+
+    /// A recording frame sink: a closure pushing each emitted frame into a shared
+    /// buffer.
+    fn recorder() -> (
+        Rc<RefCell<Vec<TerminalCopilotEvent>>>,
+        impl Fn(TerminalCopilotEvent),
+    ) {
+        let store = Rc::new(RefCell::new(Vec::new()));
+        let s = store.clone();
+        (store, move |e| s.borrow_mut().push(e))
+    }
 
     fn complete_ask(prefix: &str, recent: &str) -> TerminalCompleteAsk {
         TerminalCompleteAsk {
@@ -308,5 +365,43 @@ mod tests {
                 .unwrap_or_default()
                 .contains("ghp_secret")
         );
+    }
+
+    /// With no provider configured the seam build fails closed, so the streaming
+    /// copilot turn emits exactly one terminal `Error` frame (no half-stream).
+    #[actix_web::test]
+    async fn copilot_turn_without_provider_emits_single_error_frame() {
+        let db = provider_db().await;
+        let (store, frame_sink) = recorder();
+        let mut sink = CopilotStreamSink::new(frame_sink, "req-1").streaming_text();
+        run_copilot_turn(
+            &db,
+            copilot_ask("bind: address already in use", None),
+            &mut sink,
+        )
+        .await;
+        drop(sink);
+
+        let ev = store.borrow();
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].kind, TerminalCopilotEventKind::Error);
+        assert_eq!(ev[0].request_id, "req-1");
+    }
+
+    /// The full entry runs to completion even with no live browser: the forwarder
+    /// drains the (no-op) sends and joins, exercising the channel + forwarder wiring
+    /// without hanging.
+    #[actix_web::test]
+    async fn run_copilot_completes_without_a_live_browser() {
+        let db = provider_db().await;
+        let connection_map = web::Data::new(SharedConnectionMap::new());
+        run_copilot(
+            connection_map,
+            db,
+            "req-2".into(),
+            "browser-gone".into(),
+            copilot_ask("recent", None),
+        )
+        .await;
     }
 }

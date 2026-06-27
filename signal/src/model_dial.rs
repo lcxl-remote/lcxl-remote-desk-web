@@ -3,16 +3,19 @@
 //! This is signal's own implementation of [`desk_diagnose_core::seam::ModelSeam`]
 //! — the agentic core never speaks a provider wire dialect, it hands a neutral
 //! [`ModelRequest`] across this seam and gets back a normalized [`ModelTurn`].
-//! The manager has its own seam (its model dialect); signal's is separate and
-//! deliberately simpler: a **non-streaming** request/response over `awc`, which
-//! is enough for the single-turn diagnose (the structured `Final` result is the
-//! essential output; per-token `Partial` streaming is a later enhancement).
+//! The manager has its own seam (its model dialect); signal's is separate.
+//!
+//! The dial **streams** the provider response over Server-Sent Events: each text
+//! delta is forwarded to the [`TurnSink`] as it arrives (so the terminal copilot
+//! can render the explanation live), while the call still assembles and returns the
+//! complete, normalized [`ModelTurn`] (the structured answer parse runs on the full
+//! text). A caller that does not want streaming passes a no-op sink.
 //!
 //! Two dialects are supported, resolved from the provider identifier exactly as
 //! the edge did: `anthropic` → the Anthropic Messages API, everything else → an
-//! OpenAI-compatible `/chat/completions` endpoint. The body builders and response
-//! parsers are pure functions so they are unit-tested without a network; the HTTP
-//! send is a thin `awc` wrapper.
+//! OpenAI-compatible `/chat/completions` endpoint. The body builders and the SSE
+//! event parsers are pure so they are unit-tested without a network; the HTTP send
+//! and the byte-stream pump are a thin `awc` wrapper.
 //!
 //! `?Send`: `awc` is `!Send` and the orchestration runs on actix's
 //! single-threaded runtime, so the seam future is non-`Send`, matching the core's
@@ -118,13 +121,6 @@ impl SignalModelSeam {
             Dialect::Anthropic => build_anthropic_body(&self.model, request),
         }
     }
-
-    fn parse_response(&self, body: &Value) -> Result<ModelTurn, AgentError> {
-        match self.dialect {
-            Dialect::OpenAiCompatible => parse_openai_response(body),
-            Dialect::Anthropic => parse_anthropic_response(body),
-        }
-    }
 }
 
 fn non_empty(value: Option<&str>) -> Option<String> {
@@ -139,8 +135,10 @@ impl ModelSeam for SignalModelSeam {
     async fn call(
         &self,
         request: ModelRequest,
-        _sink: &mut dyn TurnSink,
+        sink: &mut dyn TurnSink,
     ) -> Result<ModelTurn, AgentError> {
+        use futures_util::StreamExt;
+
         // A TLS-capable client: `awc::Client::default()` has no TLS connector and
         // fails instantly on `https://` gateways. Pin the `ring` provider (the
         // rustls default `aws_lc_rs` fast-fails the process on Windows).
@@ -178,6 +176,7 @@ impl ModelSeam for SignalModelSeam {
 
         let mut response = http
             .insert_header(("Content-Type", "application/json"))
+            .insert_header(("Accept", "text/event-stream"))
             .send_json(&body)
             .await
             .map_err(|e| transport_error(format!("model request failed: {e}")))?;
@@ -197,12 +196,132 @@ impl ModelSeam for SignalModelSeam {
             }));
         }
 
-        let json: Value = response
-            .json()
-            .limit(8 * 1024 * 1024)
-            .await
-            .map_err(|e| transport_error(format!("failed to read model response: {e}")))?;
-        self.parse_response(&json)
+        // Pump the SSE byte stream: frame complete events, apply each to the
+        // dialect accumulator, and forward any text delta to the sink as it
+        // arrives. The fully assembled, normalized turn is returned at the end.
+        let mut decoder = SseDecoder::new();
+        let mut state = StreamState::new(self.dialect);
+        while let Some(item) = response.next().await {
+            let chunk =
+                item.map_err(|e| transport_error(format!("model stream interrupted: {e}")))?;
+            for data in decoder.push(&chunk) {
+                if let Some(delta) = state.apply(&data) {
+                    sink.on_text_delta(&delta);
+                }
+            }
+            if let Some(err) = state.take_error() {
+                return Err(transport_error(err));
+            }
+        }
+        Ok(state.into_turn())
+    }
+}
+
+// ============================ SSE stream framing ============================
+
+/// Incremental Server-Sent Events framer. SSE separates events with a blank line;
+/// an event's payload is the concatenation of its `data:` field lines (joined by
+/// `\n`). Buffers raw bytes across chunk boundaries so a multi-byte UTF-8 sequence
+/// split mid-character is never decoded until its event completes.
+struct SseDecoder {
+    buf: Vec<u8>,
+}
+
+impl SseDecoder {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    /// Append a raw chunk and return the `data` payload of every event that is now
+    /// complete. `\r` bytes (CRLF line endings) are dropped so event boundaries are
+    /// uniformly `\n\n`; a `\r` never appears literally inside SSE JSON data (it is
+    /// escaped as `\r`).
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.buf
+            .extend(bytes.iter().copied().filter(|&b| b != b'\r'));
+        let mut events = Vec::new();
+        while let Some(end) = find_subslice(&self.buf, b"\n\n") {
+            let event: Vec<u8> = self.buf.drain(..end + 2).collect();
+            let text = String::from_utf8_lossy(&event[..event.len() - 2]);
+            if let Some(data) = event_data(&text) {
+                events.push(data);
+            }
+        }
+        events
+    }
+}
+
+/// Concatenate an event's `data:` field value(s); `None` for an event carrying no
+/// data field (comments / other fields).
+fn event_data(event: &str) -> Option<String> {
+    let mut data: Option<String> = None;
+    for line in event.split('\n') {
+        if let Some(rest) = line.strip_prefix("data:") {
+            // A single optional leading space after the colon is part of the SSE
+            // framing, not the value.
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            match &mut data {
+                Some(acc) => {
+                    acc.push('\n');
+                    acc.push_str(rest);
+                }
+                None => data = Some(rest.to_string()),
+            }
+        }
+    }
+    data
+}
+
+/// First index of `needle` within `hay`, or `None`.
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Short message from a provider error object (`{ "message": ... }`), falling back
+/// to a compact JSON rendering.
+fn error_message(err: &Value) -> String {
+    err.get("message")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| err.to_string())
+}
+
+/// The dialect-specific stream accumulator: applies each SSE `data` payload and
+/// assembles the normalized [`ModelTurn`] at the end.
+enum StreamState {
+    OpenAi(OpenAiStreamState),
+    Anthropic(AnthropicStreamState),
+}
+
+impl StreamState {
+    fn new(dialect: Dialect) -> Self {
+        match dialect {
+            Dialect::OpenAiCompatible => StreamState::OpenAi(OpenAiStreamState::default()),
+            Dialect::Anthropic => StreamState::Anthropic(AnthropicStreamState::default()),
+        }
+    }
+
+    /// Apply one event payload; return the text delta to forward (if any).
+    fn apply(&mut self, data: &str) -> Option<String> {
+        match self {
+            StreamState::OpenAi(s) => s.apply(data),
+            StreamState::Anthropic(s) => s.apply(data),
+        }
+    }
+
+    /// Take a mid-stream provider error, if one was reported.
+    fn take_error(&mut self) -> Option<String> {
+        match self {
+            StreamState::OpenAi(s) => s.error.take(),
+            StreamState::Anthropic(s) => s.error.take(),
+        }
+    }
+
+    fn into_turn(self) -> ModelTurn {
+        match self {
+            StreamState::OpenAi(s) => s.into_turn(),
+            StreamState::Anthropic(s) => s.into_turn(),
+        }
     }
 }
 
@@ -221,8 +340,9 @@ fn openai_message_to_json(m: &ChatMessage) -> Value {
     json!({ "role": m.role.as_str(), "content": content })
 }
 
-/// Build the non-streaming `/chat/completions` body. The diagnose path is
-/// tool-free, so no tools are advertised.
+/// Build the streaming `/chat/completions` body. The diagnose path is tool-free,
+/// so no tools are advertised. `stream_options.include_usage` asks the gateway to
+/// emit a final usage chunk (omitted by default when streaming).
 fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
     let messages: Vec<Value> = request
         .messages
@@ -232,7 +352,8 @@ fn build_openai_body(model: &str, request: &ModelRequest) -> Value {
     let mut body = json!({
         "model": model,
         "messages": messages,
-        "stream": false,
+        "stream": true,
+        "stream_options": { "include_usage": true },
     });
     match &request.response_format {
         ResponseFormatSpec::None => {}
@@ -259,41 +380,71 @@ fn openai_stop_reason(finish: Option<&str>) -> StopReason {
     }
 }
 
-/// Parse a non-streaming OpenAI chat-completions response into a [`ModelTurn`].
-fn parse_openai_response(body: &Value) -> Result<ModelTurn, AgentError> {
-    let choice = body
-        .get("choices")
-        .and_then(|c| c.as_array())
-        .and_then(|c| c.first())
-        .ok_or_else(|| transport_error("model response had no choices"))?;
-    let text = choice
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let stop_reason = openai_stop_reason(choice.get("finish_reason").and_then(|f| f.as_str()));
-    let usage = body.get("usage");
+/// Map an OpenAI streaming `usage` object onto the neutral [`TokenUsage`]. OpenAI
+/// `prompt_tokens` includes the cached portion, so it is subtracted out to avoid
+/// double-counting the cache read against `input_tokens`.
+fn openai_usage(usage: Option<&Value>) -> TokenUsage {
     let prompt = usage.and_then(|u| u["prompt_tokens"].as_i64());
     let cached = usage.and_then(|u| u["prompt_tokens_details"]["cached_tokens"].as_i64());
-    // OpenAI `prompt_tokens` includes the cached portion; subtract it out so the
-    // cache read is not double-counted against `input_tokens`.
     let input_tokens = match (prompt, cached) {
         (Some(p), Some(c)) => Some((p - c).max(0)),
         (p, _) => p,
     };
-    let usage = TokenUsage {
+    TokenUsage {
         input_tokens,
         output_tokens: usage.and_then(|u| u["completion_tokens"].as_i64()),
         cache_read_tokens: cached,
         cache_write_tokens: None,
-    };
-    Ok(ModelTurn {
-        text,
-        tool_calls: Vec::new(),
-        stop_reason,
-        usage,
-    })
+    }
+}
+
+/// Accumulates an OpenAI `/chat/completions` SSE stream into a [`ModelTurn`].
+#[derive(Default)]
+struct OpenAiStreamState {
+    text: String,
+    finish_reason: Option<String>,
+    usage: Option<Value>,
+    error: Option<String>,
+}
+
+impl OpenAiStreamState {
+    /// Apply one SSE `data` payload, returning the text delta (if any). The
+    /// `[DONE]` sentinel and keep-alive / unparseable payloads are ignored.
+    fn apply(&mut self, data: &str) -> Option<String> {
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return None;
+        }
+        let v: Value = serde_json::from_str(data).ok()?;
+        if let Some(err) = v.get("error") {
+            self.error = Some(error_message(err));
+            return None;
+        }
+        if let Some(u) = v.get("usage")
+            && !u.is_null()
+        {
+            self.usage = Some(u.clone());
+        }
+        let choice = v.get("choices")?.as_array()?.first()?;
+        if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+            self.finish_reason = Some(fr.to_string());
+        }
+        let delta = choice.get("delta")?.get("content")?.as_str()?;
+        if delta.is_empty() {
+            return None;
+        }
+        self.text.push_str(delta);
+        Some(delta.to_string())
+    }
+
+    fn into_turn(self) -> ModelTurn {
+        ModelTurn {
+            stop_reason: openai_stop_reason(self.finish_reason.as_deref()),
+            usage: openai_usage(self.usage.as_ref()),
+            text: self.text,
+            tool_calls: Vec::new(),
+        }
+    }
 }
 
 // ============================ Anthropic dialect ============================
@@ -328,7 +479,7 @@ fn split_data_url(url: &str) -> Option<(String, String)> {
     Some((media_type.to_string(), data.to_string()))
 }
 
-/// Build the non-streaming `/v1/messages` body. System text is hoisted to the
+/// Build the streaming `/v1/messages` body. System text is hoisted to the
 /// top-level `system` field; the rest become `messages`. The diagnose path is
 /// tool-free.
 fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
@@ -348,7 +499,7 @@ fn build_anthropic_body(model: &str, request: &ModelRequest) -> Value {
         "model": model,
         "max_tokens": ANTHROPIC_MAX_TOKENS,
         "messages": messages,
-        "stream": false,
+        "stream": true,
     });
     if !system.is_empty() {
         body["system"] = json!(system);
@@ -366,35 +517,89 @@ fn anthropic_stop_reason(reason: Option<&str>) -> StopReason {
     }
 }
 
-/// Parse a non-streaming Anthropic Messages response into a [`ModelTurn`].
-fn parse_anthropic_response(body: &Value) -> Result<ModelTurn, AgentError> {
-    let blocks = body
-        .get("content")
-        .and_then(|c| c.as_array())
-        .ok_or_else(|| transport_error("model response had no content"))?;
-    // Concatenate every text block; non-text blocks are ignored on this tool-free
-    // path.
-    let text = blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-        .collect::<Vec<_>>()
-        .join("");
-    let stop_reason = anthropic_stop_reason(body.get("stop_reason").and_then(|r| r.as_str()));
-    let usage = body.get("usage");
-    let usage = TokenUsage {
-        // Anthropic's `input_tokens` already excludes cache, so it maps as-is.
-        input_tokens: usage.and_then(|u| u["input_tokens"].as_i64()),
-        output_tokens: usage.and_then(|u| u["output_tokens"].as_i64()),
-        cache_read_tokens: usage.and_then(|u| u["cache_read_input_tokens"].as_i64()),
-        cache_write_tokens: usage.and_then(|u| u["cache_creation_input_tokens"].as_i64()),
-    };
-    Ok(ModelTurn {
-        text,
-        tool_calls: Vec::new(),
-        stop_reason,
-        usage,
-    })
+/// Accumulates an Anthropic Messages SSE stream into a [`ModelTurn`]. The event
+/// types consumed: `message_start` (input usage), `content_block_delta` with a
+/// `text_delta` (the streamed text), `message_delta` (stop reason + output usage),
+/// and `error`. Other events (`ping`, block start/stop, `message_stop`) are inert.
+#[derive(Default)]
+struct AnthropicStreamState {
+    text: String,
+    stop_reason: Option<String>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_read: Option<i64>,
+    cache_write: Option<i64>,
+    error: Option<String>,
+}
+
+impl AnthropicStreamState {
+    /// Apply one SSE `data` payload, returning the text delta (if any).
+    fn apply(&mut self, data: &str) -> Option<String> {
+        let data = data.trim();
+        if data.is_empty() {
+            return None;
+        }
+        let v: Value = serde_json::from_str(data).ok()?;
+        match v.get("type").and_then(|t| t.as_str())? {
+            "error" => {
+                self.error = Some(
+                    v.get("error")
+                        .map(error_message)
+                        .unwrap_or_else(|| "anthropic stream error".to_string()),
+                );
+                None
+            }
+            "message_start" => {
+                if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                    self.input_tokens = u["input_tokens"].as_i64();
+                    self.cache_read = u["cache_read_input_tokens"].as_i64();
+                    self.cache_write = u["cache_creation_input_tokens"].as_i64();
+                }
+                None
+            }
+            "content_block_delta" => {
+                let d = v.get("delta")?;
+                if d.get("type").and_then(|t| t.as_str()) != Some("text_delta") {
+                    return None;
+                }
+                let text = d.get("text")?.as_str()?;
+                if text.is_empty() {
+                    return None;
+                }
+                self.text.push_str(text);
+                Some(text.to_string())
+            }
+            "message_delta" => {
+                if let Some(sr) = v
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(|s| s.as_str())
+                {
+                    self.stop_reason = Some(sr.to_string());
+                }
+                if let Some(ot) = v.get("usage").and_then(|u| u["output_tokens"].as_i64()) {
+                    self.output_tokens = Some(ot);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn into_turn(self) -> ModelTurn {
+        ModelTurn {
+            stop_reason: anthropic_stop_reason(self.stop_reason.as_deref()),
+            usage: TokenUsage {
+                // Anthropic's `input_tokens` already excludes cache, so it maps as-is.
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                cache_read_tokens: self.cache_read,
+                cache_write_tokens: self.cache_write,
+            },
+            text: self.text,
+            tool_calls: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -475,7 +680,9 @@ mod tests {
             }),
         );
         assert_eq!(body["model"], "gpt-test");
-        assert_eq!(body["stream"], false);
+        // The dial streams and asks for a trailing usage chunk.
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "why is it slow?");
         assert_eq!(body["response_format"]["type"], "json_schema");
@@ -496,21 +703,30 @@ mod tests {
         assert_eq!(body["messages"][0]["role"], "user");
     }
 
+    /// Drive an OpenAI stream: deltas concatenate in order, a `finish_reason`
+    /// chunk maps the stop reason, and the trailing usage chunk maps token counts
+    /// (cache subtracted out of `input_tokens`). Keep-alive chunks without a
+    /// content delta are inert.
     #[test]
-    fn parse_openai_response_extracts_text_stop_and_usage() {
-        let resp = json!({
-            "choices": [{
-                "message": {"content": "{\"summary\":\"ok\"}"},
-                "finish_reason": "stop",
-            }],
-            "usage": {
-                "prompt_tokens": 100,
-                "completion_tokens": 20,
-                "prompt_tokens_details": {"cached_tokens": 30},
-            },
-        });
-        let turn = parse_openai_response(&resp).expect("parse");
-        assert_eq!(turn.text, "{\"summary\":\"ok\"}");
+    fn openai_stream_assembles_text_stop_and_usage() {
+        let mut s = OpenAiStreamState::default();
+        let mut deltas = String::new();
+        for payload in [
+            r#"{"choices":[{"delta":{"role":"assistant"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"lo"}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":30}}}"#,
+            "[DONE]",
+        ] {
+            if let Some(d) = s.apply(payload) {
+                deltas.push_str(&d);
+            }
+            assert!(s.error.is_none());
+        }
+        let turn = s.into_turn();
+        assert_eq!(deltas, "Hello");
+        assert_eq!(turn.text, "Hello");
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         // input_tokens excludes the cached portion (100 - 30).
         assert_eq!(turn.usage.input_tokens, Some(70));
@@ -518,35 +734,89 @@ mod tests {
         assert_eq!(turn.usage.output_tokens, Some(20));
     }
 
+    /// A mid-stream OpenAI error payload is surfaced (so the dial fails) rather
+    /// than silently producing a partial turn.
     #[test]
-    fn parse_openai_response_without_choices_is_a_transport_error() {
-        let resp = json!({"usage": {}});
-        assert!(parse_openai_response(&resp).is_err());
+    fn openai_stream_surfaces_mid_stream_error() {
+        let mut s = OpenAiStreamState::default();
+        assert!(s.apply(r#"{"error":{"message":"rate limit"}}"#).is_none());
+        assert_eq!(s.error.as_deref(), Some("rate limit"));
     }
 
+    /// Drive an Anthropic stream: `content_block_delta` text deltas concatenate,
+    /// `message_start` carries input/cache usage, `message_delta` carries the stop
+    /// reason and output usage; `ping` and non-text deltas are inert.
     #[test]
-    fn parse_anthropic_response_concatenates_text_blocks_and_maps_usage() {
-        let resp = json!({
-            "content": [
-                {"type": "text", "text": "hello "},
-                {"type": "tool_use", "name": "ignored"},
-                {"type": "text", "text": "world"},
-            ],
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 50,
-                "output_tokens": 10,
-                "cache_read_input_tokens": 5,
-                "cache_creation_input_tokens": 7,
-            },
-        });
-        let turn = parse_anthropic_response(&resp).expect("parse");
+    fn anthropic_stream_assembles_text_stop_and_usage() {
+        let mut s = AnthropicStreamState::default();
+        let mut deltas = String::new();
+        for payload in [
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":50,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}}}"#,
+            r#"{"type":"ping"}"#,
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello "}}"#,
+            r#"{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            if let Some(d) = s.apply(payload) {
+                deltas.push_str(&d);
+            }
+            assert!(s.error.is_none());
+        }
+        let turn = s.into_turn();
+        assert_eq!(deltas, "hello world");
         assert_eq!(turn.text, "hello world");
         assert_eq!(turn.stop_reason, StopReason::EndTurn);
         assert_eq!(turn.usage.input_tokens, Some(50));
         assert_eq!(turn.usage.output_tokens, Some(10));
         assert_eq!(turn.usage.cache_read_tokens, Some(5));
         assert_eq!(turn.usage.cache_write_tokens, Some(7));
+    }
+
+    /// A mid-stream Anthropic `error` event is surfaced.
+    #[test]
+    fn anthropic_stream_surfaces_error_event() {
+        let mut s = AnthropicStreamState::default();
+        assert!(
+            s.apply(
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}"#
+            )
+            .is_none()
+        );
+        assert_eq!(s.error.as_deref(), Some("overloaded"));
+    }
+
+    /// The SSE framer joins multi-line `data:` fields, ignores comments, and only
+    /// yields an event once its terminating blank line has arrived — even when the
+    /// event is split across chunks mid-UTF-8.
+    #[test]
+    fn sse_decoder_frames_events_across_chunk_boundaries() {
+        let mut d = SseDecoder::new();
+        // No terminating blank line yet → nothing emitted.
+        assert!(d.push(b": keep-alive comment\n").is_empty());
+        assert!(d.push(b"data: {\"a\":1}\n").is_empty());
+        let evs = d.push(b"\ndata: line1\ndata: line2\n\n");
+        assert_eq!(
+            evs,
+            vec!["{\"a\":1}".to_string(), "line1\nline2".to_string()]
+        );
+
+        // A multi-byte char (… = E2 80 A6) split across two chunks decodes intact
+        // once the event completes.
+        let mut d2 = SseDecoder::new();
+        assert!(d2.push(b"data: x\xe2\x80").is_empty());
+        let evs2 = d2.push(b"\xa6y\n\n");
+        assert_eq!(evs2, vec!["x…y".to_string()]);
+    }
+
+    /// CRLF line endings are tolerated: `\r` is stripped so events still frame on a
+    /// blank line.
+    #[test]
+    fn sse_decoder_tolerates_crlf() {
+        let mut d = SseDecoder::new();
+        let evs = d.push(b"data: {\"ok\":true}\r\n\r\n");
+        assert_eq!(evs, vec!["{\"ok\":true}".to_string()]);
     }
 
     #[test]
