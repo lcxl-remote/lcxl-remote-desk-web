@@ -35,6 +35,14 @@ export type TerminalCopilotAnswer = {
     suggestions: CommandSuggestion[];
 };
 
+/** One prior exchange replayed to the server so a stateless central brain (the
+ *  OSS signal path) can continue a multi-turn conversation. The manager path
+ *  ignores it (its DB session is authoritative). */
+export type CopilotHistoryTurn = {
+    user: string;
+    assistant: string;
+};
+
 export type TerminalCopilotEventKind = 'partial' | 'tool_started' | 'final' | 'error';
 
 export type AgentError = {
@@ -73,21 +81,34 @@ export type CopilotTool = {
 
 export type CopilotPhase = 'idle' | 'running' | 'done' | 'error';
 
+/** One turn of the visible conversation: the operator's message and the
+ *  assistant's answer (null while the turn is still in flight). */
+export type TerminalCopilotTurn = {
+    /** The operator's message — their `how_to` request, or the error passage for
+     *  `explain_error`. Shown as the user bubble and replayed as history. */
+    question: string;
+    mode: TerminalCopilotMode;
+    /** The structured answer, set on the turn's terminal `final` frame. */
+    answer: TerminalCopilotAnswer | null;
+};
+
 export type CopilotState = {
     phase: CopilotPhase;
     requestId: string | null;
     /** Stable id threaded across follow-up asks so the backend continues one
-     *  agentic session (subject-namespaced server-side). */
+     *  conversation (the manager keys its DB session on it; the signal path is
+     *  stateless and relies on the replayed `history`). */
     conversationId: string | null;
     /** The mode of the current/last ask. */
     mode: TerminalCopilotMode;
-    /** Accumulated streaming explanation fragments (provisional; the Final
-     *  answer's `explanation_md` is authoritative). */
+    /** The full conversation, oldest first. The last entry is the in-flight turn
+     *  while `phase === 'running'`. */
+    turns: TerminalCopilotTurn[];
+    /** Accumulated streaming explanation fragments for the in-flight turn
+     *  (provisional; the Final answer's `explanation_md` is authoritative). */
     partialText: string;
     /** Read-only tools dispatched this run, in order. */
     tools: CopilotTool[];
-    /** The structured answer, set on the terminal `final` frame. */
-    answer: TerminalCopilotAnswer | null;
     /** A human-readable failure message, set on the terminal `error` frame. */
     error: string | null;
 };
@@ -97,11 +118,16 @@ const INITIAL_STATE: CopilotState = {
     requestId: null,
     conversationId: null,
     mode: 'how_to',
+    turns: [],
     partialText: '',
     tools: [],
-    answer: null,
     error: null,
 };
+
+/** Client-side history caps: the server re-caps and re-redacts, but the control
+ *  end bounds the replayed payload too (last N turns, each truncated). */
+const MAX_HISTORY_TURNS = 6;
+const MAX_HISTORY_MSG_CHARS = 2000;
 
 type UseTerminalCopilotProps = {
     /** The target host's connection id; the ask rides the outer
@@ -143,12 +169,34 @@ export function useTerminalCopilot({
     // Highest applied seq, so duplicate / out-of-order frames cannot corrupt the
     // accumulated text. Reset per run (frames start at seq 0).
     const lastSeqRef = useRef<number>(-1);
+    // Mirror of the rendered conversation, read at ask time to build the replayed
+    // history (kept in a ref so `ask` need not depend on `state`).
+    const turnsRef = useRef<TerminalCopilotTurn[]>([]);
+    useEffect(() => {
+        turnsRef.current = state.turns;
+    }, [state.turns]);
 
     const ask = useCallback(
         (input: AskInput) => {
             if (!connectionId) return;
             if (!conversationIdRef.current) conversationIdRef.current = v4();
             const conversationId = conversationIdRef.current;
+            // The operator's message for this turn: their request (`how_to`) or the
+            // error passage (`explain_error`). Drives the user bubble and history.
+            const question = (
+                input.mode === 'how_to'
+                    ? (input.question ?? '')
+                    : (input.context.error_text ?? '')
+            ).trim();
+            // Replay the prior completed turns so the stateless central brain can
+            // continue the thread (the manager ignores this and uses its DB session).
+            const history: CopilotHistoryTurn[] = turnsRef.current
+                .filter((t) => t.answer)
+                .slice(-MAX_HISTORY_TURNS)
+                .map((t) => ({
+                    user: t.question.slice(0, MAX_HISTORY_MSG_CHARS),
+                    assistant: (t.answer?.explanation_md ?? '').slice(0, MAX_HISTORY_MSG_CHARS),
+                }));
             const data = {
                 conversation_id: conversationId,
                 mode: input.mode,
@@ -156,6 +204,7 @@ export function useTerminalCopilot({
                 // The server steers the answer language by the operator's UI
                 // locale; it is a non-authoritative hint, re-validated server-side.
                 locale: i18n.language,
+                history,
                 context: input.context,
             };
             const requestId = sendMessage(
@@ -165,13 +214,18 @@ export function useTerminalCopilot({
             );
             activeRequestRef.current = requestId;
             lastSeqRef.current = -1;
-            setState({
-                ...INITIAL_STATE,
+            setState((prev) => ({
+                ...prev,
                 phase: 'running',
                 requestId,
                 conversationId,
                 mode: input.mode,
-            });
+                // Append the in-flight turn; its answer fills in on the Final frame.
+                turns: [...prev.turns, { question, mode: input.mode, answer: null }],
+                partialText: '',
+                tools: [],
+                error: null,
+            }));
         },
         [connectionId, sendMessage, i18n],
     );
@@ -192,6 +246,7 @@ export function useTerminalCopilot({
         activeRequestRef.current = null;
         conversationIdRef.current = null;
         lastSeqRef.current = -1;
+        turnsRef.current = [];
         setState(INITIAL_STATE);
     }, [connectionId, sendMessage]);
 
@@ -216,15 +271,20 @@ export function useTerminalCopilot({
                             ...prev,
                             tools: [...prev.tools, { name: event.tool_name ?? 'tool' }],
                         };
-                    case 'final':
+                    case 'final': {
                         activeRequestRef.current = null;
-                        return {
-                            ...prev,
-                            phase: 'done',
-                            answer: event.answer ?? { explanation_md: '', suggestions: [] },
-                        };
+                        // Commit the structured answer into the in-flight (last) turn.
+                        const answer = event.answer ?? { explanation_md: '', suggestions: [] };
+                        const turns = prev.turns.slice();
+                        if (turns.length) {
+                            turns[turns.length - 1] = { ...turns[turns.length - 1], answer };
+                        }
+                        return { ...prev, phase: 'done', partialText: '', turns };
+                    }
                     case 'error':
                         activeRequestRef.current = null;
+                        // The in-flight turn keeps a null answer; the panel shows the
+                        // error for it. It is filtered out of any replayed history.
                         return {
                             ...prev,
                             phase: 'error',

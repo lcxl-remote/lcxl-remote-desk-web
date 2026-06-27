@@ -60,6 +60,27 @@ pub struct TerminalContext {
     pub error_text: Option<String>,
 }
 
+/// One prior exchange in a multi-turn copilot conversation, supplied by the
+/// control end so a **stateless** central brain can continue the thread without
+/// server-side session storage. Non-authoritative prompt context only: the server
+/// re-redacts and length-caps it before any model dial.
+///
+/// Used only by the stateless OSS signal path. The manager path keeps its own
+/// DB-authoritative session (keyed by the subject-namespaced conversation key) and
+/// **ignores** this field — the control end can never inject or rewrite history
+/// there.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SchemaWrite, SchemaRead, ToSchema,
+)]
+pub struct CopilotHistoryTurn {
+    /// The operator's message for that turn (their request, or the error passage
+    /// they asked about).
+    pub user: String,
+    /// The assistant's prior answer text (the explanation prose). Suggestions are
+    /// not replayed — only the prose is needed as conversational context.
+    pub assistant: String,
+}
+
 /// Control end → server request payload. The target device is carried by the
 /// outer `SignalingModel.to_connection_id`, **not** here.
 #[derive(
@@ -80,6 +101,11 @@ pub struct TerminalCopilotAsk {
     /// model's default language.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
+    /// Prior turns of this conversation, oldest first. Consumed by the stateless
+    /// signal path to continue a multi-turn thread; **ignored** by the manager
+    /// path (its DB session is authoritative). Server-capped and re-redacted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<CopilotHistoryTurn>,
     pub context: TerminalContext,
 }
 
@@ -290,6 +316,10 @@ mod tests {
             mode: TerminalCopilotMode::ExplainError,
             question: None,
             locale: Some("zh-CN".into()),
+            history: vec![CopilotHistoryTurn {
+                user: "how do I list listeners?".into(),
+                assistant: "Use ss or lsof.".into(),
+            }],
             context: TerminalContext {
                 os: "linux".into(),
                 shell: "bash".into(),

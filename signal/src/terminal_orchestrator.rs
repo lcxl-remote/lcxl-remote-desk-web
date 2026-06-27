@@ -28,8 +28,8 @@ use desk_diagnose_core::terminal_complete::{
     parse_completions, redact_completion_ask,
 };
 use desk_diagnose_core::terminal_copilot::{
-    CopilotFrameSink, CopilotStreamSink, build_copilot_system_message, build_copilot_user_message,
-    parse_copilot_answer,
+    CopilotFrameSink, CopilotStreamSink, build_copilot_history_messages,
+    build_copilot_system_message, build_copilot_user_message, parse_copilot_answer,
 };
 use desk_signal_facade::model::connection::{ConnectionState, SharedConnectionMap};
 use desk_signal_facade::model::signal::{SignalingModel, SignalingType};
@@ -122,6 +122,13 @@ fn redact_copilot_context(
     redactor: &dyn Redactor,
     ask: &mut TerminalCopilotAsk,
 ) -> Result<(), String> {
+    // The control-end-supplied conversation history is replayed into the prompt on
+    // the stateless path, so it is redacted fail-closed exactly like the live
+    // context — a secret echoed into an earlier turn never reaches the model.
+    for turn in &mut ask.history {
+        turn.user = redactor.redact(&turn.user).map_err(|e| e.reason)?.text;
+        turn.assistant = redactor.redact(&turn.assistant).map_err(|e| e.reason)?.text;
+    }
     let ctx = &mut ask.context;
     ctx.recent_output = redactor
         .redact(&ctx.recent_output)
@@ -195,10 +202,15 @@ async fn run_copilot_turn(
     }
 
     let default_shell = ask.context.shell.clone();
-    let messages = vec![
-        build_copilot_system_message(ask.mode, ask.locale.as_deref()),
-        build_copilot_user_message(&ask),
-    ];
+    // Stateless multi-turn: the control end replays the conversation, so the prompt
+    // is [system, ...prior turns (capped + redacted), current user]. The signal
+    // central brain keeps no session of its own.
+    let mut messages = vec![build_copilot_system_message(
+        ask.mode,
+        ask.locale.as_deref(),
+    )];
+    messages.extend(build_copilot_history_messages(&ask.history));
+    messages.push(build_copilot_user_message(&ask));
     match dial(db, messages, sink).await {
         Ok(turn) => {
             let (answer, _outcome) = parse_copilot_answer(&turn.text, &default_shell);
@@ -323,6 +335,7 @@ mod tests {
             mode: TerminalCopilotMode::HowTo,
             question: Some("how do I check the service?".into()),
             locale: None,
+            history: Vec::new(),
             context: TerminalContext {
                 os: "linux".into(),
                 shell: "bash".into(),
@@ -365,6 +378,22 @@ mod tests {
                 .unwrap_or_default()
                 .contains("ghp_secret")
         );
+    }
+
+    /// The replayed conversation history is redacted fail-closed too, so a secret
+    /// echoed into an earlier turn never reaches the model on a follow-up.
+    #[test]
+    fn copilot_history_is_redacted_before_dial() {
+        use desk_agent_protocol::terminal_copilot::CopilotHistoryTurn;
+        let redactor = RegexRedactor::new();
+        let mut ask = copilot_ask("clean", None);
+        ask.history = vec![CopilotHistoryTurn {
+            user: "export AWS_KEY=AKIAIOSFODNN7EXAMPLE".into(),
+            assistant: "token=ghp_secretsecretsecretsecretsecret1234 leaked".into(),
+        }];
+        redact_copilot_context(&redactor, &mut ask).expect("redaction succeeds");
+        assert!(!ask.history[0].user.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(!ask.history[0].assistant.contains("ghp_secret"));
     }
 
     /// With no provider configured the seam build fails closed, so the streaming

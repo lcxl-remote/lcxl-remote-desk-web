@@ -554,6 +554,8 @@ export default {
   'pages.deskTerminal.copilot.blockedHint': 'Blocked by policy — cannot be run.',
   'pages.deskTerminal.copilot.noSuggestions': 'No command suggested.',
   'pages.deskTerminal.copilot.toolRan': 'Checked {{name}}',
+  'pages.deskTerminal.copilot.explainErrorTurn': 'Diagnose the last error',
+  'pages.deskTerminal.copilot.thinking': 'Thinking…',
   'pages.deskTerminal.copilot.risk.low': 'Low',
   'pages.deskTerminal.copilot.risk.medium': 'Medium',
   'pages.deskTerminal.copilot.risk.high': 'High',

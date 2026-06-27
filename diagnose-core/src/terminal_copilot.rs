@@ -9,8 +9,8 @@
 //! cannot mark a command as safe to run.
 
 use desk_agent_protocol::terminal_copilot::{
-    CommandSuggestion, TerminalCopilotAnswer, TerminalCopilotAsk, TerminalCopilotEvent,
-    TerminalCopilotMode,
+    CommandSuggestion, CopilotHistoryTurn, TerminalCopilotAnswer, TerminalCopilotAsk,
+    TerminalCopilotEvent, TerminalCopilotMode,
 };
 use desk_agent_protocol::{AgentError, ExecInput, ExecTarget};
 use serde::Deserialize;
@@ -30,6 +30,14 @@ pub const COPILOT_MAX_STEPS_PER_TURN: u32 = 2;
 /// Max bytes of recent terminal output forwarded to the model (after the runtime
 /// has redacted it). Caps prompt size / latency; the runtime redacts first.
 pub const MAX_RECENT_OUTPUT_BYTES: usize = 4_096;
+
+/// Max prior turns the stateless path replays into the prompt (oldest dropped
+/// past this). Bounds prompt growth across a long terminal conversation.
+pub const MAX_COPILOT_HISTORY_TURNS: usize = 6;
+
+/// Max bytes kept per replayed history message (user or assistant), truncated on a
+/// char boundary. Bounds a single oversized prior turn.
+pub const MAX_COPILOT_HISTORY_MSG_BYTES: usize = 2_000;
 
 /// Degraded-answer cap: how much raw model text to keep as the explanation when
 /// the structured JSON parse fails.
@@ -133,6 +141,37 @@ pub fn build_copilot_user_message(ask: &TerminalCopilotAsk) -> ChatMessage {
         body.push_str(&format!("\nRecent terminal output:\n{recent}\n"));
     }
     ChatMessage::text("copilot-user", ChatRole::User, body)
+}
+
+/// Build the prior-conversation messages for a stateless multi-turn copilot turn:
+/// the last [`MAX_COPILOT_HISTORY_TURNS`] turns mapped to alternating user /
+/// assistant [`ChatMessage`]s, each length-capped to [`MAX_COPILOT_HISTORY_MSG_BYTES`].
+/// Empty messages are skipped. The runtime must have redacted the history first;
+/// this only caps and assembles it. The manager path never calls this — its DB
+/// session is authoritative.
+pub fn build_copilot_history_messages(history: &[CopilotHistoryTurn]) -> Vec<ChatMessage> {
+    let start = history.len().saturating_sub(MAX_COPILOT_HISTORY_TURNS);
+    let mut messages = Vec::new();
+    for turn in &history[start..] {
+        let user = truncate_on_char_boundary(turn.user.trim(), MAX_COPILOT_HISTORY_MSG_BYTES);
+        if !user.is_empty() {
+            messages.push(ChatMessage::text(
+                "copilot-history-user",
+                ChatRole::User,
+                user,
+            ));
+        }
+        let assistant =
+            truncate_on_char_boundary(turn.assistant.trim(), MAX_COPILOT_HISTORY_MSG_BYTES);
+        if !assistant.is_empty() {
+            messages.push(ChatMessage::text(
+                "copilot-history-assistant",
+                ChatRole::Assistant,
+                assistant,
+            ));
+        }
+    }
+    messages
 }
 
 /// The model's raw final answer, before the server stamps risk / decision. The
@@ -438,6 +477,7 @@ mod tests {
             mode,
             question: Some("free port 8080".into()),
             locale: None,
+            history: Vec::new(),
             context: TerminalContext {
                 os: "linux".into(),
                 shell: "bash".into(),
@@ -486,6 +526,69 @@ mod tests {
         assert!(msg.text.contains("Request: free port 8080"));
         // The forwarded recent output is capped (plus the small fixed preamble).
         assert!(msg.text.len() < MAX_RECENT_OUTPUT_BYTES + 512);
+    }
+
+    #[test]
+    fn history_messages_alternate_roles_in_order() {
+        let history = vec![
+            CopilotHistoryTurn {
+                user: "list listeners".into(),
+                assistant: "use ss".into(),
+            },
+            CopilotHistoryTurn {
+                user: "now kill it".into(),
+                assistant: "use kill".into(),
+            },
+        ];
+        let msgs = build_copilot_history_messages(&history);
+        let roles: Vec<_> = msgs.iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                ChatRole::User,
+                ChatRole::Assistant,
+                ChatRole::User,
+                ChatRole::Assistant,
+            ]
+        );
+        assert_eq!(msgs[0].text, "list listeners");
+        assert_eq!(msgs[3].text, "use kill");
+    }
+
+    #[test]
+    fn history_keeps_only_the_last_n_turns() {
+        let history: Vec<CopilotHistoryTurn> = (0..(MAX_COPILOT_HISTORY_TURNS + 3))
+            .map(|i| CopilotHistoryTurn {
+                user: format!("u{i}"),
+                assistant: format!("a{i}"),
+            })
+            .collect();
+        let msgs = build_copilot_history_messages(&history);
+        // Two messages per kept turn.
+        assert_eq!(msgs.len(), MAX_COPILOT_HISTORY_TURNS * 2);
+        // The oldest kept turn is the (len - N)th, so the first three are dropped.
+        assert_eq!(msgs[0].text, "u3");
+    }
+
+    #[test]
+    fn history_caps_message_bytes_and_skips_empty() {
+        let history = vec![
+            CopilotHistoryTurn {
+                user: "x".repeat(MAX_COPILOT_HISTORY_MSG_BYTES * 2),
+                assistant: "   ".into(),
+            },
+            CopilotHistoryTurn {
+                user: "  ".into(),
+                assistant: "kept".into(),
+            },
+        ];
+        let msgs = build_copilot_history_messages(&history);
+        // The blank user / blank assistant are skipped; the long user is capped.
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].text.len() <= MAX_COPILOT_HISTORY_MSG_BYTES);
+        assert_eq!(msgs[0].role, ChatRole::User);
+        assert_eq!(msgs[1].text, "kept");
+        assert_eq!(msgs[1].role, ChatRole::Assistant);
     }
 
     #[test]

@@ -93,7 +93,35 @@ describe('useTerminalCopilot', () => {
 
         expect(result.current.state.tools).toEqual([{ name: 'read_process_list' }]);
         expect(result.current.state.phase).toBe('done');
-        expect(result.current.state.answer?.suggestions[0].decision).toBe('not_executable');
+        const turns = result.current.state.turns;
+        expect(turns).toHaveLength(1);
+        expect(turns[0].answer?.suggestions[0].decision).toBe('not_executable');
+    });
+
+    it('replays prior completed turns as history on a follow-up ask', () => {
+        const { result, feed } = renderCopilot();
+        act(() => result.current.ask({ mode: 'how_to', question: 'free port 8080', context: ctx }));
+        feed(
+            eventFrame({
+                request_id: 'req-1',
+                seq: 0,
+                kind: 'final',
+                answer: { explanation_md: 'Port 8080 is held by nginx.', suggestions: [] },
+            }),
+        );
+
+        // The follow-up carries the prior exchange so the stateless brain can
+        // continue the thread; the in-flight turn is not part of the sent history.
+        act(() => result.current.ask({ mode: 'how_to', question: 'now stop it', context: ctx }));
+        const asks = sendMessage.mock.calls.filter(
+            (c) => c[0] === SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,
+        );
+        const second = asks[1][1] as { history: { user: string; assistant: string }[] };
+        expect(second.history).toEqual([
+            { user: 'free port 8080', assistant: 'Port 8080 is held by nginx.' },
+        ]);
+        // Both turns are present in the conversation.
+        expect(result.current.state.turns).toHaveLength(2);
     });
 
     it('ignores stale / out-of-order frames by seq', () => {

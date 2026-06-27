@@ -32,6 +32,12 @@ export type CopilotExecControls = {
     dismiss: (rowIndex: number) => void;
 };
 
+/** Per-turn stride for the exec entry index, so suggestions from different turns
+ *  in the multi-turn log never collide on a shared `useConfirmExec` row key
+ *  (`turnIndex * stride + rowIndex`). A turn never proposes anywhere near this
+ *  many commands. */
+const COPILOT_INDEX_STRIDE = 100;
+
 /** Map a suggested-command risk level to a badge colour (mirrors the diagnose
  *  panel so the two AI surfaces read consistently). */
 function riskClass(risk: RiskLevel): string {
@@ -264,61 +270,87 @@ export function TerminalCopilotPanel({
                 </div>
             </div>
 
-            <div className="flex-1 space-y-3 overflow-y-auto p-3">
-                {state.tools.length > 0 && (
-                    <div className="space-y-1">
-                        {state.tools.map((tool, i) => (
-                            <div
-                                key={i}
-                                className="flex items-center gap-1 text-xs text-muted-foreground"
-                            >
-                                <Wrench className="h-3.5 w-3.5" />
-                                {t('pages.deskTerminal.copilot.toolRan', {
-                                    name: tool.name,
-                                })}
+            <div className="flex-1 space-y-4 overflow-y-auto p-3">
+                {state.turns.map((turn, turnIndex) => {
+                    const isLast = turnIndex === state.turns.length - 1;
+                    return (
+                        <div key={turnIndex} className="space-y-2">
+                            <div className="flex justify-end">
+                                <div className="max-w-[90%] whitespace-pre-wrap break-words rounded-md bg-primary/10 px-2 py-1 text-sm text-foreground">
+                                    {turn.question ||
+                                        t('pages.deskTerminal.copilot.explainErrorTurn')}
+                                </div>
                             </div>
-                        ))}
-                    </div>
-                )}
 
-                {running && state.partialText && (
-                    <p className="whitespace-pre-wrap text-sm text-muted-foreground">
-                        {state.partialText}
-                    </p>
-                )}
+                            {turn.answer ? (
+                                <div className="space-y-3">
+                                    {turn.answer.explanation_md && (
+                                        <p className="whitespace-pre-wrap text-sm text-foreground">
+                                            {turn.answer.explanation_md}
+                                        </p>
+                                    )}
+                                    {turn.answer.suggestions.map((s, rowIndex) => (
+                                        <SuggestionRow
+                                            key={rowIndex}
+                                            index={turnIndex * COPILOT_INDEX_STRIDE + rowIndex}
+                                            suggestion={s}
+                                            onFill={onFill}
+                                            exec={exec}
+                                        />
+                                    ))}
+                                    {turn.answer.suggestions.length === 0 && (
+                                        <p className="text-xs text-muted-foreground">
+                                            {t('pages.deskTerminal.copilot.noSuggestions')}
+                                        </p>
+                                    )}
+                                </div>
+                            ) : (
+                                isLast && (
+                                    <div className="space-y-2">
+                                        {state.tools.length > 0 && (
+                                            <div className="space-y-1">
+                                                {state.tools.map((tool, i) => (
+                                                    <div
+                                                        key={i}
+                                                        className="flex items-center gap-1 text-xs text-muted-foreground"
+                                                    >
+                                                        <Wrench className="h-3.5 w-3.5" />
+                                                        {t(
+                                                            'pages.deskTerminal.copilot.toolRan',
+                                                            { name: tool.name },
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
 
-                {state.phase === 'error' && (
-                    <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-300">
-                        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                        <span>{state.error}</span>
-                    </div>
-                )}
+                                        {running && state.partialText && (
+                                            <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                                                {state.partialText}
+                                            </p>
+                                        )}
 
-                {state.answer && (
-                    <div className="space-y-3">
-                        {state.answer.explanation_md && (
-                            <p className="whitespace-pre-wrap text-sm text-foreground">
-                                {state.answer.explanation_md}
-                            </p>
-                        )}
-                        {state.answer.suggestions.map((s, i) => (
-                            <SuggestionRow
-                                key={i}
-                                index={i}
-                                suggestion={s}
-                                onFill={onFill}
-                                exec={exec}
-                            />
-                        ))}
-                        {state.answer.suggestions.length === 0 && (
-                            <p className="text-xs text-muted-foreground">
-                                {t(
-                                    'pages.deskTerminal.copilot.noSuggestions',
-                                )}
-                            </p>
-                        )}
-                    </div>
-                )}
+                                        {running &&
+                                            !state.partialText &&
+                                            state.tools.length === 0 && (
+                                                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                    {t('pages.deskTerminal.copilot.thinking')}
+                                                </div>
+                                            )}
+
+                                        {state.phase === 'error' && (
+                                            <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-300">
+                                                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                                                <span>{state.error}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                )
+                            )}
+                        </div>
+                    );
+                })}
             </div>
         </div>
     );

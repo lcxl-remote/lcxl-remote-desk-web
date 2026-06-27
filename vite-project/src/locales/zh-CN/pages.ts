@@ -551,6 +551,8 @@ export default {
   'pages.deskTerminal.copilot.blockedHint': '已被策略阻止 —— 无法运行。',
   'pages.deskTerminal.copilot.noSuggestions': '暂无命令建议。',
   'pages.deskTerminal.copilot.toolRan': '已检查 {{name}}',
+  'pages.deskTerminal.copilot.explainErrorTurn': '诊断上一个错误',
+  'pages.deskTerminal.copilot.thinking': '思考中…',
   'pages.deskTerminal.copilot.risk.low': '低',
   'pages.deskTerminal.copilot.risk.medium': '中',
   'pages.deskTerminal.copilot.risk.high': '高',

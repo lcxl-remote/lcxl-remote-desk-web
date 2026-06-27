@@ -12,9 +12,9 @@ const baseState: CopilotState = {
     requestId: "req-1",
     conversationId: "conv-1",
     mode: "how_to",
+    turns: [],
     partialText: "",
     tools: [],
-    answer: { explanation_md: "", suggestions: [] },
     error: null,
 };
 
@@ -47,7 +47,16 @@ function renderPanel(
     const onFill = vi.fn();
     render(
         <TerminalCopilotPanel
-            state={{ ...baseState, answer: { explanation_md: "", suggestions } }}
+            state={{
+                ...baseState,
+                turns: [
+                    {
+                        question: "check nginx",
+                        mode: "how_to",
+                        answer: { explanation_md: "", suggestions },
+                    },
+                ],
+            }}
             onAsk={vi.fn()}
             onReset={vi.fn()}
             onClose={vi.fn()}
@@ -67,6 +76,47 @@ describe("TerminalCopilotPanel exec promotion", () => {
             shell: "bash",
             command: "systemctl status nginx",
             cwd: "/srv",
+            reason: "Check the nginx service",
+        });
+    });
+
+    it("keys exec entries per turn so a later turn's Run does not collide", () => {
+        const exec = stubExec();
+        render(
+            <TerminalCopilotPanel
+                state={{
+                    ...baseState,
+                    turns: [
+                        {
+                            question: "first",
+                            mode: "how_to",
+                            answer: { explanation_md: "a", suggestions: [suggestion()] },
+                        },
+                        {
+                            question: "second",
+                            mode: "how_to",
+                            answer: {
+                                explanation_md: "b",
+                                suggestions: [suggestion({ command: "systemctl restart nginx" })],
+                            },
+                        },
+                    ],
+                }}
+                onAsk={vi.fn()}
+                onReset={vi.fn()}
+                onClose={vi.fn()}
+                onFill={vi.fn()}
+                exec={exec}
+            />,
+        );
+        // Two Run buttons; clicking the second turn's must use the strided index.
+        const runs = screen.getAllByText("Run");
+        expect(runs).toHaveLength(2);
+        fireEvent.click(runs[1]);
+        expect(exec.requestPreview).toHaveBeenCalledWith(100, {
+            shell: "bash",
+            command: "systemctl restart nginx",
+            cwd: null,
             reason: "Check the nginx service",
         });
     });
