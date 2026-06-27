@@ -189,6 +189,20 @@ impl DeskErrorCode {
     pub const TIMEOUT: DeskErrorCode = DeskErrorCode(10004);
     pub const SESSION_NOT_FOUND: DeskErrorCode = DeskErrorCode(10005);
 
+    /// The device's owning manager instance is not reachable for cross-instance
+    /// proxying: its presence aged to stale, the instance is not live in the
+    /// instance registry, it advertised no internal base URL, or the internal
+    /// hop could not connect. The request never reached the device, so it is
+    /// safe for the client to retry. Carried in `RestResponse.code`, never an
+    /// HTTP status (rule: business errors stay HTTP 200).
+    pub const MANAGER_NODE_UNREACHABLE: DeskErrorCode = DeskErrorCode(10007);
+    /// A cross-instance proxied write (delete file / update settings) failed
+    /// after the request was already dispatched toward the device, so the
+    /// outcome is unknown — it may or may not have taken effect. The client must
+    /// NOT auto-retry; it should prompt the user to refresh and confirm. Carried
+    /// in `RestResponse.code`, never an HTTP status.
+    pub const REMOTE_DESK_OUTCOME_UNKNOWN: DeskErrorCode = DeskErrorCode(10008);
+
     pub const GENERATE_LOCAL_DESCRIPTION_FAILED: DeskErrorCode = DeskErrorCode(10001);
     pub const BLANK_SIGNALING_DATA: DeskErrorCode = DeskErrorCode(10002);
     pub const AUTO_START_ERROR: DeskErrorCode = DeskErrorCode(10006);
