@@ -7,6 +7,11 @@ use utoipa::{IntoParams, ToSchema};
 pub struct StartTerminalSession {
     /// The command to start the terminal session. with the format of "path/to/executable,arg1,arg2"
     pub command: String,
+    /// Target device primary key (manager multi-instance addressing). The manager
+    /// routes by this; the OSS single-instance signal leaves it `None` and routes
+    /// by the path `connection_id` (dual-target wire model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 /// Terminal list
@@ -79,12 +84,14 @@ mod wincode_tests {
     fn start_terminal_session_round_trips_wincode() {
         let original = StartTerminalSession {
             command: r"C:\Windows\System32\cmd.exe,/k,echo,hello".to_string(),
+            device_id: Some("42".to_string()),
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
         let back: StartTerminalSession =
             wincode::config::deserialize(&bytes, config).expect("decode");
         assert_eq!(back.command, original.command);
+        assert_eq!(back.device_id, original.device_id);
     }
 
     #[test]
