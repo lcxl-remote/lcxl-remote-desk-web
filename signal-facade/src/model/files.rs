@@ -45,6 +45,10 @@ pub struct FileListParams {
     pub end_modified_time: Option<DateTime<Local>>,
     /// Connection ID for remote desk
     pub connection_id: Option<String>,
+    /// Target device primary key (manager multi-instance addressing). The manager
+    /// routes by this; the OSS single-instance signal leaves it `None` and routes
+    /// by `connection_id` (dual-target wire model).
+    pub device_id: Option<String>,
 }
 
 #[derive(
@@ -178,6 +182,9 @@ pub struct DeleteFileRequest {
     /// Whether to delete permanently or move to trash
     pub delete_permanently: Option<bool>,
     pub connection_id: Option<String>,
+    /// Target device primary key (manager multi-instance addressing). See
+    /// [`FileListParams::device_id`] for the dual-target rationale.
+    pub device_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -226,6 +233,7 @@ mod wincode_tests {
                     .expect("valid local time"),
             ),
             connection_id: Some("conn-fl".to_string()),
+            device_id: Some("42".to_string()),
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -241,6 +249,7 @@ mod wincode_tests {
         assert_eq!(back.start_modified_time, original.start_modified_time);
         assert_eq!(back.end_modified_time, original.end_modified_time);
         assert_eq!(back.connection_id, original.connection_id);
+        assert_eq!(back.device_id, original.device_id);
     }
 
     /// `FileInfo` has 3 bare `DateTime<Local>` fields. Use distinct
@@ -323,6 +332,7 @@ mod wincode_tests {
             file_path: r"C:\tmp\junk.txt".to_string(),
             delete_permanently: Some(true),
             connection_id: Some("conn-del".to_string()),
+            device_id: Some("42".to_string()),
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -330,5 +340,6 @@ mod wincode_tests {
         assert_eq!(back.file_path, original.file_path);
         assert_eq!(back.delete_permanently, original.delete_permanently);
         assert_eq!(back.connection_id, original.connection_id);
+        assert_eq!(back.device_id, original.device_id);
     }
 }

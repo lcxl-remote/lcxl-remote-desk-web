@@ -16,6 +16,27 @@ pub struct SettingsPath {
     pub connection_id: String,
 }
 
+/// Run the settings query against a connection held in the local map and build the
+/// HTTP response. Addressing is decoupled from the path so cross-instance callers
+/// (the manager) reuse the same core (rule 22 dual-target parity).
+pub async fn query_settings_core(
+    connection_map: &SharedConnectionMap,
+    connection_id: &str,
+) -> Result<HttpResponse, DeskSignalFacadeError> {
+    let not_found = format!("Connection {connection_id} not found");
+    let response = request_on_local_connection::<()>(
+        connection_map,
+        connection_id,
+        SignalingType::ManagerQuerySettings,
+        None,
+        &not_found,
+    )
+    .await?;
+
+    let settings: RemoteSystemSettings = response.get_data()?;
+    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(settings)))
+}
+
 #[utoipa::path(
     tag = TAG,
     summary = "Query remote system settings via signaling",
@@ -29,20 +50,27 @@ pub async fn query_settings(
     path: web::Path<SettingsPath>,
     connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalFacadeError> {
-    let connection_id = &path.connection_id;
+    query_settings_core(&connection_map, &path.connection_id).await
+}
 
+/// Run the settings update against a connection held in the local map. Shares the
+/// addressing-decoupled core contract with [`query_settings_core`].
+pub async fn update_settings_core(
+    connection_map: &SharedConnectionMap,
+    connection_id: &str,
+    settings: &RemoteSystemSettings,
+) -> Result<HttpResponse, DeskSignalFacadeError> {
     let not_found = format!("Connection {connection_id} not found");
-    let response = request_on_local_connection::<()>(
-        &connection_map,
+    request_on_local_connection(
+        connection_map,
         connection_id,
-        SignalingType::ManagerQuerySettings,
-        None,
+        SignalingType::ManagerUpdateSettings,
+        Some(settings),
         &not_found,
     )
     .await?;
 
-    let settings: RemoteSystemSettings = response.get_data()?;
-    Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(settings)))
+    Ok(HttpResponse::Ok().json(RestResponse::succeed()))
 }
 
 #[utoipa::path(
@@ -60,18 +88,10 @@ pub async fn update_settings(
     request_json: web::Json<RemoteSystemSettings>,
     connection_map: web::Data<SharedConnectionMap>,
 ) -> Result<HttpResponse, DeskSignalFacadeError> {
-    let connection_id = &path.connection_id;
-    let settings = request_json.into_inner();
-
-    let not_found = format!("Connection {connection_id} not found");
-    request_on_local_connection(
+    update_settings_core(
         &connection_map,
-        connection_id,
-        SignalingType::ManagerUpdateSettings,
-        Some(&settings),
-        &not_found,
+        &path.connection_id,
+        &request_json.into_inner(),
     )
-    .await?;
-
-    Ok(HttpResponse::Ok().json(RestResponse::succeed()))
+    .await
 }

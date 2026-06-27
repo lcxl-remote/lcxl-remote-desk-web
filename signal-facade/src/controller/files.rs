@@ -9,6 +9,30 @@ use crate::service::request_on_local_connection;
 
 pub const TAG: &str = "File";
 
+/// Run the file-list request against a connection held in the local map and build
+/// the HTTP response. Addressing is decoupled from the request body so callers
+/// that resolve the target connection out-of-band (the manager, which addresses
+/// by device id across instances) reuse the exact same core — keeping the response
+/// shape identical for every caller (rule 22 dual-target parity).
+pub async fn list_files_core(
+    connection_map: &SharedConnectionMap,
+    connection_id: &str,
+    params: &FileListParams,
+) -> Result<HttpResponse, DeskSignalFacadeError> {
+    let not_found = format!("Connection {connection_id} not found");
+    let response = request_on_local_connection(
+        connection_map,
+        connection_id,
+        SignalingType::ManagerFileList,
+        Some(params),
+        &not_found,
+    )
+    .await?;
+
+    let file_list_response: FileListResponse = response.get_data()?;
+    Ok(HttpResponse::Ok().json(file_list_response))
+}
+
 #[utoipa::path(
     tag = TAG,
     summary = "List files on remote desk",
@@ -31,18 +55,27 @@ pub async fn list_files(
         );
     };
 
+    list_files_core(&connection_map, &connection_id, &query_list.into_inner()).await
+}
+
+/// Run the file-delete request against a connection held in the local map. Shares
+/// the addressing-decoupled core contract with [`list_files_core`].
+pub async fn delete_file_core(
+    connection_map: &SharedConnectionMap,
+    connection_id: &str,
+    request: &DeleteFileRequest,
+) -> Result<HttpResponse, DeskSignalFacadeError> {
     let not_found = format!("Connection {connection_id} not found");
-    let response = request_on_local_connection(
-        &connection_map,
-        &connection_id,
-        SignalingType::ManagerFileList,
-        Some(&query_list.into_inner()),
+    request_on_local_connection(
+        connection_map,
+        connection_id,
+        SignalingType::ManagerFileDelete,
+        Some(request),
         &not_found,
     )
     .await?;
 
-    let file_list_response: FileListResponse = response.get_data()?;
-    Ok(HttpResponse::Ok().json(file_list_response))
+    Ok(HttpResponse::Ok().finish())
 }
 
 #[utoipa::path(
@@ -69,15 +102,5 @@ pub async fn delete_file(
         );
     };
 
-    let not_found = format!("Connection {connection_id} not found");
-    request_on_local_connection(
-        &connection_map,
-        &connection_id,
-        SignalingType::ManagerFileDelete,
-        Some(&delete_file_request),
-        &not_found,
-    )
-    .await?;
-
-    Ok(HttpResponse::Ok().finish())
+    delete_file_core(&connection_map, &connection_id, &delete_file_request).await
 }

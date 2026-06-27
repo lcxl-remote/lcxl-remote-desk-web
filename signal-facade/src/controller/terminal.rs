@@ -8,6 +8,27 @@ use crate::service::request_on_local_connection;
 
 pub const TAG: &str = "Terminal";
 
+/// Run the terminal-list request against a connection held in the local map and
+/// build the HTTP response. Addressing is decoupled from the path so cross-instance
+/// callers (the manager) reuse the same core (rule 22 dual-target parity).
+pub async fn list_terminal_core(
+    connection_map: &SharedConnectionMap,
+    connection_id: &str,
+) -> Result<HttpResponse, DeskSignalFacadeError> {
+    let not_found = format!("Connection {connection_id} is not found to list terminal");
+    let response = request_on_local_connection::<()>(
+        connection_map,
+        connection_id,
+        SignalingType::ListTerminal,
+        None,
+        &not_found,
+    )
+    .await?;
+
+    let terminal_list_response: TerminalList = response.get_data()?;
+    Ok(HttpResponse::Ok().json(terminal_list_response))
+}
+
 #[utoipa::path(
     tag = TAG,
     summary = "List terminal commands on remote desk",
@@ -21,21 +42,7 @@ pub async fn list_terminal(
     connection_map: web::Data<SharedConnectionMap>,
     path: web::Path<ListTerminalPath>,
 ) -> Result<HttpResponse, DeskSignalFacadeError> {
-    let not_found = format!(
-        "Connection {} is not found to list terminal",
-        path.connection_id
-    );
-    let response = request_on_local_connection::<()>(
-        &connection_map,
-        &path.connection_id,
-        SignalingType::ListTerminal,
-        None,
-        &not_found,
-    )
-    .await?;
-
-    let terminal_list_response: TerminalList = response.get_data()?;
-    Ok(HttpResponse::Ok().json(terminal_list_response))
+    list_terminal_core(&connection_map, &path.connection_id).await
 }
 
 // NOTE: open_terminal_session is NOT extracted here because it requires
