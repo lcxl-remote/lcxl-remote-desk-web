@@ -61,8 +61,9 @@ pub fn create_video_encoder(
             #[cfg(av1_supported)]
             {
                 Box::new(Av1Encoder::new(
-                    desk_setting.get_av1_encoder_settings(),
+                    desk_setting.get_av1_encoder_settings(display_info),
                     display_info,
+                    desk_setting.video_fps,
                 )?)
             }
             // SVT-AV1 has no prebuilt binary for this target, so the encoder is

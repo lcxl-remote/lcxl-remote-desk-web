@@ -13,6 +13,11 @@ use crate::{
     video_encoder::{encoder_utils::duration_to_seconds, yuv_utils::PersistentYuvBuffer},
 };
 
+/// Frame rate fallback when the caller reports 0 fps. CBR rate control sizes
+/// its buffer model from the frame rate, so a 0 would mis-tune it; mirror the
+/// signal-facade bitrate derivation which also falls back to 60.
+const DEFAULT_FPS: u32 = 60;
+
 pub static ENCODE_TO_AV1_HISTOGRAM: LazyLock<HistogramVec> = LazyLock::new(|| {
     register_histogram_vec!("encode_to_av1_histogram", "help", &["frame_type"]).unwrap()
 });
@@ -37,30 +42,50 @@ impl Av1Encoder {
     pub fn new(
         setting: Av1EncoderSettings,
         display_info: &DisplayInfo,
+        fps: u32,
     ) -> Result<Self, CaptureError> {
         let width = display_info.desktop_coordinates.width() as usize;
         let height = display_info.desktop_coordinates.height() as usize;
 
         let mut config = EncoderConfig::new(width, height, ColorFormat::I420);
 
-        // CRF / constant-quality mode: the quantizer (`qp`) drives quality and
-        // there is no target bitrate to satisfy. This mirrors the previous
-        // rav1e quantizer-mode behaviour.
-        config.rate_control_mode = RcMode::CqpOrCrf;
-        config.qp = Some(setting.crf.min(SVT_CRF_MAX) as u8);
-        // CRF / constant-quality mode rejects a non-zero target bitrate (the
-        // constructor defaults it to a VBR value), so clear it.
-        config.target_bit_rate = 0;
-
         // Preset: higher = faster. Remote desktop prioritises latency/throughput
         // over compression, so the default leans to the fast end.
         config.enc_mode = setting.preset.min(SVT_PRESET_MAX) as u8;
 
-        // Real-time low-delay mode: this is the core fix over rav1e. With RTC on,
-        // SVT-AV1 emits a packet per input frame instead of buffering a deep
-        // look-ahead window, so a remote desktop that produces frames on demand
-        // does not stall for several seconds before the first packet.
-        config.rtc = Some(setting.rtc);
+        // Frame rate drives the CBR buffer model below; a 0 fps would mis-tune
+        // it, so fall back to a sane default.
+        let fps = if fps == 0 { DEFAULT_FPS } else { fps };
+        config.fps_numerator = fps as usize;
+        config.fps_denominator = 1;
+
+        if setting.rtc {
+            // Real-time low-delay mode. SVT-AV1 only derives the low-delay
+            // prediction structure (`pred_structure = 1`) from CBR rate
+            // control; CqpOrCrf and VBR both force a random-access structure
+            // (`pred_structure = 2`). Pairing the RTC flag with a random-access
+            // structure puts mode decision into an inconsistent state and trips
+            // the `cand_bf->valid_luma_pred` assertion, aborting the process.
+            // CBR keeps the RTC win (a packet per input frame, no deep
+            // look-ahead stall before the first packet) while staying
+            // self-consistent. The target bitrate is required and pre-derived
+            // by `DeskSettings::get_av1_encoder_settings`; clamp to a positive
+            // value as a final guard. `qp` is deliberately left unset — the
+            // wrapper writes `qp` whenever it is `Some(..)` regardless of RC
+            // mode, and a stray quantizer would perturb CBR.
+            config.rate_control_mode = RcMode::Cbr;
+            config.target_bit_rate = setting.target_bps.max(1) as usize;
+            config.rtc = Some(true);
+        } else {
+            // Offline / non-real-time: constant-quality (CRF) with the
+            // random-access prediction structure. The quantizer drives quality
+            // and there is no target bitrate to satisfy (CqpOrCrf rejects a
+            // non-zero target).
+            config.rate_control_mode = RcMode::CqpOrCrf;
+            config.qp = Some(setting.crf.min(SVT_CRF_MAX) as u8);
+            config.target_bit_rate = 0;
+            config.rtc = Some(false);
+        }
 
         config.intra_period_length = NonZeroUsize::new(INTRA_PERIOD_FRAMES);
 
@@ -220,8 +245,14 @@ mod tests {
         }
     }
 
+    /// RTC/CBR is the production default. A realistic target bitrate (rather
+    /// than the 0 "auto" sentinel, which `get_av1_encoder_settings` would have
+    /// resolved) keeps these tests exercising the real CBR path.
     fn default_setting() -> Av1EncoderSettings {
-        Av1EncoderSettings::default()
+        Av1EncoderSettings {
+            target_bps: 4_000_000,
+            ..Av1EncoderSettings::default()
+        }
     }
 
     /// Latency regression: rav1e held back ~13 frames before emitting the first
@@ -231,7 +262,7 @@ mod tests {
     /// frames has to yield at least one packet, and a keyframe first.
     #[test]
     fn emits_packet_within_a_few_frames_in_rtc_mode() {
-        let mut encoder = Av1Encoder::new(default_setting(), &display_info(256, 256))
+        let mut encoder = Av1Encoder::new(default_setting(), &display_info(256, 256), 60)
             .expect("create av1 encoder");
 
         let frame = StubBgraImage::new(256, 256);
@@ -255,7 +286,7 @@ mod tests {
     /// decoder can start without waiting for the periodic intra period.
     #[test]
     fn first_emitted_packet_is_keyframe() {
-        let mut encoder = Av1Encoder::new(default_setting(), &display_info(256, 256))
+        let mut encoder = Av1Encoder::new(default_setting(), &display_info(256, 256), 60)
             .expect("create av1 encoder");
         let frame = StubBgraImage::new(256, 256);
 
@@ -283,7 +314,7 @@ mod tests {
     fn output_is_parseable_by_webrtc_av1_payloader() {
         use rtp::packetizer::Payloader;
 
-        let mut encoder = Av1Encoder::new(default_setting(), &display_info(256, 256))
+        let mut encoder = Av1Encoder::new(default_setting(), &display_info(256, 256), 60)
             .expect("create av1 encoder");
         let frame = StubBgraImage::new(256, 256);
 
@@ -305,5 +336,77 @@ mod tests {
             !fragments.is_empty(),
             "payloader must produce at least one RTP payload fragment"
         );
+    }
+
+    /// Core regression for the AV1 crash. The previous config paired the RTC
+    /// flag with CqpOrCrf (CRF) rate control; the wrapper derives the
+    /// prediction structure purely from the RC mode, so CRF forced a
+    /// random-access structure while the RTC flag asked for low delay. That
+    /// contradiction tripped the `cand_bf->valid_luma_pred` assertion inside
+    /// SVT-AV1 and aborted the process the moment encoding began.
+    ///
+    /// A C-side `assert()` aborts the process, which a unit test cannot catch,
+    /// so this is necessarily an *indirect* check: by building the RTC encoder
+    /// with the corrected CBR config and proving it both constructs and emits
+    /// packets, we confirm the new path no longer constructs the offending
+    /// combination. A regression back to RTC+CRF would abort here rather than
+    /// fail an assertion.
+    #[test]
+    fn rtc_mode_uses_cbr_and_does_not_abort() {
+        let setting = default_setting();
+        assert!(setting.rtc, "this test must exercise the RTC/CBR path");
+
+        let mut encoder = Av1Encoder::new(setting, &display_info(1280, 800), 60)
+            .expect("RTC encoder must build with CBR rate control");
+        let frame = StubBgraImage::new(1280, 800);
+
+        let mut total = 0usize;
+        for _ in 0..5 {
+            total += encoder.encode(&frame, false).expect("encode frame").len();
+        }
+        assert!(
+            total > 0,
+            "RTC/CBR encoder must emit packets without aborting"
+        );
+    }
+
+    /// The non-RTC path keeps constant-quality (CRF) with the random-access
+    /// prediction structure. Guards that the `rtc == false` branch still builds
+    /// and accepts frames after the RC-mode split. Unlike the RTC path it does
+    /// NOT assert prompt emission: random access buffers a deep hierarchical
+    /// look-ahead and legitimately emits nothing in the first handful of frames
+    /// (the very latency the RTC path was introduced to avoid), so requiring a
+    /// packet within 5 frames would be wrong for this mode.
+    #[test]
+    fn non_rtc_mode_uses_crf_path() {
+        let setting = Av1EncoderSettings {
+            rtc: false,
+            ..default_setting()
+        };
+        let mut encoder =
+            Av1Encoder::new(setting, &display_info(256, 256), 30).expect("CRF encoder must build");
+        let frame = StubBgraImage::new(256, 256);
+
+        for _ in 0..5 {
+            encoder
+                .encode(&frame, false)
+                .expect("CRF encoder must accept frames without error");
+        }
+    }
+
+    /// A 0 fps would mis-tune the CBR buffer model (and the wrapper rejects a
+    /// 0 fps denominator). `Av1Encoder::new` must fall back to a sane default
+    /// so the RTC/CBR encoder still builds and encodes.
+    #[test]
+    fn rtc_mode_with_zero_fps_falls_back_and_builds() {
+        let mut encoder = Av1Encoder::new(default_setting(), &display_info(640, 480), 0)
+            .expect("RTC encoder must build even when fps is reported as 0");
+        let frame = StubBgraImage::new(640, 480);
+
+        let mut total = 0usize;
+        for _ in 0..5 {
+            total += encoder.encode(&frame, false).expect("encode frame").len();
+        }
+        assert!(total > 0, "encoder must emit packets after fps fallback");
     }
 }

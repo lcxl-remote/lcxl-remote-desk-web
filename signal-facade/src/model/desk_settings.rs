@@ -109,6 +109,14 @@ pub struct Av1EncoderSettings {
     /// encoder emits a packet per input frame instead of buffering a deep
     /// look-ahead window.
     pub rtc: bool,
+    /// CBR target bitrate (bps) used in RTC/low-delay mode. `0` means
+    /// "auto-derive" from resolution / fps / `crf` via `default_video_bps`.
+    /// In RTC mode SVT-AV1 only supports the low-delay prediction structure
+    /// under CBR rate control (`crf`/CQP forces a random-access structure
+    /// that is incompatible with the RTC flag and aborts the encoder), so a
+    /// positive target bitrate is required there. Unused when `rtc == false`
+    /// (the CRF / random-access path uses `crf` instead).
+    pub target_bps: u32,
 }
 
 impl Default for Av1EncoderSettings {
@@ -117,6 +125,7 @@ impl Default for Av1EncoderSettings {
             crf: 35,
             preset: 12, // remote desktop needs the fast end of the preset range
             rtc: true,
+            target_bps: 0, // 0 = auto-derive from resolution / fps / crf
         }
     }
 }
@@ -382,15 +391,32 @@ impl DeskSettings {
         }
     }
 
-    pub fn get_av1_encoder_settings(&self) -> Av1EncoderSettings {
+    pub fn get_av1_encoder_settings(&self, display_info: &DisplayInfo) -> Av1EncoderSettings {
+        let width = display_info.desktop_coordinates.width() as u64;
+        let height = display_info.desktop_coordinates.height() as u64;
+        // Mirror `get_h264_encoder_settings`: a 0 fps would derive a 0 bitrate
+        // and CBR rate control needs a positive target, so fall back to 60.
+        let fps = if self.video_fps == 0 {
+            60
+        } else {
+            self.video_fps
+        } as u64;
+
         if let Some(ref av1_encoder) = self.av1_encoder {
-            return av1_encoder.clone();
+            let mut settings = av1_encoder.clone();
+            // RTC mode is CBR; a 0 target means "auto-derive". `crf` drives the
+            // bits-per-pixel point exactly like `video_quality` (both 0-63).
+            if settings.target_bps == 0 {
+                settings.target_bps = default_video_bps(width, height, fps, settings.crf);
+            }
+            return settings;
         }
-        // use video_quality to create a default av1 encoder settings.
-        // Both video_quality and SVT-AV1 CRF are 0-63 (lower is better), so the
-        // knob maps onto `crf` directly with no interpolation.
+        // Use video_quality to create default av1 encoder settings. Both
+        // video_quality and SVT-AV1 CRF are 0-63 (lower is better), so the knob
+        // maps onto `crf` directly; the same knob also seeds the CBR target.
         Av1EncoderSettings {
             crf: self.video_quality.min(63),
+            target_bps: default_video_bps(width, height, fps, self.video_quality),
             ..Default::default()
         }
     }
@@ -487,23 +513,36 @@ mod tests {
         );
     }
 
+    fn av1_display_info(width: i32, height: i32) -> DisplayInfo {
+        DisplayInfo {
+            desktop_coordinates: DisplayRect {
+                left: 0,
+                top: 0,
+                right: width,
+                bottom: height,
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn get_av1_encoder_settings_maps_video_quality_to_crf_directly() {
         let with_quality = |video_quality: u32| DeskSettings {
             video_quality,
             ..Default::default()
         };
+        let di = av1_display_info(1920, 1080);
 
         // video_quality and CRF share the 0-63 range, so the mapping is identity.
-        let lo = with_quality(0).get_av1_encoder_settings();
+        let lo = with_quality(0).get_av1_encoder_settings(&di);
         assert_eq!(lo.crf, 0);
         assert_eq!(lo.preset, Av1EncoderSettings::default().preset);
         assert!(lo.rtc);
 
-        assert_eq!(with_quality(63).get_av1_encoder_settings().crf, 63);
+        assert_eq!(with_quality(63).get_av1_encoder_settings(&di).crf, 63);
 
         // Out-of-range video_quality is clamped to the CRF ceiling.
-        assert_eq!(with_quality(1000).get_av1_encoder_settings().crf, 63);
+        assert_eq!(with_quality(1000).get_av1_encoder_settings(&di).crf, 63);
     }
 
     #[test]
@@ -513,13 +552,70 @@ mod tests {
                 crf: 20,
                 preset: 6,
                 rtc: false,
+                target_bps: 7_000_000,
             }),
             ..Default::default()
         };
-        let got = settings.get_av1_encoder_settings();
+        let got = settings.get_av1_encoder_settings(&av1_display_info(1920, 1080));
         assert_eq!(got.crf, 20);
         assert_eq!(got.preset, 6);
         assert!(!got.rtc);
+        // An explicit non-zero target is passed through untouched.
+        assert_eq!(got.target_bps, 7_000_000);
+    }
+
+    /// RTC mode is CBR and needs a positive target bitrate. A `target_bps` of
+    /// 0 (the default "auto" sentinel) must be derived from resolution / fps /
+    /// crf rather than left at 0 — a 0 target would abort the CBR encoder.
+    #[test]
+    fn get_av1_encoder_settings_auto_derives_target_bps() {
+        // Default path (no explicit av1_encoder): quality knob seeds the target.
+        let defaults = DeskSettings {
+            video_quality: 22,
+            video_fps: 60,
+            ..Default::default()
+        };
+        let got = defaults.get_av1_encoder_settings(&av1_display_info(1920, 1080));
+        assert!(
+            got.target_bps > 0,
+            "auto target must be derived from resolution/fps/crf, got 0"
+        );
+        assert_eq!(
+            got.target_bps,
+            default_video_bps(1920, 1080, 60, 22),
+            "default path target must match the shared bitrate formula"
+        );
+
+        // Explicit settings with target_bps == 0 must also be auto-derived.
+        let explicit = DeskSettings {
+            video_fps: 30,
+            av1_encoder: Some(Av1EncoderSettings {
+                crf: 35,
+                preset: 12,
+                rtc: true,
+                target_bps: 0,
+            }),
+            ..Default::default()
+        };
+        let got = explicit.get_av1_encoder_settings(&av1_display_info(1280, 720));
+        assert_eq!(got.target_bps, default_video_bps(1280, 720, 30, 35));
+    }
+
+    /// A `video_fps` of 0 would derive a 0 bitrate; like the h264 path it must
+    /// fall back to 60 so CBR rate control still gets a positive target.
+    #[test]
+    fn get_av1_encoder_settings_fps_zero_falls_back() {
+        let settings = DeskSettings {
+            video_quality: 22,
+            video_fps: 0,
+            ..Default::default()
+        };
+        let got = settings.get_av1_encoder_settings(&av1_display_info(1920, 1080));
+        assert!(
+            got.target_bps > 0,
+            "fps=0 must fall back to 60 and derive a positive target, got 0"
+        );
+        assert_eq!(got.target_bps, default_video_bps(1920, 1080, 60, 22));
     }
 }
 
@@ -583,6 +679,7 @@ mod wincode_tests {
                 crf: 40,
                 preset: 8,
                 rtc: false,
+                target_bps: 6_000_000,
             }),
             private_screen: PrivateScreenSettings {
                 image_path: Some(r"C:\private.png".to_string()),

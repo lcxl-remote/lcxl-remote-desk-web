@@ -122,6 +122,13 @@ export type Av1EncoderSettings = {
      * @type boolean | undefined
     */
     rtc?: boolean;
+    /**
+     * @description CBR target bitrate (bps) used in RTC/low-delay mode. `0` means\n\"auto-derive\" from resolution / fps / `crf` via `default_video_bps`.\nIn RTC mode SVT-AV1 only supports the low-delay prediction structure\nunder CBR rate control (`crf`/CQP forces a random-access structure\nthat is incompatible with the RTC flag and aborts the encoder), so a\npositive target bitrate is required there. Unused when `rtc == false`\n(the CRF / random-access path uses `crf` instead).
+     * @minLength 0
+     * @default 0
+     * @type integer | undefined, int32
+    */
+    target_bps?: number;
 };
 
 /**

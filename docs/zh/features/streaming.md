@@ -10,7 +10,7 @@ LCXL Remote Desk 通过 **WebRTC** 串流远端屏幕与音频以实现超低延
 |---|---|
 | H.264 | X264 / OpenH264 |
 | VP8 / VP9 | libvpx |
-| AV1 | rav1e |
+| AV1 | SVT-AV1 |
 
 采集后端：Windows（**DXGI / WGC**）、Linux（**X11 / Wayland portal + PipeWire**）。
 
