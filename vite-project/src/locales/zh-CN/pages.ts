@@ -239,6 +239,8 @@ export default {
   'pages.modelUsage.column.cacheRead': '缓存读',
   'pages.modelUsage.column.cacheWrite': '缓存写',
   'pages.modelUsage.column.requests': '请求数',
+  'pages.usage.overview.title': '用量统计',
+  'pages.usage.backToOverview': '返回用量概览',
   'pages.user.settings.description': '管理您的帐户安全和偏好设置',
   'pages.user.settings.currentPassword': '当前密码',
   'pages.user.settings.newPassword': '新密码',

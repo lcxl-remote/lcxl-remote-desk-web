@@ -14,8 +14,10 @@ import TerminalSession from '@/features/terminal/terminal-session';
 import RequireAuth from '@/features/auth/require-auth';
 import { SystemSettings } from '@/features/settings/system-settings';
 import { TurnSettings } from '@/features/settings/turn-settings';
-import { TurnUsagePage } from '@/features/settings/turn-usage';
-import { ModelUsagePage } from '@/features/settings/model-usage';
+import { TurnUsagePage } from '@/features/usage/turn-usage';
+import { ModelUsagePage } from '@/features/usage/model-usage';
+import { UsageLayout } from '@/features/usage/usage-layout';
+import { UsageOverview } from '@/features/usage/usage-overview';
 import { TurnClientSettingsPage } from '@/features/settings/turn-client-settings';
 import { LogSettings } from '@/features/settings/log-settings';
 import { SecuritySettings } from '@/features/settings/security-settings';
@@ -102,14 +104,6 @@ export const router = createBrowserRouter([
                         element: <TurnSettings />,
                     },
                     {
-                        path: 'turn-usage',
-                        element: <TurnUsagePage />,
-                    },
-                    {
-                        path: 'model-usage',
-                        element: <ModelUsagePage />,
-                    },
-                    {
                         path: 'turn-client',
                         element: <TurnClientSettingsPage />,
                     },
@@ -140,6 +134,24 @@ export const router = createBrowserRouter([
                     {
                         path: 'ai-model',
                         element: <AiModelSettings />,
+                    },
+                ]
+            },
+            {
+                path: 'usage',
+                element: <UsageLayout />,
+                children: [
+                    {
+                        index: true,
+                        element: <UsageOverview />,
+                    },
+                    {
+                        path: 'turn',
+                        element: <TurnUsagePage />,
+                    },
+                    {
+                        path: 'model',
+                        element: <ModelUsagePage />,
                     },
                 ]
             },

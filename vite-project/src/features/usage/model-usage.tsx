@@ -3,7 +3,7 @@ import { Bot } from 'lucide-react';
 
 import { useGetModelUsage } from '@/services/hooks/modelUsageController/useGetModelUsage';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { ModelUsageChart, type ModelUsageRow } from '@/features/settings/model-usage-chart';
+import { ModelUsageChart, type ModelUsageRow } from '@/features/usage/model-usage-chart';
 
 /**
  * Local per-model AI gateway token-usage view for the portable/signal server.

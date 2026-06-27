@@ -10,6 +10,7 @@ import {
     ChevronRight,
     ChevronDown,
     Key,
+    BarChart3,
 } from "lucide-react"
 import { useLocation, Link, useNavigate } from "react-router-dom"
 import { useTranslation } from "react-i18next"
@@ -86,6 +87,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                     title: "menu.desk",
                     url: "/desk/list",
                     icon: Monitor,
+                });
+            }
+
+            if (serverInfo.startup_mode !== "desk_server") {
+                dynamicItems.push({
+                    title: "menu.usage",
+                    url: "/usage",
+                    icon: BarChart3,
                 });
             }
 

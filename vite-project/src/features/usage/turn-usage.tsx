@@ -3,7 +3,7 @@ import { Network } from 'lucide-react';
 
 import { useGetTurnUsage } from '@/services/hooks/turnUsageController/useGetTurnUsage';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { TurnUsageChart, type TurnUsageRow } from '@/features/settings/turn-usage-chart';
+import { TurnUsageChart, type TurnUsageRow } from '@/features/usage/turn-usage-chart';
 
 /**
  * Local per-device TURN usage view for the portable/signal server. Collect-only

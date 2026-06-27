@@ -241,6 +241,8 @@ export default {
   'pages.modelUsage.column.cacheRead': 'Cache Read',
   'pages.modelUsage.column.cacheWrite': 'Cache Write',
   'pages.modelUsage.column.requests': 'Requests',
+  'pages.usage.overview.title': 'Usage',
+  'pages.usage.backToOverview': 'Back to Usage Overview',
   'pages.user.settings.description': 'Manage your account security and preferences',
   'pages.user.settings.currentPassword': 'Current Password',
   'pages.user.settings.newPassword': 'New Password',

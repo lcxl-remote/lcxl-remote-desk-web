@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { useQueryServerInfo } from "@/services/hooks/systemController/useQueryServerInfo";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Settings, FileText, Server, Key, Shield, Network, Monitor, Bot, Activity, KeyRound, Link2 } from "lucide-react";
+import { Settings, FileText, Server, Key, Shield, Network, Monitor, Bot, KeyRound, Link2 } from "lucide-react";
 
 export function SettingsOverview() {
     const { t } = useTranslation();
@@ -100,19 +100,6 @@ export function SettingsOverview() {
                                 </CardHeader>
                             </Card>
                         </Link>
-                        <Link to="/system/turn-usage" className="block outline-none">
-                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
-                                <CardHeader>
-                                    <div className="flex items-center gap-2">
-                                        <Activity className="h-5 w-5 text-primary" />
-                                        <CardTitle className="text-lg">{t('menu.settings.turnUsage')}</CardTitle>
-                                    </div>
-                                    <CardDescription className="mt-2 line-clamp-2">
-                                        {t('pages.turnUsage.description')}
-                                    </CardDescription>
-                                </CardHeader>
-                            </Card>
-                        </Link>
                         <Link to="/system/ai-model" className="block outline-none">
                             <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
                                 <CardHeader>
@@ -122,19 +109,6 @@ export function SettingsOverview() {
                                     </div>
                                     <CardDescription className="mt-2 line-clamp-2">
                                         {t('pages.aiModel.settings.description')}
-                                    </CardDescription>
-                                </CardHeader>
-                            </Card>
-                        </Link>
-                        <Link to="/system/model-usage" className="block outline-none">
-                            <Card className="hover:bg-muted/50 transition-colors h-full cursor-pointer">
-                                <CardHeader>
-                                    <div className="flex items-center gap-2">
-                                        <Bot className="h-5 w-5 text-primary" />
-                                        <CardTitle className="text-lg">{t('menu.settings.modelUsage')}</CardTitle>
-                                    </div>
-                                    <CardDescription className="mt-2 line-clamp-2">
-                                        {t('pages.modelUsage.description')}
                                     </CardDescription>
                                 </CardHeader>
                             </Card>
