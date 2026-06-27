@@ -16,6 +16,8 @@ Capture backends: Windows (**DXGI / WGC**), Linux (**X11 / Wayland portal + Pipe
 
 The encoder can be auto-selected or pinned via `desk.video_encoder`. Frame rate (`video_fps`), quality (`video_quality`, 0–63, lower is better), and dirty-rectangle incremental encoding (`enable_dirty_rect`) are all configurable — see the [config.toml Reference](/config/config-toml#desktop-desk).
 
+The configured encoder is a **preference**, not an absolute choice: when a client (browser, Android, or iOS) connects, the host negotiates the actual video codec against the codecs that client advertises it can decode in its WebRTC offer. The preferred encoder is honoured when the client can decode it; otherwise the host automatically falls back to the best codec both sides support. This means a client is never sent a codec it cannot decode — no per-client capability configuration is required.
+
 ## Audio
 
 System audio is captured and encoded with **Opus** (libopus). Capture backends: Windows (**WASAPI**), Linux (**ALSA / PipeWire**).

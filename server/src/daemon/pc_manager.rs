@@ -54,6 +54,7 @@ use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSampl
 use crate::daemon::bitrate_controller::{
     AdaptiveBitrateShared, AdaptiveBitrateState, CapDirective,
 };
+use crate::daemon::codec_negotiation;
 use crate::daemon::worker_manager::WorkerManager;
 use crate::error::DeskError;
 use crate::host_control::HostControlHub;
@@ -1762,12 +1763,56 @@ pub async fn handle_offer(
     // byte of file data hits the channel.
     log_sdp_max_message_size(from_connection_id, sdp_str);
 
+    // Negotiate the single video codec the host will encode for this
+    // connection: intersect the codecs the client advertised it can decode
+    // (the offer's `m=video` rtpmap) with the codecs the host can encode,
+    // honouring `desk_settings.video_encoder` as a preference hint. This
+    // replaces the legacy "trust the client-asserted codec verbatim" path
+    // so a client never receives a codec it cannot decode (black screen).
+    // Falls back to the configured default only when no codec is shared,
+    // which is effectively impossible since VP8 is a universal baseline.
+    let preferred_codec = offer
+        .desk_settings
+        .get_video_encoder_type()
+        .ok()
+        .map(video_encoder_to_media_codec);
+    let negotiated_video_codec = if has_video {
+        let client_codecs = codec_negotiation::parse_offer_video_codecs(sdp_str);
+        let server_codecs = codec_negotiation::server_encodable_video_codecs();
+        match codec_negotiation::negotiate_video_codec(
+            &client_codecs,
+            &server_codecs,
+            preferred_codec,
+        ) {
+            Some(codec) => {
+                log::info!(
+                    "[pc_manager] Negotiated video codec {codec:?} for {from_connection_id} \
+                     (client={client_codecs:?}, preferred={preferred_codec:?})"
+                );
+                codec
+            }
+            None => {
+                let fallback = preferred_codec.unwrap_or(MediaCodec::H264);
+                log::warn!(
+                    "[pc_manager] No video codec shared with {from_connection_id} \
+                     (client={client_codecs:?}, server={server_codecs:?}); falling back to \
+                     {fallback:?} — the client may be unable to decode"
+                );
+                fallback
+            }
+        }
+    } else {
+        preferred_codec.unwrap_or(MediaCodec::H264)
+    };
+
     if has_video && ctx_guard.video_track.is_none() {
-        let video_mime_type = match offer.desk_settings.get_video_encoder_type()? {
-            VideoEncoderType::H264 | VideoEncoderType::X264 => MIME_TYPE_H264,
-            VideoEncoderType::VP8 => MIME_TYPE_VP8,
-            VideoEncoderType::VP9 => MIME_TYPE_VP9,
-            VideoEncoderType::AV1 => MIME_TYPE_AV1,
+        let video_mime_type = match negotiated_video_codec {
+            MediaCodec::H264 => MIME_TYPE_H264,
+            MediaCodec::Vp8 => MIME_TYPE_VP8,
+            MediaCodec::Vp9 => MIME_TYPE_VP9,
+            MediaCodec::Av1 => MIME_TYPE_AV1,
+            // Opus is audio-only; the negotiation never yields it for video.
+            MediaCodec::Opus => MIME_TYPE_H264,
         };
         let video_track = Arc::new(TrackLocalStaticSample::new(
             RTCRtpCodecCapability {
@@ -1829,9 +1874,11 @@ pub async fn handle_offer(
 
     // Now that the SDP exchange has populated tracks, tell the worker
     // to start its per-`connection_id` encoder. Without this the daemon
-    // would have a video_track that nobody ever feeds. Audio codec is
-    // currently fixed to OPUS.
-    let video_codec = video_encoder_to_media_codec(offer.desk_settings.get_video_encoder_type()?);
+    // would have a video_track that nobody ever feeds. The codec is the
+    // one negotiated above (client-decodable ∩ host-encodable) so the
+    // worker's encoder and the daemon's track always agree. Audio codec
+    // is currently fixed to OPUS.
+    let video_codec = negotiated_video_codec;
     // v4 capture-selection fix: thread the browser-chosen GDI device
     // name through to the worker so capture binds to the right
     // monitor. See [`video_device_for_payload`] for the empty-string

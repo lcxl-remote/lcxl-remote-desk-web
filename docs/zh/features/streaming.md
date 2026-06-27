@@ -16,6 +16,8 @@ LCXL Remote Desk 通过 **WebRTC** 串流远端屏幕与音频以实现超低延
 
 编码器可自动选择，或通过 `desk.video_encoder` 固定。帧率（`video_fps`）、画质（`video_quality`，0–63，越低越好）与脏矩形增量编码（`enable_dirty_rect`）均可配置——见 [config.toml 参考](/zh/config/config-toml#desktop-desk)。
 
+所配置的编码器是**偏好**而非绝对选择：当控制端（浏览器、Android 或 iOS）连接时，被控端会把实际视频编码与该客户端在 WebRTC offer 中声明的可解码编码做协商。客户端能解码时优先采用所配置的编码器；否则被控端自动回退到双方都支持的最佳编码。由此客户端永远不会收到自己无法解码的编码，也无需为每种客户端单独配置能力。
+
 ## 音频
 
 系统音频用 **Opus**（libopus）采集并编码。采集后端：Windows（**WASAPI**）、Linux（**ALSA / PipeWire**）。
