@@ -358,6 +358,52 @@ pub fn rewrite_mdns_candidate_with_ip(
     ))
 }
 
+/// Run a request/response signaling call against a connection held in the local
+/// map, **without holding the map lock across the await**.
+///
+/// The connection state is cloned under a brief read lock, the guard is dropped,
+/// and only then is `request_peer_with_callback` awaited — so a slow desk server
+/// can never serialize the whole map or risk a lock held across a 30s round trip.
+/// Shared by the file / settings / sysinfo / terminal proxy controllers (and the
+/// manager's owner-local handling), so all of them get the same no-lock behavior.
+///
+/// Returns the peer's response model. A connection absent from the local map
+/// yields `REMOTE_DESK_OFFLINE` (`not_found_msg`); a peer error_code in the
+/// response is surfaced as that error.
+pub async fn request_on_local_connection<T>(
+    connection_map: &SharedConnectionMap,
+    connection_id: &str,
+    signaling_type: SignalingType,
+    data: Option<&T>,
+    not_found_msg: &str,
+) -> Result<SignalingModel, DeskSignalFacadeError>
+where
+    T: ?Sized + serde::Serialize + Sync,
+{
+    let state = {
+        let guard = connection_map.read().await;
+        guard.get(connection_id).cloned()
+    };
+    let Some(state) = state else {
+        return DeskSignalFacadeError::custom_error(
+            DeskErrorCode::REMOTE_DESK_OFFLINE,
+            not_found_msg,
+        );
+    };
+    let response = state
+        .request_peer_with_callback(signaling_type, data, None)
+        .await?;
+    if let Some(ref response_state) = response.response_state
+        && response_state.error_code != 0
+    {
+        return DeskSignalFacadeError::custom_error(
+            DeskErrorCode::new(response_state.error_code),
+            &response_state.message.clone().unwrap_or_default(),
+        );
+    }
+    Ok(response)
+}
+
 // ====== SignalingHandler ======
 
 /// Generic signaling handler. Usable by both signal server and manager.

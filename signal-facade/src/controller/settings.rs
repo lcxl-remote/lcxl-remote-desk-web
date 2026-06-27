@@ -1,11 +1,11 @@
 use actix_web::{HttpResponse, get, post, web};
-use desk_utils::error::DeskErrorCode;
 use desk_utils::rest::RestResponse;
 
 use crate::error::DeskSignalFacadeError;
 use crate::model::connection::SharedConnectionMap;
-use crate::model::signal::{ForwardSignalingSender, SignalingType};
+use crate::model::signal::SignalingType;
 use crate::model::system_settings::RemoteSystemSettings;
+use crate::service::request_on_local_connection;
 
 pub const TAG: &str = "Settings";
 
@@ -31,28 +31,15 @@ pub async fn query_settings(
 ) -> Result<HttpResponse, DeskSignalFacadeError> {
     let connection_id = &path.connection_id;
 
-    let response = {
-        let connection_map = connection_map.read().await;
-        if let Some(connection) = connection_map.get(connection_id) {
-            connection
-                .request_peer_with_callback::<()>(SignalingType::ManagerQuerySettings, None, None)
-                .await?
-        } else {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Connection {} not found", connection_id),
-            );
-        }
-    };
-
-    if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0
-    {
-        return DeskSignalFacadeError::custom_error(
-            DeskErrorCode::new(response_state.error_code),
-            &response_state.message.clone().unwrap_or_default(),
-        );
-    }
+    let not_found = format!("Connection {connection_id} not found");
+    let response = request_on_local_connection::<()>(
+        &connection_map,
+        connection_id,
+        SignalingType::ManagerQuerySettings,
+        None,
+        &not_found,
+    )
+    .await?;
 
     let settings: RemoteSystemSettings = response.get_data()?;
     Ok(HttpResponse::Ok().json(RestResponse::succeed_with_data(settings)))
@@ -76,32 +63,15 @@ pub async fn update_settings(
     let connection_id = &path.connection_id;
     let settings = request_json.into_inner();
 
-    let response = {
-        let connection_map = connection_map.read().await;
-        if let Some(connection) = connection_map.get(connection_id) {
-            connection
-                .request_peer_with_callback(
-                    SignalingType::ManagerUpdateSettings,
-                    Some(&settings),
-                    None,
-                )
-                .await?
-        } else {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Connection {} not found", connection_id),
-            );
-        }
-    };
-
-    if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0
-    {
-        return DeskSignalFacadeError::custom_error(
-            DeskErrorCode::new(response_state.error_code),
-            &response_state.message.clone().unwrap_or_default(),
-        );
-    }
+    let not_found = format!("Connection {connection_id} not found");
+    request_on_local_connection(
+        &connection_map,
+        connection_id,
+        SignalingType::ManagerUpdateSettings,
+        Some(&settings),
+        &not_found,
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().json(RestResponse::succeed()))
 }

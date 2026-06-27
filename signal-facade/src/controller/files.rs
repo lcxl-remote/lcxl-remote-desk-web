@@ -4,7 +4,8 @@ use desk_utils::error::DeskErrorCode;
 use crate::error::DeskSignalFacadeError;
 use crate::model::connection::SharedConnectionMap;
 use crate::model::files::{DeleteFileRequest, FileListParams, FileListResponse};
-use crate::model::signal::{ForwardSignalingSender, SignalingType};
+use crate::model::signal::SignalingType;
+use crate::service::request_on_local_connection;
 
 pub const TAG: &str = "File";
 
@@ -30,32 +31,15 @@ pub async fn list_files(
         );
     };
 
-    let response = {
-        let connection_map = connection_map.read().await;
-        if let Some(connection) = connection_map.get(&connection_id) {
-            connection
-                .request_peer_with_callback(
-                    SignalingType::ManagerFileList,
-                    Some(&query_list.into_inner()),
-                    None,
-                )
-                .await?
-        } else {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Connection {} not found", connection_id),
-            );
-        }
-    };
-
-    if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0
-    {
-        return DeskSignalFacadeError::custom_error(
-            DeskErrorCode::new(response_state.error_code),
-            &response_state.message.clone().unwrap_or_default(),
-        );
-    }
+    let not_found = format!("Connection {connection_id} not found");
+    let response = request_on_local_connection(
+        &connection_map,
+        &connection_id,
+        SignalingType::ManagerFileList,
+        Some(&query_list.into_inner()),
+        &not_found,
+    )
+    .await?;
 
     let file_list_response: FileListResponse = response.get_data()?;
     Ok(HttpResponse::Ok().json(file_list_response))
@@ -85,32 +69,15 @@ pub async fn delete_file(
         );
     };
 
-    let response = {
-        let connection_map = connection_map.read().await;
-        if let Some(connection) = connection_map.get(&connection_id) {
-            connection
-                .request_peer_with_callback(
-                    SignalingType::ManagerFileDelete,
-                    Some(&delete_file_request),
-                    None,
-                )
-                .await?
-        } else {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!("Connection {} not found", connection_id),
-            );
-        }
-    };
-
-    if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0
-    {
-        return DeskSignalFacadeError::custom_error(
-            DeskErrorCode::new(response_state.error_code),
-            &response_state.message.clone().unwrap_or_default(),
-        );
-    }
+    let not_found = format!("Connection {connection_id} not found");
+    request_on_local_connection(
+        &connection_map,
+        &connection_id,
+        SignalingType::ManagerFileDelete,
+        Some(&delete_file_request),
+        &not_found,
+    )
+    .await?;
 
     Ok(HttpResponse::Ok().finish())
 }

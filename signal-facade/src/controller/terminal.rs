@@ -1,10 +1,10 @@
 use actix_web::{HttpResponse, get, web};
-use desk_utils::error::DeskErrorCode;
 
 use crate::error::DeskSignalFacadeError;
 use crate::model::connection::SharedConnectionMap;
-use crate::model::signal::{ForwardSignalingSender, SignalingType};
+use crate::model::signal::SignalingType;
 use crate::model::terminal::{ListTerminalPath, TerminalList};
+use crate::service::request_on_local_connection;
 
 pub const TAG: &str = "Terminal";
 
@@ -21,31 +21,18 @@ pub async fn list_terminal(
     connection_map: web::Data<SharedConnectionMap>,
     path: web::Path<ListTerminalPath>,
 ) -> Result<HttpResponse, DeskSignalFacadeError> {
-    let response = {
-        let connection_map = connection_map.read().await;
-        if let Some(connection) = connection_map.get(&path.connection_id) {
-            connection
-                .request_peer_with_callback::<()>(SignalingType::ListTerminal, None, None)
-                .await?
-        } else {
-            return DeskSignalFacadeError::custom_error(
-                DeskErrorCode::REMOTE_DESK_OFFLINE,
-                &format!(
-                    "Connection {} is not found to list terminal",
-                    path.connection_id
-                ),
-            );
-        }
-    };
-
-    if let Some(ref response_state) = response.response_state
-        && response_state.error_code != 0
-    {
-        return DeskSignalFacadeError::custom_error(
-            DeskErrorCode::new(response_state.error_code),
-            &response_state.message.clone().unwrap_or_default(),
-        );
-    }
+    let not_found = format!(
+        "Connection {} is not found to list terminal",
+        path.connection_id
+    );
+    let response = request_on_local_connection::<()>(
+        &connection_map,
+        &path.connection_id,
+        SignalingType::ListTerminal,
+        None,
+        &not_found,
+    )
+    .await?;
 
     let terminal_list_response: TerminalList = response.get_data()?;
     Ok(HttpResponse::Ok().json(terminal_list_response))
