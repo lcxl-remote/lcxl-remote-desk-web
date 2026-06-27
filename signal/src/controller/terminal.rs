@@ -53,8 +53,12 @@ pub async fn open_terminal_session(
     info!("Proxying terminal connection to desk: {}", to_connection_id);
     let (res, ws_session, stream) = actix_ws::handle(&req, stream)?;
     let stream = stream
+        // Match the signaling endpoint's per-frame ceiling (above the actix-ws
+        // 64 KiB default) so a large terminal frame is not rejected with
+        // `ProtocolError::Overflow` before continuation aggregation.
+        .max_frame_size(desk_agent_protocol::diagnose::SIGNALING_FRAME_LIMIT)
         .aggregate_continuations()
-        .max_continuation_size(2_usize.pow(20));
+        .max_continuation_size(desk_agent_protocol::diagnose::SIGNALING_FRAME_LIMIT);
 
     let start_terminal_session = query_list.clone().into_inner();
 

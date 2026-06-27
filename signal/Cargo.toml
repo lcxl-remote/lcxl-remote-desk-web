@@ -40,3 +40,9 @@ awc = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+# Exercise the WebSocket frame codec directly so the signaling endpoint's
+# raised `max_frame_size` is regression-tested against the diagnose chunk size.
+actix-http = { workspace = true }
+tokio-util = { workspace = true }
