@@ -13,6 +13,10 @@ env_logger = { workspace = true }
 utoipa = { workspace = true }
 serde = { workspace = true }
 rand = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
