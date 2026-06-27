@@ -41,6 +41,66 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Overall request timeout: hosted models can take many seconds to first byte.
 const REQUEST_TIMEOUT_SECS: u64 = 180;
 
+/// Environment variable selecting the model-provider SSRF guard mode
+/// (`strict` / `relaxed` / `off`). The portable signal server is single-instance
+/// and single-account (the provider is configured by the trusted operator), so
+/// this is a plain process-level setting rather than cluster-shared state. It
+/// defaults to [`ProviderSsrfMode::Relaxed`]: a self-hosted brain commonly points
+/// at a local model gateway (`http://localhost:11434`, `http://192.168.x.x`),
+/// which Relaxed permits while still blocking the cloud-metadata floor.
+const SSRF_MODE_ENV: &str = "LRD_PROVIDER_SSRF_MODE";
+
+/// Resolve the configured SSRF mode from the environment, defaulting to
+/// `Relaxed` when unset or unparseable.
+pub(crate) fn configured_ssrf_mode() -> desk_utils::ssrf::ProviderSsrfMode {
+    ssrf_mode_from_env_value(std::env::var(SSRF_MODE_ENV).ok().as_deref())
+}
+
+/// Map a raw env value to a mode, defaulting to `Relaxed` when absent or
+/// unparseable. Split out from [`configured_ssrf_mode`] so it is unit-testable
+/// without mutating the process environment.
+fn ssrf_mode_from_env_value(raw: Option<&str>) -> desk_utils::ssrf::ProviderSsrfMode {
+    raw.and_then(|v| v.parse().ok())
+        .unwrap_or(desk_utils::ssrf::ProviderSsrfMode::Relaxed)
+}
+
+/// A connect-time DNS resolver that drops any candidate address blocked by the
+/// active [`desk_utils::ssrf::ProviderSsrfMode`]. Resolution happens per
+/// connection, just before connecting, so a domain that rebinds to an internal /
+/// metadata IP is still caught. The original host / SNI is preserved, so TLS
+/// certificate validation is unaffected.
+#[derive(Clone)]
+struct SsrfResolver {
+    mode: desk_utils::ssrf::ProviderSsrfMode,
+}
+
+impl actix_tls::connect::Resolve for SsrfResolver {
+    fn lookup<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> futures_util::future::LocalBoxFuture<
+        'a,
+        Result<Vec<std::net::SocketAddr>, Box<dyn std::error::Error>>,
+    > {
+        let mode = self.mode;
+        Box::pin(async move {
+            let resolved = tokio::net::lookup_host((host, port)).await?;
+            let allowed: Vec<std::net::SocketAddr> = resolved
+                .filter(|addr| desk_utils::ssrf::check_resolved_ip(addr.ip(), mode).is_ok())
+                .collect();
+            if allowed.is_empty() {
+                // Coarse error: the caller must not learn which internal address
+                // was probed.
+                return Err(Box::<dyn std::error::Error>::from(
+                    "provider host resolves to a blocked address",
+                ));
+            }
+            Ok(allowed)
+        })
+    }
+}
+
 /// Which provider wire dialect to speak.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dialect {
@@ -153,9 +213,18 @@ impl ModelSeam for SignalModelSeam {
         .expect("ring provider supports the default TLS protocol versions")
         .with_root_certificates(std::sync::Arc::new(root_store))
         .with_no_client_auth();
+        // Guard the outbound dial with the SSRF resolver: every resolved IP is
+        // validated just before connecting (authoritative anti-rebinding check).
+        let tcp = actix_tls::connect::Connector::new(actix_tls::connect::Resolver::custom(
+            SsrfResolver {
+                mode: configured_ssrf_mode(),
+            },
+        ))
+        .service();
         let client = awc::Client::builder()
             .connector(
                 awc::Connector::new()
+                    .connector(tcp)
                     .timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
                     .rustls_0_23(std::sync::Arc::new(tls)),
             )
@@ -606,6 +675,32 @@ impl AnthropicStreamState {
 mod tests {
     use super::*;
     use crate::model_provider::ResponseFormatMode;
+    use desk_utils::ssrf::ProviderSsrfMode;
+
+    #[test]
+    fn ssrf_mode_defaults_to_relaxed_and_parses_overrides() {
+        // Self-hosted default: unset / blank / garbage all fall back to Relaxed
+        // so a local model gateway works out of the box.
+        assert_eq!(ssrf_mode_from_env_value(None), ProviderSsrfMode::Relaxed);
+        assert_eq!(
+            ssrf_mode_from_env_value(Some("")),
+            ProviderSsrfMode::Relaxed
+        );
+        assert_eq!(
+            ssrf_mode_from_env_value(Some("bogus")),
+            ProviderSsrfMode::Relaxed
+        );
+        // Explicit overrides parse (case-insensitive).
+        assert_eq!(
+            ssrf_mode_from_env_value(Some("strict")),
+            ProviderSsrfMode::Strict
+        );
+        assert_eq!(
+            ssrf_mode_from_env_value(Some("STRICT")),
+            ProviderSsrfMode::Strict
+        );
+        assert_eq!(ssrf_mode_from_env_value(Some("off")), ProviderSsrfMode::Off);
+    }
 
     fn text_request(format: ResponseFormatSpec) -> ModelRequest {
         ModelRequest::text_only(

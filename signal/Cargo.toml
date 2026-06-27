@@ -40,6 +40,8 @@ awc = { workspace = true }
 rustls = { workspace = true }
 rustls-native-certs = { workspace = true }
 async-trait = { workspace = true }
+# Custom connect-time DNS resolver for the model-provider SSRF guard.
+actix-tls = { version = "3.5", default-features = false, features = ["connect"] }
 
 [dev-dependencies]
 # Exercise the WebSocket frame codec directly so the signaling endpoint's
