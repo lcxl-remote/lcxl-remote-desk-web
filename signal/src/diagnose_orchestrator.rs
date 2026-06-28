@@ -51,6 +51,33 @@ pub fn global_pending_store() -> std::sync::Arc<CollectPendingStore> {
         .clone()
 }
 
+/// Monotonic `seq` slots for the single-turn diagnose lifecycle frames. The
+/// browser applies `DiagnoseEvent` frames in `seq` order and ignores any `seq`
+/// it has already seen, so every frame a given run can emit must carry a
+/// strictly increasing value (a colliding `seq` is dropped as a stale replay,
+/// hanging the panel). The lifecycle is linear and emits at most three frames:
+/// `collecting` → `modeling` → a single terminal `final`/`error`. A failure
+/// short-circuits to a terminal frame at the stage it reached, so the slots are
+/// shared across the mutually-exclusive success and failure paths:
+///
+/// - [`COLLECTING`]: the opening `collecting` status, or a pre-collection
+///   terminal error (a replay clash — the only frame on that path).
+/// - [`MODELING`]: the `modeling` status, or a terminal error raised after
+///   collection but before the model dial (host offline, push / collect failed).
+/// - [`TERMINAL`]: the model phase's terminal `final` / `error`.
+///
+/// This path streams no `partial` frames (it dials with a [`NullTurnSink`]); a
+/// future streaming variant would need a running counter instead of fixed slots.
+mod seq {
+    /// The opening `collecting` status, or a pre-collection terminal error.
+    pub const COLLECTING: u32 = 0;
+    /// The `modeling` status, or a terminal error after collection but before
+    /// the model dial.
+    pub const MODELING: u32 = 1;
+    /// The model phase's terminal `final` / `error` frame.
+    pub const TERMINAL: u32 = 2;
+}
+
 fn transport_error(message: impl Into<String>) -> AgentError {
     AgentError {
         kind: AgentErrorKind::TransportError,
@@ -124,12 +151,13 @@ pub async fn stream_diagnose_error(
     connection_map: &SharedConnectionMap,
     browser_connection_id: &str,
     request_id: &str,
+    seq: u32,
     error: AgentError,
 ) {
     stream_event(
         connection_map,
         browser_connection_id,
-        &DiagnoseEvent::error(request_id, 0, error),
+        &DiagnoseEvent::error(request_id, seq, error),
     )
     .await;
 }
@@ -157,6 +185,7 @@ pub async fn start_diagnosis(
             connection_map,
             browser_connection_id,
             request_id,
+            seq::COLLECTING,
             transport_error("a diagnosis with this request id is already running"),
         )
         .await;
@@ -165,7 +194,7 @@ pub async fn start_diagnosis(
     stream_event(
         connection_map,
         browser_connection_id,
-        &DiagnoseEvent::status(request_id, 0, "collecting"),
+        &DiagnoseEvent::status(request_id, seq::COLLECTING, "collecting"),
     )
     .await;
 
@@ -179,6 +208,7 @@ pub async fn start_diagnosis(
             connection_map,
             browser_connection_id,
             request_id,
+            seq::MODELING,
             AgentError {
                 kind: AgentErrorKind::TargetOffline,
                 message: "target host is not connected".to_string(),
@@ -195,6 +225,7 @@ pub async fn start_diagnosis(
             connection_map,
             browser_connection_id,
             request_id,
+            seq::MODELING,
             transport_error(format!("failed to start evidence collection: {e}")),
         )
         .await;
@@ -248,7 +279,7 @@ pub async fn run_model_phase(
     stream_event(
         map,
         &ctx.browser_connection_id,
-        &DiagnoseEvent::status(&ctx.request_id, 0, "modeling"),
+        &DiagnoseEvent::status(&ctx.request_id, seq::MODELING, "modeling"),
     )
     .await;
 
@@ -259,6 +290,7 @@ pub async fn run_model_phase(
                 map,
                 &ctx.browser_connection_id,
                 &ctx.request_id,
+                seq::TERMINAL,
                 transport_error(format!("failed to load model provider config: {e}")),
             )
             .await;
@@ -268,7 +300,14 @@ pub async fn run_model_phase(
     let seam = match SignalModelSeam::from_config(&config) {
         Ok(s) => s,
         Err(e) => {
-            stream_diagnose_error(map, &ctx.browser_connection_id, &ctx.request_id, e).await;
+            stream_diagnose_error(
+                map,
+                &ctx.browser_connection_id,
+                &ctx.request_id,
+                seq::TERMINAL,
+                e,
+            )
+            .await;
             return;
         }
     };
@@ -290,7 +329,14 @@ pub async fn run_model_phase(
     let turn = match seam.call(request, &mut sink).await {
         Ok(t) => t,
         Err(e) => {
-            stream_diagnose_error(map, &ctx.browser_connection_id, &ctx.request_id, e).await;
+            stream_diagnose_error(
+                map,
+                &ctx.browser_connection_id,
+                &ctx.request_id,
+                seq::TERMINAL,
+                e,
+            )
+            .await;
             return;
         }
     };
@@ -313,7 +359,7 @@ pub async fn run_model_phase(
     stream_event(
         map,
         &ctx.browser_connection_id,
-        &DiagnoseEvent::final_result(&ctx.request_id, 1, diagnosis),
+        &DiagnoseEvent::final_result(&ctx.request_id, seq::TERMINAL, diagnosis),
     )
     .await;
 }
@@ -350,8 +396,14 @@ pub async fn on_collect_response(
                 ));
             }
             AcceptOutcome::Failed { ctx, error } => {
-                stream_diagnose_error(map, &ctx.browser_connection_id, &ctx.request_id, error)
-                    .await;
+                stream_diagnose_error(
+                    map,
+                    &ctx.browser_connection_id,
+                    &ctx.request_id,
+                    seq::MODELING,
+                    error,
+                )
+                .await;
             }
             AcceptOutcome::Rejected(reason) => {
                 log::warn!("[diagnose] rejected collect chunk from {source_id}: {reason}");
@@ -367,8 +419,14 @@ pub async fn on_collect_response(
             if let AcceptOutcome::Failed { ctx, error } =
                 pending.fail(&source_id, &err.request_id, error)
             {
-                stream_diagnose_error(map, &ctx.browser_connection_id, &ctx.request_id, error)
-                    .await;
+                stream_diagnose_error(
+                    map,
+                    &ctx.browser_connection_id,
+                    &ctx.request_id,
+                    seq::MODELING,
+                    error,
+                )
+                .await;
             }
         }
     }
@@ -424,6 +482,33 @@ mod tests {
                 assert!(schema.is_object());
             }
             _ => panic!("expected json_schema spec"),
+        }
+    }
+
+    /// Every path the single-turn orchestrator can take, expressed as the ordered
+    /// `seq` of the `DiagnoseEvent` frames it streams to the browser. The panel
+    /// ignores any frame whose `seq` it has already applied (a stale-replay guard),
+    /// so each path must be **strictly increasing** — a colliding slot (the prior
+    /// `collecting == modeling == error` bug) silently drops the later frame and
+    /// hangs the panel on the earlier status.
+    #[test]
+    fn every_lifecycle_path_emits_strictly_increasing_seq() {
+        let paths: &[&[u32]] = &[
+            // Happy path: collecting -> modeling -> final.
+            &[seq::COLLECTING, seq::MODELING, seq::TERMINAL],
+            // Host offline / collect push failed (after collecting).
+            &[seq::COLLECTING, seq::MODELING],
+            // Collection failed / edge error (after collecting, before the dial).
+            &[seq::COLLECTING, seq::MODELING],
+            // Model dial failed, e.g. a gateway 429 (after modeling).
+            &[seq::COLLECTING, seq::MODELING, seq::TERMINAL],
+            // Duplicate-request clash before collecting: a single terminal frame.
+            &[seq::COLLECTING],
+        ];
+        for path in paths {
+            for w in path.windows(2) {
+                assert!(w[0] < w[1], "non-monotonic seq in path {path:?}");
+            }
         }
     }
 
