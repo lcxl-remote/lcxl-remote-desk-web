@@ -9,18 +9,18 @@ import type { QueryKey, QueryClient, QueryObserverOptions, UseQueryResult } from
 import { openSignalingHandle } from "../../clients.ts";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-export const openSignalingHandleQueryKey = (api_version: OpenSignalingHandlePathParams["api_version"] | undefined, build_number: OpenSignalingHandlePathParams["build_number"] | undefined, commit_hash: OpenSignalingHandlePathParams["commit_hash"] | undefined, remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"] | undefined, operation_system: OpenSignalingHandlePathParams["operation_system"] | undefined, display_name: OpenSignalingHandlePathParams["display_name"] | undefined, client_id: OpenSignalingHandlePathParams["client_id"] | undefined, token: OpenSignalingHandlePathParams["token"] | undefined) => [{ url: '/api/desk/signaling' }] as const
+export const openSignalingHandleQueryKey = (api_version: OpenSignalingHandlePathParams["api_version"] | undefined, build_number: OpenSignalingHandlePathParams["build_number"] | undefined, commit_hash: OpenSignalingHandlePathParams["commit_hash"] | undefined, remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"] | undefined, operation_system: OpenSignalingHandlePathParams["operation_system"] | undefined, display_name: OpenSignalingHandlePathParams["display_name"] | undefined, client_id: OpenSignalingHandlePathParams["client_id"] | undefined, token: OpenSignalingHandlePathParams["token"] | undefined, debug_build: OpenSignalingHandlePathParams["debug_build"] | undefined, repository_url: OpenSignalingHandlePathParams["repository_url"] | undefined) => [{ url: '/api/desk/signaling' }] as const
 
 export type OpenSignalingHandleQueryKey = ReturnType<typeof openSignalingHandleQueryKey>
 
-export function openSignalingHandleQueryOptions(api_version: OpenSignalingHandlePathParams["api_version"] | undefined, build_number: OpenSignalingHandlePathParams["build_number"] | undefined, commit_hash: OpenSignalingHandlePathParams["commit_hash"] | undefined, remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"] | undefined, operation_system: OpenSignalingHandlePathParams["operation_system"] | undefined, display_name: OpenSignalingHandlePathParams["display_name"] | undefined, client_id: OpenSignalingHandlePathParams["client_id"] | undefined, token: OpenSignalingHandlePathParams["token"] | undefined, config: Partial<RequestConfig> & { client?: Client } = {}) {
+export function openSignalingHandleQueryOptions(api_version: OpenSignalingHandlePathParams["api_version"] | undefined, build_number: OpenSignalingHandlePathParams["build_number"] | undefined, commit_hash: OpenSignalingHandlePathParams["commit_hash"] | undefined, remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"] | undefined, operation_system: OpenSignalingHandlePathParams["operation_system"] | undefined, display_name: OpenSignalingHandlePathParams["display_name"] | undefined, client_id: OpenSignalingHandlePathParams["client_id"] | undefined, token: OpenSignalingHandlePathParams["token"] | undefined, debug_build: OpenSignalingHandlePathParams["debug_build"] | undefined, repository_url: OpenSignalingHandlePathParams["repository_url"] | undefined, config: Partial<RequestConfig> & { client?: Client } = {}) {
 
-        const queryKey = openSignalingHandleQueryKey(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token)
+        const queryKey = openSignalingHandleQueryKey(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token, debug_build, repository_url)
         return queryOptions<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, OpenSignalingHandleQueryResponse, typeof queryKey>({
-         enabled: !!(api_version && build_number && commit_hash && remote_desk_type && operation_system && display_name && client_id && token),
+         enabled: !!(api_version && build_number && commit_hash && remote_desk_type && operation_system && display_name && client_id && token && debug_build && repository_url),
          queryKey,
          queryFn: async ({ signal }) => {
-            return openSignalingHandle(api_version!, build_number!, commit_hash!, remote_desk_type!, operation_system!, display_name!, client_id!, token!, { ...config, signal: config.signal ?? signal })
+            return openSignalingHandle(api_version!, build_number!, commit_hash!, remote_desk_type!, operation_system!, display_name!, client_id!, token!, debug_build!, repository_url!, { ...config, signal: config.signal ?? signal })
          },
         })
 
@@ -30,7 +30,7 @@ export function openSignalingHandleQueryOptions(api_version: OpenSignalingHandle
  * @summary Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.
  * {@link /api/desk/signaling}
  */
-export function useOpenSignalingHandle<TData = OpenSignalingHandleQueryResponse, TQueryData = OpenSignalingHandleQueryResponse, TQueryKey extends QueryKey = OpenSignalingHandleQueryKey>(api_version: OpenSignalingHandlePathParams["api_version"] | undefined, build_number: OpenSignalingHandlePathParams["build_number"] | undefined, commit_hash: OpenSignalingHandlePathParams["commit_hash"] | undefined, remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"] | undefined, operation_system: OpenSignalingHandlePathParams["operation_system"] | undefined, display_name: OpenSignalingHandlePathParams["display_name"] | undefined, client_id: OpenSignalingHandlePathParams["client_id"] | undefined, token: OpenSignalingHandlePathParams["token"] | undefined, options: 
+export function useOpenSignalingHandle<TData = OpenSignalingHandleQueryResponse, TQueryData = OpenSignalingHandleQueryResponse, TQueryKey extends QueryKey = OpenSignalingHandleQueryKey>(api_version: OpenSignalingHandlePathParams["api_version"] | undefined, build_number: OpenSignalingHandlePathParams["build_number"] | undefined, commit_hash: OpenSignalingHandlePathParams["commit_hash"] | undefined, remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"] | undefined, operation_system: OpenSignalingHandlePathParams["operation_system"] | undefined, display_name: OpenSignalingHandlePathParams["display_name"] | undefined, client_id: OpenSignalingHandlePathParams["client_id"] | undefined, token: OpenSignalingHandlePathParams["token"] | undefined, debug_build: OpenSignalingHandlePathParams["debug_build"] | undefined, repository_url: OpenSignalingHandlePathParams["repository_url"] | undefined, options: 
 {
   query?: Partial<QueryObserverOptions<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, TData, TQueryData, TQueryKey>> & { client?: QueryClient },
   client?: Partial<RequestConfig> & { client?: Client }
@@ -39,11 +39,11 @@ export function useOpenSignalingHandle<TData = OpenSignalingHandleQueryResponse,
 
          const { query: queryConfig = {}, client: config = {} } = options ?? {}
          const { client: queryClient, ...resolvedOptions } = queryConfig
-         const queryKey = resolvedOptions?.queryKey ?? openSignalingHandleQueryKey(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token)
+         const queryKey = resolvedOptions?.queryKey ?? openSignalingHandleQueryKey(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token, debug_build, repository_url)
          
 
          const query = useQuery({
-          ...openSignalingHandleQueryOptions(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token, config),
+          ...openSignalingHandleQueryOptions(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token, debug_build, repository_url, config),
           ...resolvedOptions,
           queryKey,
          } as unknown as QueryObserverOptions, queryClient) as UseQueryResult<TData, ResponseErrorConfig<Error>> & { queryKey: TQueryKey }

@@ -1141,6 +1141,8 @@ mod tests {
             display_name: None,
             client_id: None,
             token: Some("test-token".into()),
+            debug_build: false,
+            repository_url: None,
         };
         let query = serde_urlencoded::to_string(&version).unwrap();
         let uri = format!("/api/desk/signaling?{query}");

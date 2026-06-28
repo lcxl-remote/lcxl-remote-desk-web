@@ -22,6 +22,14 @@ pub struct VersionInfo {
     pub client_id: Option<String>,
     /// Authentication token for server nodes or API clients.
     pub token: Option<String>,
+    /// Whether this binary was compiled with debug assertions (a debug build).
+    /// Defaults to `false` for peers that do not report it.
+    #[serde(default)]
+    pub debug_build: bool,
+    /// Source repository URL this binary was built from, when known.
+    /// Defaults to `None` for peers that do not report it.
+    #[serde(default)]
+    pub repository_url: Option<String>,
 }
 
 impl VersionInfo {
@@ -42,6 +50,52 @@ impl VersionInfo {
             display_name,
             client_id,
             token: None,
+            // `cfg!(debug_assertions)` is resolved against the build profile of
+            // the binary that constructs this info, so it reports our own build.
+            debug_build: cfg!(debug_assertions),
+            repository_url: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::signal::RemoteDeskTypeEnum;
+
+    #[test]
+    fn new_stamps_build_profile_and_no_repo() {
+        let info = VersionInfo::new(1, 42, "abc".into(), RemoteDeskTypeEnum::Server, None, None);
+        assert_eq!(info.debug_build, cfg!(debug_assertions));
+        assert_eq!(info.repository_url, None);
+    }
+
+    #[test]
+    fn query_round_trip_carries_new_fields() {
+        let mut info =
+            VersionInfo::new(1, 42, "abc".into(), RemoteDeskTypeEnum::Server, None, None);
+        info.debug_build = true;
+        info.repository_url = Some("https://example.test/repo.git".into());
+
+        let query = serde_urlencoded::to_string(&info).unwrap();
+        let decoded: VersionInfo = serde_urlencoded::from_str(&query).unwrap();
+
+        assert!(decoded.debug_build);
+        assert_eq!(
+            decoded.repository_url.as_deref(),
+            Some("https://example.test/repo.git")
+        );
+    }
+
+    #[test]
+    fn missing_new_fields_fall_back_to_defaults() {
+        // A peer built before these fields existed omits them from the query;
+        // `#[serde(default)]` must keep deserialization succeeding.
+        let query = "api_version=1&build_number=0&commit_hash=x\
+            &remote_desk_type=server&operation_system=Windows";
+        let decoded: VersionInfo = serde_urlencoded::from_str(query).unwrap();
+
+        assert!(!decoded.debug_build);
+        assert_eq!(decoded.repository_url, None);
     }
 }

@@ -956,6 +956,9 @@ async fn maintain_proxy_connection(
         Some(client_id),
     );
     version_info.token = Some(auth_token);
+    if !crate::version::SERVER_REPOSITORY_URL.is_empty() {
+        version_info.repository_url = Some(crate::version::SERVER_REPOSITORY_URL.to_string());
+    }
     let version_query = serde_urlencoded::to_string(&version_info)
         .map_err(|e| format!("Failed to encode version info: {e}"))?;
 

@@ -40,6 +40,27 @@ fn main() {
     // 4. Set commit hash as environment variable (rustc-env)
     println!("cargo:rustc-env=SERVER_COMMIT_HASH={}", commit_hash);
 
+    // 4b. Resolve the source repository URL. A release/CI build can pin a clean,
+    //     public URL via the `SERVER_REPOSITORY_URL` env var (which also avoids
+    //     embedding a private remote such as an internal SSH host); otherwise it
+    //     falls back to the local `origin` remote, then to empty when unknown.
+    let repository_url = match env::var("SERVER_REPOSITORY_URL") {
+        Ok(url) if !url.trim().is_empty() => url.trim().to_string(),
+        _ => {
+            let output_remote = Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .output();
+            match output_remote {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                _ => String::new(),
+            }
+        }
+    };
+    println!("cargo:rerun-if-env-changed=SERVER_REPOSITORY_URL");
+    println!("cargo:rustc-env=SERVER_REPOSITORY_URL={}", repository_url);
+
     // 5. Trigger rebuild condition
     // Dynamically resolve git directory to support submodules and different layouts
     let git_dir_output = Command::new("git")

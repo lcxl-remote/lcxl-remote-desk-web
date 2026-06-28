@@ -572,7 +572,7 @@ export async function updateVirtualDisplaySettings(data: UpdateVirtualDisplaySet
   return res.data
 }
 
-function getOpenSignalingHandleUrl(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"]) {
+function getOpenSignalingHandleUrl(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"], debug_build: OpenSignalingHandlePathParams["debug_build"], repository_url: OpenSignalingHandlePathParams["repository_url"]) {
   const res = { method: 'GET', url: `/api/desk/signaling` as const }
   return res
 }
@@ -581,12 +581,12 @@ function getOpenSignalingHandleUrl(api_version: OpenSignalingHandlePathParams["a
  * @summary Open Signaling Handle, return websocket stream. NOTE: The OpenAPI generated typescript service is not right.
  * {@link /api/desk/signaling}
  */
-export async function openSignalingHandle(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"], config: Partial<RequestConfig> & { client?: Client } = {}) {
+export async function openSignalingHandle(api_version: OpenSignalingHandlePathParams["api_version"], build_number: OpenSignalingHandlePathParams["build_number"], commit_hash: OpenSignalingHandlePathParams["commit_hash"], remote_desk_type: OpenSignalingHandlePathParams["remote_desk_type"], operation_system: OpenSignalingHandlePathParams["operation_system"], display_name: OpenSignalingHandlePathParams["display_name"], client_id: OpenSignalingHandlePathParams["client_id"], token: OpenSignalingHandlePathParams["token"], debug_build: OpenSignalingHandlePathParams["debug_build"], repository_url: OpenSignalingHandlePathParams["repository_url"], config: Partial<RequestConfig> & { client?: Client } = {}) {
   const { client: request = fetch, ...requestConfig } = config
 
 
 
-  const res = await request<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getOpenSignalingHandleUrl(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token).url.toString(), ... requestConfig })
+  const res = await request<OpenSignalingHandleQueryResponse, ResponseErrorConfig<Error>, unknown>({ method : "GET", url : getOpenSignalingHandleUrl(api_version, build_number, commit_hash, remote_desk_type, operation_system, display_name, client_id, token, debug_build, repository_url).url.toString(), ... requestConfig })
   return res.data
 }
 

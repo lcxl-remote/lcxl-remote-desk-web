@@ -29,3 +29,6 @@ bytestring = { workspace = true }
 futures-util = { workspace = true }
 log = { workspace = true }
 futures = { workspace = true }
+
+[dev-dependencies]
+serde_urlencoded = { workspace = true }

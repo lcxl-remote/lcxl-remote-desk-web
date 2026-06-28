@@ -296,6 +296,11 @@ export type VersionInfo = {
     */
     commit_hash: string;
     /**
+     * @description Whether this binary was compiled with debug assertions (a debug build).\nDefaults to `false` for peers that do not report it.
+     * @type boolean | undefined
+    */
+    debug_build?: boolean;
+    /**
      * @description Display name of the remote desk.
      * @type string,null
     */
@@ -310,6 +315,11 @@ export type VersionInfo = {
      * @type string
     */
     remote_desk_type: RemoteDeskTypeEnum;
+    /**
+     * @description Source repository URL this binary was built from, when known.\nDefaults to `None` for peers that do not report it.
+     * @type string,null
+    */
+    repository_url?: string | null;
     /**
      * @description Authentication token for server nodes or API clients.
      * @type string,null
@@ -4137,6 +4147,16 @@ export type OpenSignalingHandlePathParams = {
      * @type string,null
     */
     token: string | null;
+    /**
+     * @description Whether this binary was compiled with debug assertions (a debug build).\nDefaults to `false` for peers that do not report it.
+     * @type boolean
+    */
+    debug_build: boolean;
+    /**
+     * @description Source repository URL this binary was built from, when known.\nDefaults to `None` for peers that do not report it.
+     * @type string,null
+    */
+    repository_url: string | null;
 };
 
 /**

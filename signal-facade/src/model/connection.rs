@@ -237,6 +237,8 @@ mod tests {
             display_name: None,
             client_id: None,
             token: None,
+            debug_build: false,
+            repository_url: None,
         }
     }
 

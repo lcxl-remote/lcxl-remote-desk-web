@@ -155,6 +155,8 @@ pub async fn open_signaling_handle(
         display_name: Some(user.name.clone()),
         client_id: None,
         token: None,
+        debug_build: false,
+        repository_url: None,
     });
     // Overwrite any self-reported role with the server-adjudicated one so the
     // downstream handler (device registration, presence) trusts only this.
