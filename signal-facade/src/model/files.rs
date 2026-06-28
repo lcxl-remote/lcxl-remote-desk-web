@@ -45,7 +45,7 @@ pub struct FileListParams {
     pub end_modified_time: Option<DateTime<Local>>,
     /// Connection ID for remote desk
     pub connection_id: Option<String>,
-    /// Target device primary key (manager multi-instance addressing). The manager
+    /// Target device handle (UUID; manager multi-instance addressing). The manager
     /// routes by this; the OSS single-instance signal leaves it `None` and routes
     /// by `connection_id` (dual-target wire model).
     pub device_id: Option<String>,
@@ -182,7 +182,7 @@ pub struct DeleteFileRequest {
     /// Whether to delete permanently or move to trash
     pub delete_permanently: Option<bool>,
     pub connection_id: Option<String>,
-    /// Target device primary key (manager multi-instance addressing). See
+    /// Target device handle (UUID; manager multi-instance addressing). See
     /// [`FileListParams::device_id`] for the dual-target rationale.
     pub device_id: Option<String>,
 }
@@ -233,7 +233,7 @@ mod wincode_tests {
                     .expect("valid local time"),
             ),
             connection_id: Some("conn-fl".to_string()),
-            device_id: Some("42".to_string()),
+            device_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -332,7 +332,7 @@ mod wincode_tests {
             file_path: r"C:\tmp\junk.txt".to_string(),
             delete_permanently: Some(true),
             connection_id: Some("conn-del".to_string()),
-            device_id: Some("42".to_string()),
+            device_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");

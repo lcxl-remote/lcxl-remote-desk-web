@@ -14,11 +14,12 @@ pub struct ConnectionModel {
     pub ip: Option<String>,
     /// Version info of the connection
     pub version_info: VersionInfo,
-    /// Device primary key for multi-instance addressing. Filled by the manager
-    /// (whose presence registry is keyed by device id); `None` on the OSS
-    /// single-instance signal server, which has no device registry. Dual-target
-    /// field, not a backward-compat field: control ends address a manager device
-    /// by this id and an OSS connection by `connection_id`.
+    /// External device handle (a non-enumerable UUID) for multi-instance
+    /// addressing. Filled by the manager (whose presence registry maps it to the
+    /// internal device id); `None` on the OSS single-instance signal server, which
+    /// has no device registry. Dual-target field, not a backward-compat field:
+    /// control ends address a manager device by this handle and an OSS connection
+    /// by `connection_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     /// Owning manager instance node id for cross-instance routing. Filled by the
@@ -261,17 +262,21 @@ mod tests {
     #[test]
     fn connection_model_round_trips_multi_instance_fields() {
         // Manager fills both; they must survive serialize -> deserialize so a
-        // control end can address the device by id and route by owner node.
+        // control end can address the device by its UUID handle and route by owner
+        // node.
         let model = ConnectionModel {
             connection_id: "c1".into(),
             ip: Some("203.0.113.4".into()),
             version_info: sample_version_info(),
-            device_id: Some("42".into()),
+            device_id: Some("11111111-1111-4111-8111-111111111111".into()),
             owner_node_id: Some("node-a".into()),
         };
         let json = serde_json::to_string(&model).unwrap();
         let back: ConnectionModel = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.device_id.as_deref(), Some("42"));
+        assert_eq!(
+            back.device_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
         assert_eq!(back.owner_node_id.as_deref(), Some("node-a"));
     }
 

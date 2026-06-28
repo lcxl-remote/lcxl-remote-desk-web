@@ -7,7 +7,7 @@ use utoipa::{IntoParams, ToSchema};
 pub struct StartTerminalSession {
     /// The command to start the terminal session. with the format of "path/to/executable,arg1,arg2"
     pub command: String,
-    /// Target device primary key (manager multi-instance addressing). The manager
+    /// Target device handle (UUID; manager multi-instance addressing). The manager
     /// routes by this; the OSS single-instance signal leaves it `None` and routes
     /// by the path `connection_id` (dual-target wire model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,7 +47,7 @@ pub struct ListTerminalPath {
 /// ignores it and routes by the path `connection_id` (dual-target wire model).
 #[derive(Clone, Debug, Default, Deserialize, Serialize, IntoParams, ToSchema)]
 pub struct ListTerminalQuery {
-    /// Target device primary key (manager multi-instance addressing); `None` on
+    /// Target device handle (UUID; manager multi-instance addressing); `None` on
     /// the OSS single-instance signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
@@ -96,7 +96,7 @@ mod wincode_tests {
     fn start_terminal_session_round_trips_wincode() {
         let original = StartTerminalSession {
             command: r"C:\Windows\System32\cmd.exe,/k,echo,hello".to_string(),
-            device_id: Some("42".to_string()),
+            device_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         };
         let config = unbounded_config();
         let bytes = wincode::config::serialize(&original, config).expect("encode");
@@ -143,8 +143,8 @@ mod wincode_tests {
         // The manager routes by device_id; the OSS signal leaves it absent. The
         // query must parse with it present and serialize without it when None so
         // an OSS request carries no stray field (dual-target wire model).
-        let with_device: ListTerminalQuery = serde_json::from_str(r#"{"device_id":"42"}"#).unwrap();
-        assert_eq!(with_device.device_id.as_deref(), Some("42"));
+        let with_device: ListTerminalQuery = serde_json::from_str(r#"{"device_id":"11111111-1111-4111-8111-111111111111"}"#).unwrap();
+        assert_eq!(with_device.device_id.as_deref(), Some("11111111-1111-4111-8111-111111111111"));
 
         let empty: ListTerminalQuery = serde_json::from_str("{}").unwrap();
         assert!(empty.device_id.is_none());
