@@ -203,6 +203,15 @@ impl DeskErrorCode {
     /// outcome that stops auto-reconnect. Never an HTTP status.
     pub const DEVICE_CLIENT_ID_REQUIRED: DeskErrorCode = DeskErrorCode(47);
 
+    /// A new API token could not be created because the user already holds the
+    /// maximum number of non-expired tokens (enabled or disabled both occupy a
+    /// slot; only deleting one frees capacity). The cap shares the device-quota
+    /// default threshold. The console surfaces the message; an auto-creating host
+    /// client (e.g. the mobile host) treats it as a stop signal and prompts the
+    /// user to remove a token or supply an existing one. Carried in
+    /// `RestResponse.code`, never an HTTP status.
+    pub const API_TOKEN_QUOTA_EXCEEDED: DeskErrorCode = DeskErrorCode(48);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
