@@ -289,6 +289,119 @@ pub trait FetchConnectionsResolver: Send + Sync {
     >;
 }
 
+// ====== PeerFrameRelay trait ======
+
+/// Result of a cross-instance peer-frame relay attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayOutcome {
+    /// The frame was delivered to the peer connection on its owning instance.
+    Delivered,
+    /// No instance currently holds the target connection (genuinely offline).
+    NotFound,
+}
+
+/// Relays a signaling frame whose `to_connection_id` this instance does not hold
+/// locally, by forwarding it to the instance that does.
+///
+/// The signal server leaves this unset — it is single-instance, so a local miss is
+/// a genuine "connection not found". The manager implements it: it resolves the
+/// target connection to its owning instance via the connection-location registry
+/// and forwards the frame over an authenticated internal hop, where the owning
+/// instance delivers it to the local peer ([`deliver_to_local_peer`]). Both relay
+/// directions flow through this — browser→host (OFFER / ICE) and host→browser
+/// (ANSWER / ICE) — because each frame is routed independently by its
+/// `to_connection_id`, and a browser connection (absent from device presence) is
+/// locatable here just like a host.
+///
+/// The returned future is intentionally **not** `Send`: the whole signaling stack
+/// runs on the single-threaded actix runtime (`rt::spawn`) on both the manager and
+/// the OSS signal server, and the manager's implementation drives the internal hop
+/// with `awc` (which is `!Send`). The trait object itself is `Send + Sync` so it can
+/// live in the shared handler.
+pub trait PeerFrameRelay: Send + Sync {
+    fn relay<'a>(
+        &'a self,
+        to_connection_id: &'a str,
+        from_connection_id: &'a str,
+        model: &'a SignalingModel,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RelayOutcome, DeskSignalFacadeError>> + 'a>,
+    >;
+}
+
+/// Place a signaling frame onto the WebSocket of the peer `to_connection_id` if
+/// it is held in `connection_map`, rewriting the frame's from/to fields.
+///
+/// Returns `Ok(true)` if delivered, `Ok(false)` if the target is not in this
+/// instance's map. The target [`ConnectionState`] is cloned out and the map lock
+/// dropped before the `send_to_peer` await, so the map is never held across I/O.
+///
+/// Shared by [`SignalingHandler::forward_to_peer`] (its local branch) and the
+/// manager's internal relay landing, so cross-instance delivery reproduces
+/// single-instance semantics exactly. The `request_callback_map` shortcut stays in
+/// `forward_to_peer` (it concerns the *origin* connection awaiting a reply, which
+/// is always co-located with that connection); the relay landing only places the
+/// frame onto the target peer's socket.
+pub async fn deliver_to_local_peer(
+    connection_map: &SharedConnectionMap,
+    from_connection_id: &str,
+    to_connection_id: &str,
+    model: &SignalingModel,
+) -> Result<bool, DeskSignalFacadeError> {
+    let target = {
+        let map = connection_map.read().await;
+        map.get(to_connection_id).cloned()
+    };
+    let Some(target) = target else {
+        return Ok(false);
+    };
+    target.send_to_peer(from_connection_id, model).await?;
+    Ok(true)
+}
+
+/// Decide the outcome for a frame whose target connection is not held locally: try
+/// the cross-instance [`PeerFrameRelay`] (if configured), otherwise honor
+/// `ignore_connection_not_found` or surface `SESSION_NOT_FOUND`.
+///
+/// Split out of [`SignalingHandler::forward_to_peer`] so the relay decision is
+/// unit-testable without a full handler (which needs a live WS `Session`). With
+/// no relay (the signal server) this is exactly the original single-instance
+/// behavior: a local miss is a genuine "connection not found".
+async fn relay_or_not_found(
+    peer_relay: &Option<Arc<dyn PeerFrameRelay>>,
+    to_connection_id: &str,
+    from_connection_id: &str,
+    model: &SignalingModel,
+    ignore_connection_not_found: bool,
+) -> Result<(), DeskSignalFacadeError> {
+    if let Some(relay) = peer_relay {
+        match relay
+            .relay(to_connection_id, from_connection_id, model)
+            .await?
+        {
+            RelayOutcome::Delivered => return Ok(()),
+            // Held by no instance — fall through to the not-found handling.
+            RelayOutcome::NotFound => {}
+        }
+    }
+
+    if ignore_connection_not_found {
+        log::warn!(
+            "Connection {} is not found to forward signaling, ignore it: {:?}",
+            to_connection_id,
+            model
+        );
+        return Ok(());
+    }
+    DeskSignalFacadeError::custom_error(
+        DeskErrorCode::SESSION_NOT_FOUND,
+        &format!(
+            "Connection {} is not found to forward signaling: {:?}",
+            to_connection_id, model
+        ),
+    )
+}
+
 // ====== 通用工具函数 ======
 
 pub fn parse_ip_from_peer_addr(addr: &str) -> Option<IpAddr> {
@@ -437,6 +550,11 @@ pub struct SignalingHandler<U: SignalingUser> {
     /// `None` in the signal server, where the handler falls back to the local
     /// connection map.
     pub fetch_connections_resolver: Option<Arc<dyn FetchConnectionsResolver>>,
+    /// Cross-instance relay for frames whose target connection this instance does
+    /// not hold. `Some` only in the manager (which routes the frame to the owning
+    /// instance via the connection-location registry); `None` in the signal server,
+    /// where a local miss is a genuine "connection not found" (single instance).
+    pub peer_relay: Option<Arc<dyn PeerFrameRelay>>,
 }
 
 impl<U: SignalingUser> Drop for SignalingHandler<U> {
@@ -606,6 +724,7 @@ impl<U: SignalingUser> SignalingHandler<U> {
             edge_exec_observer: None,
             remote_tool_observer: None,
             fetch_connections_resolver: None,
+            peer_relay: None,
         })
     }
 
@@ -658,6 +777,14 @@ impl<U: SignalingUser> SignalingHandler<U> {
         self
     }
 
+    /// Attach a cross-instance peer-frame relay (the manager's connection-location
+    /// routed internal hop). The signal server never calls this, so a frame whose
+    /// target connection is not held locally is a genuine "connection not found".
+    pub fn with_peer_relay(mut self, relay: Arc<dyn PeerFrameRelay>) -> Self {
+        self.peer_relay = Some(relay);
+        self
+    }
+
     /// Forward a signaling message to target peer
     pub async fn forward_to_peer(
         &self,
@@ -696,32 +823,30 @@ impl<U: SignalingUser> SignalingHandler<U> {
             return Ok(());
         }
         let to_connection_id = signaling_model.check_and_get_to_connection_id()?;
-        let connection_map = self.connection_map.read().await;
-        let to_connection_state =
-            if let Some(connection_state) = connection_map.get(to_connection_id) {
-                connection_state
-            } else {
-                if ignore_connection_not_found {
-                    log::warn!(
-                        "Connection {} is not found to forward signaling, ignore it: {:?}",
-                        to_connection_id,
-                        signaling_model
-                    );
-                    return Ok(());
-                }
-                return DeskSignalFacadeError::custom_error(
-                    DeskErrorCode::SESSION_NOT_FOUND,
-                    &format!(
-                        "Connection {} is not found to forward signaling: {:?}",
-                        to_connection_id, signaling_model
-                    ),
-                );
-            };
-        to_connection_state
-            .send_to_peer(&self.connection_state.model.connection_id, signaling_model)
-            .await?;
+        let from_connection_id = self.connection_state.model.connection_id.clone();
 
-        Ok(())
+        // Local fast path: the target connection is held by this instance.
+        if deliver_to_local_peer(
+            &self.connection_map,
+            &from_connection_id,
+            to_connection_id,
+            signaling_model,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+
+        // Not held locally: try the cross-instance relay, else honor the
+        // ignore flag / surface SESSION_NOT_FOUND.
+        relay_or_not_found(
+            &self.peer_relay,
+            to_connection_id,
+            &from_connection_id,
+            signaling_model,
+            ignore_connection_not_found,
+        )
+        .await
     }
 
     /// Handle incoming signaling message
@@ -1219,5 +1344,121 @@ mod tests {
         // runtime's default no-IO budget.
         broadcast_connection_removed_to_servers("conn-bye", &empty).await;
         assert_eq!(empty.read().await.len(), 0);
+    }
+
+    /// A target connection absent from this instance's map yields `Ok(false)`
+    /// (a local miss), the signal `forward_to_peer` uses to fall back to the
+    /// cross-instance relay.
+    #[tokio::test]
+    async fn deliver_to_local_peer_reports_miss_when_absent() {
+        let empty = SharedConnectionMap::new();
+        let model = SignalingModel::new(
+            "req-1",
+            SignalingType::Offer,
+            Some("from".to_string()),
+            Some("missing".to_string()),
+            None,
+            None,
+        );
+        let delivered = deliver_to_local_peer(&empty, "from", "missing", &model)
+            .await
+            .expect("miss path is not an error");
+        assert!(!delivered);
+    }
+
+    /// Records the outcome a mock relay should return, so the seam decision can be
+    /// exercised without a live WS `Session`.
+    struct MockRelay {
+        outcome: RelayOutcome,
+        called: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl PeerFrameRelay for MockRelay {
+        fn relay<'a>(
+            &'a self,
+            _to: &'a str,
+            _from: &'a str,
+            _model: &'a SignalingModel,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<RelayOutcome, DeskSignalFacadeError>> + 'a>,
+        > {
+            self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+            let outcome = self.outcome;
+            Box::pin(async move { Ok(outcome) })
+        }
+    }
+
+    fn dummy_model() -> SignalingModel {
+        SignalingModel::new(
+            "req-1",
+            SignalingType::Answer,
+            Some("from".to_string()),
+            Some("to".to_string()),
+            None,
+            None,
+        )
+    }
+
+    fn is_session_not_found(err: &DeskSignalFacadeError) -> bool {
+        matches!(
+            err,
+            DeskSignalFacadeError::CustomError(e) if e.error_code == DeskErrorCode::SESSION_NOT_FOUND
+        )
+    }
+
+    /// No relay (the signal server) + a local miss is a genuine SESSION_NOT_FOUND.
+    #[tokio::test]
+    async fn relay_or_not_found_without_relay_is_session_not_found() {
+        let model = dummy_model();
+        let err = relay_or_not_found(&None, "to", "from", &model, false)
+            .await
+            .expect_err("a local miss with no relay must error");
+        assert!(is_session_not_found(&err));
+    }
+
+    /// No relay + `ignore_connection_not_found` swallows the miss (best-effort
+    /// frames like terminal replies).
+    #[tokio::test]
+    async fn relay_or_not_found_without_relay_honors_ignore_flag() {
+        let model = dummy_model();
+        relay_or_not_found(&None, "to", "from", &model, true)
+            .await
+            .expect("ignore flag turns a miss into Ok");
+    }
+
+    /// A relay that delivers the frame resolves the forward successfully.
+    #[tokio::test]
+    async fn relay_or_not_found_delivered_is_ok() {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay: Option<Arc<dyn PeerFrameRelay>> = Some(Arc::new(MockRelay {
+            outcome: RelayOutcome::Delivered,
+            called: called.clone(),
+        }));
+        let model = dummy_model();
+        relay_or_not_found(&relay, "to", "from", &model, false)
+            .await
+            .expect("a delivered relay resolves Ok");
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A relay that reports the target held by no instance still surfaces
+    /// SESSION_NOT_FOUND (when not ignoring), and honors the ignore flag otherwise.
+    #[tokio::test]
+    async fn relay_or_not_found_not_found_falls_through() {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let relay: Option<Arc<dyn PeerFrameRelay>> = Some(Arc::new(MockRelay {
+            outcome: RelayOutcome::NotFound,
+            called: called.clone(),
+        }));
+        let model = dummy_model();
+        let err = relay_or_not_found(&relay, "to", "from", &model, false)
+            .await
+            .expect_err("relay NotFound with no ignore must error");
+        assert!(is_session_not_found(&err));
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+
+        relay_or_not_found(&relay, "to", "from", &model, true)
+            .await
+            .expect("relay NotFound with ignore is Ok");
     }
 }
