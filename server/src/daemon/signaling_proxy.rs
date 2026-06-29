@@ -1,3 +1,4 @@
+use super::manager_link_state::ManagerLinkState;
 use super::pc_manager::PcRegistry;
 use super::signaling_router::{self, RouterContext};
 use super::virtual_display::VirtualDisplaySupervisor;
@@ -36,6 +37,10 @@ pub async fn run_signaling_proxy(
     mut worker_rx: WorkerMessageReceiver,
     pc_registry: PcRegistry,
     virtual_display: Option<Arc<VirtualDisplaySupervisor>>,
+    // Shared host→manager link status: records a fatal registration rejection and
+    // carries the manual-retry signal. The same handle is exposed to the host REST
+    // API so the UI can show the rejection and trigger a reconnect.
+    manager_link_state: Arc<ManagerLinkState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Signaling proxy starting");
 
@@ -182,6 +187,8 @@ pub async fn run_signaling_proxy(
                 };
 
                 let rx = outbound_tx.subscribe();
+                // The local loopback is `TrustedCentral` in Default mode but is NOT
+                // the manager link, so fatal device-quota rejection is disabled here.
                 let _ = maintain_proxy_connection(
                     settings.clone(),
                     &router_ctx,
@@ -189,6 +196,8 @@ pub async fn run_signaling_proxy(
                     local_token,
                     rx,
                     local_loopback_source(&startup_mode),
+                    false,
+                    None,
                 )
                 .await;
 
@@ -216,6 +225,8 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
+                    // A bare remote-signaling relay is not the manager link; fatal
+                    // device-quota rejection does not apply.
                     let _ = maintain_proxy_connection(
                         settings.clone(),
                         &router_ctx,
@@ -223,6 +234,8 @@ pub async fn run_signaling_proxy(
                         token,
                         rx,
                         InboundSignalingSource::RemoteSignaling,
+                        false,
+                        None,
                     )
                     .await;
                 }
@@ -236,6 +249,7 @@ pub async fn run_signaling_proxy(
         let settings = settings.clone();
         let outbound_tx = outbound_tx.clone();
         let router_ctx = router_ctx.clone();
+        let manager_link_state = manager_link_state.clone();
         actix_web::rt::spawn(async move {
             loop {
                 let (manager_url, manager_api_token) = {
@@ -251,15 +265,30 @@ pub async fn run_signaling_proxy(
                     && !token.is_empty()
                 {
                     let rx = outbound_tx.subscribe();
-                    let _ = maintain_proxy_connection(
+                    // The manager link is the only one that enforces fatal
+                    // device-quota rejection (`remote_mgr_handle` is the sole manager
+                    // injection point).
+                    let outcome = maintain_proxy_connection(
                         settings.clone(),
                         &router_ctx,
                         url,
                         token,
                         rx,
                         InboundSignalingSource::TrustedCentral,
+                        true,
+                        Some(manager_link_state.clone()),
                     )
                     .await;
+
+                    if let Ok(ProxyConnectionOutcome::FatalReject { .. }) = outcome {
+                        // Stop the 5s auto-reconnect storm: retrying changes nothing
+                        // until the user frees a device slot from a control end. Park
+                        // until a manual retry is requested, then reconnect at once
+                        // (no long backoff).
+                        manager_link_state.await_retry().await;
+                        manager_link_state.clear().await;
+                        continue;
+                    }
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -928,6 +957,49 @@ fn send_terminal_notification<T>(
     }
 }
 
+/// Outcome of handling one inbound signaling frame on a proxy link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InboundOutcome {
+    /// Keep the connection running.
+    Continue,
+    /// A fatal registration rejection arrived on the manager link: stop the
+    /// connection and its auto-reconnect loop. Carries the error code and message.
+    FatalReject { error_code: i32, message: String },
+}
+
+/// Outcome of one `maintain_proxy_connection` lifetime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProxyConnectionOutcome {
+    /// The connection ended normally (closed / errored); the caller may reconnect.
+    Closed,
+    /// The manager fatally rejected registration; the caller must NOT auto-reconnect
+    /// until a manual retry is requested.
+    FatalReject { error_code: i32, message: String },
+}
+
+/// Whether an inbound `Error(-1)` frame is a fatal registration rejection the host
+/// must stop reconnecting on. The fatal set is exactly the device-quota codes
+/// (`DEVICE_QUOTA_EXCEEDED` / `DEVICE_CLIENT_ID_REQUIRED`); any other error code is
+/// transient and handled normally.
+fn fatal_registration_reject(model: &SignalingModel) -> Option<(i32, String)> {
+    if model.signaling_type != SignalingType::Error {
+        return None;
+    }
+    let state = model.response_state.as_ref()?;
+    let code = state.error_code;
+    if code == DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code()
+        || code == DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code()
+    {
+        let message = state
+            .message
+            .clone()
+            .unwrap_or_else(|| "device registration rejected".to_string());
+        Some((code, message))
+    } else {
+        None
+    }
+}
+
 async fn maintain_proxy_connection(
     settings: web::Data<SharedSettings>,
     router_ctx: &RouterContext,
@@ -935,7 +1007,13 @@ async fn maintain_proxy_connection(
     auth_token: String,
     mut outbound_rx: broadcast::Receiver<String>,
     source: InboundSignalingSource,
-) -> Result<(), Box<dyn std::error::Error>> {
+    // True only on the manager link (`remote_mgr_handle`); a fatal device-quota
+    // `Error` then stops auto-reconnect. Never set for the local loopback (which is
+    // also `TrustedCentral` in Default mode) or a bare remote-signaling relay.
+    fatal_quota_reject_enabled: bool,
+    // Records the fatal rejection for the host UI when the link is the manager link.
+    manager_link_state: Option<Arc<ManagerLinkState>>,
+) -> Result<ProxyConnectionOutcome, Box<dyn std::error::Error>> {
     let display_name = {
         let s = settings.read().await;
         s.desk.display_name.clone()
@@ -996,6 +1074,12 @@ async fn maintain_proxy_connection(
 
     info!("[Proxy] Connected to {signaling_url}");
 
+    // A successful (re)connection clears any prior fatal rejection so the host UI
+    // stops showing the blocked state once registration goes through.
+    if let Some(state) = manager_link_state.as_ref() {
+        state.clear().await;
+    }
+
     let (mut sink, mut stream) = framed.split();
 
     loop {
@@ -1012,7 +1096,30 @@ async fn maintain_proxy_connection(
                                         continue;
                                     }
                                 };
-                                handle_inbound_signaling_text(text_str, router_ctx, source).await;
+                                match handle_inbound_signaling_text(
+                                    text_str,
+                                    router_ctx,
+                                    source,
+                                    fatal_quota_reject_enabled,
+                                )
+                                .await
+                                {
+                                    InboundOutcome::Continue => {}
+                                    InboundOutcome::FatalReject { error_code, message } => {
+                                        warn!(
+                                            "[Proxy] Manager rejected registration (code {error_code}): \
+                                             {message}; stopping auto-reconnect until manual retry"
+                                        );
+                                        if let Some(state) = manager_link_state.as_ref() {
+                                            state.record_fatal(error_code, message.clone()).await;
+                                        }
+                                        let _ = sink.send(awc::ws::Message::Close(None)).await;
+                                        return Ok(ProxyConnectionOutcome::FatalReject {
+                                            error_code,
+                                            message,
+                                        });
+                                    }
+                                }
                             }
                             awc::ws::Frame::Ping(data) => {
                                 let _ = sink.send(awc::ws::Message::Pong(data)).await;
@@ -1056,7 +1163,7 @@ async fn maintain_proxy_connection(
     }
 
     info!("[Proxy] Connection to {signaling_url} ended");
-    Ok(())
+    Ok(ProxyConnectionOutcome::Closed)
 }
 
 /// Which upstream link an inbound signaling frame arrived on. This is the
@@ -1355,14 +1462,28 @@ async fn handle_inbound_signaling_text(
     text_str: String,
     router_ctx: &RouterContext,
     source: InboundSignalingSource,
-) {
+    fatal_quota_reject_enabled: bool,
+) -> InboundOutcome {
     let parsed = match serde_json::from_str::<SignalingModel>(&text_str) {
         Ok(m) => m,
         Err(e) => {
             warn!("[Proxy] Dropping malformed signaling text: {e}");
-            return;
+            return InboundOutcome::Continue;
         }
     };
+
+    // Manager-link registration rejection: an `Error(-1)` carrying a device-quota
+    // fatal code. Intercept before the router (which swallows `Error` frames) so the
+    // caller can stop the auto-reconnect storm. Only honoured on the manager link;
+    // the same code on any other link is treated as transient (just dropped below).
+    if fatal_quota_reject_enabled
+        && let Some((error_code, message)) = fatal_registration_reject(&parsed)
+    {
+        return InboundOutcome::FatalReject {
+            error_code,
+            message,
+        };
+    }
 
     // Source gate: `CommandTemplateSync`, `CollectRequest`, `EdgeExecRequest`,
     // and `RemoteToolRequest` are trusted central→daemon plumbing. Accept them
@@ -1381,7 +1502,7 @@ async fn handle_inbound_signaling_text(
             "[Proxy] Dropping {:?} from non-central source {source:?}",
             parsed.signaling_type
         );
-        return;
+        return InboundOutcome::Continue;
     }
 
     let expected_audience = {
@@ -1418,7 +1539,7 @@ async fn handle_inbound_signaling_text(
                 warn!("[Proxy] Dropping EdgeExecRequest: {reason}");
             }
         }
-        return;
+        return InboundOutcome::Continue;
     }
 
     // `CollectRequest` / `RemoteToolRequest` carry an optional authorization
@@ -1451,14 +1572,14 @@ async fn handle_inbound_signaling_text(
                 warn!("[Proxy] Dropping central plumbing frame: {reason}");
             }
         }
-        return;
+        return InboundOutcome::Continue;
     }
 
     let (parsed, authz) = match gate_authz_frame(parsed, source, &expected_audience, &now) {
         AuthzGateOutcome::Pass(m, authz) => (m, authz),
         AuthzGateOutcome::Drop(reason) => {
             warn!("[Proxy] Dropping AI frame: {reason}");
-            return;
+            return InboundOutcome::Continue;
         }
     };
 
@@ -1483,6 +1604,8 @@ async fn handle_inbound_signaling_text(
             parsed.signaling_type,
         );
     }
+
+    InboundOutcome::Continue
 }
 
 #[cfg(test)]
@@ -1561,7 +1684,8 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local).await;
+        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local, false)
+            .await;
     }
 
     /// Malformed JSON arriving on the WS is dropped with a warning
@@ -1573,8 +1697,93 @@ mod tests {
             "{ this is not valid json".to_string(),
             &router_ctx,
             InboundSignalingSource::Local,
+            false,
         )
         .await;
+    }
+
+    fn error_frame(code: i32, msg: &str) -> String {
+        let model = SignalingModel::error(
+            "manager-handshake",
+            SignalingType::Error,
+            None,
+            Some("conn-1".to_string()),
+            DeskErrorCode::new(code),
+            msg,
+        )
+        .unwrap();
+        serde_json::to_string(&model).unwrap()
+    }
+
+    /// `fatal_registration_reject` recognises exactly the device-quota fatal codes
+    /// on an `Error` frame and nothing else.
+    #[test]
+    fn fatal_registration_reject_matches_only_quota_codes() {
+        let quota = serde_json::from_str::<SignalingModel>(&error_frame(
+            DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
+            "full",
+        ))
+        .unwrap();
+        assert_eq!(
+            fatal_registration_reject(&quota),
+            Some((
+                DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
+                "full".to_string()
+            ))
+        );
+        let missing = serde_json::from_str::<SignalingModel>(&error_frame(
+            DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),
+            "no id",
+        ))
+        .unwrap();
+        assert!(fatal_registration_reject(&missing).is_some());
+
+        // A different error code is not fatal.
+        let other = serde_json::from_str::<SignalingModel>(&error_frame(
+            DeskErrorCode::PERMISSION_ERROR.code(),
+            "denied",
+        ))
+        .unwrap();
+        assert_eq!(fatal_registration_reject(&other), None);
+
+        // A non-Error frame is never fatal.
+        let normal = SignalingModel::new("r", SignalingType::RequestRemote, None, None, None, None);
+        assert_eq!(fatal_registration_reject(&normal), None);
+    }
+
+    /// On the manager link (flag enabled) a device-quota `Error` frame yields a
+    /// `FatalReject` outcome; with the flag disabled (loopback / relay) the same
+    /// frame is treated as transient and the loop continues.
+    #[tokio::test]
+    async fn quota_error_is_fatal_only_on_manager_link() {
+        let (router_ctx, _out_tx) = make_router_ctx();
+        let text = error_frame(DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(), "full");
+
+        let enabled = handle_inbound_signaling_text(
+            text.clone(),
+            &router_ctx,
+            InboundSignalingSource::TrustedCentral,
+            true,
+        )
+        .await;
+        assert_eq!(
+            enabled,
+            InboundOutcome::FatalReject {
+                error_code: DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
+                message: "full".to_string(),
+            }
+        );
+
+        // Same frame, flag disabled (e.g. Default-mode loopback which is also
+        // TrustedCentral): not fatal.
+        let disabled = handle_inbound_signaling_text(
+            text,
+            &router_ctx,
+            InboundSignalingSource::TrustedCentral,
+            false,
+        )
+        .await;
+        assert_eq!(disabled, InboundOutcome::Continue);
     }
 
     /// Daemon-owned RequestRemote without `from_connection_id` does
@@ -1593,7 +1802,8 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local).await;
+        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local, false)
+            .await;
     }
 
     /// Worker-bound signaling with `from_connection_id` reaches the
@@ -1614,7 +1824,8 @@ mod tests {
             None,
         );
         let text = serde_json::to_string(&model).unwrap();
-        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local).await;
+        handle_inbound_signaling_text(text, &router_ctx, InboundSignalingSource::Local, false)
+            .await;
     }
 
     fn command_template_sync_text() -> String {
@@ -1654,6 +1865,7 @@ mod tests {
             command_template_sync_text(),
             &router_ctx,
             InboundSignalingSource::Local,
+            false,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 0);
@@ -1663,6 +1875,7 @@ mod tests {
             command_template_sync_text(),
             &router_ctx,
             InboundSignalingSource::RemoteSignaling,
+            false,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 0);
@@ -1672,6 +1885,7 @@ mod tests {
             command_template_sync_text(),
             &router_ctx,
             InboundSignalingSource::TrustedCentral,
+            false,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
@@ -1715,6 +1929,7 @@ mod tests {
             make_text(1, None),
             &router_ctx,
             InboundSignalingSource::TrustedCentral,
+            false,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);
@@ -1725,6 +1940,7 @@ mod tests {
             make_text(99, Some(5)),
             &router_ctx,
             InboundSignalingSource::TrustedCentral,
+            false,
         )
         .await;
         assert_eq!(router_ctx.command_templates.len(), 1);

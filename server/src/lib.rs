@@ -33,6 +33,7 @@ use crate::{
         info::{query_backend_info, query_macos_autologin, query_server_info, query_sysinfo},
         init::init_system,
         login::{change_password, get_captcha, login_account, login_tauri, logout_account},
+        manager_link::{query_manager_link_status, retry_manager_link},
         service_mgmt::{install_service, uninstall_service},
         settings::{
             ack_security_approval, query_ai_policy_settings, query_collection_policy_settings,
@@ -204,6 +205,8 @@ pub fn configure_api_surface(
                     .service(regenerate_turn_secret)
                     .service(query_telemetry_status)
                     .service(update_telemetry_consent)
+                    .service(query_manager_link_status)
+                    .service(retry_manager_link)
                     .service(list_connections)
                     .service(list_terminal)
                     .service(open_terminal_session)
@@ -554,6 +557,12 @@ pub async fn run_with_hub(
     let host_control_hub_data: web::Data<Option<Arc<host_control::HostControlHub>>> =
         web::Data::new(Some(host_control_hub_arc.clone()));
 
+    // Host→manager link status: shared between the signaling proxy (which records a
+    // fatal device-quota rejection and parks until manual retry) and the REST API
+    // (which surfaces the rejection and triggers a reconnect).
+    let manager_link_state = Arc::new(daemon::manager_link_state::ManagerLinkState::new());
+    let manager_link_state_data = web::Data::new(manager_link_state.clone());
+
     // If this instance runs signaling, ensure local_signaling_token is generated and persisted
     if startup_mode == StartupMode::Default || startup_mode == StartupMode::Signaling {
         let mut s = shared_settings_data.write().await;
@@ -590,6 +599,7 @@ pub async fn run_with_hub(
             let settings_clone = shared_settings_data.clone();
             let session_hub = host_control_hub_arc.clone();
             let args_clone = settings.args.clone();
+            let proxy_link_state = manager_link_state.clone();
             // Freeze this node's own bundled-TURN endpoints from the running
             // `TurnApiState` (same snapshot the local signaling injects from;
             // `None` -> empty when no embedded TURN started) so the daemon's PC
@@ -603,6 +613,7 @@ pub async fn run_with_hub(
                     settings_clone,
                     session_hub,
                     own_turn_endpoints,
+                    proxy_link_state,
                 )
                 .await
                 {
@@ -622,6 +633,7 @@ pub async fn run_with_hub(
         let tauri_login_token = tauri_login_token.clone();
         let host_control_hub_data = host_control_hub_data.clone();
         let validator_data = validator_data.clone();
+        let manager_link_state_data = manager_link_state_data.clone();
         let host_control_endpoint_state = host_control_endpoint_state.clone();
         let surface_opts = ApiSurfaceOpts {
             include_signaling: matches!(
@@ -678,6 +690,7 @@ pub async fn run_with_hub(
             .app_data(conn_device_map.clone())
             .app_data(host_control_hub_data.clone())
             .app_data(validator_data.clone())
+            .app_data(manager_link_state_data.clone())
             .configure(|cfg| {
                 if let Some(turn_api_state) = &turn_api_state {
                     cfg.app_data(turn_api_state.clone());

@@ -4,6 +4,7 @@ pub mod codec_negotiation;
 pub mod command_templates;
 pub mod exec_approval;
 pub mod local_api;
+pub mod manager_link_state;
 pub mod pc_manager;
 #[cfg(target_os = "windows")]
 pub mod pipe_security;
@@ -104,6 +105,11 @@ pub async fn run_service_daemon_inner(
     // Aggregator hub: routes between worker forwarders and the Tauri shell.
     let host_control_hub = Arc::new(HostControlHub::new_aggregator());
 
+    // Host→manager link status, shared between the signaling proxy (records a fatal
+    // device-quota rejection, parks until manual retry) and the local API (surfaces
+    // it + triggers reconnect).
+    let manager_link_state = Arc::new(manager_link_state::ManagerLinkState::new());
+
     // The bridge is now a tiny holder for `tauri_is_admin` + `tauri_login_token`.
     // The host control endpoint owns `/ws/tauri_ipc` and `/ws/host_upstream` and
     // refreshes `tauri_login_token` on every Tauri ws connect.
@@ -116,9 +122,11 @@ pub async fn run_service_daemon_inner(
         let settings = Arc::clone(&shared_settings);
         let bridge = Arc::clone(&tauri_bridge);
         let hub = Arc::clone(&host_control_hub);
+        let link_state = Arc::clone(&manager_link_state);
         tokio::spawn(async move {
             if let Err(e) =
-                local_api::run_local_api(settings, bridge, hub, Some(api_ready_tx)).await
+                local_api::run_local_api(settings, bridge, hub, link_state, Some(api_ready_tx))
+                    .await
             {
                 error!("Local API error: {e}");
             }
@@ -215,6 +223,7 @@ pub async fn run_service_daemon_inner(
         let host_control_hub = Arc::clone(&host_control_hub);
         let pc_registry = pc_registry.clone();
         let virtual_display = virtual_display_supervisor.clone();
+        let manager_link_state = Arc::clone(&manager_link_state);
         actix_web::rt::spawn(async move {
             if let Err(e) = signaling_proxy::run_signaling_proxy(
                 settings,
@@ -223,6 +232,7 @@ pub async fn run_service_daemon_inner(
                 worker_rx,
                 pc_registry,
                 virtual_display,
+                manager_link_state,
             )
             .await
             {
@@ -305,6 +315,7 @@ pub async fn start_inprocess_daemon(
     settings: web::Data<SharedSettings>,
     host_control_hub: Arc<crate::host_control::HostControlHub>,
     own_turn_endpoints: Arc<std::collections::HashSet<String>>,
+    manager_link_state: Arc<crate::daemon::manager_link_state::ManagerLinkState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting in-process daemon (portable mode)");
 
@@ -352,6 +363,7 @@ pub async fn start_inprocess_daemon(
             worker_rx,
             proxy_registry,
             None,
+            manager_link_state,
         )
         .await
         {

@@ -2,6 +2,7 @@ pub mod api_token;
 pub mod info;
 pub mod init;
 pub mod login;
+pub mod manager_link;
 pub mod service_mgmt;
 pub mod settings;
 pub mod turn;

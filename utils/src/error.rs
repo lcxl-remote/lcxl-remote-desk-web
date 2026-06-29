@@ -183,6 +183,26 @@ impl DeskErrorCode {
     /// Carried in `RestResponse.code`, never an HTTP status.
     pub const INVITE_ALREADY_PENDING: DeskErrorCode = DeskErrorCode(45);
 
+    // ---- Per-user device registration quota ----
+    /// A new device registration was refused because the owner already holds the
+    /// maximum number of devices allowed by their effective plan (a stock cap, not
+    /// a per-period allowance). Existing devices keep working — only first-claim of
+    /// a new `client_id` is blocked. The owner must soft-delete an unused device to
+    /// free a slot, then retry. The manager delivers this in a signaling
+    /// `Error(-1)` frame's `error_code` during the registration handshake, and the
+    /// personal devices REST surface also branches on it. It is a fatal
+    /// registration outcome: the host stops auto-reconnecting and surfaces a
+    /// cleanup prompt. Never an HTTP status.
+    pub const DEVICE_QUOTA_EXCEEDED: DeskErrorCode = DeskErrorCode(46);
+    /// A token-authenticated desk-server registration handshake arrived without a
+    /// non-empty `client_id`. Such a connection would otherwise bypass the device
+    /// quota entirely (it neither registers a device nor counts against the cap),
+    /// so it is rejected outright. Distinct from `DEVICE_QUOTA_EXCEEDED` so the
+    /// host can show "missing device identity" rather than "device limit reached."
+    /// Delivered in a signaling `Error(-1)` frame; also a fatal registration
+    /// outcome that stops auto-reconnect. Never an HTTP status.
+    pub const DEVICE_CLIENT_ID_REQUIRED: DeskErrorCode = DeskErrorCode(47);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
@@ -403,6 +423,26 @@ mod tests {
         assert_ne!(codes[0], codes[1], "org codes must be distinct");
         // Distinct from the adjacent anti-abuse block and the next contract value.
         assert!(!codes.contains(&DeskErrorCode::RATE_LIMITED.code()));
+        assert!(!codes.contains(&DeskErrorCode::ACTION_NEED_RETRY.code()));
+    }
+
+    /// Lock the numeric wire values of the per-user device-quota codes. The manager
+    /// emits them in a signaling `Error(-1)` frame during the registration
+    /// handshake and both the desk-server host and the personal REST surface branch
+    /// on the exact `{46, 47}` fatal set, so the values are a contract and must not
+    /// drift. They must also be distinct from each other and from the adjacent org
+    /// block.
+    #[test]
+    fn device_quota_codes_are_stable_and_distinct() {
+        assert_eq!(DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(), 46);
+        assert_eq!(DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(), 47);
+        let codes = [
+            DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
+            DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),
+        ];
+        assert_ne!(codes[0], codes[1], "device quota codes must be distinct");
+        // Distinct from the adjacent org block and the next contract value.
+        assert!(!codes.contains(&DeskErrorCode::INVITE_ALREADY_PENDING.code()));
         assert!(!codes.contains(&DeskErrorCode::ACTION_NEED_RETRY.code()));
     }
 }
