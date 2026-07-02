@@ -567,6 +567,11 @@ mod tests {
     /// triggering the "duplicate" warning path (we can't observe the
     /// warning directly but we can verify the entry is in / out by
     /// re-stopping).
+    // Ignored by default: `start_connection` builds real mouse/keyboard input
+    // handlers; in Wayland auto mode that opens an `xdg-desktop-portal`
+    // RemoteDesktop permission dialog and blocks indefinitely. Run with
+    // `--ignored` on a non-interactive host (or one where input goes via uinput).
+    #[ignore = "start_connection opens the RemoteDesktop portal; hangs on a Wayland portal prompt"]
     #[test]
     fn start_then_stop_releases_state() {
         let d = dispatcher();
@@ -584,6 +589,9 @@ mod tests {
 
     /// `shutdown` clears every connection. Subsequent dispatches all
     /// see "unknown connection" and silently drop.
+    // Ignored by default: see `start_then_stop_releases_state` — `start_connection`
+    // opens the RemoteDesktop portal on a Wayland session and blocks.
+    #[ignore = "start_connection opens the RemoteDesktop portal; hangs on a Wayland portal prompt"]
     #[test]
     fn shutdown_clears_state() {
         let d = dispatcher();

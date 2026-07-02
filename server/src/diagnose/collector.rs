@@ -154,6 +154,12 @@ mod tests {
 
     /// The default set runs against the real in-process agent; `system.info`
     /// succeeds on every CI host, and the snapshot lists what was collected.
+    ///
+    /// Ignored by default: the default set includes `screen.capture.current`,
+    /// whose real capture pops an `xdg-desktop-portal` permission dialog on a
+    /// Wayland session and blocks indefinitely. Run explicitly with
+    /// `--ignored` only on a host where screen capture is non-interactive.
+    #[ignore = "default set captures the screen; hangs on a Wayland portal prompt"]
     #[tokio::test]
     async fn collects_default_set_via_agent() {
         let collector =

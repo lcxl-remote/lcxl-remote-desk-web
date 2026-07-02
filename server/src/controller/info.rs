@@ -345,6 +345,11 @@ mod tests {
         assert!(body.data.is_some());
     }
 
+    // Ignored by default: `query_backend_info` probes the input backend via
+    // `WaylandRemoteDesktop::probe_portal()`, which pops an `xdg-desktop-portal`
+    // RemoteDesktop permission dialog on a Wayland session and blocks
+    // indefinitely. Run explicitly with `--ignored` on a non-interactive host.
+    #[ignore = "probes the RemoteDesktop portal; hangs on a Wayland portal prompt"]
     #[actix_web::test]
     async fn test_query_backend_info() {
         let settings = SharedSettings::from(Settings::default());
