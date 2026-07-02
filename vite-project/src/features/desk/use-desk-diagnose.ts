@@ -62,6 +62,8 @@ export type AgentError = {
     message: string;
     retryable: boolean;
     safe_for_model: boolean;
+    /** Optional business code (a `DeskErrorCode`) the control end localizes. */
+    error_code?: number | null;
 };
 
 export type DiagnoseEvent = {
@@ -225,6 +227,8 @@ export type DiagnoseState = {
     result: Diagnosis | null;
     /** A human-readable failure message, set on an `error` frame. */
     error: string | null;
+    /** Optional business code from the error frame, localized on display. */
+    errorCode: number | null;
     /** Latest agentic turn id (set on a `turn_started` frame). */
     turnId: string | null;
     /** The agentic tool-activity timeline, in call order (agentic path). */
@@ -252,6 +256,7 @@ const INITIAL_STATE: DiagnoseState = {
     partialSummary: '',
     result: null,
     error: null,
+    errorCode: null,
     turnId: null,
     tools: [],
     answer: null,
@@ -466,6 +471,7 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                             ...prev,
                             phase: 'error',
                             error: event.error?.message ?? 'diagnosis failed',
+                            errorCode: event.error?.error_code ?? null,
                             pendingExec: null,
                         };
                     case 'turn_started':

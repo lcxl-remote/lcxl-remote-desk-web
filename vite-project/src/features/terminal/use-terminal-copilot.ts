@@ -50,6 +50,8 @@ export type AgentError = {
     message: string;
     retryable: boolean;
     safe_for_model: boolean;
+    /** Optional business code (a `DeskErrorCode`) the control end localizes. */
+    error_code?: number | null;
 };
 
 export type TerminalCopilotEvent = {
@@ -111,6 +113,8 @@ export type CopilotState = {
     tools: CopilotTool[];
     /** A human-readable failure message, set on the terminal `error` frame. */
     error: string | null;
+    /** Optional business code from the error frame, localized by the panel. */
+    errorCode: number | null;
 };
 
 const INITIAL_STATE: CopilotState = {
@@ -122,6 +126,7 @@ const INITIAL_STATE: CopilotState = {
     partialText: '',
     tools: [],
     error: null,
+    errorCode: null,
 };
 
 /** Client-side history caps: the server re-caps and re-redacts, but the control
@@ -225,6 +230,7 @@ export function useTerminalCopilot({
                 partialText: '',
                 tools: [],
                 error: null,
+                errorCode: null,
             }));
         },
         [connectionId, sendMessage, i18n],
@@ -289,6 +295,7 @@ export function useTerminalCopilot({
                             ...prev,
                             phase: 'error',
                             error: event.error?.message ?? 'copilot failed',
+                            errorCode: event.error?.error_code ?? null,
                         };
                     default:
                         return prev;

@@ -1,0 +1,41 @@
+import type { TFunction } from 'i18next';
+
+/**
+ * Localize an agent error by its machine-readable `error_code`.
+ *
+ * Agent errors (copilot / diagnose / terminal-complete / exec) ride the
+ * `AgentError` wire shape, which carries an optional `error_code` (a
+ * `DeskErrorCode` value from `web/utils/src/error.rs`). The backend sends only
+ * the numeric code plus a raw English `message`; the control end maps the code
+ * to a localized string here so the UI is never English-only. An error without a
+ * known code falls back to the backend `message`.
+ */
+
+/** Mirror of the `DeskErrorCode` values that ride the agent-error wire. */
+export const AGENT_ERROR_CODE = {
+    TERMINAL_COPILOT_DISABLED: 50,
+    AI_MODEL_NOT_CONFIGURED: 51,
+} as const;
+
+/** Codes with a dedicated localized message. */
+const CODE_TO_KEY: Record<number, string> = {
+    [AGENT_ERROR_CODE.TERMINAL_COPILOT_DISABLED]: 'pages.agentError.terminalCopilotDisabled',
+    [AGENT_ERROR_CODE.AI_MODEL_NOT_CONFIGURED]: 'pages.agentError.aiModelNotConfigured',
+};
+
+/**
+ * Resolve a display message for an agent error. Prefers the localized message
+ * for a known `code`; otherwise returns `message` (the backend text) or, if that
+ * is empty, `fallback`.
+ */
+export function agentErrorMessage(
+    t: TFunction,
+    code: number | null | undefined,
+    message: string | null | undefined,
+    fallback: string,
+): string {
+    if (code != null && CODE_TO_KEY[code]) {
+        return t(CODE_TO_KEY[code]);
+    }
+    return message && message.length > 0 ? message : fallback;
+}

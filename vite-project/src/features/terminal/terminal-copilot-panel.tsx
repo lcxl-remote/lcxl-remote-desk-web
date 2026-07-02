@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { agentErrorMessage } from '@/lib/agent-error-i18n';
 import type {
     CommandSuggestion,
     CopilotState,
@@ -342,7 +343,14 @@ export function TerminalCopilotPanel({
                                         {state.phase === 'error' && (
                                             <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-sm text-red-300">
                                                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                                                <span>{state.error}</span>
+                                                <span>
+                                                    {agentErrorMessage(
+                                                        t,
+                                                        state.errorCode,
+                                                        state.error,
+                                                        t('pages.deskTerminal.copilot.error'),
+                                                    )}
+                                                </span>
                                             </div>
                                         )}
                                     </div>

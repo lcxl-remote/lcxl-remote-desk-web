@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next"
 import { Loader2, Stethoscope, X, UserCog, AlertCircle, Play, Check, Ban, Terminal as TerminalIcon, Wrench, Clock, CheckCircle2, XCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { agentErrorMessage } from "@/lib/agent-error-i18n"
 import {
     extractStreamingSummary,
     type Confidence,
@@ -476,7 +477,14 @@ export function DiagnosePanel({
                     <div className="flex flex-col gap-3">
                         <div className="flex items-start gap-2 text-sm text-red-300">
                             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                            <span>{state.error}</span>
+                            <span>
+                                {agentErrorMessage(
+                                    t,
+                                    state.errorCode,
+                                    state.error,
+                                    state.error ?? "",
+                                )}
+                            </span>
                         </div>
                         {/* A failed turn is settled, so a follow-up may continue the
                             same conversation (the backend allows re-claiming it). */}

@@ -558,11 +558,16 @@ export default {
   'pages.deskTerminal.copilot.toolRan': 'Checked {{name}}',
   'pages.deskTerminal.copilot.explainErrorTurn': 'Diagnose the last error',
   'pages.deskTerminal.copilot.thinking': 'Thinking…',
+  'pages.deskTerminal.copilot.error': 'The copilot request failed.',
   'pages.deskTerminal.copilot.risk.low': 'Low',
   'pages.deskTerminal.copilot.risk.medium': 'Medium',
   'pages.deskTerminal.copilot.risk.high': 'High',
   'pages.deskTerminal.copilot.risk.critical': 'Critical',
   'pages.deskTerminal.copilot.risk.blocked': 'Blocked',
+  'pages.agentError.terminalCopilotDisabled':
+    'The terminal copilot is turned off for this deployment. Ask an administrator to enable it.',
+  'pages.agentError.aiModelNotConfigured':
+    'No AI model is configured on the server yet. Ask an administrator to set the provider, model, base URL, and API key in AI model settings.',
   'pages.deskTerminal.completion.title': 'AI Completion',
   'pages.deskTerminal.completion.toggleHint': 'AI command completion — press Tab to accept the ghost text',
   'pages.deskTerminal.completion.acceptHint': 'Tab',

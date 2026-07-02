@@ -23,6 +23,8 @@ export type AgentError = {
     message: string;
     retryable: boolean;
     safe_for_model: boolean;
+    /** Optional business code (a `DeskErrorCode`) the control end localizes. */
+    error_code?: number | null;
 };
 
 export type ExecPreview = {
