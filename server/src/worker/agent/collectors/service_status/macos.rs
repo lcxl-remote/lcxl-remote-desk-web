@@ -36,6 +36,7 @@ pub(super) fn query_one(name: &str) -> Result<ServiceEntry, AgentError> {
         message: format!("service {name:?} not found"),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     })
 }
 
@@ -45,6 +46,7 @@ fn internal(message: String) -> AgentError {
         message,
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

@@ -225,6 +225,7 @@ fn err(kind: AgentErrorKind, message: String) -> AgentError {
         message,
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

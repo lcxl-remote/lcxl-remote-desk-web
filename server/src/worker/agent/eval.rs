@@ -173,6 +173,7 @@ pub fn scenario_container_failure() -> EvidenceSnapshot {
         message: "no such container: payments-api-old".into(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     });
     EvidenceSnapshot::record(
         "container_failure",

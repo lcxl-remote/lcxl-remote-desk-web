@@ -928,6 +928,7 @@ mod tests {
             message: "secret policy detail".into(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         };
         let e = AuditEvent::task_failed("evt_3".into(), "ts".into(), &env, &error, 5);
 
@@ -946,6 +947,7 @@ mod tests {
             message: "secret policy detail".into(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         };
         let e = AuditEvent::task_failed_for_request(
             "evt_tf".into(),

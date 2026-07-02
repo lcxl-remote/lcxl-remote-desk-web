@@ -184,6 +184,7 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
             message: "the model response was truncated before it finished; please retry".into(),
             retryable: true,
             safe_for_model: true,
+            error_code: None,
         },
         LoopOutcome::CircuitBreak(reason) => {
             let message = match reason {
@@ -199,6 +200,7 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
                 message: message.into(),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             }
         }
         LoopOutcome::ProtocolError(_) => AgentError {
@@ -206,18 +208,21 @@ pub fn terminal_error_for(outcome: &LoopOutcome) -> Option<AgentError> {
             message: "the model returned an invalid response".into(),
             retryable: true,
             safe_for_model: true,
+            error_code: None,
         },
         LoopOutcome::TurnBusy => AgentError {
             kind: AgentErrorKind::SessionUnavailable,
             message: "a diagnosis is already running for this conversation".into(),
             retryable: true,
             safe_for_model: true,
+            error_code: None,
         },
         LoopOutcome::SubjectRejected(_) => AgentError {
             kind: AgentErrorKind::PermissionDenied,
             message: "this conversation belongs to a different user".into(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         },
     };
     Some(err)
@@ -316,6 +321,7 @@ mod tests {
             message: "late save failure".into(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         });
         b.on_tool_started("t", "c");
         b.finish_outcome(&LoopOutcome::Answered("done".into()));

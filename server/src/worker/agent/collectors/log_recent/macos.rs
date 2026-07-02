@@ -43,6 +43,7 @@ pub(super) fn query(params: &super::LogRecentParams, _limit: u32) -> Result<Stri
         message: format!("failed to run log show: {e}"),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     })?;
 
     if !output.status.success() {
@@ -52,6 +53,7 @@ pub(super) fn query(params: &super::LogRecentParams, _limit: u32) -> Result<Stri
             message: format!("log show failed: {}", stderr.trim()),
             retryable: true,
             safe_for_model: true,
+            error_code: None,
         });
     }
 

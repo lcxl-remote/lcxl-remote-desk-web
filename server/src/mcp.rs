@@ -47,6 +47,7 @@ impl ReadContextProvider for ServerReadProvider {
             message: "read context has no capability".to_string(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         })?;
         let envelope = build_read_envelope(cap, input);
         match self.agent.invoke(envelope).await? {
@@ -56,6 +57,7 @@ impl ReadContextProvider for ServerReadProvider {
                 message: "read produced an exec output".to_string(),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             }),
         }
     }

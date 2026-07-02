@@ -25,6 +25,7 @@ fn internal(message: String) -> AgentError {
         message,
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -64,6 +65,7 @@ fn open_service_err(name: &str, err: windows_service::Error) -> AgentError {
             message: format!("service {name:?} not found"),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         };
     }
     internal(format!("open service {name:?} failed: {err}"))

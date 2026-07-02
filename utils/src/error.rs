@@ -212,6 +212,25 @@ impl DeskErrorCode {
     /// `RestResponse.code`, never an HTTP status.
     pub const API_TOKEN_QUOTA_EXCEEDED: DeskErrorCode = DeskErrorCode(48);
 
+    /// A subscription plan could not be physically deleted because one or more
+    /// subscription segments still reference it (deleting the row would orphan
+    /// their immutable snapshots and break the audit trail). The admin should
+    /// disable the plan (`enabled = false`) instead, which stops new
+    /// subscriptions while preserving history. Carried in `RestResponse.code`,
+    /// never an HTTP status.
+    pub const PLAN_IN_USE: DeskErrorCode = DeskErrorCode(49);
+
+    /// The terminal copilot is turned off for this deployment (the fleet-wide
+    /// enable flag is unset), so a copilot ask is refused. The control end maps
+    /// this code to a localized message; the backend never sends a localized
+    /// string. Rides the agent-error wire, not an HTTP status.
+    pub const TERMINAL_COPILOT_DISABLED: DeskErrorCode = DeskErrorCode(50);
+    /// No AI model provider is configured on the manager (provider / model /
+    /// base URL / API key unset), so an agentic ask cannot dial a model. The
+    /// control end maps this code to a localized "configure a model" message.
+    /// Rides the agent-error wire, not an HTTP status.
+    pub const AI_MODEL_NOT_CONFIGURED: DeskErrorCode = DeskErrorCode(51);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
@@ -445,6 +464,10 @@ mod tests {
     fn device_quota_codes_are_stable_and_distinct() {
         assert_eq!(DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(), 46);
         assert_eq!(DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(), 47);
+        assert_eq!(DeskErrorCode::API_TOKEN_QUOTA_EXCEEDED.code(), 48);
+        assert_eq!(DeskErrorCode::PLAN_IN_USE.code(), 49);
+        assert_eq!(DeskErrorCode::TERMINAL_COPILOT_DISABLED.code(), 50);
+        assert_eq!(DeskErrorCode::AI_MODEL_NOT_CONFIGURED.code(), 51);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
             DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),

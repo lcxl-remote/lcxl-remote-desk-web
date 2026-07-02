@@ -29,6 +29,7 @@ fn bad_arguments(detail: impl std::fmt::Display) -> AgentError {
         message: format!("invalid tool arguments: {detail}"),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -155,6 +156,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
                 message: format!("unknown read tool `{other}`"),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             });
         }
     };
@@ -164,6 +166,7 @@ pub fn build_read_operation(call: &ToolCall) -> Result<(Capability, OperationInp
         message: "read tool maps to no capability".to_string(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     })?;
     Ok((cap, input))
 }

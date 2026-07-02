@@ -540,6 +540,7 @@ mod tests {
                     message: "redactor failed".into(),
                     retryable: false,
                     safe_for_model: true,
+                    error_code: None,
                 },
             ),
         ];
@@ -573,6 +574,7 @@ mod tests {
                     message: "x".into(),
                     retryable: true,
                     safe_for_model: true,
+                    error_code: None,
                 },
             )
             .is_terminal()

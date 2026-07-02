@@ -2649,6 +2649,7 @@ mod tests {
                     message: "capability not granted".to_string(),
                     retryable: false,
                     safe_for_model: false,
+                    error_code: None,
                 }),
             ),
         ] {

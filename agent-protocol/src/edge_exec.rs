@@ -155,6 +155,7 @@ mod tests {
                     message: "timed out".into(),
                     retryable: false,
                     safe_for_model: true,
+                    error_code: None,
                 }),
             },
             EdgeExecDisposition::ExecutionStateUnknown {

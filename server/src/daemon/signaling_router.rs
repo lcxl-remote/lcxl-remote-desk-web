@@ -919,6 +919,7 @@ fn send_remote_tool_error(
                 message: reason.to_string(),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             },
         }),
     );
@@ -1803,6 +1804,7 @@ fn agent_error(
         message: message.to_string(),
         retryable,
         safe_for_model,
+        error_code: None,
     }
 }
 

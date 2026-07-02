@@ -84,6 +84,7 @@ fn transport_error(message: impl Into<String>) -> AgentError {
         message: message.into(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -214,6 +215,7 @@ pub async fn start_diagnosis(
                 message: "target host is not connected".to_string(),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             },
         )
         .await;
@@ -415,6 +417,7 @@ pub async fn on_collect_response(
                 message: err.reason,
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             };
             if let AcceptOutcome::Failed { ctx, error } =
                 pending.fail(&source_id, &err.request_id, error)

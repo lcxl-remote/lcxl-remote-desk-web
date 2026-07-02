@@ -2580,6 +2580,7 @@ mod tests {
                     message: "x".to_string(),
                     retryable: false,
                     safe_for_model: true,
+                    error_code: None,
                 }),
             }),
             WorkerToService::ExecResult(ExecResultIpcPayload {
@@ -2593,6 +2594,7 @@ mod tests {
                             message: "x".to_string(),
                             retryable: false,
                             safe_for_model: true,
+                            error_code: None,
                         },
                     ),
                 },
@@ -3208,6 +3210,7 @@ mod tests {
                 message: "not implemented yet".to_string(),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             }),
         });
         match wincode_round_trip(&err) {

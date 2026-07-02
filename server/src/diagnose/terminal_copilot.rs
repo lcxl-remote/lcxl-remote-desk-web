@@ -84,6 +84,7 @@ mod tests {
             message: "centralized".to_string(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         });
 
         let text = rx.try_recv().expect("a frame was broadcast");

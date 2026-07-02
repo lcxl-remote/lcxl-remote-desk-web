@@ -276,6 +276,7 @@ mod tests {
             message: "boom".into(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         }
     }
 

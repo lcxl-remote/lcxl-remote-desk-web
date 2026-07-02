@@ -35,6 +35,7 @@ fn denied(message: impl Into<String>) -> AgentError {
         message: message.into(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -85,6 +86,7 @@ impl EdgeReadInvoker {
                 message: "remote tool request carries no read capability".to_string(),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             })?;
 
         // Edge re-check 1: the operation must be within the envelope's granted
@@ -119,6 +121,7 @@ impl EdgeReadInvoker {
             message: format!("evidence redaction failed: {}", e.reason),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         })?;
         super::model::screenshot::refit_snapshot_screenshots(&mut snapshot);
 

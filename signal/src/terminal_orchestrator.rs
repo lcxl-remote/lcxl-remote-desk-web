@@ -45,6 +45,7 @@ fn transport_error(message: impl Into<String>) -> AgentError {
         message: message.into(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -54,6 +55,7 @@ fn redaction_failed_error() -> AgentError {
         message: "failed to redact terminal context".to_string(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

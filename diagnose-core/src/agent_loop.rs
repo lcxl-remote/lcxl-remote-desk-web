@@ -1334,6 +1334,7 @@ mod tests {
                     message: "db down".into(),
                     retryable: false,
                     safe_for_model: false,
+                    error_code: None,
                 })
             }
         }

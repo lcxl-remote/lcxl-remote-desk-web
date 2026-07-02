@@ -55,6 +55,7 @@ pub fn collect(params: &ServiceStatusParams) -> Result<ServiceStatusOutput, Agen
             message: "service.status is not supported on this platform".to_string(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         })
     }
 }

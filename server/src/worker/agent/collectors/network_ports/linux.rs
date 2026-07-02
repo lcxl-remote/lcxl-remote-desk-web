@@ -34,6 +34,7 @@ pub(super) fn enumerate() -> Result<Vec<RawPort>, AgentError> {
                     message: format!("failed to read {path}: {e}"),
                     retryable: true,
                     safe_for_model: true,
+                    error_code: None,
                 });
             }
         }

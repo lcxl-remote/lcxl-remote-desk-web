@@ -810,6 +810,7 @@ mod tests {
             message: "late".into(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         });
         s.on_tool_started("t", "c");
         let ev = store.borrow();
@@ -827,6 +828,7 @@ mod tests {
             message: "busy".into(),
             retryable: true,
             safe_for_model: true,
+            error_code: None,
         });
         let ev = store.borrow();
         assert_eq!(ev.len(), 1);

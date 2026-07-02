@@ -72,6 +72,7 @@ fn enforce_size_limit(len: usize, max: usize) -> Result<(), AgentError> {
             message: format!("captured image is {len} bytes, over the {max} byte transport limit"),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         });
     }
     Ok(())
@@ -83,6 +84,7 @@ fn capture_err(err: CaptureError) -> AgentError {
         message: format!("screen capture failed: {err}"),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -92,6 +94,7 @@ fn internal(message: &str) -> AgentError {
         message: message.to_string(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

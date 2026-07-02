@@ -46,6 +46,7 @@ fn unavailable() -> AgentError {
         message: "Docker is not available on this host".to_string(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -62,6 +63,7 @@ fn docker_call_err(err: bollard::errors::Error) -> AgentError {
             message: format!("container not found: {message}"),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         };
     }
     AgentError {
@@ -69,6 +71,7 @@ fn docker_call_err(err: bollard::errors::Error) -> AgentError {
         message: format!("Docker API call failed: {err}"),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -138,6 +141,7 @@ pub async fn inspect(
         message: format!("failed to serialize inspect response: {e}"),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     })?;
     // Truncate by size if the document is oversized; the result is evidence
     // text, not required to stay valid JSON when truncated.

@@ -129,6 +129,7 @@ fn config_error(message: impl Into<String>) -> AgentError {
         message: message.into(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -138,6 +139,7 @@ fn transport_error(message: impl Into<String>) -> AgentError {
         message: message.into(),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

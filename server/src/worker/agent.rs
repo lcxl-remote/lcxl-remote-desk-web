@@ -234,6 +234,7 @@ where
             message: format!("collector task failed to join: {e}"),
             retryable: true,
             safe_for_model: true,
+            error_code: None,
         })
 }
 
@@ -243,6 +244,7 @@ fn unsupported(message: &str) -> AgentError {
         message: message.to_string(),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

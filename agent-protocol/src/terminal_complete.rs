@@ -159,6 +159,7 @@ mod tests {
                 message: "busy".into(),
                 retryable: true,
                 safe_for_model: true,
+                error_code: None,
             },
         );
         assert!(err.is_error());

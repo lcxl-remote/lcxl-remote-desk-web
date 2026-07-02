@@ -799,6 +799,23 @@ pub struct AgentError {
     pub message: String,
     pub retryable: bool,
     pub safe_for_model: bool,
+    /// Optional machine-readable business code (a `DeskErrorCode` value) so the
+    /// control end can localize the error instead of showing the raw English
+    /// `message`. `None` for errors without a dedicated code (the UI falls back
+    /// to `message`). Optional on the wire so both roles — the manager and the
+    /// open-source single-instance signal — interoperate unchanged; an older or
+    /// code-less producer simply omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<i32>,
+}
+
+impl AgentError {
+    /// Attach a machine-readable business code (a `DeskErrorCode` value) so the
+    /// control end can localize the error. Chainable on any constructed error.
+    pub fn with_error_code(mut self, code: i32) -> Self {
+        self.error_code = Some(code);
+        self
+    }
 }
 
 #[derive(
@@ -1022,6 +1039,7 @@ mod tests {
                 message: "not supported".into(),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             }),
         ] {
             let json = serde_json::to_string(&outcome).expect("json encode");
@@ -1033,6 +1051,48 @@ mod tests {
                 wincode::config::deserialize(&bytes, config).expect("wincode decode");
             assert_eq!(outcome, back2);
         }
+    }
+
+    /// `error_code` round-trips through JSON and wincode when set, is omitted from
+    /// JSON when `None` (`skip_serializing_if`), and decodes to `None` when absent
+    /// (`serde(default)`) — the compatibility contract that lets a code-less or
+    /// older producer interoperate with a code-aware consumer.
+    #[test]
+    fn agent_error_code_round_trips_and_json_defaults() {
+        let config = unbounded_config();
+        let coded = AgentOutcome::Err(AgentError {
+            kind: AgentErrorKind::Internal,
+            message: "not configured".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: Some(51),
+        });
+
+        // JSON + wincode both preserve the code.
+        let json = serde_json::to_string(&coded).expect("json encode");
+        assert!(json.contains("\"error_code\":51"));
+        let back: AgentOutcome = serde_json::from_str(&json).expect("json decode");
+        assert_eq!(coded, back);
+        let bytes = wincode::config::serialize(&coded, config).expect("wincode encode");
+        let back2: AgentOutcome =
+            wincode::config::deserialize(&bytes, config).expect("wincode decode");
+        assert_eq!(coded, back2);
+
+        // `None` is omitted from JSON, and an absent field decodes back to `None`.
+        let codeless = AgentError {
+            kind: AgentErrorKind::UnsupportedCapability,
+            message: "x".into(),
+            retryable: false,
+            safe_for_model: true,
+            error_code: None,
+        };
+        let j = serde_json::to_string(&codeless).expect("encode");
+        assert!(!j.contains("error_code"), "None must be omitted: {j}");
+        let decoded: AgentError = serde_json::from_str(
+            r#"{"kind":"internal","message":"m","retryable":false,"safe_for_model":true}"#,
+        )
+        .expect("decode without error_code");
+        assert_eq!(decoded.error_code, None);
     }
 
     #[test]

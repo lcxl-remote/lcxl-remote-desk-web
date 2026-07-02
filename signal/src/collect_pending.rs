@@ -233,6 +233,7 @@ fn transport_error(message: String) -> AgentError {
         message,
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

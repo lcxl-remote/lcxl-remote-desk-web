@@ -44,6 +44,7 @@ fn table_query_err(code: u32) -> AgentError {
         message: format!("IpHelper table query failed (code {code})"),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     }
 }
 

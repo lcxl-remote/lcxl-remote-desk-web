@@ -30,6 +30,7 @@ pub(super) fn enumerate() -> Result<Vec<RawPort>, AgentError> {
         message: format!("failed to list processes: {e}"),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     })?;
     let mut ports = Vec::new();
     for pid in pids {

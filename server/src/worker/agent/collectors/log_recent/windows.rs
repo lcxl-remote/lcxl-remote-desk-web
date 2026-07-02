@@ -51,6 +51,7 @@ pub(super) fn query(params: &LogRecentParams, limit: u32) -> Result<String, Agen
         message: format!("failed to run Get-WinEvent: {e}"),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     })?;
 
     if !output.status.success() {
@@ -60,6 +61,7 @@ pub(super) fn query(params: &LogRecentParams, limit: u32) -> Result<String, Agen
             message: format!("Get-WinEvent failed: {}", stderr.trim()),
             retryable: true,
             safe_for_model: true,
+            error_code: None,
         });
     }
 

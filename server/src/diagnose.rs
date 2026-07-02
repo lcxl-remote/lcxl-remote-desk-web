@@ -74,6 +74,7 @@ impl DiagnoseOrchestrator {
                 message: format!("evidence redaction failed: {}", error.reason),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             });
         }
         crate::diagnose::model::screenshot::strip_raw_screenshots(&mut snapshot);

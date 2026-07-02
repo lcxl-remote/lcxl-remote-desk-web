@@ -166,6 +166,7 @@ mod tests {
                     message: "no such container".into(),
                     retryable: false,
                     safe_for_model: true,
+                    error_code: None,
                 }),
             )],
         );

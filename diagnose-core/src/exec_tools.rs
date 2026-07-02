@@ -57,6 +57,7 @@ fn bad_arguments(detail: impl std::fmt::Display) -> AgentError {
         message: format!("invalid exec tool arguments: {detail}"),
         retryable: false,
         safe_for_model: true,
+        error_code: None,
     }
 }
 
@@ -97,6 +98,7 @@ pub fn build_exec_input(call: &ToolCall) -> Result<(OperationInput, Option<Strin
             message: format!("unknown exec tool `{}`", call.name),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         });
     }
     let trimmed = call.arguments_json.trim();

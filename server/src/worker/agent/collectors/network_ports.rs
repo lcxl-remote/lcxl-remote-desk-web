@@ -70,6 +70,7 @@ pub fn collect(params: &NetworkPortsParams) -> Result<NetworkPortsOutput, AgentE
                 message: format!("unknown protocol filter {other:?}; expected \"tcp\" or \"udp\""),
                 retryable: false,
                 safe_for_model: true,
+                error_code: None,
             });
         }
     };
@@ -142,6 +143,7 @@ fn enumerate() -> Result<Vec<RawPort>, AgentError> {
             message: "network.ports is not supported on this platform".to_string(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         })
     }
 }

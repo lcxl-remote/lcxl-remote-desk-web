@@ -59,6 +59,7 @@ pub fn collect(params: &LogRecentParams) -> Result<LogRecentOutput, AgentError> 
             message: "log.recent is not supported on this platform".to_string(),
             retryable: false,
             safe_for_model: true,
+            error_code: None,
         })
     }
 }
@@ -182,6 +183,7 @@ fn parse_events_json(json: &str) -> Result<Vec<LogEvent>, AgentError> {
         message: format!("failed to parse Get-WinEvent output: {e}"),
         retryable: true,
         safe_for_model: true,
+        error_code: None,
     };
 
     let value: serde_json::Value = serde_json::from_str(trimmed).map_err(parse_err)?;
