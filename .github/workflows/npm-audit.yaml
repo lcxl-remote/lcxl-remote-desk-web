@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - name: Audit production dependencies (fail on moderate+)
         run: npm audit --package-lock-only --omit=dev --audit-level=moderate
       - name: Audit all dependencies (fail on high+)
