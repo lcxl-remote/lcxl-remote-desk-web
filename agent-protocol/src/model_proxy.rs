@@ -68,6 +68,12 @@ pub struct ProxyChatRequest {
     /// to the token owner).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Optional upper bound on the tokens the model may generate. Forwarded to the
+    /// provider as `max_tokens` and used by the manager to estimate an admission
+    /// hold. `None` on legacy callers; the manager then falls back to its platform
+    /// default cap for the estimate and lets the provider apply its own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<i64>,
 }
 
 #[cfg(test)]
@@ -108,6 +114,7 @@ mod tests {
             response_format: ProxyResponseFormat::JsonObject,
             source_request_id: Some("req-1".into()),
             client_id: Some("client-abc".into()),
+            max_tokens: Some(4096),
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: ProxyChatRequest = serde_json::from_str(&s).unwrap();
@@ -122,5 +129,6 @@ mod tests {
         let req: ProxyChatRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.source_request_id, None);
         assert_eq!(req.client_id, None);
+        assert_eq!(req.max_tokens, None);
     }
 }
