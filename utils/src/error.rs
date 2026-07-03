@@ -230,6 +230,12 @@ impl DeskErrorCode {
     /// control end maps this code to a localized "configure a model" message.
     /// Rides the agent-error wire, not an HTTP status.
     pub const AI_MODEL_NOT_CONFIGURED: DeskErrorCode = DeskErrorCode(51);
+    /// The caller explicitly requested a model that is not in its resolution
+    /// subject's gated catalog (its own tier plus the platform tier when the
+    /// platform-fallback switch is on) — an out-of-catalog / disabled / archived
+    /// model id. The request is rejected fail-closed rather than silently
+    /// downgraded to a default. Rides the agent-error wire, not an HTTP status.
+    pub const AI_MODEL_NOT_AUTHORIZED: DeskErrorCode = DeskErrorCode(54);
 
     /// A priced subscription plan has no recurring-price row matching the
     /// account's currency (neither an org-scoped override nor the platform
@@ -485,6 +491,7 @@ mod tests {
         assert_eq!(DeskErrorCode::AI_MODEL_NOT_CONFIGURED.code(), 51);
         assert_eq!(DeskErrorCode::PLAN_NO_PRICE.code(), 52);
         assert_eq!(DeskErrorCode::PLAN_PRICE_REQUIRED.code(), 53);
+        assert_eq!(DeskErrorCode::AI_MODEL_NOT_AUTHORIZED.code(), 54);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
             DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),
