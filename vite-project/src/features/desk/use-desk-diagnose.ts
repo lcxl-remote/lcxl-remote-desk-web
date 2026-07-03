@@ -103,6 +103,10 @@ export type DiagnoseStartOptions = {
     contextKinds?: string[];
     /** BCP-47 tag of the current UI language, so the AI answers in it. */
     locale?: string;
+    /** Manager-only user-selected agent model. Omitted (null/undefined) when the
+     *  model selector is hidden (open-source signal); the server then resolves the
+     *  default, keeping the flow identical across both signaling targets. */
+    modelId?: number | null;
 };
 
 /**
@@ -343,6 +347,9 @@ export function useDeskDiagnose({ deskId, subscribe, sendMessage }: UseDeskDiagn
                 context_kinds: options?.contextKinds ?? [],
                 locale: options?.locale,
                 conversation_id: conversationId,
+                // Absent (undefined) unless the manager model selector supplied a
+                // choice; the open-source server ignores the field anyway.
+                model_id: options?.modelId ?? undefined,
             };
             const requestId = sendMessage(SIGNALING_TYPE_CODE_DIAGNOSE, data, deskId);
             activeRequestRef.current = requestId;

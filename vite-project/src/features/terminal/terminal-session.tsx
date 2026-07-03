@@ -110,8 +110,8 @@ function TerminalView({ connectionId, deviceId, command, onClose }: { connection
         }
     }, [command])
 
-    const askCopilot = useCallback((mode: TerminalCopilotMode, question: string) => {
-        copilot.ask({ mode, question: question || undefined, context: buildContext(mode) })
+    const askCopilot = useCallback((mode: TerminalCopilotMode, question: string, modelId: number | null) => {
+        copilot.ask({ mode, question: question || undefined, context: buildContext(mode), modelId })
     }, [copilot, buildContext])
 
     // The (non-authoritative) environment hint for a completion ask.

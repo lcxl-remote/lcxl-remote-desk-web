@@ -22,6 +22,7 @@ import type {
 } from './use-terminal-copilot';
 import { ExecLifecycle } from '../exec/exec-lifecycle';
 import type { ExecEntry, ExecRequestInput } from '../exec/use-confirm-exec';
+import { ModelSelector } from '../desk/model-selector';
 
 /** Confirmed-execution controls, shared with the diagnose panel via
  *  `useConfirmExec`. Omitted when the copilot is rendered suggest-only. */
@@ -175,7 +176,9 @@ function SuggestionRow({ index, suggestion, onFill, exec }: SuggestionRowProps) 
 
 export type TerminalCopilotPanelProps = {
     state: CopilotState;
-    onAsk: (mode: TerminalCopilotMode, question: string) => void;
+    /** `modelId` is the manager-selected agent model, or null when the selector is
+     *  hidden (open-source signal) — then no `model_id` is sent. */
+    onAsk: (mode: TerminalCopilotMode, question: string, modelId: number | null) => void;
     onReset: () => void;
     onClose: () => void;
     /** Inject the command into the shell input without a trailing Enter. */
@@ -201,13 +204,15 @@ export function TerminalCopilotPanel({
     const { t } = useTranslation();
     const [mode, setMode] = useState<TerminalCopilotMode>('how_to');
     const [question, setQuestion] = useState('');
+    // The manager-selected agent model, or null when the selector is hidden.
+    const [modelId, setModelId] = useState<number | null>(null);
 
     const running = state.phase === 'running';
 
     const submit = () => {
         if (running) return;
         if (mode === 'how_to' && !question.trim()) return;
-        onAsk(mode, question.trim());
+        onAsk(mode, question.trim(), modelId);
     };
 
     return (
@@ -258,6 +263,15 @@ export function TerminalCopilotPanel({
                         )}
                     </p>
                 )}
+                {/* Manager-only agent-model picker; renders nothing against an
+                    open-source signal server, leaving the flow unchanged. */}
+                <div className="mt-2">
+                    <ModelSelector
+                        role="agent"
+                        onChange={setModelId}
+                        className="border-input bg-background text-foreground"
+                    />
+                </div>
                 <div className="mt-2 flex gap-2">
                     <Button size="sm" onClick={submit} disabled={running}>
                         {running && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}

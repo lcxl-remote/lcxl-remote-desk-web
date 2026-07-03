@@ -152,6 +152,10 @@ export type AskInput = {
     /** `how_to`: the operator's natural-language request. */
     question?: string;
     context: TerminalContext;
+    /** Manager-only user-selected agent model. Omitted (null/undefined) when the
+     *  model selector is hidden (open-source signal); the server then resolves the
+     *  default, so the flow is identical across both signaling targets. */
+    modelId?: number | null;
 };
 
 /**
@@ -211,6 +215,9 @@ export function useTerminalCopilot({
                 locale: i18n.language,
                 history,
                 context: input.context,
+                // Absent (undefined) unless the manager model selector supplied a
+                // choice; the open-source server ignores the field anyway.
+                model_id: input.modelId ?? undefined,
             };
             const requestId = sendMessage(
                 SIGNALING_TYPE_CODE_TERMINAL_COPILOT_ASK,

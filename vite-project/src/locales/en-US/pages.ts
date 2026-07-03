@@ -419,6 +419,13 @@ export default {
   'pages.desk.diagnose.risk.high': 'High risk',
   'pages.desk.diagnose.risk.critical': 'Critical risk',
   'pages.desk.diagnose.risk.blocked': 'Blocked',
+  // Shared AI-model selector (diagnose panel + terminal copilot). Only shown when
+  // connected to a manager; hidden against the open-source signal server.
+  'pages.desk.modelSelector.label': 'AI model',
+  'pages.desk.modelSelector.priceHint': 'in {{input}} / out {{output}} pts',
+  'pages.desk.modelSelector.free': 'Free',
+  'pages.desk.modelSelector.balance': 'Balance: {{points}} pts',
+  'pages.desk.modelSelector.saveFailed': 'Failed to save model preference',
   'pages.deskDashboard.backToList': 'Back to List',
   'pages.deskDashboard.deskManagement': 'Desk Management: {deskId}',
   'pages.deskDashboard.fileManagement': 'File Management',

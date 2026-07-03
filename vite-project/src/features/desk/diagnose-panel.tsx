@@ -17,6 +17,7 @@ import {
 } from "./use-desk-diagnose"
 import type { ExecEntry, ExecPreview, ExecRequestInput } from "../exec/use-confirm-exec"
 import { ExecLifecycle } from "../exec/exec-lifecycle"
+import { ModelSelector } from "./model-selector"
 
 type ExecControls = {
     entries: Record<number, ExecEntry>
@@ -322,6 +323,9 @@ export function DiagnosePanel({
     const { t, i18n } = useTranslation()
     const [question, setQuestion] = useState("")
     const [includeScreen, setIncludeScreen] = useState(false)
+    // The manager-selected agent model, or null when the selector is hidden
+    // (open-source signal) — in which case no `model_id` is sent.
+    const [modelId, setModelId] = useState<number | null>(null)
 
     const presets: string[] = [
         t("pages.desk.diagnose.presetCpu"),
@@ -333,12 +337,13 @@ export function DiagnosePanel({
         const trimmed = q.trim()
         if (!trimmed) return
         // Pass the current UI language so the AI answers in it.
-        onStart(trimmed, { includeScreen, locale: i18n.language })
+        onStart(trimmed, { includeScreen, locale: i18n.language, modelId })
     }
 
     // A follow-up keeps the same conversation; the hook reuses the conversation
     // id so the model sees the prior turns.
-    const askFollowUp = (q: string) => onStart(q, { includeScreen, locale: i18n.language })
+    const askFollowUp = (q: string) =>
+        onStart(q, { includeScreen, locale: i18n.language, modelId })
 
     // The lifecycle status name is a backend-provided phase string; map the
     // known ones to localized labels, falling back to the raw value.
@@ -429,6 +434,14 @@ export function DiagnosePanel({
                             />
                             {t("pages.desk.diagnose.includeScreen")}
                         </label>
+
+                        {/* Manager-only agent-model picker; renders nothing against
+                            an open-source signal server, leaving the flow unchanged. */}
+                        <ModelSelector
+                            role="agent"
+                            onChange={setModelId}
+                            className="border-white/20 bg-white/10 text-white"
+                        />
 
                         <Button
                             size="sm"
