@@ -231,6 +231,21 @@ impl DeskErrorCode {
     /// Rides the agent-error wire, not an HTTP status.
     pub const AI_MODEL_NOT_CONFIGURED: DeskErrorCode = DeskErrorCode(51);
 
+    /// A priced subscription plan has no recurring-price row matching the
+    /// account's currency (neither an org-scoped override nor the platform
+    /// default), so the subscription cannot snapshot a fee. The admin must add a
+    /// price in that currency (or switch the plan to `free`). Carried in
+    /// `RestResponse.code`; self-healing subscribe paths log a warning and skip.
+    /// Never an HTTP status.
+    pub const PLAN_NO_PRICE: DeskErrorCode = DeskErrorCode(52);
+    /// A plan price row cannot be deleted because it is the required platform
+    /// price (in the account default currency) of an enabled or default priced
+    /// plan; removing it would drop the plan's default subscription back to
+    /// `PLAN_NO_PRICE`. The admin must first disable the plan, switch it to
+    /// `free`, or add a replacement price. Carried in `RestResponse.code`, never
+    /// an HTTP status.
+    pub const PLAN_PRICE_REQUIRED: DeskErrorCode = DeskErrorCode(53);
+
     pub const ACTION_NEED_RETRY: DeskErrorCode = DeskErrorCode(1001);
 
     pub const REMOTE_DESK_OFFLINE: DeskErrorCode = DeskErrorCode(10003);
@@ -468,6 +483,8 @@ mod tests {
         assert_eq!(DeskErrorCode::PLAN_IN_USE.code(), 49);
         assert_eq!(DeskErrorCode::TERMINAL_COPILOT_DISABLED.code(), 50);
         assert_eq!(DeskErrorCode::AI_MODEL_NOT_CONFIGURED.code(), 51);
+        assert_eq!(DeskErrorCode::PLAN_NO_PRICE.code(), 52);
+        assert_eq!(DeskErrorCode::PLAN_PRICE_REQUIRED.code(), 53);
         let codes = [
             DeskErrorCode::DEVICE_QUOTA_EXCEEDED.code(),
             DeskErrorCode::DEVICE_CLIENT_ID_REQUIRED.code(),
